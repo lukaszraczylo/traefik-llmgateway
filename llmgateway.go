@@ -101,9 +101,10 @@ func CreateConfig() *Config {
 type Gateway struct {
 	next http.Handler
 	cfg  *Config
+	auth *authStore
 	name string
-	// wired in later tasks: auth *authStore, limiter *limiter,
-	// registry *modelRegistry, adapters map[string]providerAdapter
+	// wired in later tasks: limiter *limiter, registry *modelRegistry,
+	// adapters map[string]providerAdapter
 }
 
 // New creates the middleware. NOTE: no tail call — Yaegi zeroes
@@ -120,7 +121,11 @@ func newGateway(ctx context.Context, next http.Handler, config *Config, name str
 	if config == nil || len(config.Providers) == 0 {
 		return nil, errors.New("llmgateway: at least one provider must be configured")
 	}
-	return &Gateway{next: next, name: name, cfg: config}, nil
+	auth, err := newAuthStore(config)
+	if err != nil {
+		return nil, err
+	}
+	return &Gateway{next: next, name: name, cfg: config, auth: auth}, nil
 }
 
 // ServeHTTP is the internal router. It grows in later tasks.
