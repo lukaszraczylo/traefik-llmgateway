@@ -10,8 +10,9 @@ import (
 // empty value returns empty with no error. A "env:NAME" value returns
 // os.Getenv(NAME), erroring if the variable is unset or empty. A
 // "file:/path" value returns the file's contents with surrounding
-// whitespace trimmed, erroring if the file cannot be read. Any other value
-// is returned unchanged as a literal.
+// whitespace trimmed, erroring if the file cannot be read or its trimmed
+// contents are empty — symmetric with the env: case. Any other value is
+// returned unchanged as a literal.
 //
 // Error messages never include a resolved secret value — only the env var
 // name or file path, which are config, not secrets.
@@ -31,7 +32,11 @@ func resolveSecret(v string) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("llmgateway: cannot read secret file %q: %w", path, err)
 		}
-		return strings.TrimSpace(string(b)), nil
+		val := strings.TrimSpace(string(b))
+		if val == "" {
+			return "", fmt.Errorf("llmgateway: secret file %q is empty or whitespace-only", path)
+		}
+		return val, nil
 	}
 	return v, nil
 }
