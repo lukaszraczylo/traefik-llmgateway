@@ -1,0 +1,18 @@
+displayName: LLM Gateway
+type: middleware
+import: github.com/lukaszraczylo/traefik-llmgateway
+summary: Multi-provider LLM gateway with groups, per-user keys, token/cost limits, MCP/A2A proxy.
+testData:
+  providers:
+    openai:
+      type: openai
+      apiKey: test-key
+      models:
+        - gpt-test
+  groups:
+    default: {}
+  users:
+    inline:
+      - name: tester
+        group: default
+        apiKey: test-user-key
