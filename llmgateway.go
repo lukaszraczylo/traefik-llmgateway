@@ -125,10 +125,11 @@ func newGateway(ctx context.Context, next http.Handler, config *Config, name str
 
 // ServeHTTP is the internal router. It grows in later tasks.
 func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	defer recoverPanic(w, g)
+	sw := &statusTrackingWriter{ResponseWriter: w}
+	defer recoverPanic(sw, g)
 	if g.cfg.PassthroughUnknown {
-		g.next.ServeHTTP(w, r)
+		g.next.ServeHTTP(sw, r)
 		return
 	}
-	writeOAIError(w, http.StatusNotFound, "invalid_request_error", "unknown route")
+	writeOAIError(sw, http.StatusNotFound, "invalid_request_error", "unknown route")
 }

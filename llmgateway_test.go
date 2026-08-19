@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -83,7 +84,7 @@ func TestWriteOAIError_WritesEnvelope(t *testing.T) {
 		Error struct {
 			Message string `json:"message"`
 			Type    string `json:"type"`
-			Code    int    `json:"code"`
+			Code    string `json:"code"`
 		} `json:"error"`
 	}
 	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
@@ -95,8 +96,9 @@ func TestWriteOAIError_WritesEnvelope(t *testing.T) {
 	if body.Error.Type != "invalid_request_error" {
 		t.Fatalf("want type %q, got %q", "invalid_request_error", body.Error.Type)
 	}
-	if body.Error.Code != http.StatusBadRequest {
-		t.Fatalf("want code %d, got %d", http.StatusBadRequest, body.Error.Code)
+	wantCode := strconv.Itoa(http.StatusBadRequest)
+	if body.Error.Code != wantCode {
+		t.Fatalf("want code %q (JSON string), got %q", wantCode, body.Error.Code)
 	}
 }
 
@@ -119,8 +121,9 @@ func TestServeHTTP_PanicRecovery_Returns500Envelope(t *testing.T) {
 	defer func() { os.Stderr = origStderr }()
 
 	rec := httptest.NewRecorder()
+	sw := &statusTrackingWriter{ResponseWriter: rec}
 	func() {
-		defer recoverPanic(rec, gw)
+		defer recoverPanic(sw, gw)
 		panic("boom")
 	}()
 
@@ -197,5 +200,90 @@ func TestGateway_Errorf_WritesErrorPrefix(t *testing.T) {
 	want := "llmgw[mygw] ERROR failed: reason"
 	if !strings.Contains(buf.String(), want) {
 		t.Fatalf("want stderr to contain %q, got %q", want, buf.String())
+	}
+}
+
+func TestStatusTrackingWriter_WriteHeaderSetsFlag(t *testing.T) {
+	rec := httptest.NewRecorder()
+	sw := &statusTrackingWriter{ResponseWriter: rec}
+	if sw.wroteHeader {
+		t.Fatal("want wroteHeader false before any write")
+	}
+	sw.WriteHeader(http.StatusAccepted)
+	if !sw.wroteHeader {
+		t.Fatal("want wroteHeader true after WriteHeader")
+	}
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("want delegated status %d, got %d", http.StatusAccepted, rec.Code)
+	}
+}
+
+func TestStatusTrackingWriter_WriteSetsFlag(t *testing.T) {
+	rec := httptest.NewRecorder()
+	sw := &statusTrackingWriter{ResponseWriter: rec}
+	if _, err := sw.Write([]byte("hi")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if !sw.wroteHeader {
+		t.Fatal("want wroteHeader true after an implicit-header Write")
+	}
+	if rec.Body.String() != "hi" {
+		t.Fatalf("want delegated body %q, got %q", "hi", rec.Body.String())
+	}
+}
+
+func TestStatusTrackingWriter_FlushDelegates(t *testing.T) {
+	rec := httptest.NewRecorder()
+	sw := &statusTrackingWriter{ResponseWriter: rec}
+	sw.Flush()
+	if !rec.Flushed {
+		t.Fatal("want Flush to delegate to the underlying http.Flusher")
+	}
+}
+
+// TestServeHTTP_PanicAfterHeadersCommitted_DoesNotOverwriteResponse is the
+// regression test for the recoverPanic header-guard: a handler that panics
+// after it has already written a status code and body bytes (e.g.
+// mid-stream) must not get a second, conflicting error envelope appended.
+func TestServeHTTP_PanicAfterHeadersCommitted_DoesNotOverwriteResponse(t *testing.T) {
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		if _, err := w.Write([]byte("partial")); err != nil {
+			t.Fatalf("next handler Write: %v", err)
+		}
+		panic("boom mid-stream")
+	})
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{"openai": {Type: "openai", APIKey: "k"}}
+	cfg.PassthroughUnknown = true
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	origStderr := os.Stderr
+	pr, pw, _ := os.Pipe()
+	os.Stderr = pw
+	defer func() { os.Stderr = origStderr }()
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/stream", nil)
+	h.ServeHTTP(rec, req)
+
+	_ = pw.Close() // closing the pipe write end to unblock the read; error not actionable in a test
+	os.Stderr = origStderr
+	var logBuf bytes.Buffer
+	if _, err := io.Copy(&logBuf, pr); err != nil {
+		t.Fatalf("io.Copy: %v", err)
+	}
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("want status left at %d (already committed by next), got %d", http.StatusOK, rec.Code)
+	}
+	if got := rec.Body.String(); got != "partial" {
+		t.Fatalf("want body left as %q (no error envelope appended), got %q", "partial", got)
+	}
+	if !strings.Contains(logBuf.String(), "llmgw[llmgw] ERROR ") {
+		t.Fatalf("want panic still logged even though no envelope was written, got %q", logBuf.String())
 	}
 }
