@@ -1,7 +1,9 @@
 package traefikllmgateway
 
 import (
+	"fmt"
 	"net/http/httptest"
+	"sync"
 	"testing"
 )
 
@@ -278,5 +280,97 @@ func TestAuthStore_ReplaceFileUsers_UnknownGroup_ReturnsError(t *testing.T) {
 	err = a.replaceFileUsers([]*UserConfig{{Name: "f1", Group: "nonexistent", APIKey: "sk-file1"}})
 	if err == nil {
 		t.Fatal("want error for file user referencing unknown group")
+	}
+}
+
+// TestAuthStore_ReplaceFileUsers_NilElement_ReturnsErrorNotPanic is the
+// regression for a nil *UserConfig slice element reaching buildEntry. This
+// path is reachable at runtime: json.Unmarshal of a `null` array element
+// into []*UserConfig yields a nil entry, and the config-reload path (Task 4)
+// that calls replaceFileUsers is NOT wrapped by recoverPanic — that guard
+// only covers ServeHTTP. An unguarded nil dereference here would take down
+// the whole process instead of failing one reload.
+func TestAuthStore_ReplaceFileUsers_NilElement_ReturnsErrorNotPanic(t *testing.T) {
+	a, err := newAuthStore(testAuthCfg())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.replaceFileUsers([]*UserConfig{nil}); err == nil {
+		t.Fatal("want error for a nil user config element, got nil")
+	}
+
+	// The store must still be usable — the rejected replace must not have
+	// partially mutated it.
+	r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	r.Header.Set("Authorization", "Bearer sk-secret")
+	if _, _, ok := a.identify(r); !ok {
+		t.Fatal("want inline user still resolvable after a rejected nil-element replace")
+	}
+}
+
+// TestNewAuthStore_NilInlineElement_ReturnsErrorNotPanic covers the same
+// nil-element hazard reachable from newAuthStore's inline-user loop, which
+// runs at plugin construction time — also outside recoverPanic's coverage.
+func TestNewAuthStore_NilInlineElement_ReturnsErrorNotPanic(t *testing.T) {
+	cfg := &Config{
+		Providers: map[string]*ProviderConfig{"openai": {Type: "openai", APIKey: "k"}},
+		Groups:    map[string]*GroupConfig{"eng": {}},
+		Users:     &UsersConfig{Inline: []*UserConfig{nil}},
+	}
+	if _, err := newAuthStore(cfg); err == nil {
+		t.Fatal("want error for a nil inline user config element, got nil")
+	}
+}
+
+// TestAuthStore_ReplaceFileUsers_ConcurrentWritersAndReaders exercises
+// replaceFileUsers and identify from many goroutines simultaneously under
+// -race. Each writer swaps in a single, uniquely-keyed file user, so
+// whichever writer's rebuild is applied last, the store must always hold
+// exactly the inline users plus one file user's worth of entries — never a
+// partial mix from two overlapping rebuilds, and never a state where the
+// always-present inline user briefly disappears.
+func TestAuthStore_ReplaceFileUsers_ConcurrentWritersAndReaders(t *testing.T) {
+	a, err := newAuthStore(testAuthCfg()) // inline user "a" / sk-secret, group eng
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const writers = 20
+	const readers = 10
+	const readsPerReader = 50
+
+	var wg sync.WaitGroup
+	wg.Add(writers + readers)
+
+	for i := 0; i < writers; i++ {
+		go func(i int) {
+			defer wg.Done()
+			uc := &UserConfig{Name: fmt.Sprintf("f%d", i), Group: "eng", APIKey: fmt.Sprintf("sk-file-%d", i)}
+			if err := a.replaceFileUsers([]*UserConfig{uc}); err != nil {
+				t.Errorf("replaceFileUsers(%d): %v", i, err)
+			}
+		}(i)
+	}
+	for i := 0; i < readers; i++ {
+		go func() {
+			defer wg.Done()
+			r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+			r.Header.Set("Authorization", "Bearer sk-secret")
+			for j := 0; j < readsPerReader; j++ {
+				if _, _, ok := a.identify(r); !ok {
+					t.Error("inline user must remain identifiable during concurrent file-user swaps")
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+
+	a.mu.RLock()
+	got := len(a.byDigest)
+	a.mu.RUnlock()
+	want := len(a.inline) + 1 // inline users plus exactly one winning file-user batch
+	if got != want {
+		t.Fatalf("want exactly one file-user batch to survive concurrent swaps (size %d), got size %d — a rebuild was lost or merged with another", want, got)
 	}
 }

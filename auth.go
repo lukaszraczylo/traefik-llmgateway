@@ -130,6 +130,9 @@ func newAuthStore(cfg *Config) (*authStore, error) {
 // goes through resolveSecret before digesting, so env:/file: references
 // work the same as for provider keys.
 func (a *authStore) buildEntry(uc *UserConfig) (*authEntry, error) {
+	if uc == nil {
+		return nil, fmt.Errorf("llmgateway: user config entry must not be nil")
+	}
 	grp, ok := a.groups[uc.Group]
 	if !ok {
 		return nil, fmt.Errorf("llmgateway: user %q references unknown group %q", uc.Name, uc.Group)
@@ -154,7 +157,16 @@ func (a *authStore) buildEntry(uc *UserConfig) (*authEntry, error) {
 // (Task 4) to pick up changes to Users.File without restarting the plugin.
 // On error the store is left exactly as it was before the call — the new
 // set is validated and built in full before it replaces the old one.
+//
+// mu is held for the whole rebuild, not just the final swap. That serializes
+// concurrent callers (a reload timer must never race itself), so one call's
+// result can never be partially overwritten or interleaved with another's.
+// identify's reads stay fast (RLock) and reloads are rare, so the extra hold
+// time is a good trade.
 func (a *authStore) replaceFileUsers(us []*UserConfig) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
 	next := make(map[[32]byte]*authEntry, len(a.inline)+len(us))
 	for digest, entry := range a.inline {
 		next[digest] = entry
@@ -170,9 +182,7 @@ func (a *authStore) replaceFileUsers(us []*UserConfig) error {
 		next[entry.digest] = entry
 	}
 
-	a.mu.Lock()
 	a.byDigest = next
-	a.mu.Unlock()
 	return nil
 }
 
