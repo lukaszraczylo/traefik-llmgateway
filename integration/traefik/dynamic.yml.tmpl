@@ -132,10 +132,11 @@ http:
               type: openai
               baseUrl: "__INTEGRATION_REAL_BASEURL__"
               apiKey: ""
-              # Explicit rather than discovered: resolution must not depend
-              # on this container reaching the real upstream at Traefik
-              # startup (offline dev machines, CI with no egress). The
-              # actual chat completion call in task 7 still goes out live.
+              # Explicit model AND discovery: the explicit entry keeps
+              # resolution working offline (discovery failures are non-fatal
+              # by design - log + retry next interval), while discovery
+              # populates /v1/models with the gateway's full live catalog
+              # when the upstream is reachable (INTEGRATION_REAL=1 runs).
               #
               # The provider is deliberately NOT named "uni": the upstream
               # gateway's own model ids carry a "uni/" prefix, and a
@@ -144,6 +145,8 @@ http:
               # non-colliding name the whole slash-bearing id below is a
               # bare model id and is forwarded verbatim.
               models: ["uni/deepseek-v4-flash-0731"]
+              discovery: true
+              discoveryInterval: "5m"
           groups:
             eng:
               limits:
