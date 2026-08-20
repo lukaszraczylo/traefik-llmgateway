@@ -71,7 +71,18 @@ type GroupConfig struct {
 	// group in — but only when the global cache block is actually
 	// configured (newAuthStore rejects true otherwise, a constructor
 	// error, since there is nothing to inherit ttl/maxBodyBytes from).
-	Cache      *bool    `json:"cache,omitempty"`
+	Cache *bool `json:"cache,omitempty"`
+	// CacheTTL overrides the global cache.ttl (a Go duration string, e.g.
+	// "5m") for this group's cache entries only. Empty (the default)
+	// inherits the global TTL. Set means: parsed via time.ParseDuration at
+	// construction (newAuthStore, auth.go); a malformed duration, a
+	// duration <= 0, or CacheTTL set while the global cache block is not
+	// configured (cfg.Cache.Enabled false — there is no global TTL to
+	// override) is a constructor error naming the group. CacheTTL is
+	// independent of Cache above: it names the TTL to use WHEN this
+	// group's requests are cached, whether that caching comes from the
+	// global default or from this group's own Cache:true.
+	CacheTTL   string   `json:"cacheTTL,omitempty"`
 	MCPServers []string `json:"mcpServers,omitempty"`
 	Agents     []string `json:"agents,omitempty"`
 }

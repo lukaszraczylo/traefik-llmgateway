@@ -425,7 +425,7 @@ func TestResponseCache_Store_SendsSETWithTTL(t *testing.T) {
 	c := newResponseCache(client, 90*time.Second, defaultCacheMaxBodyBytes, noop, noop)
 	c.nowFn = time.Now
 
-	c.store("llmgw:cache:k", 200, "application/json", []byte(`{"ok":true}`))
+	c.store("llmgw:cache:k", 200, "application/json", []byte(`{"ok":true}`), 90*time.Second)
 }
 
 func TestResponseCache_Store_OversizeBody_SkipsSilentlyLogged(t *testing.T) {
@@ -443,7 +443,7 @@ func TestResponseCache_Store_OversizeBody_SkipsSilentlyLogged(t *testing.T) {
 	c := newResponseCache(client, time.Minute, 4, logf, errorf) // maxBodyBytes=4
 	c.nowFn = time.Now
 
-	c.store("k", 200, "text/plain", []byte("way too big"))
+	c.store("k", 200, "text/plain", []byte("way too big"), time.Minute)
 
 	if len(logged) != 1 {
 		t.Fatalf("logged = %d lines, want 1 (oversize skip is logged via logf, not errorf)", len(logged))
@@ -464,12 +464,12 @@ func TestResponseCache_Store_RedisDown_LoggedRateLimited(t *testing.T) {
 	now := time.Date(2026, 8, 20, 10, 0, 0, 0, time.UTC)
 	c.nowFn = func() time.Time { return now }
 
-	c.store("k", 200, "application/json", []byte(`{}`))
+	c.store("k", 200, "application/json", []byte(`{}`), time.Minute)
 	if len(logged) != 1 {
 		t.Fatalf("logged = %d lines after the first failed store, want 1", len(logged))
 	}
 
-	c.store("k", 200, "application/json", []byte(`{}`))
+	c.store("k", 200, "application/json", []byte(`{}`), time.Minute)
 	if len(logged) != 1 {
 		t.Fatalf("logged = %d lines still inside the rate-limit window, want 1", len(logged))
 	}
@@ -526,7 +526,7 @@ func TestResponseCache_DownLatch_SkipsNetworkCallsWithinWindow(t *testing.T) {
 	}
 
 	// store while latched: also zero network calls.
-	c.store("k", 200, "application/json", []byte(`{}`))
+	c.store("k", 200, "application/json", []byte(`{}`), time.Minute)
 	if stub.setCalls != 0 {
 		t.Fatalf("setCalls = %d while latched, want 0 (no network call attempted)", stub.setCalls)
 	}
@@ -629,4 +629,63 @@ func TestNewAuthStore_GroupCacheTrueWithGlobalCacheEnabled_NoError(t *testing.T)
 	if _, err := newAuthStore(cfg); err != nil {
 		t.Fatalf("newAuthStore: %v, want no error when the global cache block is configured", err)
 	}
+}
+
+// --- effectiveTTL: per-group cache TTL (item B) ---
+
+// TestEffectiveTTL_NilInheritsGlobal proves a group with no CacheTTL
+// override (cacheTTL == 0, GroupConfig.CacheTTL left empty) resolves to
+// the cache's own global TTL.
+func TestEffectiveTTL_NilInheritsGlobal(t *testing.T) {
+	c := &responseCache{ttl: 5 * time.Minute}
+	grp := &group{name: "g"}
+	if got := effectiveTTL(c, grp); got != 5*time.Minute {
+		t.Errorf("effectiveTTL = %v, want the global TTL 5m (group has no override)", got)
+	}
+}
+
+// TestEffectiveTTL_GroupOverrideHonored proves a group's own resolved
+// cacheTTL wins over the cache's global TTL.
+func TestEffectiveTTL_GroupOverrideHonored(t *testing.T) {
+	c := &responseCache{ttl: 5 * time.Minute}
+	grp := &group{name: "g", cacheTTL: 30 * time.Second}
+	if got := effectiveTTL(c, grp); got != 30*time.Second {
+		t.Errorf("effectiveTTL = %v, want the group override 30s", got)
+	}
+}
+
+// TestResponseCache_Store_EffectiveTTLDiffersPerGroup_SETCarriesGroupTTL is
+// item B's "override honored" proof against a real (scripted) RESP wire:
+// store's ttl argument — effectiveTTL's per-group resolution, computed by
+// the caller (routes_unified.go) before store is ever invoked — reaches
+// the SET...EX command as a genuinely different EX value for a group that
+// overrides the global TTL (30) versus one that inherits it (60, the
+// cache's own 1m global TTL). runFakeRESPServer fails the test outright if
+// either SET carries the wrong EX value.
+func TestResponseCache_Store_EffectiveTTLDiffersPerGroup_SETCarriesGroupTTL(t *testing.T) {
+	val1, err := json.Marshal(cachedResponse{Status: 200, ContentType: "application/json", Body: []byte(`{"a":1}`)})
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	val2, err := json.Marshal(cachedResponse{Status: 200, ContentType: "application/json", Body: []byte(`{"b":2}`)})
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+
+	ln := newFakeListener(t)
+	runFakeRESPServer(t, ln, []respStep{
+		{wantArgs: []string{"SELECT", "0"}, reply: []byte("+OK\r\n")},
+		{wantArgs: []string{"SET", "k-override", string(val1), "EX", "30"}, reply: []byte("+OK\r\n")},
+		{wantArgs: []string{"SET", "k-inherit", string(val2), "EX", "60"}, reply: []byte("+OK\r\n")},
+	})
+	client := newRESPClient(ln.Addr().String(), "", 0)
+	noop := func(string, ...any) {}
+	c := newResponseCache(client, time.Minute, defaultCacheMaxBodyBytes, noop, noop) // global ttl = 60s
+	c.nowFn = time.Now
+
+	overrideGrp := &group{name: "override", cacheTTL: 30 * time.Second}
+	inheritGrp := &group{name: "inherit"} // cacheTTL 0 → inherits c.ttl (60s)
+
+	c.store("k-override", 200, "application/json", []byte(`{"a":1}`), effectiveTTL(c, overrideGrp))
+	c.store("k-inherit", 200, "application/json", []byte(`{"b":2}`), effectiveTTL(c, inheritGrp))
 }

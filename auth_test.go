@@ -190,6 +190,74 @@ func TestNewAuthStore_NoUsers_OK(t *testing.T) {
 	}
 }
 
+// --- GroupConfig.CacheTTL: constructor validation (item B) ---
+
+// TestNewAuthStore_GroupCacheTTL_ConstructorErrors is the constructor-error
+// table for GroupConfig.CacheTTL: a malformed duration, a zero duration, a
+// negative duration, and CacheTTL set while the global cache block is not
+// configured (nothing to inherit ttl from, the same reasoning
+// newAuthStore already applies to Cache:true) must all fail construction.
+func TestNewAuthStore_GroupCacheTTL_ConstructorErrors(t *testing.T) {
+	tests := []struct {
+		name        string
+		cacheTTL    string
+		globalCache bool
+	}{
+		{name: "malformed duration", cacheTTL: "not-a-duration", globalCache: true},
+		{name: "zero duration", cacheTTL: "0s", globalCache: true},
+		{name: "negative duration", cacheTTL: "-5s", globalCache: true},
+		{name: "set without global cache enabled", cacheTTL: "5m", globalCache: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &Config{
+				Providers: map[string]*ProviderConfig{"openai": {Type: "openai", APIKey: "k"}},
+				Groups:    map[string]*GroupConfig{"default": {CacheTTL: tt.cacheTTL}},
+				Cache:     CacheConfig{Enabled: tt.globalCache},
+			}
+			if _, err := newAuthStore(cfg); err == nil {
+				t.Fatalf("newAuthStore: want a constructor error for cacheTTL=%q (globalCache=%v)", tt.cacheTTL, tt.globalCache)
+			}
+		})
+	}
+}
+
+// TestNewAuthStore_GroupCacheTTL_EmptyInheritsZero proves an omitted
+// CacheTTL resolves to group.cacheTTL == 0 — effectiveTTL's (cache.go)
+// signal to inherit the global cache TTL rather than override it.
+func TestNewAuthStore_GroupCacheTTL_EmptyInheritsZero(t *testing.T) {
+	cfg := &Config{
+		Providers: map[string]*ProviderConfig{"openai": {Type: "openai", APIKey: "k"}},
+		Groups:    map[string]*GroupConfig{"default": {}},
+	}
+	a, err := newAuthStore(cfg)
+	if err != nil {
+		t.Fatalf("newAuthStore: %v", err)
+	}
+	if got := a.groups["default"].cacheTTL; got != 0 {
+		t.Errorf("groups[default].cacheTTL = %v, want 0 (inherit)", got)
+	}
+}
+
+// TestNewAuthStore_GroupCacheTTL_ValidOverride_ResolvedOnGroup proves a
+// well-formed, positive CacheTTL with the global cache block configured
+// both constructs cleanly and resolves onto the group struct exactly,
+// ready for effectiveTTL to read.
+func TestNewAuthStore_GroupCacheTTL_ValidOverride_ResolvedOnGroup(t *testing.T) {
+	cfg := &Config{
+		Providers: map[string]*ProviderConfig{"openai": {Type: "openai", APIKey: "k"}},
+		Groups:    map[string]*GroupConfig{"default": {CacheTTL: "30s"}},
+		Cache:     CacheConfig{Enabled: true},
+	}
+	a, err := newAuthStore(cfg)
+	if err != nil {
+		t.Fatalf("newAuthStore: %v", err)
+	}
+	if got := a.groups["default"].cacheTTL; got != 30*time.Second {
+		t.Errorf("groups[default].cacheTTL = %v, want 30s", got)
+	}
+}
+
 func TestGroup_AllowsProvider_EmptyListAllowsAll(t *testing.T) {
 	grp := &group{name: "eng"}
 	if !grp.allowsProvider("openai") {

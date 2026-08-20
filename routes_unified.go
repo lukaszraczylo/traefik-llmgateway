@@ -210,7 +210,7 @@ func (g *Gateway) runUnified(w http.ResponseWriter, r *http.Request, u *user, gr
 	// but only after being handed a silently truncated body — skip the
 	// call outright instead of ever constructing a corrupt cache entry.
 	if cacheable && callErr == nil && capture.status == http.StatusOK && !capture.oversize {
-		g.cache.store(cacheKeyStr, capture.status, capture.contentType, capture.buf.Bytes())
+		g.cache.store(cacheKeyStr, capture.status, capture.contentType, capture.buf.Bytes(), effectiveTTL(g.cache, grp))
 	}
 
 	if callErr != nil {

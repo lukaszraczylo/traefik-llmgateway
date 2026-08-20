@@ -107,6 +107,46 @@ func groupCacheEnabled(grp *group) bool {
 	return true
 }
 
+// groupCacheTTL parses and validates a GroupConfig.CacheTTL string for
+// group name, returning the resolved time.Duration — 0 when raw is empty,
+// meaning "inherit the global cache TTL" (effectiveTTL below). cacheEnabled
+// is cfg.Cache.Enabled: a non-empty raw while the global cache block is not
+// configured is a constructor error, since there is then no global TTL to
+// override — the identical "nothing to inherit from" reasoning newAuthStore
+// already applies to Cache:true (auth.go). Called once per group by
+// newAuthStore (auth.go), independent of that group's own Cache setting.
+func groupCacheTTL(name, raw string, cacheEnabled bool) (time.Duration, error) {
+	if raw == "" {
+		return 0, nil
+	}
+	if !cacheEnabled {
+		return 0, fmt.Errorf("llmgateway: group %q sets cacheTTL but global cache is not configured", name)
+	}
+	ttl, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, fmt.Errorf("llmgateway: group %q: cacheTTL: %w", name, err)
+	}
+	if ttl <= 0 {
+		return 0, fmt.Errorf("llmgateway: group %q: cacheTTL must be positive, got %q", name, raw)
+	}
+	return ttl, nil
+}
+
+// effectiveTTL resolves the TTL to use for grp's cache entries: grp's own
+// resolved cacheTTL when set (non-zero — GroupConfig.CacheTTL parsed and
+// validated at construction, groupCacheTTL above), otherwise c's global TTL
+// (buildResponseCache's cc.TTL, validateCacheConfig). Called by
+// routes_unified.go's runUnified immediately before store, so every stored
+// entry's Redis-native expiry (setEx's ttl argument, resp.go) already
+// reflects the group-specific override — no separate "shrink the group's
+// TTL later" step exists.
+func effectiveTTL(c *responseCache, grp *group) time.Duration {
+	if grp.cacheTTL > 0 {
+		return grp.cacheTTL
+	}
+	return c.ttl
+}
+
 // cachedResponse is the value responseCache stores per key: enough to
 // replay a cached response verbatim. json.Marshal/Unmarshal base64-encode
 // Body automatically (it is a []byte field), matching spec §2's "value:
@@ -245,14 +285,16 @@ func (c *responseCache) lookup(key string) (*cachedResponse, bool) {
 	return &cr, true
 }
 
-// store saves status/contentType/body under key with the cache's
-// configured TTL. A body exceeding maxBodyBytes is skipped (logged, not
-// treated as an error) before ever touching the network; a down-latch
+// store saves status/contentType/body under key with ttl (the caller's
+// resolved TTL — effectiveTTL above; every existing caller before the
+// per-group override passed c.ttl itself, so behavior for a group with no
+// override is unchanged). A body exceeding maxBodyBytes is skipped (logged,
+// not treated as an error) before ever touching the network; a down-latch
 // already open (latched) also skips the network entirely; and a Redis
 // error writing it is logged (rate-limited) and opens the latch — none of
 // which surface to the caller: a cache write must never fail a request
 // that already succeeded and was already written to the client.
-func (c *responseCache) store(key string, status int, contentType string, body []byte) {
+func (c *responseCache) store(key string, status int, contentType string, body []byte, ttl time.Duration) {
 	if len(body) > c.maxBodyBytes {
 		// Pre-formatted with fmt.Sprintf, then logged as a single "%s"
 		// argument, not c.logf(format, key, len(body), c.maxBodyBytes)
@@ -277,7 +319,7 @@ func (c *responseCache) store(key string, status int, contentType string, body [
 		panic(fmt.Sprintf("llmgateway: cache store: marshal cached response: %v", err))
 	}
 
-	if err := c.client.setEx(key, val, c.ttl); err != nil {
+	if err := c.client.setEx(key, val, ttl); err != nil {
 		c.recordFailure(err)
 	}
 }

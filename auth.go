@@ -29,9 +29,19 @@ type group struct {
 	// cache is GroupConfig.Cache carried through unchanged: nil inherits
 	// the global cache.enabled setting, non-nil overrides it for this
 	// group's requests. Resolved by groupCacheEnabled (cache.go).
-	cache                                 *bool
-	name                                  string
-	providers, models, mcpServers, agents []string
+	cache      *bool
+	name       string
+	providers  []string
+	models     []string
+	mcpServers []string
+	agents     []string
+	// cacheTTL is GroupConfig.CacheTTL parsed and validated at construction
+	// (newAuthStore below): 0 inherits the global responseCache's TTL
+	// (effectiveTTL, cache.go), a positive value overrides it for this
+	// group's cache entries only. GroupConfig.CacheTTL == "" is the only
+	// input that produces 0 here — every other value either becomes a
+	// positive duration or fails newAuthStore as a constructor error.
+	cacheTTL time.Duration
 }
 
 // allowsProvider reports whether name matches one of the group's provider
@@ -143,9 +153,22 @@ func newAuthStore(cfg *Config) (*authStore, error) {
 		if gc.Cache != nil && *gc.Cache && !cfg.Cache.Enabled {
 			return nil, fmt.Errorf("llmgateway: group %q enables cache but global cache is not configured", name)
 		}
+		// CacheTTL follows the identical "nothing to inherit from" reasoning
+		// as Cache:true above: overriding a TTL only means something when
+		// there is a global cache.ttl to override, so CacheTTL set while
+		// the global cache block itself is not configured is a constructor
+		// error, independent of this group's own Cache setting (a group
+		// may set CacheTTL for when caching later becomes enabled globally
+		// is NOT supported — cfg.Cache.Enabled is checked here, not
+		// per-group, matching Cache:true's own check above).
+		cacheTTL, err := groupCacheTTL(name, gc.CacheTTL, cfg.Cache.Enabled)
+		if err != nil {
+			return nil, err
+		}
 		a.groups[name] = &group{
 			limits:     gc.Limits,
 			cache:      gc.Cache,
+			cacheTTL:   cacheTTL,
 			name:       name,
 			providers:  gc.Providers,
 			models:     gc.Models,

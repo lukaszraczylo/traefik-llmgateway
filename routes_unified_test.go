@@ -1002,7 +1002,13 @@ func TestHandleChat_MidStreamDropAfterUsageChunk_AccountsPartialUsage(t *testing
 // resp_test.go's scripted tests already pin.
 type behavioralRedisServer struct {
 	data map[string]string
-	mu   sync.Mutex
+	// lastSetEX is the EX seconds argument from the most recent SET...EX
+	// command this server has handled — item B's per-group cache TTL
+	// override needs a way to observe the actual wire value a real
+	// Gateway.ServeHTTP request produced, not just the reply data's
+	// content. Empty until the first such SET arrives.
+	lastSetEX string
+	mu        sync.Mutex
 }
 
 // newBehavioralRedisServer starts the server on an OS-assigned port,
@@ -1010,10 +1016,31 @@ type behavioralRedisServer struct {
 // its listener.
 func newBehavioralRedisServer(t *testing.T) net.Listener {
 	t.Helper()
+	ln, _ := newBehavioralRedisServerAndHandle(t)
+	return ln
+}
+
+// newBehavioralRedisServerAndHandle is newBehavioralRedisServer, additionally
+// returning the *behavioralRedisServer itself so a caller can inspect state
+// the wire protocol alone does not expose — namely lastSetEX (see setEX
+// below), used by TestHandleChat_CachePerGroupTTL_EndToEnd_DifferentEXPerGroup
+// to prove effectiveTTL's per-group override (cache.go) actually reaches
+// the SET...EX command a real Gateway.ServeHTTP request issues.
+func newBehavioralRedisServerAndHandle(t *testing.T) (net.Listener, *behavioralRedisServer) {
+	t.Helper()
 	ln := newFakeListener(t)
 	srv := &behavioralRedisServer{data: make(map[string]string)}
 	go srv.acceptLoop(ln)
-	return ln
+	return ln, srv
+}
+
+// setEX returns the EX seconds argument from the most recent SET...EX
+// command this server has handled, and whether any such SET has arrived
+// yet.
+func (s *behavioralRedisServer) setEX() (string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.lastSetEX, s.lastSetEX != ""
 }
 
 func (s *behavioralRedisServer) acceptLoop(ln net.Listener) {
@@ -1062,6 +1089,9 @@ func (s *behavioralRedisServer) handle(args []string) []byte {
 	case "SET":
 		s.mu.Lock()
 		s.data[args[1]] = args[2]
+		if len(args) >= 5 && strings.EqualFold(args[3], "EX") {
+			s.lastSetEX = args[4]
+		}
 		s.mu.Unlock()
 		return []byte("+OK\r\n")
 	case "INCRBY":
@@ -1519,6 +1549,79 @@ func TestHandleChat_CacheableRequest_UpstreamDown_502HasNoCacheHeader(t *testing
 	}
 	if got := rec.Header().Get("X-Llmgw-Cache"); got != "" {
 		t.Errorf("X-Llmgw-Cache = %q, want unset on a 502 (nothing was served from or stored to the cache)", got)
+	}
+}
+
+// --- per-group cache TTL: end-to-end through a real Gateway (item B) ---
+
+// TestHandleChat_CachePerGroupTTL_EndToEnd_DifferentEXPerGroup is item B's
+// e2e proof: two groups share one global cache.ttl ("1m" = EX 60), one
+// ("override") overrides it to "30s", the other ("inherit") leaves it
+// unset. A cache-miss request from each group's own user must produce a
+// SET...EX command carrying that group's own resolved TTL — 30 for
+// "override", 60 for "inherit" — proving effectiveTTL's per-group
+// resolution (cache.go) actually reaches the wire through the full
+// ServeHTTP path, not just the unit level
+// (TestResponseCache_Store_EffectiveTTLDiffersPerGroup_SETCarriesGroupTTL,
+// cache_test.go). The two requests carry deliberately different bodies —
+// cacheKey has no group/user component (routes_unified.go), so identical
+// bodies from different groups would collide into one cache entry and the
+// second request would be a hit, never issuing a second SET at all.
+func TestHandleChat_CachePerGroupTTL_EndToEnd_DifferentEXPerGroup(t *testing.T) {
+	const respBody = `{"id":"c1","object":"chat.completion","model":"gpt-test","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(respBody))
+	}))
+	defer srv.Close()
+
+	redisLn, redisSrv := newBehavioralRedisServerAndHandle(t)
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{
+		"openai": {Type: "openai", BaseURL: srv.URL, APIKey: "k", Models: []string{"gpt-test"}},
+	}
+	cfg.Groups = map[string]*GroupConfig{
+		"override": {CacheTTL: "30s"},
+		"inherit":  {},
+	}
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{
+		{Name: "bob", Group: "override", APIKey: "sk-bob", Limits: &LimitsConfig{}},
+		{Name: "alice", Group: "inherit", APIKey: "sk-alice", Limits: &LimitsConfig{}},
+	}}
+	cfg.Redis = &RedisConfig{Address: redisLn.Addr().String()}
+	cfg.Cache = CacheConfig{Enabled: true, TTL: "1m", MaxBodyBytes: defaultCacheMaxBodyBytes}
+
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	// "override" group's user (bob): expect EX 30.
+	overrideBody := map[string]any{"model": "gpt-test", "messages": []any{map[string]any{"role": "user", "content": "override-group"}}}
+	reqOverride := newUnifiedRequest(t, http.MethodPost, "/v1/chat/completions", "sk-bob", overrideBody)
+	recOverride := httptest.NewRecorder()
+	h.ServeHTTP(recOverride, reqOverride)
+	if recOverride.Code != http.StatusOK {
+		t.Fatalf("override-group request: status = %d, want 200", recOverride.Code)
+	}
+	if ex, ok := redisSrv.setEX(); !ok || ex != "30" {
+		t.Errorf("override-group SET...EX = %q (ok=%v), want %q", ex, ok, "30")
+	}
+
+	// "inherit" group's user (alice), a genuinely different body so it
+	// misses (and issues its own SET) rather than hitting bob's entry:
+	// expect EX 60 (the global 1m).
+	inheritBody := map[string]any{"model": "gpt-test", "messages": []any{map[string]any{"role": "user", "content": "inherit-group"}}}
+	reqInherit := newUnifiedRequest(t, http.MethodPost, "/v1/chat/completions", "sk-alice", inheritBody)
+	recInherit := httptest.NewRecorder()
+	h.ServeHTTP(recInherit, reqInherit)
+	if recInherit.Code != http.StatusOK {
+		t.Fatalf("inherit-group request: status = %d, want 200", recInherit.Code)
+	}
+	if ex, ok := redisSrv.setEX(); !ok || ex != "60" {
+		t.Errorf("inherit-group SET...EX = %q (ok=%v), want %q", ex, ok, "60")
 	}
 }
 
