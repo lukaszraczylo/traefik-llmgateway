@@ -121,7 +121,7 @@ func (a *openaiAdapter) chatCompletion(ctx context.Context, w http.ResponseWrite
 		return usage{}, newProviderHTTPError(resp)
 	}
 
-	if streaming && strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream") {
+	if streaming && strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "text/event-stream") {
 		return a.forwardStream(w, resp.Body, clientAskedUsage)
 	}
 	// Either a non-streaming request, or a streaming one whose upstream
