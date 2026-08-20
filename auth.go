@@ -118,6 +118,9 @@ func newAuthStore(cfg *Config) (*authStore, error) {
 		nowFn:    time.Now,
 	}
 	for name, gc := range cfg.Groups {
+		if err := gc.Limits.validate(); err != nil {
+			return nil, fmt.Errorf("llmgateway: group %q: %w", name, err)
+		}
 		a.groups[name] = &group{
 			limits:     gc.Limits,
 			name:       name,
@@ -154,6 +157,9 @@ func (a *authStore) buildEntry(uc *UserConfig) (*authEntry, error) {
 	grp, ok := a.groups[uc.Group]
 	if !ok {
 		return nil, fmt.Errorf("llmgateway: user %q references unknown group %q", uc.Name, uc.Group)
+	}
+	if err := uc.Limits.validate(); err != nil {
+		return nil, fmt.Errorf("llmgateway: user %q: %w", uc.Name, err)
 	}
 	key, err := resolveSecret(uc.APIKey)
 	if err != nil {

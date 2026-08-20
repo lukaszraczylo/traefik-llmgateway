@@ -7,6 +7,12 @@ import (
 	"time"
 )
 
+// storeErrorLogEvery bounds how often the limiter logs a configured
+// store's operation error: once per this interval, regardless of how many
+// operations fail in between. A backend outage under load must not flood
+// the log with one line per request.
+const storeErrorLogEvery = 30 * time.Second
+
 // Window identifiers used throughout windowKey, counter metrics, and
 // retry-after calculation.
 const (
@@ -45,6 +51,52 @@ const usdToMicroFactor = 1_000_000
 // 8_199_999 micro-USD instead of 8_200_000, one micro-USD too strict.
 func usdToMicros(usd float64) int64 {
 	return int64(math.Round(usd * usdToMicroFactor))
+}
+
+// validate reports an error if lc holds a negative int64 count limit, or a
+// cost limit that is negative, NaN, or ±Inf. A nil lc (no limits
+// configured) is valid. Without this check, a negative int64 limit would
+// silently behave as unlimited — every enforcement path below treats
+// limit<=0 as "no limit" — and a NaN/Inf cost limit would propagate
+// through usdToMicros into meaningless comparisons instead of failing
+// loudly at construction time. Called by newAuthStore for every group's
+// and every user's LimitsConfig, so a malformed limit is a constructor
+// error rather than a silent misconfiguration.
+func (lc *LimitsConfig) validate() error {
+	if lc == nil {
+		return nil
+	}
+	counts := []struct {
+		name string
+		v    int64
+	}{
+		{"requestsPerMinute", lc.RequestsPerMinute},
+		{"requestsPerDay", lc.RequestsPerDay},
+		{"tokensPerDay", lc.TokensPerDay},
+		{"tokensPerMonth", lc.TokensPerMonth},
+	}
+	for _, c := range counts {
+		if c.v < 0 {
+			return fmt.Errorf("llmgateway: limits: %s must not be negative, got %d", c.name, c.v)
+		}
+	}
+
+	costs := []struct {
+		name string
+		v    float64
+	}{
+		{"costPerDayUSD", lc.CostPerDayUSD},
+		{"costPerMonthUSD", lc.CostPerMonthUSD},
+	}
+	for _, c := range costs {
+		if math.IsNaN(c.v) || math.IsInf(c.v, 0) {
+			return fmt.Errorf("llmgateway: limits: %s must be a finite number, got %v", c.name, c.v)
+		}
+		if c.v < 0 {
+			return fmt.Errorf("llmgateway: limits: %s must not be negative, got %v", c.name, c.v)
+		}
+	}
+	return nil
 }
 
 // counterStore is the storage backend the limiter uses for atomic windowed
@@ -171,33 +223,41 @@ type limitScope struct {
 type limitViolation struct {
 	message string
 	// retryAfter is the number of seconds until the violated window ends
-	// — until the client can plausibly succeed again.
+	// — until the client can plausibly succeed again. Left at its zero
+	// value for a storeDown violation, which carries no meaningful window.
 	retryAfter int
 	// storeDown reports whether the violation was manufactured because the
-	// configured counterStore was unreachable, rather than an actual limit
-	// breach. Always false in this task; a later task wires failOpen /
-	// fail-closed handling for a real remote store.
+	// configured counterStore was unreachable and failOpen is false,
+	// rather than an actual limit breach. Callers map this to an HTTP 503
+	// instead of 429 (Task 12).
 	storeDown bool
 }
 
 // limiter enforces per-minute/day/month request, token, and cost limits
 // using fixed windows keyed by windowKey.
 type limiter struct {
-	store    counterStore     // nil means always use fallback (see newLimiter)
-	fallback *memoryStore     // in-process counter store, always available
-	nowFn    func() time.Time // injected for tests; defaults to time.Now
-	failOpen bool             // wired for a later task's store-down handling
+	store     counterStore                     // configured backend; nil means always use fallback (see newLimiter)
+	fallback  *memoryStore                     // in-process counter store, always available
+	nowFn     func() time.Time                 // injected for tests; defaults to time.Now
+	logf      func(format string, args ...any) // injectable store-error log; defaults to a no-op
+	lastLogAt time.Time                        // guarded by logMu; last time a store error was logged
+	logMu     sync.Mutex
+	failOpen  bool // store-error policy: true falls back to fallback, false refuses the request
 }
 
 // newLimiter returns a limiter. A nil store means every operation uses the
 // limiter's own in-process fallback memoryStore — the plugin still
 // enforces limits with no distributed backend configured, just without
-// sharing counters across Traefik instances.
+// sharing counters across Traefik instances. failOpen governs what happens
+// when a non-nil store errors: true silently falls back to the in-process
+// memoryStore for that operation, false refuses the request (see
+// storeIncrBy / storeGet).
 func newLimiter(store counterStore, failOpen bool) *limiter {
 	return &limiter{
 		store:    store,
 		fallback: newMemoryStore(),
 		nowFn:    time.Now,
+		logf:     func(string, ...any) {},
 		failOpen: failOpen,
 	}
 }
@@ -207,13 +267,71 @@ func (l *limiter) now() time.Time {
 	return l.nowFn()
 }
 
-// activeStore returns the store operations should use: the configured
-// store when set, otherwise the in-process fallback.
-func (l *limiter) activeStore() counterStore {
-	if l.store != nil {
-		return l.store
+// logStoreError logs err via l.logf, rate-limited to once per
+// storeErrorLogEvery regardless of how many store operations fail in
+// between.
+func (l *limiter) logStoreError(err error) {
+	now := l.now()
+	l.logMu.Lock()
+	shouldLog := now.Sub(l.lastLogAt) >= storeErrorLogEvery
+	if shouldLog {
+		l.lastLogAt = now
 	}
-	return l.fallback
+	l.logMu.Unlock()
+	if shouldLog {
+		l.logf("limit store error: %v", err)
+	}
+}
+
+// storeIncrBy increments key by n with the given ttl, applying the
+// limiter's fail-open/fail-closed policy when a configured store errors.
+// ok is false only when the store errored and failOpen is false — the
+// fail-closed case a caller must refuse the request for, rather than
+// treating a zero value as a real counter reading.
+func (l *limiter) storeIncrBy(key string, n int64, ttl time.Duration) (v int64, ok bool) {
+	if l.store == nil {
+		v, _ = l.fallback.incrBy(key, n, ttl) // fallback never errors
+		return v, true
+	}
+	v, err := l.store.incrBy(key, n, ttl)
+	if err == nil {
+		return v, true
+	}
+	l.logStoreError(err)
+	if !l.failOpen {
+		return 0, false
+	}
+	v, _ = l.fallback.incrBy(key, n, ttl)
+	return v, true
+}
+
+// storeGet mirrors storeIncrBy for a read: it applies the same fail-open
+// (transparently reads the fallback) / fail-closed (ok=false) policy on a
+// configured store's error.
+func (l *limiter) storeGet(key string) (v int64, ok bool) {
+	if l.store == nil {
+		v, _ = l.fallback.get(key)
+		return v, true
+	}
+	v, err := l.store.get(key)
+	if err == nil {
+		return v, true
+	}
+	l.logStoreError(err)
+	if !l.failOpen {
+		return 0, false
+	}
+	v, _ = l.fallback.get(key)
+	return v, true
+}
+
+// storeDownViolation is the violation checkAndCount/budgetViolation return
+// when the configured store is unreachable and failOpen is false: the
+// request is refused instead of silently enforcing limits against a
+// non-shared fallback, so a backend outage cannot let every configured
+// limit go unenforced across a fleet of gateway instances.
+func storeDownViolation() *limitViolation {
+	return &limitViolation{message: "limit store unavailable", storeDown: true}
 }
 
 // windowKey builds the counterStore key for one (kind, id, metric, window)
@@ -265,20 +383,19 @@ func retryAfterSeconds(t time.Time, window string) int {
 }
 
 // incrCounter increments the (kind, id, metric, window) counter at t by n
-// and returns its new value. A store error is treated as "no increment
-// observed" — the fallback memoryStore never errors, and a real store's
-// fail-open/fail-closed policy is wired in a later task.
-func (l *limiter) incrCounter(kind, id, metric, window string, t time.Time, n int64, ttl time.Duration) int64 {
-	v, err := l.activeStore().incrBy(windowKey(kind, id, metric, window, t), n, ttl)
-	if err != nil {
-		return 0
-	}
-	return v
+// and returns its new value, together with whether the operation
+// succeeded under the limiter's fail-open/fail-closed policy (see
+// storeIncrBy). ok is false only in the fail-closed case: a configured
+// store errored and failOpen is false.
+func (l *limiter) incrCounter(kind, id, metric, window string, t time.Time, n int64, ttl time.Duration) (int64, bool) {
+	return l.storeIncrBy(windowKey(kind, id, metric, window, t), n, ttl)
 }
 
-// getCounter returns the (kind, id, metric, window) counter's value at t.
-func (l *limiter) getCounter(kind, id, metric, window string, t time.Time) (int64, error) {
-	return l.activeStore().get(windowKey(kind, id, metric, window, t))
+// getCounter returns the (kind, id, metric, window) counter's value at t,
+// together with whether the read succeeded under the limiter's fail-open/
+// fail-closed policy (see storeGet).
+func (l *limiter) getCounter(kind, id, metric, window string, t time.Time) (int64, bool) {
+	return l.storeGet(windowKey(kind, id, metric, window, t))
 }
 
 // checkAndCount increments every scope's req:min and req:day counters —
@@ -286,7 +403,10 @@ func (l *limiter) getCounter(kind, id, metric, window string, t time.Time) (int6
 // gets refused by one scope's limit still counts toward every other
 // scope's rate tracking — then evaluates each scope's set limits in order
 // and returns the first violation found, or nil if the request may
-// proceed.
+// proceed. If any store operation fails closed (a configured store errored
+// and failOpen is false), it returns a storeDownViolation immediately —
+// the request is refused rather than evaluated against partial or
+// fallback-only counters.
 //
 // Requests limits compare against the value just incremented in this call.
 // Token and cost limits compare against the value already accumulated by
@@ -299,8 +419,17 @@ func (l *limiter) checkAndCount(scopes []limitScope) *limitViolation {
 	minCounts := make([]int64, len(scopes))
 	dayCounts := make([]int64, len(scopes))
 	for i, sc := range scopes {
-		minCounts[i] = l.incrCounter(sc.kind, sc.id, metricReq, windowMin, now, 1, minWindowTTL)
-		dayCounts[i] = l.incrCounter(sc.kind, sc.id, metricReq, windowDay, now, 1, dayWindowTTL)
+		v, ok := l.incrCounter(sc.kind, sc.id, metricReq, windowMin, now, 1, minWindowTTL)
+		if !ok {
+			return storeDownViolation()
+		}
+		minCounts[i] = v
+
+		v, ok = l.incrCounter(sc.kind, sc.id, metricReq, windowDay, now, 1, dayWindowTTL)
+		if !ok {
+			return storeDownViolation()
+		}
+		dayCounts[i] = v
 	}
 
 	for i, sc := range scopes {
@@ -357,15 +486,19 @@ func requestLimitViolation(sc limitScope, name string, limit, count int64, windo
 
 // budgetViolation reports a violation when the scope's accumulated
 // counter for metric/window is already at or above limit. limit<=0 means
-// unlimited. A store read error fails open — no violation reported —
-// consistent with this task's storeDown always being false; a later task
-// wires strict fail-closed handling for a real remote store.
+// unlimited. A failed-closed read (configured store errored, failOpen
+// false) returns storeDownViolation rather than silently passing the
+// check — a store outage must never look the same as staying under
+// budget.
 func (l *limiter) budgetViolation(sc limitScope, metric, name string, limit int64, window string, now time.Time) *limitViolation {
 	if limit <= 0 {
 		return nil
 	}
-	used, err := l.getCounter(sc.kind, sc.id, metric, window, now)
-	if err != nil || used < limit {
+	used, ok := l.getCounter(sc.kind, sc.id, metric, window, now)
+	if !ok {
+		return storeDownViolation()
+	}
+	if used < limit {
 		return nil
 	}
 	return &limitViolation{
@@ -376,7 +509,11 @@ func (l *limiter) budgetViolation(sc limitScope, metric, name string, limit int6
 
 // account records u's total tokens and costMicros against every scope's
 // day and month counters. A zero-valued metric is skipped entirely — no
-// store write for a metric this call has nothing to report.
+// store write for a metric this call has nothing to report. A sample that
+// hits a fail-closed store error (see storeIncrBy) is dropped silently:
+// account has no error return to signal it, and dropping — rather than
+// counting it in the fallback — avoids double-counting once the store
+// recovers.
 func (l *limiter) account(scopes []limitScope, u usage, costMicros int64) {
 	now := l.now()
 	total := u.total()

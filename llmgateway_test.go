@@ -416,3 +416,222 @@ func TestServeHTTP_TriggersUsersFileReload(t *testing.T) {
 		t.Fatal("want ServeHTTP's entry-time maybeReload call to have picked up the file change")
 	}
 }
+
+// TestNewGateway_RejectsInvalidGroupLimits is carried-item (a): a negative
+// limit value in a group's LimitsConfig must fail plugin construction, not
+// silently behave as unlimited.
+func TestNewGateway_RejectsInvalidGroupLimits(t *testing.T) {
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{"openai": {Type: "openai", APIKey: "k"}}
+	cfg.Groups = map[string]*GroupConfig{"default": {Limits: &LimitsConfig{RequestsPerDay: -1}}}
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	if _, err := New(context.Background(), next, cfg, "llmgw"); err == nil {
+		t.Fatal("want constructor error for a negative group limit")
+	}
+}
+
+// TestNewGateway_RejectsInvalidUserLimits mirrors the group case for an
+// inline user's own limits override.
+func TestNewGateway_RejectsInvalidUserLimits(t *testing.T) {
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{"openai": {Type: "openai", APIKey: "k"}}
+	cfg.Groups = map[string]*GroupConfig{"default": {}}
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{
+		{Name: "a", Group: "default", APIKey: "sk-a", Limits: &LimitsConfig{CostPerMonthUSD: -1}},
+	}}
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	if _, err := New(context.Background(), next, cfg, "llmgw"); err == nil {
+		t.Fatal("want constructor error for a negative user limit")
+	}
+}
+
+// TestNewGateway_RejectsInvalidFileUserLimits covers the file-sourced user
+// path (attachUsersFile -> replaceFileUsers -> buildEntry), the other
+// caller of LimitsConfig.validate besides newAuthStore's inline loop.
+func TestNewGateway_RejectsInvalidFileUserLimits(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "users.json")
+	writeUsersDoc(t, fp, []*UserConfig{
+		{Name: "f", Group: "default", APIKey: "sk-f", Limits: &LimitsConfig{TokensPerDay: -1}},
+	}, time.Time{})
+
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{"openai": {Type: "openai", APIKey: "k"}}
+	cfg.Groups = map[string]*GroupConfig{"default": {}}
+	cfg.Users = &UsersConfig{File: fp}
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	if _, err := New(context.Background(), next, cfg, "llmgw"); err == nil {
+		t.Fatal("want constructor error for a negative file-sourced user limit")
+	}
+}
+
+// TestNewGateway_NoRedis_UsesMemoryLimiterFailOpenDefaultTrue is
+// carried-item (d)'s "else" branch: no Redis configured wires
+// newLimiter(nil, true) — a nil store (memoryStore fallback only) and
+// failOpen defaulted true.
+func TestNewGateway_NoRedis_UsesMemoryLimiterFailOpenDefaultTrue(t *testing.T) {
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{"openai": {Type: "openai", APIKey: "k"}}
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	gw := h.(*Gateway)
+	if gw.limiter == nil {
+		t.Fatal("want a non-nil limiter")
+	}
+	if gw.limiter.store != nil {
+		t.Errorf("gw.limiter.store = %#v, want nil (no Redis configured)", gw.limiter.store)
+	}
+	if !gw.limiter.failOpen {
+		t.Error("gw.limiter.failOpen = false, want true (default)")
+	}
+}
+
+// TestNewGateway_RedisConfigured_WiresRedisStoreAndFailOpen is
+// carried-item (d)'s main branch: a configured Redis block wires a
+// redisStore (backed by a respClient) into the limiter, and an explicit
+// FailOpen=false is honored rather than overridden by the default.
+func TestNewGateway_RedisConfigured_WiresRedisStoreAndFailOpen(t *testing.T) {
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{"openai": {Type: "openai", APIKey: "k"}}
+	failOpen := false
+	cfg.Redis = &RedisConfig{Address: "127.0.0.1:0", FailOpen: &failOpen}
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	gw := h.(*Gateway)
+	if gw.limiter == nil {
+		t.Fatal("want a non-nil limiter")
+	}
+	if _, ok := gw.limiter.store.(*redisStore); !ok {
+		t.Errorf("gw.limiter.store = %#v (%T), want *redisStore", gw.limiter.store, gw.limiter.store)
+	}
+	if gw.limiter.failOpen {
+		t.Error("gw.limiter.failOpen = true, want false (explicit config)")
+	}
+}
+
+// TestNewGateway_RedisFailOpenNilDefaultsTrue asserts a configured Redis
+// block with FailOpen left nil defaults to true, matching the no-Redis
+// default.
+func TestNewGateway_RedisFailOpenNilDefaultsTrue(t *testing.T) {
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{"openai": {Type: "openai", APIKey: "k"}}
+	cfg.Redis = &RedisConfig{Address: "127.0.0.1:0"}
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	gw := h.(*Gateway)
+	if !gw.limiter.failOpen {
+		t.Error("gw.limiter.failOpen = false, want true (FailOpen left nil)")
+	}
+}
+
+// TestNewGateway_RedisConfigured_EmptyAddress_ReturnsConstructorError
+// asserts a Redis block with no address fails construction immediately,
+// rather than deferring the error to the first lazy-connect attempt on
+// the request path.
+func TestNewGateway_RedisConfigured_EmptyAddress_ReturnsConstructorError(t *testing.T) {
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{"openai": {Type: "openai", APIKey: "k"}}
+	cfg.Redis = &RedisConfig{}
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	if _, err := New(context.Background(), next, cfg, "llmgw"); err == nil {
+		t.Fatal("want constructor error for a Redis block with an empty address")
+	}
+}
+
+// TestNewGateway_RedisPassword_ResolvedViaSecret is an end-to-end proof
+// that newGateway resolves Config.Redis.Password through resolveSecret
+// (env:/file:/literal) before handing it to respClient: an "env:" password
+// must arrive at the fake server as its resolved value, not the literal
+// "env:..." string.
+func TestNewGateway_RedisPassword_ResolvedViaSecret(t *testing.T) {
+	t.Setenv("LLMGW_TEST_REDIS_PASSWORD", "resolved-pw")
+
+	ln := newFakeListener(t)
+	runFakeRESPServer(t, ln, []respStep{
+		{wantArgs: []string{"AUTH", "resolved-pw"}, reply: []byte("+OK\r\n")},
+		{wantArgs: []string{"SELECT", "0"}, reply: []byte("+OK\r\n")},
+		{wantArgs: []string{"GET", "k"}, reply: []byte("$-1\r\n")},
+	})
+
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{"openai": {Type: "openai", APIKey: "k"}}
+	cfg.Redis = &RedisConfig{Address: ln.Addr().String(), Password: "env:LLMGW_TEST_REDIS_PASSWORD"} // #nosec G101 -- not a credential, a resolveSecret "env:" reference to an env var name
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	gw := h.(*Gateway)
+	store, ok := gw.limiter.store.(*redisStore)
+	if !ok {
+		t.Fatalf("gw.limiter.store = %#v (%T), want *redisStore", gw.limiter.store, gw.limiter.store)
+	}
+	if _, err := store.get("k"); err != nil {
+		t.Fatalf("store.get: %v (want the resolved password to authenticate against the fake server)", err)
+	}
+}
+
+// TestNewGateway_RedisPassword_UnresolvableSecret_ReturnsConstructorError
+// asserts an "env:" password referencing an unset variable fails
+// construction with resolveSecret's error, rather than deferring to a
+// confusing AUTH failure at request time.
+func TestNewGateway_RedisPassword_UnresolvableSecret_ReturnsConstructorError(t *testing.T) {
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{"openai": {Type: "openai", APIKey: "k"}}
+	cfg.Redis = &RedisConfig{Address: "127.0.0.1:0", Password: "env:LLMGW_TEST_REDIS_PASSWORD_UNSET"} // #nosec G101 -- not a credential, a resolveSecret "env:" reference to an env var name
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	if _, err := New(context.Background(), next, cfg, "llmgw"); err == nil {
+		t.Fatal("want constructor error for an unresolvable Redis password secret")
+	}
+}
+
+// TestNewGateway_SetsPricingWarnFn is carried-item (d)'s pricing wiring:
+// New must call setPricingWarnFn so an unpriced model's warning reaches
+// the gateway's own log, not pricing.go's default no-op.
+func TestNewGateway_SetsPricingWarnFn(t *testing.T) {
+	warnedModelsMu.Lock()
+	prevWarned, prevCapNotified := warnedModels, warnCapNotified
+	warnedModels = map[string]bool{}
+	warnCapNotified = false
+	warnedModelsMu.Unlock()
+	t.Cleanup(func() {
+		warnedModelsMu.Lock()
+		warnedModels, warnCapNotified = prevWarned, prevCapNotified
+		warnedModelsMu.Unlock()
+		setPricingWarnFn(func(string) {})
+	})
+
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{"openai": {Type: "openai", APIKey: "k"}}
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "mygw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	_ = h.(*Gateway)
+
+	origStderr := os.Stderr
+	r, w, _ := os.Pipe()
+	os.Stderr = w
+
+	costMicros("totally-unpriced-model-for-newgateway-test", usage{prompt: 1}, nil)
+
+	_ = w.Close() // closing the pipe write end to unblock the read; error not actionable in a test
+	os.Stderr = origStderr
+	var buf bytes.Buffer
+	if _, err := io.Copy(&buf, r); err != nil {
+		t.Fatalf("io.Copy: %v", err)
+	}
+	if !strings.Contains(buf.String(), "llmgw[mygw]") {
+		t.Fatalf("want the pricing warning routed through the gateway's own logf, got %q", buf.String())
+	}
+}

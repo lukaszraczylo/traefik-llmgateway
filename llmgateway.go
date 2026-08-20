@@ -101,12 +101,13 @@ func CreateConfig() *Config {
 
 // Gateway is the Traefik middleware handler.
 type Gateway struct {
-	next http.Handler
-	cfg  *Config
-	auth *authStore
-	name string
-	// wired in later tasks: limiter *limiter, registry *modelRegistry,
-	// adapters map[string]providerAdapter
+	next    http.Handler
+	cfg     *Config
+	auth    *authStore
+	limiter *limiter
+	name    string
+	// wired in later tasks: registry *modelRegistry, adapters
+	// map[string]providerAdapter
 }
 
 // New creates the middleware. NOTE: no tail call — Yaegi zeroes
@@ -130,12 +131,56 @@ func newGateway(ctx context.Context, next http.Handler, config *Config, name str
 	g := &Gateway{next: next, name: name, cfg: config, auth: auth}
 
 	if config.Users != nil && config.Users.File != "" {
-		if err := attachUsersFile(auth, config.Users.File, g); err != nil {
+		if err = attachUsersFile(auth, config.Users.File, g); err != nil {
 			return nil, err
 		}
 	}
 
+	lim, err := newConfiguredLimiter(config)
+	if err != nil {
+		return nil, err
+	}
+	lim.logf = g.errorf
+	g.limiter = lim
+
+	setPricingWarnFn(func(msg string) {
+		if msg == warnCapMessage {
+			g.logf("%s", msg)
+			return
+		}
+		g.logf("pricing: no price configured for model %q; cost will be recorded as 0", msg)
+	})
+
 	return g, nil
+}
+
+// newConfiguredLimiter builds the limiter for config, wiring config.Redis
+// when set. A configured Redis block wires a respClient-backed redisStore
+// behind AUTH/SELECT and resolveSecret'd credentials; otherwise the
+// limiter runs on its in-process fallback alone. failOpen defaults to
+// true (a Redis outage must not take the whole gateway down unless an
+// operator opts into strict enforcement) unless RedisConfig.FailOpen is
+// explicitly set.
+func newConfiguredLimiter(config *Config) (*limiter, error) {
+	if config.Redis == nil {
+		return newLimiter(nil, true), nil
+	}
+	if config.Redis.Address == "" {
+		return nil, errors.New("llmgateway: redis: address must not be empty")
+	}
+
+	password, err := resolveSecret(config.Redis.Password)
+	if err != nil {
+		return nil, fmt.Errorf("llmgateway: redis: %w", err)
+	}
+
+	failOpen := true
+	if config.Redis.FailOpen != nil {
+		failOpen = *config.Redis.FailOpen
+	}
+
+	client := newRESPClient(config.Redis.Address, password, config.Redis.DB)
+	return newLimiter(newRedisStore(client), failOpen), nil
 }
 
 // attachUsersFile performs the synchronous initial load of a Users.File path
