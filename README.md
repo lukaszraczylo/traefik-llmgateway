@@ -211,7 +211,7 @@ also a construction error, never a panic (`providers.go`, `mcp_a2a.go`,
 | `providers` | `[]string` | `[]` (all) | Glob-matched (`path.Match`) against a provider's configured name. |
 | `models` | `[]string` | `[]` (all) | Glob-matched, exactly as given — no automatic `provider/` prefix stripping. Both the bare and provider-prefixed forms of a model id are checked, so a pattern like `gpt-*` matches a client request for either `gpt-5-mini` or `openai/gpt-5-mini`. |
 | `cache` | `*bool` | `nil` (inherit) | Overrides the top-level `cache.enabled` setting for this group's requests — see [Caching](#caching). `nil` inherits the global setting; `false` opts the group out even when caching is globally on; `true` opts the group in, but only when the top-level `cache` block is actually configured (a construction error otherwise — there is nothing to inherit `ttl`/`maxBodyBytes` from). |
-| `cacheTTL` | `string` | `""` (inherit) | Overrides the top-level `cache.ttl` for this group's cache entries — see [Caching](#caching). Empty inherits the global TTL. A set value must be a valid, positive Go duration (`"30s"`, `"5m"`), and requires the top-level `cache` block to be configured — a construction error otherwise, the same "nothing to inherit from" reasoning as `cache: true` above. |
+| `cacheTTL` | `string` | `""` (inherit) | Sets the TTL written when this group's own request populates a cache entry — see [Caching](#caching). It does not scope entries to a group: cache entries are shared across every group that can reach the model (see the Caching section's "User identity is not part of the key" note, which applies to group identity too), so this controls a write's TTL only, not which group can read the entry. Empty inherits the global TTL. A set value must be a valid, positive Go duration (`"30s"`, `"5m"`), and requires the top-level `cache` block to be configured — a construction error otherwise, the same "nothing to inherit from" reasoning as `cache: true` above. |
 | `mcpServers` | `[]string` | `[]` (all) | Glob-matched against a configured MCP server name. |
 | `agents` | `[]string` | `[]` (all) | Glob-matched against a configured agent name. |
 
@@ -585,11 +585,16 @@ cached bodies for the same request.
   enabled — the block omitted entirely, or present with `enabled: false`,
   both read the same way — is a construction error: there is nothing
   configured to inherit `ttl`/`maxBodyBytes` from.
-- **Group TTL override**: `GroupConfig.cacheTTL` overrides the top-level
-  `cache.ttl` for one group's cache entries only, independently of that
-  group's own `cache` setting — an empty value inherits the global TTL, a
-  set value must parse as a positive Go duration and requires the
-  top-level `cache` block to be configured, or construction fails.
+- **Group TTL override**: `GroupConfig.cacheTTL` sets the TTL written when
+  this group's own request populates a cache entry — it is not a per-group
+  scope. Cache entries are shared across groups, exactly like the "User
+  identity is not part of the key" bullet above: whichever group's request
+  happens to populate (or later refresh) an entry decides that entry's
+  TTL, and a later request from a different group that hits the same
+  entry reads it with the TTL already stored there, unaffected by its own
+  `cacheTTL`. An empty value inherits the global TTL for that group's own
+  writes; a set value must parse as a positive Go duration and requires
+  the top-level `cache` block to be configured, or construction fails.
 - **Storage**: values are stored via the same hand-rolled RESP2 client
   (`resp.go`) the limiter's distributed counters use — the identical
   Redis/Valkey/Dragonfly connection, not a second one. A Redis error
@@ -887,9 +892,13 @@ manual reload step. The Kubernetes CRD provider watches `Middleware`
 resources natively: on a change, Traefik builds a whole new plugin
 instance from the updated config, lets it warm-fill discovery for every
 provider with `discovery: true` (see [Model routing](#model-routing)), then
-swaps it in for new requests. Requests already in flight keep running
-against the old instance until they finish; only new requests reach the
-new one.
+swaps it in for new requests. This repository does not carry evidence of
+Traefik's exact draining mechanism for requests already in flight on the
+old instance at swap time. What is verified: the integration suite's
+sustained-traffic reload test (`TestConfigHotReload`,
+`integration/config_hot_reload_test.go`) sends requests throughout the
+whole rewrite-and-propagation window and sees zero non-200 responses, on
+every run.
 
 A rebuilt instance keeps some state and resets the rest:
 
@@ -899,11 +908,13 @@ A rebuilt instance keeps some state and resets the rest:
   [Limits and accounting](#limits-and-accounting)) — never from anything
   specific to one Gateway instance — so a new instance reads the exact
   counters the old one wrote. The response cache's keys work the same way.
-- **Resets on a rebuild**: the in-process fallback counters used only when
-  `redis` is not configured, the limiter's and cache's Redis-outage
-  down-latches, and the model registry's discovery cache — a new instance
-  always runs its own full warm-fill before serving, rather than
-  inheriting the old instance's listing.
+- **Resets on a rebuild**: the in-process fallback counters (used whenever
+  no Redis is configured, and also transparently during a Redis outage
+  when `failOpen` is true — the default; see `limiter.storeIncrBy`,
+  `limits.go`), the limiter's and cache's own Redis-outage down-latches,
+  and the model registry's discovery cache — a new instance always runs
+  its own full warm-fill before serving, rather than inheriting the old
+  instance's listing.
 
 Two practical implications follow:
 

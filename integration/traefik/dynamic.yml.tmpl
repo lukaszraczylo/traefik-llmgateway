@@ -66,6 +66,20 @@ http:
             limited:
               limits:
                 requestsPerMinute: 3
+            # Dedicated to TestConfigHotReload's sustained ~20rps probe loop
+            # (integration/config_hot_reload_test.go), isolated from "eng"'s
+            # shared 1000/min bucket: that loop alone can run several
+            # hundred requests in one test, and "eng" is also driven by
+            # every other alice-keyed test in this suite. Sharing "eng"
+            # measurably risked exhausting its per-minute budget, which
+            # would surface as a 429 in the probe loop — indistinguishable
+            # from a real reload-caused blip to that test's own "zero
+            # non-200s" assertion, and a false failure signal for every
+            # OTHER "eng" test running around the same time. 100000/min is
+            # deliberately far above anything this suite could ever send.
+            hotreload:
+              limits:
+                requestsPerMinute: 100000
           users:
             inline:
               # limits.requestsPerDay is set (generously — every test in
@@ -92,6 +106,13 @@ http:
                 admin: true
                 limits:
                   requestsPerDay: 1000000
+              # TestConfigHotReload's dedicated identity — see the
+              # "hotreload" group's own comment above for why it is not
+              # alice/eng. No per-user limits set: the group's
+              # requestsPerMinute alone (100000) already covers this user.
+              - name: hotreload-probe
+                group: hotreload
+                apiKey: "sk-int-hotreload"
             file: "/users/users.json"
           redis:
             address: "redis:6379"

@@ -26,6 +26,129 @@ func dynamicConfigPath() string {
 	return filepath.Join("traefik", "dynamic", "dynamic.yml")
 }
 
+// doJSONNonFatal is doJSON's non-fatal counterpart: every error (marshal,
+// request construction, transport, or body read) is returned to the
+// caller instead of calling t.Fatalf. It exists for the two places in this
+// file that poll in a loop — waitForModelAliasBounded and
+// settleToBaseline — where a single transient failure (a request landing
+// mid-rebuild, a dropped connection) must reset that poll's own retry
+// state and try again, never abort the whole test. A non-JSON or empty
+// body decodes to a nil map, matching doJSON's own contract.
+func doJSONNonFatal(method, url, apiKey string, body any) (*http.Response, map[string]any, error) {
+	var reader io.Reader
+	if body != nil {
+		b, err := json.Marshal(body)
+		if err != nil {
+			return nil, nil, fmt.Errorf("marshal request body: %w", err)
+		}
+		reader = bytes.NewReader(b)
+	}
+
+	req, err := http.NewRequest(method, url, reader)
+	if err != nil {
+		return nil, nil, fmt.Errorf("new request %s %s: %w", method, url, err)
+	}
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, nil, fmt.Errorf("do request %s %s: %w", method, url, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return resp, nil, fmt.Errorf("read response body from %s %s: %w", method, url, err)
+	}
+	var out map[string]any
+	if len(raw) > 0 {
+		_ = json.Unmarshal(raw, &out)
+	}
+	return resp, out, nil
+}
+
+// modelIDSet extracts the set of model ids from a GET /v1/models response
+// body's "data" array. A body that does not decode as expected yields an
+// empty set, never a panic — callers compare sets, so a malformed body
+// simply fails to match rather than crashing the poll loop it runs inside.
+func modelIDSet(body map[string]any) map[string]bool {
+	ids := make(map[string]bool)
+	data, ok := body["data"].([]any)
+	if !ok {
+		return ids
+	}
+	for _, entry := range data {
+		if m, ok := entry.(map[string]any); ok {
+			if id, ok := m["id"].(string); ok {
+				ids[id] = true
+			}
+		}
+	}
+	return ids
+}
+
+// sameModelIDSet reports whether a and b contain exactly the same ids.
+func sameModelIDSet(a, b map[string]bool) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for id := range a {
+		if !b[id] {
+			return false
+		}
+	}
+	return true
+}
+
+// settleConsecutivePolls is how many consecutive matching polls
+// settleToBaseline requires before declaring the live config settled —
+// one lucky poll landing between two still-in-flight rebuilds is not
+// enough evidence the config has actually stopped changing.
+const settleConsecutivePolls = 3
+
+// settleToBaseline polls GET /v1/models (roughly 1s apart) until it
+// observes baseline's exact model id set on settleConsecutivePolls
+// consecutive polls, or bound elapses without ever reaching that streak;
+// it returns whether it settled.
+//
+// This is called unconditionally by TestConfigHotReload's cleanup, on
+// BOTH outcomes of the earlier alias poll (the watch firing within its
+// own bound, or not) — fixing a real bug found during verification: an
+// earlier version of this cleanup polled only for the injected alias to
+// DISAPPEAR, which trivially and instantly "succeeded" on the path where
+// the watch never fired at all, since the alias was never live in the
+// first place and "not present" was already true on the very first
+// check. That left the exact propagation window this function now
+// guards completely unwatched, and it raced TestUsersFileHotReload's own
+// (pre-existing, non-atomic) write to users.json during verification: a
+// rebuild this test's own restore triggered landed later, mid-write, read
+// a torn file, and failed plugin construction outright — a global 404
+// outage until some later, unrelated config change happened to trigger a
+// successful rebuild. Requiring a real settle, on every path, removes
+// that window.
+func settleToBaseline(baseURL, apiKey string, baseline map[string]bool, bound time.Duration) bool {
+	consecutive := 0
+	deadline := time.Now().Add(bound)
+	for time.Now().Before(deadline) {
+		resp, body, err := doJSONNonFatal(http.MethodGet, baseURL+"/v1/models", apiKey, nil)
+		if err == nil && resp.StatusCode == http.StatusOK && sameModelIDSet(modelIDSet(body), baseline) {
+			consecutive++
+			if consecutive >= settleConsecutivePolls {
+				return true
+			}
+		} else {
+			consecutive = 0
+		}
+		time.Sleep(time.Second)
+	}
+	return false
+}
+
 // runChatLoop issues a POST /v1/chat/completions against baseURL for model
 // every interval, from goroutine start until stop is closed, then closes
 // done. Every response whose status is not 200, and every request-level
@@ -94,13 +217,15 @@ func runChatLoop(baseURL, apiKey, model string, interval time.Duration, stop <-c
 // (integration_test.go), a timeout here is not itself a test failure:
 // TestConfigHotReload uses the bool to choose between asserting success and
 // t.Skipf-ing a known, host-dependent limitation (the directory watch not
-// firing under this host's Docker Desktop VirtioFS).
+// firing within this bound). Uses doJSONNonFatal, not doJSON: a transient
+// transport error during this poll must be treated as "try again", not as
+// an immediate hard failure of the whole test.
 func waitForModelAliasBounded(t *testing.T, baseURL, apiKey, wantID string, timeout time.Duration) bool {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		resp, body := doJSON(t, http.MethodGet, baseURL+"/v1/models", apiKey, nil)
-		if resp.StatusCode == http.StatusOK {
+		resp, body, err := doJSONNonFatal(http.MethodGet, baseURL+"/v1/models", apiKey, nil)
+		if err == nil && resp.StatusCode == http.StatusOK {
 			if data, ok := body["data"].([]any); ok {
 				for _, entry := range data {
 					if m, ok := entry.(map[string]any); ok && m["id"] == wantID {
@@ -121,8 +246,20 @@ func waitForModelAliasBounded(t *testing.T, baseURL, apiKey, wantID string, time
 // mount) must pick up a config change with no blip in service, and — when
 // it does — the newly added config must actually be live.
 //
+// Every request this test issues — the baseline chat, the sustained probe
+// loop, both /v1/models polls, and the final aliased-model chat — uses
+// hotReloadProbeKey, a dedicated user in its own "hotreload" group with a
+// 100000/min limit (dynamic.yml.tmpl), never aliceKey/"eng". "eng" is
+// shared by most of this suite's other tests and carries a much lower
+// limit (1000/min); this test's own loop alone can burn several hundred
+// requests in one run, and a 429 from that shared budget being exhausted
+// would be indistinguishable, to this test's own "zero non-200s"
+// assertion, from a genuine reload-caused blip.
+//
 // Sequence:
-//  1. Baseline: an existing model answers 200.
+//  1. Baseline: an existing model answers 200, and the live /v1/models
+//     listing is captured as the "baseline" model id set — the value
+//     step 6 below polls for once the config is restored.
 //  2. A sustained ~20rps request loop against that same model starts,
 //     recording every non-200 (runChatLoop above).
 //  3. While the loop runs, the rendered dynamic config is rewritten to add
@@ -135,23 +272,36 @@ func waitForModelAliasBounded(t *testing.T, baseURL, apiKey, wantID string, time
 //     this is the directory watch actually firing.
 //  5. The loop stops. The no-blip property — zero non-200s across the
 //     entire rewrite/propagation window — is asserted unconditionally,
-//     whether or not the watch fired within 30s: a slow or absent watch is
-//     a config-propagation limitation, not a service disruption, and the
-//     two must never be conflated.
+//     whether or not the watch fired within 30s. On the fired path this is
+//     a genuine no-blip-under-reload result; on the skip path it proves
+//     only that the stack survived an unreloaded rewrite attempt (see the
+//     Skip message below for why that distinction matters).
 //  6. Only if the watch fired: a chat request through the newly live
 //     "aliased/hot" alias must succeed (200) — proving the config that
 //     actually landed is usable, not just present in the listing.
 //
-// t.Cleanup restores the original rendered config content unconditionally,
-// including on a Skip or a failure partway through.
+// t.Cleanup restores the original rendered config content atomically, the
+// same way step 3 writes it, then unconditionally polls (settleToBaseline)
+// until the live /v1/models listing matches the captured baseline again —
+// see settleToBaseline's own doc comment for the outage this specifically
+// prevents.
 func TestConfigHotReload(t *testing.T) {
 	baseReq := map[string]any{
 		"model":    "openai/gpt-mock",
 		"messages": []map[string]any{{"role": "user", "content": "baseline"}},
 	}
-	resp, body := doJSON(t, http.MethodPost, traefik1URL+"/v1/chat/completions", aliceKey, baseReq)
+	resp, body := doJSON(t, http.MethodPost, traefik1URL+"/v1/chat/completions", hotReloadProbeKey, baseReq)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("baseline chat: status = %d, body=%#v", resp.StatusCode, body)
+	}
+
+	baselineResp, baselineBody, err := doJSONNonFatal(http.MethodGet, traefik1URL+"/v1/models", hotReloadProbeKey, nil)
+	if err != nil || baselineResp.StatusCode != http.StatusOK {
+		t.Fatalf("capture baseline model set: status=%v err=%v", baselineResp, err)
+	}
+	baselineIDs := modelIDSet(baselineBody)
+	if len(baselineIDs) == 0 {
+		t.Fatalf("baseline /v1/models returned no models, body=%#v; cannot verify settle later", baselineBody)
 	}
 
 	configPath := dynamicConfigPath()
@@ -159,22 +309,6 @@ func TestConfigHotReload(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read rendered dynamic config %q: %v", configPath, err)
 	}
-	// The restore is written the same atomic way as the mutation below (temp
-	// file in the same directory, then os.Rename over the target), and
-	// t.Cleanup then WAITS (bounded 30s) for "aliased/hot" to actually
-	// disappear from a live /v1/models before returning. This matters
-	// because VirtioFS propagation latency is highly variable (this test's
-	// own poll below observed anywhere from under a second to over 30s) —
-	// without waiting, this cleanup's own restore can trigger a Traefik
-	// middleware rebuild that lands arbitrarily late, during a LATER test's
-	// execution. That was reproduced empirically: it raced
-	// TestUsersFileHotReload's non-atomic os.WriteFile to users.json
-	// (integration_test.go), the rebuild read a torn/empty file mid-write,
-	// and plugin construction failed outright — removing the router
-	// entirely (global 404s) until the next unrelated config change
-	// happened to trigger a successful rebuild. Waiting here for this
-	// test's OWN change to fully settle before it hands control back
-	// removes that window for every test that runs after it.
 	t.Cleanup(func() {
 		tmpPath := configPath + ".restore.tmp"
 		if err := os.WriteFile(tmpPath, original, 0o644); err != nil {
@@ -185,26 +319,9 @@ func TestConfigHotReload(t *testing.T) {
 			t.Errorf("rename restore temp config over %q: %v", configPath, err)
 			return
 		}
-		deadline := time.Now().Add(30 * time.Second)
-		for time.Now().Before(deadline) {
-			resp, body := doJSON(t, http.MethodGet, traefik1URL+"/v1/models", aliceKey, nil)
-			if resp.StatusCode == http.StatusOK {
-				stillPresent := false
-				if data, ok := body["data"].([]any); ok {
-					for _, entry := range data {
-						if m, ok := entry.(map[string]any); ok && m["id"] == "aliased/hot" {
-							stillPresent = true
-							break
-						}
-					}
-				}
-				if !stillPresent {
-					return
-				}
-			}
-			time.Sleep(500 * time.Millisecond)
+		if !settleToBaseline(traefik1URL, hotReloadProbeKey, baselineIDs, 20*time.Second) {
+			t.Logf("cleanup: /v1/models did not settle back to the baseline model set within 20s of restoring the config — a later test may race a still-pending rebuild")
 		}
-		t.Logf("cleanup: %q still visible in /v1/models (or /v1/models still unhealthy) 30s after restoring the config — a later test may race a still-pending rebuild", "aliased/hot")
 	})
 
 	// Sustained request loop: started before the config mutation below and
@@ -214,7 +331,7 @@ func TestConfigHotReload(t *testing.T) {
 	done := make(chan struct{})
 	var mu sync.Mutex
 	var failures []string
-	go runChatLoop(traefik1URL, aliceKey, "openai/gpt-mock", 50*time.Millisecond, stop, done, &mu, &failures)
+	go runChatLoop(traefik1URL, hotReloadProbeKey, "openai/gpt-mock", 50*time.Millisecond, stop, done, &mu, &failures)
 
 	const anchor = `aliased/claude: "claude-mock"`
 	if !strings.Contains(string(original), anchor) {
@@ -236,7 +353,7 @@ func TestConfigHotReload(t *testing.T) {
 		t.Fatalf("rename %q over %q: %v", tmpPath, configPath, err)
 	}
 
-	fired := waitForModelAliasBounded(t, traefik1URL, aliceKey, "aliased/hot", 30*time.Second)
+	fired := waitForModelAliasBounded(t, traefik1URL, hotReloadProbeKey, "aliased/hot", 30*time.Second)
 
 	close(stop)
 	<-done
@@ -250,14 +367,14 @@ func TestConfigHotReload(t *testing.T) {
 	}
 
 	if !fired {
-		t.Skipf("directory-based file provider watch did not surface the new alias within 30s on this host (a VirtioFS/Docker Desktop fsnotify propagation limitation, not a plugin defect) — the no-blip property above still held (0 failures) regardless")
+		t.Skipf("directory-based file provider watch did not surface the new alias within 30s on this host (a VirtioFS/Docker Desktop fsnotify propagation limitation, not a plugin defect). The zero-failures result above proves only that the stack stayed healthy through an unreloaded rewrite attempt — it is NOT evidence that a successful reload is blip-free, since no reload actually happened on this run")
 	}
 
 	hotReq := map[string]any{
 		"model":    "aliased/hot",
 		"messages": []map[string]any{{"role": "user", "content": "hi"}},
 	}
-	hotResp, hotBody := doJSON(t, http.MethodPost, traefik1URL+"/v1/chat/completions", aliceKey, hotReq)
+	hotResp, hotBody := doJSON(t, http.MethodPost, traefik1URL+"/v1/chat/completions", hotReloadProbeKey, hotReq)
 	if hotResp.StatusCode != http.StatusOK {
 		t.Errorf("chat via the newly hot-reloaded alias: status = %d, body=%#v", hotResp.StatusCode, hotBody)
 	}

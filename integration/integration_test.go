@@ -39,6 +39,13 @@ const (
 	bobKey   = "sk-int-bob"   // limited group (requestsPerMinute: 3), file-sourced user
 	carolKey = "sk-int-carol" // added to users.json mid-run by TestUsersFileHotReload
 	adminKey = "sk-int-admin" // eng group, inline user, admin: true (spec §4, v0.2)
+	// hotReloadProbeKey belongs to a dedicated "hotreload" group
+	// (requestsPerMinute: 100000, dynamic.yml.tmpl) — used only by
+	// TestConfigHotReload's sustained request loop and its /v1/models
+	// polls (config_hot_reload_test.go), isolated from "eng"'s shared,
+	// much lower per-minute bucket so that loop's volume can never
+	// masquerade as a reload-caused failure via a budget-exhaustion 429.
+	hotReloadProbeKey = "sk-int-hotreload"
 )
 
 // composeFile returns the path to docker-compose.yml relative to this

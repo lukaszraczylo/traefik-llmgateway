@@ -9,3 +9,8 @@ dist/
 # watches integration/traefik/dynamic/, matching the k8s-ConfigMap-mount
 # pattern (see traefik.yml's own comment).
 integration/traefik/dynamic/
+# Stale-checkout hygiene: this used to be the single rendered file, before
+# the switch to the directory above. Keeping it ignored means a leftover
+# copy from an older checkout (or a stash/worktree predating the switch)
+# never gets accidentally `git add`-ed back in.
+integration/traefik/dynamic.yml
