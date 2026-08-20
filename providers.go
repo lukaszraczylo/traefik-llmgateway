@@ -207,12 +207,26 @@ var configNamePattern = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
 // reachable — reject it here instead of silently shadowing it.
 var reservedConfigNames = map[string]bool{"v1": true, "mcp": true, "a2a": true}
 
-// validateConfigName reports an error unless name matches configNamePattern
-// and is not one of reservedConfigNames. kind labels the config section
-// (e.g. "provider", "mcpServers", "agents") in the error message.
+// dotOnlyConfigNames are the two names configNamePattern's character class
+// permits (it allows ".") but that are rejected anyway: "." and ".." read
+// as directory-traversal segments once embedded as a path segment in the
+// gateway's own routes (passthroughRoute's "/{provider}/*", targetRoute's
+// "/mcp/{name}/*" and "/a2a/{name}/*"), even though nothing in this
+// package's own path handling currently mis-resolves them — disallowing
+// them at construction is cheap, and removes any dependence on that
+// staying true.
+var dotOnlyConfigNames = map[string]bool{".": true, "..": true}
+
+// validateConfigName reports an error unless name matches configNamePattern,
+// is not one of dotOnlyConfigNames, and is not one of reservedConfigNames.
+// kind labels the config section (e.g. "provider", "mcpServers", "agents")
+// in the error message.
 func validateConfigName(kind, name string) error {
 	if !configNamePattern.MatchString(name) {
 		return fmt.Errorf("llmgateway: %s name %q is invalid: must match %s", kind, name, configNamePattern.String())
+	}
+	if dotOnlyConfigNames[name] {
+		return fmt.Errorf("llmgateway: %s name %q is invalid: must not be \".\" or \"..\"", kind, name)
 	}
 	if reservedConfigNames[name] {
 		return fmt.Errorf("llmgateway: %s name %q is reserved and would shadow a gateway route", kind, name)

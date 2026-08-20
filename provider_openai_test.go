@@ -666,11 +666,13 @@ func TestBuildAdapters(t *testing.T) {
 	})
 }
 
-// TestValidateConfigName covers validateConfigName's character-set and
-// reserved-name rules, shared by buildAdapters (provider names) and
-// validateTargetURLs (mcpServers/agents names, mcp_a2a_test.go) — a
-// provider, MCP server, or agent named "v1", "mcp", or "a2a" would shadow
-// one of the gateway's own fixed top-level routes.
+// TestValidateConfigName covers validateConfigName's character-set,
+// dot-only-name, and reserved-name rules, shared by buildAdapters
+// (provider names) and validateTargetURLs (mcpServers/agents names,
+// mcp_a2a_test.go) — a provider, MCP server, or agent named "v1", "mcp",
+// or "a2a" would shadow one of the gateway's own fixed top-level routes,
+// and one named "." or ".." reads as a directory-traversal segment once
+// embedded as a path segment in the gateway's own routes.
 func TestValidateConfigName(t *testing.T) {
 	tests := []struct {
 		kind    string
@@ -687,6 +689,11 @@ func TestValidateConfigName(t *testing.T) {
 		{"provider", "a2a", true},         // reserved: A2A target-proxy prefix
 		{"mcpServers", "v1", true},        // same reserved set applies to every kind
 		{"agents", "a2a", true},
+		{"provider", ".", true},    // dot-only: matches configNamePattern's character class but rejected anyway
+		{"provider", "..", true},   // dot-only: same
+		{"mcpServers", ".", true},  // dot-only rule applies to every kind
+		{"agents", "..", true},     // dot-only rule applies to every kind
+		{"provider", "...", false}, // three dots is NOT one of dotOnlyConfigNames — the rule is exact-match on "." and "..", not "any dots-only string"
 	}
 	for _, tt := range tests {
 		t.Run(tt.kind+"/"+tt.name, func(t *testing.T) {
