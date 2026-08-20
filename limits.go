@@ -27,18 +27,30 @@ const storeErrorLogEvery = 30 * time.Second
 const storeDownLatchFor = 5 * time.Second
 
 // Window identifiers used throughout windowKey, counter metrics, and
-// retry-after calculation.
+// retry-after calculation. windowHour is stats-only (v0.2 data-layer
+// task, see hourWindowTTL): checkAndCount/account both write it, but no
+// LimitsConfig field ever names it, so evaluateScope has nothing to
+// evaluate it against — GET /admin/api/usage/history (admin.go) is its
+// only reader.
 const (
+	windowHour  = "hour"
 	windowMin   = "min"
 	windowDay   = "day"
 	windowMonth = "month"
 )
 
-// Counter metric names embedded in windowKey.
+// Counter metric names embedded in windowKey. metricTokIn/metricTokOut
+// replace a single combined "tok" metric (v0.2 data-layer task, folding
+// the operator's tokens-in/tokens-out split directive): account records
+// usage.prompt under metricTokIn and usage.completion under metricTokOut
+// separately, so the admin usage/history APIs can chart each direction on
+// its own. A TokensPerDay/TokensPerMonth limit still enforces a TOTAL
+// budget across both — see tokenBudgetViolation.
 const (
-	metricReq  = "req"
-	metricTok  = "tok"
-	metricCost = "cost"
+	metricReq    = "req"
+	metricTokIn  = "tokin"
+	metricTokOut = "tokout"
+	metricCost   = "cost"
 )
 
 // TTLs applied to counter keys. They exceed their window's natural length
@@ -46,10 +58,18 @@ const (
 // embedded in the key (see windowKey) already makes a rolled-over window
 // use a different key, so these TTLs only bound how long a stale key
 // lingers in memoryStore before an opportunistic sweep reclaims it.
+// dayWindowTTL/monthWindowTTL were bumped from their original 25h/32d
+// (v0.2 data-layer task): the admin usage-history API's day/month charts
+// need a bucket to stay readable for the whole retention span a chart
+// can request (historyMaxSpan, admin.go — 35 daily, 13 monthly buckets),
+// not just long enough to survive its own single rollover. The TTL >
+// window-length invariant this comment already documented still holds at
+// the new values, and at hourWindowTTL for the new hour window.
 const (
 	minWindowTTL   = 2 * time.Minute
-	dayWindowTTL   = 25 * time.Hour
-	monthWindowTTL = 32 * 24 * time.Hour
+	hourWindowTTL  = 48 * time.Hour
+	dayWindowTTL   = 35 * 24 * time.Hour
+	monthWindowTTL = 400 * 24 * time.Hour
 )
 
 // usdToMicroFactor scales a USD amount to micro-USD (1e6 micro-USD per
@@ -248,15 +268,30 @@ func (u usage) total() int64 {
 	return u.prompt + u.completion
 }
 
-// limitScope is one entity (a user or their group) whose limits apply to a
-// request. checkAndCount and account evaluate every scope in the slice
-// they are given, so a request is counted and checked against both its
-// user's and its group's limits in one call.
+// limitScope is one entity (a user, their group, or the synthetic total
+// scope — see totalScopeKind) whose limits apply to a request.
+// checkAndCount and account evaluate every scope in the slice they are
+// given, so a request is counted and checked against both its user's and
+// its group's limits in one call.
 type limitScope struct {
 	limits *LimitsConfig
-	kind   string // "user" or "group"
+	kind   string // "user", "group", or "total"
 	id     string
 }
+
+// totalScopeKind and totalScopeID name the synthetic "all LLM traffic"
+// scope withTotalScope (routes_unified.go) appends to every metered
+// route's scopes slice (v0.2 data-layer task): {kind: totalScopeKind, id:
+// totalScopeID}, limits always nil. evaluateScope's nil-limits check
+// (below) skips it during evaluation, so checkAndCount still counts it
+// like any other scope — its req/tokin/tokout/cost counters accumulate
+// every LLM request across all users and groups combined, the admin
+// usage-history "total" series — but no configuration can ever throttle
+// traffic in its name.
+const (
+	totalScopeKind = "total"
+	totalScopeID   = "all"
+)
 
 // limitViolation describes the first limit a request breached.
 type limitViolation struct {
@@ -479,36 +514,46 @@ func storeDownViolation() *limitViolation {
 	return &limitViolation{message: "limit store unavailable", storeDown: true}
 }
 
-// windowKey builds the counterStore key for one (kind, id, metric, window)
-// counter at time t: llmgw:{kind}:{id}:{metric}:{window}:{bucket}. bucket
-// is t.UTC() formatted to the window's granularity, so a counter's key
-// changes automatically when its window rolls over.
-func windowKey(kind, id, metric, window string, t time.Time) string {
+// bucketFor formats t (in UTC) to window's bucket granularity: the string
+// windowKey embeds as a key's final component, and the same string GET
+// /admin/api/usage/history echoes as each point's "bucket" field
+// (historyBucketKeys, below).
+func bucketFor(t time.Time, window string) string {
 	u := t.UTC()
-	var bucket string
 	switch window {
+	case windowHour:
+		return u.Format("2006010215")
 	case windowMin:
-		bucket = u.Format("200601021504")
+		return u.Format("200601021504")
 	case windowDay:
-		bucket = u.Format("20060102")
+		return u.Format("20060102")
 	case windowMonth:
-		bucket = u.Format("200601")
+		return u.Format("200601")
 	default:
-		// window is always one of the three constants above, set by this
+		// window is always one of the four constants above, set by this
 		// file's own callers, never by request input — an unknown value
 		// here is a programming error. ServeHTTP's recoverPanic turns
 		// this into a logged 500 instead of crashing the process.
-		panic(fmt.Sprintf("llmgateway: windowKey: unknown window %q", window))
+		panic(fmt.Sprintf("llmgateway: bucketFor: unknown window %q", window))
 	}
-	return fmt.Sprintf("llmgw:%s:%s:%s:%s:%s", kind, id, metric, window, bucket)
+}
+
+// windowKey builds the counterStore key for one (kind, id, metric, window)
+// counter at time t: llmgw:{kind}:{id}:{metric}:{window}:{bucket}. bucket
+// is t.UTC() formatted to the window's granularity (bucketFor), so a
+// counter's key changes automatically when its window rolls over.
+func windowKey(kind, id, metric, window string, t time.Time) string {
+	return fmt.Sprintf("llmgw:%s:%s:%s:%s:%s", kind, id, metric, window, bucketFor(t, window))
 }
 
 // windowEnd returns the UTC instant at which window's bucket containing t
-// ends: the next minute boundary, the next UTC midnight, or the first of
-// next month UTC.
+// ends: the next hour or minute boundary, the next UTC midnight, or the
+// first of next month UTC.
 func windowEnd(t time.Time, window string) time.Time {
 	u := t.UTC()
 	switch window {
+	case windowHour:
+		return time.Date(u.Year(), u.Month(), u.Day(), u.Hour(), 0, 0, 0, time.UTC).Add(time.Hour)
 	case windowMin:
 		return time.Date(u.Year(), u.Month(), u.Day(), u.Hour(), u.Minute(), 0, 0, time.UTC).Add(time.Minute)
 	case windowDay:
@@ -575,6 +620,14 @@ func (l *limiter) checkAndCount(scopes []limitScope) *limitViolation {
 			return storeDownViolation()
 		}
 		dayCounts[i] = v
+
+		// Hour is stats-only (windowHour's own doc comment): its value is
+		// never read back here, only written, so the admin usage-history
+		// API (admin.go) has an hour-granularity req series to read
+		// later.
+		if _, ok = l.incrCounter(sc.kind, sc.id, metricReq, windowHour, now, 1, hourWindowTTL); !ok {
+			return storeDownViolation()
+		}
 	}
 
 	for i, sc := range scopes {
@@ -607,10 +660,10 @@ func (l *limiter) evaluateScope(sc limitScope, minCount, dayCount int64, now tim
 	if v := requestLimitViolation(sc, "requests-per-day", lim.RequestsPerDay, dayCount, windowDay, now); v != nil {
 		return v
 	}
-	if v := l.budgetViolation(sc, metricTok, "tokens-per-day", lim.TokensPerDay, windowDay, now); v != nil {
+	if v := l.tokenBudgetViolation(sc, "tokens-per-day", lim.TokensPerDay, windowDay, now); v != nil {
 		return v
 	}
-	if v := l.budgetViolation(sc, metricTok, "tokens-per-month", lim.TokensPerMonth, windowMonth, now); v != nil {
+	if v := l.tokenBudgetViolation(sc, "tokens-per-month", lim.TokensPerMonth, windowMonth, now); v != nil {
 		return v
 	}
 	if v := l.budgetViolation(sc, metricCost, "cost-per-day", usdToMicros(lim.CostPerDayUSD), windowDay, now); v != nil {
@@ -657,84 +710,145 @@ func (l *limiter) budgetViolation(sc limitScope, metric, name string, limit int6
 	}
 }
 
-// account records u's total tokens and costMicros against every scope's
-// day and month counters. A zero-valued metric is skipped entirely — no
-// store write for a metric this call has nothing to report. A sample that
+// tokenBudgetViolation mirrors budgetViolation for a token limit, which —
+// unlike a request or cost limit — enforces a TOTAL budget over two split
+// counters (metricTokIn, metricTokOut; v0.2 data-layer task): it reads
+// both of the scope's accumulated tok-in/tok-out counters for window in
+// ONE storeGetMulti round trip and compares their sum against limit.
+// limit<=0 means unlimited. A fail-closed read returns
+// storeDownViolation, matching budgetViolation's own contract; name is
+// still e.g. "tokens-per-day", so the violation message still says
+// "tokens" regardless of which direction pushed the total over.
+func (l *limiter) tokenBudgetViolation(sc limitScope, name string, limit int64, window string, now time.Time) *limitViolation {
+	if limit <= 0 {
+		return nil
+	}
+	keys := []string{
+		windowKey(sc.kind, sc.id, metricTokIn, window, now),
+		windowKey(sc.kind, sc.id, metricTokOut, window, now),
+	}
+	vals, ok := l.storeGetMulti(keys)
+	if !ok || len(vals) != 2 {
+		return storeDownViolation()
+	}
+	used := vals[0] + vals[1]
+	if used < limit {
+		return nil
+	}
+	return &limitViolation{
+		message:    fmt.Sprintf("%s %q exceeded %s budget", sc.kind, sc.id, name),
+		retryAfter: retryAfterSeconds(now, window),
+	}
+}
+
+// account records u's prompt/completion tokens — split into metricTokIn/
+// metricTokOut (v0.2 data-layer task) — and costMicros against every
+// scope's hour, day, and month counters. Each metric/direction is skipped
+// independently when its own value is 0 — no store write for a direction
+// this call has nothing to report, so a streaming response cut off before
+// any completion tokens arrived still writes tokin alone. A sample that
 // hits a fail-closed store error (see storeIncrBy) is dropped silently:
 // account has no error return to signal it, and dropping — rather than
 // counting it in the fallback — avoids double-counting once the store
 // recovers.
 func (l *limiter) account(scopes []limitScope, u usage, costMicros int64) {
 	now := l.now()
-	total := u.total()
 
 	for _, sc := range scopes {
-		if total != 0 {
-			l.incrCounter(sc.kind, sc.id, metricTok, windowDay, now, total, dayWindowTTL)
-			l.incrCounter(sc.kind, sc.id, metricTok, windowMonth, now, total, monthWindowTTL)
+		if u.prompt != 0 {
+			l.incrCounter(sc.kind, sc.id, metricTokIn, windowHour, now, u.prompt, hourWindowTTL)
+			l.incrCounter(sc.kind, sc.id, metricTokIn, windowDay, now, u.prompt, dayWindowTTL)
+			l.incrCounter(sc.kind, sc.id, metricTokIn, windowMonth, now, u.prompt, monthWindowTTL)
+		}
+		if u.completion != 0 {
+			l.incrCounter(sc.kind, sc.id, metricTokOut, windowHour, now, u.completion, hourWindowTTL)
+			l.incrCounter(sc.kind, sc.id, metricTokOut, windowDay, now, u.completion, dayWindowTTL)
+			l.incrCounter(sc.kind, sc.id, metricTokOut, windowMonth, now, u.completion, monthWindowTTL)
 		}
 		if costMicros != 0 {
+			l.incrCounter(sc.kind, sc.id, metricCost, windowHour, now, costMicros, hourWindowTTL)
 			l.incrCounter(sc.kind, sc.id, metricCost, windowDay, now, costMicros, dayWindowTTL)
 			l.incrCounter(sc.kind, sc.id, metricCost, windowMonth, now, costMicros, monthWindowTTL)
 		}
 	}
 }
 
-// scopeUsage is one scope's (a user's or a group's) current-window
-// counter values — the admin dashboard's usage table (spec §4, v0.2). The
-// six value fields mirror LimitsConfig's six limit kinds exactly, so the
-// admin API can echo a usage value beside its matching limit.
+// usageKeysPerScope is the number of windowKey strings usageWindowKeys
+// builds per scope, and the stride currentUsage's flat storeGetMulti
+// result is sliced back into per-scope chunks by. Named here, closing a
+// v0.2 final review wave follow-up (2026-08-20) that flagged the previous
+// literal "6" as a magic-number stride: this task grows the per-scope key
+// count from 6 to 8 for the tokens-in/tokens-out split, which is exactly
+// the moment a silent off-by-N here would have gone unnoticed.
+const usageKeysPerScope = 8
+
+// scopeUsage is one scope's (a user's, a group's, or the synthetic total
+// scope's — totalScopeKind) current-window counter values — the admin
+// dashboard's usage table (spec §4, v0.2) and GET /admin/api/usage's
+// total row (v0.2 data-layer task). tokensInPerDay/tokensOutPerDay and
+// their per-month counterparts replace a single combined
+// tokensPerDay/tokensPerMonth pair (v0.2 data-layer task, tokens-in/
+// tokens-out split): a caller wanting the combined total a
+// LimitsConfig.TokensPerDay/TokensPerMonth limit is actually evaluated
+// against (tokenBudgetViolation) sums the two itself.
 type scopeUsage struct {
-	kind               string // "user" or "group", mirroring limitScope.kind
+	kind               string // "user", "group", or "total", mirroring limitScope.kind
 	id                 string
 	requestsPerMinute  int64
 	requestsPerDay     int64
-	tokensPerDay       int64
-	tokensPerMonth     int64
+	tokensInPerDay     int64
+	tokensInPerMonth   int64
+	tokensOutPerDay    int64
+	tokensOutPerMonth  int64
 	costPerDayMicros   int64
 	costPerMonthMicros int64
-	// storeDown reports whether reading any of the six counters above
-	// failed closed (a configured store errored and failOpen is false) —
-	// mirrors limitViolation.storeDown. Every value field is 0 in that
-	// case; a caller must not present them as "confirmed zero usage".
+	// storeDown reports whether reading any of the usageKeysPerScope
+	// counters above failed closed (a configured store errored and
+	// failOpen is false) — mirrors limitViolation.storeDown. Every value
+	// field is 0 in that case; a caller must not present them as
+	// "confirmed zero usage".
 	storeDown bool
 }
 
-// usageWindowKeys returns the six windowKey strings currentUsage reads
-// for sc at time now, in a fixed order — req/min, req/day, tok/day,
-// tok/month, cost/day, cost/month — matching scopeUsage's field order
-// exactly, so currentUsage can map storeGetMulti's result slice back to
-// named fields by plain index.
+// usageWindowKeys returns the usageKeysPerScope windowKey strings
+// currentUsage reads for sc at time now, in a fixed order — req/min,
+// req/day, tokin/day, tokin/month, tokout/day, tokout/month, cost/day,
+// cost/month — matching scopeUsage's field order exactly, so currentUsage
+// can map storeGetMulti's result slice back to named fields by plain
+// index.
 func usageWindowKeys(sc limitScope, now time.Time) []string {
 	return []string{
 		windowKey(sc.kind, sc.id, metricReq, windowMin, now),
 		windowKey(sc.kind, sc.id, metricReq, windowDay, now),
-		windowKey(sc.kind, sc.id, metricTok, windowDay, now),
-		windowKey(sc.kind, sc.id, metricTok, windowMonth, now),
+		windowKey(sc.kind, sc.id, metricTokIn, windowDay, now),
+		windowKey(sc.kind, sc.id, metricTokIn, windowMonth, now),
+		windowKey(sc.kind, sc.id, metricTokOut, windowDay, now),
+		windowKey(sc.kind, sc.id, metricTokOut, windowMonth, now),
 		windowKey(sc.kind, sc.id, metricCost, windowDay, now),
 		windowKey(sc.kind, sc.id, metricCost, windowMonth, now),
 	}
 }
 
-// currentUsage reads every scope's six current-window counters — the
-// same (kind, id, metric, window) combinations checkAndCount/account
-// already write — via the limiter's own storeGetMulti, so it applies the
-// identical fail-open/fail-closed policy every enforcement read already
-// does, and it is read-only: unlike checkAndCount, it never increments
-// anything.
+// currentUsage reads every scope's usageKeysPerScope current-window
+// counters — the same (kind, id, metric, window) combinations
+// checkAndCount/account already write — via the limiter's own
+// storeGetMulti, so it applies the identical fail-open/fail-closed policy
+// every enforcement read already does, and it is read-only: unlike
+// checkAndCount, it never increments anything.
 //
 // ONE storeGetMulti call for the whole scopes slice (v0.2 final review
 // wave, 2026-08-20; supersedes the "one call per scope" amendment this
-// comment previously described, 2026-08-20 review): every scope's six
-// keys are flattened into a single round trip against the shared store,
+// comment previously described, 2026-08-20 review): every scope's keys
+// are flattened into a single round trip against the shared store,
 // rather than N separate ones. The reviewer-confirmed reason for this
 // second amendment: GET /admin/api/usage's per-scope loop was contending
 // with request admission on the same store connection as live traffic,
-// and N round trips (even pipelined 6-at-a-time) scales with the number
-// of configured users and groups in a way one round trip does not.
-// buildAdminUsage (admin.go) drives this by concatenating its users and
-// groups into one scopes slice before calling in, then slicing the flat
-// result back into its two response sections at the same split point.
+// and N round trips (even pipelined usageKeysPerScope-at-a-time) scales
+// with the number of configured users and groups in a way one round trip
+// does not. buildAdminUsage (admin.go) drives this by concatenating its
+// users, groups, and the total scope into one scopes slice before calling
+// in, then slicing the flat result back into its response sections at the
+// same split points.
 //
 // Tradeoff given up by this second amendment: a transient store error
 // now marks every scope in the call storeDown together, where the
@@ -751,7 +865,7 @@ func (l *limiter) currentUsage(scopes []limitScope) []scopeUsage {
 	}
 
 	now := l.now()
-	allKeys := make([]string, 0, len(scopes)*6)
+	allKeys := make([]string, 0, len(scopes)*usageKeysPerScope)
 	for _, sc := range scopes {
 		allKeys = append(allKeys, usageWindowKeys(sc, now)...)
 	}
@@ -771,13 +885,86 @@ func (l *limiter) currentUsage(scopes []limitScope) []scopeUsage {
 	}
 
 	for i, sc := range scopes {
-		v := vals[i*6 : i*6+6]
+		v := vals[i*usageKeysPerScope : i*usageKeysPerScope+usageKeysPerScope]
 		out[i] = scopeUsage{
 			kind: sc.kind, id: sc.id,
 			requestsPerMinute: v[0], requestsPerDay: v[1],
-			tokensPerDay: v[2], tokensPerMonth: v[3],
-			costPerDayMicros: v[4], costPerMonthMicros: v[5],
+			tokensInPerDay: v[2], tokensInPerMonth: v[3],
+			tokensOutPerDay: v[4], tokensOutPerMonth: v[5],
+			costPerDayMicros: v[6], costPerMonthMicros: v[7],
 		}
 	}
 	return out
+}
+
+// historyPoint is one bucket's counter value in a limiter.history result:
+// bucket is the same string bucketFor produces for that instant (e.g.
+// "2026082114" for an hour bucket), value is the counter's reading — 0
+// for a bucket that was never written, matching get/getMulti's existing
+// "0 for a missing key" contract.
+type historyPoint struct {
+	bucket string
+	value  int64
+}
+
+// historyStepBack returns the instant window's bucket was current i steps
+// before now: i=0 is now's own (current, possibly partial) bucket, i=1
+// the previous one, and so on. hour and day step by a fixed duration/day
+// count from now itself; month anchors on the 1st of now's own month
+// first, then steps whole calendar months from there —
+// time.Time.AddDate normalizes an overflowing day-of-month (e.g. "Mar 31"
+// minus one month becomes "Mar 3", not "Feb 28/29"), so stepping from day
+// 1 (which exists in every month) is the only way whole-month arithmetic
+// stays exact regardless of what day of the month now is.
+func historyStepBack(now time.Time, window string, i int) time.Time {
+	u := now.UTC()
+	switch window {
+	case windowHour:
+		return u.Add(-time.Duration(i) * time.Hour)
+	case windowDay:
+		return u.AddDate(0, 0, -i)
+	case windowMonth:
+		anchor := time.Date(u.Year(), u.Month(), 1, 0, 0, 0, 0, time.UTC)
+		return anchor.AddDate(0, -i, 0)
+	default:
+		panic(fmt.Sprintf("llmgateway: historyStepBack: unknown window %q", window))
+	}
+}
+
+// historyBucketKeys returns the span counterStore keys and their matching
+// bucket label strings for (kind, id, metric, window), stepping back from
+// now one whole window unit at a time — oldest first, the current
+// (possibly partial) bucket last, matching GET /admin/api/usage/history's
+// "inclusive of current bucket, oldest-first" contract.
+func historyBucketKeys(kind, id, metric, window string, now time.Time, span int) (keys, buckets []string) {
+	keys = make([]string, span)
+	buckets = make([]string, span)
+	for i := 0; i < span; i++ {
+		t := historyStepBack(now, window, span-1-i)
+		keys[i] = windowKey(kind, id, metric, window, t)
+		buckets[i] = bucketFor(t, window)
+	}
+	return keys, buckets
+}
+
+// history returns span counter values for (kind, id, metric, window)
+// ending at now, oldest-first — GET /admin/api/usage/history's data
+// source (v0.2 data-layer task). It computes every bucket key up front
+// and reads them in ONE storeGetMulti round trip, the same single-batch
+// discipline currentUsage already applies to a scope's current-window
+// keys, scaled here to a whole span of one metric/window instead of a
+// fixed set of usageKeysPerScope. ok is false only in the fail-closed
+// case (storeGetMulti's own contract): a caller must not present the
+// returned points as real data then.
+func (l *limiter) history(kind, id, metric, window string, now time.Time, span int) ([]historyPoint, bool) {
+	keys, buckets := historyBucketKeys(kind, id, metric, window, now, span)
+	vals, ok := l.storeGetMulti(keys)
+	if !ok || len(vals) != len(keys) {
+		return nil, false
+	}
+	points := make([]historyPoint, span)
+	for i := range points {
+		points[i] = historyPoint{bucket: buckets[i], value: vals[i]}
+	}
+	return points, true
 }

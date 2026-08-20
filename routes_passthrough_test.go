@@ -461,9 +461,24 @@ func TestHandlePassthrough_NonStreamJSON_AccountsUsage(t *testing.T) {
 		t.Errorf("body = %q, want verbatim upstream body %q", rec.Body.String(), respBody)
 	}
 
-	tok, ok := gw.limiter.getCounter("user", "alice", metricTok, windowDay, time.Now())
-	if !ok || tok != 10 {
-		t.Errorf("user token/day counter = %d (ok=%v), want 10", tok, ok)
+	tokIn, ok := gw.limiter.getCounter("user", "alice", metricTokIn, windowDay, time.Now())
+	if !ok || tokIn != 7 {
+		t.Errorf("user tokin/day counter = %d (ok=%v), want 7", tokIn, ok)
+	}
+	tokOut, ok := gw.limiter.getCounter("user", "alice", metricTokOut, windowDay, time.Now())
+	if !ok || tokOut != 3 {
+		t.Errorf("user tokout/day counter = %d (ok=%v), want 3", tokOut, ok)
+	}
+
+	// withTotalScope (handlePassthrough, routes_passthrough.go) must have
+	// appended the synthetic total scope too (v0.2 data-layer task).
+	totalTokIn, ok := gw.limiter.getCounter(totalScopeKind, totalScopeID, metricTokIn, windowDay, time.Now())
+	if !ok || totalTokIn != 7 {
+		t.Errorf("total tokin/day counter = %d (ok=%v), want 7", totalTokIn, ok)
+	}
+	totalTokOut, ok := gw.limiter.getCounter(totalScopeKind, totalScopeID, metricTokOut, windowDay, time.Now())
+	if !ok || totalTokOut != 3 {
+		t.Errorf("total tokout/day counter = %d (ok=%v), want 3", totalTokOut, ok)
 	}
 }
 
@@ -623,9 +638,13 @@ func TestHandlePassthrough_AcceptEncodingStripped_AccountsUsageThroughGzip(t *te
 		t.Errorf("body = %q, want decompressed upstream body %q", rec.Body.String(), respBody)
 	}
 
-	tok, ok := gw.limiter.getCounter("user", "alice", metricTok, windowDay, time.Now())
-	if !ok || tok != 10 {
-		t.Errorf("user token/day counter = %d (ok=%v), want 10 — usage must still be accounted through gzip", tok, ok)
+	tokIn, ok := gw.limiter.getCounter("user", "alice", metricTokIn, windowDay, time.Now())
+	if !ok || tokIn != 7 {
+		t.Errorf("user tokin/day counter = %d (ok=%v), want 7 — usage must still be accounted through gzip", tokIn, ok)
+	}
+	tokOut, ok := gw.limiter.getCounter("user", "alice", metricTokOut, windowDay, time.Now())
+	if !ok || tokOut != 3 {
+		t.Errorf("user tokout/day counter = %d (ok=%v), want 3 — usage must still be accounted through gzip", tokOut, ok)
 	}
 }
 
@@ -757,9 +776,13 @@ func TestHandlePassthrough_OversizedJSONBody_ClientGetsFullBody_RequestOnlyAccou
 		t.Errorf("client body = %d bytes, want the full %d bytes (client copy must never truncate)", rec.Body.Len(), len(respBody))
 	}
 
-	tok, ok := gw.limiter.getCounter("user", "alice", metricTok, windowDay, time.Now())
-	if !ok || tok != 0 {
-		t.Errorf("user token/day counter = %d (ok=%v), want 0 — usage accounting must be skipped over the tee cap", tok, ok)
+	tokIn, ok := gw.limiter.getCounter("user", "alice", metricTokIn, windowDay, time.Now())
+	if !ok || tokIn != 0 {
+		t.Errorf("user tokin/day counter = %d (ok=%v), want 0 — usage accounting must be skipped over the tee cap", tokIn, ok)
+	}
+	tokOut, ok := gw.limiter.getCounter("user", "alice", metricTokOut, windowDay, time.Now())
+	if !ok || tokOut != 0 {
+		t.Errorf("user tokout/day counter = %d (ok=%v), want 0 — usage accounting must be skipped over the tee cap", tokOut, ok)
 	}
 	reqCount, ok := gw.limiter.getCounter("user", "alice", metricReq, windowMin, time.Now())
 	if !ok || reqCount != 1 {

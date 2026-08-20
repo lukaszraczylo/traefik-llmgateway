@@ -757,6 +757,29 @@ func adminUsageEntry(t *testing.T, kind, id string) map[string]any {
 	return nil
 }
 
+// adminTotalTokensPerDay sums an admin usage entry's tokensInPerDay and
+// tokensOutPerDay (v0.2 data-layer task: the JSON API split what was
+// previously a single combined tokensPerDay field into in/out — see
+// adminUsageEntryView, admin.go).
+func adminTotalTokensPerDay(entry map[string]any) float64 {
+	in, _ := entry["tokensInPerDay"].(float64)
+	out, _ := entry["tokensOutPerDay"].(float64)
+	return in + out
+}
+
+// adminUsageHistory issues GET /admin/api/usage/history as adminKey for
+// scope/metric/window and returns the decoded response body — the v0.2
+// data-layer task's third admin API.
+func adminUsageHistory(t *testing.T, scope, metric, window string) map[string]any {
+	t.Helper()
+	url := traefik1URL + "/admin/api/usage/history?scope=" + scope + "&metric=" + metric + "&window=" + window
+	resp, body := doJSON(t, http.MethodGet, url, adminKey, nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /admin/api/usage/history (scope=%s metric=%s window=%s): status = %d, body=%#v", scope, metric, window, resp.StatusCode, body)
+	}
+	return body
+}
+
 // TestResponseCache covers v0.2 integration coverage: two identical chat
 // completions get X-Llmgw-Cache: miss then hit, and the admin usage API
 // (spec §4) proves the hit added zero tokens — only the miss's real
@@ -784,9 +807,9 @@ func TestResponseCache(t *testing.T) {
 		t.Error("redis holds no llmgw:cache:* key after a cache miss, want the entry the miss's SET (cache.go) should have written")
 	}
 
-	tokensAfterMiss, _ := adminUsageEntry(t, "users", "alice")["tokensPerDay"].(float64)
+	tokensAfterMiss := adminTotalTokensPerDay(adminUsageEntry(t, "users", "alice"))
 	if tokensAfterMiss <= 0 {
-		t.Fatalf("tokensPerDay after the miss = %v, want > 0 (the mock's real usage should have been accounted)", tokensAfterMiss)
+		t.Fatalf("tokensInPerDay+tokensOutPerDay after the miss = %v, want > 0 (the mock's real usage should have been accounted)", tokensAfterMiss)
 	}
 
 	resp2, body2 := doJSON(t, http.MethodPost, traefik1URL+"/v1/chat/completions", aliceKey, reqBody)
@@ -800,9 +823,9 @@ func TestResponseCache(t *testing.T) {
 		t.Errorf("second request: content = %q, want the cached %q", content, "mock openai response")
 	}
 
-	tokensAfterHit, _ := adminUsageEntry(t, "users", "alice")["tokensPerDay"].(float64)
+	tokensAfterHit := adminTotalTokensPerDay(adminUsageEntry(t, "users", "alice"))
 	if tokensAfterHit != tokensAfterMiss {
-		t.Errorf("tokensPerDay changed across the cache hit: after miss = %v, after hit = %v, want unchanged", tokensAfterMiss, tokensAfterHit)
+		t.Errorf("tokensInPerDay+tokensOutPerDay changed across the cache hit: after miss = %v, after hit = %v, want unchanged", tokensAfterMiss, tokensAfterHit)
 	}
 }
 
@@ -977,5 +1000,28 @@ func TestAdminDashboard(t *testing.T) {
 	adminUsage := adminUsageEntry(t, "users", "admin")
 	if reqDay, _ := adminUsage["requestsPerDay"].(float64); reqDay <= 0 {
 		t.Errorf("admin requestsPerDay = %v, want > 0 (this test's own admin API calls count too)", reqDay)
+	}
+
+	// v0.2 data-layer task: GET /admin/api/usage/history's hour series for
+	// alice and for the synthetic total scope both must show a non-zero
+	// current-hour bucket, reflecting the real LLM traffic this suite
+	// already generated (TestRetryFlakyRecovers, TestResponseCache, ...)
+	// against a real Redis-backed limiter, not just a unit-test stub.
+	for _, scope := range []string{"user:alice", "total"} {
+		hist := adminUsageHistory(t, scope, "req", "hour")
+		if got, _ := hist["scope"].(string); got != scope {
+			t.Errorf("history scope=%q: echoed scope = %q, want %q", scope, got, scope)
+		}
+		points, ok := hist["points"].([]any)
+		if !ok || len(points) == 0 {
+			t.Fatalf("history scope=%q: points = %#v, want a non-empty array", scope, hist["points"])
+		}
+		current, ok := points[len(points)-1].(map[string]any)
+		if !ok {
+			t.Fatalf("history scope=%q: last point is not an object, got %#v", scope, points[len(points)-1])
+		}
+		if val, _ := current["value"].(float64); val <= 0 {
+			t.Errorf("history scope=%q: current-hour bucket value = %v, want > 0 (this suite's own traffic)", scope, val)
+		}
 	}
 }

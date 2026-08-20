@@ -381,6 +381,12 @@ func TestAdminUsage_MathAgainstSeededCounters(t *testing.T) {
 	gw.limiter.incrCounter("group", "agroup", metricReq, windowDay, fixedNow, 9, dayWindowTTL)
 	gw.limiter.account([]limitScope{{kind: "group", id: "agroup"}}, usage{prompt: 100, completion: 50}, 9_000_000)
 
+	// Seed the synthetic total scope directly too (v0.2 data-layer task):
+	// buildAdminUsage always includes it, independent of whether any
+	// route's withTotalScope call ever ran in this test.
+	gw.limiter.incrCounter(totalScopeKind, totalScopeID, metricReq, windowDay, fixedNow, 16, dayWindowTTL)
+	gw.limiter.account([]limitScope{{kind: totalScopeKind, id: totalScopeID}}, usage{prompt: 140, completion: 60}, 11_500_000)
+
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, adminRequest(http.MethodGet, adminUsagePath, "sk-admin1"))
 	if rec.Code != http.StatusOK {
@@ -396,8 +402,9 @@ func TestAdminUsage_MathAgainstSeededCounters(t *testing.T) {
 	if alice.RequestsPerMinute != 3 || alice.RequestsPerDay != 7 {
 		t.Errorf("alice requests = min:%d day:%d, want min:3 day:7", alice.RequestsPerMinute, alice.RequestsPerDay)
 	}
-	if alice.TokensPerDay != 50 || alice.TokensPerMonth != 50 {
-		t.Errorf("alice tokens = day:%d month:%d, want 50/50", alice.TokensPerDay, alice.TokensPerMonth)
+	if alice.TokensInPerDay != 40 || alice.TokensOutPerDay != 10 || alice.TokensInPerMonth != 40 || alice.TokensOutPerMonth != 10 {
+		t.Errorf("alice tokens = in/day:%d out/day:%d in/month:%d out/month:%d, want 40/10/40/10",
+			alice.TokensInPerDay, alice.TokensOutPerDay, alice.TokensInPerMonth, alice.TokensOutPerMonth)
 	}
 	if alice.CostPerDayMicroUSD != 2_500_000 || alice.CostPerMonthMicroUSD != 2_500_000 {
 		t.Errorf("alice cost = day:%d month:%d, want 2500000/2500000", alice.CostPerDayMicroUSD, alice.CostPerMonthMicroUSD)
@@ -416,8 +423,9 @@ func TestAdminUsage_MathAgainstSeededCounters(t *testing.T) {
 	if agroup.RequestsPerMinute != 5 || agroup.RequestsPerDay != 9 {
 		t.Errorf("agroup requests = min:%d day:%d, want min:5 day:9", agroup.RequestsPerMinute, agroup.RequestsPerDay)
 	}
-	if agroup.TokensPerDay != 150 || agroup.TokensPerMonth != 150 {
-		t.Errorf("agroup tokens = day:%d month:%d, want 150/150", agroup.TokensPerDay, agroup.TokensPerMonth)
+	if agroup.TokensInPerDay != 100 || agroup.TokensOutPerDay != 50 || agroup.TokensInPerMonth != 100 || agroup.TokensOutPerMonth != 50 {
+		t.Errorf("agroup tokens = in/day:%d out/day:%d in/month:%d out/month:%d, want 100/50/100/50",
+			agroup.TokensInPerDay, agroup.TokensOutPerDay, agroup.TokensInPerMonth, agroup.TokensOutPerMonth)
 	}
 	if agroup.CostPerDayMicroUSD != 9_000_000 {
 		t.Errorf("agroup cost/day = %d, want 9000000", agroup.CostPerDayMicroUSD)
@@ -434,6 +442,28 @@ func TestAdminUsage_MathAgainstSeededCounters(t *testing.T) {
 	}
 	if admin1.StoreDown {
 		t.Error("admin1.storeDown must be false")
+	}
+
+	// The synthetic total scope row (v0.2 data-layer task): present,
+	// carries no limit (limits.go's totalScopeKind is never evaluated),
+	// and reflects exactly the counters seeded above.
+	if got.Total.Kind != totalScopeKind || got.Total.ID != totalScopeID {
+		t.Errorf("total kind/id = %q/%q, want %q/%q", got.Total.Kind, got.Total.ID, totalScopeKind, totalScopeID)
+	}
+	if got.Total.Limits != nil {
+		t.Errorf("total limits = %+v, want nil (the total scope is never evaluated)", got.Total.Limits)
+	}
+	if got.Total.RequestsPerDay != 16 {
+		t.Errorf("total requestsPerDay = %d, want 16", got.Total.RequestsPerDay)
+	}
+	if got.Total.TokensInPerDay != 140 || got.Total.TokensOutPerDay != 60 {
+		t.Errorf("total tokens = in/day:%d out/day:%d, want 140/60", got.Total.TokensInPerDay, got.Total.TokensOutPerDay)
+	}
+	if got.Total.CostPerDayMicroUSD != 11_500_000 {
+		t.Errorf("total cost/day = %d, want 11500000", got.Total.CostPerDayMicroUSD)
+	}
+	if got.Total.StoreDown {
+		t.Error("total.storeDown must be false")
 	}
 }
 
@@ -466,8 +496,9 @@ func TestLimiterCurrentUsage_StoreDown(t *testing.T) {
 	if !su.storeDown {
 		t.Fatal("want storeDown true when the configured store errors and failOpen is false")
 	}
-	if su.requestsPerMinute != 0 || su.requestsPerDay != 0 || su.tokensPerDay != 0 ||
-		su.tokensPerMonth != 0 || su.costPerDayMicros != 0 || su.costPerMonthMicros != 0 {
+	if su.requestsPerMinute != 0 || su.requestsPerDay != 0 || su.tokensInPerDay != 0 ||
+		su.tokensInPerMonth != 0 || su.tokensOutPerDay != 0 || su.tokensOutPerMonth != 0 ||
+		su.costPerDayMicros != 0 || su.costPerMonthMicros != 0 {
 		t.Errorf("storeDown entry must report zero values, got %+v", su)
 	}
 }
@@ -698,11 +729,11 @@ func TestAdminOverview_BaseURLStripsCredentials(t *testing.T) {
 
 // countingMultiStore is a counterStore stub whose getMulti serves a fixed
 // value per key and counts how many times it was called — it proves
-// limiter.currentUsage flattens every scope's six counter reads into ONE
-// getMulti call total (v0.2 final review wave, 2026-08-20), rather than
-// six separate get calls or even one getMulti call per scope.
-// incrBy/get are never exercised by currentUsage and just return zero
-// values.
+// limiter.currentUsage flattens every scope's usageKeysPerScope counter
+// reads into ONE getMulti call total (v0.2 final review wave,
+// 2026-08-20), rather than usageKeysPerScope separate get calls or even
+// one getMulti call per scope. incrBy/get are never exercised by
+// currentUsage and just return zero values.
 type countingMultiStore struct {
 	values        map[string]int64
 	getMultiCalls int
@@ -725,13 +756,15 @@ func TestLimiterCurrentUsage_BatchesOneGetMultiCallForAllScopes(t *testing.T) {
 	t.Parallel()
 	fixedNow := time.Date(2026, 8, 20, 10, 0, 0, 0, time.UTC)
 	store := &countingMultiStore{values: map[string]int64{
-		windowKey("user", "alice", metricReq, windowMin, fixedNow):    3,
-		windowKey("user", "alice", metricReq, windowDay, fixedNow):    7,
-		windowKey("user", "alice", metricTok, windowDay, fixedNow):    50,
-		windowKey("user", "alice", metricTok, windowMonth, fixedNow):  60,
-		windowKey("user", "alice", metricCost, windowDay, fixedNow):   1_000,
-		windowKey("user", "alice", metricCost, windowMonth, fixedNow): 2_000,
-		windowKey("group", "g1", metricReq, windowMin, fixedNow):      1,
+		windowKey("user", "alice", metricReq, windowMin, fixedNow):      3,
+		windowKey("user", "alice", metricReq, windowDay, fixedNow):      7,
+		windowKey("user", "alice", metricTokIn, windowDay, fixedNow):    50,
+		windowKey("user", "alice", metricTokIn, windowMonth, fixedNow):  60,
+		windowKey("user", "alice", metricTokOut, windowDay, fixedNow):   20,
+		windowKey("user", "alice", metricTokOut, windowMonth, fixedNow): 25,
+		windowKey("user", "alice", metricCost, windowDay, fixedNow):     1_000,
+		windowKey("user", "alice", metricCost, windowMonth, fixedNow):   2_000,
+		windowKey("group", "g1", metricReq, windowMin, fixedNow):        1,
 	}}
 	l := newLimiter(store, true)
 	l.nowFn = func() time.Time { return fixedNow }
@@ -752,8 +785,9 @@ func TestLimiterCurrentUsage_BatchesOneGetMultiCallForAllScopes(t *testing.T) {
 	if alice.storeDown {
 		t.Fatal("alice.storeDown must be false")
 	}
-	if alice.requestsPerMinute != 3 || alice.requestsPerDay != 7 || alice.tokensPerDay != 50 ||
-		alice.tokensPerMonth != 60 || alice.costPerDayMicros != 1_000 || alice.costPerMonthMicros != 2_000 {
+	if alice.requestsPerMinute != 3 || alice.requestsPerDay != 7 || alice.tokensInPerDay != 50 ||
+		alice.tokensInPerMonth != 60 || alice.tokensOutPerDay != 20 || alice.tokensOutPerMonth != 25 ||
+		alice.costPerDayMicros != 1_000 || alice.costPerMonthMicros != 2_000 {
 		t.Errorf("alice usage = %+v, want the seeded values", alice)
 	}
 	g1 := got[1]
@@ -837,5 +871,242 @@ func TestAdmin_FileUserAdminFlag_GrantsAccess(t *testing.T) {
 	h.ServeHTTP(rec, adminRequest(http.MethodGet, adminOverviewPath, "sk-filedmin"))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 for a file-sourced admin user, body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// --- usage/history: gate, validation, shape, batching, storeDown (v0.2 data-layer task) ---
+
+// TestAdminUsageHistory_GateMatrix mirrors TestAdmin_GateMatrix for the
+// third /admin/api/* route: unauthenticated → 401, authenticated
+// non-admin → 403, admin → 200.
+func TestAdminUsageHistory_GateMatrix(t *testing.T) {
+	cfg := newAdminTestConfig()
+	h, _ := newAdminGatewayHandle(t, cfg)
+	query := adminUsageHistoryPath + "?scope=total&metric=req&window=hour"
+
+	t.Run("unauthenticated", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, adminRequest(http.MethodGet, query, ""))
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("status = %d, want 401", rec.Code)
+		}
+		assertOAIErrorEnvelope(t, rec)
+	})
+	t.Run("authenticated_non_admin", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, adminRequest(http.MethodGet, query, "sk-alice"))
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("status = %d, want 403", rec.Code)
+		}
+		assertOAIErrorEnvelope(t, rec)
+	})
+	t.Run("admin", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, adminRequest(http.MethodGet, query, "sk-admin1"))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+		}
+	})
+}
+
+// TestAdminUsageHistory_DoesNotCountStats proves GET
+// /admin/api/usage/history skips checkAndCount entirely (unlike
+// overview/usage — handleAdminAPI's own doc comment, admin.go): repeated
+// requests never move admin1's own req/min counter, and the route stays
+// reachable even once admin1 is already pinned at a requestsPerMinute
+// limit tight enough to 429 on the other two admin routes.
+func TestAdminUsageHistory_DoesNotCountStats(t *testing.T) {
+	cfg := newAdminTestConfig()
+	cfg.Users.Inline[1].Limits = &LimitsConfig{RequestsPerMinute: 1} // admin1
+	h, gw := newAdminGatewayHandle(t, cfg)
+
+	query := adminUsageHistoryPath + "?scope=total&metric=req&window=hour"
+	for i := 0; i < 5; i++ {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, adminRequest(http.MethodGet, query, "sk-admin1"))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("request %d: status = %d, want 200 (never 429), body=%s", i, rec.Code, rec.Body.String())
+		}
+	}
+	reqCount, ok := gw.limiter.getCounter("user", "admin1", metricReq, windowMin, time.Now())
+	if !ok || reqCount != 0 {
+		t.Errorf("admin1 req/min counter = %d (ok=%v), want 0 (history route never calls checkAndCount)", reqCount, ok)
+	}
+}
+
+// TestAdminUsageHistory_ValidationTable drives GET
+// /admin/api/usage/history's query-parameter validation end to end: an
+// unrecognized scope kind/metric/window or an out-of-range span is 400,
+// an unknown user/group id is 404, and every well-formed combination
+// (including span pinned exactly at its window's max) is 200.
+func TestAdminUsageHistory_ValidationTable(t *testing.T) {
+	cfg := newAdminTestConfig()
+	h, _ := newAdminGatewayHandle(t, cfg)
+
+	cases := []struct {
+		name  string
+		query string
+		want  int
+	}{
+		{"unknown scope kind", "scope=nope&metric=req&window=hour", http.StatusBadRequest},
+		{"total scope rejects an id suffix", "scope=total:all&metric=req&window=hour", http.StatusBadRequest},
+		{"scope missing a colon", "scope=user&metric=req&window=hour", http.StatusBadRequest},
+		{"scope with an empty id", "scope=user:&metric=req&window=hour", http.StatusBadRequest},
+		{"unknown metric", "scope=total&metric=nope&window=hour", http.StatusBadRequest},
+		{"unknown window", "scope=total&metric=req&window=nope", http.StatusBadRequest},
+		{"span not an integer", "scope=total&metric=req&window=hour&span=abc", http.StatusBadRequest},
+		{"span zero", "scope=total&metric=req&window=hour&span=0", http.StatusBadRequest},
+		{"span negative", "scope=total&metric=req&window=hour&span=-1", http.StatusBadRequest},
+		{"span beyond hour max (48)", "scope=total&metric=req&window=hour&span=49", http.StatusBadRequest},
+		{"span beyond day max (35)", "scope=total&metric=req&window=day&span=36", http.StatusBadRequest},
+		{"span beyond month max (13)", "scope=total&metric=req&window=month&span=14", http.StatusBadRequest},
+		{"span pinned exactly at the hour max is valid", "scope=total&metric=req&window=hour&span=48", http.StatusOK},
+		{"unknown user id", "scope=user:ghost&metric=req&window=hour", http.StatusNotFound},
+		{"unknown group id", "scope=group:ghost&metric=req&window=hour", http.StatusNotFound},
+		{"valid total/req/hour, default span", "scope=total&metric=req&window=hour", http.StatusOK},
+		{"valid user/tokin/day", "scope=user:alice&metric=tokin&window=day", http.StatusOK},
+		{"valid group/tokout/month", "scope=group:agroup&metric=tokout&window=month", http.StatusOK},
+		{"valid cost metric", "scope=total&metric=cost&window=day", http.StatusOK},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, adminRequest(http.MethodGet, adminUsageHistoryPath+"?"+c.query, "sk-admin1"))
+			if rec.Code != c.want {
+				t.Errorf("status = %d, want %d, body=%s", rec.Code, c.want, rec.Body.String())
+			}
+			if c.want >= 400 {
+				assertOAIErrorEnvelope(t, rec)
+			}
+		})
+	}
+}
+
+// TestAdminUsageHistory_DefaultSpanIsMax asserts an omitted span defaults
+// to each window's own historyMaxSpan.
+func TestAdminUsageHistory_DefaultSpanIsMax(t *testing.T) {
+	cfg := newAdminTestConfig()
+	h, _ := newAdminGatewayHandle(t, cfg)
+
+	cases := []struct {
+		window string
+		want   int
+	}{
+		{windowHour, 48},
+		{windowDay, 35},
+		{windowMonth, 13},
+	}
+	for _, c := range cases {
+		t.Run(c.window, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, adminRequest(http.MethodGet, adminUsageHistoryPath+"?scope=total&metric=req&window="+c.window, "sk-admin1"))
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+			}
+			var got usageHistoryResponse
+			if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if len(got.Points) != c.want {
+				t.Errorf("len(points) = %d, want %d (default span = max)", len(got.Points), c.want)
+			}
+		})
+	}
+}
+
+// TestAdminUsageHistory_ShapeOldestFirstOneBatchCall drives the route
+// against a limiter whose store is swapped for a counting stub: it must
+// decode to the documented {"scope","metric","window","points":[...]}
+// shape, points must be oldest-first with the current (possibly partial)
+// bucket last, and the whole span must cost exactly ONE getMulti call —
+// never one call per bucket.
+func TestAdminUsageHistory_ShapeOldestFirstOneBatchCall(t *testing.T) {
+	cfg := newAdminTestConfig()
+	h, gw := newAdminGatewayHandle(t, cfg)
+
+	fixedNow := time.Date(2026, 8, 20, 14, 0, 0, 0, time.UTC)
+	countStore := &countingMultiStore{values: map[string]int64{
+		windowKey(totalScopeKind, totalScopeID, metricReq, windowHour, fixedNow.Add(-2*time.Hour)): 5,
+		windowKey(totalScopeKind, totalScopeID, metricReq, windowHour, fixedNow.Add(-1*time.Hour)): 7,
+		windowKey(totalScopeKind, totalScopeID, metricReq, windowHour, fixedNow):                   9,
+	}}
+	gw.limiter = newLimiter(countStore, true)
+	gw.limiter.nowFn = func() time.Time { return fixedNow }
+
+	rec := httptest.NewRecorder()
+	query := adminUsageHistoryPath + "?scope=total&metric=req&window=hour&span=3"
+	h.ServeHTTP(rec, adminRequest(http.MethodGet, query, "sk-admin1"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	if countStore.getMultiCalls != 1 {
+		t.Errorf("getMultiCalls = %d, want 1 (one batch for the whole span)", countStore.getMultiCalls)
+	}
+
+	var got usageHistoryResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Scope != "total" || got.Metric != "req" || got.Window != "hour" {
+		t.Errorf("echoed scope/metric/window = %q/%q/%q, want total/req/hour", got.Scope, got.Metric, got.Window)
+	}
+	if len(got.Points) != 3 {
+		t.Fatalf("len(points) = %d, want 3", len(got.Points))
+	}
+	wantValues := []int64{5, 7, 9}
+	for i, want := range wantValues {
+		if got.Points[i].Value != want {
+			t.Errorf("points[%d].value = %d, want %d (oldest-first)", i, got.Points[i].Value, want)
+		}
+	}
+	if got.Points[2].Bucket != bucketFor(fixedNow, windowHour) {
+		t.Errorf("points[2].bucket = %q, want the current bucket %q", got.Points[2].Bucket, bucketFor(fixedNow, windowHour))
+	}
+}
+
+// TestAdminUsageHistory_StoreDown503 asserts a fail-closed store error
+// answers 503 with the standard OAI-shaped error envelope, never a
+// silently-zero series — data unavailable beats a chart that lies about
+// zero usage.
+func TestAdminUsageHistory_StoreDown503(t *testing.T) {
+	cfg := newAdminTestConfig()
+	failOpen := false
+	cfg.Redis = &RedisConfig{Address: "127.0.0.1:1", FailOpen: &failOpen}
+	h, _ := newAdminGatewayHandle(t, cfg)
+
+	rec := httptest.NewRecorder()
+	query := adminUsageHistoryPath + "?scope=total&metric=req&window=hour"
+	h.ServeHTTP(rec, adminRequest(http.MethodGet, query, "sk-admin1"))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503, body=%s", rec.Code, rec.Body.String())
+	}
+	assertOAIErrorEnvelope(t, rec)
+}
+
+// TestAdminUsageHistory_MemoryStoreFallbackWorks proves the history API
+// serves real data through the in-process memoryStore fallback too — a
+// deployment with no Redis configured at all still gets charts of
+// whatever the process itself accumulated (spec's "memoryStore works
+// too" requirement).
+func TestAdminUsageHistory_MemoryStoreFallbackWorks(t *testing.T) {
+	cfg := newAdminTestConfig() // cfg.Redis left nil: limiter.store is nil, every op uses the fallback
+	h, gw := newAdminGatewayHandle(t, cfg)
+
+	fixedNow := time.Date(2026, 8, 20, 9, 0, 0, 0, time.UTC)
+	gw.limiter.nowFn = func() time.Time { return fixedNow }
+	gw.limiter.account([]limitScope{{kind: totalScopeKind, id: totalScopeID}}, usage{prompt: 12, completion: 4}, 0)
+
+	rec := httptest.NewRecorder()
+	query := adminUsageHistoryPath + "?scope=total&metric=tokin&window=hour&span=1"
+	h.ServeHTTP(rec, adminRequest(http.MethodGet, query, "sk-admin1"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	var got usageHistoryResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(got.Points) != 1 || got.Points[0].Value != 12 {
+		t.Errorf("points = %+v, want one point with value 12", got.Points)
 	}
 }

@@ -164,8 +164,18 @@ func TestHandleImagesGenerations_OpenAI_HappyPath_NativeForward(t *testing.T) {
 	if !ok || reqCount != 1 {
 		t.Errorf("user request/min counter = %d (ok=%v), want 1", reqCount, ok)
 	}
-	if tok, ok := gw.limiter.getCounter("user", "alice", metricTok, windowDay, time.Now()); ok && tok != 0 {
-		t.Errorf("user token/day counter = %d, want 0 (images are never token-accounted)", tok)
+	if tokIn, okIn := gw.limiter.getCounter("user", "alice", metricTokIn, windowDay, time.Now()); okIn && tokIn != 0 {
+		t.Errorf("user tokin/day counter = %d, want 0 (images are never token-accounted)", tokIn)
+	}
+	if tokOut, okOut := gw.limiter.getCounter("user", "alice", metricTokOut, windowDay, time.Now()); okOut && tokOut != 0 {
+		t.Errorf("user tokout/day counter = %d, want 0 (images are never token-accounted)", tokOut)
+	}
+
+	// withTotalScope (resolveMediaRequest, routes_media.go) must have
+	// appended the synthetic total scope too (v0.2 data-layer task).
+	totalReq, ok := gw.limiter.getCounter(totalScopeKind, totalScopeID, metricReq, windowMin, time.Now())
+	if !ok || totalReq != 1 {
+		t.Errorf("total request/min counter = %d (ok=%v), want 1", totalReq, ok)
 	}
 }
 

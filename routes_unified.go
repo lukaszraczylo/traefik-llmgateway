@@ -113,7 +113,7 @@ func (g *Gateway) runUnified(w http.ResponseWriter, r *http.Request, u *user, gr
 		return
 	}
 
-	scopes := buildLimitScopes(u, grp)
+	scopes := withTotalScope(buildLimitScopes(u, grp))
 	if violation := g.limiter.checkAndCount(scopes); violation != nil {
 		writeLimitViolation(sw, violation)
 		return
@@ -225,6 +225,12 @@ func (g *Gateway) runUnified(w http.ResponseWriter, r *http.Request, u *user, gr
 // apply to a given request. The user scope is listed first, so
 // checkAndCount reports a user's own violation ahead of their group's when
 // both are breached by the same request.
+//
+// Callers metering actual LLM traffic wrap this result in withTotalScope
+// before passing it to checkAndCount/account; handleAdminAPI (admin.go)
+// calls this directly, without withTotalScope, so an admin request's own
+// req/min-req/day accounting never contributes to the total-scope
+// LLM-traffic series (v0.2 data-layer task).
 func buildLimitScopes(u *user, grp *group) []limitScope {
 	scopes := make([]limitScope, 0, 2)
 	if u.limits != nil {
@@ -234,6 +240,20 @@ func buildLimitScopes(u *user, grp *group) []limitScope {
 		scopes = append(scopes, limitScope{limits: grp.limits, kind: "group", id: grp.name})
 	}
 	return scopes
+}
+
+// withTotalScope returns scopes with the synthetic total scope
+// (totalScopeKind/totalScopeID, limits.go) appended — the single helper
+// every metered route (runUnified above; resolveMediaRequest,
+// routes_media.go; handlePassthrough, routes_passthrough.go;
+// handleTargetProxy, mcp_a2a.go) calls around its own buildLimitScopes
+// result, so none of them can forget it and none of them duplicate the
+// scope literal. Deliberately not folded into buildLimitScopes itself:
+// that helper is also called directly by handleAdminAPI (admin.go) for
+// its own req/min-req/day accounting, and admin traffic must never
+// contribute to the total LLM-traffic scope.
+func withTotalScope(scopes []limitScope) []limitScope {
+	return append(scopes, limitScope{kind: totalScopeKind, id: totalScopeID, limits: nil})
 }
 
 // unifiedCostMicros resolves the price to charge one request's usage

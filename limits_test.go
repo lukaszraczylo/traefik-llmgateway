@@ -168,13 +168,15 @@ func TestLimiterRequestLimitRetryAfter(t *testing.T) {
 
 // TestWindowKeyFormat pins the exact key layout every store operation
 // depends on: llmgw:{kind}:{id}:{metric}:{window}:{bucket}, with bucket
-// formatted from t.UTC() at each window's granularity.
+// formatted from t.UTC() at each window's granularity — including hour
+// (v0.2 data-layer task).
 func TestWindowKeyFormat(t *testing.T) {
 	tm := time.Date(2026, 8, 20, 10, 4, 59, 0, time.FixedZone("UTC+1", 3600)) // 09:04:59 UTC
 	cases := []struct {
 		window string
 		want   string
 	}{
+		{windowHour, "llmgw:user:a:req:hour:2026082009"},
 		{windowMin, "llmgw:user:a:req:min:202608200904"},
 		{windowDay, "llmgw:user:a:req:day:20260820"},
 		{windowMonth, "llmgw:user:a:req:month:202608"},
@@ -183,6 +185,270 @@ func TestWindowKeyFormat(t *testing.T) {
 		if got := windowKey("user", "a", "req", c.window, tm); got != c.want {
 			t.Errorf("windowKey(..., %q, ...) = %q, want %q", c.window, got, c.want)
 		}
+	}
+}
+
+// TestWindowKeyFormat_HourUTCBoundary pins the hour bucket rolling over
+// exactly at the UTC hour boundary, and proves a non-UTC input is
+// converted to UTC first (an input at 00:04:59 in a UTC+1 zone is 23:04:59
+// UTC the PREVIOUS day — a bug converting the hour field alone without
+// re-deriving the date would produce "...23" glued onto the wrong day).
+func TestWindowKeyFormat_HourUTCBoundary(t *testing.T) {
+	justBefore := time.Date(2026, 8, 20, 8, 59, 59, 0, time.UTC)
+	justAfter := time.Date(2026, 8, 20, 9, 0, 0, 0, time.UTC)
+	if got := windowKey("user", "a", "req", windowHour, justBefore); got != "llmgw:user:a:req:hour:2026082008" {
+		t.Errorf("just before the hour boundary: got %q", got)
+	}
+	if got := windowKey("user", "a", "req", windowHour, justAfter); got != "llmgw:user:a:req:hour:2026082009" {
+		t.Errorf("just after the hour boundary: got %q", got)
+	}
+
+	// 00:04:59 in UTC+1 is 23:04:59 UTC the previous day.
+	crossMidnight := time.Date(2026, 8, 21, 0, 4, 59, 0, time.FixedZone("UTC+1", 3600))
+	if got := windowKey("user", "a", "req", windowHour, crossMidnight); got != "llmgw:user:a:req:hour:2026082023" {
+		t.Errorf("cross-midnight non-UTC input: got %q, want the previous UTC day's hour 23 bucket", got)
+	}
+}
+
+// TestWindowEnd_HourBoundary asserts windowEnd's new hour case (v0.2
+// data-layer task) returns the next UTC hour boundary, and that a value
+// exactly on the boundary reports zero seconds remaining in that boundary
+// (retryAfterSeconds rounds a zero duration up to 0, distinct from
+// rounding a fractional second up to 1 — see TestLimiterRetryAfter for
+// the day/month/min cases this mirrors).
+func TestWindowEnd_HourBoundary(t *testing.T) {
+	t.Run("mid-hour", func(t *testing.T) {
+		got := windowEnd(time.Date(2026, 8, 20, 9, 30, 0, 0, time.UTC), windowHour)
+		want := time.Date(2026, 8, 20, 10, 0, 0, 0, time.UTC)
+		if !got.Equal(want) {
+			t.Errorf("windowEnd = %v, want %v", got, want)
+		}
+	})
+	t.Run("exactly on the boundary", func(t *testing.T) {
+		got := windowEnd(time.Date(2026, 8, 20, 10, 0, 0, 0, time.UTC), windowHour)
+		want := time.Date(2026, 8, 20, 11, 0, 0, 0, time.UTC)
+		if !got.Equal(want) {
+			t.Errorf("windowEnd = %v, want %v", got, want)
+		}
+	})
+}
+
+// TestHistoryStepBack_HourAndDay asserts the fixed-duration step-back
+// cases (hour, day) land i units before now exactly, including across a
+// UTC day boundary.
+func TestHistoryStepBack_HourAndDay(t *testing.T) {
+	now := time.Date(2026, 8, 20, 1, 30, 0, 0, time.UTC)
+
+	if got := historyStepBack(now, windowHour, 0); !got.Equal(now) {
+		t.Errorf("i=0 must be now itself, got %v", got)
+	}
+	wantHour := time.Date(2026, 8, 19, 23, 30, 0, 0, time.UTC) // 2 hours back, crossing midnight
+	if got := historyStepBack(now, windowHour, 2); !got.Equal(wantHour) {
+		t.Errorf("i=2 hours back = %v, want %v", got, wantHour)
+	}
+
+	wantDay := time.Date(2026, 8, 17, 1, 30, 0, 0, time.UTC)
+	if got := historyStepBack(now, windowDay, 3); !got.Equal(wantDay) {
+		t.Errorf("i=3 days back = %v, want %v", got, wantDay)
+	}
+}
+
+// TestHistoryStepBack_MonthAnchorsOnDayOne is the month-arithmetic trap
+// TestLimiterRetryAfter's own month case does not exercise: stepping back
+// from a high day-of-month (the 31st) with a naive
+// now.AddDate(0, -i, 0) overflows a shorter target month (e.g. "Mar 31"
+// minus one month normalizes to "Mar 3", not "Feb 28") and would land in
+// the WRONG calendar month's bucket. historyStepBack avoids this by
+// anchoring on day 1 first — this test drives it from Mar 31 and Jan 31
+// specifically because those are the inputs that would expose a
+// regression back to the naive form.
+func TestHistoryStepBack_MonthAnchorsOnDayOne(t *testing.T) {
+	cases := []struct {
+		now  time.Time
+		name string
+		want string
+		i    int
+	}{
+		{name: "Mar 31 minus 1 month = Feb", now: time.Date(2026, 3, 31, 12, 0, 0, 0, time.UTC), i: 1, want: "202602"},
+		{name: "Jan 31 minus 1 month = Dec (year rollover)", now: time.Date(2026, 1, 31, 0, 0, 0, 0, time.UTC), i: 1, want: "202512"},
+		{name: "May 31 minus 3 months = Feb", now: time.Date(2026, 5, 31, 0, 0, 0, 0, time.UTC), i: 3, want: "202602"},
+		{name: "i=0 is now's own month", now: time.Date(2026, 3, 31, 0, 0, 0, 0, time.UTC), i: 0, want: "202603"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := bucketFor(historyStepBack(c.now, windowMonth, c.i), windowMonth)
+			if got != c.want {
+				t.Errorf("bucketFor(historyStepBack(%v, month, %d)) = %q, want %q", c.now, c.i, got, c.want)
+			}
+		})
+	}
+}
+
+// TestHistoryBucketKeys_OldestFirstInclusiveOfCurrent asserts
+// historyBucketKeys returns span buckets oldest-first, with the LAST
+// entry being now's own (current, possibly partial) bucket — the
+// "inclusive of current bucket" contract GET /admin/api/usage/history
+// promises.
+func TestHistoryBucketKeys_OldestFirstInclusiveOfCurrent(t *testing.T) {
+	now := time.Date(2026, 8, 20, 14, 0, 0, 0, time.UTC)
+	keys, buckets := historyBucketKeys("total", "all", "req", windowHour, now, 4)
+
+	wantBuckets := []string{"2026082011", "2026082012", "2026082013", "2026082014"}
+	if len(buckets) != len(wantBuckets) {
+		t.Fatalf("len(buckets) = %d, want %d", len(buckets), len(wantBuckets))
+	}
+	for i, want := range wantBuckets {
+		if buckets[i] != want {
+			t.Errorf("buckets[%d] = %q, want %q", i, buckets[i], want)
+		}
+		wantKey := "llmgw:total:all:req:hour:" + want
+		if keys[i] != wantKey {
+			t.Errorf("keys[%d] = %q, want %q", i, keys[i], wantKey)
+		}
+	}
+}
+
+// TestLimiterHistory_OneBatchCallOldestFirst drives limiter.history
+// against a counting stub store: it must issue exactly ONE getMulti call
+// for the whole span, and the returned points must be oldest-first with
+// the seeded values in the right buckets.
+func TestLimiterHistory_OneBatchCallOldestFirst(t *testing.T) {
+	now := time.Date(2026, 8, 20, 10, 0, 0, 0, time.UTC)
+	countStore := &historyCountingStore{values: map[string]int64{
+		windowKey("total", "all", metricReq, windowHour, now.Add(-2*time.Hour)): 5,
+		windowKey("total", "all", metricReq, windowHour, now):                   9,
+	}}
+	l := newLimiter(countStore, true)
+	l.nowFn = func() time.Time { return now }
+
+	points, ok := l.history("total", "all", "req", windowHour, now, 3)
+	if !ok {
+		t.Fatal("want ok=true")
+	}
+	if countStore.getMultiCalls != 1 {
+		t.Errorf("getMultiCalls = %d, want 1", countStore.getMultiCalls)
+	}
+	if len(points) != 3 {
+		t.Fatalf("len(points) = %d, want 3", len(points))
+	}
+	if points[0].value != 5 || points[0].bucket != bucketFor(now.Add(-2*time.Hour), windowHour) {
+		t.Errorf("points[0] (oldest) = %+v, want value 5 at the -2h bucket", points[0])
+	}
+	if points[1].value != 0 {
+		t.Errorf("points[1] (unseeded -1h bucket) = %+v, want value 0", points[1])
+	}
+	if points[2].value != 9 || points[2].bucket != bucketFor(now, windowHour) {
+		t.Errorf("points[2] (newest, current bucket) = %+v, want value 9", points[2])
+	}
+}
+
+// historyCountingStore is a counterStore stub whose getMulti serves fixed
+// values and counts its own calls — mirrors admin_test.go's
+// countingMultiStore, defined separately here since limits_test.go must
+// not depend on admin_test.go's test-only types.
+type historyCountingStore struct {
+	values        map[string]int64
+	getMultiCalls int
+}
+
+func (s *historyCountingStore) incrBy(string, int64, time.Duration) (int64, error) { return 0, nil }
+func (s *historyCountingStore) get(string) (int64, error)                          { return 0, nil }
+func (s *historyCountingStore) getMulti(keys []string) ([]int64, error) {
+	s.getMultiCalls++
+	out := make([]int64, len(keys))
+	for i, k := range keys {
+		out[i] = s.values[k]
+	}
+	return out, nil
+}
+
+// TestLimiterHistory_StoreDown asserts limiter.history reports ok=false
+// when the configured store errors and failOpen is false — the caller
+// (GET /admin/api/usage/history) must answer 503, never a silently-zero
+// series.
+func TestLimiterHistory_StoreDown(t *testing.T) {
+	l := newLimiter(alwaysErrStore{}, false)
+	points, ok := l.history("total", "all", "req", windowDay, time.Now(), 5)
+	if ok {
+		t.Fatal("want ok=false when the configured store errors and failOpen is false")
+	}
+	if points != nil {
+		t.Errorf("points = %+v, want nil on a storeDown read", points)
+	}
+}
+
+// TestWithTotalScope_AppendsUnlimitedTotalScope asserts withTotalScope
+// appends exactly one {kind: totalScopeKind, id: totalScopeID, limits:
+// nil} scope after whatever buildLimitScopes already returned.
+func TestWithTotalScope_AppendsUnlimitedTotalScope(t *testing.T) {
+	base := []limitScope{{kind: "user", id: "u", limits: &LimitsConfig{RequestsPerMinute: 1}}}
+	got := withTotalScope(base)
+
+	if len(got) != 2 {
+		t.Fatalf("len(got) = %d, want 2", len(got))
+	}
+	if got[0].kind != "user" || got[0].id != "u" {
+		t.Errorf("got[0] = %+v, want the original user scope untouched", got[0])
+	}
+	total := got[1]
+	if total.kind != totalScopeKind || total.id != totalScopeID || total.limits != nil {
+		t.Errorf("got[1] = %+v, want kind=%q id=%q limits=nil", total, totalScopeKind, totalScopeID)
+	}
+}
+
+// TestWithTotalScope_CountedButNeverEvaluated drives checkAndCount many
+// times against a scopes slice built via withTotalScope: the total
+// scope's own limits are always nil, so no volume of traffic can ever
+// make it violate — evaluateScope's nil-limits check skips it — while its
+// req counter still climbs by exactly one per call, proving
+// checkAndCount's counting loop does not skip a nil-limits scope the way
+// evaluation does.
+func TestWithTotalScope_CountedButNeverEvaluated(t *testing.T) {
+	l := newLimiter(nil, true)
+	now := time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC)
+	l.nowFn = func() time.Time { return now }
+
+	scopes := withTotalScope([]limitScope{{kind: "user", id: "u", limits: nil}})
+	const n = 250
+	for i := 0; i < n; i++ {
+		if v := l.checkAndCount(scopes); v != nil {
+			t.Fatalf("iteration %d: total scope must never violate (limits always nil), got %+v", i, v)
+		}
+	}
+
+	total, ok := l.getCounter(totalScopeKind, totalScopeID, metricReq, windowDay, now)
+	if !ok || total != n {
+		t.Errorf("total req:day = %d, ok=%v, want %d (counted every call despite never evaluating)", total, ok, n)
+	}
+	totalHour, ok := l.getCounter(totalScopeKind, totalScopeID, metricReq, windowHour, now)
+	if !ok || totalHour != n {
+		t.Errorf("total req:hour = %d, ok=%v, want %d", totalHour, ok, n)
+	}
+}
+
+// TestWithTotalScope_AccountWritesHourBuckets asserts account (v0.2
+// data-layer task) writes the total scope's hour-window tokin/tokout/cost
+// counters, not just day/month — checkAndCount's own hour write is
+// covered by TestWithTotalScope_CountedButNeverEvaluated above.
+func TestWithTotalScope_AccountWritesHourBuckets(t *testing.T) {
+	l := newLimiter(nil, true)
+	now := time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC)
+	l.nowFn = func() time.Time { return now }
+
+	scopes := withTotalScope([]limitScope{{kind: "user", id: "u", limits: nil}})
+	l.account(scopes, usage{prompt: 4, completion: 6}, 700)
+
+	tokIn, ok := l.getCounter(totalScopeKind, totalScopeID, metricTokIn, windowHour, now)
+	if !ok || tokIn != 4 {
+		t.Errorf("total tokin:hour = %d, ok=%v, want 4", tokIn, ok)
+	}
+	tokOut, ok := l.getCounter(totalScopeKind, totalScopeID, metricTokOut, windowHour, now)
+	if !ok || tokOut != 6 {
+		t.Errorf("total tokout:hour = %d, ok=%v, want 6", tokOut, ok)
+	}
+	cost, ok := l.getCounter(totalScopeKind, totalScopeID, metricCost, windowHour, now)
+	if !ok || cost != 700 {
+		t.Errorf("total cost:hour = %d, ok=%v, want 700", cost, ok)
 	}
 }
 
@@ -303,9 +569,10 @@ func TestLimiterCostBudgetRoundsUSDConversion(t *testing.T) {
 	}
 }
 
-// TestAccountSkipsZeroMetrics asserts account writes no tokens counter
-// when usage totals 0, and no cost counter when costMicros is 0 — each
-// metric's absence is independently observable via get.
+// TestAccountSkipsZeroMetrics asserts account writes no tokin/tokout
+// counter when the matching usage direction is 0, and no cost counter
+// when costMicros is 0 — each metric's absence is independently
+// observable via get.
 func TestAccountSkipsZeroMetrics(t *testing.T) {
 	now := time.Date(2026, 8, 20, 10, 0, 0, 0, time.UTC)
 	l := newLimiter(nil, true)
@@ -314,13 +581,65 @@ func TestAccountSkipsZeroMetrics(t *testing.T) {
 
 	l.account(scopes, usage{}, 0)
 
-	tok, ok := l.getCounter("user", "z", metricTok, windowDay, now)
-	if !ok || tok != 0 {
-		t.Errorf("tok counter = %d, ok=%v, want 0, true", tok, ok)
+	tokIn, ok := l.getCounter("user", "z", metricTokIn, windowDay, now)
+	if !ok || tokIn != 0 {
+		t.Errorf("tokin counter = %d, ok=%v, want 0, true", tokIn, ok)
+	}
+	tokOut, ok := l.getCounter("user", "z", metricTokOut, windowDay, now)
+	if !ok || tokOut != 0 {
+		t.Errorf("tokout counter = %d, ok=%v, want 0, true", tokOut, ok)
 	}
 	cost, ok := l.getCounter("user", "z", metricCost, windowDay, now)
 	if !ok || cost != 0 {
 		t.Errorf("cost counter = %d, ok=%v, want 0, true", cost, ok)
+	}
+}
+
+// TestAccountSplitsTokensIndependently asserts account writes prompt
+// tokens to metricTokIn and completion tokens to metricTokOut
+// independently — including the asymmetric case (prompt only, no
+// completion yet) the estimation fallback and a dropped stream both rely
+// on: a nonzero prompt with a zero completion must still write tokin
+// alone, never skip it because completion is 0.
+func TestAccountSplitsTokensIndependently(t *testing.T) {
+	now := time.Date(2026, 8, 20, 10, 0, 0, 0, time.UTC)
+	l := newLimiter(nil, true)
+	l.nowFn = func() time.Time { return now }
+	scopes := []limitScope{{kind: "user", id: "split", limits: nil}}
+
+	l.account(scopes, usage{prompt: 25}, 0) // completion left at zero
+
+	tokIn, ok := l.getCounter("user", "split", metricTokIn, windowDay, now)
+	if !ok || tokIn != 25 {
+		t.Errorf("tokin counter = %d, ok=%v, want 25, true", tokIn, ok)
+	}
+	tokOut, ok := l.getCounter("user", "split", metricTokOut, windowDay, now)
+	if !ok || tokOut != 0 {
+		t.Errorf("tokout counter = %d, ok=%v, want 0, true (no completion tokens reported)", tokOut, ok)
+	}
+
+	l.account(scopes, usage{completion: 9}, 0) // prompt left at zero this time
+	tokIn, ok = l.getCounter("user", "split", metricTokIn, windowDay, now)
+	if !ok || tokIn != 25 {
+		t.Errorf("tokin counter = %d, ok=%v, want still 25 (this call reported no prompt tokens)", tokIn, ok)
+	}
+	tokOut, ok = l.getCounter("user", "split", metricTokOut, windowDay, now)
+	if !ok || tokOut != 9 {
+		t.Errorf("tokout counter = %d, ok=%v, want 9", tokOut, ok)
+	}
+}
+
+// TestTokenBudgetSumsInAndOut asserts a TokensPerDay/TokensPerMonth limit
+// enforces a TOTAL budget across metricTokIn and metricTokOut combined —
+// the operator directive's "limits stay total-token (limiter sums both at
+// read)": neither direction alone crosses the budget, but their sum does.
+func TestTokenBudgetSumsInAndOut(t *testing.T) {
+	l := newLimiter(nil, true)
+	scopes := []limitScope{{kind: "group", id: "g", limits: &LimitsConfig{TokensPerDay: 100}}}
+
+	l.account(scopes, usage{prompt: 60, completion: 45}, 0) // 105 > 100, split 60/45
+	if v := l.checkAndCount(scopes); v == nil {
+		t.Fatal("60 tokin + 45 tokout = 105 > 100 must refuse, even though neither direction alone exceeds 100")
 	}
 }
 
@@ -491,12 +810,19 @@ func TestLimiter_FailClosed_AccountDropsSampleOnStoreError(t *testing.T) {
 
 	l.account(scopes, usage{prompt: 10, completion: 10}, 500)
 
-	got, err := l.fallback.get(windowKey("user", "u", metricTok, windowDay, l.now()))
+	gotIn, err := l.fallback.get(windowKey("user", "u", metricTokIn, windowDay, l.now()))
 	if err != nil {
 		t.Fatalf("fallback.get: %v", err)
 	}
-	if got != 0 {
-		t.Errorf("fallback tok:day counter = %d, want 0 (sample must be dropped, not counted locally)", got)
+	if gotIn != 0 {
+		t.Errorf("fallback tokin:day counter = %d, want 0 (sample must be dropped, not counted locally)", gotIn)
+	}
+	gotOut, err := l.fallback.get(windowKey("user", "u", metricTokOut, windowDay, l.now()))
+	if err != nil {
+		t.Fatalf("fallback.get: %v", err)
+	}
+	if gotOut != 0 {
+		t.Errorf("fallback tokout:day counter = %d, want 0 (sample must be dropped, not counted locally)", gotOut)
 	}
 }
 

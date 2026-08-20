@@ -166,7 +166,7 @@ func (g *Gateway) handleTargetProxy(w http.ResponseWriter, r *http.Request, u *u
 		return
 	}
 
-	scopes := buildLimitScopes(u, grp)
+	scopes := withTotalScope(buildLimitScopes(u, grp))
 	if violation := g.limiter.checkAndCount(scopes); violation != nil {
 		writeLimitViolation(w, violation)
 		return

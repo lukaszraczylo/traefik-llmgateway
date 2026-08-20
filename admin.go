@@ -2,20 +2,23 @@ package traefikllmgateway
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
 
-// The three routes the read-only admin dashboard registers (spec §4,
-// v0.2), matched only when adminEnabled(g.cfg) — see llmgateway.go's
-// ServeHTTP dispatch.
+// The four routes the read-only admin dashboard registers (spec §4, v0.2;
+// adminUsageHistoryPath added by the v0.2 data-layer task), matched only
+// when adminEnabled(g.cfg) — see llmgateway.go's ServeHTTP dispatch.
 const (
-	adminPagePath     = "/admin"
-	adminOverviewPath = "/admin/api/overview"
-	adminUsagePath    = "/admin/api/usage"
+	adminPagePath         = "/admin"
+	adminOverviewPath     = "/admin/api/overview"
+	adminUsagePath        = "/admin/api/usage"
+	adminUsageHistoryPath = "/admin/api/usage/history"
 )
 
 // adminCSP is the Content-Security-Policy header served with all three
@@ -43,9 +46,9 @@ func adminEnabled(cfg *Config) bool {
 	return cfg.Admin != nil && cfg.Admin.Enabled
 }
 
-// isAdminPath reports whether path is one of the three admin routes.
+// isAdminPath reports whether path is one of the four admin routes.
 func isAdminPath(path string) bool {
-	return path == adminPagePath || path == adminOverviewPath || path == adminUsagePath
+	return path == adminPagePath || path == adminOverviewPath || path == adminUsagePath || path == adminUsageHistoryPath
 }
 
 // handleAdmin is ServeHTTP's single entry point for all three /admin*
@@ -70,13 +73,21 @@ func (g *Gateway) handleAdmin(sw *statusTrackingWriter, r *http.Request) {
 	g.handleAdminAPI(sw, r)
 }
 
-// handleAdminAPI is the gate for the two /admin/api/* JSON routes,
+// handleAdminAPI is the gate for the three /admin/api/* JSON routes,
 // applying spec §4's gate order: unauthenticated → 401, authenticated
-// non-admin → 403, admin → serve. Like every other authenticated route
-// it counts request counters via checkAndCount before serving: an admin
-// over their own req/min limit gets a 429 here exactly as they would on
-// any other route (spec §4's "Accounting: admin routes count request
-// counters like any authed route").
+// non-admin → 403, admin → serve. GET /admin/api/overview and GET
+// /admin/api/usage count request counters via checkAndCount before
+// serving, like every other authenticated route: an admin over their own
+// req/min limit gets a 429 here exactly as they would on any other route
+// (spec §4's "Accounting: admin routes count request counters like any
+// authed route").
+//
+// GET /admin/api/usage/history (v0.2 data-layer task) is the one
+// exception: it skips checkAndCount entirely. The operator-directed
+// removal of admin-route stat counting (progress ledger, 2026-08-20)
+// lands for every /admin/api/* route in a later task; this new route is
+// built consistent with that direction from the start, rather than
+// counted now and un-counted later.
 func (g *Gateway) handleAdminAPI(sw *statusTrackingWriter, r *http.Request) {
 	u, grp, ok := g.auth.identify(r)
 	g.logAuthEvent(ok, authEventUserName(u), r)
@@ -88,6 +99,12 @@ func (g *Gateway) handleAdminAPI(sw *statusTrackingWriter, r *http.Request) {
 		writeOAIError(sw, http.StatusForbidden, "invalid_request_error", "admin access required")
 		return
 	}
+
+	if r.URL.Path == adminUsageHistoryPath {
+		g.serveAdminUsageHistory(sw, r)
+		return
+	}
+
 	if violation := g.limiter.checkAndCount(buildLimitScopes(u, grp)); violation != nil {
 		writeLimitViolation(sw, violation)
 		return
@@ -322,12 +339,16 @@ func (g *Gateway) serveAdminOverview(w http.ResponseWriter) {
 	_ = json.NewEncoder(w).Encode(g.buildAdminOverview())
 }
 
-// adminUsageEntryView is one user's or group's row in GET
-// /admin/api/usage (spec §4, v0.2): its current-window counter values,
-// with its configured limit echoed beside each. GroupName is set only for
-// a user entry (empty for a group entry) — the group a user currently
-// belongs to, for display; it carries no access-control meaning of its
-// own.
+// adminUsageEntryView is one user's, group's, or the total scope's row in
+// GET /admin/api/usage (spec §4, v0.2): its current-window counter
+// values, with its configured limit echoed beside each. GroupName is set
+// only for a user entry (empty for a group or the total entry) — the
+// group a user currently belongs to, for display; it carries no
+// access-control meaning of its own. TokensInPerDay/TokensOutPerDay and
+// their per-month counterparts replace a single combined
+// tokensPerDay/tokensPerMonth pair (v0.2 data-layer task, tokens-in/
+// tokens-out split) — a client wanting the combined total sums the two
+// itself.
 type adminUsageEntryView struct {
 	Limits               *LimitsConfig `json:"limits,omitempty"`
 	Kind                 string        `json:"kind"`
@@ -335,8 +356,10 @@ type adminUsageEntryView struct {
 	GroupName            string        `json:"groupName,omitempty"`
 	RequestsPerMinute    int64         `json:"requestsPerMinute"`
 	RequestsPerDay       int64         `json:"requestsPerDay"`
-	TokensPerDay         int64         `json:"tokensPerDay"`
-	TokensPerMonth       int64         `json:"tokensPerMonth"`
+	TokensInPerDay       int64         `json:"tokensInPerDay"`
+	TokensOutPerDay      int64         `json:"tokensOutPerDay"`
+	TokensInPerMonth     int64         `json:"tokensInPerMonth"`
+	TokensOutPerMonth    int64         `json:"tokensOutPerMonth"`
 	CostPerDayMicroUSD   int64         `json:"costPerDayMicroUsd"`
 	CostPerMonthMicroUSD int64         `json:"costPerMonthMicroUsd"`
 	StoreDown            bool          `json:"storeDown,omitempty"`
@@ -344,11 +367,14 @@ type adminUsageEntryView struct {
 
 // adminUsageResponse is the full body of GET /admin/api/usage: every
 // currently active user, and every configured group, each with its own
-// usage+limits row. Both slices are sorted (authStore.snapshot's own
-// contract) and built fresh per request.
+// usage+limits row, plus the synthetic total scope's own row (v0.2
+// data-layer task) — usage summed across every user and group combined,
+// limits always nil (see totalScopeKind). Users and Groups are both
+// sorted (authStore.snapshot's own contract) and built fresh per request.
 type adminUsageResponse struct {
 	Users  []adminUsageEntryView `json:"users"`
 	Groups []adminUsageEntryView `json:"groups"`
+	Total  adminUsageEntryView   `json:"total"`
 }
 
 // usageEntryView converts one limiter.currentUsage result plus its
@@ -360,8 +386,10 @@ func usageEntryView(su scopeUsage, limits *LimitsConfig) adminUsageEntryView {
 		Limits:               limits,
 		RequestsPerMinute:    su.requestsPerMinute,
 		RequestsPerDay:       su.requestsPerDay,
-		TokensPerDay:         su.tokensPerDay,
-		TokensPerMonth:       su.tokensPerMonth,
+		TokensInPerDay:       su.tokensInPerDay,
+		TokensOutPerDay:      su.tokensOutPerDay,
+		TokensInPerMonth:     su.tokensInPerMonth,
+		TokensOutPerMonth:    su.tokensOutPerMonth,
 		CostPerDayMicroUSD:   su.costPerDayMicros,
 		CostPerMonthMicroUSD: su.costPerMonthMicros,
 		StoreDown:            su.storeDown,
@@ -371,28 +399,32 @@ func usageEntryView(su scopeUsage, limits *LimitsConfig) adminUsageEntryView {
 // buildAdminUsage assembles adminUsageResponse: authStore.snapshot lists
 // every currently active user and every configured group (names, group
 // membership, and limits only — never a key or its digest), and
-// limiter.currentUsage reads every one's six current-window counters in
-// ONE storeGetMulti round trip total (v0.2 final review wave, 2026-08-20;
-// see limiter.currentUsage's own doc comment for the tradeoff this
-// supersedes) — users and groups are concatenated into a single scopes
-// slice before that one call, then the flat result is sliced back into
-// the two response sections at the same split point, order preserved.
-// Unlike buildLimitScopes (routes_unified.go), this never omits an
-// entity for having nil limits — the dashboard shows usage for every
-// user and group, limited or not.
+// limiter.currentUsage reads every one's current-window counters — plus
+// the synthetic total scope's own (v0.2 data-layer task) — in ONE
+// storeGetMulti round trip total (v0.2 final review wave, 2026-08-20; see
+// limiter.currentUsage's own doc comment for the tradeoff this
+// supersedes) — users, groups, and the total scope are concatenated into
+// a single scopes slice before that one call, then the flat result is
+// sliced back into the three response sections at the same split points,
+// order preserved. Unlike buildLimitScopes (routes_unified.go), this
+// never omits an entity for having nil limits — the dashboard shows usage
+// for every user and group, limited or not.
 func (g *Gateway) buildAdminUsage() adminUsageResponse {
 	userSummaries, groupSummaries := g.auth.snapshot()
 
-	scopes := make([]limitScope, 0, len(userSummaries)+len(groupSummaries))
+	scopes := make([]limitScope, 0, len(userSummaries)+len(groupSummaries)+1)
 	for _, us := range userSummaries {
 		scopes = append(scopes, limitScope{kind: "user", id: us.name, limits: us.limits})
 	}
 	for _, gs := range groupSummaries {
 		scopes = append(scopes, limitScope{kind: "group", id: gs.name, limits: gs.limits})
 	}
+	scopes = append(scopes, limitScope{kind: totalScopeKind, id: totalScopeID, limits: nil})
 
 	allUsage := g.limiter.currentUsage(scopes)
-	userUsage, groupUsage := allUsage[:len(userSummaries)], allUsage[len(userSummaries):]
+	userUsage := allUsage[:len(userSummaries)]
+	groupUsage := allUsage[len(userSummaries) : len(userSummaries)+len(groupSummaries)]
+	totalUsage := allUsage[len(userSummaries)+len(groupSummaries)]
 
 	users := make([]adminUsageEntryView, len(userUsage))
 	for i, su := range userUsage {
@@ -403,14 +435,198 @@ func (g *Gateway) buildAdminUsage() adminUsageResponse {
 	for i, su := range groupUsage {
 		groups[i] = usageEntryView(su, groupSummaries[i].limits)
 	}
+	total := usageEntryView(totalUsage, nil)
 
-	return adminUsageResponse{Users: users, Groups: groups}
+	return adminUsageResponse{Users: users, Groups: groups, Total: total}
 }
 
 // serveAdminUsage writes buildAdminUsage's result as JSON.
 func (g *Gateway) serveAdminUsage(w http.ResponseWriter) {
 	setAdminJSONHeaders(w)
 	_ = json.NewEncoder(w).Encode(g.buildAdminUsage())
+}
+
+// historyMaxSpan caps GET /admin/api/usage/history's span query parameter
+// per window (v0.2 data-layer task), matching each window's own retention
+// (limits.go: hourWindowTTL/dayWindowTTL/monthWindowTTL) rounded down to
+// whole buckets: 48 hourly buckets, 35 daily buckets, 13 monthly buckets
+// (a one-month margin over monthWindowTTL's 400*24h ≈ 13.3 months). A
+// span beyond what its window's TTL could ever have kept alive would only
+// echo zeros for the missing tail, so the cap keeps every requested
+// bucket meaningful. window is assumed already validated by
+// validHistoryWindow — the default case is a programming error, not a
+// client input, mirroring windowKey/windowEnd's own panic convention.
+func historyMaxSpan(window string) int {
+	switch window {
+	case windowHour:
+		return 48
+	case windowDay:
+		return 35
+	case windowMonth:
+		return 13
+	default:
+		panic(fmt.Sprintf("llmgateway: historyMaxSpan: unknown window %q", window))
+	}
+}
+
+// validHistoryMetric reports whether metric is one of GET
+// /admin/api/usage/history's four accepted metric values.
+func validHistoryMetric(metric string) bool {
+	switch metric {
+	case metricReq, metricTokIn, metricTokOut, metricCost:
+		return true
+	default:
+		return false
+	}
+}
+
+// validHistoryWindow reports whether window is one of GET
+// /admin/api/usage/history's three accepted window values.
+func validHistoryWindow(window string) bool {
+	switch window {
+	case windowHour, windowDay, windowMonth:
+		return true
+	default:
+		return false
+	}
+}
+
+// parseHistoryScope parses GET /admin/api/usage/history's "scope" query
+// parameter: "user:{id}", "group:{id}", or the literal "total". ok is
+// false for anything else, including a bare "total:{id}" form — the total
+// scope carries no id component of its own, it is always totalScopeID
+// (limits.go).
+func parseHistoryScope(raw string) (kind, id string, ok bool) {
+	if raw == totalScopeKind {
+		return totalScopeKind, totalScopeID, true
+	}
+	k, i, found := strings.Cut(raw, ":")
+	if !found || i == "" {
+		return "", "", false
+	}
+	if k != "user" && k != "group" {
+		return "", "", false
+	}
+	return k, i, true
+}
+
+// parseHistorySpan parses GET /admin/api/usage/history's "span" query
+// parameter for window: an empty raw value defaults to window's own
+// historyMaxSpan; otherwise raw must parse as an integer between 1 and
+// that max inclusive. ok is false for anything else — a non-integer, a
+// value below 1, or a value beyond window's max.
+func parseHistorySpan(raw, window string) (span int, ok bool) {
+	max := historyMaxSpan(window)
+	if raw == "" {
+		return max, true
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < 1 || n > max {
+		return 0, false
+	}
+	return n, true
+}
+
+// scopeExists reports whether kind/id names a currently active user or a
+// configured group — GET /admin/api/usage/history's 404 check for an
+// unknown scope id. authStore.snapshot's own listing is the same
+// membership buildAdminUsage already trusts for "every currently active
+// user and every configured group"; kind is assumed already restricted to
+// "user" or "group" by parseHistoryScope (the total scope's id is never
+// checked against it — totalScopeID always exists).
+func (g *Gateway) scopeExists(kind, id string) bool {
+	users, groups := g.auth.snapshot()
+	switch kind {
+	case "user":
+		for _, u := range users {
+			if u.name == id {
+				return true
+			}
+		}
+	case "group":
+		for _, gr := range groups {
+			if gr.name == id {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// usageHistoryPointView is one bucket in GET /admin/api/usage/history's
+// points array.
+type usageHistoryPointView struct {
+	Bucket string `json:"bucket"`
+	Value  int64  `json:"value"`
+}
+
+// usageHistoryResponse is the full body of GET /admin/api/usage/history
+// (v0.2 data-layer task): scope/metric/window echoed back exactly as
+// validated (scope in its raw "user:{id}"/"group:{id}"/"total" query
+// form), plus span buckets oldest-first — Points[len-1] is the current,
+// possibly partial, bucket.
+type usageHistoryResponse struct {
+	Scope  string                  `json:"scope"`
+	Metric string                  `json:"metric"`
+	Window string                  `json:"window"`
+	Points []usageHistoryPointView `json:"points"`
+}
+
+// serveAdminUsageHistory writes GET /admin/api/usage/history's bucketed
+// series for one scope/metric/window (v0.2 data-layer task, the Vue admin
+// panel's chart data source): "scope"=user:{id}|group:{id}|total,
+// "metric"=req|tokin|tokout|cost, "window"=hour|day|month, optional
+// "span"=N (default and max per historyMaxSpan). Validates every
+// parameter before touching the store — 400 for an unrecognized scope
+// kind/metric/window or an out-of-range span, 404 for a user/group id
+// that names no configured entity — then reads the series via
+// limiter.history, ONE storeGetMulti round trip for the whole span. A
+// storeDown read answers 503, not a silently-zero series: a chart built
+// on this API must never mistake "the store was unreachable" for "usage
+// was genuinely zero". checkAndCount is deliberately never called here —
+// see handleAdminAPI's own doc comment.
+func (g *Gateway) serveAdminUsageHistory(sw *statusTrackingWriter, r *http.Request) {
+	q := r.URL.Query()
+
+	rawScope := q.Get("scope")
+	kind, id, ok := parseHistoryScope(rawScope)
+	if !ok {
+		writeOAIError(sw, http.StatusBadRequest, "invalid_request_error", "unknown scope")
+		return
+	}
+	metric := q.Get("metric")
+	if !validHistoryMetric(metric) {
+		writeOAIError(sw, http.StatusBadRequest, "invalid_request_error", "unknown metric")
+		return
+	}
+	window := q.Get("window")
+	if !validHistoryWindow(window) {
+		writeOAIError(sw, http.StatusBadRequest, "invalid_request_error", "unknown window")
+		return
+	}
+	span, ok := parseHistorySpan(q.Get("span"), window)
+	if !ok {
+		writeOAIError(sw, http.StatusBadRequest, "invalid_request_error", "invalid span")
+		return
+	}
+	if kind != totalScopeKind && !g.scopeExists(kind, id) {
+		writeOAIError(sw, http.StatusNotFound, "invalid_request_error", "unknown "+kind+" id")
+		return
+	}
+
+	points, storeOK := g.limiter.history(kind, id, metric, window, g.limiter.now(), span)
+	if !storeOK {
+		writeOAIError(sw, http.StatusServiceUnavailable, "server_error", "usage history store unavailable")
+		return
+	}
+
+	view := make([]usageHistoryPointView, len(points))
+	for i, p := range points {
+		view[i] = usageHistoryPointView{Bucket: p.bucket, Value: p.value}
+	}
+
+	setAdminJSONHeaders(sw)
+	_ = json.NewEncoder(sw).Encode(usageHistoryResponse{Scope: rawScope, Metric: metric, Window: window, Points: view})
 }
 
 // adminPageHTML is the entire /admin single-page dashboard: markup, CSS,
@@ -531,14 +747,14 @@ const adminPageHTML = `<!doctype html>
 <section>
   <h2>Groups</h2>
   <table id="groups"><thead><tr>
-    <th>Name</th><th>Members</th><th>Limits</th><th>req/min</th><th>req/day</th><th>tok/day</th><th>tok/month</th><th>cost/day</th><th>cost/month</th>
+    <th>Name</th><th>Members</th><th>Limits</th><th>req/min</th><th>req/day</th><th>tokIn/day</th><th>tokOut/day</th><th>tokIn/month</th><th>tokOut/month</th><th>cost/day</th><th>cost/month</th>
   </tr></thead><tbody></tbody></table>
 </section>
 
 <section>
   <h2>Users</h2>
   <table id="users"><thead><tr>
-    <th>Name</th><th>Group</th><th>Limits</th><th>req/min</th><th>req/day</th><th>tok/day</th><th>tok/month</th><th>cost/day</th><th>cost/month</th>
+    <th>Name</th><th>Group</th><th>Limits</th><th>req/min</th><th>req/day</th><th>tokIn/day</th><th>tokOut/day</th><th>tokIn/month</th><th>tokOut/month</th><th>cost/day</th><th>cost/month</th>
   </tr></thead><tbody></tbody></table>
 </section>
 
@@ -660,8 +876,10 @@ const adminPageHTML = `<!doctype html>
       tr.appendChild(el("td", fmtLimits(entry.limits)));
       tr.appendChild(el("td", entry.storeDown ? "?" : String(entry.requestsPerMinute)));
       tr.appendChild(el("td", entry.storeDown ? "?" : String(entry.requestsPerDay)));
-      tr.appendChild(el("td", entry.storeDown ? "?" : String(entry.tokensPerDay)));
-      tr.appendChild(el("td", entry.storeDown ? "?" : String(entry.tokensPerMonth)));
+      tr.appendChild(el("td", entry.storeDown ? "?" : String(entry.tokensInPerDay)));
+      tr.appendChild(el("td", entry.storeDown ? "?" : String(entry.tokensOutPerDay)));
+      tr.appendChild(el("td", entry.storeDown ? "?" : String(entry.tokensInPerMonth)));
+      tr.appendChild(el("td", entry.storeDown ? "?" : String(entry.tokensOutPerMonth)));
       tr.appendChild(el("td", entry.storeDown ? "?" : fmtCost(entry.costPerDayMicroUsd)));
       tr.appendChild(el("td", entry.storeDown ? "?" : fmtCost(entry.costPerMonthMicroUsd)));
       if (entry.storeDown) tr.className = "err";

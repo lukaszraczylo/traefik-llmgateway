@@ -69,7 +69,7 @@ func (g *Gateway) resolveMediaRequest(sw *statusTrackingWriter, u *user, grp *gr
 		writeModelResolveError(sw, err)
 		return nil, "", false
 	}
-	if violation := g.limiter.checkAndCount(buildLimitScopes(u, grp)); violation != nil {
+	if violation := g.limiter.checkAndCount(withTotalScope(buildLimitScopes(u, grp))); violation != nil {
 		writeLimitViolation(sw, violation)
 		return nil, "", false
 	}

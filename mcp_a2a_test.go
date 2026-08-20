@@ -660,9 +660,13 @@ func TestHandleTargetProxy_JSONResponse_OnlyRequestCounterMoves(t *testing.T) {
 		t.Errorf("body = %q, want verbatim upstream body", rec.Body.String())
 	}
 
-	tok, ok := gw.limiter.getCounter("user", "alice", metricTok, windowDay, time.Now())
-	if !ok || tok != 0 {
-		t.Errorf("user token/day counter = %d (ok=%v), want 0 — target proxy must never account response usage", tok, ok)
+	tokIn, ok := gw.limiter.getCounter("user", "alice", metricTokIn, windowDay, time.Now())
+	if !ok || tokIn != 0 {
+		t.Errorf("user tokin/day counter = %d (ok=%v), want 0 — target proxy must never account response usage", tokIn, ok)
+	}
+	tokOut, ok := gw.limiter.getCounter("user", "alice", metricTokOut, windowDay, time.Now())
+	if !ok || tokOut != 0 {
+		t.Errorf("user tokout/day counter = %d (ok=%v), want 0 — target proxy must never account response usage", tokOut, ok)
 	}
 	cost, ok := gw.limiter.getCounter("user", "alice", metricCost, windowDay, time.Now())
 	if !ok || cost != 0 {
@@ -671,6 +675,14 @@ func TestHandleTargetProxy_JSONResponse_OnlyRequestCounterMoves(t *testing.T) {
 	reqCount, ok := gw.limiter.getCounter("user", "alice", metricReq, windowMin, time.Now())
 	if !ok || reqCount != 1 {
 		t.Errorf("user request/min counter = %d (ok=%v), want 1 — the request itself is still accounted", reqCount, ok)
+	}
+
+	// withTotalScope (handleTargetProxy, mcp_a2a.go) must have appended
+	// the synthetic total scope too (v0.2 data-layer task): counted like
+	// any other scope, still never token/cost-accounted here.
+	totalReq, ok := gw.limiter.getCounter(totalScopeKind, totalScopeID, metricReq, windowMin, time.Now())
+	if !ok || totalReq != 1 {
+		t.Errorf("total request/min counter = %d (ok=%v), want 1", totalReq, ok)
 	}
 }
 

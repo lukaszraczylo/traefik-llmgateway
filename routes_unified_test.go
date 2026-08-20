@@ -127,13 +127,33 @@ func TestHandleChat_HappyPath_NonStreaming_AccountsUsage(t *testing.T) {
 		t.Errorf("body = %q, want verbatim upstream body %q", rec.Body.String(), respBody)
 	}
 
-	tok, ok := gw.limiter.getCounter("user", "alice", metricTok, windowDay, time.Now())
-	if !ok || tok != 15 {
-		t.Errorf("user token/day counter = %d (ok=%v), want 15", tok, ok)
+	tokIn, ok := gw.limiter.getCounter("user", "alice", metricTokIn, windowDay, time.Now())
+	if !ok || tokIn != 10 {
+		t.Errorf("user tokin/day counter = %d (ok=%v), want 10", tokIn, ok)
+	}
+	tokOut, ok := gw.limiter.getCounter("user", "alice", metricTokOut, windowDay, time.Now())
+	if !ok || tokOut != 5 {
+		t.Errorf("user tokout/day counter = %d (ok=%v), want 5", tokOut, ok)
 	}
 	reqCount, ok := gw.limiter.getCounter("user", "alice", metricReq, windowMin, time.Now())
 	if !ok || reqCount != 1 {
 		t.Errorf("user request/min counter = %d (ok=%v), want 1", reqCount, ok)
+	}
+
+	// withTotalScope (routes_unified.go) must have appended the synthetic
+	// total scope to runUnified's own checkAndCount/account calls: its
+	// req/tokin/tokout counters mirror alice's own (v0.2 data-layer task).
+	totalReq, ok := gw.limiter.getCounter(totalScopeKind, totalScopeID, metricReq, windowMin, time.Now())
+	if !ok || totalReq != 1 {
+		t.Errorf("total request/min counter = %d (ok=%v), want 1", totalReq, ok)
+	}
+	totalTokIn, ok := gw.limiter.getCounter(totalScopeKind, totalScopeID, metricTokIn, windowDay, time.Now())
+	if !ok || totalTokIn != 10 {
+		t.Errorf("total tokin/day counter = %d (ok=%v), want 10", totalTokIn, ok)
+	}
+	totalTokOut, ok := gw.limiter.getCounter(totalScopeKind, totalScopeID, metricTokOut, windowDay, time.Now())
+	if !ok || totalTokOut != 5 {
+		t.Errorf("total tokout/day counter = %d (ok=%v), want 5", totalTokOut, ok)
 	}
 }
 
@@ -980,9 +1000,13 @@ func TestHandleChat_MidStreamDropAfterUsageChunk_AccountsPartialUsage(t *testing
 		t.Errorf("want the mid-stream error logged, got %q", logBuf.String())
 	}
 
-	tok, ok := gw.limiter.getCounter("user", "alice", metricTok, windowDay, time.Now())
-	if !ok || tok != 10 {
-		t.Errorf("user token/day counter = %d (ok=%v), want 10 (the usage chunk captured before the drop, 7 prompt + 3 completion)", tok, ok)
+	tokIn, ok := gw.limiter.getCounter("user", "alice", metricTokIn, windowDay, time.Now())
+	if !ok || tokIn != 7 {
+		t.Errorf("user tokin/day counter = %d (ok=%v), want 7 (the usage chunk captured before the drop)", tokIn, ok)
+	}
+	tokOut, ok := gw.limiter.getCounter("user", "alice", metricTokOut, windowDay, time.Now())
+	if !ok || tokOut != 3 {
+		t.Errorf("user tokout/day counter = %d (ok=%v), want 3 (the usage chunk captured before the drop)", tokOut, ok)
 	}
 }
 
@@ -1183,9 +1207,13 @@ func TestHandleChat_CacheHitMiss_EndToEnd_CountersAndHeaders(t *testing.T) {
 	if !ok || reqCount != 1 {
 		t.Errorf("req:day after first request = %d (ok=%v), want 1", reqCount, ok)
 	}
-	tok, ok := gw.limiter.getCounter("user", "alice", metricTok, windowDay, time.Now())
-	if !ok || tok != 15 {
-		t.Errorf("tok:day after first request = %d (ok=%v), want 15 (10 prompt + 5 completion)", tok, ok)
+	tokIn, ok := gw.limiter.getCounter("user", "alice", metricTokIn, windowDay, time.Now())
+	if !ok || tokIn != 10 {
+		t.Errorf("tokin:day after first request = %d (ok=%v), want 10", tokIn, ok)
+	}
+	tokOut, ok := gw.limiter.getCounter("user", "alice", metricTokOut, windowDay, time.Now())
+	if !ok || tokOut != 5 {
+		t.Errorf("tokout:day after first request = %d (ok=%v), want 5", tokOut, ok)
 	}
 
 	// Second, identical request: hit.
@@ -1207,9 +1235,9 @@ func TestHandleChat_CacheHitMiss_EndToEnd_CountersAndHeaders(t *testing.T) {
 	if !ok || reqCount != 2 {
 		t.Errorf("req:day after the cache hit = %d (ok=%v), want 2 (hit still counts as one more request)", reqCount, ok)
 	}
-	tok, ok = gw.limiter.getCounter("user", "alice", metricTok, windowDay, time.Now())
-	if !ok || tok != 15 {
-		t.Errorf("tok:day after the cache hit = %d (ok=%v), want still 15 (a hit accounts zero tokens, no estimation)", tok, ok)
+	tokIn, ok = gw.limiter.getCounter("user", "alice", metricTokIn, windowDay, time.Now())
+	if !ok || tokIn != 10 {
+		t.Errorf("tokin:day after the cache hit = %d (ok=%v), want still 10 (a hit accounts zero tokens, no estimation)", tokIn, ok)
 	}
 }
 
