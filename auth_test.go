@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"sync"
 	"testing"
+	"time"
 )
 
 // TestIdentify is the brief's Step-1 table: bearer auth resolves the right
@@ -372,5 +373,40 @@ func TestAuthStore_ReplaceFileUsers_ConcurrentWritersAndReaders(t *testing.T) {
 	want := len(a.inline) + 1 // inline users plus exactly one winning file-user batch
 	if got != want {
 		t.Fatalf("want exactly one file-user batch to survive concurrent swaps (size %d), got size %d — a rebuild was lost or merged with another", want, got)
+	}
+}
+
+// TestAuthStore_Identify_NotBlockedByBuildMu is the regression for the
+// Task-4 lock split: replaceFileUsers's writer-serialization lock (buildMu)
+// must be independent from the reader lock (mu) that identify uses. The
+// prior implementation held mu for the whole rebuild, which would stall
+// every identify call for as long as a reload's build phase (including
+// resolveSecret's potentially slow file-backed reads) took. Holding buildMu
+// externally here simulates "a rebuild's build phase is in progress" — a
+// correct identify must not need buildMu at all.
+func TestAuthStore_Identify_NotBlockedByBuildMu(t *testing.T) {
+	a, err := newAuthStore(testAuthCfg())
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.buildMu.Lock()
+	defer a.buildMu.Unlock()
+
+	r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	r.Header.Set("Authorization", "Bearer sk-secret")
+
+	done := make(chan bool, 1)
+	go func() {
+		_, _, ok := a.identify(r)
+		done <- ok
+	}()
+
+	select {
+	case ok := <-done:
+		if !ok {
+			t.Fatal("want identify to succeed")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("identify blocked while buildMu is held — reader lock must not depend on the writer-serialization lock")
 	}
 }

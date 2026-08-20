@@ -83,11 +83,19 @@ type authEntry struct {
 // authStore identifies requests by API key and resolves them to a user and
 // their group. Raw API keys are never retained after construction — only
 // their SHA-256 digests.
+//
+// mu guards byDigest for readers (identify) and the final swap in
+// replaceFileUsers. buildMu serializes the whole body of replaceFileUsers —
+// including buildEntry's potentially slow file-backed secret resolution —
+// so concurrent reload attempts never interleave or overwrite each other.
+// buildMu is never held at the same time as mu, so a rebuild in progress
+// never blocks identify's readers.
 type authStore struct {
 	groups   map[string]*group
 	inline   map[[32]byte]*authEntry // built once by newAuthStore; never mutated afterward
 	byDigest map[[32]byte]*authEntry // inline entries plus the current file-sourced set; guarded by mu
 	mu       sync.RWMutex
+	buildMu  sync.Mutex
 }
 
 // newAuthStore builds an authStore from cfg's groups and inline users. It
@@ -158,14 +166,16 @@ func (a *authStore) buildEntry(uc *UserConfig) (*authEntry, error) {
 // On error the store is left exactly as it was before the call — the new
 // set is validated and built in full before it replaces the old one.
 //
-// mu is held for the whole rebuild, not just the final swap. That serializes
-// concurrent callers (a reload timer must never race itself), so one call's
-// result can never be partially overwritten or interleaved with another's.
-// identify's reads stay fast (RLock) and reloads are rare, so the extra hold
-// time is a good trade.
+// buildMu is held for the whole rebuild, not just the final swap — that
+// serializes concurrent callers (a reload timer must never race itself), so
+// one call's result can never be partially overwritten or interleaved with
+// another's. mu, which identify's reads use (RLock), is locked only for the
+// final map swap below: a slow rebuild (buildEntry's resolveSecret can do
+// blocking file I/O for "file:"-prefixed API keys) no longer stalls every
+// identify call for its whole duration.
 func (a *authStore) replaceFileUsers(us []*UserConfig) error {
-	a.mu.Lock()
-	defer a.mu.Unlock()
+	a.buildMu.Lock()
+	defer a.buildMu.Unlock()
 
 	next := make(map[[32]byte]*authEntry, len(a.inline)+len(us))
 	for digest, entry := range a.inline {
@@ -182,7 +192,9 @@ func (a *authStore) replaceFileUsers(us []*UserConfig) error {
 		next[entry.digest] = entry
 	}
 
+	a.mu.Lock()
 	a.byDigest = next
+	a.mu.Unlock()
 	return nil
 }
 
