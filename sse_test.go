@@ -177,6 +177,28 @@ func TestReadSSE_BlankLinesWithoutFieldsDoNotDispatch(t *testing.T) {
 	}
 }
 
+// TestReadSSE_EventFieldAloneDoesNotDispatch proves an "event:" field with
+// no "data:" line does not produce a data-less event on the blank line
+// that follows it — matching the EventSource spec, which discards an
+// event whose data buffer is empty even when the event type was set.
+func TestReadSSE_EventFieldAloneDoesNotDispatch(t *testing.T) {
+	raw := "event: ping\n\ndata: real\n\n"
+
+	var got []sseEvent
+	err := readSSE(strings.NewReader(raw), func(ev sseEvent) error {
+		got = append(got, ev)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("readSSE: %v", err)
+	}
+
+	want := []sseEvent{{event: "", data: []byte("real")}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %#v, want %#v", got, want)
+	}
+}
+
 // TestNewSSEWriter_SetsHeaders proves newSSEWriter sets the three SSE
 // response headers on construction, before any body write.
 func TestNewSSEWriter_SetsHeaders(t *testing.T) {

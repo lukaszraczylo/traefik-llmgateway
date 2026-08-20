@@ -51,15 +51,21 @@ func readSSE(r io.Reader, fn func(sseEvent) error) error {
 	var (
 		event     string
 		dataLines []string
-		pending   bool
+		hasData   bool
 	)
 
+	// dispatch fires fn on a blank line, but only when at least one
+	// "data:" line was accumulated — matching the EventSource spec, an
+	// "event:" field alone (no data) discards silently rather than
+	// producing a data-less event. It always resets the accumulated
+	// fields, dispatched or not.
 	dispatch := func() error {
-		if !pending {
+		fire := hasData
+		ev := sseEvent{event: event, data: []byte(strings.Join(dataLines, "\n"))}
+		event, dataLines, hasData = "", nil, false
+		if !fire {
 			return nil
 		}
-		ev := sseEvent{event: event, data: []byte(strings.Join(dataLines, "\n"))}
-		event, dataLines, pending = "", nil, false
 		return fn(ev)
 	}
 
@@ -80,10 +86,9 @@ func readSSE(r io.Reader, fn func(sseEvent) error) error {
 		switch field {
 		case "event":
 			event = value
-			pending = true
 		case "data":
 			dataLines = append(dataLines, value)
-			pending = true
+			hasData = true
 		case "id", "retry":
 			// recognized fields, intentionally ignored
 		}
