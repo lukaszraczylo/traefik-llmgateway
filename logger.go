@@ -27,10 +27,10 @@ func (g *Gateway) errorf(format string, args ...any) {
 // key it authenticated.
 func (g *Gateway) logAuthEvent(ok bool, userName string, r *http.Request) {
 	if !ok {
-		g.logf("auth failed: %s %s from %s", r.Method, r.URL.Path, r.RemoteAddr)
+		g.logf("auth failed: %s %q from %s", r.Method, r.URL.Path, r.RemoteAddr)
 		return
 	}
-	g.logf("auth ok: user %q %s %s", userName, r.Method, r.URL.Path)
+	g.logf("auth ok: user %q %s %q", userName, r.Method, r.URL.Path)
 }
 
 // authEventUserName extracts u's name for logAuthEvent's userName
