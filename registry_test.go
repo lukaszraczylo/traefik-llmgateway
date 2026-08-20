@@ -899,7 +899,7 @@ func TestNewGateway_WarmFill_PopulatesDiscoveredModels_BeforeAnyRequest(t *testi
 // --- model aliases (spec §5, v0.2) ---
 
 // newAliasTestRegistry builds a registry with one "openai" provider
-// (explicit model "gpt-test") and grp's given aliases, failing the test on
+// (explicit model "gpt-test") and the given aliases, failing the test on
 // any construction error. log defaults to a no-op when nil.
 func newAliasTestRegistry(t *testing.T, aliases map[string]string, log func(string, ...any)) *modelRegistry {
 	t.Helper()
@@ -1241,5 +1241,62 @@ func TestModelRegistry_ListFor_Alias_NotAuthorized_Omitted(t *testing.T) {
 		if entry["id"] == "aliased/coding" {
 			t.Errorf("listFor lists %q for a group authorized for neither the alias nor its target", "aliased/coding")
 		}
+	}
+}
+
+// TestModelRegistry_ListFor_Alias_DedupedAgainstDiscoveredCollision is the
+// review fix for listFor's alias-listing loop: when a provider's
+// discovery fetch finds a model whose bare id is identical to a
+// configured alias id (impossible for an EXPLICIT model —
+// validateModelAliases already rejects that at construction, but
+// discovery is dynamic and runs after that check), the listing must show
+// exactly ONE entry for that id — not one from the real discovered model
+// and a second, duplicate one from the alias loop. resolve's own
+// precedence (registry.go's resolve doc comment) must still have the
+// alias win at request time regardless of which entry the listing shows.
+func TestModelRegistry_ListFor_Alias_DedupedAgainstDiscoveredCollision(t *testing.T) {
+	t.Parallel()
+	adapters := map[string]providerAdapter{
+		"openai": newFakeAdapter("openai"),
+		"acme":   newFakeAdapter("acme"),
+	}
+	cfg := &Config{
+		Providers: map[string]*ProviderConfig{
+			"openai": {Models: []string{"gpt-test"}},
+			"acme":   {Discovery: true},
+		},
+		ModelAliases: map[string]string{"shared-id": "openai/gpt-test"},
+	}
+	reg, err := newModelRegistry(adapters, cfg, func(string, ...any) {})
+	if err != nil {
+		t.Fatalf("newModelRegistry: %v", err)
+	}
+	// acme's discovery finds a model literally named "shared-id" — the
+	// same string as the configured alias, discovered only after
+	// construction, so validateModelAliases never saw it.
+	reg.states["acme"].finishRefresh(reg.now(), []string{"shared-id"}, nil)
+
+	got := reg.listFor(allowAllGroup())
+	count := 0
+	for _, entry := range got {
+		if entry["id"] == "shared-id" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("listFor has %d entries for id %q, want exactly 1 (deduped)", count, "shared-id")
+	}
+
+	// resolve must still prefer the alias, per its documented precedence,
+	// regardless of which single entry the listing showed above.
+	adapter, _, canonical, err := reg.resolve("shared-id", allowAllGroup())
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if adapter != adapters["openai"] {
+		t.Errorf("adapter = %v, want openai (the alias, not acme's discovered model, must still win resolution)", adapter)
+	}
+	if canonical != "openai/gpt-test" {
+		t.Errorf("canonical = %q, want %q", canonical, "openai/gpt-test")
 	}
 }

@@ -139,6 +139,37 @@ func waitForHealthy(t *testing.T, url, apiKey string, timeout time.Duration) {
 	t.Fatalf("%s did not become healthy within %s (last status=%d, last error=%v)", url, timeout, lastStatus, lastErr)
 }
 
+// waitForModelAlias polls GET /v1/models on baseURL with apiKey until an
+// entry with id wantID appears, or timeout elapses. Task 6 review fix: a
+// plain 200 from /v1/models (waitForHealthy's own check) only proves
+// Traefik's file provider has loaded SOME generation of dynamic.yml — not
+// necessarily the one carrying modelAliases. A request landing in that
+// narrow propagation window would see a config generation from before the
+// alias applied and get a spurious "unknown model" 404, which is exactly
+// what one cold-start run of this suite hit. Polling the actual listing
+// removes that window deterministically instead of guessing at a fixed
+// sleep.
+func waitForModelAlias(t *testing.T, baseURL, apiKey, wantID string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	var lastBody map[string]any
+	for time.Now().Before(deadline) {
+		resp, body := doJSON(t, http.MethodGet, baseURL+"/v1/models", apiKey, nil)
+		if resp.StatusCode == http.StatusOK {
+			lastBody = body
+			if data, ok := body["data"].([]any); ok {
+				for _, entry := range data {
+					if m, ok := entry.(map[string]any); ok && m["id"] == wantID {
+						return
+					}
+				}
+			}
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	t.Fatalf("GET %s/v1/models never listed alias %q within %s, last body=%#v", baseURL, wantID, timeout, lastBody)
+}
+
 // checkNoPluginErrors greps docker compose's captured logs for service,
 // failing if no plugin-loading message appears at all, or if any
 // plugin-related line is logged at error level.
@@ -248,6 +279,11 @@ func TestUnifiedChatAllProviders(t *testing.T) {
 // registry_test.go's Gateway-level equivalents for the same assertion
 // under go test).
 func TestModelAliases(t *testing.T) {
+	// Review fix: wait for the alias to actually appear in /v1/models
+	// before asserting anything below — see waitForModelAlias's doc
+	// comment for why a plain healthy-200 is not enough on its own.
+	waitForModelAlias(t, traefik1URL, aliceKey, "aliased/mock", 30*time.Second)
+
 	// openai-type: the upstream response is forwarded verbatim
 	// (provider_openai.go), so its "model" field carries whatever the
 	// mock echoes back — the resolved upstream id "gpt-mock", not the

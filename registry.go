@@ -466,8 +466,15 @@ func (m *modelRegistry) bareWinner(id string) (string, bool) {
 // errModelUnknown for a model no configured provider knows at all.
 func (m *modelRegistry) resolve(id string, grp *group) (providerAdapter, string, string, error) {
 	if target, isAlias := m.aliases[id]; isAlias {
-		if _, discoveredCollision := m.bareWinner(id); discoveredCollision {
-			m.warnAliasShadowsDiscoveredOnce(id)
+		// Warned-set checked FIRST (review fix): bareWinner is an
+		// O(providerNames) scan, and every request for an already-warned
+		// alias would otherwise pay it just to decide not to log again.
+		// Once warned, this collapses to one cheap mutex-guarded map
+		// lookup per request instead.
+		if !m.aliasShadowWarned(id) {
+			if _, discoveredCollision := m.bareWinner(id); discoveredCollision {
+				m.warnAliasShadowsDiscoveredOnce(id)
+			}
 		}
 		return m.resolveAliasTarget(id, target, grp)
 	}
@@ -529,6 +536,27 @@ func (m *modelRegistry) resolveAliasTarget(alias, target string, grp *group) (pr
 	return m.resolveAgainst(providerName, target, target, alias, grp, notFound)
 }
 
+// aliasShadowWarnKey builds the m.warned key for alias's discovered-
+// collision warning — shared by aliasShadowWarned and
+// warnAliasShadowsDiscoveredOnce so the two can never drift apart into
+// mismatched keys. Prefixed with "alias-shadow:" so it can never collide
+// with warnCollisionOnce's own plain-id keys in the same m.warned map.
+func aliasShadowWarnKey(alias string) string {
+	return "alias-shadow:" + alias
+}
+
+// aliasShadowWarned reports whether warnAliasShadowsDiscoveredOnce has
+// already logged for alias, with no other side effect — resolve's fast
+// path (its own doc comment) checks this BEFORE paying bareWinner's
+// O(providerNames) scan, so a registry with many providers does not pay
+// that cost on every request for an alias once its one-time warning has
+// already fired.
+func (m *modelRegistry) aliasShadowWarned(alias string) bool {
+	m.warnedMu.Lock()
+	defer m.warnedMu.Unlock()
+	return m.warned[aliasShadowWarnKey(alias)]
+}
+
 // warnAliasShadowsDiscoveredOnce logs, at most once per colliding alias id
 // for this registry's lifetime, that alias also names a model some
 // provider's discovery fetch found after construction — resolve's
@@ -536,13 +564,11 @@ func (m *modelRegistry) resolveAliasTarget(alias, target string, grp *group) (pr
 // wins, since only an EXPLICIT collision is rejected at construction
 // (validateModelAliases); discovery is dynamic and runs after that check,
 // so this collision can only be caught, and only warned about, here at
-// request time. Keyed with an "alias-shadow:" prefix in the same m.warned
-// map warnCollisionOnce uses, so the two unrelated warning kinds can never
-// share a key and suppress each other.
+// request time.
 func (m *modelRegistry) warnAliasShadowsDiscoveredOnce(alias string) {
 	m.warnedMu.Lock()
 	defer m.warnedMu.Unlock()
-	key := "alias-shadow:" + alias
+	key := aliasShadowWarnKey(alias)
 	if m.warned[key] {
 		return
 	}
@@ -668,15 +694,22 @@ func (m *modelRegistry) listFor(grp *group) []map[string]any {
 	// then deny. owned_by is recovered from the successful call's own
 	// canonical return value ("provider/upstreamModel") by splitting on
 	// the first "/" — exact, because a registry provider name can never
-	// itself contain one (configNamePattern, providers.go). An alias id
-	// that also happens to collide with a since-discovered model's own
-	// bare id (impossible for an EXPLICIT model — validateModelAliases
-	// already rejects that at construction) is not deduped against that
-	// model's own entry above: the same documented, alias-wins
-	// precedence edge resolve's warnAliasShadowsDiscoveredOnce logs
-	// about, accepted here too as rare enough not to warrant extra
-	// bookkeeping.
+	// itself contain one (configNamePattern, providers.go).
+	//
+	// An alias id that also happens to collide with a since-discovered
+	// model's own bare id (impossible for an EXPLICIT model —
+	// validateModelAliases already rejects that at construction) is
+	// SKIPPED here (review fix), not appended a second time: owners
+	// already holds a real-model entry for that id from the loop above,
+	// and adding another with the same id would list it twice —
+	// duplicate, order-nondeterministic-looking entries in an
+	// OpenAI-shaped model list. resolve's own precedence (its doc
+	// comment) still has the alias win at REQUEST time regardless of
+	// which entry the listing shows; only the listing itself is deduped.
 	for alias, target := range m.aliases {
+		if _, collides := owners[alias]; collides {
+			continue
+		}
 		_, _, canonical, err := m.resolveAliasTarget(alias, target, grp)
 		if err != nil {
 			continue
