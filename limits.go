@@ -266,8 +266,15 @@ type limiter struct {
 	logf             func(format string, args ...any)
 	lastLogAt        time.Time // guarded by logMu; last time a store error was logged
 	lastStoreFailure time.Time // guarded by logMu; zero means the store-down latch is not open (see storeLatched)
-	logMu            sync.Mutex
-	failOpen         bool // store-error policy: true falls back to fallback, false refuses the request
+	// lastErrMsg is the message of the most recent store operation
+	// failure, guarded by logMu alongside lastStoreFailure. It is never
+	// cleared on a later success — "last store error" for the admin
+	// dashboard (spec §4, v0.2) means exactly that, a persisting fact,
+	// not "is the store currently failing" (storeLatched already answers
+	// that question for the enforcement path).
+	lastErrMsg string
+	logMu      sync.Mutex
+	failOpen   bool // store-error policy: true falls back to fallback, false refuses the request
 }
 
 // newLimiter returns a limiter. A nil store means every operation uses the
@@ -328,7 +335,19 @@ func (l *limiter) recordStoreFailure(err error) {
 	l.logStoreError(err)
 	l.logMu.Lock()
 	l.lastStoreFailure = l.now()
+	l.lastErrMsg = err.Error()
 	l.logMu.Unlock()
+}
+
+// redisStatus reports whether l has a configured (non-fallback-only)
+// store, and that store's most recent operation failure message — the
+// admin dashboard's redis status line (spec §4, v0.2). lastErr is "" when
+// no store operation has ever failed. Guarded by logMu, the same mutex
+// lastStoreFailure/lastErrMsg already use.
+func (l *limiter) redisStatus() (configured bool, lastErr string) {
+	l.logMu.Lock()
+	defer l.logMu.Unlock()
+	return l.store != nil, l.lastErrMsg
 }
 
 // storeIncrBy increments key by n with the given ttl, applying the
@@ -601,4 +620,55 @@ func (l *limiter) account(scopes []limitScope, u usage, costMicros int64) {
 			l.incrCounter(sc.kind, sc.id, metricCost, windowMonth, now, costMicros, monthWindowTTL)
 		}
 	}
+}
+
+// scopeUsage is one scope's (a user's or a group's) current-window
+// counter values — the admin dashboard's usage table (spec §4, v0.2). The
+// six value fields mirror LimitsConfig's six limit kinds exactly, so the
+// admin API can echo a usage value beside its matching limit.
+type scopeUsage struct {
+	kind               string // "user" or "group", mirroring limitScope.kind
+	id                 string
+	requestsPerMinute  int64
+	requestsPerDay     int64
+	tokensPerDay       int64
+	tokensPerMonth     int64
+	costPerDayMicros   int64
+	costPerMonthMicros int64
+	// storeDown reports whether reading any of the six counters above
+	// failed closed (a configured store errored and failOpen is false) —
+	// mirrors limitViolation.storeDown. Every value field is 0 in that
+	// case; a caller must not present them as "confirmed zero usage".
+	storeDown bool
+}
+
+// currentUsage reads every scope's six current-window counters — the
+// same (kind, id, metric, window) combinations checkAndCount/account
+// already write — via the limiter's own getCounter, so it applies the
+// identical fail-open/fail-closed policy every enforcement read already
+// does. It is read-only: unlike checkAndCount, it never increments
+// anything. Order is preserved: currentUsage(scopes)[i] corresponds to
+// scopes[i].
+func (l *limiter) currentUsage(scopes []limitScope) []scopeUsage {
+	now := l.now()
+	out := make([]scopeUsage, len(scopes))
+	for i, sc := range scopes {
+		reqMin, ok1 := l.getCounter(sc.kind, sc.id, metricReq, windowMin, now)
+		reqDay, ok2 := l.getCounter(sc.kind, sc.id, metricReq, windowDay, now)
+		tokDay, ok3 := l.getCounter(sc.kind, sc.id, metricTok, windowDay, now)
+		tokMonth, ok4 := l.getCounter(sc.kind, sc.id, metricTok, windowMonth, now)
+		costDay, ok5 := l.getCounter(sc.kind, sc.id, metricCost, windowDay, now)
+		costMonth, ok6 := l.getCounter(sc.kind, sc.id, metricCost, windowMonth, now)
+		if !ok1 || !ok2 || !ok3 || !ok4 || !ok5 || !ok6 {
+			out[i] = scopeUsage{kind: sc.kind, id: sc.id, storeDown: true}
+			continue
+		}
+		out[i] = scopeUsage{
+			kind: sc.kind, id: sc.id,
+			requestsPerMinute: reqMin, requestsPerDay: reqDay,
+			tokensPerDay: tokDay, tokensPerMonth: tokMonth,
+			costPerDayMicros: costDay, costPerMonthMicros: costMonth,
+		}
+	}
+	return out
 }

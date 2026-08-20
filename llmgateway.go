@@ -22,6 +22,11 @@ type Config struct {
 	Agents     map[string]*AgentConfig    `json:"agents,omitempty"`
 	Users      *UsersConfig               `json:"users,omitempty"`
 	Redis      *RedisConfig               `json:"redis,omitempty"`
+	// Admin gates the read-only admin dashboard (spec §4, v0.2): nil or
+	// Admin.Enabled false means the /admin* routes are not registered at
+	// all — ServeHTTP falls through to its existing 404/passthroughUnknown
+	// handling for those paths, preserving v0.1 behavior exactly.
+	Admin *AdminConfig `json:"admin,omitempty"`
 	// Retry is a struct value, not a pointer, because its own Enabled
 	// field is the on/off signal (unlike Redis/Users, where the block's
 	// mere presence is the signal) — so its tag omits "omitempty":
@@ -84,6 +89,13 @@ type UserConfig struct {
 	Name   string        `json:"name"`
 	Group  string        `json:"group"`
 	APIKey string        `json:"apiKey"`
+	// Admin grants this user access to the read-only admin dashboard
+	// (spec §4, v0.2), whether the user is inline or file-sourced —
+	// file-users granting admin is operator-controlled via the Secret
+	// backing Users.File, which is an accepted trust boundary. An admin
+	// user is otherwise an ordinary user: their own keys, group, and
+	// limits still apply, including to the admin routes themselves.
+	Admin bool `json:"admin,omitempty"`
 }
 
 // RedisConfig configures the distributed limit-state backend.
@@ -134,6 +146,15 @@ type CacheConfig struct {
 	// value above maxCacheMaxBodyBytes is a construction error.
 	MaxBodyBytes int  `json:"maxBodyBytes,omitempty"`
 	Enabled      bool `json:"enabled,omitempty"`
+}
+
+// AdminConfig configures the read-only admin dashboard (spec §4, v0.2).
+// The zero value (Enabled: false) disables it, preserving v0.1 behavior
+// exactly: no /admin* route is registered, so those paths fall through
+// to ServeHTTP's existing 404/passthroughUnknown handling like any other
+// unrecognized path.
+type AdminConfig struct {
+	Enabled bool `json:"enabled,omitempty"`
 }
 
 // ModelPricing overrides the built-in per-model price table.
@@ -380,6 +401,16 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		case audioTranscriptionsPath:
 			g.handleAudioTranscriptions(sw, r, u, grp)
 		}
+		return
+	}
+
+	// Admin routes (spec §4, v0.2) are matched only when adminEnabled: a
+	// nil or disabled Config.Admin means none of these paths are
+	// registered at all, so a request to /admin* falls through to the
+	// same 404/passthroughUnknown handling as any other unrecognized
+	// path — no special-casing needed for the disabled case.
+	if adminEnabled(g.cfg) && r.Method == http.MethodGet && isAdminPath(r.URL.Path) {
+		g.handleAdmin(sw, r)
 		return
 	}
 

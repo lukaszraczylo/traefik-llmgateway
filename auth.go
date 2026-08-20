@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"path"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -15,6 +16,10 @@ import (
 type user struct {
 	limits          *LimitsConfig
 	name, groupName string
+	// admin grants access to the read-only admin dashboard (spec §4,
+	// v0.2) — an admin user is otherwise ordinary: their own limits and
+	// group authorization still apply, including to the admin routes.
+	admin bool
 }
 
 // group describes a group's access rules and default limits. Empty
@@ -189,7 +194,7 @@ func (a *authStore) buildEntry(uc *UserConfig) (*authEntry, error) {
 	digest := sha256.Sum256([]byte(key))
 	return &authEntry{
 		digest: digest,
-		user:   &user{limits: uc.Limits, name: uc.Name, groupName: uc.Group},
+		user:   &user{limits: uc.Limits, name: uc.Name, groupName: uc.Group, admin: uc.Admin},
 		group:  grp,
 	}, nil
 }
@@ -286,4 +291,50 @@ func presentedKey(r *http.Request) (string, bool) {
 		return key, true
 	}
 	return "", false
+}
+
+// userSummary and groupSummary are the read-only, redaction-safe listing
+// authStore.snapshot returns for the admin dashboard (spec §4, v0.2):
+// names, group membership, and limits only — never an API key or its
+// digest, matching the package-wide "raw keys are never retained past
+// construction" rule this file's own doc comment already states for
+// byDigest itself.
+type userSummary struct {
+	limits    *LimitsConfig
+	name      string
+	groupName string
+}
+
+// groupSummary mirrors userSummary for one configured group, plus its
+// current member count (how many active users, inline or file-sourced,
+// currently reference it).
+type groupSummary struct {
+	limits      *LimitsConfig
+	name        string
+	memberCount int
+}
+
+// snapshot returns a sorted, redaction-safe listing of every currently
+// active user and every configured group. a.mu is read-locked only for
+// the byDigest walk, mirroring identify's own RLock usage; a.groups is
+// built once by newAuthStore and never mutated afterward (see this
+// file's authStore doc comment), so reading it needs no lock.
+func (a *authStore) snapshot() ([]userSummary, []groupSummary) {
+	a.mu.RLock()
+	users := make([]userSummary, 0, len(a.byDigest))
+	memberCounts := make(map[string]int, len(a.groups))
+	for _, entry := range a.byDigest {
+		users = append(users, userSummary{limits: entry.user.limits, name: entry.user.name, groupName: entry.user.groupName})
+		memberCounts[entry.user.groupName]++
+	}
+	a.mu.RUnlock()
+	sort.Slice(users, func(i, j int) bool { return users[i].name < users[j].name })
+
+	groups := make([]groupSummary, 0, len(a.groups))
+	for name, grp := range a.groups {
+		groups = append(groups, groupSummary{limits: grp.limits, name: name, memberCount: memberCounts[name]})
+	}
+	sort.Slice(groups, func(i, j int) bool { return groups[i].name < groups[j].name })
+
+	return users, groups
 }

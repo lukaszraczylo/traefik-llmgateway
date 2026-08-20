@@ -42,9 +42,17 @@ var errModelDenied = errors.New("llmgateway: model access denied")
 // stale-while-error — a failed refresh leaves the previous discovered set
 // in place rather than clearing it. mu guards every mutable field below it.
 type providerState struct {
-	lastRefresh      time.Time
-	explicit         map[string]bool
-	discovered       map[string]bool
+	lastRefresh time.Time
+	explicit    map[string]bool
+	discovered  map[string]bool
+	// lastErr is the most recent finishRefresh call's error message, or
+	// "" when that call succeeded (or discovery is disabled and
+	// finishRefresh was never called at all). Read by snapshot for the
+	// admin dashboard (spec §4, v0.2) — it reflects the latest attempt's
+	// outcome, not the stale-while-error discovered set: a provider can
+	// show a non-empty lastErr while modelCount still reflects its last
+	// successful discovery.
+	lastErr          string
 	interval         time.Duration
 	mu               sync.Mutex
 	discoveryEnabled bool
@@ -106,13 +114,31 @@ func (st *providerState) finishRefresh(now time.Time, ids []string, err error) {
 	st.inFlight = false
 	st.lastRefresh = now
 	if err != nil {
+		st.lastErr = err.Error()
 		return
 	}
+	st.lastErr = ""
 	discovered := make(map[string]bool, len(ids))
 	for _, id := range ids {
 		discovered[id] = true
 	}
 	st.discovered = discovered
+}
+
+// snapshot returns st's read-only view for the admin dashboard (spec §4,
+// v0.2): its known model count (explicit ∪ discovered, mirroring
+// knownIDs), last refresh time, and last refresh error message.
+func (st *providerState) snapshot() (modelCount int, lastRefresh time.Time, lastErr string) {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	set := make(map[string]bool, len(st.explicit)+len(st.discovered))
+	for id := range st.explicit {
+		set[id] = true
+	}
+	for id := range st.discovered {
+		set[id] = true
+	}
+	return len(set), st.lastRefresh, st.lastErr
 }
 
 // modelRegistry aggregates every configured provider's explicit and
@@ -442,4 +468,38 @@ func (m *modelRegistry) listFor(grp *group) []map[string]any {
 // modelObject builds one OpenAI-compatible model list entry.
 func modelObject(id, ownedBy string) map[string]any {
 	return map[string]any{"id": id, "object": "model", "owned_by": ownedBy}
+}
+
+// providerSnapshot is one provider's read-only view for the admin
+// dashboard (spec §4, v0.2). baseURL is not secret (the spec's NEVER-
+// exposed list is API keys, digests, redis password, and users-file path
+// contents only) — it is included so an operator can see which upstream
+// a provider actually targets.
+type providerSnapshot struct {
+	lastRefresh time.Time
+	name        string
+	typeName    string
+	baseURL     string
+	lastErr     string
+	modelCount  int
+}
+
+// snapshot returns every configured provider's read-only view, sorted by
+// name (m.providerNames is already sorted at construction) — the admin
+// dashboard's provider table (spec §4, v0.2).
+func (m *modelRegistry) snapshot() []providerSnapshot {
+	out := make([]providerSnapshot, 0, len(m.providerNames))
+	for _, name := range m.providerNames {
+		adapter := m.adapters[name]
+		modelCount, lastRefresh, lastErr := m.states[name].snapshot()
+		out = append(out, providerSnapshot{
+			name:        adapter.name(),
+			typeName:    adapter.typeName(),
+			baseURL:     adapter.base(),
+			modelCount:  modelCount,
+			lastRefresh: lastRefresh,
+			lastErr:     lastErr,
+		})
+	}
+	return out
 }
