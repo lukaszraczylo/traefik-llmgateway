@@ -195,6 +195,14 @@ func assertOAIErrorEnvelope(t *testing.T, rec *httptest.ResponseRecorder) {
 func TestAdminOverview_SortedShapeAndVersion(t *testing.T) {
 	t.Parallel()
 	cfg := newAdminTestConfig()
+	// Two aliases, deliberately out of sorted order, proving both the
+	// overview's aliases table (spec §5, v0.2) is populated AND sorted by
+	// alias — "zaliased/x" is a bare target ("z-model", zeta's own
+	// explicit model), "aaliased/y" is provider-prefixed.
+	cfg.ModelAliases = map[string]string{
+		"zaliased/x": "z-model",
+		"aaliased/y": "alpha/a-model-1",
+	}
 	h, _ := newAdminGatewayHandle(t, cfg)
 
 	rec := httptest.NewRecorder()
@@ -246,6 +254,19 @@ func TestAdminOverview_SortedShapeAndVersion(t *testing.T) {
 	}
 	if got.Redis.Configured {
 		t.Error("redis.configured must be false: cfg.Redis was never configured")
+	}
+
+	wantAliases := []adminAliasView{
+		{Alias: "aaliased/y", Target: "alpha/a-model-1"},
+		{Alias: "zaliased/x", Target: "z-model"},
+	}
+	if len(got.Aliases) != len(wantAliases) {
+		t.Fatalf("aliases = %+v, want exactly %+v", got.Aliases, wantAliases)
+	}
+	for i, want := range wantAliases {
+		if got.Aliases[i] != want {
+			t.Errorf("aliases[%d] = %+v, want %+v (sorted by alias)", i, got.Aliases[i], want)
+		}
 	}
 }
 

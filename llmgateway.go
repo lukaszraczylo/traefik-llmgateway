@@ -27,6 +27,15 @@ type Config struct {
 	// all — ServeHTTP falls through to its existing 404/passthroughUnknown
 	// handling for those paths, preserving v0.1 behavior exactly.
 	Admin *AdminConfig `json:"admin,omitempty"`
+	// ModelAliases maps an operator-defined alias id to a target model id
+	// (spec §5, v0.2) — e.g. {"aliased/coding": "anthropic/claude-sonnet-4-5"}.
+	// An exact alias match wins resolution before any other rule
+	// (modelRegistry.resolve, registry.go); the target then resolves
+	// through the normal rules. nil/omitted preserves v0.1 behavior
+	// exactly: resolve never consults an empty alias map, so no existing
+	// model id's resolution changes. Validated at construction
+	// (validateModelAliases, registry.go).
+	ModelAliases map[string]string `json:"modelAliases,omitempty"`
 	// Retry is a struct value, not a pointer, because its own Enabled
 	// field is the on/off signal (unlike Redis/Users, where the block's
 	// mere presence is the signal) — so its tag omits "omitempty":

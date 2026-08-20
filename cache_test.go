@@ -151,6 +151,34 @@ func TestCacheKey_ChatVsEmbeddings_DistinctKeys(t *testing.T) {
 	}
 }
 
+// TestCacheKey_TwoOperatorAliases_SameTarget_DistinctKeys is task 6's
+// (spec §5, v0.2) dedicated cache-key regression, phrased in terms of
+// operator-defined model aliases (modelAliases) rather than
+// TestCacheKey_BareVsPrefixedAlias_DistinctKeys' bare-vs-prefixed pair
+// above. Two DIFFERENT alias ids ("aliased/coding", "aliased/fast")
+// configured to resolve to the identical provider+upstreamModel target
+// must still hash to distinct cache entries: cacheKey already hashes
+// requestedModel as real key material (this file's own doc comment,
+// TestCacheKey_BareVsPrefixedAlias_DistinctKeys), and
+// modelRegistry.resolveAliasTarget (registry.go) leaves that string
+// completely untouched regardless of which alias resolved to which
+// target — the two features compose with NO cache.go changes required.
+func TestCacheKey_TwoOperatorAliases_SameTarget_DistinctKeys(t *testing.T) {
+	req := map[string]any{"messages": []any{"hi"}}
+
+	codingAlias := cacheKey("anthropic", "claude-sonnet-4-5", "aliased/coding", cacheEndpointChat, req)
+	fastAlias := cacheKey("anthropic", "claude-sonnet-4-5", "aliased/fast", cacheEndpointChat, req)
+	if codingAlias == fastAlias {
+		t.Error("cacheKey identical for two different operator-defined aliases resolving to the identical provider+upstreamModel target")
+	}
+
+	// Same alias twice must still hash identically — a genuine repeat
+	// request under the same alias is a genuine cache hit.
+	if got, want := cacheKey("anthropic", "claude-sonnet-4-5", "aliased/coding", cacheEndpointChat, req), codingAlias; got != want {
+		t.Errorf("cacheKey differs for two requests using the identical alias: %q vs %q", got, want)
+	}
+}
+
 // --- validateCacheConfig: defaults and validation ---
 
 func TestValidateCacheConfig_DefaultsAppliedWhenZero(t *testing.T) {

@@ -170,6 +170,7 @@ config accepts them as YAML, which decodes to the same JSON shape.
 | `retry` | `RetryConfig` | `{}` (disabled) | Same-provider retry for transient upstream failures — see [Retry](#retry). Omitted or `enabled: false` means no retry: every request makes exactly one upstream attempt, byte-identical to a gateway built before this field existed. |
 | `cache` | `CacheConfig` | `{}` (disabled) | Opt-in Redis-backed response cache for unified non-streaming chat/embeddings — see [Caching](#caching). Omitted or `enabled: false` means no caching, byte-identical to a gateway built before this field existed. |
 | `admin` | `*AdminConfig` | `nil` (disabled) | Read-only admin dashboard — see [Admin](#admin). `nil` or `enabled: false` means the `/admin*` routes are not registered at all. |
+| `modelAliases` | `map[string]string` | `{}` | Operator-defined alias id → target model id — see [Model aliases](#model-aliases). Omitted or empty means no aliases, byte-identical to a gateway built before this field existed. |
 | `passthroughUnknown` | `bool` | `false` | `false`: a request matching none of the plugin's routes gets a 404 JSON envelope. `true`: it falls through to the router's own backing service. |
 
 Provider, `mcpServers`, and `agents` map **keys** (names) must match
@@ -358,6 +359,85 @@ kept — a bad edit to the file never breaks already-authenticated traffic.
   refresh is logged and keeps the provider's last-known discovered set —
   **stale-while-error**, never an empty list just because one refresh
   attempt failed.
+
+## Model aliases
+
+Operator-defined indirection: a client-facing alias id that resolves to a
+real target model id. `modelAliases` is empty by default, and an empty map
+changes nothing about model resolution — this is purely additive.
+
+```yaml
+http:
+  middlewares:
+    llmgateway:
+      plugin:
+        llmgateway:
+          # ... providers, groups, users unchanged ...
+          modelAliases:
+            # Client-facing name -> real target. The target can itself be
+            # bare ("gpt-5-mini") or provider-prefixed
+            # ("anthropic/claude-sonnet-4-5"); either resolves through the
+            # normal rules in [Model routing](#model-routing) above.
+            aliased/coding: "anthropic/claude-sonnet-4-5"
+            aliased/fast: "gpt-5-mini"
+```
+
+- **Swapping the underlying model**: point an alias at a different target
+  and let Traefik's dynamic-config reload apply it — no gateway restart,
+  no client-side change. A client that has always addressed
+  `aliased/coding` keeps working unmodified after the operator moves that
+  alias to a newer model.
+- **Precedence**: an EXACT alias match wins resolution before any other
+  rule, including `provider/model` prefix splitting — checked first in
+  `modelRegistry.resolve`. The target then resolves through the same
+  rules as any other id (bare, `provider/model`, or a discovered id).
+  Because of this, an alias whose id contains a `/` is rejected at
+  construction if the part before the `/` names an actually configured
+  provider (it would be shadowed by prefix resolution) — see the
+  validation rules below.
+- **Authorization**: a group may use an alias when its `models` glob
+  matches the **alias name itself**, OR when it already grants access to
+  the **resolved target** — either is enough. `providers` still gates the
+  target's own provider as usual.
+- **Validation at construction** (a bad alias config fails the same way a
+  bad provider config does — no gateway starts with a broken alias
+  table):
+  - the alias must be non-empty and contain no control characters;
+  - when the alias contains `/`, its prefix must not name a configured
+    provider (would be shadowed by prefix resolution);
+  - the alias must not equal an explicit `models` entry of any provider
+    (ambiguous — which one wins?);
+  - the target must not itself be another alias (no alias chains);
+  - the target must not be empty.
+  A target naming a model that is not yet known (awaiting a provider's
+  first discovery fetch, or simply never configured) is accepted at
+  construction — it resolves lazily. An unresolvable target at request
+  time returns 404 with a message naming both the alias and the missing
+  target. A target that is later discovered and collides with an
+  already-configured alias id is not a construction error either — the
+  alias always wins that resolution, and the gateway logs one warning
+  per such id.
+- **`GET /v1/models` listing**: every alias the caller's group may use is
+  listed as a model object alongside real models — `id` is the alias,
+  `owned_by` is the target's resolved provider name. An alias whose
+  target does not resolve yet is omitted from the listing until it does.
+- **Echo behavior**: exactly like the existing provider-prefix alias echo
+  (`__alias`, [Unified vs. passthrough](#unified-vs-passthrough)) —
+  `anthropic`- and `gemini`-type targets build their own response
+  envelope and echo the client's exact alias string back in its `model`
+  field. An `openai`-type target's response is a **verbatim passthrough**
+  of the upstream body, so its `model` field carries whatever the
+  upstream itself returned (typically the bare upstream model id) —
+  **not** the alias — the same documented v0.1 passthrough asymmetry,
+  unchanged by this feature.
+- **Applies everywhere a model routes**: unified chat and embeddings,
+  `/v1/images/generations`, `/v1/audio/speech`, and
+  `/v1/audio/transcriptions` (including its multipart rewrite — the
+  upstream `model` field receives the resolved target's own upstream id,
+  never the alias, exactly like a provider-prefixed id already does).
+- **Admin overview**: `GET /admin/api/overview` includes an `aliases`
+  array (`{alias, target}`, sorted by alias) — see [Admin](#admin). No
+  secrets involved.
 
 ## Limits and accounting
 
@@ -592,10 +672,12 @@ request to any of them falls through to the plugin's existing
   the `x-api-key` header on this page's own `/admin/api/*` fetches.
 - **`GET /admin/api/overview`** and **`GET /admin/api/usage`** share one
   gate: unauthenticated → 401, authenticated non-admin → 403, admin →
-  serve. `overview` returns the provider list, groups, redis/cache
-  status, and the plugin version string. `usage` returns every user's and
-  every group's current-window counter values (req/min, req/day, tok/day,
-  tok/month, cost/day, cost/month) alongside their configured limits.
+  serve. `overview` returns the provider list, groups, the configured
+  model alias table (`alias`/`target` pairs, sorted by alias — see
+  [Model aliases](#model-aliases)), redis/cache status, and the plugin
+  version string. `usage` returns every user's and every group's
+  current-window counter values (req/min, req/day, tok/day, tok/month,
+  cost/day, cost/month) alongside their configured limits.
 - **What's exposed**: provider names, types, base URLs (with any
   userinfo/query string stripped before it's ever echoed), model counts,
   discovery status, group/user names, membership, limits, and live usage

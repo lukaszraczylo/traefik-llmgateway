@@ -98,9 +98,10 @@ http:
           mcpServers:
             tool:
               url: "http://mocktool:8080"
-          # v0.2 features (spec §1, §2, §4), all opt-in and off by default
-          # in v0.1: enabled here so the integration suite exercises every
-          # one under real Traefik+Yaegi, not just go test.
+          # v0.2 features (spec §1, §2, §4, §5), all opt-in and off by
+          # default in v0.1: enabled here so the integration suite
+          # exercises every one under real Traefik+Yaegi, not just go
+          # test.
           retry:
             enabled: true
             attempts: 1 # one retry after the first try — matches handleFlakyOpenAIChat's single forced 503
@@ -109,6 +110,15 @@ http:
             ttl: "2m"
           admin:
             enabled: true
+          # Task 6 (spec §5): one alias per mock provider type, so the
+          # integration suite proves the echo-behavior asymmetry under
+          # real Traefik+Yaegi — openai-type forwards the upstream body
+          # verbatim (its "model" field carries "gpt-mock", not the
+          # alias); anthropic-type builds its own envelope and echoes the
+          # client's exact alias string back.
+          modelAliases:
+            aliased/mock: "gpt-mock"
+            aliased/claude: "claude-mock"
 
     # Second, separate middleware instance carrying only the optional
     # real-upstream smoke test's "uni" provider (task 7, INTEGRATION_REAL=1

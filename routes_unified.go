@@ -255,10 +255,19 @@ func unifiedCostMicros(canonical, bare string, u usage, overrides map[string]*Mo
 // writeModelResolveError maps a modelRegistry.resolve error to its HTTP
 // envelope: errModelUnknown is a 404 (no configured provider knows this
 // model), errModelDenied is a 403 (a real model the caller's group cannot
-// use). Any other error is a defensive 500 — resolve's own contract
-// promises only these two sentinels, so reaching this branch would be a
-// programming error, not a client mistake.
+// use). A *aliasTargetError (spec §5, v0.2) is also a 404, but with its
+// own message naming both the alias and its unresolved target, checked
+// first via a plain type assertion — not errors.As, matching this
+// package's established yaegi-safe convention for a pointer error type
+// (registry.go's aliasTargetError doc comment). Any other error is a
+// defensive 500 — resolve's own contract promises only these sentinels/
+// types, so reaching this branch would be a programming error, not a
+// client mistake.
 func writeModelResolveError(w http.ResponseWriter, err error) {
+	if aerr, ok := err.(*aliasTargetError); ok {
+		writeOAIError(w, http.StatusNotFound, "invalid_request_error", aerr.Error())
+		return
+	}
 	switch {
 	case errors.Is(err, errModelUnknown):
 		writeOAIError(w, http.StatusNotFound, "invalid_request_error", "unknown model")

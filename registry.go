@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -160,7 +161,16 @@ type modelRegistry struct {
 	// specific to a field holding a func value. Verified empirically
 	// against yaegi v0.16.1 (see tools/yaegi-check) and does not apply to
 	// g.logf/g.errorf, which are methods, not fields.
-	log           func(string, ...any)
+	log func(string, ...any)
+	// aliases is the validated alias->target map from Config.ModelAliases
+	// (spec §5, v0.2), built once by newModelRegistry via
+	// validateModelAliases and never mutated afterward — resolve checks
+	// it first, ahead of splitConfiguredProvider/bareWinner (see resolve's
+	// own doc comment). nil (not merely empty) when the operator
+	// configured no aliases at all, so every alias-aware code path is a
+	// cheap nil-map lookup (always false/zero) that adds no branching
+	// cost to the v0.1 no-aliases case.
+	aliases       map[string]string
 	nowFn         func() time.Time
 	warned        map[string]bool
 	providerNames []string
@@ -187,6 +197,12 @@ func newModelRegistry(adapters map[string]providerAdapter, cfg *Config, log func
 	}
 	sort.Strings(m.providerNames)
 
+	// explicitModels is the union of every configured provider's EXPLICIT
+	// model ids only (never discovered ones — discovery has not run yet
+	// at this point in construction) — validateModelAliases' collision
+	// check needs exactly this set (spec §5: "alias must not equal an
+	// explicit model id of any provider").
+	explicitModels := make(map[string]bool)
 	for _, name := range m.providerNames {
 		pc := cfg.Providers[name]
 		if pc == nil {
@@ -205,6 +221,7 @@ func newModelRegistry(adapters map[string]providerAdapter, cfg *Config, log func
 		explicit := make(map[string]bool, len(pc.Models))
 		for _, id := range pc.Models {
 			explicit[id] = true
+			explicitModels[id] = true
 		}
 
 		m.states[name] = &providerState{
@@ -214,7 +231,85 @@ func newModelRegistry(adapters map[string]providerAdapter, cfg *Config, log func
 			interval:         interval,
 		}
 	}
+
+	aliases, err := validateModelAliases(cfg.ModelAliases, m.providerNames, explicitModels)
+	if err != nil {
+		return nil, err
+	}
+	m.aliases = aliases
+
 	return m, nil
+}
+
+// isValidModelID reports whether id satisfies spec §5's alias model-id
+// shape: non-empty, and free of ASCII control characters (0x00-0x1F and
+// 0x7F) — the same class of raw value mcp_a2a.go's target-URL validation
+// already rejects, applied here to a model/alias id string instead of a
+// URL.
+func isValidModelID(id string) bool {
+	if id == "" {
+		return false
+	}
+	for _, r := range id {
+		if r < 0x20 || r == 0x7f {
+			return false
+		}
+	}
+	return true
+}
+
+// validateModelAliases validates cfg.ModelAliases per spec §5's
+// validation table and returns the accepted alias->target map (nil when
+// raw is empty — newGateway's default, zero-behavior-change case).
+// providerNames is the registry's own sorted provider-name list (used for
+// the prefix-shadow check); explicitModels is the union of every
+// configured provider's EXPLICIT model ids only (used for the collision
+// check) — a DISCOVERED model colliding with an alias is NOT a
+// construction error (discovery is dynamic and runs after this), and is
+// instead resolved in the alias's favor by resolve's own precedence; see
+// resolve's warnAliasShadowsDiscoveredOnce call for the one-time runtime
+// log that implies.
+//
+// raw is iterated in sorted alias-key order, not Go's randomized map
+// order, so a config with more than one invalid alias always reports the
+// same one first, deterministically, across repeated runs.
+func validateModelAliases(raw map[string]string, providerNames []string, explicitModels map[string]bool) (map[string]string, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+
+	providerSet := make(map[string]bool, len(providerNames))
+	for _, p := range providerNames {
+		providerSet[p] = true
+	}
+
+	names := make([]string, 0, len(raw))
+	for alias := range raw {
+		names = append(names, alias)
+	}
+	sort.Strings(names)
+
+	out := make(map[string]string, len(raw))
+	for _, alias := range names {
+		target := raw[alias]
+		if !isValidModelID(alias) {
+			return nil, fmt.Errorf("llmgateway: modelAliases: alias %q is invalid: must be non-empty with no control characters", alias)
+		}
+		if prefix, _, hasSlash := strings.Cut(alias, "/"); hasSlash && providerSet[prefix] {
+			return nil, fmt.Errorf("llmgateway: modelAliases: alias %q is invalid: its prefix %q names a configured provider and would be shadowed by provider-prefix resolution", alias, prefix)
+		}
+		if explicitModels[alias] {
+			return nil, fmt.Errorf("llmgateway: modelAliases: alias %q collides with an explicitly configured model id of the same name", alias)
+		}
+		if target == "" {
+			return nil, fmt.Errorf("llmgateway: modelAliases: alias %q has an empty target", alias)
+		}
+		if _, targetIsAlias := raw[target]; targetIsAlias {
+			return nil, fmt.Errorf("llmgateway: modelAliases: alias %q targets %q, which is itself an alias (alias chains are not allowed)", alias, target)
+		}
+		out[alias] = target
+	}
+	return out, nil
 }
 
 // now returns the registry's current time, via nowFn — overridable in
@@ -350,6 +445,17 @@ func (m *modelRegistry) bareWinner(id string) (string, bool) {
 // exactly-as-requested id the caller passed in is not returned separately —
 // the caller already holds it, in the id argument itself.
 //
+// An EXACT alias match (spec §5, v0.2) wins before any other rule below —
+// checked first, ahead of provider-prefix splitting, so an alias id that
+// happens to look like "prefix/rest" is never mistaken for one (and
+// validateModelAliases already rejects an alias whose prefix names an
+// actually configured provider at construction, so this ordering never
+// has to arbitrate a genuine conflict between the two forms). id also
+// happening to collide with a since-DISCOVERED model of some provider
+// (impossible for an explicit one; validateModelAliases already rejects
+// that at construction) is resolved in the alias's favor by this same
+// ordering — warnAliasShadowsDiscoveredOnce logs that once per id.
+//
 // id in "provider/model" form (ruling (a): only when "provider" names a
 // configured provider) resolves directly against that provider. Any other
 // id is a bare id, resolved against the first configured provider (sorted
@@ -359,14 +465,89 @@ func (m *modelRegistry) bareWinner(id string) (string, bool) {
 // exists but fails authorization returns errModelDenied, distinct from
 // errModelUnknown for a model no configured provider knows at all.
 func (m *modelRegistry) resolve(id string, grp *group) (providerAdapter, string, string, error) {
+	if target, isAlias := m.aliases[id]; isAlias {
+		if _, discoveredCollision := m.bareWinner(id); discoveredCollision {
+			m.warnAliasShadowsDiscoveredOnce(id)
+		}
+		return m.resolveAliasTarget(id, target, grp)
+	}
 	if providerName, rest, ok := m.splitConfiguredProvider(id); ok {
-		return m.resolveAgainst(providerName, rest, id, grp)
+		return m.resolveAgainst(providerName, rest, id, "", grp, errModelUnknown)
 	}
 	providerName, ok := m.bareWinner(id)
 	if !ok {
 		return nil, "", "", errModelUnknown
 	}
-	return m.resolveAgainst(providerName, id, id, grp)
+	return m.resolveAgainst(providerName, id, id, "", grp, errModelUnknown)
+}
+
+// aliasTargetError is resolveAgainst's notFoundErr when the provider it
+// was called against, and the upstream model id on it, both came from
+// resolving an alias's TARGET (resolveAliasTarget) rather than a direct
+// client request — spec §5's "Targets referencing not-yet-discovered
+// models are allowed at construction and resolve lazily; an unresolvable
+// target at request time → 404 whose message names the alias AND the
+// missing target". writeModelResolveError (routes_unified.go) type-
+// asserts for *aliasTargetError explicitly, ahead of its
+// errors.Is(errModelUnknown) switch — a plain type assertion, not
+// errors.As, matching this package's established yaegi-safe convention
+// for a pointer error type (providers.go's providerHTTPError doc
+// comment: errors.As panics under yaegi checking whether an interpreted
+// pointer type implements error).
+type aliasTargetError struct {
+	alias, target string
+}
+
+// Error names both the alias and its unresolved target, per spec §5.
+func (e *aliasTargetError) Error() string {
+	return fmt.Sprintf("llmgateway: alias %q targets %q, which is not a known model", e.alias, e.target)
+}
+
+// resolveAliasTarget finishes resolve for id already known to be an exact
+// alias match: target is resolved through the SAME rules as any other id
+// — provider-prefixed direct, or bare-id collision winner — via the same
+// resolveAgainst helper, with two differences from a direct request:
+//
+//   - Authorization (spec §5): "a group may use an alias when its model
+//     globs match the ALIAS name OR the resolved target (either
+//     grants)". alias is passed to resolveAgainst as its extraModelName,
+//     so a request denied by every target-side candidate can still
+//     succeed purely because the group's model glob names the alias
+//     itself.
+//   - A target that does not resolve to any known model at request time
+//     returns *aliasTargetError (naming both ids), not the bare
+//     errModelUnknown a direct request's unknown-model case returns.
+func (m *modelRegistry) resolveAliasTarget(alias, target string, grp *group) (providerAdapter, string, string, error) {
+	notFound := &aliasTargetError{alias: alias, target: target}
+	if providerName, rest, ok := m.splitConfiguredProvider(target); ok {
+		return m.resolveAgainst(providerName, rest, target, alias, grp, notFound)
+	}
+	providerName, ok := m.bareWinner(target)
+	if !ok {
+		return nil, "", "", notFound
+	}
+	return m.resolveAgainst(providerName, target, target, alias, grp, notFound)
+}
+
+// warnAliasShadowsDiscoveredOnce logs, at most once per colliding alias id
+// for this registry's lifetime, that alias also names a model some
+// provider's discovery fetch found after construction — resolve's
+// documented precedence (its own doc comment above): the alias always
+// wins, since only an EXPLICIT collision is rejected at construction
+// (validateModelAliases); discovery is dynamic and runs after that check,
+// so this collision can only be caught, and only warned about, here at
+// request time. Keyed with an "alias-shadow:" prefix in the same m.warned
+// map warnCollisionOnce uses, so the two unrelated warning kinds can never
+// share a key and suppress each other.
+func (m *modelRegistry) warnAliasShadowsDiscoveredOnce(alias string) {
+	m.warnedMu.Lock()
+	defer m.warnedMu.Unlock()
+	key := "alias-shadow:" + alias
+	if m.warned[key] {
+		return
+	}
+	m.warned[key] = true
+	m.log("%s", fmt.Sprintf("model registry: alias %q also names a discovered model; the alias takes precedence", alias))
 }
 
 // resolveAgainst finishes resolve for a providerName already chosen (either
@@ -386,11 +567,29 @@ func (m *modelRegistry) resolve(id string, grp *group) (providerAdapter, string,
 // legitimately provider-prefixed in the first place (ruling: a pattern like
 // "deepseek-*" must not match a bare id that merely contains a slash, e.g.
 // "uni/deepseek-v4-flash-0731", when "uni" is not a configured provider).
-func (m *modelRegistry) resolveAgainst(providerName, upstreamModel, requestedID string, grp *group) (providerAdapter, string, string, error) {
+//
+// extraModelName is a further authorization candidate checked via
+// grp.allowsModel, alongside requestedID and upstreamModel: empty ("") for
+// a direct (non-alias) resolution, or an alias's own id when resolveAliasTarget
+// (spec §5, v0.2) is resolving that alias's target — "a group may use an
+// alias when its model globs match the ALIAS name OR the resolved target
+// (either grants)".
+//
+// notFoundErr is returned, unmodified, when upstreamModel is not known to
+// providerName: resolve's own two call sites pass the bare errModelUnknown
+// sentinel (unchanged from before this parameter existed — checked by "err
+// != errModelUnknown" equality in registry_test.go, not errors.Is, so it
+// must stay the exact sentinel value there); resolveAliasTarget passes a
+// *aliasTargetError naming both the alias and its unresolved target (spec
+// §5's 404 message requirement).
+func (m *modelRegistry) resolveAgainst(providerName, upstreamModel, requestedID, extraModelName string, grp *group, notFoundErr error) (providerAdapter, string, string, error) {
 	if !m.states[providerName].hasModel(upstreamModel) {
-		return nil, "", "", errModelUnknown
+		return nil, "", "", notFoundErr
 	}
 	allowed := grp.allowsModel(requestedID) || grp.allowsModel(upstreamModel)
+	if extraModelName != "" {
+		allowed = allowed || grp.allowsModel(extraModelName)
+	}
 	if !allowed || !grp.allowsProvider(providerName) {
 		return nil, "", "", errModelDenied
 	}
@@ -459,6 +658,33 @@ func (m *modelRegistry) listFor(grp *group) []map[string]any {
 		}
 	}
 
+	// Aliases (spec §5, v0.2): listed alongside real models only when
+	// both their target actually resolves right now (a target awaiting
+	// its provider's first discovery fetch is not listed — there is
+	// nothing yet to name as owned_by) and grp is authorized for it.
+	// resolveAliasTarget applies the exact same "alias name OR target"
+	// authorization rule request-time resolve uses (its own doc
+	// comment), so this listing can never promise access resolve would
+	// then deny. owned_by is recovered from the successful call's own
+	// canonical return value ("provider/upstreamModel") by splitting on
+	// the first "/" — exact, because a registry provider name can never
+	// itself contain one (configNamePattern, providers.go). An alias id
+	// that also happens to collide with a since-discovered model's own
+	// bare id (impossible for an EXPLICIT model — validateModelAliases
+	// already rejects that at construction) is not deduped against that
+	// model's own entry above: the same documented, alias-wins
+	// precedence edge resolve's warnAliasShadowsDiscoveredOnce logs
+	// about, accepted here too as rare enough not to warrant extra
+	// bookkeeping.
+	for alias, target := range m.aliases {
+		_, _, canonical, err := m.resolveAliasTarget(alias, target, grp)
+		if err != nil {
+			continue
+		}
+		providerName, _, _ := strings.Cut(canonical, "/")
+		out = append(out, modelObject(alias, providerName))
+	}
+
 	sort.Slice(out, func(i, j int) bool {
 		return out[i]["id"].(string) < out[j]["id"].(string) //nolint:forcetypeassert // modelObject always sets id to a string
 	})
@@ -482,6 +708,33 @@ type providerSnapshot struct {
 	baseURL     string
 	lastErr     string
 	modelCount  int
+}
+
+// aliasSnapshotEntry is one configured alias's read-only view for the
+// admin dashboard (spec §5, v0.2): the pair exactly as an operator wrote
+// it. No secrets involved. The target's actual resolved provider is
+// deliberately not included — a target still awaiting its provider's
+// first discovery fetch has none yet, and the configured pair is the
+// meaningful, stable fact an operator wants to see either way.
+type aliasSnapshotEntry struct {
+	Alias  string
+	Target string
+}
+
+// aliasSnapshot returns every configured alias's alias->target pair,
+// sorted by alias — the admin dashboard's alias table (spec §5, v0.2).
+func (m *modelRegistry) aliasSnapshot() []aliasSnapshotEntry {
+	names := make([]string, 0, len(m.aliases))
+	for alias := range m.aliases {
+		names = append(names, alias)
+	}
+	sort.Strings(names)
+
+	out := make([]aliasSnapshotEntry, len(names))
+	for i, alias := range names {
+		out[i] = aliasSnapshotEntry{Alias: alias, Target: m.aliases[alias]}
+	}
+	return out
 }
 
 // snapshot returns every configured provider's read-only view, sorted by

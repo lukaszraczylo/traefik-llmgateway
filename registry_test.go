@@ -3,9 +3,11 @@ package traefikllmgateway
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -891,5 +893,353 @@ func TestNewGateway_WarmFill_PopulatesDiscoveredModels_BeforeAnyRequest(t *testi
 
 	if !gw.registry.states["openai"].hasModel("disco-model") {
 		t.Fatal("want disco-model known immediately after New returns (synchronous warm fill)")
+	}
+}
+
+// --- model aliases (spec §5, v0.2) ---
+
+// newAliasTestRegistry builds a registry with one "openai" provider
+// (explicit model "gpt-test") and grp's given aliases, failing the test on
+// any construction error. log defaults to a no-op when nil.
+func newAliasTestRegistry(t *testing.T, aliases map[string]string, log func(string, ...any)) *modelRegistry {
+	t.Helper()
+	if log == nil {
+		log = func(string, ...any) {}
+	}
+	adapters := map[string]providerAdapter{"openai": newFakeAdapter("openai")}
+	cfg := &Config{
+		Providers:    map[string]*ProviderConfig{"openai": {Models: []string{"gpt-test"}}},
+		ModelAliases: aliases,
+	}
+	reg, err := newModelRegistry(adapters, cfg, log)
+	if err != nil {
+		t.Fatalf("newModelRegistry: %v", err)
+	}
+	return reg
+}
+
+// TestNewModelRegistry_ModelAliases_ValidationTable covers every row of
+// spec §5's validation table, plus a positive control.
+func TestNewModelRegistry_ModelAliases_ValidationTable(t *testing.T) {
+	t.Parallel()
+	baseProviders := map[string]*ProviderConfig{"openai": {Models: []string{"gpt-test"}}}
+	adapters := map[string]providerAdapter{"openai": newFakeAdapter("openai")}
+
+	tests := []struct {
+		aliases     map[string]string
+		name        string
+		wantErrText string // substring expected in the error; "" means construction must succeed
+	}{
+		{
+			name:        "empty alias id",
+			aliases:     map[string]string{"": "gpt-test"},
+			wantErrText: "invalid",
+		},
+		{
+			name:        "control character in alias id",
+			aliases:     map[string]string{"bad\x7falias": "gpt-test"},
+			wantErrText: "invalid",
+		},
+		{
+			name:        "alias prefix shadows a configured provider",
+			aliases:     map[string]string{"openai/special": "gpt-test"},
+			wantErrText: "shadowed",
+		},
+		{
+			name:        "alias collides with an explicit model id",
+			aliases:     map[string]string{"gpt-test": "openai/gpt-test"},
+			wantErrText: "collides",
+		},
+		{
+			name:        "alias chain: target is itself an alias",
+			aliases:     map[string]string{"aliased/a": "aliased/b", "aliased/b": "openai/gpt-test"},
+			wantErrText: "itself an alias",
+		},
+		{
+			name:        "empty target",
+			aliases:     map[string]string{"aliased/x": ""},
+			wantErrText: "empty target",
+		},
+		{
+			name:    "valid: bare target, no prefix collision",
+			aliases: map[string]string{"aliased/coding": "gpt-test"},
+		},
+		{
+			name:    "valid: provider-prefixed target, unconfigured prefix on the alias itself",
+			aliases: map[string]string{"team/coding": "openai/gpt-test"},
+		},
+		{
+			name:    "valid: target not yet known (lazy resolution, allowed at construction)",
+			aliases: map[string]string{"aliased/future": "openai/not-yet-discovered"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := &Config{Providers: baseProviders, ModelAliases: tt.aliases}
+			_, err := newModelRegistry(adapters, cfg, func(string, ...any) {})
+			if tt.wantErrText == "" {
+				if err != nil {
+					t.Fatalf("newModelRegistry: %v, want success", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("newModelRegistry: want error, got nil")
+			}
+			if !strings.Contains(err.Error(), tt.wantErrText) {
+				t.Errorf("err = %v, want substring %q", err, tt.wantErrText)
+			}
+		})
+	}
+}
+
+// TestModelRegistry_Resolve_Alias_SlashLikeID_NotMistakenForProviderPrefix
+// is the resolve-precedence regression from spec §5: an alias id
+// containing "/" whose prefix names NO configured provider ("team" is not
+// configured here — a prefix that IS configured is rejected at
+// construction, so this is the only shape available to prove the alias
+// map is checked, and wins, ahead of splitConfiguredProvider/bareWinner)
+// must still resolve through the alias table, not fall through to
+// errModelUnknown.
+func TestModelRegistry_Resolve_Alias_SlashLikeID_NotMistakenForProviderPrefix(t *testing.T) {
+	t.Parallel()
+	reg := newAliasTestRegistry(t, map[string]string{"team/coding": "openai/gpt-test"}, nil)
+
+	adapter, upstreamModel, canonical, err := reg.resolve("team/coding", allowAllGroup())
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if adapter != reg.adapters["openai"] {
+		t.Errorf("adapter = %v, want openai adapter", adapter)
+	}
+	if upstreamModel != "gpt-test" {
+		t.Errorf("upstreamModel = %q, want %q", upstreamModel, "gpt-test")
+	}
+	if canonical != "openai/gpt-test" {
+		t.Errorf("canonical = %q, want %q", canonical, "openai/gpt-test")
+	}
+}
+
+// TestModelRegistry_Resolve_Alias_BareTarget_ResolvesViaCollisionWinner
+// proves resolveAliasTarget's bareWinner branch (a target with no
+// provider prefix) applies the identical sorted-first collision rule a
+// direct bare-id request already gets (ruling g).
+func TestModelRegistry_Resolve_Alias_BareTarget_ResolvesViaCollisionWinner(t *testing.T) {
+	t.Parallel()
+	adapters := map[string]providerAdapter{
+		"beta":  newFakeAdapter("beta"),
+		"alpha": newFakeAdapter("alpha"),
+	}
+	cfg := &Config{
+		Providers: map[string]*ProviderConfig{
+			"beta":  {Models: []string{"shared"}},
+			"alpha": {Models: []string{"shared"}},
+		},
+		ModelAliases: map[string]string{"aliased/x": "shared"},
+	}
+	reg, err := newModelRegistry(adapters, cfg, func(string, ...any) {})
+	if err != nil {
+		t.Fatalf("newModelRegistry: %v", err)
+	}
+
+	adapter, _, canonical, err := reg.resolve("aliased/x", allowAllGroup())
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if adapter != adapters["alpha"] {
+		t.Errorf("adapter = %v, want alpha (sorted-first collision winner)", adapter)
+	}
+	if canonical != "alpha/shared" {
+		t.Errorf("canonical = %q, want %q", canonical, "alpha/shared")
+	}
+}
+
+// --- resolve: alias authorization (spec §5's "alias name OR target,
+// either grants") ---
+
+func TestModelRegistry_Resolve_Alias_AuthorizedViaAliasNameOnly(t *testing.T) {
+	t.Parallel()
+	reg := newAliasTestRegistry(t, map[string]string{"aliased/coding": "openai/gpt-test"}, nil)
+
+	// Matches the alias name; matches neither "openai/gpt-test" nor its
+	// bare suffix "gpt-test".
+	grp := &group{name: "narrow", models: []string{"aliased/coding"}}
+	if _, _, _, err := reg.resolve("aliased/coding", grp); err != nil {
+		t.Errorf("resolve: %v, want success (authorized via the alias name alone)", err)
+	}
+}
+
+func TestModelRegistry_Resolve_Alias_AuthorizedViaTargetOnly(t *testing.T) {
+	t.Parallel()
+	reg := newAliasTestRegistry(t, map[string]string{"aliased/coding": "openai/gpt-test"}, nil)
+
+	// Matches the target's bare suffix; does not match the alias name.
+	grp := &group{name: "narrow", models: []string{"gpt-*"}}
+	if _, _, _, err := reg.resolve("aliased/coding", grp); err != nil {
+		t.Errorf("resolve: %v, want success (authorized via the resolved target alone)", err)
+	}
+}
+
+func TestModelRegistry_Resolve_Alias_DeniedWhenNeitherAliasNorTargetMatch(t *testing.T) {
+	t.Parallel()
+	reg := newAliasTestRegistry(t, map[string]string{"aliased/coding": "openai/gpt-test"}, nil)
+
+	grp := &group{name: "narrow", models: []string{"claude-*"}}
+	if _, _, _, err := reg.resolve("aliased/coding", grp); err != errModelDenied {
+		t.Errorf("err = %v, want errModelDenied", err)
+	}
+}
+
+func TestModelRegistry_Resolve_Alias_ProviderDenied_OverridesModelAuthz(t *testing.T) {
+	t.Parallel()
+	reg := newAliasTestRegistry(t, map[string]string{"aliased/coding": "openai/gpt-test"}, nil)
+
+	// The model glob would allow it via the alias name, but the group's
+	// providers list excludes "openai" entirely — allowsProvider still
+	// gates the resolved target's provider (spec §5's "allowsProvider
+	// still applies to the target's provider").
+	grp := &group{name: "no-openai", providers: []string{"anthropic"}, models: []string{"aliased/coding"}}
+	if _, _, _, err := reg.resolve("aliased/coding", grp); err != errModelDenied {
+		t.Errorf("err = %v, want errModelDenied (provider gate must still apply)", err)
+	}
+}
+
+// TestModelRegistry_Resolve_Alias_UnresolvedTarget_ReturnsAliasTargetError
+// is spec §5's lazy-resolution 404: a target naming no currently-known
+// model returns *aliasTargetError, whose message names both the alias and
+// the missing target.
+func TestModelRegistry_Resolve_Alias_UnresolvedTarget_ReturnsAliasTargetError(t *testing.T) {
+	t.Parallel()
+	reg := newAliasTestRegistry(t, map[string]string{"aliased/future": "openai/not-yet-discovered"}, nil)
+
+	_, _, _, err := reg.resolve("aliased/future", allowAllGroup())
+	var aerr *aliasTargetError
+	if !errors.As(err, &aerr) {
+		t.Fatalf("err = %v (%T), want *aliasTargetError", err, err)
+	}
+	if !strings.Contains(aerr.Error(), "aliased/future") {
+		t.Errorf("error message = %q, want it to name the alias %q", aerr.Error(), "aliased/future")
+	}
+	if !strings.Contains(aerr.Error(), "openai/not-yet-discovered") {
+		t.Errorf("error message = %q, want it to name the target %q", aerr.Error(), "openai/not-yet-discovered")
+	}
+}
+
+// TestModelRegistry_Resolve_Alias_TargetBecomesKnown_ResolvesAfterDiscovery
+// proves the lazy side of "resolve lazily": a target that was unresolvable
+// at construction succeeds once its provider's discovered set catches up
+// (no re-validation needed — discovery mutates providerState directly).
+func TestModelRegistry_Resolve_Alias_TargetBecomesKnown_ResolvesAfterDiscovery(t *testing.T) {
+	t.Parallel()
+	reg := newAliasTestRegistry(t, map[string]string{"aliased/future": "openai/not-yet-discovered"}, nil)
+
+	if _, _, _, err := reg.resolve("aliased/future", allowAllGroup()); err == nil {
+		t.Fatal("resolve before discovery: want an error, got nil")
+	}
+
+	reg.states["openai"].finishRefresh(reg.now(), []string{"not-yet-discovered"}, nil)
+
+	adapter, upstreamModel, canonical, err := reg.resolve("aliased/future", allowAllGroup())
+	if err != nil {
+		t.Fatalf("resolve after discovery: %v, want success", err)
+	}
+	if adapter != reg.adapters["openai"] || upstreamModel != "not-yet-discovered" || canonical != "openai/not-yet-discovered" {
+		t.Errorf("resolve after discovery = (%v, %q, %q), want (openai adapter, %q, %q)", adapter, upstreamModel, canonical, "not-yet-discovered", "openai/not-yet-discovered")
+	}
+}
+
+// TestModelRegistry_Resolve_Alias_PrecedesDiscoveredCollision_WarnsOnce
+// covers the documented precedence edge (registry.go's resolve doc
+// comment): an alias id that also happens to name a model discovered
+// AFTER construction (impossible for an explicit model — that is a
+// construction error) still resolves to the ALIAS's own target, and the
+// gateway logs exactly one warning about the shadowed id, regardless of
+// how many times resolve is called for it.
+func TestModelRegistry_Resolve_Alias_PrecedesDiscoveredCollision_WarnsOnce(t *testing.T) {
+	t.Parallel()
+	adapters := map[string]providerAdapter{
+		"openai": newFakeAdapter("openai"),
+		"acme":   newFakeAdapter("acme"),
+	}
+	cfg := &Config{
+		Providers: map[string]*ProviderConfig{
+			"openai": {Models: []string{"gpt-test"}},
+			"acme":   {Discovery: true},
+		},
+		ModelAliases: map[string]string{"shared-id": "openai/gpt-test"},
+	}
+	rl := &recordingLog{}
+	reg, err := newModelRegistry(adapters, cfg, rl.fn)
+	if err != nil {
+		t.Fatalf("newModelRegistry: %v", err)
+	}
+	// acme's discovery finds a model literally named "shared-id" — the
+	// same string as the configured alias, discovered only after
+	// construction, so validateModelAliases never saw it.
+	reg.states["acme"].finishRefresh(reg.now(), []string{"shared-id"}, nil)
+
+	adapter, _, canonical, err := reg.resolve("shared-id", allowAllGroup())
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if adapter != adapters["openai"] {
+		t.Errorf("adapter = %v, want openai (the alias, not acme's discovered model, must win)", adapter)
+	}
+	if canonical != "openai/gpt-test" {
+		t.Errorf("canonical = %q, want %q", canonical, "openai/gpt-test")
+	}
+
+	if _, _, _, err := reg.resolve("shared-id", allowAllGroup()); err != nil {
+		t.Fatalf("second resolve: %v", err)
+	}
+	if got := rl.count(); got != 1 {
+		t.Errorf("collision-shadow log emitted %d times across 2 resolve calls, want exactly 1", got)
+	}
+}
+
+// --- listFor: alias visibility (spec §5) ---
+
+func TestModelRegistry_ListFor_Alias_ListedWhenAuthorized_OwnedByTargetProvider(t *testing.T) {
+	t.Parallel()
+	reg := newAliasTestRegistry(t, map[string]string{"aliased/coding": "openai/gpt-test"}, nil)
+
+	got := reg.listFor(allowAllGroup())
+	var found bool
+	for _, entry := range got {
+		if entry["id"] == "aliased/coding" {
+			found = true
+			if entry["owned_by"] != "openai" {
+				t.Errorf("aliased/coding owned_by = %v, want %q", entry["owned_by"], "openai")
+			}
+		}
+	}
+	if !found {
+		t.Errorf("listFor = %v, want an entry for the alias %q", got, "aliased/coding")
+	}
+}
+
+func TestModelRegistry_ListFor_Alias_UnresolvedTarget_Omitted(t *testing.T) {
+	t.Parallel()
+	reg := newAliasTestRegistry(t, map[string]string{"aliased/future": "openai/not-yet-discovered"}, nil)
+
+	got := reg.listFor(allowAllGroup())
+	for _, entry := range got {
+		if entry["id"] == "aliased/future" {
+			t.Errorf("listFor lists %q whose target does not resolve yet, want it omitted", "aliased/future")
+		}
+	}
+}
+
+func TestModelRegistry_ListFor_Alias_NotAuthorized_Omitted(t *testing.T) {
+	t.Parallel()
+	reg := newAliasTestRegistry(t, map[string]string{"aliased/coding": "openai/gpt-test"}, nil)
+
+	grp := &group{name: "narrow", models: []string{"claude-*"}}
+	got := reg.listFor(grp)
+	for _, entry := range got {
+		if entry["id"] == "aliased/coding" {
+			t.Errorf("listFor lists %q for a group authorized for neither the alias nor its target", "aliased/coding")
+		}
 	}
 }

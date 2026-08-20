@@ -166,6 +166,38 @@ func TestHandleImagesGenerations_OpenAI_HappyPath_NativeForward(t *testing.T) {
 	}
 }
 
+// TestHandleImagesGenerations_ModelAlias_ResolvesToTargetUpstreamModel
+// proves an operator-defined modelAliases entry (spec §5, v0.2) routes
+// /v1/images/generations exactly like a bare or provider-prefixed id: the
+// upstream call carries the target's own upstream model id, never the
+// alias.
+func TestHandleImagesGenerations_ModelAlias_ResolvesToTargetUpstreamModel(t *testing.T) {
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"created":1,"data":[{"b64_json":"xyz"}]}`))
+	}))
+	defer srv.Close()
+
+	cfg := newMediaTestConfig(srv.URL, "img-test")
+	cfg.ModelAliases = map[string]string{"aliased/image": "openai/img-test"}
+	gw := newMediaTestGateway(t, cfg)
+
+	body := map[string]any{"model": "aliased/image", "prompt": "a cat", "n": 1}
+	req := newUnifiedRequest(t, http.MethodPost, imagesGenerationsPath, "sk-alice", body)
+	rec := httptest.NewRecorder()
+	gw.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	if gotBody["model"] != "img-test" {
+		t.Errorf("upstream request model = %v, want the alias target's bare upstream id %q", gotBody["model"], "img-test")
+	}
+}
+
 // TestHandleImagesGenerations_StripsClientSuppliedAliasKey proves a
 // client independently including a literal "__alias" field in its own
 // JSON body (never one the gateway itself injects for a media route —
@@ -720,6 +752,100 @@ func TestHandleAudioTranscriptions_PrefixedAlias_RewritesModelFieldOnly(t *testi
 
 	if !sawModel || gotModel != "whisper-test" {
 		t.Errorf("upstream model field = %q (present=%v), want the bare upstream id %q", gotModel, sawModel, "whisper-test")
+	}
+	if !sawFile || string(gotFile) != fileContent {
+		t.Errorf("upstream file part = %q (present=%v), want unchanged %q", gotFile, sawFile, fileContent)
+	}
+}
+
+// TestHandleAudioTranscriptions_ModelAlias_RewritesModelFieldToTargetUpstreamID
+// mirrors TestHandleAudioTranscriptions_PrefixedAlias_RewritesModelFieldOnly
+// above, but through an operator-defined modelAliases entry (spec §5,
+// v0.2) rather than a bare provider-prefixed id: the client's "model"
+// form field ("aliased/whisper") differs from the resolved upstream model
+// id ("whisper-test"), so rewriteMultipartModel (routes_media.go) must
+// rebuild the multipart body — every part copied verbatim except "model",
+// which becomes the target's own upstream id. The alias must never reach
+// the real provider, the same invariant every other unified route
+// already enforces.
+func TestHandleAudioTranscriptions_ModelAlias_RewritesModelFieldToTargetUpstreamID(t *testing.T) {
+	const fileContent = "FAKEAUDIOBYTES-DISTINCTIVE-PAYLOAD"
+	var gotContentType string
+	var gotBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotContentType = r.Header.Get("Content-Type")
+		gotBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"text":"ok"}`))
+	}))
+	defer srv.Close()
+
+	cfg := newMediaTestConfig(srv.URL, "whisper-test")
+	cfg.ModelAliases = map[string]string{"aliased/whisper": "openai/whisper-test"}
+	gw := newMediaTestGateway(t, cfg)
+
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	ffw, err := mw.CreateFormFile("file", "audio.wav")
+	if err != nil {
+		t.Fatalf("CreateFormFile: %v", err)
+	}
+	if _, err = ffw.Write([]byte(fileContent)); err != nil {
+		t.Fatalf("write file field: %v", err)
+	}
+	mfw, err := mw.CreateFormField("model")
+	if err != nil {
+		t.Fatalf("CreateFormField(model): %v", err)
+	}
+	if _, err = mfw.Write([]byte("aliased/whisper")); err != nil {
+		t.Fatalf("write model field: %v", err)
+	}
+	if err = mw.Close(); err != nil {
+		t.Fatalf("close multipart writer: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, audioTranscriptionsPath, &buf)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	req.Header.Set("Authorization", "Bearer sk-alice")
+	rec := httptest.NewRecorder()
+	gw.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+
+	_, params, err := mime.ParseMediaType(gotContentType)
+	if err != nil {
+		t.Fatalf("upstream Content-Type %q did not parse: %v", gotContentType, err)
+	}
+	mr := multipart.NewReader(bytes.NewReader(gotBody), params["boundary"])
+	var gotModel string
+	var gotFile []byte
+	var sawModel, sawFile bool
+	for {
+		part, perr := mr.NextPart()
+		if perr == io.EOF { //nolint:errorlint // multipart.Reader.NextPart's own contract returns io.EOF bare
+			break
+		}
+		if perr != nil {
+			t.Fatalf("parse upstream multipart body: %v", perr)
+		}
+		switch part.FormName() {
+		case "model":
+			b, _ := io.ReadAll(part)
+			gotModel = string(b)
+			sawModel = true
+		case "file":
+			b, _ := io.ReadAll(part)
+			gotFile = b
+			sawFile = true
+		}
+		_ = part.Close()
+	}
+
+	if !sawModel || gotModel != "whisper-test" {
+		t.Errorf("upstream model field = %q (present=%v), want the alias target's bare upstream id %q", gotModel, sawModel, "whisper-test")
 	}
 	if !sawFile || string(gotFile) != fileContent {
 		t.Errorf("upstream file part = %q (present=%v), want unchanged %q", gotFile, sawFile, fileContent)

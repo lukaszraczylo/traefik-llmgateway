@@ -533,6 +533,245 @@ func TestHandleChat_AnthropicProviderPrefixedModel_EchoesAliasInResponse(t *test
 	}
 }
 
+// --- model aliases end-to-end (spec §5, v0.2) ---
+
+// TestHandleChat_ModelAlias_AnthropicTarget_EchoesAliasInResponse mirrors
+// TestHandleChat_AnthropicProviderPrefixedModel_EchoesAliasInResponse
+// above, but through an operator-defined modelAliases entry rather than a
+// bare provider-prefixed id: the upstream call uses the target's own
+// upstream model id, and the translated response's "model" field echoes
+// the client's exact alias string back (ruling a, ALIAS ECHO — aliases
+// inherit the existing __alias machinery for free, per registry.go's
+// resolve doc comment).
+func TestHandleChat_ModelAlias_AnthropicTarget_EchoesAliasInResponse(t *testing.T) {
+	const anthResp = `{"id":"msg_01ABC","type":"message","role":"assistant","content":[{"type":"text","text":"hi there"}],"model":"claude-x","stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":4}}`
+
+	var gotBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(anthResp))
+	}))
+	defer srv.Close()
+
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{
+		"anthropic": {Type: "anthropic", BaseURL: srv.URL, APIKey: "sk-ant", Models: []string{"claude-x"}},
+	}
+	cfg.ModelAliases = map[string]string{"aliased/coding": "anthropic/claude-x"}
+	cfg.Groups = map[string]*GroupConfig{"default": {}}
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{{Name: "alice", Group: "default", APIKey: "sk-alice"}}}
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	const requestedID = "aliased/coding"
+	body := map[string]any{"model": requestedID, "messages": []any{map[string]any{"role": "user", "content": "hi"}}}
+	req := newUnifiedRequest(t, http.MethodPost, "/v1/chat/completions", "sk-alice", body)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+
+	var out map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if out["model"] != requestedID {
+		t.Errorf("response model = %v, want the client-requested alias %q echoed back", out["model"], requestedID)
+	}
+
+	sentUpstream := decodeJSONBody(t, gotBody)
+	if sentUpstream["model"] != "claude-x" {
+		t.Errorf("upstream request model = %v, want the alias target's bare upstream id %q", sentUpstream["model"], "claude-x")
+	}
+	if _, present := sentUpstream[gatewayAliasKey]; present {
+		t.Errorf("gatewayAliasKey %q leaked into the upstream request body: %v", gatewayAliasKey, sentUpstream)
+	}
+}
+
+// TestHandleChat_ModelAlias_OpenAITarget_UpstreamEchoNotAlias documents the
+// v0.1 passthrough asymmetry (routes_unified.go's gatewayAliasKey doc
+// comment) as it applies to aliases: an openai-type target's response is
+// forwarded verbatim, so its own "model" field carries whatever the mock
+// upstream itself returned — the target's bare upstream id, NOT the
+// alias. The gateway makes no attempt, and is not expected, to rewrite an
+// openai-type body in flight.
+func TestHandleChat_ModelAlias_OpenAITarget_UpstreamEchoNotAlias(t *testing.T) {
+	const respBody = `{"id":"c1","model":"gpt-test","choices":[{"message":{"role":"assistant","content":"hi"}}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`
+
+	var gotBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(respBody))
+	}))
+	defer srv.Close()
+
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{
+		"openai": {Type: "openai", BaseURL: srv.URL, APIKey: "k", Models: []string{"gpt-test"}},
+	}
+	cfg.ModelAliases = map[string]string{"aliased/fast": "openai/gpt-test"}
+	cfg.Groups = map[string]*GroupConfig{"default": {}}
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{{Name: "alice", Group: "default", APIKey: "sk-alice"}}}
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	body := map[string]any{"model": "aliased/fast", "messages": []any{}}
+	req := newUnifiedRequest(t, http.MethodPost, "/v1/chat/completions", "sk-alice", body)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	var out map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if out["model"] != "gpt-test" {
+		t.Errorf("response model = %v, want the openai-type passthrough's own upstream id %q, not the alias", out["model"], "gpt-test")
+	}
+
+	sentUpstream := decodeJSONBody(t, gotBody)
+	if sentUpstream["model"] != "gpt-test" {
+		t.Errorf("upstream request model = %v, want bare upstream id %q", sentUpstream["model"], "gpt-test")
+	}
+}
+
+// TestHandleEmbeddings_ModelAlias_ResolvesToTargetUpstreamModel proves
+// aliasing applies to /v1/embeddings exactly like /v1/chat/completions —
+// the upstream call uses the target's bare upstream model id.
+func TestHandleEmbeddings_ModelAlias_ResolvesToTargetUpstreamModel(t *testing.T) {
+	const respBody = `{"object":"list","data":[{"embedding":[0.1]}],"usage":{"prompt_tokens":1,"total_tokens":1}}`
+
+	var gotBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(respBody))
+	}))
+	defer srv.Close()
+
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{
+		"openai": {Type: "openai", BaseURL: srv.URL, APIKey: "k", Models: []string{"text-embedding-3"}},
+	}
+	cfg.ModelAliases = map[string]string{"aliased/embed": "openai/text-embedding-3"}
+	cfg.Groups = map[string]*GroupConfig{"default": {}}
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{{Name: "alice", Group: "default", APIKey: "sk-alice"}}}
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	body := map[string]any{"model": "aliased/embed", "input": "hello"}
+	req := newUnifiedRequest(t, http.MethodPost, "/v1/embeddings", "sk-alice", body)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	sentUpstream := decodeJSONBody(t, gotBody)
+	if sentUpstream["model"] != "text-embedding-3" {
+		t.Errorf("upstream request model = %v, want the alias target's bare upstream id %q", sentUpstream["model"], "text-embedding-3")
+	}
+}
+
+// TestHandleChat_ModelAlias_AuthorizedViaAliasNameAlone_EndToEnd proves
+// spec §5's authorization rule end-to-end: a group whose models glob
+// matches only the ALIAS name (not the target, in either form) can still
+// use it through the real ServeHTTP pipeline, not just modelRegistry.resolve
+// in isolation.
+func TestHandleChat_ModelAlias_AuthorizedViaAliasNameAlone_EndToEnd(t *testing.T) {
+	const respBody = `{"id":"c1","model":"gpt-test","choices":[{"message":{"role":"assistant","content":"hi"}}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(respBody))
+	}))
+	defer srv.Close()
+
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{
+		"openai": {Type: "openai", BaseURL: srv.URL, APIKey: "k", Models: []string{"gpt-test"}},
+	}
+	cfg.ModelAliases = map[string]string{"aliased/coding": "openai/gpt-test"}
+	// Matches only the alias name, not "openai/gpt-test" nor "gpt-test".
+	cfg.Groups = map[string]*GroupConfig{"narrow": {Models: []string{"aliased/coding"}}}
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{{Name: "alice", Group: "narrow", APIKey: "sk-alice"}}}
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	body := map[string]any{"model": "aliased/coding", "messages": []any{}}
+	req := newUnifiedRequest(t, http.MethodPost, "/v1/chat/completions", "sk-alice", body)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (authorized via the alias name alone), body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestHandleChat_ModelAlias_UnresolvedTarget_Returns404NamingAliasAndTarget
+// covers spec §5's lazy-resolution 404 end-to-end: an alias whose target
+// names no currently-known model returns 404 with a message naming both
+// the alias and the missing target — not the generic "unknown model" text
+// a plain unresolved bare/prefixed id gets.
+func TestHandleChat_ModelAlias_UnresolvedTarget_Returns404NamingAliasAndTarget(t *testing.T) {
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{
+		"openai": {Type: "openai", APIKey: "k", Models: []string{"gpt-test"}},
+	}
+	cfg.ModelAliases = map[string]string{"aliased/future": "openai/not-yet-discovered"}
+	cfg.Groups = map[string]*GroupConfig{"default": {}}
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{{Name: "alice", Group: "default", APIKey: "sk-alice"}}}
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	body := map[string]any{"model": "aliased/future", "messages": []any{}}
+	req := newUnifiedRequest(t, http.MethodPost, "/v1/chat/completions", "sk-alice", body)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404, body=%s", rec.Code, rec.Body.String())
+	}
+	var out struct {
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if !strings.Contains(out.Error.Message, "aliased/future") {
+		t.Errorf("error message = %q, want it to name the alias %q", out.Error.Message, "aliased/future")
+	}
+	if !strings.Contains(out.Error.Message, "openai/not-yet-discovered") {
+		t.Errorf("error message = %q, want it to name the target %q", out.Error.Message, "openai/not-yet-discovered")
+	}
+}
+
 // TestHandleChat_UpstreamNon2xx_WrapsProviderErrorEnvelope asserts a
 // non-2xx upstream response is passed through with its status code, but
 // wrapped in the gateway's own envelope with the raw upstream body

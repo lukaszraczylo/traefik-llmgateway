@@ -194,6 +194,14 @@ type adminGroupView struct {
 	MemberCount int           `json:"memberCount"`
 }
 
+// adminAliasView is one configured model alias's row in GET
+// /admin/api/overview (spec §5, v0.2): the alias->target pair exactly as
+// an operator wrote it. No secrets involved.
+type adminAliasView struct {
+	Alias  string `json:"alias"`
+	Target string `json:"target"`
+}
+
 // adminOverviewResponse is the full body of GET /admin/api/overview (spec
 // §4, v0.2). Every slice is sorted and built fresh per request — no
 // caching of the response itself — so the dashboard's 5s poll always
@@ -202,6 +210,7 @@ type adminOverviewResponse struct {
 	Version   string              `json:"version"`
 	Providers []adminProviderView `json:"providers"`
 	Groups    []adminGroupView    `json:"groups"`
+	Aliases   []adminAliasView    `json:"aliases"`
 	Redis     adminRedisView      `json:"redis"`
 	Cache     adminCacheView      `json:"cache"`
 }
@@ -237,11 +246,18 @@ func (g *Gateway) buildAdminOverview() adminOverviewResponse {
 		groups[i] = adminGroupView{Name: gs.name, Limits: gs.limits, MemberCount: gs.memberCount}
 	}
 
+	aliasSnaps := g.registry.aliasSnapshot()
+	aliases := make([]adminAliasView, len(aliasSnaps))
+	for i, a := range aliasSnaps {
+		aliases[i] = adminAliasView(a) // identical underlying field shape (alias, target string), differing only in json tags
+	}
+
 	return adminOverviewResponse{
 		Providers: providers,
 		Redis:     adminRedisView{Configured: configured, LastErr: redisLastErr, LastErrAt: redisLastErrAt},
 		Cache:     adminCacheView{Enabled: cacheEnabled, TTL: ttl},
 		Groups:    groups,
+		Aliases:   aliases,
 		Version:   pluginVersion,
 	}
 }
@@ -444,6 +460,13 @@ const adminPageHTML = `<!doctype html>
 </section>
 
 <section>
+  <h2>Model aliases</h2>
+  <table id="aliases"><thead><tr>
+    <th>Alias</th><th>Target</th>
+  </tr></thead><tbody></tbody></table>
+</section>
+
+<section>
   <h2>Infrastructure</h2>
   <div id="infra"></div>
 </section>
@@ -539,6 +562,13 @@ const adminPageHTML = `<!doctype html>
       tr.appendChild(el("td", String(p.modelCount)));
       tr.appendChild(el("td", p.lastRefresh && p.lastRefresh !== ZERO_TIME ? p.lastRefresh : "never"));
       tr.appendChild(el("td", p.lastErr || "", p.lastErr ? "err" : "muted"));
+      return tr;
+    });
+
+    setRows("aliases", data.aliases, function (a) {
+      var tr = document.createElement("tr");
+      tr.appendChild(el("td", a.alias));
+      tr.appendChild(el("td", a.target));
       return tr;
     });
 

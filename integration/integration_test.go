@@ -239,6 +239,55 @@ func TestUnifiedChatAllProviders(t *testing.T) {
 	}
 }
 
+// TestModelAliases covers v0.2 integration coverage: task 6 (spec §5).
+// dynamic.yml.tmpl configures two operator-defined aliases —
+// "aliased/mock" -> "gpt-mock" (openai-type) and "aliased/claude" ->
+// "claude-mock" (anthropic-type) — proving alias resolution runs under
+// real Traefik+Yaegi, not just go test, including the documented
+// echo-behavior asymmetry between provider types (see
+// registry_test.go's Gateway-level equivalents for the same assertion
+// under go test).
+func TestModelAliases(t *testing.T) {
+	// openai-type: the upstream response is forwarded verbatim
+	// (provider_openai.go), so its "model" field carries whatever the
+	// mock echoes back — the resolved upstream id "gpt-mock", not the
+	// alias. Correctness here is 200 + real content + the cache header
+	// unified routes always set, not the "model" field (documented v0.1
+	// passthrough asymmetry, unchanged by aliasing).
+	openaiReq := map[string]any{
+		"model":    "aliased/mock",
+		"messages": []map[string]any{{"role": "user", "content": "hi"}},
+	}
+	resp, body := doJSON(t, http.MethodPost, traefik1URL+"/v1/chat/completions", aliceKey, openaiReq)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("aliased openai chat: status = %d, body=%#v", resp.StatusCode, body)
+	}
+	if content := firstChoiceContent(t, body); content != "mock openai response" {
+		t.Errorf("aliased openai chat: content = %q, want %q", content, "mock openai response")
+	}
+	if got := resp.Header.Get("X-Llmgw-Cache"); got == "" {
+		t.Error("aliased openai chat: X-Llmgw-Cache header missing, want \"miss\" or \"hit\"")
+	}
+
+	// anthropic-type: translate_anthropic.go builds its own response
+	// envelope and echoes the client's exact requested id (the alias)
+	// back into "model" — this DOES surface the alias.
+	anthropicReq := map[string]any{
+		"model":    "aliased/claude",
+		"messages": []map[string]any{{"role": "user", "content": "hi"}},
+	}
+	resp2, body2 := doJSON(t, http.MethodPost, traefik1URL+"/v1/chat/completions", aliceKey, anthropicReq)
+	if resp2.StatusCode != http.StatusOK {
+		t.Fatalf("aliased anthropic chat: status = %d, body=%#v", resp2.StatusCode, body2)
+	}
+	if content := firstChoiceContent(t, body2); content != "mock anthropic response" {
+		t.Errorf("aliased anthropic chat: content = %q, want %q", content, "mock anthropic response")
+	}
+	if model, _ := body2["model"].(string); model != "aliased/claude" {
+		t.Errorf("aliased anthropic chat: response model = %q, want the client-requested alias %q echoed back", model, "aliased/claude")
+	}
+}
+
 // TestStreamingIncrementalityProbe covers integration test 3.
 //
 // Content correctness always runs, via assertStreamingContent: a host-side
