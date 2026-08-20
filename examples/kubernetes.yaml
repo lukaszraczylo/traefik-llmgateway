@@ -234,6 +234,14 @@ spec:
 #          secret: {secretName: llmgw-users}
 #      deployment:
 #        additionalVolumeMounts:
+#          # Whole-volume mount — no subPath — is required, not a style
+#          # choice: a subPath mount binds once at pod start and the
+#          # kubelet never updates it again, so editing the llmgw-users
+#          # Secret above would never reach this pod. A whole-volume mount
+#          # updates via the kubelet swapping a symlink for the whole
+#          # directory, which users.file's own 5-second mtime poll
+#          # (reloadEvery, users_file.go) picks up with no pod restart —
+#          # see ../README.md#config-hot-reload.
 #          - name: llmgw-users
 #            mountPath: /secrets/llmgw-users
 #            readOnly: true

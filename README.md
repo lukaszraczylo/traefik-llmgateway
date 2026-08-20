@@ -880,6 +880,60 @@ The short version:
   rather than standing up a dedicated instance for this plugin — the
   distributed limiter is a client, not a datastore.
 
+### Config hot-reload
+
+Editing the `Middleware` custom resource applies with no pod restart and no
+manual reload step. The Kubernetes CRD provider watches `Middleware`
+resources natively: on a change, Traefik builds a whole new plugin
+instance from the updated config, lets it warm-fill discovery for every
+provider with `discovery: true` (see [Model routing](#model-routing)), then
+swaps it in for new requests. Requests already in flight keep running
+against the old instance until they finish; only new requests reach the
+new one.
+
+A rebuilt instance keeps some state and resets the rest:
+
+- **Survives a rebuild**: request/token/cost counters and cached responses,
+  both stored in Redis. A counter's key comes from `windowKey`'s
+  `(kind, id, metric, window, time)` alone (see
+  [Limits and accounting](#limits-and-accounting)) — never from anything
+  specific to one Gateway instance — so a new instance reads the exact
+  counters the old one wrote. The response cache's keys work the same way.
+- **Resets on a rebuild**: the in-process fallback counters used only when
+  `redis` is not configured, the limiter's and cache's Redis-outage
+  down-latches, and the model registry's discovery cache — a new instance
+  always runs its own full warm-fill before serving, rather than
+  inheriting the old instance's listing.
+
+Two practical implications follow:
+
+- **New models need no config edit at all.** A provider's own
+  `discoveryInterval` polls the upstream directly on its own schedule;
+  adding a model upstream needs neither a `Middleware` change nor a
+  rebuild.
+- **The users `Secret` must be a whole-volume mount, never `subPath`.** A
+  `subPath` volume mount binds once at pod start — the kubelet never
+  updates it again, so a `Secret` change behind a `subPath` mount stays
+  invisible to the running pod for its whole lifetime (a documented
+  kubelet limitation, not a plugin one). Mount the whole `Secret` as its
+  own volume instead, exactly as `examples/kubernetes.yaml`'s
+  `additionalVolumeMounts` snippet does: a whole-volume mount updates by
+  the kubelet swapping a symlink, and the plugin's own 5-second mtime poll
+  (`reloadEvery`, `users_file.go`) picks that swap up with no pod restart.
+
+If you run Traefik's file provider in Kubernetes instead of the CRD
+provider — a `ConfigMap`-mounted dynamic config file rather than
+`Middleware` resources — point it at the mount with `directory:`, never
+`filename:`. A `ConfigMap` update reaches the pod the same way a `Secret`
+does: the kubelet swaps a symlink for the whole mounted directory, which
+Traefik's single-file `filename:` watch never observes; `directory:`
+watches the directory itself and picks the swap up. The same
+`directory:` requirement also holds for local/Docker Desktop development
+against this plugin: a single file's fsnotify watch does not fire
+reliably over Docker Desktop's VirtioFS bind mount, which is why this
+repository's own integration stack (`integration/traefik/traefik.yml`)
+uses `directory:` rather than `filename:`.
+
 ## Development
 
 ```sh
