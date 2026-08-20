@@ -13,7 +13,13 @@ import (
 // itself, and any OpenAI-compatible upstream (the operator's own gateway
 // included — a real deployment target for this adapter is keyless).
 type openaiAdapter struct {
-	client      *http.Client
+	client *http.Client
+	// retry is nil for every adapter built by a bare newOpenAIAdapter call
+	// (every v0.1 test, and any caller that never wires one) — nil-safe,
+	// per retryPolicy.do's own contract, so leaving it unset is exactly
+	// v0.1's one-attempt behavior. buildAdapters (providers.go) sets it
+	// from cfg.Retry for production use.
+	retry       *retryPolicy
 	adapterName string
 	baseURL     string
 	apiKey      string
@@ -131,7 +137,7 @@ func (a *openaiAdapter) chatCompletion(ctx context.Context, w http.ResponseWrite
 		hdr.Set("Accept", "text/event-stream")
 	}
 
-	resp, err := upstreamJSON(ctx, a.client, http.MethodPost, a.baseURL+"/v1/chat/completions", hdr, req)
+	resp, err := upstreamJSON(ctx, a.client, http.MethodPost, a.baseURL+"/v1/chat/completions", hdr, req, a.retry)
 	if err != nil {
 		return usage{}, err
 	}
@@ -156,7 +162,7 @@ func (a *openaiAdapter) chatCompletion(ctx context.Context, w http.ResponseWrite
 // non-streaming path.
 func (a *openaiAdapter) embeddings(ctx context.Context, w http.ResponseWriter, req map[string]any) (usage, error) {
 	delete(req, gatewayAliasKey) // see chatCompletion's identical delete for why
-	resp, err := upstreamJSON(ctx, a.client, http.MethodPost, a.baseURL+"/v1/embeddings", a.requestHeaders(true), req)
+	resp, err := upstreamJSON(ctx, a.client, http.MethodPost, a.baseURL+"/v1/embeddings", a.requestHeaders(true), req, a.retry)
 	if err != nil {
 		return usage{}, err
 	}
@@ -258,7 +264,7 @@ type modelsPayload struct {
 
 // listModels implements providerAdapter.
 func (a *openaiAdapter) listModels(ctx context.Context) ([]string, error) {
-	resp, err := upstreamJSON(ctx, a.client, http.MethodGet, a.baseURL+"/v1/models", a.requestHeaders(false), nil)
+	resp, err := upstreamJSON(ctx, a.client, http.MethodGet, a.baseURL+"/v1/models", a.requestHeaders(false), nil, a.retry)
 	if err != nil {
 		return nil, err
 	}

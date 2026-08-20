@@ -22,6 +22,7 @@ type Config struct {
 	Agents             map[string]*AgentConfig    `json:"agents,omitempty"`
 	Users              *UsersConfig               `json:"users,omitempty"`
 	Redis              *RedisConfig               `json:"redis,omitempty"`
+	Retry              RetryConfig                `json:"retry,omitempty"`
 	PassthroughUnknown bool                       `json:"passthroughUnknown,omitempty"`
 }
 
@@ -75,6 +76,18 @@ type RedisConfig struct {
 	Address  string `json:"address"`
 	Password string `json:"password,omitempty"`
 	DB       int    `json:"db,omitempty"`
+}
+
+// RetryConfig configures same-provider retry on transient upstream
+// failures (connection errors, HTTP 429, HTTP 5xx) — spec §1. The zero
+// value (Enabled: false) disables retry, preserving v0.1 behavior
+// exactly: every request still makes exactly one upstream attempt.
+// Attempts and Backoff are validated (and defaulted, when left zero) by
+// newRetryPolicy (retry.go) only when Enabled is true.
+type RetryConfig struct {
+	Backoff  string `json:"backoff,omitempty"`
+	Attempts int    `json:"attempts,omitempty"`
+	Enabled  bool   `json:"enabled,omitempty"`
 }
 
 // ModelPricing overrides the built-in per-model price table.

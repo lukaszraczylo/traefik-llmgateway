@@ -19,7 +19,13 @@ const (
 
 // anthropicAdapter is the providerAdapter for provider type "anthropic".
 type anthropicAdapter struct {
-	client      *http.Client
+	client *http.Client
+	// retry is nil for every adapter built by a bare newAnthropicAdapter
+	// call (every v0.1 test, and any caller that never wires one) —
+	// nil-safe, per retryPolicy.do's own contract, so leaving it unset is
+	// exactly v0.1's one-attempt behavior. buildAdapters (providers.go)
+	// sets it from cfg.Retry for production use.
+	retry       *retryPolicy
 	adapterName string
 	baseURL     string
 	apiKey      string
@@ -106,7 +112,7 @@ func (a *anthropicAdapter) chatCompletion(ctx context.Context, w http.ResponseWr
 		hdr.Set("Accept", "text/event-stream")
 	}
 
-	resp, err := upstreamJSON(ctx, a.client, http.MethodPost, a.baseURL+anthropicMessagesPath, hdr, body)
+	resp, err := upstreamJSON(ctx, a.client, http.MethodPost, a.baseURL+anthropicMessagesPath, hdr, body, a.retry)
 	if err != nil {
 		return usage{}, err
 	}
@@ -200,7 +206,7 @@ func (a *anthropicAdapter) embeddings(_ context.Context, _ http.ResponseWriter, 
 // falls back to a provider's explicitly configured models on error rather
 // than this adapter guessing at a fallback itself.
 func (a *anthropicAdapter) listModels(ctx context.Context) ([]string, error) {
-	resp, err := upstreamJSON(ctx, a.client, http.MethodGet, a.baseURL+anthropicModelsPath, a.requestHeaders(false), nil)
+	resp, err := upstreamJSON(ctx, a.client, http.MethodGet, a.baseURL+anthropicModelsPath, a.requestHeaders(false), nil, a.retry)
 	if err != nil {
 		return nil, err
 	}

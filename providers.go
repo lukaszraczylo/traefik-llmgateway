@@ -159,34 +159,54 @@ func newAdapterHTTPClient() *http.Client {
 // a non-2xx status is not itself an error here, since some callers (e.g.
 // listModels) have nothing to write through and every current caller
 // checks resp.StatusCode itself.
-func upstreamJSON(ctx context.Context, client *http.Client, method, url string, hdr http.Header, body any) (*http.Response, error) {
-	var r io.Reader
+//
+// policy (retry.go) wraps the whole request-and-receive-status exchange:
+// a nil policy, or a disabled one, makes exactly one attempt (v0.1
+// behavior, byte-identical). Every caller of upstreamJSON — chatCompletion,
+// embeddings, listModels, across all three adapter types — sits upstream
+// of any response-body forwarding (forwardJSON/forwardStream), so a retry
+// here can only ever replace an attempt whose body no caller has read or
+// forwarded yet. That is what makes "zero bytes reached the client" hold
+// by construction: forwardStream is invoked only after upstreamJSON has
+// already returned its final, retried-or-not response, so a stream that
+// dies while forwardStream is mid-flight never re-enters this function
+// and is therefore never retried.
+func upstreamJSON(ctx context.Context, client *http.Client, method, url string, hdr http.Header, body any, policy *retryPolicy) (*http.Response, error) {
+	var bodyBytes []byte
 	if body != nil {
 		b, err := json.Marshal(body)
 		if err != nil {
 			return nil, fmt.Errorf("%w: encode request body: %w", errUpstream, err)
 		}
-		r = bytes.NewReader(b)
+		bodyBytes = b
 	}
 
-	req, err := http.NewRequestWithContext(ctx, method, url, r)
-	if err != nil {
-		return nil, fmt.Errorf("%w: build request: %w", errUpstream, err)
-	}
-	for k, vs := range hdr {
-		for _, v := range vs {
-			req.Header.Add(k, v)
+	call := func() (*http.Response, error) {
+		var r io.Reader
+		if bodyBytes != nil {
+			r = bytes.NewReader(bodyBytes)
 		}
-	}
-	if body != nil && req.Header.Get("Content-Type") == "" {
-		req.Header.Set("Content-Type", "application/json")
+		req, err := http.NewRequestWithContext(ctx, method, url, r)
+		if err != nil {
+			return nil, fmt.Errorf("%w: build request: %w", errUpstream, err)
+		}
+		for k, vs := range hdr {
+			for _, v := range vs {
+				req.Header.Add(k, v)
+			}
+		}
+		if bodyBytes != nil && req.Header.Get("Content-Type") == "" {
+			req.Header.Set("Content-Type", "application/json")
+		}
+
+		resp, err := client.Do(req) //nolint:bodyclose // caller closes resp.Body; upstreamJSON hands the response, not its lifecycle, back
+		if err != nil {
+			return nil, fmt.Errorf("%w: %w", errUpstream, err)
+		}
+		return resp, nil
 	}
 
-	resp, err := client.Do(req) //nolint:bodyclose // caller closes resp.Body; upstreamJSON hands the response, not its lifecycle, back
-	if err != nil {
-		return nil, fmt.Errorf("%w: %w", errUpstream, err)
-	}
-	return resp, nil
+	return policy.do(ctx, call)
 }
 
 // configNamePattern is the character set allowed in a provider, mcpServers,
@@ -247,7 +267,21 @@ func validateConfigName(kind, name string) error {
 // that, per ruling (c); this function just propagates whatever error it
 // returns. A configured gemini provider follows the same constructor-error
 // ruling — newGeminiAdapter enforces it too.
+//
+// buildAdapters also derives cfg.Retry into a single *retryPolicy
+// (newRetryPolicy, retry.go — an invalid Retry config fails construction
+// the same way any other bad config value does) and attaches it to every
+// adapter it constructs. Deriving it here, from cfg, rather than taking it
+// as a parameter built upstream in newGateway, keeps buildAdapters'
+// signature at its v0.1 shape — buildAdapters(cfg *Config) — so every
+// existing direct call to it (production and test) keeps compiling and
+// behaving identically when cfg.Retry is left at its zero value.
 func buildAdapters(cfg *Config) (map[string]providerAdapter, error) {
+	policy, err := newRetryPolicy(cfg.Retry)
+	if err != nil {
+		return nil, err
+	}
+
 	adapters := make(map[string]providerAdapter, len(cfg.Providers))
 	for name, pc := range cfg.Providers {
 		if pc == nil {
@@ -268,18 +302,22 @@ func buildAdapters(cfg *Config) (map[string]providerAdapter, error) {
 
 		switch pc.Type {
 		case providerTypeOpenAI:
-			adapters[name] = newOpenAIAdapter(name, base, apiKey)
+			a := newOpenAIAdapter(name, base, apiKey)
+			a.retry = policy
+			adapters[name] = a
 		case providerTypeAnthropic:
 			a, err := newAnthropicAdapter(name, base, apiKey)
 			if err != nil {
 				return nil, err
 			}
+			a.retry = policy
 			adapters[name] = a
 		case providerTypeGemini:
 			g, err := newGeminiAdapter(name, base, apiKey)
 			if err != nil {
 				return nil, err
 			}
+			g.retry = policy
 			adapters[name] = g
 		default:
 			return nil, fmt.Errorf("llmgateway: provider %q: unknown type %q", name, pc.Type)

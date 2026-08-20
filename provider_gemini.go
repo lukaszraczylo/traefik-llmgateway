@@ -13,7 +13,13 @@ import (
 
 // geminiAdapter is the providerAdapter for provider type "gemini".
 type geminiAdapter struct {
-	client      *http.Client
+	client *http.Client
+	// retry is nil for every adapter built by a bare newGeminiAdapter call
+	// (every v0.1 test, and any caller that never wires one) — nil-safe,
+	// per retryPolicy.do's own contract, so leaving it unset is exactly
+	// v0.1's one-attempt behavior. buildAdapters (providers.go) sets it
+	// from cfg.Retry for production use.
+	retry       *retryPolicy
 	adapterName string
 	baseURL     string
 	apiKey      string
@@ -119,7 +125,7 @@ func (a *geminiAdapter) chatCompletion(ctx context.Context, w http.ResponseWrite
 		endpoint = a.baseURL + geminiAPIPrefix + escapedModel + ":streamGenerateContent?alt=sse"
 	}
 
-	resp, err := upstreamJSON(ctx, a.client, http.MethodPost, endpoint, hdr, body)
+	resp, err := upstreamJSON(ctx, a.client, http.MethodPost, endpoint, hdr, body, a.retry)
 	if err != nil {
 		return usage{}, err
 	}
@@ -228,7 +234,7 @@ func (a *geminiAdapter) embeddings(ctx context.Context, w http.ResponseWriter, r
 		endpoint = a.baseURL + geminiAPIPrefix + escapedModel + ":batchEmbedContents"
 	}
 
-	resp, err := upstreamJSON(ctx, a.client, http.MethodPost, endpoint, a.requestHeaders(true), body)
+	resp, err := upstreamJSON(ctx, a.client, http.MethodPost, endpoint, a.requestHeaders(true), body, a.retry)
 	if err != nil {
 		return usage{}, err
 	}
@@ -273,7 +279,7 @@ type geminiModelsListPayload struct {
 // model ids, matching the shape openai-type and anthropic-type adapters
 // both return.
 func (a *geminiAdapter) listModels(ctx context.Context) ([]string, error) {
-	resp, err := upstreamJSON(ctx, a.client, http.MethodGet, a.baseURL+"/v1beta/models", a.requestHeaders(false), nil)
+	resp, err := upstreamJSON(ctx, a.client, http.MethodGet, a.baseURL+"/v1beta/models", a.requestHeaders(false), nil, a.retry)
 	if err != nil {
 		return nil, err
 	}
