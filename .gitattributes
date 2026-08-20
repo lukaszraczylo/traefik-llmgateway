@@ -1,0 +1,15 @@
+# export-ignore controls what `git archive` leaves out of the tree it
+# packs. GoReleaser's `source:` block runs `git archive` under the hood
+# (.goreleaser.yaml), so these entries are the actual filter for the
+# release source tarball — not the archive block's own file globs, which
+# have no negation syntax and cannot exclude anything.
+vendor/ export-ignore
+integration/ export-ignore
+tools/ export-ignore
+docs/ export-ignore
+examples/ export-ignore
+testdata/ export-ignore
+.superpowers/ export-ignore
+.github/ export-ignore
+*_test.go export-ignore
+.gitattributes export-ignore

@@ -5,27 +5,21 @@ version: 2
 builds:
   - skip: true
 
-# Create source archive for GitHub releases
-archives:
-  - formats: [tar.gz]
-    name_template: "{{ .ProjectName }}_v{{ .Version }}_source"
-    files:
-      - "*.go"
-      - "**/*.go"
-      - go.mod
-      - go.sum
-      - .traefik.yml
-      - LICENSE*
-      - README*
-      # Exclude test files and non-shipped dirs from release archive
-      - "!**/*_test.go"
-      - "!testdata/**"
-      - "!tools/**"
-      - "!integration/**"
-      - "!docs/**"
-      - "!examples/**"
-      - "!vendor/**"
-      - "!.superpowers/**"
+# Source archive for GitHub releases, built with `git archive` under the
+# hood. `git archive` reads .gitattributes export-ignore at the archived
+# commit — that is the real filter for test files and non-shipped dirs
+# (vendor/, tools/, integration/, docs/, examples/, testdata/,
+# .superpowers/, .github/); see .gitattributes at the repo root.
+#
+# An `archives:` files-list with `!glob` excludes looked equivalent but was
+# not: GoReleaser's archive fileglob has no negation, so every `!`-prefixed
+# entry was a silent no-op and the tarball shipped every file the plain
+# globs matched, tests and vendor included. `source:` avoids that trap
+# entirely because it does not use the archive fileglob at all.
+source:
+  enabled: true
+  format: tar.gz
+  name_template: "{{ .ProjectName }}_v{{ .Version }}_source"
 
 checksum:
   name_template: "{{ .ProjectName }}_v{{ .Version }}_checksums.txt"

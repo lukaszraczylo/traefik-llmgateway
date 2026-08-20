@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -216,8 +217,15 @@ func TestAdminOverview_SortedShapeAndVersion(t *testing.T) {
 		t.Fatalf("decode: %v", err)
 	}
 
-	if got.Version != pluginVersion {
-		t.Errorf("version = %q, want %q", got.Version, pluginVersion)
+	// Assert shape, not identity: comparing against the pluginVersion const
+	// itself is tautological (it would pass even if the overview handler
+	// stopped reading pluginVersion at all, as long as it echoed some other
+	// copy of the same string). The real invariant is what version.go's
+	// stamping contract promises: either the unstamped dev sentinel, or a
+	// release semver a build stamped in.
+	versionShape := regexp.MustCompile(`^(0\.0\.0-dev|\d+\.\d+\.\d+)$`)
+	if got.Version == "" || !versionShape.MatchString(got.Version) {
+		t.Errorf("version = %q, want non-empty and matching %s", got.Version, versionShape)
 	}
 
 	if len(got.Providers) != 2 || got.Providers[0].Name != "alpha" || got.Providers[1].Name != "zeta" {

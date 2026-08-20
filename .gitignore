@@ -1,6 +1,7 @@
 .superpowers/
 *.wasm
 tools/yaegi-check/llmgw-yaegi-check
+dist/
 
 # Rendered from integration/traefik/dynamic.yml.tmpl by `make integration-up`
 # (INTEGRATION_REAL_BASEURL substitution) — generated, not source.

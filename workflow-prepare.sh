@@ -12,16 +12,16 @@
 #   $VERSION  $VERSION_TAG  $SEMVER  $NEW_VERSION  $RELEASE_VERSION
 # A leading "v"/"V" is stripped.
 #
-# NOTE: go-release.yaml @main does not yet pass the computed version into this
-# step's environment. Add it to the "Run workflow prepare script" step, e.g.:
-#   env:
-#     VERSION: ${{ needs.version.outputs.version }}   # bare, no leading v
+# go-release.yaml's release job already exposes the computed version to this
+# script's environment (shared-actions commit 58ab34e, "Run workflow prepare
+# script" step): VERSION carries the bare semver, VERSION_TAG the v-prefixed
+# form. Stamping works end-to-end with no extra wiring in this repo.
 #
 # The shared workflow runs this script in its test, version AND release jobs,
-# but only the release job has a computed version. So a missing version is a
-# no-op (leave the dev sentinel) — NOT a hard failure, otherwise the test/version
-# jobs would break. A malformed version that IS provided is a hard error. Wire
-# the env only on the release job's prepare step (see header note above).
+# but only the release job's step sets that env — the test/version jobs run
+# it with no version at all. So a missing version is a no-op (leave the dev
+# sentinel) — NOT a hard failure, otherwise the test/version jobs would
+# break. A malformed version that IS provided is a hard error.
 set -euo pipefail
 
 FILE="version.go"
@@ -33,7 +33,7 @@ VER="${VER#V}"
 
 if [ -z "$VER" ]; then
   if [ "${GITHUB_ACTIONS:-}" = "true" ]; then
-    echo "workflow-prepare: WARNING no version provided; leaving ${FILE} at the dev placeholder. If this is the release build, set 'env: VERSION: \${{ needs.version.outputs.version }}' on the release job's prepare step — otherwise the release ships 0.0.0-dev and the admin overview reports it." >&2
+    echo "workflow-prepare: WARNING no version provided; leaving ${FILE} at the dev placeholder. Expected on the test/version jobs. If this is the release job, the shared workflow's VERSION wiring (shared-actions commit 58ab34e) has broken — the release will ship 0.0.0-dev and the admin overview will report it." >&2
   else
     echo "workflow-prepare: no version provided; leaving dev placeholder in ${FILE} (local build)"
   fi
