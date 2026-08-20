@@ -254,6 +254,20 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if r.Method == http.MethodPost && (r.URL.Path == "/v1/chat/completions" || r.URL.Path == "/v1/embeddings") {
+		u, grp, ok := g.auth.identify(r)
+		if !ok {
+			writeOAIError(sw, http.StatusUnauthorized, "authentication_error", "invalid or missing API key")
+			return
+		}
+		if r.URL.Path == "/v1/chat/completions" {
+			g.handleChat(sw, r, u, grp)
+		} else {
+			g.handleEmbeddings(sw, r, u, grp)
+		}
+		return
+	}
+
 	if g.cfg.PassthroughUnknown {
 		g.next.ServeHTTP(sw, r)
 		return

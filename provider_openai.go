@@ -92,6 +92,14 @@ type chatStreamChunk struct {
 // resulting usage-only chunk from a client that never asked for it while
 // still capturing its usage for accounting.
 func (a *openaiAdapter) chatCompletion(ctx context.Context, w http.ResponseWriter, req map[string]any) (usage, error) {
+	// gatewayAliasKey must never reach the real provider: an openai-type
+	// adapter forwards req verbatim as the upstream wire body, so a
+	// leftover alias entry would arrive as an unrecognized request field.
+	// This adapter's own response is a verbatim passthrough of whatever
+	// the upstream returns, so — unlike anthropic/gemini — there is no
+	// alias to echo back into it (documented in gatewayAliasKey's doc
+	// comment, routes_unified.go).
+	delete(req, gatewayAliasKey)
 	streaming, _ := req["stream"].(bool)
 	clientAskedUsage := false
 	if streaming {
@@ -135,6 +143,7 @@ func (a *openaiAdapter) chatCompletion(ctx context.Context, w http.ResponseWrite
 // stream, so it is forwardJSON end to end, same as chatCompletion's
 // non-streaming path.
 func (a *openaiAdapter) embeddings(ctx context.Context, w http.ResponseWriter, req map[string]any) (usage, error) {
+	delete(req, gatewayAliasKey) // see chatCompletion's identical delete for why
 	resp, err := upstreamJSON(ctx, a.client, http.MethodPost, a.baseURL+"/v1/embeddings", a.requestHeaders(true), req)
 	if err != nil {
 		return usage{}, err

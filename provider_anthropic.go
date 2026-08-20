@@ -81,6 +81,14 @@ func (a *anthropicAdapter) requestHeaders(hasBody bool) http.Header {
 // request is made.
 func (a *anthropicAdapter) chatCompletion(ctx context.Context, w http.ResponseWriter, req map[string]any) (usage, error) {
 	gatewayModel, _ := req["model"].(string)
+	// gatewayAliasKey (ruling a, ALIAS ECHO), when present, is the exact id
+	// the client requested — echoed into the translated response's "model"
+	// field below instead of the bare upstream id, then deleted so it
+	// cannot leak into the upstream request body.
+	if alias, ok := req[gatewayAliasKey].(string); ok && alias != "" {
+		gatewayModel = alias
+	}
+	delete(req, gatewayAliasKey)
 	streaming, _ := req["stream"].(bool)
 
 	body, err := anthropicRequestFromOpenAI(req)

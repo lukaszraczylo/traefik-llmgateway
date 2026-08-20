@@ -84,6 +84,16 @@ func geminiModelFromRequest(req map[string]any) string {
 // request is made.
 func (a *geminiAdapter) chatCompletion(ctx context.Context, w http.ResponseWriter, req map[string]any) (usage, error) {
 	model := geminiModelFromRequest(req)
+	// responseModel (ruling a, ALIAS ECHO): gatewayAliasKey, when present,
+	// is the exact id the client requested — echoed into the translated
+	// response's "model" field, distinct from model (the bare upstream id),
+	// which must keep driving the URL below unchanged. Deleted from req so
+	// it cannot leak into the upstream request body.
+	responseModel := model
+	if alias, ok := req[gatewayAliasKey].(string); ok && alias != "" {
+		responseModel = alias
+	}
+	delete(req, gatewayAliasKey)
 	streaming, _ := req["stream"].(bool)
 
 	body, err := geminiRequestFromOpenAI(req)
@@ -117,11 +127,11 @@ func (a *geminiAdapter) chatCompletion(ctx context.Context, w http.ResponseWrite
 	}
 
 	if streaming && strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "text/event-stream") {
-		return a.forwardStream(w, resp.Body, model)
+		return a.forwardStream(w, resp.Body, responseModel)
 	}
 	// Either a non-streaming request, or a streaming one whose upstream
 	// ignored stream=true and answered with a normal JSON body.
-	return a.forwardJSON(w, resp, model)
+	return a.forwardJSON(w, resp, responseModel)
 }
 
 // forwardJSON reads resp's full body (capped at maxResponseBytes),
@@ -189,6 +199,13 @@ func (a *geminiAdapter) forwardStream(w http.ResponseWriter, body io.Reader, gat
 // Embeddings never stream.
 func (a *geminiAdapter) embeddings(ctx context.Context, w http.ResponseWriter, req map[string]any) (usage, error) {
 	model := geminiModelFromRequest(req)
+	// responseModel (ruling a, ALIAS ECHO): see chatCompletion's identical
+	// pattern above.
+	responseModel := model
+	if alias, ok := req[gatewayAliasKey].(string); ok && alias != "" {
+		responseModel = alias
+	}
+	delete(req, gatewayAliasKey)
 
 	texts, single, err := geminiEmbeddingInputTexts(req["input"])
 	if err != nil {
@@ -223,7 +240,7 @@ func (a *geminiAdapter) embeddings(ctx context.Context, w http.ResponseWriter, r
 		return usage{}, fmt.Errorf("%w: read response body: %w", errUpstream, err)
 	}
 
-	out, u, err := openAIEmbeddingResponseFromGemini(raw, single, model, estimatedEmbeddingTokens(texts))
+	out, u, err := openAIEmbeddingResponseFromGemini(raw, single, responseModel, estimatedEmbeddingTokens(texts))
 	if err != nil {
 		return usage{}, err
 	}
