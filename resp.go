@@ -447,6 +447,48 @@ func (c *respClient) getBytes(key string) ([]byte, bool, error) {
 	return b, true, nil
 }
 
+// getBatch reads every key in keys in one pipelined round trip — N GET
+// commands sent together, replies read together — instead of len(keys)
+// separate calls each paying their own respCallTimeout budget (the fix
+// for GET /admin/api/usage otherwise serializing 6 GETs per user/group
+// scope on the single shared connection). It returns one value per key,
+// in the same order, with a missing key (RESP null bulk) mapped to 0,
+// matching getBytes/redisStore.get's convention for a single key. Any
+// reply that is a RESP error, an unexpected reply type, or a non-integer
+// value fails the whole batch — mirrored by the limiter's
+// storeGetMulti/currentUsage as one fail-open/fail-closed decision for
+// the scope, never a partial result mixing real and zero values.
+func (c *respClient) getBatch(keys []string) ([]int64, error) {
+	cmds := make([][]string, len(keys))
+	for i, k := range keys {
+		cmds[i] = []string{"GET", k}
+	}
+	replies, err := c.pipeline(cmds)
+	if err != nil {
+		return nil, fmt.Errorf("resp: getBatch: %w", err)
+	}
+
+	out := make([]int64, len(keys))
+	for i, reply := range replies {
+		if reply == nil {
+			continue // missing key -> 0, matching getBytes/get's convention
+		}
+		if e, ok := reply.(respErr); ok {
+			return nil, fmt.Errorf("resp: getBatch %q: %w", keys[i], e)
+		}
+		b, ok := reply.([]byte)
+		if !ok {
+			return nil, fmt.Errorf("resp: getBatch %q: unexpected reply type %T", keys[i], reply)
+		}
+		v, err := strconv.ParseInt(string(b), 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("resp: getBatch %q: non-integer value %q: %w", keys[i], b, err)
+		}
+		out[i] = v
+	}
+	return out, nil
+}
+
 // readLine reads one CRLF-terminated line from r, with the trailing CRLF
 // (or bare LF) stripped. It reads a byte at a time so it can bail out
 // after respMaxLineLen bytes without ever finding '\n' — a peer that

@@ -77,6 +77,10 @@ func (alwaysErrStore) get(string) (int64, error) {
 	return 0, errStoreDownStub
 }
 
+func (alwaysErrStore) getMulti([]string) ([]int64, error) {
+	return nil, errStoreDownStub
+}
+
 // TestHandleChat_HappyPath_NonStreaming_AccountsUsage drives a full
 // chat-completion request through Gateway.ServeHTTP against a fake
 // openai-shaped upstream, and asserts the response is forwarded verbatim

@@ -67,6 +67,19 @@ func (s *redisStore) incrBy(key string, n int64, ttl time.Duration) (int64, erro
 	return v, nil
 }
 
+// getMulti implements counterStore: one pipelined GET per key
+// (respClient.getBatch), a single round trip regardless of len(keys) —
+// used by limiter.currentUsage (admin dashboard, spec §4) to read a
+// scope's six current-window counters without serializing six separate
+// calls on the one shared connection.
+func (s *redisStore) getMulti(keys []string) ([]int64, error) {
+	v, err := s.client.getBatch(keys)
+	if err != nil {
+		return nil, fmt.Errorf("redisStore: getMulti: %w", err)
+	}
+	return v, nil
+}
+
 // get implements counterStore: GET key, treating a missing key (RESP null
 // bulk reply) as 0, matching memoryStore's behavior for an absent or
 // expired counter.

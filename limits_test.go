@@ -390,6 +390,7 @@ type erroringStore struct {
 
 func (s *erroringStore) incrBy(string, int64, time.Duration) (int64, error) { return 0, s.err }
 func (s *erroringStore) get(string) (int64, error)                          { return 0, s.err }
+func (s *erroringStore) getMulti([]string) ([]int64, error)                 { return nil, s.err }
 
 // TestLimiter_FailOpen_StoreErrorUsesFallback is carried-item (c): a store
 // error with failOpen=true must not block the request — the operation
@@ -448,6 +449,9 @@ func (s *succeedIncrFailGetStore) incrBy(string, int64, time.Duration) (int64, e
 	return 1, nil
 }
 func (s *succeedIncrFailGetStore) get(string) (int64, error) { return 0, s.getErr }
+func (s *succeedIncrFailGetStore) getMulti([]string) ([]int64, error) {
+	return nil, s.getErr
+}
 
 // TestLimiter_FailClosed_BudgetReadReturnsStoreDownViolation covers the
 // budgetViolation fail-closed path specifically (as opposed to the
@@ -544,6 +548,11 @@ func (s *countingErrorStore) incrBy(string, int64, time.Duration) (int64, error)
 func (s *countingErrorStore) get(string) (int64, error) {
 	s.getCalls++
 	return 0, s.err
+}
+
+func (s *countingErrorStore) getMulti([]string) ([]int64, error) {
+	s.getCalls++
+	return nil, s.err
 }
 
 // TestLimiter_StoreDownLatch_SkipsStoreCallsWithinWindow is review-round-3

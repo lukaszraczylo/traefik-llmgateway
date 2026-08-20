@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/url"
 	"time"
 )
 
@@ -23,11 +24,12 @@ const (
 	adminUsagePath    = "/admin/api/usage"
 )
 
-// adminCSP is the Content-Security-Policy header served with GET /admin
-// (spec §4, v0.2): no external assets of any kind, only this page's own
-// inline script/style, and fetch calls restricted to same-origin — the
-// dashboard works air-gapped and cannot be coerced into loading anything
-// off-host.
+// adminCSP is the Content-Security-Policy header served with all three
+// admin routes (spec §4, v0.2; extended to the two JSON routes by a
+// folded review item, 2026-08-20 review): no external assets of any
+// kind, only this page's own inline script/style, and fetch calls
+// restricted to same-origin — the dashboard works air-gapped and cannot
+// be coerced into loading anything off-host.
 const adminCSP = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'"
 
 // adminEnabled reports whether cfg's Admin block is present and enabled —
@@ -44,15 +46,36 @@ func isAdminPath(path string) bool {
 	return path == adminPagePath || path == adminOverviewPath || path == adminUsagePath
 }
 
-// handleAdmin is the shared entry point for all three /admin* routes,
-// applying spec §4's gate order: unauthenticated → 401, authenticated
-// non-admin → 403, admin → serve. It is called only when adminEnabled —
-// ServeHTTP's dispatch already checked that — and, like every other
-// authenticated route, counts request counters via checkAndCount before
-// serving: an admin over their own req/min limit gets a 429 here exactly
-// as they would on any other route (spec §4's "Accounting: admin routes
-// count request counters like any authed route").
+// handleAdmin is ServeHTTP's single entry point for all three /admin*
+// routes (spec §4, v0.2), called only when adminEnabled — ServeHTTP's
+// dispatch already checked that.
+//
+// GET /admin itself serves the HTML shell with no authentication at all
+// (controller-approved amendment to spec §4, 2026-08-20 review): a
+// browser navigating straight to a URL cannot attach a custom
+// Authorization or x-api-key header, so the original "401 when
+// unauthenticated" gate made the dashboard unreachable from a browser in
+// the first place. The shell carries zero data — every value is fetched
+// client-side from /admin/api/*, which stay fully gated below — so there
+// is nothing to protect by gating the page itself. adminEnabled(g.cfg)
+// still governs whether GET /admin is reachable at all (disabled falls
+// through to 404, unchanged).
 func (g *Gateway) handleAdmin(sw *statusTrackingWriter, r *http.Request) {
+	if r.URL.Path == adminPagePath {
+		g.serveAdminPage(sw)
+		return
+	}
+	g.handleAdminAPI(sw, r)
+}
+
+// handleAdminAPI is the gate for the two /admin/api/* JSON routes,
+// applying spec §4's gate order: unauthenticated → 401, authenticated
+// non-admin → 403, admin → serve. Like every other authenticated route
+// it counts request counters via checkAndCount before serving: an admin
+// over their own req/min limit gets a 429 here exactly as they would on
+// any other route (spec §4's "Accounting: admin routes count request
+// counters like any authed route").
+func (g *Gateway) handleAdminAPI(sw *statusTrackingWriter, r *http.Request) {
 	u, grp, ok := g.auth.identify(r)
 	g.logAuthEvent(ok, authEventUserName(u), r)
 	if !ok {
@@ -69,8 +92,6 @@ func (g *Gateway) handleAdmin(sw *statusTrackingWriter, r *http.Request) {
 	}
 
 	switch r.URL.Path {
-	case adminPagePath:
-		g.serveAdminPage(sw)
 	case adminOverviewPath:
 		g.serveAdminOverview(sw)
 	case adminUsagePath:
@@ -79,18 +100,59 @@ func (g *Gateway) handleAdmin(sw *statusTrackingWriter, r *http.Request) {
 }
 
 // serveAdminPage writes the single-page dashboard (adminPageHTML, below)
-// with its Content-Security-Policy header.
+// with its Content-Security-Policy header. Unauthenticated by design —
+// see handleAdmin's doc comment.
 func (g *Gateway) serveAdminPage(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Content-Security-Policy", adminCSP)
 	_, _ = io.WriteString(w, adminPageHTML)
 }
 
+// setAdminJSONHeaders applies the response headers shared by both admin
+// JSON endpoints (folded review item, 2026-08-20 review): the same CSP
+// as the HTML page, X-Content-Type-Options: nosniff (a browser must
+// never guess this response is anything other than the JSON it is
+// declared as), and Cache-Control: no-store (every response is built
+// fresh per request from live state and must never linger in a shared
+// or disk cache).
+func setAdminJSONHeaders(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Security-Policy", adminCSP)
+}
+
+// sanitizeBaseURL strips a provider baseUrl's userinfo (username and
+// password) and query string before admin.go ever echoes it (folded
+// review item, 2026-08-20 review): an operator who embeds credentials in
+// a baseUrl — "https://token@host" or "https://host?api-key=..." are
+// both misconfigurations, but ones this dashboard must never amplify
+// into a credential leak — must never see them reflected back. This
+// strips the userinfo entirely rather than only the password the way
+// net/url's own URL.Redacted() does: Redacted() would still leave a bare
+// embedded username in place, and a bare username with no separate
+// password is itself commonly how a token gets embedded in a URL. A raw
+// value that fails to parse as a URL is returned unchanged — it names no
+// scheme/host/userinfo net/url can identify, so there is nothing
+// structured left to strip.
+func sanitizeBaseURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return raw
+	}
+	u.User = nil
+	u.RawQuery = ""
+	u.Fragment = ""
+	return u.String()
+}
+
 // adminProviderView is one provider's read-only view in GET
 // /admin/api/overview (spec §4, v0.2). baseUrl is not secret — the
 // spec's NEVER-exposed list is API keys (not even digests), provider
 // keys, the redis password, and users-file path contents; a provider's
-// base URL names no credential.
+// base URL names no credential by itself, and any credential-shaped
+// userinfo/query an operator mistakenly embedded in it is stripped by
+// sanitizeBaseURL before this view is ever built.
 type adminProviderView struct {
 	Name        string    `json:"name"`
 	Type        string    `json:"type"`
@@ -101,9 +163,19 @@ type adminProviderView struct {
 }
 
 // adminRedisView is the redis status line in GET /admin/api/overview.
+// LastErrAt's json tag omits "omitempty": encoding/json never treats a
+// struct value (time.Time) as "empty" regardless of its fields, so the
+// tag would be a silent no-op — the same caveat Config's own Retry/Cache
+// field doc comments already record (llmgateway.go). Its zero value
+// ("0001-01-01T00:00:00Z") is the "no error recorded yet" sentinel,
+// matching adminProviderView.LastRefresh's own convention; the dashboard
+// renders it as "last error (Ns ago): ..." (folded review item,
+// 2026-08-20 review) so a single transient blip does not read as
+// currently-broken long after it recovered.
 type adminRedisView struct {
-	LastErr    string `json:"lastErr,omitempty"`
-	Configured bool   `json:"configured"`
+	LastErrAt  time.Time `json:"lastErrAt"`
+	LastErr    string    `json:"lastErr,omitempty"`
+	Configured bool      `json:"configured"`
 }
 
 // adminCacheView is the cache config summary in GET /admin/api/overview —
@@ -143,14 +215,14 @@ func (g *Gateway) buildAdminOverview() adminOverviewResponse {
 		providers[i] = adminProviderView{
 			Name:        s.name,
 			Type:        s.typeName,
-			BaseURL:     s.baseURL,
+			BaseURL:     sanitizeBaseURL(s.baseURL),
 			ModelCount:  s.modelCount,
 			LastRefresh: s.lastRefresh,
 			LastErr:     s.lastErr,
 		}
 	}
 
-	configured, redisLastErr := g.limiter.redisStatus()
+	configured, redisLastErr, redisLastErrAt := g.limiter.redisStatus()
 
 	cacheEnabled := g.cache != nil
 	var ttl string
@@ -166,7 +238,7 @@ func (g *Gateway) buildAdminOverview() adminOverviewResponse {
 
 	return adminOverviewResponse{
 		Providers: providers,
-		Redis:     adminRedisView{Configured: configured, LastErr: redisLastErr},
+		Redis:     adminRedisView{Configured: configured, LastErr: redisLastErr, LastErrAt: redisLastErrAt},
 		Cache:     adminCacheView{Enabled: cacheEnabled, TTL: ttl},
 		Groups:    groups,
 		Version:   pluginVersion,
@@ -175,7 +247,7 @@ func (g *Gateway) buildAdminOverview() adminOverviewResponse {
 
 // serveAdminOverview writes buildAdminOverview's result as JSON.
 func (g *Gateway) serveAdminOverview(w http.ResponseWriter) {
-	w.Header().Set("Content-Type", "application/json")
+	setAdminJSONHeaders(w)
 	_ = json.NewEncoder(w).Encode(g.buildAdminOverview())
 }
 
@@ -228,10 +300,11 @@ func usageEntryView(su scopeUsage, limits *LimitsConfig) adminUsageEntryView {
 // buildAdminUsage assembles adminUsageResponse: authStore.snapshot lists
 // every currently active user and every configured group (names, group
 // membership, and limits only — never a key or its digest), and
-// limiter.currentUsage reads each one's six current-window counters in
-// one read-only pass per list. Unlike buildLimitScopes (routes_
-// unified.go), this never omits an entity for having nil limits — the
-// dashboard shows usage for every user and group, limited or not.
+// limiter.currentUsage reads each one's six current-window counters —
+// one batched round trip per scope (limits.go's storeGetMulti) rather
+// than six separate ones. Unlike buildLimitScopes (routes_unified.go),
+// this never omits an entity for having nil limits — the dashboard shows
+// usage for every user and group, limited or not.
 func (g *Gateway) buildAdminUsage() adminUsageResponse {
 	userSummaries, groupSummaries := g.auth.snapshot()
 
@@ -262,19 +335,28 @@ func (g *Gateway) buildAdminUsage() adminUsageResponse {
 
 // serveAdminUsage writes buildAdminUsage's result as JSON.
 func (g *Gateway) serveAdminUsage(w http.ResponseWriter) {
-	w.Header().Set("Content-Type", "application/json")
+	setAdminJSONHeaders(w)
 	_ = json.NewEncoder(w).Encode(g.buildAdminUsage())
 }
 
 // adminPageHTML is the entire /admin single-page dashboard: markup, CSS,
 // and vanilla JS in one Go raw-string const. Yaegi interpretation forbids
 // the embed directive (no filesystem access from an interpreted plugin),
-// so the page ships as source, exactly like every other Yaegi-compatible plugin's
-// static assets. It polls adminOverviewPath and adminUsagePath every 5s
-// via fetch, loads no external asset of any kind (matching adminCSP's
-// default-src 'none'), and never uses innerHTML with server-provided
-// strings — every dynamic value is written via textContent, so nothing
-// the API returns is ever interpreted as markup.
+// so the page ships as source, exactly like every other Yaegi-compatible
+// plugin's static assets. It polls adminOverviewPath and adminUsagePath
+// every 5s via fetch, loads no external asset of any kind (matching
+// adminCSP's default-src 'none'), and never uses innerHTML with
+// server-provided strings — every dynamic value is written via
+// textContent, so nothing the API returns is ever interpreted as markup.
+//
+// Browser key entry (controller-approved amendment, 2026-08-20 review):
+// the page itself carries no auth (see handleAdmin), so its script reads
+// an admin API key from this tab's sessionStorage and sends it as
+// "x-api-key" on every /admin/api/* fetch. Absent a stored key, or on any
+// 401/403 response, it shows an inline key-entry form instead of the
+// dashboard; a submitted key is kept only in sessionStorage — never in a
+// cookie, localStorage, or any persistent store — so it disappears when
+// the tab closes and is never sent anywhere but this page's own fetches.
 const adminPageHTML = `<!doctype html>
 <html lang="en">
 <head>
@@ -323,13 +405,35 @@ const adminPageHTML = `<!doctype html>
   th { background: var(--head-bg); font-weight: 600; }
   .muted { color: var(--muted); }
   .err { color: var(--err); }
+  .hidden { display: none; }
   .infra-line { margin: .25rem 0; font-size: .85rem; }
   section { margin-bottom: 1.5rem; }
+  input, button {
+    font: inherit;
+    padding: .4rem .6rem;
+    border: 1px solid var(--border);
+    border-radius: .25rem;
+    background: var(--bg);
+    color: var(--fg);
+  }
+  button { cursor: pointer; }
 </style>
 </head>
 <body>
 <h1>LLM Gateway - Admin</h1>
 <div id="status-line">loading...</div>
+
+<section id="auth-gate">
+  <h2>Admin key required</h2>
+  <p class="muted">Enter an admin API key. The browser keeps it only in this tab's sessionStorage: it is never written to disk and is sent only to this page's own /admin/api/* requests.</p>
+  <form id="auth-form">
+    <input type="password" id="auth-key-input" autocomplete="off" placeholder="API key">
+    <button type="submit">Continue</button>
+  </form>
+  <div id="auth-error" class="err"></div>
+</section>
+
+<div id="dashboard" class="hidden">
 
 <section>
   <h2>Providers</h2>
@@ -357,6 +461,8 @@ const adminPageHTML = `<!doctype html>
   </tr></thead><tbody></tbody></table>
 </section>
 
+</div>
+
 <script>
 (function () {
   "use strict";
@@ -365,7 +471,18 @@ const adminPageHTML = `<!doctype html>
   var OVERVIEW_URL = "/admin/api/overview";
   var USAGE_URL = "/admin/api/usage";
   var ZERO_TIME = "0001-01-01T00:00:00Z";
+  var KEY_STORAGE = "llmgwAdminKey";
   var groupMeta = {};
+
+  function getStoredKey() {
+    try { return sessionStorage.getItem(KEY_STORAGE) || ""; } catch (e) { return ""; }
+  }
+  function setStoredKey(k) {
+    try { sessionStorage.setItem(KEY_STORAGE, k); } catch (e) { /* storage unavailable */ }
+  }
+  function clearStoredKey() {
+    try { sessionStorage.removeItem(KEY_STORAGE); } catch (e) { /* storage unavailable */ }
+  }
 
   function el(tag, text, cls) {
     var e = document.createElement(tag);
@@ -376,6 +493,14 @@ const adminPageHTML = `<!doctype html>
 
   function fmtCost(micros) {
     return "$" + (micros / 1000000).toFixed(4);
+  }
+
+  function fmtAgo(iso) {
+    if (!iso || iso === ZERO_TIME) return "";
+    var then = new Date(iso).getTime();
+    if (isNaN(then)) return "";
+    var secs = Math.max(0, Math.round((Date.now() - then) / 1000));
+    return " (" + secs + "s ago)";
   }
 
   function fmtLimits(l) {
@@ -419,7 +544,7 @@ const adminPageHTML = `<!doctype html>
     var infra = document.getElementById("infra");
     while (infra.firstChild) infra.removeChild(infra.firstChild);
     var redisText = "Redis: " + (data.redis.configured ? "configured" : "not configured");
-    if (data.redis.lastErr) redisText += " - last error: " + data.redis.lastErr;
+    if (data.redis.lastErr) redisText += " - last error" + fmtAgo(data.redis.lastErrAt) + ": " + data.redis.lastErr;
     infra.appendChild(el("div", redisText, "infra-line"));
     var cacheText = "Cache: " + (data.cache.enabled ? "enabled (ttl " + data.cache.ttl + ")" : "disabled");
     infra.appendChild(el("div", cacheText, "infra-line"));
@@ -465,22 +590,60 @@ const adminPageHTML = `<!doctype html>
     s.className = isErr ? "err" : "";
   }
 
+  function showAuthGate(message) {
+    document.getElementById("dashboard").classList.add("hidden");
+    document.getElementById("auth-gate").classList.remove("hidden");
+    document.getElementById("auth-error").textContent = message || "";
+  }
+
+  function showDashboard() {
+    document.getElementById("auth-gate").classList.add("hidden");
+    document.getElementById("dashboard").classList.remove("hidden");
+  }
+
   function fetchJSON(url) {
-    return fetch(url, { credentials: "same-origin" }).then(function (resp) {
+    var key = getStoredKey();
+    var headers = key ? { "x-api-key": key } : {};
+    return fetch(url, { credentials: "same-origin", headers: headers }).then(function (resp) {
+      if (resp.status === 401 || resp.status === 403) {
+        var err = new Error("admin key rejected: HTTP " + resp.status);
+        err.authFailed = true;
+        throw err;
+      }
       if (!resp.ok) throw new Error(url + ": HTTP " + resp.status);
       return resp.json();
     });
   }
 
   function refresh() {
+    if (!getStoredKey()) {
+      showAuthGate("");
+      return;
+    }
     Promise.all([fetchJSON(OVERVIEW_URL), fetchJSON(USAGE_URL)]).then(function (results) {
+      showDashboard();
       renderOverview(results[0]);
       renderUsage(results[1]);
       setStatus("last updated " + new Date().toLocaleTimeString(), false);
     }).catch(function (err) {
+      if (err.authFailed) {
+        clearStoredKey();
+        showAuthGate("invalid key, or not an admin");
+        return;
+      }
       setStatus("refresh failed: " + err.message, true);
     });
   }
+
+  document.getElementById("auth-form").addEventListener("submit", function (ev) {
+    ev.preventDefault();
+    var input = document.getElementById("auth-key-input");
+    var val = input.value;
+    input.value = "";
+    if (!val) return;
+    setStoredKey(val);
+    refresh();
+  });
 
   refresh();
   setInterval(refresh, POLL_MS);

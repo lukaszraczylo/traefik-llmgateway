@@ -123,6 +123,15 @@ type counterStore interface {
 	// get returns key's current counter value, or 0 if it does not exist
 	// or has expired.
 	get(key string) (int64, error)
+	// getMulti reads every key in keys in one round trip where the
+	// backend supports it (redisStore pipelines via respClient.getBatch;
+	// memoryStore's in-process map needs no such optimization but
+	// implements the same contract for interface conformance), returning
+	// one value per key in the same order — 0 for a key that does not
+	// exist or has expired, matching get's contract. An error fails the
+	// whole batch (mirrored by the limiter's storeGetMulti as a single
+	// fail-open/fail-closed decision), never a partial result.
+	getMulti(keys []string) ([]int64, error)
 }
 
 // memoryEntry is one counter's value and expiry in memoryStore.
@@ -195,6 +204,19 @@ func (m *memoryStore) get(key string) (int64, error) {
 		return 0, nil
 	}
 	return e.value, nil
+}
+
+// getMulti implements counterStore by looping over get: memoryStore's
+// in-process map access is already effectively free per key, so there is
+// no round-trip cost to batch away — this exists purely so memoryStore
+// satisfies counterStore's getMulti contract for the limiter's nil-store
+// fallback path (storeGetMulti).
+func (m *memoryStore) getMulti(keys []string) ([]int64, error) {
+	out := make([]int64, len(keys))
+	for i, k := range keys {
+		out[i], _ = m.get(k) // memoryStore.get never errors
+	}
+	return out, nil
 }
 
 // sweepLocked deletes every expired entry. Callers must hold m.mu.
@@ -340,14 +362,19 @@ func (l *limiter) recordStoreFailure(err error) {
 }
 
 // redisStatus reports whether l has a configured (non-fallback-only)
-// store, and that store's most recent operation failure message — the
-// admin dashboard's redis status line (spec §4, v0.2). lastErr is "" when
-// no store operation has ever failed. Guarded by logMu, the same mutex
-// lastStoreFailure/lastErrMsg already use.
-func (l *limiter) redisStatus() (configured bool, lastErr string) {
+// store, that store's most recent operation failure message, and when
+// that failure happened — the admin dashboard's redis status line (spec
+// §4, v0.2). lastErr is "" and lastErrAt is the zero time when no store
+// operation has ever failed. Returning the timestamp alongside the
+// message (controller-approved amendment, 2026-08-20 review) lets the
+// dashboard render "last error (12s ago): ..." instead of a bare message
+// that reads as "currently broken" even long after a single transient
+// blip. Guarded by logMu, the same mutex lastStoreFailure/lastErrMsg
+// already use.
+func (l *limiter) redisStatus() (configured bool, lastErr string, lastErrAt time.Time) {
 	l.logMu.Lock()
 	defer l.logMu.Unlock()
-	return l.store != nil, l.lastErrMsg
+	return l.store != nil, l.lastErrMsg, l.lastStoreFailure
 }
 
 // storeIncrBy increments key by n with the given ttl, applying the
@@ -409,6 +436,37 @@ func (l *limiter) failPolicyGet(key string) (int64, bool) {
 		return 0, false
 	}
 	v, _ := l.fallback.get(key)
+	return v, true
+}
+
+// storeGetMulti mirrors storeGet for a batch of keys: one round trip
+// against the configured store (or the in-process fallback) for the
+// whole slice, applying the identical fail-open/fail-closed/latched
+// policy storeGet applies per key. ok is false only in the fail-closed
+// case, matching storeGet's contract — a caller must not read the
+// returned slice as real values when ok is false.
+func (l *limiter) storeGetMulti(keys []string) (v []int64, ok bool) {
+	if l.store == nil {
+		v, _ = l.fallback.getMulti(keys) // fallback never errors
+		return v, true
+	}
+	if l.storeLatched() {
+		return l.failPolicyGetMulti(keys)
+	}
+	v, err := l.store.getMulti(keys)
+	if err == nil {
+		return v, true
+	}
+	l.recordStoreFailure(err)
+	return l.failPolicyGetMulti(keys)
+}
+
+// failPolicyGetMulti mirrors failPolicyGet for a batch read.
+func (l *limiter) failPolicyGetMulti(keys []string) ([]int64, bool) {
+	if !l.failOpen {
+		return nil, false
+	}
+	v, _ := l.fallback.getMulti(keys)
 	return v, true
 }
 
@@ -642,32 +700,58 @@ type scopeUsage struct {
 	storeDown bool
 }
 
+// usageWindowKeys returns the six windowKey strings currentUsage reads
+// for sc at time now, in a fixed order — req/min, req/day, tok/day,
+// tok/month, cost/day, cost/month — matching scopeUsage's field order
+// exactly, so currentUsage can map storeGetMulti's result slice back to
+// named fields by plain index.
+func usageWindowKeys(sc limitScope, now time.Time) []string {
+	return []string{
+		windowKey(sc.kind, sc.id, metricReq, windowMin, now),
+		windowKey(sc.kind, sc.id, metricReq, windowDay, now),
+		windowKey(sc.kind, sc.id, metricTok, windowDay, now),
+		windowKey(sc.kind, sc.id, metricTok, windowMonth, now),
+		windowKey(sc.kind, sc.id, metricCost, windowDay, now),
+		windowKey(sc.kind, sc.id, metricCost, windowMonth, now),
+	}
+}
+
 // currentUsage reads every scope's six current-window counters — the
 // same (kind, id, metric, window) combinations checkAndCount/account
-// already write — via the limiter's own getCounter, so it applies the
+// already write — via the limiter's own storeGetMulti, so it applies the
 // identical fail-open/fail-closed policy every enforcement read already
-// does. It is read-only: unlike checkAndCount, it never increments
-// anything. Order is preserved: currentUsage(scopes)[i] corresponds to
-// scopes[i].
+// does, and it is read-only: unlike checkAndCount, it never increments
+// anything.
+//
+// One storeGetMulti call per scope (controller-approved amendment,
+// 2026-08-20 review): the original per-metric l.getCounter loop issued
+// six separate round trips per scope against the single shared Redis
+// connection — GET /admin/api/usage serialized 6×(users+groups) of them.
+// Batching all scopes' keys into one single storeGetMulti call would cut
+// that further, to one round trip total, but was not taken here: it
+// would need buildAdminUsage to flatten and later re-split two
+// differently-sized scope lists (users, groups) around one shared call,
+// for a further win only realized when both lists are non-trivially
+// large. One call per scope already turns 6N round trips into N, keeps
+// currentUsage's per-scope iteration shape identical to
+// checkAndCount/evaluateScope's, and keeps a single scope's store
+// failure from forcing every other scope in the same request to look
+// storeDown too. Order is preserved: currentUsage(scopes)[i] corresponds
+// to scopes[i].
 func (l *limiter) currentUsage(scopes []limitScope) []scopeUsage {
 	now := l.now()
 	out := make([]scopeUsage, len(scopes))
 	for i, sc := range scopes {
-		reqMin, ok1 := l.getCounter(sc.kind, sc.id, metricReq, windowMin, now)
-		reqDay, ok2 := l.getCounter(sc.kind, sc.id, metricReq, windowDay, now)
-		tokDay, ok3 := l.getCounter(sc.kind, sc.id, metricTok, windowDay, now)
-		tokMonth, ok4 := l.getCounter(sc.kind, sc.id, metricTok, windowMonth, now)
-		costDay, ok5 := l.getCounter(sc.kind, sc.id, metricCost, windowDay, now)
-		costMonth, ok6 := l.getCounter(sc.kind, sc.id, metricCost, windowMonth, now)
-		if !ok1 || !ok2 || !ok3 || !ok4 || !ok5 || !ok6 {
+		vals, ok := l.storeGetMulti(usageWindowKeys(sc, now))
+		if !ok {
 			out[i] = scopeUsage{kind: sc.kind, id: sc.id, storeDown: true}
 			continue
 		}
 		out[i] = scopeUsage{
 			kind: sc.kind, id: sc.id,
-			requestsPerMinute: reqMin, requestsPerDay: reqDay,
-			tokensPerDay: tokDay, tokensPerMonth: tokMonth,
-			costPerDayMicros: costDay, costPerMonthMicros: costMonth,
+			requestsPerMinute: vals[0], requestsPerDay: vals[1],
+			tokensPerDay: vals[2], tokensPerMonth: vals[3],
+			costPerDayMicros: vals[4], costPerMonthMicros: vals[5],
 		}
 	}
 	return out
