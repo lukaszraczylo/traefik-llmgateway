@@ -122,8 +122,18 @@ func (st *providerState) finishRefresh(now time.Time, ids []string, err error) {
 // guarded by its own mutex), so modelRegistry itself needs no lock beyond
 // warnedMu for the collision-log dedup below.
 type modelRegistry struct {
-	adapters      map[string]providerAdapter
-	states        map[string]*providerState
+	adapters map[string]providerAdapter
+	states   map[string]*providerState
+	// log is a bound method value (g.errorf), injected rather than holding
+	// a *Gateway directly. Every call site below pre-formats with
+	// fmt.Sprintf and calls log("%s", msg) — never log(format, a, b, ...)
+	// with two or more variadic arguments. Yaegi v0.16.1's CFG builder
+	// panics ("index out of range") compiling a call to a struct FIELD of
+	// variadic func type with 2+ variadic arguments; the identical call
+	// shape through a method or interface method is unaffected — this is
+	// specific to a field holding a func value. Verified empirically
+	// against yaegi v0.16.1 (see tools/yaegi-check) and does not apply to
+	// g.logf/g.errorf, which are methods, not fields.
 	log           func(string, ...any)
 	nowFn         func() time.Time
 	warned        map[string]bool
@@ -205,7 +215,7 @@ func (m *modelRegistry) warmFill(ctx context.Context) {
 		cancel()
 		st.finishRefresh(m.now(), ids, err)
 		if err != nil {
-			m.log("model registry: initial discovery for provider %q failed: %v", name, err)
+			m.log("%s", fmt.Sprintf("model registry: initial discovery for provider %q failed: %v", name, err))
 		}
 	}
 }
@@ -264,7 +274,7 @@ func (m *modelRegistry) refreshProvider(name string, st *providerState, adapter 
 		}
 		st.finishRefresh(m.now(), ids, err)
 		if err != nil {
-			m.log("model registry: discovery refresh for provider %q failed: %v", name, err)
+			m.log("%s", fmt.Sprintf("model registry: discovery refresh for provider %q failed: %v", name, err))
 		}
 	}()
 
@@ -371,7 +381,7 @@ func (m *modelRegistry) warnCollisionOnce(id, winner string, provs []string) {
 		return
 	}
 	m.warned[id] = true
-	m.log("model registry: model id %q is provided by multiple providers %v; %q wins the bare id", id, provs, winner)
+	m.log("%s", fmt.Sprintf("model registry: model id %q is provided by multiple providers %v; %q wins the bare id", id, provs, winner))
 }
 
 // listFor returns grp's visible model catalog as OpenAI-compatible model

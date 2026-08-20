@@ -249,12 +249,19 @@ type limitViolation struct {
 // limiter enforces per-minute/day/month request, token, and cost limits
 // using fixed windows keyed by windowKey.
 type limiter struct {
-	store            counterStore                     // configured backend; nil means always use fallback (see newLimiter)
-	fallback         *memoryStore                     // in-process counter store, always available
-	nowFn            func() time.Time                 // injected for tests; defaults to time.Now
-	logf             func(format string, args ...any) // injectable store-error log; defaults to a no-op
-	lastLogAt        time.Time                        // guarded by logMu; last time a store error was logged
-	lastStoreFailure time.Time                        // guarded by logMu; zero means the store-down latch is not open (see storeLatched)
+	store    counterStore     // configured backend; nil means always use fallback (see newLimiter)
+	fallback *memoryStore     // in-process counter store, always available
+	nowFn    func() time.Time // injected for tests; defaults to time.Now
+	// logf is a bound method value (g.errorf), injectable for tests; defaults
+	// to a no-op. Its own call site (logStoreError) passes exactly one
+	// variadic argument — never extend that to two or more without first
+	// reading modelRegistry.log's doc comment in registry.go: a struct
+	// field of variadic func type crashes Yaegi v0.16.1's CFG builder past
+	// one variadic argument, even though the identical call through a
+	// method or interface method does not.
+	logf             func(format string, args ...any)
+	lastLogAt        time.Time // guarded by logMu; last time a store error was logged
+	lastStoreFailure time.Time // guarded by logMu; zero means the store-down latch is not open (see storeLatched)
 	logMu            sync.Mutex
 	failOpen         bool // store-error policy: true falls back to fallback, false refuses the request
 }

@@ -1,2 +1,3 @@
 .superpowers/
 *.wasm
+tools/yaegi-check/llmgw-yaegi-check

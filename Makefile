@@ -13,7 +13,7 @@ lint:
 	go vet ./...
 
 yaegi-check:
-	@echo "yaegi-check: placeholder until Task 14"
+	cd tools/yaegi-check && GOWORK=off go run . $(CURDIR)
 
 integration:
 	@echo "integration: placeholder until Task 15"
