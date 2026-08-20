@@ -897,8 +897,14 @@ Traefik's exact draining mechanism for requests already in flight on the
 old instance at swap time. What is verified: the integration suite's
 sustained-traffic reload test (`TestConfigHotReload`,
 `integration/config_hot_reload_test.go`) sends requests throughout the
-whole rewrite-and-propagation window and sees zero non-200 responses, on
-every run.
+whole rewrite-and-propagation window and sees zero non-200 responses.
+That result means different things depending on whether Traefik's
+directory watch actually picks up the change within the test's own
+bound. When it does, zero non-200s is evidence of a blip-free reload.
+When it does not — a host-dependent propagation delay, not a plugin
+defect — the same zero-non-200s result only shows the stack stayed
+healthy through an unreloaded rewrite attempt, not that a reload itself
+is blip-free.
 
 A rebuilt instance keeps some state and resets the rest:
 

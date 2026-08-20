@@ -37,10 +37,14 @@ type group struct {
 	agents     []string
 	// cacheTTL is GroupConfig.CacheTTL parsed and validated at construction
 	// (newAuthStore below): 0 inherits the global responseCache's TTL
-	// (effectiveTTL, cache.go), a positive value overrides it for this
-	// group's cache entries only. GroupConfig.CacheTTL == "" is the only
-	// input that produces 0 here — every other value either becomes a
-	// positive duration or fails newAuthStore as a constructor error.
+	// (effectiveTTL, cache.go); a positive value sets the TTL written
+	// when THIS group's own request populates a cache entry. It is not a
+	// per-group scope — cache entries are shared across every group that
+	// can reach the model (groupCacheEnabled, cache.go), so a positive
+	// cacheTTL only ever controls a write's TTL, never which group can
+	// later read the entry. GroupConfig.CacheTTL == "" is the only input
+	// that produces 0 here — every other value either becomes a positive
+	// duration or fails newAuthStore as a constructor error.
 	cacheTTL time.Duration
 }
 

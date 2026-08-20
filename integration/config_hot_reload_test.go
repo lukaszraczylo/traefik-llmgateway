@@ -116,21 +116,26 @@ const settleConsecutivePolls = 3
 // consecutive polls, or bound elapses without ever reaching that streak;
 // it returns whether it settled.
 //
-// This is called unconditionally by TestConfigHotReload's cleanup, on
-// BOTH outcomes of the earlier alias poll (the watch firing within its
-// own bound, or not) — fixing a real bug found during verification: an
+// TestConfigHotReload's cleanup calls this unconditionally, on both
+// outcomes of the earlier alias poll. On the fired path it is a real
+// guard: two rebuilds are known to have been triggered (the original
+// add, then this cleanup's own restore), and settling confirms both
+// landed before cleanup returns. On the skip path it is best effort
+// only — if the original add's rebuild is still pending past the 30s
+// alias-poll bound, or never fires at all, no amount of polling here can
+// prove that; it can only improve the odds that a still-in-flight
+// rebuild resolves before this test hands control back.
+//
+// Waiting here is still required on the skip path, not a no-op: an
 // earlier version of this cleanup polled only for the injected alias to
-// DISAPPEAR, which trivially and instantly "succeeded" on the path where
-// the watch never fired at all, since the alias was never live in the
-// first place and "not present" was already true on the very first
-// check. That left the exact propagation window this function now
-// guards completely unwatched, and it raced TestUsersFileHotReload's own
-// (pre-existing, non-atomic) write to users.json during verification: a
-// rebuild this test's own restore triggered landed later, mid-write, read
-// a torn file, and failed plugin construction outright — a global 404
-// outage until some later, unrelated config change happened to trigger a
-// successful rebuild. Requiring a real settle, on every path, removes
-// that window.
+// DISAPPEAR, which trivially and instantly "succeeded" on that path (the
+// alias was never live, so "not present" was already true on the first
+// check) — a guaranteed-zero-wait bug, found when it raced
+// TestUsersFileHotReload's own non-atomic write to users.json during
+// verification: a rebuild this test's own restore triggered landed
+// later, mid-write, read a torn file, and failed plugin construction
+// outright — a global 404 outage until an unrelated later config change
+// triggered a successful rebuild.
 func settleToBaseline(baseURL, apiKey string, baseline map[string]bool, bound time.Duration) bool {
 	consecutive := 0
 	deadline := time.Now().Add(bound)
@@ -319,8 +324,8 @@ func TestConfigHotReload(t *testing.T) {
 			t.Errorf("rename restore temp config over %q: %v", configPath, err)
 			return
 		}
-		if !settleToBaseline(traefik1URL, hotReloadProbeKey, baselineIDs, 20*time.Second) {
-			t.Logf("cleanup: /v1/models did not settle back to the baseline model set within 20s of restoring the config — a later test may race a still-pending rebuild")
+		if !settleToBaseline(traefik1URL, hotReloadProbeKey, baselineIDs, 30*time.Second) {
+			t.Logf("cleanup: /v1/models did not settle back to the baseline model set within 30s of restoring the config — a later test may race a still-pending rebuild")
 		}
 	})
 
