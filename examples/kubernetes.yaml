@@ -10,12 +10,15 @@
 # see the Helm values snippet at the bottom of this file.
 #
 # The empty-map gotcha: write an empty group as `providers: []`, never a
-# bare `{}`. Traefik's own dynamic-config decode pipeline (which the
-# Kubernetes CRD provider funnels plugin config through, same as the file
-# provider) can fail to round-trip a truly empty nested object with
-# "expected a map, got 'string'" — verified against this exact shape in
-# examples/docker-compose.yml. An explicit empty list decodes correctly
-# and means the same thing (all values allowed).
+# bare `{}`. Confirmed against Traefik's file provider, twice, with this
+# exact plugin build (examples/docker-compose.yml, plus an isolated
+# minimal repro outside that demo's compose-specific config mechanism): a
+# bare `default: {}` fails plugin construction with
+# "expected a map, got 'string'"; an explicit empty list decodes
+# correctly and means the same thing (all values allowed). Whether the
+# Kubernetes CRD provider used below hits the same decode path as the
+# file provider is NOT verified — this file uses the empty-list form
+# defensively, not because the CRD path is confirmed affected.
 
 apiVersion: v1
 kind: Secret
@@ -98,6 +101,46 @@ spec:
       passthroughUnknown: false
 
 ---
+# Traefik requires a real backing Service for a router even though this
+# middleware short-circuits every path it recognizes; whoami (the same
+# image already exercised in ../examples/docker-compose.yml) is a small,
+# always-up dummy, only ever reached via passthroughUnknown (default
+# false, which 404s instead). Any always-up internal service works here.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: llmgateway-dummy-backend
+  namespace: traefik
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: llmgateway-dummy-backend
+  template:
+    metadata:
+      labels:
+        app: llmgateway-dummy-backend
+    spec:
+      containers:
+        - name: whoami
+          image: traefik/whoami:v1.10
+          ports:
+            - containerPort: 80
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: llmgateway-dummy-backend
+  namespace: traefik
+spec:
+  selector:
+    app: llmgateway-dummy-backend
+  ports:
+    - port: 80
+      targetPort: 80
+
+---
 apiVersion: traefik.io/v1alpha1
 kind: IngressRoute
 metadata:
@@ -111,11 +154,6 @@ spec:
       kind: Rule
       middlewares:
         - name: llmgateway
-      # Traefik requires a real backing Service for a router even though
-      # this middleware short-circuits every path it recognizes; a small
-      # dummy such as traefik/whoami (see ../examples/docker-compose.yml)
-      # or any always-up internal service works, since it is only ever
-      # reached via passthroughUnknown (default false, which 404s instead).
       services:
         - name: llmgateway-dummy-backend
           port: 80

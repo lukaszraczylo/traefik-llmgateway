@@ -34,13 +34,16 @@ Catalog — see [Development](#development) for what that needs.
 
 ```mermaid
 flowchart LR
-    Req["incoming request"] --> Auth["auth<br/>identify(): key digest lookup"]
-    Auth -->|"no match"| E401["401 invalid_api_key"]
-    Auth -->|"user, group"| Route["route<br/>ServeHTTP dispatch"]
-    Route --> Unified["unified<br/>/v1/chat/completions<br/>/v1/embeddings<br/>/v1/models"]
-    Route --> MCP["MCP/A2A proxy<br/>/mcp/name/...<br/>/a2a/name/..."]
-    Route --> Passthrough["native passthrough<br/>/providerName/..."]
-    Route -->|"no route matches"| Fallback["passthroughUnknown ? next : 404"]
+    Req["incoming request"] --> Route{"route<br/>ServeHTTP: path+method dispatch"}
+    Route -->|"a recognized route:<br/>/v1/models, /v1/chat/completions,<br/>/v1/embeddings, /v1/mcp/servers,<br/>/v1/agents, /mcp/name/...,<br/>/a2a/name/..., or /providerName/...<br/>for a known provider"| Auth["auth (per branch)<br/>identify(): key digest lookup"]
+    Route -->|"no route matches"| Fallback["passthroughUnknown ? next : 404<br/>never calls identify()"]
+    Auth -->|"no match"| E401["401 authentication_error"]
+    Auth -->|"user, group"| Branch{"branch"}
+    Branch --> Models["GET /v1/models"]
+    Branch --> Unified["POST /v1/chat/completions<br/>POST /v1/embeddings"]
+    Branch --> Registry["GET /v1/mcp/servers, /v1/agents"]
+    Branch --> MCP["MCP/A2A proxy"]
+    Branch --> Passthrough["native passthrough"]
     Unified --> Resolve["resolve model<br/>registry.resolve"]
     Resolve -->|"unknown/denied"| E404["404 / 403"]
     Resolve --> Limit1["limiter.checkAndCount"]
@@ -55,6 +58,8 @@ flowchart LR
     Exec --> Account["account: usage, cost"]
     Account --> Resp["respond to client"]
     ExecProxy --> Resp
+    Models --> Resp
+    Registry --> Resp
 ```
 
 Every route the plugin recognises is handled entirely inside the
@@ -120,11 +125,14 @@ http:
 
 > Write an "allow everything" group as `providers: []` (an explicit empty
 > list), not a bare `{}`. See the note at the top of
-> [`examples/kubernetes.yaml`](examples/kubernetes.yaml) — an empty nested
-> object can fail to round-trip through Traefik's own dynamic-config
-> decoder with `expected a map, got 'string'`; an explicit empty list
-> means the same thing (all values allowed) and decodes correctly. Verified
-> against this exact plugin build in `examples/docker-compose.yml`.
+> [`examples/kubernetes.yaml`](examples/kubernetes.yaml) — confirmed
+> against Traefik's **file provider**, twice, with this exact plugin build:
+> a bare `default: {}` fails plugin construction with
+> `expected a map, got 'string'`; `default: {providers: []}` loads cleanly.
+> Not tested against the Docker/ECS label providers or the Kubernetes CRD
+> provider — no claim either way for those. An explicit empty list means
+> the same thing as an empty object (all values allowed), so writing it
+> this way costs nothing even where the bug does not apply.
 
 Attach the middleware to a router the same way as any other Traefik
 middleware. The router's backing service is never actually reached unless
@@ -406,11 +414,17 @@ kept — a bad edit to the file never breaks already-authenticated traffic.
   stripped before any upstream or target request and never reaches a
   provider, MCP server, or A2A agent.
 - Neither kind of key is ever written to a log line — the logging helpers
-  (`logger.go`) carry an explicit "never log key material" contract, and
-  error types (`providerHTTPError`, etc.) deliberately omit request/response
-  bodies that could carry one from ending up in a log line by accident.
-- Auth events are logged without key material: a lookup miss is a plain
-  401 with no indication of which key was tried.
+  (`logger.go`) carry an explicit "never log key material" contract.
+  `providerHTTPError`'s `Error()` string (`providers.go`) separately omits
+  the upstream response body it still holds as a struct field, so a future
+  caller that ever formats the error bare (`%v`) cannot accidentally echo
+  provider response content into a log line; today's only caller
+  (`writeProviderUpstreamError`) reads that body directly and puts it in
+  the client-facing response, never in a log.
+- **There is no auth-event logging at all** — `auth.go` has zero logging
+  calls of any kind. A key that fails lookup gets a plain 401 JSON
+  envelope and nothing else happens; there is no log line, successful or
+  failed, for a request to appear in.
 
 ## Known limitations
 
@@ -452,19 +466,19 @@ kept — a bad edit to the file never breaks already-authenticated traffic.
   Go's `Transport` auto-negotiates; an upstream that used a different
   encoding on its own initiative (never observed against OpenAI,
   Anthropic, or Gemini) would pass through unmodified instead.
-- Malformed-path rejects (a `..` traversal segment in a passthrough or
-  MCP/A2A rest-path) are checked, and rejected, before the rate limiter
-  runs — they never consume quota.
 
 ## Kubernetes
 
 See [`examples/kubernetes.yaml`](examples/kubernetes.yaml) for a complete,
-YAML-validated example manifest: a `Secret` holding the users file, a
-`Middleware` custom resource carrying the plugin's own configuration
-(validated against the real `Config` struct — every field in that example
-round-trips through `New()` cleanly), an `IngressRoute` wiring it to a
-host, and a Traefik Helm values snippet for loading the plugin and wiring
-provider keys in from Secrets via environment variables.
+YAML-validated example manifest that `kubectl apply -f` runs as-is: a
+`Secret` holding the users file, a `Middleware` custom resource carrying
+the plugin's own configuration (validated against the real `Config`
+struct — every field in that example round-trips through `New()`
+cleanly), a dummy backing `Deployment`/`Service` (Traefik requires a real
+router backend even though this middleware never actually reaches it —
+see [Quickstart](#quickstart)), an `IngressRoute` wiring it all to a
+host, and a Traefik Helm values snippet for loading the plugin and
+wiring provider keys in from Secrets via environment variables.
 
 The short version:
 
