@@ -1141,3 +1141,228 @@ func TestHandleChat_AnthropicTranslatedResponse_CachedAboveAdapter(t *testing.T)
 		t.Errorf("upstreamCalls = %d, want 1 (the anthropic upstream must not be called again on a cache hit)", upstreamCalls)
 	}
 }
+
+// TestHandleChat_CacheMixedAliasForm_NeverHits_SameFormHits is the
+// review-fix (finding 1, CRITICAL) end-to-end regression: a bare alias
+// ("claude-x") and its provider-prefixed form ("anthropic/claude-x")
+// resolve to the identical provider+upstreamModel, but a translating
+// adapter bakes the client's own requested alias into the cached
+// response body's "model" field — so a request using one form must never
+// be served from an entry cached under the other form, or the client
+// would receive a "model" value it never sent. The same form repeated
+// must still hit.
+func TestHandleChat_CacheMixedAliasForm_NeverHits_SameFormHits(t *testing.T) {
+	const anthResp = `{"id":"msg_01ABC","type":"message","role":"assistant","content":[{"type":"text","text":"hi there"}],"model":"claude-x","stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":4}}`
+	var upstreamCalls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalls++
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(anthResp))
+	}))
+	defer srv.Close()
+
+	redisLn := newBehavioralRedisServer(t)
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{
+		"anthropic": {Type: "anthropic", BaseURL: srv.URL, APIKey: "sk-ant", Models: []string{"claude-x"}},
+	}
+	cfg.Groups = map[string]*GroupConfig{"default": {}}
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{{Name: "alice", Group: "default", APIKey: "sk-alice"}}}
+	cfg.Redis = &RedisConfig{Address: redisLn.Addr().String()}
+	cfg.Cache = CacheConfig{Enabled: true, TTL: "1m"}
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	bareBody := map[string]any{"model": "claude-x", "messages": []any{map[string]any{"role": "user", "content": "hi"}}}
+	prefixedBody := map[string]any{"model": "anthropic/claude-x", "messages": []any{map[string]any{"role": "user", "content": "hi"}}}
+
+	// A: bare alias form. Miss, cached under the bare-alias key.
+	reqA := newUnifiedRequest(t, http.MethodPost, "/v1/chat/completions", "sk-alice", bareBody)
+	recA := httptest.NewRecorder()
+	h.ServeHTTP(recA, reqA)
+	if recA.Code != http.StatusOK || recA.Header().Get("X-Llmgw-Cache") != "miss" {
+		t.Fatalf("request A: status=%d cache=%q, want 200/miss", recA.Code, recA.Header().Get("X-Llmgw-Cache"))
+	}
+	var outA map[string]any
+	if err := json.Unmarshal(recA.Body.Bytes(), &outA); err != nil {
+		t.Fatalf("decode A: %v", err)
+	}
+	if outA["model"] != "claude-x" {
+		t.Fatalf("request A model = %v, want %q", outA["model"], "claude-x")
+	}
+	if upstreamCalls != 1 {
+		t.Fatalf("upstreamCalls after A = %d, want 1", upstreamCalls)
+	}
+
+	// B: same upstream model, PREFIXED alias form. Must be a genuine
+	// miss, never served A's cached "claude-x" body.
+	reqB := newUnifiedRequest(t, http.MethodPost, "/v1/chat/completions", "sk-alice", prefixedBody)
+	recB := httptest.NewRecorder()
+	h.ServeHTTP(recB, reqB)
+	if recB.Code != http.StatusOK {
+		t.Fatalf("request B: status = %d, body=%s", recB.Code, recB.Body.String())
+	}
+	if got := recB.Header().Get("X-Llmgw-Cache"); got != "miss" {
+		t.Errorf("request B X-Llmgw-Cache = %q, want %q (a different alias form must never hit A's entry)", got, "miss")
+	}
+	var outB map[string]any
+	if err := json.Unmarshal(recB.Body.Bytes(), &outB); err != nil {
+		t.Fatalf("decode B: %v", err)
+	}
+	if outB["model"] != "anthropic/claude-x" {
+		t.Fatalf("request B model = %v, want its own requested alias %q, never A's cached %q", outB["model"], "anthropic/claude-x", "claude-x")
+	}
+	if upstreamCalls != 2 {
+		t.Fatalf("upstreamCalls after B = %d, want 2 (a different alias form is a genuine miss)", upstreamCalls)
+	}
+
+	// C: bare form again, matching A exactly. Must hit A's entry.
+	reqC := newUnifiedRequest(t, http.MethodPost, "/v1/chat/completions", "sk-alice", bareBody)
+	recC := httptest.NewRecorder()
+	h.ServeHTTP(recC, reqC)
+	if got := recC.Header().Get("X-Llmgw-Cache"); got != "hit" {
+		t.Errorf("request C X-Llmgw-Cache = %q, want %q (same alias form as A must hit)", got, "hit")
+	}
+	if recC.Body.String() != recA.Body.String() {
+		t.Errorf("request C body = %q, want identical to A's cached body %q", recC.Body.String(), recA.Body.String())
+	}
+	if upstreamCalls != 2 {
+		t.Errorf("upstreamCalls after C = %d, want still 2 (C is a real hit, no upstream call)", upstreamCalls)
+	}
+}
+
+// TestHandleChat_CacheableRequest_UpstreamDown_502HasNoCacheHeader is the
+// review-fix (finding 4, folded) regression: a cacheable request whose
+// upstream is unreachable gets a 502 with NO X-Llmgw-Cache header — the
+// pre-set "miss" header (set before call() runs, so headers precede a
+// successful body) must be cleared once handleAdapterError decides the
+// request actually failed, since nothing was served from or stored to
+// the cache.
+func TestHandleChat_CacheableRequest_UpstreamDown_502HasNoCacheHeader(t *testing.T) {
+	deadLn := newFakeListener(t)
+	deadAddr := deadLn.Addr().String()
+	if err := deadLn.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	redisLn := newBehavioralRedisServer(t)
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{
+		"openai": {Type: "openai", BaseURL: "http://" + deadAddr, APIKey: "k", Models: []string{"gpt-test"}},
+	}
+	cfg.Groups = map[string]*GroupConfig{"default": {}}
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{{Name: "alice", Group: "default", APIKey: "sk-alice"}}}
+	cfg.Redis = &RedisConfig{Address: redisLn.Addr().String()}
+	cfg.Cache = CacheConfig{Enabled: true, TTL: "1m"}
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	body := map[string]any{"model": "gpt-test", "messages": []any{map[string]any{"role": "user", "content": "hi"}}}
+	req := newUnifiedRequest(t, http.MethodPost, "/v1/chat/completions", "sk-alice", body)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502 (connection refused), body=%s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("X-Llmgw-Cache"); got != "" {
+		t.Errorf("X-Llmgw-Cache = %q, want unset on a 502 (nothing was served from or stored to the cache)", got)
+	}
+}
+
+// --- cacheCaptureWriter: bounded capture (review finding 2) ---
+
+// TestCacheCaptureWriter_BoundsBufferAtMaxBodyBytes_StillWritesFullBodyThrough
+// is the review-fix (finding 2, Important) regression: a single Write of
+// a body larger than maxBodyBytes must not buffer the whole thing —
+// capture stops at the cap — while the real client-visible write is
+// never truncated.
+func TestCacheCaptureWriter_BoundsBufferAtMaxBodyBytes_StillWritesFullBodyThrough(t *testing.T) {
+	rec := httptest.NewRecorder()
+	sw := &statusTrackingWriter{ResponseWriter: rec}
+	const maxBody = 16
+	cw := newCacheCaptureWriter(sw, maxBody)
+
+	fullBody := []byte(strings.Repeat("x", maxBody+50)) // one write, well over the cap
+	cw.Header().Set("Content-Type", "application/json")
+	cw.WriteHeader(http.StatusOK)
+	n, err := cw.Write(fullBody)
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if n != len(fullBody) {
+		t.Errorf("Write returned n=%d, want %d (the real client write must never be truncated)", n, len(fullBody))
+	}
+
+	if !cw.oversize {
+		t.Error("oversize = false, want true")
+	}
+	// "buffer <= cap + one write": this implementation holds the capture
+	// at exactly the cap, a tighter bound the looser one still accepts.
+	if cw.buf.Len() > maxBody {
+		t.Errorf("captured buffer = %d bytes, want <= maxBodyBytes (%d)", cw.buf.Len(), maxBody)
+	}
+	if rec.Body.String() != string(fullBody) {
+		t.Errorf("client-visible body = %d bytes, want the full %d-byte body (capture must never truncate the real response)", rec.Body.Len(), len(fullBody))
+	}
+}
+
+// TestCacheCaptureWriter_MultipleWrites_StopsCapturingOnceCapReached
+// covers the multi-write case: capture stops appending once the cap is
+// crossed on a later write, not just a single oversize one, while every
+// write still reaches the real client in full.
+func TestCacheCaptureWriter_MultipleWrites_StopsCapturingOnceCapReached(t *testing.T) {
+	rec := httptest.NewRecorder()
+	sw := &statusTrackingWriter{ResponseWriter: rec}
+	const maxBody = 10
+	cw := newCacheCaptureWriter(sw, maxBody)
+	cw.WriteHeader(http.StatusOK)
+
+	if _, err := cw.Write([]byte("12345")); err != nil { // 5 bytes, under the cap
+		t.Fatalf("Write: %v", err)
+	}
+	if cw.oversize {
+		t.Fatal("oversize = true after a write under the cap")
+	}
+	if _, err := cw.Write([]byte("67890ABCDE")); err != nil { // 10 more bytes, crosses the 10-byte cap
+		t.Fatalf("Write: %v", err)
+	}
+	if !cw.oversize {
+		t.Error("oversize = false, want true once the cap is crossed")
+	}
+	if cw.buf.Len() != maxBody {
+		t.Errorf("captured buffer = %d bytes, want exactly maxBodyBytes (%d)", cw.buf.Len(), maxBody)
+	}
+	if rec.Body.String() != "1234567890ABCDE" {
+		t.Errorf("client-visible body = %q, want the full, unsplit content across both writes", rec.Body.String())
+	}
+}
+
+// TestCacheCaptureWriter_ImplicitStatus_CapturesContentType is the
+// review-fix (finding 4, folded) regression: the implicit-200 Write path
+// (no explicit WriteHeader call) must still snapshot Content-Type, not
+// just status — mirroring WriteHeader's own capture.
+func TestCacheCaptureWriter_ImplicitStatus_CapturesContentType(t *testing.T) {
+	rec := httptest.NewRecorder()
+	sw := &statusTrackingWriter{ResponseWriter: rec}
+	cw := newCacheCaptureWriter(sw, defaultCacheMaxBodyBytes)
+	cw.Header().Set("Content-Type", "application/json") // set, but WriteHeader never explicitly called
+
+	if _, err := cw.Write([]byte(`{"ok":true}`)); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	if cw.status != http.StatusOK {
+		t.Errorf("status = %d, want 200 (implicit)", cw.status)
+	}
+	if cw.contentType != "application/json" {
+		t.Errorf("contentType = %q, want %q (must be captured on the implicit-200 path too)", cw.contentType, "application/json")
+	}
+}

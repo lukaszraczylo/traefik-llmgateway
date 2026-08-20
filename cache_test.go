@@ -2,6 +2,7 @@ package traefikllmgateway
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"strings"
@@ -11,6 +12,16 @@ import (
 
 // --- cacheKey: stability, stripped fields, key material (task 2) ---
 
+// testCacheKey calls cacheKey with requestedModel defaulted to
+// upstreamModel and endpoint defaulted to cacheEndpointChat. The tests
+// below that use it exercise the provider/upstreamModel/body dimensions
+// of the key; the alias and endpoint dimensions have their own dedicated
+// tests further down (TestCacheKey_BareVsPrefixedAlias_DistinctKeys,
+// TestCacheKey_ChatVsEmbeddings_DistinctKeys).
+func testCacheKey(provider, upstreamModel string, req map[string]any) string {
+	return cacheKey(provider, upstreamModel, upstreamModel, cacheEndpointChat, req)
+}
+
 // TestCacheKey_StableAcrossMapInsertionOrder proves two requests with
 // identical fields, built in different map-literal order, hash to the
 // same key — Go's json.Marshal always sorts map[string]any keys, which is
@@ -19,8 +30,8 @@ func TestCacheKey_StableAcrossMapInsertionOrder(t *testing.T) {
 	req1 := map[string]any{"model": "gpt-4", "messages": []any{"a"}, "temperature": 0.7}
 	req2 := map[string]any{"temperature": 0.7, "model": "gpt-4", "messages": []any{"a"}}
 
-	k1 := cacheKey("openai", "gpt-4", req1)
-	k2 := cacheKey("openai", "gpt-4", req2)
+	k1 := testCacheKey("openai", "gpt-4", req1)
+	k2 := testCacheKey("openai", "gpt-4", req2)
 	if k1 != k2 {
 		t.Errorf("cacheKey differs by map insertion order: %q vs %q", k1, k2)
 	}
@@ -39,13 +50,13 @@ func TestCacheKey_StripsStreamOptionsAndUser(t *testing.T) {
 		"user":           "alice",
 	}
 
-	if got, want := cacheKey("openai", "gpt-4", base), cacheKey("openai", "gpt-4", withExtras); got != want {
+	if got, want := testCacheKey("openai", "gpt-4", base), testCacheKey("openai", "gpt-4", withExtras); got != want {
 		t.Errorf("cacheKey changed by stream_options/user: %q vs %q", got, want)
 	}
 
 	// A genuinely different "user" value must still change nothing.
 	otherUser := map[string]any{"model": "gpt-4", "messages": []any{"hi"}, "user": "bob"}
-	if got, want := cacheKey("openai", "gpt-4", withExtras), cacheKey("openai", "gpt-4", otherUser); got != want {
+	if got, want := testCacheKey("openai", "gpt-4", withExtras), testCacheKey("openai", "gpt-4", otherUser); got != want {
 		t.Errorf("cacheKey changed by a different user value: %q vs %q", got, want)
 	}
 }
@@ -54,7 +65,7 @@ func TestCacheKey_StripsStreamOptionsAndUser(t *testing.T) {
 // stripping works on a copy — the brief's "never mutate the live req".
 func TestCacheKey_NeverMutatesLiveRequestMap(t *testing.T) {
 	req := map[string]any{"model": "gpt-4", "user": "alice", "stream_options": map[string]any{}}
-	_ = cacheKey("openai", "gpt-4", req)
+	_ = testCacheKey("openai", "gpt-4", req)
 
 	if _, ok := req["user"]; !ok {
 		t.Error("cacheKey removed \"user\" from the live request map; want it left untouched")
@@ -73,16 +84,16 @@ func TestCacheKey_NeverMutatesLiveRequestMap(t *testing.T) {
 func TestCacheKey_DifferentProviderOrModel_DifferentKey(t *testing.T) {
 	req := map[string]any{"model": "gpt-4", "messages": []any{"hi"}}
 
-	base := cacheKey("openai", "gpt-4", req)
-	if got := cacheKey("azure", "gpt-4", req); got == base {
+	base := testCacheKey("openai", "gpt-4", req)
+	if got := testCacheKey("azure", "gpt-4", req); got == base {
 		t.Error("cacheKey identical across different providers")
 	}
-	if got := cacheKey("openai", "gpt-4o", req); got == base {
+	if got := testCacheKey("openai", "gpt-4o", req); got == base {
 		t.Error("cacheKey identical across different upstream models")
 	}
 	// "ab"+"c" vs "a"+"bc" must not collide despite concatenating to the
 	// same string — proves the \x00 separator actually separates.
-	if got := cacheKey("ab", "c", req); got == cacheKey("a", "bc", req) {
+	if got := testCacheKey("ab", "c", req); got == testCacheKey("a", "bc", req) {
 		t.Error("cacheKey collides across a provider/model boundary shift (missing separator)")
 	}
 }
@@ -90,13 +101,53 @@ func TestCacheKey_DifferentProviderOrModel_DifferentKey(t *testing.T) {
 // TestCacheKey_HasExpectedPrefix pins the key's wire format: spec §2's
 // "llmgw:cache:" + hex SHA-256 (64 hex chars).
 func TestCacheKey_HasExpectedPrefix(t *testing.T) {
-	k := cacheKey("openai", "gpt-4", map[string]any{"model": "gpt-4"})
+	k := testCacheKey("openai", "gpt-4", map[string]any{"model": "gpt-4"})
 	if !strings.HasPrefix(k, cacheKeyPrefix) {
 		t.Fatalf("cacheKey = %q, want prefix %q", k, cacheKeyPrefix)
 	}
 	hexPart := strings.TrimPrefix(k, cacheKeyPrefix)
 	if len(hexPart) != 64 {
 		t.Errorf("hex digest length = %d, want 64 (SHA-256)", len(hexPart))
+	}
+}
+
+// TestCacheKey_BareVsPrefixedAlias_DistinctKeys is the review-fix
+// (finding 1, CRITICAL) regression: cacheKey must hash the client's own
+// requestedModel string as real key material, not just provider and
+// upstreamModel — a translating adapter (anthropic, gemini) bakes the
+// echoed alias straight into the cached response body's own "model"
+// field, so "claude-x" (bare) and "anthropic/claude-x" (provider-
+// prefixed), which resolve to the identical provider+upstreamModel, must
+// still hash differently: serving client B (who sent the prefixed form)
+// a body whose "model" field reads "claude-x" (client A's form) would be
+// serving an id B never sent.
+func TestCacheKey_BareVsPrefixedAlias_DistinctKeys(t *testing.T) {
+	req := map[string]any{"messages": []any{"hi"}}
+
+	bare := cacheKey("anthropic", "claude-x", "claude-x", cacheEndpointChat, req)
+	prefixed := cacheKey("anthropic", "claude-x", "anthropic/claude-x", cacheEndpointChat, req)
+	if bare == prefixed {
+		t.Error("cacheKey identical for a bare vs provider-prefixed alias of the same upstream model")
+	}
+
+	// Same alias form twice must still hash identically (the whole point
+	// of a cache: a genuine repeat request is a genuine hit).
+	if got, want := cacheKey("anthropic", "claude-x", "claude-x", cacheEndpointChat, req), bare; got != want {
+		t.Errorf("cacheKey differs for two requests using the identical alias form: %q vs %q", got, want)
+	}
+}
+
+// TestCacheKey_ChatVsEmbeddings_DistinctKeys is finding 1's second
+// requirement: endpoint is real key material, so a canonically-identical
+// body under /v1/chat/completions and /v1/embeddings never collides into
+// one entry.
+func TestCacheKey_ChatVsEmbeddings_DistinctKeys(t *testing.T) {
+	req := map[string]any{"model": "gpt-4", "input": "hi"}
+
+	chatKey := cacheKey("openai", "gpt-4", "gpt-4", cacheEndpointChat, req)
+	embedKey := cacheKey("openai", "gpt-4", "gpt-4", cacheEndpointEmbeddings, req)
+	if chatKey == embedKey {
+		t.Error("cacheKey identical for the same body under chat vs embeddings endpoints")
 	}
 }
 
@@ -393,6 +444,100 @@ func TestResponseCache_Store_RedisDown_LoggedRateLimited(t *testing.T) {
 	c.store("k", 200, "application/json", []byte(`{}`))
 	if len(logged) != 1 {
 		t.Fatalf("logged = %d lines still inside the rate-limit window, want 1", len(logged))
+	}
+}
+
+// --- groupCacheEnabled ---
+// --- responseCache down-latch: outage amplification (review finding 3) ---
+
+// countingCacheStore is a cacheStore stub whose every call fails and is
+// counted, so a test can assert the down-latch (responseCache.latched/
+// recordFailure) skips the network call entirely once open, rather than
+// merely tolerating a repeated failure.
+type countingCacheStore struct {
+	err      error
+	getCalls int
+	setCalls int
+}
+
+func (s *countingCacheStore) getBytes(string) ([]byte, bool, error) {
+	s.getCalls++
+	return nil, false, s.err
+}
+
+func (s *countingCacheStore) setEx(string, []byte, time.Duration) error {
+	s.setCalls++
+	return s.err
+}
+
+// TestResponseCache_DownLatch_SkipsNetworkCallsWithinWindow is the
+// review-fix (finding 3, Important) regression: a Redis outage must not
+// pay a fresh network attempt (and its respCallTimeout) on every request
+// — after the first failure, lookup/store skip the network entirely for
+// storeDownLatchFor, mirroring limiter.storeLatched (limits.go).
+func TestResponseCache_DownLatch_SkipsNetworkCallsWithinWindow(t *testing.T) {
+	stub := &countingCacheStore{err: errors.New("boom")}
+	c := newResponseCache(stub, time.Minute, defaultCacheMaxBodyBytes, func(string, ...any) {}, func(string, ...any) {})
+	now := time.Date(2026, 8, 20, 10, 0, 0, 0, time.UTC)
+	c.nowFn = func() time.Time { return now }
+
+	// First lookup: a real network attempt, fails, opens the latch.
+	if _, ok := c.lookup("k"); ok {
+		t.Fatal("lookup ok = true, want false")
+	}
+	if stub.getCalls != 1 {
+		t.Fatalf("getCalls = %d, want 1", stub.getCalls)
+	}
+
+	// Second lookup, same instant: latched — zero network calls.
+	if _, ok := c.lookup("k"); ok {
+		t.Fatal("lookup ok = true, want false")
+	}
+	if stub.getCalls != 1 {
+		t.Fatalf("getCalls = %d after a latched lookup, want still 1 (no network call attempted)", stub.getCalls)
+	}
+
+	// store while latched: also zero network calls.
+	c.store("k", 200, "application/json", []byte(`{}`))
+	if stub.setCalls != 0 {
+		t.Fatalf("setCalls = %d while latched, want 0 (no network call attempted)", stub.setCalls)
+	}
+
+	// Once storeDownLatchFor elapses, the next call probes the store
+	// again (a natural half-open retry).
+	now = now.Add(storeDownLatchFor)
+	if _, ok := c.lookup("k"); ok {
+		t.Fatal("lookup ok = true, want false")
+	}
+	if stub.getCalls != 2 {
+		t.Fatalf("getCalls = %d after the latch window elapsed, want 2", stub.getCalls)
+	}
+}
+
+// TestResponseCache_CorruptedValue_DoesNotOpenDownLatch asserts a
+// corrupted stored value — the store answered fine, one entry was just
+// bad — never opens the down-latch: latching the WHOLE cache down over
+// one bad entry would turn a single corrupted key into an outage for
+// every other (perfectly healthy) key for storeDownLatchFor.
+func TestResponseCache_CorruptedValue_DoesNotOpenDownLatch(t *testing.T) {
+	ln := newFakeListener(t)
+	runFakeRESPServer(t, ln, []respStep{
+		{wantArgs: []string{"SELECT", "0"}, reply: []byte("+OK\r\n")},
+		{wantArgs: []string{"GET", "bad"}, reply: []byte("$8\r\nnot-json\r\n")},
+		{wantArgs: []string{"GET", "good"}, reply: []byte("$-1\r\n")},
+	})
+	c, _ := newTestResponseCache(t, ln)
+
+	if _, ok := c.lookup("bad"); ok {
+		t.Fatal("lookup ok = true, want false for a corrupted value")
+	}
+	if c.latched() {
+		t.Fatal("latched() = true after a corrupted-value miss, want false (not a Redis failure)")
+	}
+	// A second key's lookup must still reach the real store, not be
+	// short-circuited by an incorrectly-opened latch.
+	if _, ok := c.lookup("good"); ok {
+		t.Fatal("lookup ok = true, want false (a real miss)")
 	}
 }
 

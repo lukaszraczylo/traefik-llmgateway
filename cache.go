@@ -53,6 +53,17 @@ func validateCacheConfig(cc CacheConfig) (time.Duration, int, error) {
 	return ttl, maxBody, nil
 }
 
+// cacheStore is the minimal interface responseCache needs from its Redis
+// backend — satisfied structurally by *respClient (resp.go), with no
+// changes needed there. Abstracted so tests can inject a call-counting
+// stub in place of a real respClient, to prove the down-latch below
+// (recordFailure/latched) skips the network entirely rather than merely
+// tolerating repeated failures.
+type cacheStore interface {
+	setEx(key string, val []byte, ttl time.Duration) error
+	getBytes(key string) ([]byte, bool, error)
+}
+
 // buildResponseCache constructs the *responseCache newGateway attaches to
 // its Gateway, or nil when caching is not configured or not usable:
 //
@@ -111,8 +122,22 @@ type cachedResponse struct {
 // on *Gateway means caching is off; every method below assumes a non-nil
 // receiver, so every call site (routes_unified.go) checks g.cache != nil
 // first rather than this type having its own always-disabled behavior.
+//
+// Concurrent identical misses (a stampede) are not deduplicated: N
+// requests for the same uncached key that arrive close together all miss,
+// all call the upstream, and all SET the same key — accepted for v0.2. A
+// singleflight-style dedup would save upstream calls under bursty
+// concurrent identical traffic, but adds real complexity (a per-key
+// in-flight map, cancellation semantics if the leader request's client
+// disconnects) for a case that only wastes cost/latency, never
+// correctness — every request still gets a right answer, just not always
+// a cached one.
 type responseCache struct {
-	client *respClient
+	// client is a cacheStore, not a concrete *respClient: buildResponseCache
+	// always passes a *respClient (Go satisfies the interface implicitly),
+	// but tests inject a call-counting stub to prove the down-latch below
+	// skips the network entirely.
+	client cacheStore
 	// logf is informational — construction warnings (buildResponseCache)
 	// and store's oversize-skip notice — matching spec §2's "construction-
 	// time WARN via logf" and "skip store silently-with-debug-log": both
@@ -123,12 +148,20 @@ type responseCache struct {
 	// "existing pattern" (limits.go) — g.errorf there, g.errorf here.
 	errorf func(format string, args ...any)
 	nowFn  func() time.Time // injected for tests; defaults to time.Now
-	// lastLogAt and logMu rate-limit logCacheError to once per
-	// storeErrorLogEvery (limits.go), mirroring limiter.logStoreError —
-	// the same constant, so a Redis outage affecting both the limiter and
-	// the cache does not double the log volume a limiter-only outage
-	// would produce.
+	// lastLogAt, lastFailure, and logMu together implement the same two
+	// mechanisms as limiter's logStoreError/storeLatched (limits.go),
+	// reusing storeErrorLogEvery and storeDownLatchFor rather than
+	// duplicating them:
+	//   - lastLogAt rate-limits logCacheError to once per
+	//     storeErrorLogEvery, so a Redis outage does not flood the log.
+	//   - lastFailure opens the down-latch (see latched/recordFailure):
+	//     for storeDownLatchFor after any GET/SET error, lookup/store
+	//     skip the network call entirely rather than paying a fresh
+	//     respCallTimeout to rediscover the same outage on every request
+	//     — the amplification a shared-connection cache and limiter would
+	//     otherwise cause together during an outage.
 	lastLogAt    time.Time
+	lastFailure  time.Time
 	ttl          time.Duration
 	maxBodyBytes int
 	logMu        sync.Mutex
@@ -136,7 +169,7 @@ type responseCache struct {
 
 // newResponseCache returns a responseCache backed by client, storing
 // entries for ttl and refusing to store a body larger than maxBodyBytes.
-func newResponseCache(client *respClient, ttl time.Duration, maxBodyBytes int, logf, errorf func(format string, args ...any)) *responseCache {
+func newResponseCache(client cacheStore, ttl time.Duration, maxBodyBytes int, logf, errorf func(format string, args ...any)) *responseCache {
 	return &responseCache{client: client, ttl: ttl, maxBodyBytes: maxBodyBytes, logf: logf, errorf: errorf, nowFn: time.Now}
 }
 
@@ -158,16 +191,46 @@ func (c *responseCache) logCacheError(err error) {
 	}
 }
 
+// latched reports whether c is within storeDownLatchFor of its last
+// recorded GET/SET failure — mirrors limiter.storeLatched (limits.go).
+// While true, lookup/store skip the network call entirely rather than
+// paying a fresh respCallTimeout to rediscover an outage already known.
+func (c *responseCache) latched() bool {
+	c.logMu.Lock()
+	defer c.logMu.Unlock()
+	return !c.lastFailure.IsZero() && c.nowFn().Sub(c.lastFailure) < storeDownLatchFor
+}
+
+// recordFailure logs err (rate-limited, see logCacheError) and opens the
+// down-latch: every lookup/store call for the next storeDownLatchFor
+// skips the network call entirely — mirrors limiter.recordStoreFailure
+// (limits.go). Callers pass only a genuine transport/protocol error from
+// c.client (getBytes/setEx) here — a decoded-but-corrupted cached value is
+// not a Redis failure and must not latch the whole cache down over one
+// bad entry (lookup logs that case via logCacheError directly instead).
+func (c *responseCache) recordFailure(err error) {
+	c.logCacheError(err)
+	c.logMu.Lock()
+	c.lastFailure = c.nowFn()
+	c.logMu.Unlock()
+}
+
 // lookup returns the cached response for key. ok is false on a cache
-// miss — a real miss (key absent), a Redis error (logged, rate-limited),
-// or a corrupted stored value (also logged) — none of which distinguish
-// themselves to the caller: per spec §2, "redis errors during cache ops →
-// treat as miss ... never fail the request because the cache is down",
-// and a corrupted entry is handled the same way for the same reason.
+// miss — a real miss (key absent), the down-latch already open (latched,
+// no network call attempted), a Redis error (logged, rate-limited, and
+// latches the cache down for storeDownLatchFor), or a corrupted stored
+// value (logged, but does NOT latch — the store answered fine, one entry
+// was just bad) — none of which distinguish themselves to the caller: per
+// spec §2, "redis errors during cache ops → treat as miss ... never fail
+// the request because the cache is down".
 func (c *responseCache) lookup(key string) (*cachedResponse, bool) {
+	if c.latched() {
+		return nil, false
+	}
+
 	raw, found, err := c.client.getBytes(key)
 	if err != nil {
-		c.logCacheError(err)
+		c.recordFailure(err)
 		return nil, false
 	}
 	if !found {
@@ -184,10 +247,11 @@ func (c *responseCache) lookup(key string) (*cachedResponse, bool) {
 
 // store saves status/contentType/body under key with the cache's
 // configured TTL. A body exceeding maxBodyBytes is skipped (logged, not
-// treated as an error), and a Redis error writing it is logged
-// (rate-limited via logCacheError) rather than surfaced — a cache write
-// must never fail a request that already succeeded and was already
-// written to the client.
+// treated as an error) before ever touching the network; a down-latch
+// already open (latched) also skips the network entirely; and a Redis
+// error writing it is logged (rate-limited) and opens the latch — none of
+// which surface to the caller: a cache write must never fail a request
+// that already succeeded and was already written to the client.
 func (c *responseCache) store(key string, status int, contentType string, body []byte) {
 	if len(body) > c.maxBodyBytes {
 		// Pre-formatted with fmt.Sprintf, then logged as a single "%s"
@@ -198,6 +262,9 @@ func (c *responseCache) store(key string, status int, contentType string, body [
 		// identical note, registry.go) — c.logf is exactly such a field.
 		msg := fmt.Sprintf("response cache: skipping store for %q: body %d bytes exceeds maxBodyBytes %d", key, len(body), c.maxBodyBytes)
 		c.logf("%s", msg)
+		return
+	}
+	if c.latched() {
 		return
 	}
 
@@ -211,26 +278,51 @@ func (c *responseCache) store(key string, status int, contentType string, body [
 	}
 
 	if err := c.client.setEx(key, val, c.ttl); err != nil {
-		c.logCacheError(err)
+		c.recordFailure(err)
 	}
 }
 
-// cacheKey derives the response-cache key for one request: spec §2's
-// "llmgw:cache: + hex SHA-256 of provider \x00 upstreamModel \x00
-// canonical-JSON(request body minus stream_options and user)". req is
-// never mutated — stripping builds a fresh copy — and canonical-JSON is
-// plain json.Marshal of that copy: encoding/json always marshals a
-// map[string]any's keys in sorted order, which is what makes the result
-// deterministic across requests carrying the same fields in different
-// insertion order.
+// cacheEndpointChat and cacheEndpointEmbeddings are cacheKey's endpoint
+// argument, one per cacheable route (routes_unified.go's handleChat/
+// handleEmbeddings) — keeping /v1/chat/completions and /v1/embeddings
+// requests that happen to canonicalize identically (same provider,
+// upstream model, and stripped body) from colliding into one cache entry.
+const (
+	cacheEndpointChat       = "chat"
+	cacheEndpointEmbeddings = "embeddings"
+)
+
+// cacheKey derives the response-cache key for one request: controller-
+// approved amendment to spec §2's original definition (design doc §2),
+// adding requestedModel and endpoint as two further \x00-separated
+// components ahead of the canonical-JSON: "llmgw:cache: + hex SHA-256 of
+// provider \x00 upstreamModel \x00 requestedModel \x00 endpoint \x00
+// canonical-JSON(request body minus stream_options and user)".
+//
+// requestedModel is the client's own, exactly-as-sent model string (e.g.
+// "claude-x" or "anthropic/claude-x") — NOT stripped from req, and passed
+// as a separate argument rather than left in req, because a translating
+// adapter (anthropic, gemini) bakes gatewayAliasKey's echoed alias
+// straight into the cached response body's own "model" field
+// (translate_anthropic.go, translate_gemini.go): two clients requesting
+// the same upstream model under different alias forms must never collide
+// into one entry, or the second client would receive a response whose
+// "model" field is an id it never sent. endpoint distinguishes
+// /v1/chat/completions from /v1/embeddings, so a canonically-identical
+// body under each route (however unlikely) still keys separately.
+//
+// req is never mutated — stripping builds a fresh copy — and
+// canonical-JSON is plain json.Marshal of that copy: encoding/json always
+// marshals a map[string]any's keys in sorted order, which is what makes
+// the result deterministic across requests carrying the same fields in
+// different insertion order.
 //
 // Callers must pass req before injecting gatewayAliasKey
 // (routes_unified.go): that key is a purely internal echo-back mechanism
-// with no bearing on upstream request equivalence, so two different
-// aliases resolving to the same upstream model must hash identically —
-// stripping stream_options and user, as this function does, is not
-// enough on its own if the alias key were still present.
-func cacheKey(provider, upstreamModel string, req map[string]any) string {
+// with no bearing on upstream request equivalence beyond what
+// requestedModel above already captures, so leaving it in req would only
+// add noise, not distinguishing power.
+func cacheKey(provider, upstreamModel, requestedModel, endpoint string, req map[string]any) string {
 	stripped := make(map[string]any, len(req))
 	for k, v := range req {
 		if k == "stream_options" || k == "user" {
@@ -253,6 +345,10 @@ func cacheKey(provider, upstreamModel string, req map[string]any) string {
 	_, _ = h.Write([]byte(provider))
 	_, _ = h.Write([]byte{0})
 	_, _ = h.Write([]byte(upstreamModel))
+	_, _ = h.Write([]byte{0})
+	_, _ = h.Write([]byte(requestedModel))
+	_, _ = h.Write([]byte{0})
+	_, _ = h.Write([]byte(endpoint))
 	_, _ = h.Write([]byte{0})
 	_, _ = h.Write(canonical)
 	return cacheKeyPrefix + hex.EncodeToString(h.Sum(nil))

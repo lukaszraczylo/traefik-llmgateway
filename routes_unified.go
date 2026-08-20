@@ -63,14 +63,14 @@ type adapterCall func(a providerAdapter, ctx context.Context, w http.ResponseWri
 
 // handleChat implements POST /v1/chat/completions.
 func (g *Gateway) handleChat(w http.ResponseWriter, r *http.Request, u *user, grp *group) {
-	g.runUnified(w, r, u, grp, func(a providerAdapter, ctx context.Context, w http.ResponseWriter, req map[string]any) (usage, error) {
+	g.runUnified(w, r, u, grp, cacheEndpointChat, func(a providerAdapter, ctx context.Context, w http.ResponseWriter, req map[string]any) (usage, error) {
 		return a.chatCompletion(ctx, w, req)
 	})
 }
 
 // handleEmbeddings implements POST /v1/embeddings.
 func (g *Gateway) handleEmbeddings(w http.ResponseWriter, r *http.Request, u *user, grp *group) {
-	g.runUnified(w, r, u, grp, func(a providerAdapter, ctx context.Context, w http.ResponseWriter, req map[string]any) (usage, error) {
+	g.runUnified(w, r, u, grp, cacheEndpointEmbeddings, func(a providerAdapter, ctx context.Context, w http.ResponseWriter, req map[string]any) (usage, error) {
 		return a.embeddings(ctx, w, req)
 	})
 }
@@ -82,8 +82,10 @@ func (g *Gateway) handleEmbeddings(w http.ResponseWriter, r *http.Request, u *us
 // still gets billed — before translating that error into a response. w is
 // wrapped in its own statusTrackingWriter so a mid-stream adapter error
 // (headers already sent) can be told apart from one that failed before any
-// write.
-func (g *Gateway) runUnified(w http.ResponseWriter, r *http.Request, u *user, grp *group, call adapterCall) {
+// write. endpoint is cacheEndpointChat or cacheEndpointEmbeddings — one of
+// cacheKey's key-material components (cache.go), so the two routes never
+// collide into one cache entry.
+func (g *Gateway) runUnified(w http.ResponseWriter, r *http.Request, u *user, grp *group, endpoint string, call adapterCall) {
 	sw := &statusTrackingWriter{ResponseWriter: w}
 
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxRequestBytes))
@@ -126,14 +128,17 @@ func (g *Gateway) runUnified(w http.ResponseWriter, r *http.Request, u *user, gr
 	// cacheKey is computed here — after "model" is rewritten to
 	// upstreamModel but deliberately BEFORE gatewayAliasKey is injected
 	// below — so the hashed request body reflects exactly what goes
-	// upstream and never includes gatewayAliasKey, a purely internal
-	// echo-back key with no bearing on upstream request equivalence: two
-	// different aliases resolving to the same upstream model must share
-	// one cache entry.
+	// upstream. requestedModel (the client's own, un-rewritten alias
+	// string) and endpoint are passed as separate cacheKey arguments,
+	// not left in req: a translating adapter bakes the echoed alias
+	// straight into the cached response body's own "model" field, so two
+	// clients requesting the same upstream model under different alias
+	// forms (e.g. "claude-x" vs "anthropic/claude-x") must never collide
+	// into one cache entry (cacheKey's own doc comment, cache.go).
 	cacheable := !streaming && g.cache != nil && groupCacheEnabled(grp)
 	var cacheKeyStr string
 	if cacheable {
-		cacheKeyStr = cacheKey(adapter.name(), upstreamModel, req)
+		cacheKeyStr = cacheKey(adapter.name(), upstreamModel, requestedModel, endpoint, req)
 		if cached, hit := g.cache.lookup(cacheKeyStr); hit {
 			// A cache hit accounts the request only — checkAndCount
 			// above already counted it — never token/cost, and never
@@ -163,7 +168,7 @@ func (g *Gateway) runUnified(w http.ResponseWriter, r *http.Request, u *user, gr
 	var respWriter http.ResponseWriter = sw
 	var capture *cacheCaptureWriter
 	if cacheable {
-		capture = newCacheCaptureWriter(sw)
+		capture = newCacheCaptureWriter(sw, g.cache.maxBodyBytes)
 		respWriter = capture
 	}
 
@@ -199,8 +204,12 @@ func (g *Gateway) runUnified(w http.ResponseWriter, r *http.Request, u *user, gr
 	// capture.status (forwardJSON/translate error paths return
 	// *providerHTTPError/*translateError instead of writing through
 	// respWriter, so callErr is non-nil and capture.status stays 0), and
-	// callErr == nil is checked directly regardless.
-	if cacheable && callErr == nil && capture.status == http.StatusOK {
+	// callErr == nil is checked directly regardless. capture.oversize
+	// excludes a response cacheCaptureWriter stopped buffering past
+	// maxBodyBytes: store's own maxBodyBytes check would reject it too,
+	// but only after being handed a silently truncated body — skip the
+	// call outright instead of ever constructing a corrupt cache entry.
+	if cacheable && callErr == nil && capture.status == http.StatusOK && !capture.oversize {
 		g.cache.store(cacheKeyStr, capture.status, capture.contentType, capture.buf.Bytes())
 	}
 
@@ -284,6 +293,16 @@ func writeLimitViolation(w http.ResponseWriter, v *limitViolation) {
 // drop) must never get a second, conflicting envelope appended, whatever
 // kind of error it is.
 func (g *Gateway) handleAdapterError(sw *statusTrackingWriter, err error, providerName string) {
+	// A cacheable request's miss path pre-sets X-Llmgw-Cache: miss before
+	// call() runs (runUnified), so headers precede a successful body —
+	// but an adapter error means nothing was actually served from, or
+	// stored to, the cache. Del is unconditional and harmless when the
+	// header was never set (a no-op on an absent key), so this needs no
+	// cacheable-specific branch here: every error response — 400, 404,
+	// 429, 501, 502 — must never carry a stale cache header from a
+	// request that turned out not to succeed.
+	sw.Header().Del("X-Llmgw-Cache")
+
 	if sw.wroteHeader {
 		g.errorf("unified route: adapter error after response started (provider %q): %v", providerName, err)
 		return
@@ -349,10 +368,19 @@ func writeProviderUpstreamError(w http.ResponseWriter, providerName string, perr
 }
 
 // cacheCaptureWriter tees a cacheable request's response into an
-// in-memory buffer while writing everything through to the wrapped
-// *statusTrackingWriter unchanged — the mechanism runUnified uses to fill
-// the response cache (cache.go) on a miss without any adapter, or
+// in-memory buffer, capped at maxBodyBytes regardless of how large the
+// real response turns out to be, while writing everything through to the
+// wrapped *statusTrackingWriter unchanged — the mechanism runUnified uses
+// to fill the response cache (cache.go) on a miss without any adapter, or
 // forwardJSON/forwardStream inside one, needing to know caching exists.
+//
+// The cap matters even though the adapter response it captures is itself
+// already bounded by maxResponseBytes (32MiB): cache.maxBodyBytes
+// defaults to 1MiB and maxes out at 8MiB, both far below that, and
+// forwardJSON delivers a non-streaming body as one single Write call —
+// without this cap, buffering that one call unconditionally would hold
+// up to 32MiB in memory per cacheable request regardless of how small
+// maxBodyBytes is actually configured.
 //
 // It embeds *statusTrackingWriter rather than holding one in a named
 // field: every promoted method (Flush included) delegates automatically,
@@ -365,14 +393,21 @@ func writeProviderUpstreamError(w http.ResponseWriter, providerName string, perr
 // must delegate to the embedded pointer, never shadow its state).
 type cacheCaptureWriter struct {
 	*statusTrackingWriter
-	contentType string
-	buf         bytes.Buffer
-	status      int
+	contentType  string
+	buf          bytes.Buffer
+	maxBodyBytes int
+	status       int
+	// oversize is true once buf has reached maxBodyBytes: Write stops
+	// appending to buf from that point on (the real write to the client
+	// is never affected), and runUnified skips calling store() entirely
+	// rather than handing it a silently truncated body.
+	oversize bool
 }
 
-// newCacheCaptureWriter returns a cacheCaptureWriter teeing into sw.
-func newCacheCaptureWriter(sw *statusTrackingWriter) *cacheCaptureWriter {
-	return &cacheCaptureWriter{statusTrackingWriter: sw}
+// newCacheCaptureWriter returns a cacheCaptureWriter teeing into sw,
+// capturing at most maxBodyBytes of the response body.
+func newCacheCaptureWriter(sw *statusTrackingWriter, maxBodyBytes int) *cacheCaptureWriter {
+	return &cacheCaptureWriter{statusTrackingWriter: sw, maxBodyBytes: maxBodyBytes}
 }
 
 // WriteHeader records status and the Content-Type header already set on
@@ -384,15 +419,28 @@ func (w *cacheCaptureWriter) WriteHeader(status int) {
 	w.statusTrackingWriter.WriteHeader(status)
 }
 
-// Write buffers b (unbounded here — the caller, runUnified, only stores
-// the buffer for a genuine upstream 200, and the adapter response it
-// captures is itself already capped at maxResponseBytes, so this never
-// buffers more than that), applies net/http's implicit-200 default when
-// no WriteHeader call preceded it, and delegates to the wrapped writer.
+// Write captures up to maxBodyBytes total of b into buf — silently
+// dropping anything beyond the cap and marking oversize, rather than
+// buffering an arbitrarily large response only to reject it in store()
+// afterward — applies net/http's implicit-200 default (status AND its
+// Content-Type snapshot; WriteHeader's own capture above never ran on
+// this path) when no WriteHeader call preceded it, and always delegates
+// the full, untruncated b to the wrapped writer: capture is capped, the
+// real response to the client never is.
 func (w *cacheCaptureWriter) Write(b []byte) (int, error) {
 	if w.status == 0 {
 		w.status = http.StatusOK
+		w.contentType = w.Header().Get("Content-Type")
 	}
-	_, _ = w.buf.Write(b) // bytes.Buffer.Write never returns an error
+	if !w.oversize {
+		if remaining := w.maxBodyBytes - w.buf.Len(); remaining <= 0 {
+			w.oversize = true
+		} else if len(b) > remaining {
+			_, _ = w.buf.Write(b[:remaining]) // bytes.Buffer.Write never returns an error
+			w.oversize = true
+		} else {
+			_, _ = w.buf.Write(b)
+		}
+	}
 	return w.statusTrackingWriter.Write(b)
 }
