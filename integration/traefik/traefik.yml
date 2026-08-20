@@ -7,9 +7,17 @@ experimental:
     llmgateway:
       moduleName: github.com/lukaszraczylo/traefik-llmgateway
 
+# providers.file.directory, not .filename: a single-file watch's fsnotify
+# never fires under Docker Desktop's VirtioFS bind mount (empirically
+# confirmed against this exact stack) — Traefik's directory-based watch
+# does, and it is also the correct pattern for a Kubernetes ConfigMap mount
+# (a ConfigMap update swaps the mounted directory's symlink target, which a
+# single-file watch on the file itself never observes either). See the
+# integration/docker-compose.yml volumes and Makefile's integration-up
+# render target, which mount/render into traefik/dynamic/ accordingly.
 providers:
   file:
-    filename: /etc/traefik/dynamic.yml
+    directory: /etc/traefik/dynamic
     watch: true
 
 log:

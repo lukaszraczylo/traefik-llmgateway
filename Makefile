@@ -28,12 +28,15 @@ INTEGRATION_ALICE_KEY := sk-int-alice
 # INTEGRATION_REAL=1) never hardcodes one operator's personal hostname as
 # the only option: `INTEGRATION_REAL_BASEURL=https://other.example make
 # integration` points it elsewhere. Rendered into
-# integration/traefik/dynamic.yml (git-ignored) from the checked-in
-# dynamic.yml.tmpl by integration-up, below.
+# integration/traefik/dynamic/dynamic.yml (git-ignored directory) from the
+# checked-in dynamic.yml.tmpl by integration-up, below. Traefik's file
+# provider watches that whole directory (traefik.yml's providers.file.directory),
+# not the single rendered file — see traefik.yml's own comment for why.
 INTEGRATION_REAL_BASEURL ?= https://llmgw.example.com
 
 integration-up:
-	sed 's#__INTEGRATION_REAL_BASEURL__#$(INTEGRATION_REAL_BASEURL)#' integration/traefik/dynamic.yml.tmpl > integration/traefik/dynamic.yml
+	mkdir -p integration/traefik/dynamic
+	sed 's#__INTEGRATION_REAL_BASEURL__#$(INTEGRATION_REAL_BASEURL)#' integration/traefik/dynamic.yml.tmpl > integration/traefik/dynamic/dynamic.yml
 	docker compose -f $(INTEGRATION_COMPOSE) up -d --build
 
 integration-wait:

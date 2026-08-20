@@ -4,5 +4,8 @@ tools/yaegi-check/llmgw-yaegi-check
 dist/
 
 # Rendered from integration/traefik/dynamic.yml.tmpl by `make integration-up`
-# (INTEGRATION_REAL_BASEURL substitution) — generated, not source.
-integration/traefik/dynamic.yml
+# (INTEGRATION_REAL_BASEURL substitution) — generated, not source. A whole
+# directory (not a single file): Traefik's directory-based file provider
+# watches integration/traefik/dynamic/, matching the k8s-ConfigMap-mount
+# pattern (see traefik.yml's own comment).
+integration/traefik/dynamic/

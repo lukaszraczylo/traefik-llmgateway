@@ -69,7 +69,7 @@ services:
     volumes:
       - ../:/plugins-local/src/github.com/lukaszraczylo/traefik-llmgateway:ro
       - ./traefik/traefik.yml:/etc/traefik/traefik.yml:ro
-      - ./traefik/dynamic.yml:/etc/traefik/dynamic.yml:ro
+      - ./traefik/dynamic:/etc/traefik/dynamic:ro
       - ./users:/users:ro
     depends_on:
       redis:
@@ -92,7 +92,7 @@ services:
     volumes:
       - ../:/plugins-local/src/github.com/lukaszraczylo/traefik-llmgateway:ro
       - ./traefik/traefik.yml:/etc/traefik/traefik.yml:ro
-      - ./traefik/dynamic.yml:/etc/traefik/dynamic.yml:ro
+      - ./traefik/dynamic:/etc/traefik/dynamic:ro
       - ./users:/users:ro
     depends_on:
       redis:
