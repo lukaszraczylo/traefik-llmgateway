@@ -281,27 +281,95 @@ func (g *Gateway) handlePassthrough(w http.ResponseWriter, r *http.Request, u *u
 		upstreamURL += "?" + r.URL.RawQuery
 	}
 
+	result, ok := g.proxyUpstream(w, r, upstreamURL, adapter.httpClient(), adapter.injectAuth, true, "passthrough (provider "+providerName+")")
+	if !ok || !result.isJSON {
+		// A build/connection/copy failure already wrote its own response
+		// (or, for a canceled client context, wrote nothing at all — see
+		// proxyUpstream); a non-JSON response has nothing more to account
+		// than the request itself, already counted by checkAndCount above.
+		return
+	}
+	if result.tee.truncated {
+		g.logf("passthrough: response body exceeded %d bytes; skipping usage accounting (provider %q)", maxAccountingTeeBytes, providerName)
+		return
+	}
+
+	respUsage, model, unmarshalErr := extractPassthroughUsage(adapter.typeName(), providerName, result.tee.buf.Bytes())
+	if unmarshalErr != nil {
+		g.logf("passthrough: response body did not decode as JSON for usage accounting (provider %q): %v", providerName, unmarshalErr)
+	}
+	cost := unifiedCostMicros(providerName+"/"+model, model, respUsage, g.cfg.Pricing)
+	g.limiter.account(scopes, respUsage, cost)
+}
+
+// proxyResult is what proxyUpstream reports back to its caller once it has
+// streamed a response to the client: enough for a caller that wants
+// best-effort JSON usage accounting (handlePassthrough) to run it, without
+// proxyUpstream itself knowing anything about usage or pricing. tee is
+// nil unless accountJSON was true and the response's Content-Type was
+// application/json.
+type proxyResult struct {
+	tee    *cappedAccountingBuffer
+	isJSON bool
+}
+
+// proxyUpstream is the shared reverse-proxy core behind both native
+// provider passthrough (handlePassthrough, above) and the MCP/A2A target
+// proxy (handleTargetProxy, mcp_a2a.go): it builds an upstream request
+// from r's method/body/headers, sends it over client, and streams the
+// response back to w incrementally through a flushWriter — so an SSE or
+// other chunked upstream body reaches the client as each chunk arrives,
+// never buffered until the copy finishes.
+//
+// Every hop-by-hop header (hopByHopHeaders) and the client's own gateway
+// credential (gatewayCredentialHeaders) are stripped from the outgoing
+// request, and Accept-Encoding (clientNegotiationHeaders) besides, so
+// Transport can negotiate and transparently decompress compression
+// itself. injectAuth, when non-nil, is called on the built request before
+// it is sent — handlePassthrough passes its adapter's injectAuth to swap
+// the client's key for the provider's own; handleTargetProxy passes nil,
+// since an MCP server or A2A agent is an in-cluster target that receives
+// no injected credential at all.
+//
+// A build failure or a dead upstream writes a 502 envelope to w and
+// returns ok=false; a canceled client context (errors.Is context.Canceled)
+// is logged, not surfaced, and also returns ok=false, writing nothing —
+// the client is already gone. A response-copy failure after headers were
+// already written also returns ok=false, since nothing further can be
+// written to w at that point either way. logPrefix labels every
+// logf/errorf line this call emits, so passthrough and target-proxy
+// failures stay distinguishable in the log.
+//
+// accountJSON gates whether a non-streaming application/json response
+// gets teed off into result.tee for the caller's own best-effort usage
+// parse afterward: handlePassthrough passes true; handleTargetProxy
+// passes false, since target-proxy accounting never goes past the
+// request-count checkAndCount already ran before calling in, and teeing a
+// response nobody will ever read back would only cost memory for nothing.
+func (g *Gateway) proxyUpstream(w http.ResponseWriter, r *http.Request, upstreamURL string, client *http.Client, injectAuth func(*http.Request), accountJSON bool, logPrefix string) (result proxyResult, ok bool) {
 	bodyReader := io.LimitReader(r.Body, maxPassthroughBytes)
 	// gosec G704 (SSRF via taint analysis) flags upstreamURL as
 	// request-derived: it is, by design — this is a reverse proxy, and its
 	// whole job is to forward a client-supplied path/query onto the
-	// upstream. The host component is never request-derived: adapter.base()
-	// is a fixed, operator-configured URL from Config.Providers, and
-	// upstreamURL is built as base()+"/"+rest — string concatenation, not a
-	// second url.Parse of rest alone — so no client-supplied value can
-	// change the scheme or host url.Parse resolves for the final string.
-	// rest is additionally traversal-checked above (hasTraversalSegment
-	// rejects any ".." segment in its decoded form before this point is
-	// reached) and is forwarded here in its original escaped form — see
-	// passthroughRoute's EscapedPath()-based split in llmgateway.go — so a
-	// client cannot smuggle an encoded "/" (%2f) past this gateway's own
+	// upstream. The host component is never request-derived: every caller
+	// builds upstreamURL as an operator-configured base (a provider's
+	// adapter.base(), or an MCP-server/agent TargetConfig.URL validated at
+	// construction — see validateTargetURLs) plus "/"+rest — string
+	// concatenation, not a second url.Parse of rest alone — so no
+	// client-supplied value can change the scheme or host url.Parse
+	// resolves for the final string. rest is additionally
+	// traversal-checked by every caller before this point is reached
+	// (hasTraversalSegment rejects any ".." segment in its decoded form)
+	// and is forwarded here in its original escaped form — see
+	// passthroughRoute's and targetRoute's EscapedPath()-based splits — so
+	// a client cannot smuggle an encoded "/" (%2f) past this gateway's own
 	// routing only to have a permissive upstream reinterpret it as a real
 	// separator.
 	upstreamReq, err := http.NewRequestWithContext(r.Context(), r.Method, upstreamURL, bodyReader) //nolint:gosec // operator-fixed host, rest is traversal-checked and forwarded escaped; see comment above
 	if err != nil {
-		g.errorf("passthrough: build upstream request (provider %q): %v", providerName, err)
+		g.errorf("%s: build upstream request: %v", logPrefix, err)
 		writeOAIError(w, http.StatusBadGateway, "server_error", "upstream connection error")
-		return
+		return proxyResult{}, false
 	}
 	upstreamReq.ContentLength = r.ContentLength
 	if r.ContentLength < 0 || r.ContentLength > maxPassthroughBytes {
@@ -311,17 +379,19 @@ func (g *Gateway) handlePassthrough(w http.ResponseWriter, r *http.Request, u *u
 		upstreamReq.ContentLength = -1
 	}
 	copyHeadersExcept(upstreamReq.Header, r.Header, hopByHopHeaders, gatewayCredentialHeaders, clientNegotiationHeaders)
-	adapter.injectAuth(upstreamReq)
+	if injectAuth != nil {
+		injectAuth(upstreamReq)
+	}
 
-	resp, err := adapter.httpClient().Do(upstreamReq) //nolint:gosec // same upstreamReq built above; operator-fixed host, traversal-checked, see its construction comment
+	resp, err := client.Do(upstreamReq) //nolint:gosec // same upstreamReq built above; operator-fixed host, traversal-checked, see its construction comment
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
-			g.logf("passthrough: client canceled request to provider %q: %v", providerName, err)
-			return
+			g.logf("%s: client canceled request: %v", logPrefix, err)
+			return proxyResult{}, false
 		}
-		g.errorf("passthrough: upstream connection error (provider %q): %v", providerName, err)
+		g.errorf("%s: upstream connection error: %v", logPrefix, err)
 		writeOAIError(w, http.StatusBadGateway, "server_error", "upstream connection error")
-		return
+		return proxyResult{}, false
 	}
 	defer resp.Body.Close() //nolint:errcheck // read-side close; nothing actionable on failure
 
@@ -330,10 +400,11 @@ func (g *Gateway) handlePassthrough(w http.ResponseWriter, r *http.Request, u *u
 	fw := newFlushWriter(w)
 
 	// Only a non-streaming JSON response gets teed off for best-effort
-	// accounting; every other response streams straight through fw with no
-	// extra buffering — a large or slow upstream body must never sit
-	// waiting for full receipt before the client sees its first byte.
-	isJSON := strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "application/json")
+	// accounting, and only when the caller wants that at all (accountJSON);
+	// every other response streams straight through fw with no extra
+	// buffering — a large or slow upstream body must never sit waiting for
+	// full receipt before the client sees its first byte.
+	isJSON := accountJSON && strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "application/json")
 	var tee *cappedAccountingBuffer
 	var reader io.Reader = resp.Body
 	if isJSON {
@@ -342,24 +413,8 @@ func (g *Gateway) handlePassthrough(w http.ResponseWriter, r *http.Request, u *u
 	}
 
 	if _, err := io.Copy(fw, reader); err != nil {
-		g.errorf("passthrough: stream response body (provider %q): %v", providerName, err)
-		return
+		g.errorf("%s: stream response body: %v", logPrefix, err)
+		return proxyResult{isJSON: isJSON, tee: tee}, false
 	}
-	if !isJSON {
-		// Streaming or non-JSON: usage is unknowable from here, so only the
-		// request itself gets accounted — already done by checkAndCount
-		// above.
-		return
-	}
-	if tee.truncated {
-		g.logf("passthrough: response body exceeded %d bytes; skipping usage accounting (provider %q)", maxAccountingTeeBytes, providerName)
-		return
-	}
-
-	respUsage, model, unmarshalErr := extractPassthroughUsage(adapter.typeName(), providerName, tee.buf.Bytes())
-	if unmarshalErr != nil {
-		g.logf("passthrough: response body did not decode as JSON for usage accounting (provider %q): %v", providerName, unmarshalErr)
-	}
-	cost := unifiedCostMicros(providerName+"/"+model, model, respUsage, g.cfg.Pricing)
-	g.limiter.account(scopes, respUsage, cost)
+	return proxyResult{isJSON: isJSON, tee: tee}, true
 }

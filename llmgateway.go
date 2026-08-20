@@ -107,7 +107,12 @@ type Gateway struct {
 	limiter  *limiter
 	registry *modelRegistry
 	adapters map[string]providerAdapter
-	name     string
+	// targetClient is the shared, connection-pooled *http.Client the
+	// MCP/A2A target proxy (mcp_a2a.go) issues every upstream request
+	// through — built once via newAdapterHTTPClient, the same constructor
+	// each provider adapter uses for its own client.
+	targetClient *http.Client
+	name         string
 }
 
 // New creates the middleware. NOTE: no tail call — Yaegi zeroes
@@ -123,6 +128,9 @@ func New(ctx context.Context, next http.Handler, config *Config, name string) (h
 func newGateway(ctx context.Context, next http.Handler, config *Config, name string) (*Gateway, error) {
 	if config == nil || len(config.Providers) == 0 {
 		return nil, errors.New("llmgateway: at least one provider must be configured")
+	}
+	if err := validateTargetURLs(config); err != nil {
+		return nil, err
 	}
 	auth, err := newAuthStore(config)
 	if err != nil {
@@ -148,6 +156,7 @@ func newGateway(ctx context.Context, next http.Handler, config *Config, name str
 		return nil, err
 	}
 	g.adapters = adapters
+	g.targetClient = newAdapterHTTPClient()
 
 	registry, err := newModelRegistry(adapters, config, g.errorf)
 	if err != nil {
@@ -265,6 +274,39 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		} else {
 			g.handleEmbeddings(sw, r, u, grp)
 		}
+		return
+	}
+
+	if r.Method == http.MethodGet && (r.URL.Path == "/v1/mcp/servers" || r.URL.Path == "/v1/agents") {
+		_, grp, ok := g.auth.identify(r)
+		if !ok {
+			writeOAIError(sw, http.StatusUnauthorized, "authentication_error", "invalid or missing API key")
+			return
+		}
+		if r.URL.Path == "/v1/mcp/servers" {
+			g.handleMCPServers(sw, grp)
+		} else {
+			g.handleAgents(sw, grp)
+		}
+		return
+	}
+
+	if name, rest, ok := targetRoute(r.URL.EscapedPath(), targetKindMCP); ok {
+		u, grp, authOK := g.auth.identify(r)
+		if !authOK {
+			writeOAIError(sw, http.StatusUnauthorized, "authentication_error", "invalid or missing API key")
+			return
+		}
+		g.handleTargetProxy(sw, r, u, grp, targetKindMCP, name, rest)
+		return
+	}
+	if name, rest, ok := targetRoute(r.URL.EscapedPath(), targetKindAgent); ok {
+		u, grp, authOK := g.auth.identify(r)
+		if !authOK {
+			writeOAIError(sw, http.StatusUnauthorized, "authentication_error", "invalid or missing API key")
+			return
+		}
+		g.handleTargetProxy(sw, r, u, grp, targetKindAgent, name, rest)
 		return
 	}
 
