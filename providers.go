@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"strings"
 )
 
@@ -188,19 +189,59 @@ func upstreamJSON(ctx context.Context, client *http.Client, method, url string, 
 	return resp, nil
 }
 
+// configNamePattern is the character set allowed in a provider, mcpServers,
+// or agents config key: it is embedded verbatim as a path segment in the
+// gateway's own routes (passthroughRoute's "/{provider}/*",
+// targetRoute's "/mcp/{name}/*" and "/a2a/{name}/*"), so it is restricted to
+// characters safe there rather than the full range a Go map key allows.
+var configNamePattern = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
+
+// reservedConfigNames are the provider, mcpServers, and agents names
+// rejected at construction because they would shadow one of the gateway's
+// own fixed top-level routes: "v1" is the unified API namespace
+// (/v1/chat/completions, /v1/models, /v1/embeddings, /v1/mcp/servers,
+// /v1/agents), "mcp" and "a2a" are the MCP/A2A target-proxy prefixes
+// (/mcp/{name}/..., /a2a/{name}/...). ServeHTTP checks those fixed routes
+// ahead of passthrough/target routing (llmgateway.go), so a provider, MCP
+// server, or agent configured under one of these names would never be
+// reachable — reject it here instead of silently shadowing it.
+var reservedConfigNames = map[string]bool{"v1": true, "mcp": true, "a2a": true}
+
+// validateConfigName reports an error unless name matches configNamePattern
+// and is not one of reservedConfigNames. kind labels the config section
+// (e.g. "provider", "mcpServers", "agents") in the error message.
+func validateConfigName(kind, name string) error {
+	if !configNamePattern.MatchString(name) {
+		return fmt.Errorf("llmgateway: %s name %q is invalid: must match %s", kind, name, configNamePattern.String())
+	}
+	if reservedConfigNames[name] {
+		return fmt.Errorf("llmgateway: %s name %q is reserved and would shadow a gateway route", kind, name)
+	}
+	return nil
+}
+
 // buildAdapters resolves cfg.Providers into a map of providerAdapter keyed
-// by provider name. For each provider it resolves APIKey via resolveSecret
-// (propagating that error) and defaults BaseURL by provider type when the
-// config omits one, trimming any trailing slash either way. An unknown
-// provider type is a config error. A resolved empty key is a valid
-// keyless upstream for openai-type providers, but a constructor error for
-// anthropic-type ones — newAnthropicAdapter enforces that, per ruling (c);
-// this function just propagates whatever error it returns. A configured
-// gemini provider follows the same constructor-error ruling —
-// newGeminiAdapter enforces it too.
+// by provider name. Every provider name is validated (validateConfigName)
+// and every ProviderConfig value must be non-nil before anything else runs,
+// so a malformed map key or a nil map value fails construction with a clear
+// error instead of a nil-pointer panic. For each provider it resolves
+// APIKey via resolveSecret (propagating that error) and defaults BaseURL by
+// provider type when the config omits one, trimming any trailing slash
+// either way. An unknown provider type is a config error. A resolved empty
+// key is a valid keyless upstream for openai-type providers, but a
+// constructor error for anthropic-type ones — newAnthropicAdapter enforces
+// that, per ruling (c); this function just propagates whatever error it
+// returns. A configured gemini provider follows the same constructor-error
+// ruling — newGeminiAdapter enforces it too.
 func buildAdapters(cfg *Config) (map[string]providerAdapter, error) {
 	adapters := make(map[string]providerAdapter, len(cfg.Providers))
 	for name, pc := range cfg.Providers {
+		if pc == nil {
+			return nil, fmt.Errorf("llmgateway: provider %q: config must not be nil", name)
+		}
+		if err := validateConfigName("provider", name); err != nil {
+			return nil, err
+		}
 		apiKey, err := resolveSecret(pc.APIKey)
 		if err != nil {
 			return nil, fmt.Errorf("llmgateway: provider %q: %w", name, err)

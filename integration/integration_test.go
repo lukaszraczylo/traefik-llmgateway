@@ -5,10 +5,16 @@
 // upstreams, and a real shared Redis, all orchestrated by
 // integration/docker-compose.yml. It assumes the compose stack is already
 // up and healthy — the `integration` Makefile target starts it, waits for
-// traefik1 to answer, runs this package, then tears the stack down; run it
-// directly with `go test -tags integration ./...` from this directory
-// after `docker compose up -d --build` if you want to keep the stack alive
-// between runs (see the `integration-keep` Makefile target).
+// traefik1 to answer, runs this package, then tears the stack down. To keep
+// the stack alive between runs for debugging, use `make integration-keep`
+// (or `make integration-up` followed directly by
+// `go test -tags integration ./...` from this directory), not a bare
+// `docker compose up -d --build`: integration-up first renders
+// integration/traefik/dynamic.yml from dynamic.yml.tmpl (substituting
+// INTEGRATION_REAL_BASEURL), and that generated dynamic.yml is
+// git-ignored — running docker compose directly reuses whatever stale or
+// absent dynamic.yml happens to be on disk instead of a freshly rendered
+// one.
 package integration
 
 import (
@@ -213,8 +219,12 @@ func TestUnifiedChatAllProviders(t *testing.T) {
 	}
 
 	geminiReq := map[string]any{
-		"model":    "gemini/gemini-mock",
-		"messages": []map[string]any{{"role": "user", "content": "hi"}},
+		"model": "gemini/gemini-mock",
+		// max_tokens exercises translate_gemini.go's hasMaxTokens=true
+		// branch (see its comment on the yaegi multi-value-assignment
+		// workaround) under real Traefik + Yaegi, not just go test.
+		"max_tokens": 64,
+		"messages":   []map[string]any{{"role": "user", "content": "hi"}},
 	}
 	resp3, body3 := doJSON(t, http.MethodPost, traefik1URL+"/v1/chat/completions", aliceKey, geminiReq)
 	if resp3.StatusCode != http.StatusOK {

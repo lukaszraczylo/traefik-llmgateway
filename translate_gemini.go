@@ -368,9 +368,10 @@ func geminiRequestFromOpenAI(req map[string]any) (map[string]any, error) {
 	// v0.16.1 panics interpreting a multi-value assignment mixing a
 	// variable and a literal in one statement on this exact live path (the
 	// same class of bug as sse.go's readSSE dispatch and registry.go's
-	// resolveAgainst — see those files' comments). Verified empirically
-	// under real Traefik (Task 15's integration suite, the gemini chat
-	// completion path).
+	// resolveAgainst — see those files' comments). The hasMaxTokens=true
+	// branch below is exercised by the integration suite's gemini chat
+	// request (integration/integration_test.go, TestUnifiedChatAllProviders,
+	// which sets "max_tokens") under real Traefik + Yaegi.
 	if v, ok := req["max_completion_tokens"]; ok {
 		if n, ok2 := toInt64(v); ok2 {
 			maxTokens = n

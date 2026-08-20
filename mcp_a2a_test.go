@@ -666,6 +666,36 @@ func TestNewGateway_TargetURLValidation(t *testing.T) {
 			agents:  map[string]*AgentConfig{"agent1": {URL: "http://agent1.internal:notaport"}},
 			wantErr: true,
 		},
+		{
+			name:       "nil mcpServers config value is a constructor error, not a panic",
+			mcpServers: map[string]*TargetConfig{"alpha": nil},
+			wantErr:    true,
+		},
+		{
+			name:    "nil agents config value is a constructor error, not a panic",
+			agents:  map[string]*AgentConfig{"agent1": nil},
+			wantErr: true,
+		},
+		{
+			name:       "mcpServers name reserved (v1) is a constructor error",
+			mcpServers: map[string]*TargetConfig{"v1": {URL: "http://mcp-alpha.internal:8080"}},
+			wantErr:    true,
+		},
+		{
+			name:       "mcpServers name reserved (mcp) is a constructor error",
+			mcpServers: map[string]*TargetConfig{"mcp": {URL: "http://mcp-alpha.internal:8080"}},
+			wantErr:    true,
+		},
+		{
+			name:    "agents name reserved (a2a) is a constructor error",
+			agents:  map[string]*AgentConfig{"a2a": {URL: "https://agent1.internal"}},
+			wantErr: true,
+		},
+		{
+			name:       "mcpServers name with invalid character is a constructor error",
+			mcpServers: map[string]*TargetConfig{"has a space": {URL: "http://mcp-alpha.internal:8080"}},
+			wantErr:    true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

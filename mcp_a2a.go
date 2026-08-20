@@ -183,18 +183,34 @@ func (g *Gateway) handleTargetProxy(w http.ResponseWriter, r *http.Request, u *u
 	g.proxyUpstream(w, r, upstreamURL, g.targetClient, nil, false, kind+" target (name "+name+")")
 }
 
-// validateTargetURLs checks that every configured MCP-server and agent
-// target URL parses (url.Parse) and uses an http or https scheme. A
-// malformed or non-HTTP target is rejected once, here, at construction —
-// a constructor error, not a 502 the first time some caller happens to
-// address it.
+// validateTargetURLs checks every configured MCP-server and agent entry at
+// construction: the map value must be non-nil, the name must pass
+// validateConfigName (same character set and reserved-name rules as a
+// provider name — an MCP server or agent is routed at "/mcp/{name}/*" or
+// "/a2a/{name}/*", the same shadowing risk applies), and the target URL
+// must parse (url.Parse) and use an http or https scheme. A nil value,
+// invalid name, or malformed/non-HTTP target is rejected once, here, at
+// construction — a constructor error, not a nil-pointer panic or a 502 the
+// first time some caller happens to address it.
 func validateTargetURLs(cfg *Config) error {
 	for name, tc := range cfg.MCPServers {
+		if tc == nil {
+			return fmt.Errorf("llmgateway: mcpServers %q: config must not be nil", name)
+		}
+		if err := validateConfigName("mcpServers", name); err != nil {
+			return err
+		}
 		if err := validateTargetURL(tc.URL); err != nil {
 			return fmt.Errorf("llmgateway: mcpServers %q: %w", name, err)
 		}
 	}
 	for name, ac := range cfg.Agents {
+		if ac == nil {
+			return fmt.Errorf("llmgateway: agents %q: config must not be nil", name)
+		}
+		if err := validateConfigName("agents", name); err != nil {
+			return err
+		}
 		if err := validateTargetURL(ac.URL); err != nil {
 			return fmt.Errorf("llmgateway: agents %q: %w", name, err)
 		}

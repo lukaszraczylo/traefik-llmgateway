@@ -657,4 +657,67 @@ func TestBuildAdapters(t *testing.T) {
 			t.Fatalf("buildAdapters: want error for keyless gemini provider, got nil")
 		}
 	})
+
+	t.Run("bad: nil provider config value is a constructor error, not a panic", func(t *testing.T) {
+		cfg := &Config{Providers: map[string]*ProviderConfig{"p1": nil}}
+		if _, err := buildAdapters(cfg); err == nil {
+			t.Fatalf("buildAdapters: want error for a nil ProviderConfig value, got nil")
+		}
+	})
+}
+
+// TestValidateConfigName covers validateConfigName's character-set and
+// reserved-name rules, shared by buildAdapters (provider names) and
+// validateTargetURLs (mcpServers/agents names, mcp_a2a_test.go) — a
+// provider, MCP server, or agent named "v1", "mcp", or "a2a" would shadow
+// one of the gateway's own fixed top-level routes.
+func TestValidateConfigName(t *testing.T) {
+	tests := []struct {
+		kind    string
+		name    string
+		wantErr bool
+	}{
+		{"provider", "openai", false},
+		{"provider", "my-provider_1.local", false},
+		{"provider", "openai grok", true}, // space
+		{"provider", "openai/grok", true}, // slash: would break passthroughRoute's own path splitting
+		{"provider", "", true},            // empty never matches configNamePattern
+		{"provider", "v1", true},          // reserved: unified API namespace
+		{"provider", "mcp", true},         // reserved: MCP target-proxy prefix
+		{"provider", "a2a", true},         // reserved: A2A target-proxy prefix
+		{"mcpServers", "v1", true},        // same reserved set applies to every kind
+		{"agents", "a2a", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.kind+"/"+tt.name, func(t *testing.T) {
+			err := validateConfigName(tt.kind, tt.name)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("validateConfigName(%q, %q) error = %v, wantErr %v", tt.kind, tt.name, err, tt.wantErr)
+			}
+		})
+	}
+}
+
+// TestBuildAdapters_RejectsReservedOrInvalidProviderName covers buildAdapters'
+// own call to validateConfigName, end to end through the map key rather than
+// validateConfigName in isolation.
+func TestBuildAdapters_RejectsReservedOrInvalidProviderName(t *testing.T) {
+	tests := []struct {
+		name string
+	}{
+		{"v1"},
+		{"mcp"},
+		{"a2a"},
+		{"has a space"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &Config{Providers: map[string]*ProviderConfig{
+				tt.name: {Type: "openai", APIKey: "sk-test"},
+			}}
+			if _, err := buildAdapters(cfg); err == nil {
+				t.Fatalf("buildAdapters: want error for provider name %q, got nil", tt.name)
+			}
+		})
+	}
 }

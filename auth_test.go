@@ -160,6 +160,21 @@ func TestNewAuthStore_EmptyAPIKeyAfterResolution_ReturnsError(t *testing.T) {
 	}
 }
 
+// TestNewAuthStore_NilGroupConfig_ReturnsError covers a Groups map entry
+// whose value is a nil *GroupConfig (a caller can construct this in Go, and
+// Traefik's own YAML-to-struct decoding can leave a map value nil for an
+// empty mapping entry) — newAuthStore must reject it as a constructor error
+// rather than panic dereferencing gc.Limits on a nil gc.
+func TestNewAuthStore_NilGroupConfig_ReturnsError(t *testing.T) {
+	cfg := &Config{
+		Providers: map[string]*ProviderConfig{"openai": {Type: "openai", APIKey: "k"}},
+		Groups:    map[string]*GroupConfig{"eng": nil},
+	}
+	if _, err := newAuthStore(cfg); err == nil {
+		t.Fatal("want error for a nil GroupConfig value, got nil")
+	}
+}
+
 func TestNewAuthStore_NoUsers_OK(t *testing.T) {
 	cfg := &Config{
 		Providers: map[string]*ProviderConfig{"openai": {Type: "openai", APIKey: "k"}},

@@ -119,6 +119,9 @@ func newAuthStore(cfg *Config) (*authStore, error) {
 		nowFn:    time.Now,
 	}
 	for name, gc := range cfg.Groups {
+		if gc == nil {
+			return nil, fmt.Errorf("llmgateway: group %q: config must not be nil", name)
+		}
 		if err := gc.Limits.validate(); err != nil {
 			return nil, fmt.Errorf("llmgateway: group %q: %w", name, err)
 		}
