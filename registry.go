@@ -368,7 +368,18 @@ func (m *modelRegistry) resolveAgainst(providerName, upstreamModel, requestedID 
 	if !allowed || !grp.allowsProvider(providerName) {
 		return nil, "", "", errModelDenied
 	}
-	return m.adapters[providerName], upstreamModel, providerName + "/" + upstreamModel, nil
+	// canonical is assigned to a local before the return, not inlined into
+	// it: yaegi v0.16.1 panics ("reflect.Set: value of type
+	// interp.valueInterface is not assignable to type string") building a
+	// multi-value return tuple when one element is an inline string
+	// concatenation of two parameters. The identical expression assigned
+	// to a variable first, then returned, does not trigger it. Verified
+	// empirically against yaegi v0.16.1 running this exact function under
+	// real Traefik (Task 15's integration suite) — tools/yaegi-check never
+	// exercises this call path (it only drives GET /v1/models), which is
+	// why the existing yaegi gate never caught it.
+	canonical := providerName + "/" + upstreamModel
+	return m.adapters[providerName], upstreamModel, canonical, nil
 }
 
 // warnCollisionOnce logs, at most once per colliding bare id for this

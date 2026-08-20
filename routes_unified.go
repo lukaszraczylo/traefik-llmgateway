@@ -225,14 +225,21 @@ func (g *Gateway) handleAdapterError(sw *statusTrackingWriter, err error, provid
 		return
 	}
 
-	var perr *providerHTTPError
-	if errors.As(err, &perr) {
+	// Plain type assertions, not errors.As: providerHTTPError and
+	// translateError are both always returned bare from every adapter and
+	// translate_*.go call site — never wrapped via fmt.Errorf("%w", ...) —
+	// so errors.As's unwrap-chain walk buys nothing here, and yaegi
+	// v0.16.1 panics ("errors: *target must be interface or implement
+	// error") calling errors.As with an interpreted pointer type as its
+	// target, even though that type's Error() method is right there.
+	// Verified empirically under real Traefik (Task 15's integration
+	// suite); tools/yaegi-check never exercises this call path.
+	if perr, ok := err.(*providerHTTPError); ok {
 		writeProviderUpstreamError(sw, providerName, perr)
 		return
 	}
 
-	var terr *translateError
-	if errors.As(err, &terr) {
+	if terr, ok := err.(*translateError); ok {
 		status := http.StatusBadRequest
 		if terr.notSupported {
 			status = http.StatusNotImplemented

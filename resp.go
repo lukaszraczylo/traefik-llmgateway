@@ -51,10 +51,19 @@ const respMaxLineLen = 64 << 10
 // respErr is a RESP2 error reply ("-message\r\n"). It implements error so a
 // caller inspecting a decoded reply can type-assert for it the same way as
 // any other error.
-type respErr string
+//
+// A struct wrapping the message, not a defined string type ("type respErr
+// string"): yaegi v0.16.1 conflates a defined string type with plain
+// string in a type assertion — v.(respErr) on an any holding a genuine
+// plain string (e.g. decodeReply's "+OK" success reply, itself a string)
+// incorrectly reports ok=true, so every successful handshakeLocked call
+// (AUTH/SELECT) was misread as a failed one under real Traefik. A struct
+// has no such ambiguity: verified empirically under real Traefik (Task
+// 15's integration suite, cross-replica rate limiting via Redis).
+type respErr struct{ msg string }
 
 // Error implements the error interface.
-func (e respErr) Error() string { return string(e) }
+func (e respErr) Error() string { return e.msg }
 
 // respClient is a minimal stdlib-only RESP2 client for a single Redis-
 // compatible server: one mutex-guarded TCP connection, lazily dialled on
@@ -305,7 +314,7 @@ func decodeReply(r *bufio.Reader, depth int) (any, error) {
 	case '+':
 		return rest, nil
 	case '-':
-		return respErr(rest), nil
+		return respErr{msg: rest}, nil
 	case ':':
 		n, err := strconv.ParseInt(rest, 10, 64)
 		if err != nil {

@@ -1,0 +1,5 @@
+{
+  "users": [
+    {"name": "bob", "group": "limited", "apiKey": "sk-int-bob"}
+  ]
+}

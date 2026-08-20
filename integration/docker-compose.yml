@@ -1,0 +1,122 @@
+networks:
+  llmgw-integration:
+    driver: bridge
+
+services:
+  redis:
+    image: redis:7-alpine
+    networks: ["llmgw-integration"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
+  mockopenai:
+    build:
+      context: .
+      dockerfile: mock/Dockerfile
+    command: ["-mode", "openai"]
+    networks: ["llmgw-integration"]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/healthz"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
+  mockanthropic:
+    build:
+      context: .
+      dockerfile: mock/Dockerfile
+    command: ["-mode", "anthropic"]
+    networks: ["llmgw-integration"]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/healthz"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
+  mockgemini:
+    build:
+      context: .
+      dockerfile: mock/Dockerfile
+    command: ["-mode", "gemini"]
+    networks: ["llmgw-integration"]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/healthz"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
+  mocktool:
+    build:
+      context: .
+      dockerfile: mock/Dockerfile
+    command: ["-mode", "tool"]
+    networks: ["llmgw-integration"]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/healthz"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
+  traefik1:
+    image: traefik:v3.5
+    command: ["--configfile=/etc/traefik/traefik.yml"]
+    networks: ["llmgw-integration"]
+    ports:
+      - "19081:80"
+    volumes:
+      - ../:/plugins-local/src/github.com/lukaszraczylo/traefik-llmgateway:ro
+      - ./traefik/traefik.yml:/etc/traefik/traefik.yml:ro
+      - ./traefik/dynamic.yml:/etc/traefik/dynamic.yml:ro
+      - ./users:/users:ro
+    depends_on:
+      redis:
+        condition: service_healthy
+      mockopenai:
+        condition: service_healthy
+      mockanthropic:
+        condition: service_healthy
+      mockgemini:
+        condition: service_healthy
+      mocktool:
+        condition: service_healthy
+
+  traefik2:
+    image: traefik:v3.5
+    command: ["--configfile=/etc/traefik/traefik.yml"]
+    networks: ["llmgw-integration"]
+    ports:
+      - "19082:80"
+    volumes:
+      - ../:/plugins-local/src/github.com/lukaszraczylo/traefik-llmgateway:ro
+      - ./traefik/traefik.yml:/etc/traefik/traefik.yml:ro
+      - ./traefik/dynamic.yml:/etc/traefik/dynamic.yml:ro
+      - ./users:/users:ro
+    depends_on:
+      redis:
+        condition: service_healthy
+      mockopenai:
+        condition: service_healthy
+      mockanthropic:
+        condition: service_healthy
+      mockgemini:
+        condition: service_healthy
+      mocktool:
+        condition: service_healthy
+
+  # In-network streaming timing prober. Never started by `up`; the test
+  # invokes it on demand via `docker compose run --rm probe`, from inside
+  # this same compose network so its raw-TCP read against traefik1
+  # reflects true inter-chunk arrival timing instead of the buffered
+  # behaviour Docker Desktop's host port-proxy would introduce.
+  probe:
+    build:
+      context: .
+      dockerfile: mock/Dockerfile
+    command: ["-probe", "-target", "traefik1:80", "-apikey", "sk-int-alice", "-model", "openai/gpt-mock"]
+    networks: ["llmgw-integration"]
+    profiles: ["probe"]
+    depends_on:
+      - traefik1

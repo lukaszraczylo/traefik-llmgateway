@@ -1,0 +1,91 @@
+http:
+  routers:
+    llmgateway-router:
+      rule: "PathPrefix(`/`)"
+      entryPoints: ["web"]
+      service: dummy-service
+      middlewares: ["llmgateway"]
+      priority: 1
+
+    llmgateway-real-router:
+      rule: "Host(`real.localhost`)"
+      entryPoints: ["web"]
+      service: dummy-service
+      middlewares: ["llmgateway-real"]
+      priority: 100
+
+  services:
+    # Placeholder upstream. Every route the plugin recognizes is
+    # short-circuited by the middleware itself; this backend is never
+    # actually reached by the requests the integration suite sends.
+    dummy-service:
+      loadBalancer:
+        servers:
+          - url: "http://mockopenai:8080"
+
+  middlewares:
+    llmgateway:
+      plugin:
+        llmgateway:
+          providers:
+            openai:
+              type: openai
+              baseUrl: "http://mockopenai:8080"
+              apiKey: "mock-openai-key"
+              discovery: true
+              models: ["gpt-mock"]
+            anthropic:
+              type: anthropic
+              baseUrl: "http://mockanthropic:8080"
+              apiKey: "mock-anthropic-key"
+              models: ["claude-mock"]
+            gemini:
+              type: gemini
+              baseUrl: "http://mockgemini:8080"
+              apiKey: "mock-gemini-key"
+              models: ["gemini-mock"]
+          groups:
+            eng:
+              limits:
+                requestsPerMinute: 1000
+            limited:
+              limits:
+                requestsPerMinute: 3
+          users:
+            inline:
+              - name: alice
+                group: eng
+                apiKey: "sk-int-alice"
+            file: "/users/users.json"
+          redis:
+            address: "redis:6379"
+          mcpServers:
+            tool:
+              url: "http://mocktool:8080"
+
+    # Second, separate middleware instance carrying only the optional
+    # real-upstream smoke test's "uni" provider (task 7, INTEGRATION_REAL=1
+    # gated). Kept isolated from the mock-backed "llmgateway" middleware
+    # above so the always-on tests never depend on network egress.
+    llmgateway-real:
+      plugin:
+        llmgateway:
+          providers:
+            uni:
+              type: openai
+              baseUrl: "https://llmgw.example.com"
+              apiKey: ""
+              # Explicit rather than discovered: resolution must not depend
+              # on this container reaching the real upstream at Traefik
+              # startup (offline dev machines, CI with no egress). The
+              # actual chat completion call in task 7 still goes out live.
+              models: ["deepseek-v4-flash-0731"]
+          groups:
+            eng:
+              limits:
+                requestsPerMinute: 1000
+          users:
+            inline:
+              - name: alice-real
+                group: eng
+                apiKey: "sk-int-real"

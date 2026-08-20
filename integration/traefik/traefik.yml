@@ -1,0 +1,18 @@
+entryPoints:
+  web:
+    address: ":80"
+
+experimental:
+  localPlugins:
+    llmgateway:
+      moduleName: github.com/lukaszraczylo/traefik-llmgateway
+
+providers:
+  file:
+    filename: /etc/traefik/dynamic.yml
+    watch: true
+
+log:
+  level: INFO
+
+accessLog: {}

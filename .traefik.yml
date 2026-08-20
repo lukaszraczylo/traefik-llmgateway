@@ -1,6 +1,17 @@
 displayName: LLM Gateway
 type: middleware
 import: github.com/lukaszraczylo/traefik-llmgateway
+# basePkg: Traefik's Yaegi middleware loader (pkg/plugins/middlewareyaegi.go,
+# newYaegiMiddlewareBuilder) binds the interpreted package under
+# strings.ReplaceAll(path.Base(import), "-", "_") — "traefik_llmgateway" —
+# unless this field overrides it. The package itself declares
+# `package traefikllmgateway` (no underscore), so without this override a
+# real Traefik instance fails plugin load with
+# `failed to eval New: ...: undefined: traefik_llmgateway`, discovered
+# running the plugin in real Traefik v3.5 for the first time (Task 15's
+# integration suite). Required for both Traefik itself and the Plugin
+# Catalog analyzer (piceus), which uses this identical mechanism.
+basePkg: traefikllmgateway
 summary: Multi-provider LLM gateway with groups, per-user keys, token/cost limits, MCP/A2A proxy.
 testData:
   providers:

@@ -78,7 +78,19 @@ func readSSE(r io.Reader, fn func(sseEvent) error) error {
 		joined := strings.Join(dataLines, "\n")
 		fire := hasData && joined != ""
 		ev := sseEvent{event: event, data: []byte(joined)}
-		event, dataLines, hasData = "", nil, false
+		// Three separate assignments, not one "event, dataLines, hasData =
+		// \"\", nil, false" multi-value statement: yaegi v0.16.1 panics
+		// ("reflect: New(nil)") interpreting a 3-way assignment mixing a
+		// string, a nil slice, and a bool literal in one statement — the
+		// same class of bug as resolveAgainst's local-var fix (registry.go),
+		// just in assignment form instead of a return tuple. The identical
+		// values assigned one statement at a time do not trigger it.
+		// Verified empirically under real Traefik (Task 15's integration
+		// suite, the SSE streaming path); tools/yaegi-check never exercises
+		// a live streaming response.
+		event = ""
+		dataLines = nil
+		hasData = false
 		if !fire {
 			return nil
 		}
@@ -134,6 +146,25 @@ type sseWriter struct {
 // need not implement http.Flusher — the Gateway's statusTrackingWriter
 // always does, since it delegates — but writeData/writeDone tolerate its
 // absence by skipping the flush.
+//
+// KNOWN LIMITATION under real Traefik (yaegi v0.16.1), confirmed by
+// Task 15's integration suite: the w.(http.Flusher) assertion below
+// always reports false, because Yaegi wraps any http.ResponseWriter
+// argument crossing from Traefik's compiled dispatcher into this
+// interpreted package in a synthetic type scoped to exactly the
+// http.ResponseWriter method set — Header/Write/WriteHeader — dropping
+// any other interface the real writer satisfies. The same holds one
+// layer down: statusTrackingWriter.Flush's own w.rw.(http.Flusher)
+// check, and even http.NewResponseController(w.rw).Flush(), fail the
+// same way, all verified empirically. Net effect: streamed responses
+// (chat completions, MCP/A2A proxying via flushWriter below) are
+// correct in content but arrive as one batch when the handler returns,
+// not incrementally, when this plugin is loaded via localPlugins —
+// unlike compiled Go, where this exact code streams correctly (see the
+// unit tests). Confirmed as an external, still-open Yaegi/Traefik bug,
+// not a defect in this code: traefik/yaegi#1600 and, with the
+// "confirmed bug" label from Traefik's own maintainers,
+// traefik/traefik#10269. No code-level workaround is known.
 func newSSEWriter(w http.ResponseWriter) *sseWriter {
 	h := w.Header()
 	h.Set("Content-Type", "text/event-stream")
