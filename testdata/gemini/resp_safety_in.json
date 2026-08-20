@@ -1,0 +1,10 @@
+{
+  "candidates": [
+    {
+      "content": {"role": "model", "parts": []},
+      "finishReason": "SAFETY"
+    }
+  ],
+  "usageMetadata": {"promptTokenCount": 4, "candidatesTokenCount": 0},
+  "responseId": "resp_SAFETY1"
+}

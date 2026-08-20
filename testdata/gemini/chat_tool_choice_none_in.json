@@ -1,0 +1,11 @@
+{
+  "model": "gemini-2.5-pro",
+  "messages": [{"role": "user", "content": "hi"}],
+  "tools": [
+    {
+      "type": "function",
+      "function": {"name": "noop", "description": "does nothing", "parameters": {"type": "object", "properties": {}}}
+    }
+  ],
+  "tool_choice": "none"
+}

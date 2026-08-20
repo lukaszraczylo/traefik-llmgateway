@@ -1,0 +1,6 @@
+{
+  "systemInstruction": {"parts": [{"text": "Line one.\nLine two."}]},
+  "contents": [
+    {"role": "user", "parts": [{"text": "Hi"}]}
+  ]
+}

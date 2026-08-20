@@ -1,0 +1,6 @@
+[
+  {"id":"chatcmpl-resp_STREAM1","object":"chat.completion.chunk","created":1734000000,"model":"gw-gemini-model","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]},
+  {"id":"chatcmpl-resp_STREAM1","object":"chat.completion.chunk","created":1734000000,"model":"gw-gemini-model","choices":[{"index":0,"delta":{"content":"Hello"},"finish_reason":null}]},
+  {"id":"chatcmpl-resp_STREAM1","object":"chat.completion.chunk","created":1734000000,"model":"gw-gemini-model","choices":[{"index":0,"delta":{"content":", world!"},"finish_reason":null}]},
+  {"id":"chatcmpl-resp_STREAM1","object":"chat.completion.chunk","created":1734000000,"model":"gw-gemini-model","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+]

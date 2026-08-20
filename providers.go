@@ -182,8 +182,8 @@ func upstreamJSON(ctx context.Context, client *http.Client, method, url string, 
 // keyless upstream for openai-type providers, but a constructor error for
 // anthropic-type ones — newAnthropicAdapter enforces that, per ruling (c);
 // this function just propagates whatever error it returns. A configured
-// gemini provider currently errors too — Task 10 fills in that switch
-// case.
+// gemini provider follows the same constructor-error ruling —
+// newGeminiAdapter enforces it too.
 func buildAdapters(cfg *Config) (map[string]providerAdapter, error) {
 	adapters := make(map[string]providerAdapter, len(cfg.Providers))
 	for name, pc := range cfg.Providers {
@@ -207,7 +207,11 @@ func buildAdapters(cfg *Config) (map[string]providerAdapter, error) {
 			}
 			adapters[name] = a
 		case providerTypeGemini:
-			return nil, fmt.Errorf("llmgateway: provider %q: type %q not yet implemented", name, pc.Type)
+			g, err := newGeminiAdapter(name, base, apiKey)
+			if err != nil {
+				return nil, err
+			}
+			adapters[name] = g
 		default:
 			return nil, fmt.Errorf("llmgateway: provider %q: unknown type %q", name, pc.Type)
 		}

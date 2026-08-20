@@ -1,0 +1,22 @@
+{
+  "model": "gemini-2.5-pro",
+  "messages": [
+    {"role": "system", "content": "You are a helpful weather bot."},
+    {"role": "user", "content": "What's the weather in Paris?"}
+  ],
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "get_weather",
+        "description": "Get current weather for a location",
+        "parameters": {
+          "type": "object",
+          "properties": {"location": {"type": "string"}},
+          "required": ["location"]
+        }
+      }
+    }
+  ],
+  "tool_choice": {"type": "function", "function": {"name": "get_weather"}}
+}

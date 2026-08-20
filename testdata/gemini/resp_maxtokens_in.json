@@ -1,0 +1,13 @@
+{
+  "candidates": [
+    {
+      "content": {
+        "role": "model",
+        "parts": [{"text": "This response got cut off because it"}]
+      },
+      "finishReason": "MAX_TOKENS"
+    }
+  ],
+  "usageMetadata": {"promptTokenCount": 5, "candidatesTokenCount": 50},
+  "responseId": "resp_MAXTOK"
+}

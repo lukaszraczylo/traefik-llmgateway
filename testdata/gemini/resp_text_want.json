@@ -1,0 +1,14 @@
+{
+  "id": "chatcmpl-resp_ABC123",
+  "object": "chat.completion",
+  "created": 1734000000,
+  "model": "gw-gemini-model",
+  "choices": [
+    {
+      "index": 0,
+      "message": {"role": "assistant", "content": "Hello! How can I help you today?"},
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {"prompt_tokens": 8, "completion_tokens": 9, "total_tokens": 17}
+}

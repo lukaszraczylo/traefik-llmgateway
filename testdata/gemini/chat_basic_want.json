@@ -1,0 +1,9 @@
+{
+  "contents": [
+    {"role": "user", "parts": [{"text": "Hello there"}]}
+  ],
+  "generationConfig": {
+    "maxOutputTokens": 256,
+    "temperature": 0.7
+  }
+}

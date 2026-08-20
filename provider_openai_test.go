@@ -629,13 +629,32 @@ func TestBuildAdapters(t *testing.T) {
 		}
 	})
 
-	t.Run("edge: gemini type not yet implemented", func(t *testing.T) {
+	t.Run("good: gemini with an API key builds successfully", func(t *testing.T) {
 		cfg := &Config{Providers: map[string]*ProviderConfig{
 			"p1": {Type: "gemini", APIKey: "sk-test"},
 		}}
-		_, err := buildAdapters(cfg)
-		if err == nil {
-			t.Fatalf("buildAdapters: want placeholder error for gemini, got nil")
+		adapters, err := buildAdapters(cfg)
+		if err != nil {
+			t.Fatalf("buildAdapters: %v", err)
+		}
+		a, ok := adapters["p1"]
+		if !ok {
+			t.Fatalf("adapters[%q] missing", "p1")
+		}
+		if a.typeName() != "gemini" {
+			t.Errorf("typeName() = %q, want %q", a.typeName(), "gemini")
+		}
+		if a.base() != defaultBaseGemini {
+			t.Errorf("base() = %q, want %q", a.base(), defaultBaseGemini)
+		}
+	})
+
+	t.Run("bad: gemini without an API key is a constructor error", func(t *testing.T) {
+		cfg := &Config{Providers: map[string]*ProviderConfig{
+			"p1": {Type: "gemini"},
+		}}
+		if _, err := buildAdapters(cfg); err == nil {
+			t.Fatalf("buildAdapters: want error for keyless gemini provider, got nil")
 		}
 	})
 }

@@ -1,0 +1,19 @@
+{
+  "contents": [
+    {"role": "user", "parts": [{"text": "What's the weather in Paris and Tokyo?"}]},
+    {
+      "role": "model",
+      "parts": [
+        {"functionCall": {"name": "get_weather", "args": {"location": "Paris"}}},
+        {"functionCall": {"name": "get_weather", "args": {"location": "Tokyo"}}}
+      ]
+    },
+    {
+      "role": "user",
+      "parts": [
+        {"functionResponse": {"name": "get_weather", "response": {"content": "{\"temp_c\":18}"}}},
+        {"functionResponse": {"name": "get_weather", "response": {"content": "{\"temp_c\":27}"}}}
+      ]
+    }
+  ]
+}

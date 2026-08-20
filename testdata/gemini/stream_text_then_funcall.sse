@@ -1,0 +1,6 @@
+data: {"candidates":[{"content":{"role":"model","parts":[{"text":"Let me check that."}]}}],"responseId":"resp_STREAM2"}
+
+data: {"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"get_weather","args":{"location":"Berlin"}}}]}}]}
+
+data: {"candidates":[{"content":{"role":"model","parts":[]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":4}}
+

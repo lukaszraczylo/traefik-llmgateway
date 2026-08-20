@@ -1,0 +1,6 @@
+{
+  "requests": [
+    {"model": "models/text-embedding-004", "content": {"parts": [{"text": "hello"}]}},
+    {"model": "models/text-embedding-004", "content": {"parts": [{"text": "world!!"}]}}
+  ]
+}

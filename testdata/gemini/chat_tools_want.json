@@ -1,0 +1,27 @@
+{
+  "systemInstruction": {"parts": [{"text": "You are a helpful weather bot."}]},
+  "contents": [
+    {"role": "user", "parts": [{"text": "What's the weather in Paris?"}]}
+  ],
+  "tools": [
+    {
+      "functionDeclarations": [
+        {
+          "name": "get_weather",
+          "description": "Get current weather for a location",
+          "parameters": {
+            "type": "object",
+            "properties": {"location": {"type": "string"}},
+            "required": ["location"]
+          }
+        }
+      ]
+    }
+  ],
+  "toolConfig": {
+    "functionCallingConfig": {
+      "mode": "ANY",
+      "allowedFunctionNames": ["get_weather"]
+    }
+  }
+}

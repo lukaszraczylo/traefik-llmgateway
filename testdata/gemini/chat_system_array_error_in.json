@@ -1,0 +1,7 @@
+{
+  "model": "gemini-2.5-pro",
+  "messages": [
+    {"role": "system", "content": [{"type": "image_url", "image_url": {"url": "https://x"}}]},
+    {"role": "user", "content": "Hi"}
+  ]
+}

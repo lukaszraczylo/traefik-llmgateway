@@ -1,0 +1,15 @@
+{
+  "contents": [
+    {"role": "user", "parts": [{"text": "hi"}]}
+  ],
+  "tools": [
+    {
+      "functionDeclarations": [
+        {"name": "noop", "description": "does nothing", "parameters": {"type": "object", "properties": {}}}
+      ]
+    }
+  ],
+  "toolConfig": {
+    "functionCallingConfig": {"mode": "NONE"}
+  }
+}

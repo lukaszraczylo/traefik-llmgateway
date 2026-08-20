@@ -1,0 +1,4 @@
+{
+  "model": "text-embedding-004",
+  "input": ["hello", "world!!"]
+}

@@ -1,0 +1,18 @@
+{
+  "candidates": [
+    {
+      "content": {
+        "role": "model",
+        "parts": [
+          {"functionCall": {"id": "fc_1", "name": "get_weather", "args": {"location": "Paris"}}}
+        ]
+      },
+      "finishReason": "STOP"
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 12,
+    "candidatesTokenCount": 6
+  },
+  "responseId": "resp_FUNC1"
+}

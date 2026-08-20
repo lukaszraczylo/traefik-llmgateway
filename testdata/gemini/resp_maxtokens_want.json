@@ -1,0 +1,14 @@
+{
+  "id": "chatcmpl-resp_MAXTOK",
+  "object": "chat.completion",
+  "created": 1734000000,
+  "model": "gw-gemini-model",
+  "choices": [
+    {
+      "index": 0,
+      "message": {"role": "assistant", "content": "This response got cut off because it"},
+      "finish_reason": "length"
+    }
+  ],
+  "usage": {"prompt_tokens": 5, "completion_tokens": 50, "total_tokens": 55}
+}
