@@ -254,6 +254,104 @@ func (a *openaiAdapter) forwardStream(w http.ResponseWriter, body io.Reader, cli
 	return u, nil
 }
 
+// imagesGeneration implements providerAdapter: a native forward to
+// {base}/v1/images/generations. req has already had its "model" field
+// rewritten to the provider's own model id by the caller (routes_media.go),
+// matching chatCompletion/embeddings' contract. Images are never
+// cost-accounted (spec §3, v0.2), so this always returns a zero usage,
+// regardless of what the upstream response reports.
+func (a *openaiAdapter) imagesGeneration(ctx context.Context, w http.ResponseWriter, req map[string]any) (usage, error) {
+	resp, err := upstreamJSON(ctx, a.client, http.MethodPost, a.baseURL+"/v1/images/generations", a.requestHeaders(true), req, a.retry)
+	if err != nil {
+		return usage{}, err
+	}
+	defer resp.Body.Close() //nolint:errcheck // read-side close; nothing actionable on failure
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return usage{}, newProviderHTTPError(resp)
+	}
+	return usage{}, a.forwardMediaBody(w, resp)
+}
+
+// audioSpeech implements providerAdapter: a native forward to
+// {base}/v1/audio/speech. body is the caller's already re-marshaled JSON
+// request (routes_media.go rewrites "model" to the provider's own model id
+// before calling in). The response is binary audio, streamed to w via a
+// flushWriter as it arrives rather than buffered in full: once this loop
+// starts copying bytes, the response has already committed to the client
+// and can no longer be retried — matching spec §1's "retry only while ZERO
+// response bytes have reached the client" (the retry itself lives entirely
+// inside upstreamRawBytes, above this point).
+func (a *openaiAdapter) audioSpeech(ctx context.Context, w http.ResponseWriter, body []byte, contentType string) (usage, error) {
+	hdr := a.requestHeaders(false)
+	if contentType != "" {
+		hdr.Set("Content-Type", contentType)
+	}
+	resp, err := upstreamRawBytes(ctx, a.client, http.MethodPost, a.baseURL+"/v1/audio/speech", hdr, body, a.retry)
+	if err != nil {
+		return usage{}, err
+	}
+	defer resp.Body.Close() //nolint:errcheck // read-side close; nothing actionable on failure
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return usage{}, newProviderHTTPError(resp)
+	}
+
+	if ct := resp.Header.Get("Content-Type"); ct != "" {
+		w.Header().Set("Content-Type", ct)
+	}
+	w.WriteHeader(resp.StatusCode)
+	fw := newFlushWriter(w)
+	if _, err := io.Copy(fw, io.LimitReader(resp.Body, maxResponseBytes)); err != nil {
+		return usage{}, fmt.Errorf("%w: stream audio response: %w", errUpstream, err)
+	}
+	return usage{}, nil
+}
+
+// audioTranscription implements providerAdapter: a native forward to
+// {base}/v1/audio/transcriptions. body is the client's original raw
+// multipart request, replayed unchanged (routes_media.go never rewrites
+// it), and contentType is the client's original Content-Type header,
+// forwarded verbatim so the upstream sees the same multipart boundary the
+// client used. The response (JSON or plain text, depending on the
+// client's requested response_format) is copied through unchanged, the
+// same non-streaming path images.generations uses.
+func (a *openaiAdapter) audioTranscription(ctx context.Context, w http.ResponseWriter, body []byte, contentType string) (usage, error) {
+	hdr := a.requestHeaders(false)
+	if contentType != "" {
+		hdr.Set("Content-Type", contentType)
+	}
+	resp, err := upstreamRawBytes(ctx, a.client, http.MethodPost, a.baseURL+"/v1/audio/transcriptions", hdr, body, a.retry)
+	if err != nil {
+		return usage{}, err
+	}
+	defer resp.Body.Close() //nolint:errcheck // read-side close; nothing actionable on failure
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return usage{}, newProviderHTTPError(resp)
+	}
+	return usage{}, a.forwardMediaBody(w, resp)
+}
+
+// forwardMediaBody reads resp's full body (capped at maxResponseBytes) and
+// writes resp's Content-Type, status code, and body verbatim to w — the
+// copy-through path images.generations and audio-transcriptions share.
+// Unlike forwardJSON, it never extracts usage: images/audio are never
+// cost-accounted (spec §3, v0.2), so there is nothing to parse the body
+// for.
+func (a *openaiAdapter) forwardMediaBody(w http.ResponseWriter, resp *http.Response) error {
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
+	if err != nil {
+		return fmt.Errorf("%w: read response body: %w", errUpstream, err)
+	}
+	if ct := resp.Header.Get("Content-Type"); ct != "" {
+		w.Header().Set("Content-Type", ct)
+	}
+	w.WriteHeader(resp.StatusCode)
+	_, _ = w.Write(body)
+	return nil
+}
+
 // modelsPayload is the "data": [{"id": ...}, ...] shape OpenAI's
 // /v1/models endpoint returns.
 type modelsPayload struct {

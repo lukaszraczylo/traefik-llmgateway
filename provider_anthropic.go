@@ -198,6 +198,26 @@ func (a *anthropicAdapter) embeddings(_ context.Context, _ http.ResponseWriter, 
 	return usage{}, &translateError{msg: "embeddings not supported for anthropic models", notSupported: true}
 }
 
+// imagesGeneration implements providerAdapter: Anthropic has no images API
+// (spec §3, v0.2), so this never makes an upstream request.
+func (a *anthropicAdapter) imagesGeneration(_ context.Context, _ http.ResponseWriter, _ map[string]any) (usage, error) {
+	return usage{}, &translateError{msg: "image generation not supported for anthropic models", notSupported: true}
+}
+
+// audioSpeech implements providerAdapter: Anthropic has no
+// OpenAI-compatible text-to-speech API (spec §3, v0.2), so this never
+// makes an upstream request.
+func (a *anthropicAdapter) audioSpeech(_ context.Context, _ http.ResponseWriter, _ []byte, _ string) (usage, error) {
+	return usage{}, &translateError{msg: "audio speech not supported for anthropic models", notSupported: true}
+}
+
+// audioTranscription implements providerAdapter: Anthropic has no
+// OpenAI-compatible speech-to-text API (spec §3, v0.2), so this never
+// makes an upstream request.
+func (a *anthropicAdapter) audioTranscription(_ context.Context, _ http.ResponseWriter, _ []byte, _ string) (usage, error) {
+	return usage{}, &translateError{msg: "audio transcription not supported for anthropic models", notSupported: true}
+}
+
 // listModels implements providerAdapter: GET {base}/v1/models, parsing
 // the same "data": [{"id": ...}] shape OpenAI's endpoint uses (Anthropic's
 // 2026 Models API responds in the same shape). A non-2xx response —

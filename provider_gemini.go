@@ -265,6 +265,72 @@ func (a *geminiAdapter) embeddings(ctx context.Context, w http.ResponseWriter, r
 	return u, nil
 }
 
+// imagesGeneration implements providerAdapter: translates req to an Imagen
+// :predict request via geminiImagesRequestFromOpenAI, POSTs it, and
+// translates the response back to OpenAI's images.generations shape
+// (translate_gemini_images.go). Images never stream. Like
+// chatCompletion/embeddings, the model id is read from req (already
+// rewritten to the provider's own model id by the caller) and drives the
+// URL directly; an OpenAI images.generations response carries no "model"
+// field at all, so there is no alias to echo back the way chat/embeddings
+// do.
+func (a *geminiAdapter) imagesGeneration(ctx context.Context, w http.ResponseWriter, req map[string]any) (usage, error) {
+	model := geminiModelFromRequest(req)
+	delete(req, gatewayAliasKey)
+
+	body, err := geminiImagesRequestFromOpenAI(req)
+	if err != nil {
+		return usage{}, err
+	}
+
+	escapedModel := url.PathEscape(model)
+	endpoint := a.baseURL + geminiAPIPrefix + escapedModel + ":predict"
+
+	resp, err := upstreamJSON(ctx, a.client, http.MethodPost, endpoint, a.requestHeaders(true), body, a.retry)
+	if err != nil {
+		return usage{}, err
+	}
+	defer resp.Body.Close() //nolint:errcheck // read-side close; nothing actionable on failure
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return usage{}, newProviderHTTPError(resp)
+	}
+
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
+	if err != nil {
+		return usage{}, fmt.Errorf("%w: read response body: %w", errUpstream, err)
+	}
+
+	out, err := openAIImagesResponseFromGemini(raw, time.Now().Unix())
+	if err != nil {
+		return usage{}, err
+	}
+
+	b, err := json.Marshal(out)
+	if err != nil {
+		return usage{}, fmt.Errorf("%w: marshal translated images response: %w", errUpstream, err)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(b)
+	return usage{}, nil
+}
+
+// audioSpeech implements providerAdapter: Gemini has no OpenAI-compatible
+// text-to-speech API (spec §3, v0.2), so this never makes an upstream
+// request.
+func (a *geminiAdapter) audioSpeech(_ context.Context, _ http.ResponseWriter, _ []byte, _ string) (usage, error) {
+	return usage{}, &translateError{msg: "audio speech not supported for gemini models", notSupported: true}
+}
+
+// audioTranscription implements providerAdapter: Gemini has no
+// OpenAI-compatible speech-to-text API (spec §3, v0.2), so this never
+// makes an upstream request.
+func (a *geminiAdapter) audioTranscription(_ context.Context, _ http.ResponseWriter, _ []byte, _ string) (usage, error) {
+	return usage{}, &translateError{msg: "audio transcription not supported for gemini models", notSupported: true}
+}
+
 // geminiModelsListPayload is the "models": [{"name": "models/..."}, ...]
 // shape Gemini's models.list endpoint returns (its "name" field is the
 // full "models/{model}" resource name, unlike OpenAI's bare "id").

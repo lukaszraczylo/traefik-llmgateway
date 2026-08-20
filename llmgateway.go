@@ -365,6 +365,24 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if r.Method == http.MethodPost && (r.URL.Path == imagesGenerationsPath || r.URL.Path == audioSpeechPath || r.URL.Path == audioTranscriptionsPath) {
+		u, grp, ok := g.auth.identify(r)
+		g.logAuthEvent(ok, authEventUserName(u), r)
+		if !ok {
+			writeOAIError(sw, http.StatusUnauthorized, "authentication_error", "invalid or missing API key")
+			return
+		}
+		switch r.URL.Path {
+		case imagesGenerationsPath:
+			g.handleImagesGenerations(sw, r, u, grp)
+		case audioSpeechPath:
+			g.handleAudioSpeech(sw, r, u, grp)
+		case audioTranscriptionsPath:
+			g.handleAudioTranscriptions(sw, r, u, grp)
+		}
+		return
+	}
+
 	if r.Method == http.MethodGet && (r.URL.Path == "/v1/mcp/servers" || r.URL.Path == "/v1/agents") {
 		u, grp, ok := g.auth.identify(r)
 		g.logAuthEvent(ok, authEventUserName(u), r)

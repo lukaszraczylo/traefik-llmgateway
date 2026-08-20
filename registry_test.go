@@ -34,6 +34,15 @@ func (f *fakeAdapter) chatCompletion(context.Context, http.ResponseWriter, map[s
 func (f *fakeAdapter) embeddings(context.Context, http.ResponseWriter, map[string]any) (usage, error) {
 	return usage{}, nil
 }
+func (f *fakeAdapter) imagesGeneration(context.Context, http.ResponseWriter, map[string]any) (usage, error) {
+	return usage{}, nil
+}
+func (f *fakeAdapter) audioSpeech(context.Context, http.ResponseWriter, []byte, string) (usage, error) {
+	return usage{}, nil
+}
+func (f *fakeAdapter) audioTranscription(context.Context, http.ResponseWriter, []byte, string) (usage, error) {
+	return usage{}, nil
+}
 func (f *fakeAdapter) listModels(ctx context.Context) ([]string, error) {
 	if f.listModelsFn == nil {
 		return nil, nil

@@ -433,6 +433,50 @@ request.
 | Unsupported parameters | A semantically meaningful field the target provider cannot express (e.g. `n > 1`, `logit_bias`, `logprobs` on Anthropic) is a **400**, never silently dropped. | Not applicable — the request reaches the provider exactly as sent. |
 | Non-2xx upstream response | Wrapped in the gateway's own error envelope, with the provider's own body embedded under `error.upstream`. | Forwarded to the client exactly as the upstream sent it — status, headers, and body. |
 
+## Image and audio endpoints
+
+`POST /v1/images/generations`, `POST /v1/audio/speech`, and
+`POST /v1/audio/transcriptions` follow the same pipeline as
+`/v1/chat/completions` — auth, model routing, group authorization, limits,
+adapter call — minus response caching and token/cost accounting (below).
+
+| | `openai`-type | `gemini` | `anthropic` |
+|---|---|---|---|
+| `images/generations` | Native forward. | Translated to Imagen's `:predict` (below). | **501**. |
+| `audio/speech` | Native forward; the binary response is streamed to the client as it arrives. | **501** — no OpenAI-compatible text-to-speech endpoint. | **501**. |
+| `audio/transcriptions` | Native forward; the client's original multipart body is replayed upstream unchanged. | **501** — no OpenAI-compatible speech-to-text endpoint. | **501**. |
+
+- **Model routing**: `images/generations` and `audio/speech` read `model`
+  from the JSON request body. `audio/transcriptions` reads it from the
+  multipart request's `model` form field instead — the field can appear
+  in any position among the request's parts.
+- **Gemini image translation**: `{model, prompt, n, size,
+  response_format}` maps to Imagen's `{instances:[{prompt}], parameters:
+  {sampleCount, aspectRatio}}`. `size` maps to `aspectRatio`:
+  `1024x1024`/`512x512` → `1:1`, `1792x1024` → `16:9`, `1024x1792` →
+  `9:16`; an absent `size` defaults to `1:1`; any other value is a
+  **400**. `response_format: "url"` is a **400** — the gateway stores
+  nothing to host a URL from. A truthy `quality` or `style` is a **400**,
+  the same convention chat's translators use for an unsupported field.
+  Imagen's `predictions[].bytesBase64Encoded` maps back to OpenAI's
+  `data[].b64_json`.
+- **Never cached**: image and audio responses are excluded from the
+  response cache (`cache.enabled`) regardless of its configuration.
+- **Accounting**: request counters (`requestsPerMinute`/`requestsPerDay`)
+  increment the same as any other route. Token counters never move, and
+  cost is always recorded as 0 — images and audio are not
+  cost-accounted.
+- **Body limits**: `images/generations` and `audio/speech` share the
+  unified routes' 10MiB JSON cap. `audio/transcriptions` enforces the
+  same 10MiB cap explicitly, returning **413** over it — unlike an
+  oversized JSON body, which is silently truncated into a parse failure,
+  a truncated multipart body can still parse a valid prefix and would
+  forward cut-off audio upstream if it were not rejected outright.
+- **Retry** (above) applies to all three the same as chat/embeddings; a
+  streaming `audio/speech` response is retried only before the first
+  response byte reaches the client, the same zero-bytes rule as chat's
+  streaming path.
+
 ## MCP and A2A
 
 - **Registry** (group-filtered, sorted by name):

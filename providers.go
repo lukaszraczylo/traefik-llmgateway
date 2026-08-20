@@ -127,6 +127,31 @@ type providerAdapter interface {
 	embeddings(ctx context.Context, w http.ResponseWriter, req map[string]any) (usage, error)
 	// listModels returns the provider's available model ids, for discovery.
 	listModels(ctx context.Context) ([]string, error)
+	// imagesGeneration proxies req to the provider's image-generation
+	// endpoint and writes the response to w (spec §3, v0.2). req has
+	// already had its "model" field rewritten to the provider's own model
+	// id by the caller, matching chatCompletion/embeddings' contract.
+	// Images are never cached (spec §2) and never cost-accounted (spec
+	// §3) — every implementation returns a zero usage regardless of what
+	// its upstream reports. Anthropic has no images API and always
+	// returns a *translateError with notSupported set, mapped to HTTP 501
+	// by the same handleAdapterError chatCompletion/embeddings errors
+	// already go through.
+	imagesGeneration(ctx context.Context, w http.ResponseWriter, req map[string]any) (usage, error)
+	// audioSpeech proxies body — a JSON request the caller has already
+	// re-marshaled with "model" rewritten to the provider's own model id
+	// — to the provider's text-to-speech endpoint, streaming the (binary)
+	// response to w as it arrives rather than buffering it in full (spec
+	// §3, v0.2). Gemini and Anthropic have no OpenAI-compatible TTS
+	// endpoint and always return a *translateError with notSupported set.
+	audioSpeech(ctx context.Context, w http.ResponseWriter, body []byte, contentType string) (usage, error)
+	// audioTranscription proxies body — the client's original raw
+	// multipart request, replayed unchanged — to the provider's
+	// speech-to-text endpoint, forwarding its (JSON or text) response to w
+	// verbatim (spec §3, v0.2). Gemini and Anthropic have no
+	// OpenAI-compatible STT endpoint and always return a *translateError
+	// with notSupported set.
+	audioTranscription(ctx context.Context, w http.ResponseWriter, body []byte, contentType string) (usage, error)
 	// httpClient returns the adapter's shared *http.Client, so a caller
 	// outside this file (the native passthrough route, routes_passthrough.go)
 	// can issue upstream requests through the same connection-pooled client
@@ -190,13 +215,47 @@ func upstreamJSON(ctx context.Context, client *http.Client, method, url string, 
 		}
 		bodyBytes = b
 	}
+	return upstreamBytes(ctx, client, method, url, hdr, bodyBytes, policy)
+}
 
+// upstreamRawBytes is upstreamJSON's counterpart for a body the caller has
+// already encoded: the audio endpoints' openai-type adapter methods
+// (provider_openai.go's audioSpeech and audioTranscription) call this
+// directly with a body that must never be marshaled again — audioSpeech's
+// is a JSON request the caller (routes_media.go) already re-marshaled
+// once after rewriting "model", and audioTranscription's is a raw
+// multipart payload upstreamJSON's json.Marshal would corrupt outright.
+// Shares upstreamBytes with upstreamJSON, so both get the identical
+// retry/zero-bytes-reached invariant documented on upstreamJSON.
+func upstreamRawBytes(ctx context.Context, client *http.Client, method, url string, hdr http.Header, body []byte, policy *retryPolicy) (*http.Response, error) {
+	return upstreamBytes(ctx, client, method, url, hdr, body, policy)
+}
+
+// upstreamBytes is the shared request-build-and-send core behind both
+// upstreamJSON (which marshals body to JSON first) and upstreamRawBytes
+// (which sends an already-encoded body verbatim): hdr's values are added
+// to the request, bodyBytes (nil for a body-less request) becomes the
+// request body unchanged, and Content-Type defaults to
+// "application/json" only when bodyBytes is non-nil and hdr set none of
+// its own.
+func upstreamBytes(ctx context.Context, client *http.Client, method, url string, hdr http.Header, bodyBytes []byte, policy *retryPolicy) (*http.Response, error) {
 	call := func() (*http.Response, error) {
 		var r io.Reader
 		if bodyBytes != nil {
 			r = bytes.NewReader(bodyBytes)
 		}
-		req, err := http.NewRequestWithContext(ctx, method, url, r)
+		// gosec G704 (SSRF via taint analysis) flags url below: every call
+		// site builds it from an operator-configured value —
+		// adapter.baseURL (ProviderConfig.BaseURL, or defaultBaseURLByType
+		// when omitted) concatenated with a fixed, hardcoded path string —
+		// never anything request-derived that could change the scheme or
+		// host. Gemini's endpoints additionally embed a url.PathEscape'd
+		// model id mid-path (provider_gemini.go), which cannot introduce a
+		// new host or scheme either. See routes_passthrough.go's
+		// proxyUpstream for the one adapter call path where a request-
+		// derived path segment genuinely reaches the outgoing URL, and its
+		// own comment for why that case is safe.
+		req, err := http.NewRequestWithContext(ctx, method, url, r) //nolint:gosec // operator-configured host; see comment above
 		if err != nil {
 			return nil, fmt.Errorf("%w: %w: build request: %w", errUpstream, errRequestBuildFailed, err)
 		}
@@ -209,7 +268,7 @@ func upstreamJSON(ctx context.Context, client *http.Client, method, url string, 
 			req.Header.Set("Content-Type", "application/json")
 		}
 
-		resp, err := client.Do(req) //nolint:bodyclose // caller closes resp.Body; upstreamJSON hands the response, not its lifecycle, back
+		resp, err := client.Do(req) //nolint:bodyclose,gosec // caller closes resp.Body; upstreamBytes hands the response, not its lifecycle, back — same operator-configured URL as above
 		if err != nil {
 			return nil, fmt.Errorf("%w: %w", errUpstream, err)
 		}
