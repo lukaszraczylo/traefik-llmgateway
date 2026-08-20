@@ -2,6 +2,7 @@ package traefikllmgateway
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"io"
 	"net/http"
@@ -49,6 +50,7 @@ func TestExtractPassthroughUsage(t *testing.T) {
 		body         string
 		wantModel    string
 		wantUsage    usage
+		wantErr      bool
 	}{
 		{
 			name:         "openai shape",
@@ -81,16 +83,45 @@ func TestExtractPassthroughUsage(t *testing.T) {
 			body:         `not json`,
 			wantUsage:    usage{},
 			wantModel:    "unknown/openai",
+			wantErr:      true,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			gotUsage, gotModel := extractPassthroughUsage(tt.typeName, tt.providerName, []byte(tt.body))
+			gotUsage, gotModel, gotErr := extractPassthroughUsage(tt.typeName, tt.providerName, []byte(tt.body))
 			if gotUsage != tt.wantUsage {
 				t.Errorf("usage = %+v, want %+v", gotUsage, tt.wantUsage)
 			}
 			if gotModel != tt.wantModel {
 				t.Errorf("model = %q, want %q", gotModel, tt.wantModel)
+			}
+			if (gotErr != nil) != tt.wantErr {
+				t.Errorf("err = %v, want err present = %v", gotErr, tt.wantErr)
+			}
+		})
+	}
+}
+
+// --- unit tests: hasTraversalSegment ---
+
+func TestHasTraversalSegment(t *testing.T) {
+	tests := []struct {
+		rest string
+		want bool
+	}{
+		{"v1/audio/speech", false},
+		{"v1beta/models/gemini-pro:generateContent", false},
+		{"a%2Fb", false},
+		{"../secret", true},
+		{"v1/../secret", true},
+		{"..%2f..%2fsecret", true},
+		{"..%2F..%2Fsecret", true},
+		{"%zz", true}, // invalid percent-encoding
+	}
+	for _, tt := range tests {
+		t.Run(tt.rest, func(t *testing.T) {
+			if got := hasTraversalSegment(tt.rest); got != tt.want {
+				t.Errorf("hasTraversalSegment(%q) = %v, want %v", tt.rest, got, tt.want)
 			}
 		})
 	}
@@ -490,5 +521,276 @@ func TestHandlePassthrough_DeadUpstream_Returns502(t *testing.T) {
 
 	if rec.Code != http.StatusBadGateway {
 		t.Fatalf("status = %d, want 502, body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestHandlePassthrough_AcceptEncodingStripped_AccountsUsageThroughGzip
+// proves a client's own "Accept-Encoding: gzip" (sent by every mainstream
+// OpenAI SDK, Node fetch, and curl --compressed) never reaches the
+// upstream verbatim: stripping it lets Go's Transport negotiate and
+// transparently decompress gzip itself, so the accounting JSON parse
+// still sees plaintext instead of silently failing on raw gzip bytes.
+func TestHandlePassthrough_AcceptEncodingStripped_AccountsUsageThroughGzip(t *testing.T) {
+	const respBody = `{"model":"gpt-native-x","usage":{"prompt_tokens":7,"completion_tokens":3}}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
+			w.Header().Set("Content-Encoding", "gzip")
+			w.WriteHeader(http.StatusOK)
+			gz := gzip.NewWriter(w)
+			_, _ = gz.Write([]byte(respBody))
+			_ = gz.Close()
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(respBody))
+	}))
+	defer srv.Close()
+
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{
+		"openai": {Type: "openai", BaseURL: srv.URL, APIKey: "sk-up"},
+	}
+	cfg.Groups = map[string]*GroupConfig{"default": {}}
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{
+		{Name: "alice", Group: "default", APIKey: "sk-alice", Limits: &LimitsConfig{}},
+	}}
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	gw, ok := h.(*Gateway)
+	if !ok {
+		t.Fatal("handler is not *Gateway")
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/openai/v1/native-endpoint", strings.NewReader(`{}`))
+	req.Header.Set("Authorization", "Bearer sk-alice")
+	req.Header.Set("Accept-Encoding", "gzip")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	if rec.Body.String() != respBody {
+		t.Errorf("body = %q, want decompressed upstream body %q", rec.Body.String(), respBody)
+	}
+
+	tok, ok := gw.limiter.getCounter("user", "alice", metricTok, windowDay, time.Now())
+	if !ok || tok != 10 {
+		t.Errorf("user token/day counter = %d (ok=%v), want 10 — usage must still be accounted through gzip", tok, ok)
+	}
+}
+
+// TestHandlePassthrough_TraversalPath_Returns400 covers both a literal
+// and a percent-encoded ".." segment in rest; neither must ever reach the
+// upstream.
+func TestHandlePassthrough_TraversalPath_Returns400(t *testing.T) {
+	upstreamCalled := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalled = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{
+		"openai": {Type: "openai", BaseURL: srv.URL, APIKey: "sk-up"},
+	}
+	cfg.Groups = map[string]*GroupConfig{"default": {}}
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{{Name: "alice", Group: "default", APIKey: "sk-alice"}}}
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	for _, path := range []string{
+		"/openai/../secret",
+		"/openai/..%2f..%2fsecret",
+	} {
+		t.Run(path, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, path, nil)
+			req.Header.Set("Authorization", "Bearer sk-alice")
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400, body=%s", rec.Code, rec.Body.String())
+			}
+		})
+	}
+	if upstreamCalled {
+		t.Error("upstream must never be called for a rejected traversal path")
+	}
+}
+
+// TestHandlePassthrough_EncodedSlashSegment_PreservedAtUpstream proves a
+// legitimately percent-encoded "/" within one rest segment (e.g. a
+// resource id that itself contains a slash) reaches the upstream in its
+// original encoded form, not silently decoded into an extra path
+// separator.
+func TestHandlePassthrough_EncodedSlashSegment_PreservedAtUpstream(t *testing.T) {
+	var gotRequestURI string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotRequestURI = r.RequestURI
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{
+		"openai": {Type: "openai", BaseURL: srv.URL, APIKey: "sk-up"},
+	}
+	cfg.Groups = map[string]*GroupConfig{"default": {}}
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{{Name: "alice", Group: "default", APIKey: "sk-alice"}}}
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/openai/v1/files/a%2Fb", nil)
+	req.Header.Set("Authorization", "Bearer sk-alice")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(gotRequestURI, "a%2Fb") {
+		t.Errorf("upstream RequestURI = %q, want the encoded \"a%%2Fb\" preserved, not decoded", gotRequestURI)
+	}
+}
+
+// TestHandlePassthrough_OversizedJSONBody_ClientGetsFullBody_RequestOnlyAccounting
+// proves a JSON response body larger than maxAccountingTeeBytes still
+// reaches the client in full, while the accounting parse is skipped —
+// only the request itself was already accounted, by checkAndCount.
+func TestHandlePassthrough_OversizedJSONBody_ClientGetsFullBody_RequestOnlyAccounting(t *testing.T) {
+	// Pad well past maxAccountingTeeBytes (4MiB) with an oversized field
+	// ahead of "usage", so the tee's cap is hit before "usage" is reached.
+	padding := strings.Repeat("x", maxAccountingTeeBytes+1024)
+	respBody := `{"model":"gpt-native-x","padding":"` + padding + `","usage":{"prompt_tokens":7,"completion_tokens":3}}`
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(respBody))
+	}))
+	defer srv.Close()
+
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{
+		"openai": {Type: "openai", BaseURL: srv.URL, APIKey: "sk-up"},
+	}
+	cfg.Groups = map[string]*GroupConfig{"default": {}}
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{
+		{Name: "alice", Group: "default", APIKey: "sk-alice", Limits: &LimitsConfig{}},
+	}}
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	gw, ok := h.(*Gateway)
+	if !ok {
+		t.Fatal("handler is not *Gateway")
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/openai/v1/native-endpoint", strings.NewReader(`{}`))
+	req.Header.Set("Authorization", "Bearer sk-alice")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if rec.Body.String() != respBody {
+		t.Errorf("client body = %d bytes, want the full %d bytes (client copy must never truncate)", rec.Body.Len(), len(respBody))
+	}
+
+	tok, ok := gw.limiter.getCounter("user", "alice", metricTok, windowDay, time.Now())
+	if !ok || tok != 0 {
+		t.Errorf("user token/day counter = %d (ok=%v), want 0 — usage accounting must be skipped over the tee cap", tok, ok)
+	}
+	reqCount, ok := gw.limiter.getCounter("user", "alice", metricReq, windowMin, time.Now())
+	if !ok || reqCount != 1 {
+		t.Errorf("user request/min counter = %d (ok=%v), want 1 — the request itself is still accounted", reqCount, ok)
+	}
+}
+
+// TestHandlePassthrough_QueryStringForwarded proves the client's query
+// string reaches the upstream via RawQuery, unmodified.
+func TestHandlePassthrough_QueryStringForwarded(t *testing.T) {
+	var gotQuery string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.RawQuery
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{
+		"openai": {Type: "openai", BaseURL: srv.URL, APIKey: "sk-up"},
+	}
+	cfg.Groups = map[string]*GroupConfig{"default": {}}
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{{Name: "alice", Group: "default", APIKey: "sk-alice"}}}
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/openai/v1/thing?a=1&b=2", nil)
+	req.Header.Set("Authorization", "Bearer sk-alice")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	if gotQuery != "a=1&b=2" {
+		t.Errorf("upstream RawQuery = %q, want %q", gotQuery, "a=1&b=2")
+	}
+}
+
+// TestHandlePassthrough_AnthropicClientAPIKeyStripped_ProviderKeyInjected
+// proves an anthropic passthrough client's own x-api-key — the gateway's
+// own auth header, which happens to share anthropic's own upstream
+// credential header name — never reaches the upstream: the provider's own
+// key is injected in its place.
+func TestHandlePassthrough_AnthropicClientAPIKeyStripped_ProviderKeyInjected(t *testing.T) {
+	var gotAPIKeyHeader string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAPIKeyHeader = r.Header.Get("x-api-key")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{
+		"anthropic": {Type: "anthropic", BaseURL: srv.URL, APIKey: "sk-provider-real"},
+	}
+	cfg.Groups = map[string]*GroupConfig{"default": {}}
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{{Name: "alice", Group: "default", APIKey: "client-key-should-not-leak"}}}
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(`{}`))
+	req.Header.Set("x-api-key", "client-key-should-not-leak")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	if gotAPIKeyHeader != "sk-provider-real" {
+		t.Errorf("x-api-key = %q, want the provider's own key injected", gotAPIKeyHeader)
 	}
 }

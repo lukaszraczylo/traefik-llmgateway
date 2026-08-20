@@ -268,7 +268,7 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if providerName, rest, ok := passthroughRoute(r.URL.Path); ok {
+	if providerName, rest, ok := passthroughRoute(r.URL.EscapedPath()); ok {
 		if _, known := g.adapters[providerName]; known {
 			u, grp, ok := g.auth.identify(r)
 			if !ok {
