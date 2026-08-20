@@ -91,8 +91,12 @@ type providerAdapter interface {
 	// trimmed.
 	base() string
 	// injectAuth sets whatever headers r needs to authenticate against the
-	// provider. It is a no-op when the provider's resolved API key is
-	// empty — a keyless upstream is a valid configuration, not an error.
+	// provider. Behavior is type-specific: an openai-type adapter treats
+	// a resolved-empty API key as a valid keyless upstream, so injectAuth
+	// is a no-op in that case. An anthropic-type adapter's constructor
+	// rejects an empty key outright (ruling c), so its injectAuth always
+	// sets auth headers — there is no keyless case for it to be a no-op
+	// over.
 	injectAuth(r *http.Request)
 	// chatCompletion proxies req to the provider's chat completions
 	// endpoint and writes the (possibly streamed) response to w. req has

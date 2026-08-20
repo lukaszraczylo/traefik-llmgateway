@@ -1,0 +1,7 @@
+[
+  {"id":"chatcmpl-msg_01MIX","object":"chat.completion.chunk","created":1734000000,"model":"gw-anthropic-model","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]},
+  {"id":"chatcmpl-msg_01MIX","object":"chat.completion.chunk","created":1734000000,"model":"gw-anthropic-model","choices":[{"index":0,"delta":{"content":"Let me check."},"finish_reason":null}]},
+  {"id":"chatcmpl-msg_01MIX","object":"chat.completion.chunk","created":1734000000,"model":"gw-anthropic-model","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"toolu_MIX1","type":"function","function":{"name":"get_weather","arguments":""}}]},"finish_reason":null}]},
+  {"id":"chatcmpl-msg_01MIX","object":"chat.completion.chunk","created":1734000000,"model":"gw-anthropic-model","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"location\":\"Paris\"}"}}]},"finish_reason":null}]},
+  {"id":"chatcmpl-msg_01MIX","object":"chat.completion.chunk","created":1734000000,"model":"gw-anthropic-model","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
+]

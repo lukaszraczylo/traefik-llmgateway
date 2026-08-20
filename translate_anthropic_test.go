@@ -270,6 +270,16 @@ func TestAnthropicStreamGolden_ToolUse(t *testing.T) {
 	runStreamGolden(t, "stream_tooluse")
 }
 
+// TestAnthropicStreamGolden_TextThenTool covers a text block followed by
+// a tool_use block (Anthropic content-block index 0 then 1) and proves
+// the emitted tool_calls[0].index is the 0-based tool-call ordinal (0),
+// not the raw Anthropic content-block index (1) — review fix: OpenAI's
+// contract requires tool_calls[].index to be contiguous from 0 over the
+// tool-call array, regardless of how many non-tool_use blocks preceded it.
+func TestAnthropicStreamGolden_TextThenTool(t *testing.T) {
+	runStreamGolden(t, "stream_text_then_tool")
+}
+
 // TestAnthropicStreamState_ErrorEvent proves an "error" SSE event
 // translates to one OpenAI-shaped {"error":{...}} chunk and a non-nil
 // terminal error, per the stream mapping table's error row — built
@@ -304,6 +314,33 @@ func TestAnthropicStreamState_ErrorEvent(t *testing.T) {
 	}
 	if errObj["type"] != "overloaded_error" {
 		t.Errorf("error.type = %v, want %q", errObj["type"], "overloaded_error")
+	}
+}
+
+// TestAnthropicStreamState_MalformedEventReturnsError proves a malformed
+// (invalid-JSON) data payload on each recognized event type returns an
+// error wrapping errUpstream, rather than being swallowed as (nil, nil) —
+// review fix: a dropped input_json_delta would otherwise silently corrupt
+// the client's reassembled tool-call arguments. The "error" event type
+// itself already returned an error before this fix and is covered by
+// TestAnthropicStreamState_ErrorEvent, not repeated here.
+func TestAnthropicStreamState_MalformedEventReturnsError(t *testing.T) {
+	const corrupt = `{"type":"message_start","message":{`
+
+	for _, event := range []string{"message_start", "content_block_start", "content_block_delta", "message_delta"} {
+		t.Run(event, func(t *testing.T) {
+			st := newAnthropicStreamState(goldenGatewayModel, goldenCreated)
+			chunks, err := st.translate(sseEvent{event: event, data: []byte(corrupt)})
+			if err == nil {
+				t.Fatalf("translate(%s, corrupt data): want error, got nil (chunks=%v)", event, chunks)
+			}
+			if !errors.Is(err, errUpstream) {
+				t.Errorf("translate(%s, corrupt data): err = %v, want errors.Is(err, errUpstream)", event, err)
+			}
+			if len(chunks) != 0 {
+				t.Errorf("translate(%s, corrupt data): chunks = %v, want none", event, chunks)
+			}
+		})
 	}
 }
 

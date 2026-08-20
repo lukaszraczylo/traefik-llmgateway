@@ -1,0 +1,15 @@
+{
+  "model": "claude-opus-5",
+  "messages": [
+    {"role": "user", "content": "What's the weather in Paris and Tokyo?"},
+    {"role": "assistant", "content": [
+      {"type": "tool_use", "id": "call_1", "name": "get_weather", "input": {"location": "Paris"}},
+      {"type": "tool_use", "id": "call_2", "name": "get_weather", "input": {"location": "Tokyo"}}
+    ]},
+    {"role": "user", "content": [
+      {"type": "tool_result", "tool_use_id": "call_1", "content": "72F and sunny"},
+      {"type": "tool_result", "tool_use_id": "call_2", "content": "50F and rainy"}
+    ]}
+  ],
+  "max_tokens": 200
+}

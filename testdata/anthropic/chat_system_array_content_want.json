@@ -1,0 +1,8 @@
+{
+  "model": "claude-opus-5",
+  "system": "You are a helpful assistant.\nAlways be concise.",
+  "messages": [
+    {"role": "user", "content": "Hi"}
+  ],
+  "max_tokens": 100
+}

@@ -181,6 +181,52 @@ func TestAnthropicAdapter_ChatCompletion_Streaming(t *testing.T) {
 	}
 }
 
+// TestAnthropicAdapter_ChatCompletion_Streaming_CaseInsensitiveContentType
+// proves the streaming-vs-JSON-fallback gate matches an upstream's
+// Content-Type case-insensitively — review fix, mirroring the same fix
+// in the openai-type adapter. Distinguishing evidence: the streaming path
+// extracts real usage from the SSE events and sets Content-Type to the
+// sseWriter's own lowercase "text/event-stream"; the JSON fallback path
+// would copy the upstream's mixed-case header verbatim and fail to
+// decode a body of raw SSE text as a single Anthropic response.
+func TestAnthropicAdapter_ChatCompletion_Streaming_CaseInsensitiveContentType(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "Text/Event-Stream; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		f, ok := w.(http.Flusher)
+		if !ok {
+			t.Fatalf("httptest ResponseWriter does not implement http.Flusher")
+		}
+		for _, frame := range anthropicStreamFrames {
+			fmt.Fprintf(w, "event: %s\ndata: %s\n\n", frame.event, frame.data)
+			f.Flush()
+		}
+	}))
+	defer srv.Close()
+
+	a, err := newAnthropicAdapter("p1", srv.URL, "sk-ant-test")
+	if err != nil {
+		t.Fatalf("newAnthropicAdapter: %v", err)
+	}
+	rec := newRecordingResponseWriter()
+
+	req := map[string]any{
+		"model":    "claude-opus-5",
+		"stream":   true,
+		"messages": []any{map[string]any{"role": "user", "content": "hello"}},
+	}
+	u, err := a.chatCompletion(context.Background(), rec, req)
+	if err != nil {
+		t.Fatalf("chatCompletion: %v", err)
+	}
+	if u.prompt != 6 || u.completion != 3 {
+		t.Errorf("usage = %+v, want {prompt:6 completion:3} (proves the streaming path, not JSON fallback, was taken)", u)
+	}
+	if got := rec.header.Get("Content-Type"); got != "text/event-stream" {
+		t.Errorf("Content-Type on client response = %q, want %q (sseWriter's own header; JSON fallback would copy the upstream's mixed-case value verbatim)", got, "text/event-stream")
+	}
+}
+
 // TestAnthropicAdapter_ChatCompletion_Upstream429 proves a non-2xx
 // upstream response returns a *providerHTTPError with nothing written to
 // the client, mirroring the openai-type adapter's contract.

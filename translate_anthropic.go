@@ -218,22 +218,43 @@ func anthropicMessageFromOpenAI(msg map[string]any, role string) (map[string]any
 	return map[string]any{"role": role, "content": blocks}, nil
 }
 
-// anthropicToolResultMessage maps one OpenAI role:"tool" message to an
-// Anthropic user message carrying a single tool_result content block, per
-// the mapping table's "messages[role=tool]" row. content passes through
-// unchanged — Anthropic's tool_result.content accepts a string, matching
-// the common case, and this translator does not need to further interpret
-// it.
-func anthropicToolResultMessage(msg map[string]any) map[string]any {
+// anthropicToolResultBlock maps one OpenAI role:"tool" message to a single
+// Anthropic {"type":"tool_result","tool_use_id","content"} content block,
+// per the mapping table's "messages[role=tool]" row. content passes
+// through unchanged — Anthropic's tool_result.content accepts a string,
+// matching the common case, and this translator does not need to further
+// interpret it. The caller (anthropicRequestFromOpenAI) accumulates
+// consecutive tool messages' blocks into one Anthropic user turn — see
+// its doc comment.
+func anthropicToolResultBlock(msg map[string]any) map[string]any {
 	toolCallID, _ := msg["tool_call_id"].(string)
 	return map[string]any{
-		"role": "user",
-		"content": []any{map[string]any{
-			"type":        "tool_result",
-			"tool_use_id": toolCallID,
-			"content":     msg["content"],
-		}},
+		"type":        "tool_result",
+		"tool_use_id": toolCallID,
+		"content":     msg["content"],
 	}
+}
+
+// systemTextFromContentParts joins an OpenAI system message's array-form
+// content ([{"type":"text","text":...}, ...]) into plain text, joined
+// with "\n". Any part that is not {"type":"text"} has no equivalent in
+// Anthropic's plain-string top-level "system" field, so it is a
+// *translateError rather than being silently dropped.
+func systemTextFromContentParts(parts []any) (string, error) {
+	texts := make([]string, 0, len(parts))
+	for _, part := range parts {
+		pm, ok := part.(map[string]any)
+		if !ok {
+			return "", &translateError{msg: "system message content[] entries must be objects"}
+		}
+		ptype, _ := pm["type"].(string)
+		if ptype != "text" {
+			return "", &translateError{msg: fmt.Sprintf("system message content part type %q is not supported for anthropic models", ptype)}
+		}
+		text, _ := pm["text"].(string)
+		texts = append(texts, text)
+	}
+	return strings.Join(texts, "\n"), nil
 }
 
 // anthropicToolChoiceFromOpenAI maps OpenAI's "tool_choice" to Anthropic's
@@ -291,7 +312,9 @@ func anthropicToolsFromOpenAI(toolsRaw []any) []any {
 // mapping table. It returns a *translateError — never wrapped — for a
 // field Anthropic has no equivalent for (n>1, logit_bias, logprobs) or a
 // content part this translator cannot map (a non-data-URI image URL, a
-// malformed tool_calls argument string).
+// malformed tool_calls argument string). Consecutive role:"tool" messages
+// are merged into one Anthropic user turn carrying all of their
+// tool_result blocks — see anthropicToolResultBlock's doc comment.
 func anthropicRequestFromOpenAI(req map[string]any) (map[string]any, error) {
 	if v, ok := req["n"]; ok {
 		if n, ok2 := toFloat64(v); ok2 && n > 1 {
@@ -313,6 +336,21 @@ func anthropicRequestFromOpenAI(req map[string]any) (map[string]any, error) {
 	msgsRaw, _ := req["messages"].([]any)
 	var systemParts []string
 	anthMsgs := make([]any, 0, len(msgsRaw))
+	// pendingToolResults accumulates consecutive role:"tool" messages'
+	// blocks. Anthropic requires alternating user/assistant turns and
+	// 400s on two consecutive same-role messages, and parallel tool calls
+	// (one assistant message with N tool_calls, followed by N role:"tool"
+	// messages) are the standard agentic transcript shape — so those N
+	// messages must collapse into one Anthropic user turn carrying N
+	// tool_result blocks, not N separate user turns.
+	var pendingToolResults []any
+	flushPendingToolResults := func() {
+		if len(pendingToolResults) == 0 {
+			return
+		}
+		anthMsgs = append(anthMsgs, map[string]any{"role": "user", "content": pendingToolResults})
+		pendingToolResults = nil
+	}
 	for _, m := range msgsRaw {
 		msg, ok := m.(map[string]any)
 		if !ok {
@@ -320,19 +358,28 @@ func anthropicRequestFromOpenAI(req map[string]any) (map[string]any, error) {
 		}
 		switch role, _ := msg["role"].(string); role {
 		case "system":
-			if s, ok := msg["content"].(string); ok {
-				systemParts = append(systemParts, s)
+			switch c := msg["content"].(type) {
+			case string:
+				systemParts = append(systemParts, c)
+			case []any:
+				text, err := systemTextFromContentParts(c)
+				if err != nil {
+					return nil, err
+				}
+				systemParts = append(systemParts, text)
 			}
 		case "user", "assistant":
+			flushPendingToolResults()
 			am, err := anthropicMessageFromOpenAI(msg, role)
 			if err != nil {
 				return nil, err
 			}
 			anthMsgs = append(anthMsgs, am)
 		case "tool":
-			anthMsgs = append(anthMsgs, anthropicToolResultMessage(msg))
+			pendingToolResults = append(pendingToolResults, anthropicToolResultBlock(msg))
 		}
 	}
+	flushPendingToolResults()
 	if len(systemParts) > 0 {
 		out["system"] = strings.Join(systemParts, "\n\n")
 	}
@@ -519,10 +566,19 @@ func reMarshalToolInput(raw json.RawMessage) (string, error) {
 // running usage total. A caller constructs one per stream and calls
 // translate once per upstream sseEvent, in order.
 type anthropicStreamState struct {
-	id      string
-	model   string
-	created int64
-	u       usage
+	// toolOrdinals maps an Anthropic content-block index to the 0-based
+	// ordinal of that tool call among all tool_use blocks seen so far in
+	// this message. OpenAI's tool_calls[].index must be contiguous
+	// starting at 0 over the tool-call array; Anthropic's content-block
+	// index also counts any preceding non-tool_use blocks (a tool_use
+	// block right after a text block is content-block index 1, but it is
+	// still the first — index 0 — tool call).
+	toolOrdinals    map[int]int
+	id              string
+	model           string
+	u               usage
+	created         int64
+	nextToolOrdinal int
 }
 
 // newAnthropicStreamState returns an anthropicStreamState for one
@@ -530,7 +586,7 @@ type anthropicStreamState struct {
 // created the response timestamp every emitted chunk carries — the
 // adapter fixes both once, before the first upstream event arrives.
 func newAnthropicStreamState(model string, created int64) *anthropicStreamState {
-	return &anthropicStreamState{model: model, created: created}
+	return &anthropicStreamState{model: model, created: created, toolOrdinals: map[int]int{}}
 }
 
 // usage returns the prompt/completion token counts captured so far, from
@@ -636,15 +692,18 @@ type anthropicErrorEventPayload struct {
 //     error — translate's caller must stop reading the stream after this
 //     return, but forwards the returned chunk to the client first.
 //
-// Any other or malformed event is ignored (nil, nil) rather than erroring
-// — an event this translator does not recognize is not necessarily a
-// broken stream.
+// An unrecognized event type is ignored (nil, nil) — this translator does
+// not treat an event it does not know about as a broken stream. Malformed
+// data on a recognized event type is different: it returns an error
+// wrapping errUpstream instead of silently producing nothing, since a
+// dropped input_json_delta (say) would otherwise corrupt the client's
+// reassembled tool-call arguments without either side noticing.
 func (st *anthropicStreamState) translate(ev sseEvent) ([][]byte, error) {
 	switch ev.event {
 	case "message_start":
 		var p anthropicMessageStartPayload
 		if err := json.Unmarshal(ev.data, &p); err != nil {
-			return nil, nil
+			return nil, fmt.Errorf("%w: decode anthropic message_start event: %w", errUpstream, err)
 		}
 		st.id = p.Message.ID
 		st.u.prompt = p.Message.Usage.InputTokens
@@ -653,13 +712,16 @@ func (st *anthropicStreamState) translate(ev sseEvent) ([][]byte, error) {
 	case "content_block_start":
 		var p anthropicContentBlockStartPayload
 		if err := json.Unmarshal(ev.data, &p); err != nil {
-			return nil, nil
+			return nil, fmt.Errorf("%w: decode anthropic content_block_start event: %w", errUpstream, err)
 		}
 		if p.ContentBlock.Type != "tool_use" {
 			return nil, nil
 		}
+		ordinal := st.nextToolOrdinal
+		st.toolOrdinals[p.Index] = ordinal
+		st.nextToolOrdinal++
 		delta := map[string]any{"tool_calls": []any{map[string]any{
-			"index": p.Index,
+			"index": ordinal,
 			"id":    p.ContentBlock.ID,
 			"type":  "function",
 			"function": map[string]any{
@@ -672,14 +734,24 @@ func (st *anthropicStreamState) translate(ev sseEvent) ([][]byte, error) {
 	case "content_block_delta":
 		var p anthropicContentBlockDeltaPayload
 		if err := json.Unmarshal(ev.data, &p); err != nil {
-			return nil, nil
+			return nil, fmt.Errorf("%w: decode anthropic content_block_delta event: %w", errUpstream, err)
 		}
 		switch p.Delta.Type {
 		case "text_delta":
 			return [][]byte{st.chunk(map[string]any{"content": p.Delta.Text}, nil)}, nil
 		case "input_json_delta":
+			ordinal, ok := st.toolOrdinals[p.Index]
+			if !ok {
+				// Defensive: an input_json_delta for a content-block index
+				// this translator never saw a tool_use content_block_start
+				// for. Fall back to the raw content-block index rather than
+				// dropping the fragment — a wrong index is recoverable by
+				// the client's own reassembly; a silently dropped argument
+				// fragment is not.
+				ordinal = p.Index
+			}
 			delta := map[string]any{"tool_calls": []any{map[string]any{
-				"index":    p.Index,
+				"index":    ordinal,
 				"function": map[string]any{"arguments": p.Delta.PartialJSON},
 			}}}
 			return [][]byte{st.chunk(delta, nil)}, nil
@@ -690,7 +762,7 @@ func (st *anthropicStreamState) translate(ev sseEvent) ([][]byte, error) {
 	case "message_delta":
 		var p anthropicMessageDeltaPayload
 		if err := json.Unmarshal(ev.data, &p); err != nil {
-			return nil, nil
+			return nil, fmt.Errorf("%w: decode anthropic message_delta event: %w", errUpstream, err)
 		}
 		st.u.completion = p.Usage.OutputTokens
 		reason := anthropicFinishReason(p.Delta.StopReason)

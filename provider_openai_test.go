@@ -364,6 +364,49 @@ func TestOpenAIAdapter_ChatCompletion_Streaming_UpstreamIgnoresStreamFallsBackTo
 	}
 }
 
+// TestOpenAIAdapter_ChatCompletion_Streaming_CaseInsensitiveContentType
+// proves the streaming-vs-JSON-fallback gate matches an upstream's
+// Content-Type case-insensitively — review fix: Content-Type values are
+// case-insensitive per RFC 7231, but the gate previously did a
+// case-sensitive substring match against "text/event-stream" and would
+// wrongly fall back to the JSON path for an upstream that sent, e.g.,
+// "Text/Event-Stream". Distinguishing evidence: the streaming path
+// extracts real usage from the SSE chunks and sets Content-Type to the
+// sseWriter's own lowercase "text/event-stream"; the JSON fallback path
+// would copy the upstream's mixed-case header verbatim and fail to parse
+// usage out of raw SSE text.
+func TestOpenAIAdapter_ChatCompletion_Streaming_CaseInsensitiveContentType(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "Text/Event-Stream; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		f, ok := w.(http.Flusher)
+		if !ok {
+			t.Fatalf("httptest ResponseWriter does not implement http.Flusher")
+		}
+		for _, frame := range streamFrames {
+			fmt.Fprintf(w, "data: %s\n\n", frame)
+			f.Flush()
+		}
+		fmt.Fprint(w, "data: [DONE]\n\n")
+		f.Flush()
+	}))
+	defer srv.Close()
+
+	a := newOpenAIAdapter("p1", srv.URL, "sk-test")
+	rec := newRecordingResponseWriter()
+
+	u, err := a.chatCompletion(context.Background(), rec, map[string]any{"model": "gpt-5", "stream": true})
+	if err != nil {
+		t.Fatalf("chatCompletion: %v", err)
+	}
+	if u.prompt != 7 || u.completion != 9 {
+		t.Errorf("usage = %+v, want {prompt:7 completion:9} (proves the streaming path, not JSON fallback, was taken)", u)
+	}
+	if got := rec.header.Get("Content-Type"); got != "text/event-stream" {
+		t.Errorf("Content-Type on client response = %q, want %q (sseWriter's own header; JSON fallback would copy the upstream's mixed-case value verbatim)", got, "text/event-stream")
+	}
+}
+
 // TestOpenAIAdapter_ChatCompletion_Upstream429 proves a non-2xx upstream
 // response returns a *providerHTTPError carrying the status and body,
 // with nothing written to the client — the caller decides envelope vs
