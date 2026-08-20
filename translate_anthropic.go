@@ -28,6 +28,13 @@ const chatCompletionIDPrefix = "chatcmpl-"
 // set — embeddings has no Anthropic equivalent at all, which is a
 // different failure than a single unsupported field on an otherwise valid
 // request.
+//
+// MUST be returned bare, never wrapped with fmt.Errorf("%w", ...):
+// routes_unified.go's handleAdapterError relies on a direct type assertion
+// (err.(*translateError)), not errors.As, because errors.As panics under
+// yaegi when checking whether an interpreted pointer type implements error
+// (verified empirically under real Traefik, Task 15's integration suite).
+// A wrapped translateError would make that assertion fail to find it.
 type translateError struct {
 	msg          string
 	notSupported bool

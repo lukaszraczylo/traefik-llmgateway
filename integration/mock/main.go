@@ -341,6 +341,7 @@ func runProbe(target, apiKey, model string) int {
 	}
 
 	var arrivals []time.Time
+	var headerBuf []byte
 	buf := make([]byte, 4096)
 	headerDone := false
 	for {
@@ -348,12 +349,22 @@ func runProbe(target, apiKey, model string) int {
 		if n > 0 {
 			chunk := buf[:n]
 			if !headerDone {
-				if idx := bytes.Index(chunk, []byte("\r\n\r\n")); idx >= 0 {
-					headerDone = true
-					chunk = chunk[idx+4:]
-				} else {
-					chunk = nil
+				// The "\r\n\r\n" header/body terminator is not guaranteed to
+				// land inside a single Read: accumulate every read into a
+				// rolling buffer and search that, not just the latest
+				// chunk, so a terminator split across two reads is still
+				// found instead of silently discarding both reads' bytes.
+				headerBuf = append(headerBuf, chunk...)
+				idx := bytes.Index(headerBuf, []byte("\r\n\r\n"))
+				if idx < 0 {
+					if readErr != nil {
+						break
+					}
+					continue
 				}
+				headerDone = true
+				chunk = headerBuf[idx+4:]
+				headerBuf = nil
 			}
 			if len(chunk) > 0 && bytes.Contains(chunk, []byte("data:")) {
 				arrivals = append(arrivals, time.Now())

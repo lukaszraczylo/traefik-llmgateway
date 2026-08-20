@@ -363,13 +363,23 @@ func geminiRequestFromOpenAI(req map[string]any) (map[string]any, error) {
 	genConfig := map[string]any{}
 	var maxTokens int64
 	var hasMaxTokens bool
+	// maxTokens and hasMaxTokens are set as two separate statements, not one
+	// "maxTokens, hasMaxTokens = n, true" multi-value assignment: yaegi
+	// v0.16.1 panics interpreting a multi-value assignment mixing a
+	// variable and a literal in one statement on this exact live path (the
+	// same class of bug as sse.go's readSSE dispatch and registry.go's
+	// resolveAgainst — see those files' comments). Verified empirically
+	// under real Traefik (Task 15's integration suite, the gemini chat
+	// completion path).
 	if v, ok := req["max_completion_tokens"]; ok {
 		if n, ok2 := toInt64(v); ok2 {
-			maxTokens, hasMaxTokens = n, true
+			maxTokens = n
+			hasMaxTokens = true
 		}
 	} else if v, ok := req["max_tokens"]; ok {
 		if n, ok2 := toInt64(v); ok2 {
-			maxTokens, hasMaxTokens = n, true
+			maxTokens = n
+			hasMaxTokens = true
 		}
 	}
 	if hasMaxTokens {

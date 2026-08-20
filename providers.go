@@ -51,6 +51,13 @@ const adapterIdleConnsPerHost = 16
 // so the caller — the unified route in a later task — decides whether to
 // pass the body through verbatim or wrap it in the gateway's own error
 // envelope.
+//
+// MUST be returned bare, never wrapped with fmt.Errorf("%w", ...):
+// routes_unified.go's handleAdapterError relies on a direct type assertion
+// (err.(*providerHTTPError)), not errors.As, because errors.As panics under
+// yaegi when checking whether an interpreted pointer type implements error
+// (verified empirically under real Traefik, Task 15's integration suite).
+// A wrapped providerHTTPError would make that assertion fail to find it.
 type providerHTTPError struct {
 	body   []byte
 	status int

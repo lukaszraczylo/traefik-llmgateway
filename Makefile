@@ -1,3 +1,8 @@
+# Serialize targets even under `make -j`: the integration targets are
+# stateful (one docker compose stack, one set of host ports) and running
+# two of them concurrently would corrupt each other's containers.
+.NOTPARALLEL:
+
 .PHONY: test lint yaegi-check integration integration-keep integration-up integration-wait integration-down
 
 test:
@@ -19,7 +24,16 @@ INTEGRATION_COMPOSE := integration/docker-compose.yml
 INTEGRATION_HEALTH_URL := http://localhost:19081/v1/models
 INTEGRATION_ALICE_KEY := sk-int-alice
 
+# Overridable so the optional real-upstream smoke test (task 7,
+# INTEGRATION_REAL=1) never hardcodes one operator's personal hostname as
+# the only option: `INTEGRATION_REAL_BASEURL=https://other.example make
+# integration` points it elsewhere. Rendered into
+# integration/traefik/dynamic.yml (git-ignored) from the checked-in
+# dynamic.yml.tmpl by integration-up, below.
+INTEGRATION_REAL_BASEURL ?= https://llmgw.example.com
+
 integration-up:
+	sed 's#__INTEGRATION_REAL_BASEURL__#$(INTEGRATION_REAL_BASEURL)#' integration/traefik/dynamic.yml.tmpl > integration/traefik/dynamic.yml
 	docker compose -f $(INTEGRATION_COMPOSE) up -d --build
 
 integration-wait:
@@ -38,15 +52,26 @@ integration-down:
 	docker compose -f $(INTEGRATION_COMPOSE) down -v
 
 # integration brings the stack up, waits for it to answer, runs the suite,
-# then always tears the stack down (pass or fail) so the exit code
-# reflects the tests alone.
-integration: integration-up integration-wait
-	@go -C integration test -tags integration -count=1 ./...; status=$$?; \
+# then always tears the stack down — pass, fail, or a failure to even come
+# up or become healthy — so a broken run never leaves a stray stack behind.
+# integration-up/-wait run as recipe-body sub-makes (not prerequisites)
+# specifically so a non-zero status from either one still falls through to
+# integration-down instead of Make aborting before teardown ever runs.
+integration:
+	@$(MAKE) integration-up; status=$$?; \
+	if [ $$status -eq 0 ]; then \
+		$(MAKE) integration-wait; status=$$?; \
+	fi; \
+	if [ $$status -eq 0 ]; then \
+		go -C integration test -tags integration -count=1 ./...; status=$$?; \
+	fi; \
 	$(MAKE) integration-down; \
 	exit $$status
 
 # integration-keep is the debugging variant: same run, but leaves the
-# compose stack up afterward for inspecting logs/state by hand. Tear it
-# down yourself with `make integration-down` when done.
+# compose stack up afterward for inspecting logs/state by hand (including
+# on a bring-up/health failure, deliberately — there's nothing to inspect
+# post-mortem if it tore itself down). Tear it down yourself with
+# `make integration-down` when done.
 integration-keep: integration-up integration-wait
 	go -C integration test -tags integration -count=1 ./...
