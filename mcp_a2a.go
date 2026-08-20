@@ -185,13 +185,14 @@ func (g *Gateway) handleTargetProxy(w http.ResponseWriter, r *http.Request, u *u
 
 // validateTargetURLs checks every configured MCP-server and agent entry at
 // construction: the map value must be non-nil, the name must pass
-// validateConfigName (same character set and reserved-name rules as a
-// provider name — an MCP server or agent is routed at "/mcp/{name}/*" or
-// "/a2a/{name}/*", the same shadowing risk applies), and the target URL
-// must parse (url.Parse) and use an http or https scheme. A nil value,
-// invalid name, or malformed/non-HTTP target is rejected once, here, at
-// construction — a constructor error, not a nil-pointer panic or a 502 the
-// first time some caller happens to address it.
+// validateConfigName (the same character-set, dot-only, and reserved-name
+// rules as a provider name — an MCP server or agent is routed at
+// "/mcp/{name}/*" or "/a2a/{name}/*", so the same shadowing risk and the
+// same "." / ".." directory-traversal-segment risk both apply), and the
+// target URL must parse (url.Parse) and use an http or https scheme. A nil
+// value, invalid name, or malformed/non-HTTP target is rejected once, here,
+// at construction — a constructor error, not a nil-pointer panic or a 502
+// the first time some caller happens to address it.
 func validateTargetURLs(cfg *Config) error {
 	for name, tc := range cfg.MCPServers {
 		if tc == nil {

@@ -358,7 +358,10 @@ kept — a bad edit to the file never breaks already-authenticated traffic.
   built-in per-model table (`pricing.go`) or a configured `pricing`
   override. An unpriced model costs 0 and logs a once-per-model warning
   (capped at 128 distinct unpriced model names per process lifetime, then
-  one summary warning).
+  one summary warning). The built-in table is **approximate** — list
+  prices as each provider published them, recorded 2026-08, and not kept
+  in sync automatically. Set `pricing` overrides for billing-grade
+  accuracy.
 - **Storage**: `redis` configured wires a hand-rolled, stdlib-only RESP2
   client (`resp.go`) — no `go-redis`, which is not Yaegi-interpretable —
   against Redis, Valkey, or Dragonfly. Semantics are deliberately
@@ -421,10 +424,14 @@ kept — a bad edit to the file never breaks already-authenticated traffic.
   provider response content into a log line; today's only caller
   (`writeProviderUpstreamError`) reads that body directly and puts it in
   the client-facing response, never in a log.
-- **There is no auth-event logging at all** — `auth.go` has zero logging
-  calls of any kind. A key that fails lookup gets a plain 401 JSON
-  envelope and nothing else happens; there is no log line, successful or
-  failed, for a request to appear in.
+- **Every authentication attempt is logged**, through one shared helper
+  (`logAuthEvent`, `logger.go`) called at each of the six routes that
+  authenticate a request (`llmgateway.go`'s `ServeHTTP`, and
+  `routes_unified.go`'s `handleModels`). A failed attempt logs the request
+  method, path, and remote address, and returns the usual 401 JSON
+  envelope. A successful attempt logs the resolved user's name and the
+  route. Neither line ever includes the presented API key — only the
+  identity it resolved to, never the key material itself.
 
 ## Known limitations
 
@@ -470,9 +477,10 @@ kept — a bad edit to the file never breaks already-authenticated traffic.
 ## Kubernetes
 
 See [`examples/kubernetes.yaml`](examples/kubernetes.yaml) for a complete,
-YAML-validated example manifest that `kubectl apply -f` runs as-is: a
-`Secret` holding the users file, a `Middleware` custom resource carrying
-the plugin's own configuration (validated against the real `Config`
+YAML-validated example manifest that `kubectl apply -f` applies cleanly
+once Traefik's CRDs (`Middleware`, `IngressRoute`) are installed in the
+cluster: a `Secret` holding the users file, a `Middleware` custom resource
+carrying the plugin's own configuration (validated against the real `Config`
 struct — every field in that example round-trips through `New()`
 cleanly), a dummy backing `Deployment`/`Service` (Traefik requires a real
 router backend even though this middleware never actually reaches it —

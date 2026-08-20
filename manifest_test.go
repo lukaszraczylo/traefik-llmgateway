@@ -34,6 +34,7 @@ func testDataConfig(t *testing.T) *Config {
 		"providers", "groups", "users", // top-level testData keys
 		"openai", "type: openai", "test-key", "gpt-test", // providers.openai
 		"default",       // groups.default and users.inline[0].group
+		"providers: []", // groups.default.providers — zero-semantic hedge, not bare {}
 		"tester",        // users.inline[0].name
 		"test-user-key", // users.inline[0].apiKey
 	}
@@ -50,7 +51,7 @@ func testDataConfig(t *testing.T) *Config {
 	cfg := CreateConfig()
 	// mirror of testData, kept in sync by this test living next to the manifest
 	blob := `{"providers":{"openai":{"type":"openai","apiKey":"test-key","models":["gpt-test"]}},
-	  "groups":{"default":{}},
+	  "groups":{"default":{"providers":[]}},
 	  "users":{"inline":[{"name":"tester","group":"default","apiKey":"test-user-key"}]}}`
 	if err := json.Unmarshal([]byte(blob), cfg); err != nil {
 		t.Fatal(err)

@@ -10,8 +10,10 @@ import (
 const tokensPerMillion = 1_000_000
 
 // builtinPricing is the built-in per-model price table, in USD per 1M
-// tokens (InputPerM, OutputPerM). Source: public list prices, 2026-08;
-// verify before release.
+// tokens (InputPerM, OutputPerM). Source: each provider's own published
+// list prices, as recorded 2026-08. Approximate: providers change prices
+// without notice, and this table is not refreshed automatically — set the
+// middleware config's "pricing" overrides for billing-grade accuracy.
 var builtinPricing = map[string]ModelPricing{
 	"gpt-5":             {InputPerM: 1.25, OutputPerM: 10},
 	"gpt-5-mini":        {InputPerM: 0.25, OutputPerM: 2},
