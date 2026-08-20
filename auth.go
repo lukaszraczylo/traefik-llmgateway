@@ -8,6 +8,7 @@ import (
 	"path"
 	"strings"
 	"sync"
+	"time"
 )
 
 // user is an authenticated API-key holder resolved by authStore.identify.
@@ -84,18 +85,26 @@ type authEntry struct {
 // their group. Raw API keys are never retained after construction — only
 // their SHA-256 digests.
 //
-// mu guards byDigest for readers (identify) and the final swap in
-// replaceFileUsers. buildMu serializes the whole body of replaceFileUsers —
-// including buildEntry's potentially slow file-backed secret resolution —
-// so concurrent reload attempts never interleave or overwrite each other.
-// buildMu is never held at the same time as mu, so a rebuild in progress
-// never blocks identify's readers.
+// mu guards byDigest and fileUserCount for readers (identify) and the final
+// swap in replaceFileUsers. buildMu serializes the whole body of
+// replaceFileUsers — including buildEntry's potentially slow file-backed
+// secret resolution — so concurrent reload attempts never interleave or
+// overwrite each other. buildMu is never held at the same time as mu, so a
+// rebuild in progress never blocks identify's readers. reloadMu (Task 4)
+// serializes maybeReload's throttle check and the reload it may trigger.
 type authStore struct {
-	groups   map[string]*group
-	inline   map[[32]byte]*authEntry // built once by newAuthStore; never mutated afterward
-	byDigest map[[32]byte]*authEntry // inline entries plus the current file-sourced set; guarded by mu
-	mu       sync.RWMutex
-	buildMu  sync.Mutex
+	groups        map[string]*group
+	inline        map[[32]byte]*authEntry // built once by newAuthStore; never mutated afterward
+	byDigest      map[[32]byte]*authEntry // inline entries plus the current file-sourced set; guarded by mu
+	usersFile     *usersFile              // nil when Users.File is not configured; maybeReload no-ops
+	log           gatewayLogger           // set alongside usersFile; unused when usersFile is nil
+	nowFn         func() time.Time        // injected for tests; defaults to time.Now
+	lastCheck     time.Time               // guarded by reloadMu
+	lastModTime   time.Time               // guarded by reloadMu
+	fileUserCount int                     // guarded by mu; size of the current file-sourced user set
+	mu            sync.RWMutex
+	buildMu       sync.Mutex
+	reloadMu      sync.Mutex
 }
 
 // newAuthStore builds an authStore from cfg's groups and inline users. It
@@ -106,6 +115,7 @@ func newAuthStore(cfg *Config) (*authStore, error) {
 		groups:   make(map[string]*group, len(cfg.Groups)),
 		inline:   make(map[[32]byte]*authEntry),
 		byDigest: make(map[[32]byte]*authEntry),
+		nowFn:    time.Now,
 	}
 	for name, gc := range cfg.Groups {
 		a.groups[name] = &group{
@@ -160,11 +170,16 @@ func (a *authStore) buildEntry(uc *UserConfig) (*authEntry, error) {
 	}, nil
 }
 
-// replaceFileUsers rebuilds the file-sourced portion of the store from us,
-// leaving the inline users untouched. It is used by the config-reload path
-// (Task 4) to pick up changes to Users.File without restarting the plugin.
-// On error the store is left exactly as it was before the call — the new
-// set is validated and built in full before it replaces the old one.
+// replaceFileUsers rebuilds the file-sourced portion of the store from us. A
+// file user overrides an inline user of the same name — the inline entry is
+// dropped from the rebuilt set, even if its API key differs from the file
+// user's — so an operator can promote or rotate a statically-configured user
+// through the hot-reloadable file. Inline users with no same-named file
+// counterpart are carried forward unchanged. This is used by the
+// config-reload path (Task 4) to pick up changes to Users.File without
+// restarting the plugin. On error the store is left exactly as it was before
+// the call — the new set is validated and built in full before it replaces
+// the old one.
 //
 // buildMu is held for the whole rebuild, not just the final swap — that
 // serializes concurrent callers (a reload timer must never race itself), so
@@ -177,8 +192,18 @@ func (a *authStore) replaceFileUsers(us []*UserConfig) error {
 	a.buildMu.Lock()
 	defer a.buildMu.Unlock()
 
+	fileNames := make(map[string]bool, len(us))
+	for _, uc := range us {
+		if uc != nil {
+			fileNames[uc.Name] = true
+		}
+	}
+
 	next := make(map[[32]byte]*authEntry, len(a.inline)+len(us))
 	for digest, entry := range a.inline {
+		if fileNames[entry.user.name] {
+			continue // a file user of the same name overrides this inline user
+		}
 		next[digest] = entry
 	}
 	for _, uc := range us {
@@ -194,6 +219,7 @@ func (a *authStore) replaceFileUsers(us []*UserConfig) error {
 
 	a.mu.Lock()
 	a.byDigest = next
+	a.fileUserCount = len(us)
 	a.mu.Unlock()
 	return nil
 }

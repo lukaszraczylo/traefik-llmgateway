@@ -8,9 +8,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestCreateConfig_ReturnsEmptyConfig(t *testing.T) {
@@ -285,5 +287,132 @@ func TestServeHTTP_PanicAfterHeadersCommitted_DoesNotOverwriteResponse(t *testin
 	}
 	if !strings.Contains(logBuf.String(), "llmgw[llmgw] ERROR ") {
 		t.Fatalf("want panic still logged even though no envelope was written, got %q", logBuf.String())
+	}
+}
+
+// TestNewGateway_UsersFile_InitialLoadFailure_ReturnsConstructorError is the
+// fail-fast case: a malformed users file must fail plugin construction, not
+// leave the plugin running with an empty file-sourced user set.
+func TestNewGateway_UsersFile_InitialLoadFailure_ReturnsConstructorError(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "bad.json")
+	if err := os.WriteFile(fp, []byte("{not json"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{"openai": {Type: "openai", APIKey: "k"}}
+	cfg.Users = &UsersConfig{File: fp}
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	if err == nil {
+		t.Fatal("want constructor error for a malformed initial users file")
+	}
+	if h != nil {
+		t.Fatal("want nil handler on error")
+	}
+}
+
+// TestNewGateway_UsersFile_InitialLoadMissingFile_ReturnsConstructorError
+// covers the other fail-fast path: a configured file that does not exist.
+func TestNewGateway_UsersFile_InitialLoadMissingFile_ReturnsConstructorError(t *testing.T) {
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{"openai": {Type: "openai", APIKey: "k"}}
+	cfg.Users = &UsersConfig{File: filepath.Join(t.TempDir(), "nope.json")}
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	if err == nil {
+		t.Fatal("want constructor error for a missing initial users file")
+	}
+	if h != nil {
+		t.Fatal("want nil handler on error")
+	}
+}
+
+// TestNewGateway_UsersFile_ValidFile_LoadsUsersSynchronously verifies the
+// synchronous initial load: a file-sourced user must be identifiable
+// immediately after New returns, with no reload wait.
+func TestNewGateway_UsersFile_ValidFile_LoadsUsersSynchronously(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "users.json")
+	writeUsersDoc(t, fp, []*UserConfig{{Name: "alice", Group: "default", APIKey: "sk-alice"}}, time.Time{})
+
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{"openai": {Type: "openai", APIKey: "k"}}
+	cfg.Groups = map[string]*GroupConfig{"default": {}}
+	cfg.Users = &UsersConfig{File: fp}
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	gw, ok := h.(*Gateway)
+	if !ok {
+		t.Fatal("handler is not *Gateway")
+	}
+	if _, _, ok := identifyWithKey(gw.auth, "sk-alice"); !ok {
+		t.Fatal("want file-sourced user identifiable immediately after construction")
+	}
+}
+
+// TestServeHTTP_NoUsersFile_MaybeReloadIsNoOp verifies that entry-time
+// maybeReload is a cheap no-op — and, crucially, does not panic — when no
+// users file is configured.
+func TestServeHTTP_NoUsersFile_MaybeReloadIsNoOp(t *testing.T) {
+	called := false
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+	})
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{"openai": {Type: "openai", APIKey: "k"}}
+	cfg.PassthroughUnknown = true
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/x", nil)
+	h.ServeHTTP(rec, req)
+	if !called {
+		t.Fatal("want next handler called")
+	}
+}
+
+// TestServeHTTP_TriggersUsersFileReload is the wire-up regression: ServeHTTP
+// must call g.auth.maybeReload() at entry, not just newGateway's initial
+// load. It drives a real request through ServeHTTP (never calling
+// maybeReload directly) and expects the file change to have been picked up.
+func TestServeHTTP_TriggersUsersFileReload(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "users.json")
+	writeUsersDoc(t, fp, []*UserConfig{{Name: "f1", Group: "default", APIKey: "sk-f1"}}, time.Time{})
+
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{"openai": {Type: "openai", APIKey: "k"}}
+	cfg.Groups = map[string]*GroupConfig{"default": {}}
+	cfg.Users = &UsersConfig{File: fp}
+	cfg.PassthroughUnknown = true
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	gw, ok := h.(*Gateway)
+	if !ok {
+		t.Fatal("handler is not *Gateway")
+	}
+
+	// Force the throttle window open and give the file an unambiguous
+	// future mtime, then drive one request through ServeHTTP.
+	clock := &fakeClock{now: gw.auth.nowFn().Add(reloadEvery + time.Second)}
+	gw.auth.nowFn = clock.Now
+	writeUsersDoc(t, fp, []*UserConfig{{Name: "f2", Group: "default", APIKey: "sk-f2"}}, time.Now().Add(time.Hour))
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/x", nil)
+	h.ServeHTTP(rec, req)
+
+	if _, _, ok := identifyWithKey(gw.auth, "sk-f2"); !ok {
+		t.Fatal("want ServeHTTP's entry-time maybeReload call to have picked up the file change")
 	}
 }

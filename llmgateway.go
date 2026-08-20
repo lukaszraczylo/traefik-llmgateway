@@ -6,7 +6,9 @@ package traefikllmgateway
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
+	"os"
 )
 
 // Config is the plugin's dynamic configuration, populated by Traefik from
@@ -125,13 +127,45 @@ func newGateway(ctx context.Context, next http.Handler, config *Config, name str
 	if err != nil {
 		return nil, err
 	}
-	return &Gateway{next: next, name: name, cfg: config, auth: auth}, nil
+	g := &Gateway{next: next, name: name, cfg: config, auth: auth}
+
+	if config.Users != nil && config.Users.File != "" {
+		if err := attachUsersFile(auth, config.Users.File, g); err != nil {
+			return nil, err
+		}
+	}
+
+	return g, nil
+}
+
+// attachUsersFile performs the synchronous initial load of a Users.File path
+// and wires auth up for throttled hot reload. A failing initial load is a
+// constructor error — fail fast on bad config rather than start with an
+// empty file-sourced user set.
+func attachUsersFile(auth *authStore, path string, log gatewayLogger) error {
+	uf := newUsersFile(path)
+	initial, err := uf.load()
+	if err != nil {
+		return fmt.Errorf("llmgateway: cannot load initial users file %q: %w", path, err)
+	}
+	if err := auth.replaceFileUsers(initial); err != nil {
+		return fmt.Errorf("llmgateway: initial users file %q: %w", path, err)
+	}
+
+	auth.usersFile = uf
+	auth.log = log
+	if info, statErr := os.Stat(path); statErr == nil {
+		auth.lastModTime = info.ModTime()
+	}
+	auth.lastCheck = auth.nowFn()
+	return nil
 }
 
 // ServeHTTP is the internal router. It grows in later tasks.
 func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	sw := &statusTrackingWriter{ResponseWriter: w}
 	defer recoverPanic(sw, g)
+	g.auth.maybeReload()
 	if g.cfg.PassthroughUnknown {
 		g.next.ServeHTTP(sw, r)
 		return
