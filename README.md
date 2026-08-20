@@ -168,6 +168,8 @@ config accepts them as YAML, which decodes to the same JSON shape.
 | `users` | `UsersConfig` | — | Inline and/or file-backed API-key holders. With none configured, every request is unauthenticated and gets 401. |
 | `redis` | `RedisConfig` | — | Distributed limit-counter backend. Omitted means in-process counters only (per-replica, approximate across multiple Traefik instances). |
 | `retry` | `RetryConfig` | `{}` (disabled) | Same-provider retry for transient upstream failures — see [Retry](#retry). Omitted or `enabled: false` means no retry: every request makes exactly one upstream attempt, byte-identical to a gateway built before this field existed. |
+| `cache` | `CacheConfig` | `{}` (disabled) | Opt-in Redis-backed response cache for unified non-streaming chat/embeddings — see [Caching](#caching). Omitted or `enabled: false` means no caching, byte-identical to a gateway built before this field existed. |
+| `admin` | `*AdminConfig` | `nil` (disabled) | Read-only admin dashboard — see [Admin](#admin). `nil` or `enabled: false` means the `/admin*` routes are not registered at all. |
 | `passthroughUnknown` | `bool` | `false` | `false`: a request matching none of the plugin's routes gets a 404 JSON envelope. `true`: it falls through to the router's own backing service. |
 
 Provider, `mcpServers`, and `agents` map **keys** (names) must match
@@ -197,6 +199,7 @@ also a construction error, never a panic (`providers.go`, `mcp_a2a.go`,
 | `limits` | `*LimitsConfig` | `nil` (unlimited) | |
 | `providers` | `[]string` | `[]` (all) | Glob-matched (`path.Match`) against a provider's configured name. |
 | `models` | `[]string` | `[]` (all) | Glob-matched, exactly as given — no automatic `provider/` prefix stripping. Both the bare and provider-prefixed forms of a model id are checked, so a pattern like `gpt-*` matches a client request for either `gpt-5-mini` or `openai/gpt-5-mini`. |
+| `cache` | `*bool` | `nil` (inherit) | Overrides the top-level `cache.enabled` setting for this group's requests — see [Caching](#caching). `nil` inherits the global setting; `false` opts the group out even when caching is globally on; `true` opts the group in, but only when the top-level `cache` block is actually configured (a construction error otherwise — there is nothing to inherit `ttl`/`maxBodyBytes` from). |
 | `mcpServers` | `[]string` | `[]` (all) | Glob-matched against a configured MCP server name. |
 | `agents` | `[]string` | `[]` (all) | Glob-matched against a configured agent name. |
 
@@ -235,6 +238,7 @@ own is governed purely by their group's — see
 | `group` | `string` | — | Required; must reference a configured group, or construction fails. |
 | `apiKey` | `string` | — | Secret form (see [Secret forms](#secret-forms)); must resolve non-empty and unique across every inline **and** file-sourced user. |
 | `limits` | `*LimitsConfig` | `nil` (governed by group's limits alone) | When set, enforced alongside — not instead of — the group's own limits; both scopes are checked, and the request is refused by whichever is breached first. |
+| `admin` | `bool` | `false` | Grants access to the read-only admin dashboard — see [Admin](#admin). Works the same for an inline or a file-sourced user. An admin user is otherwise ordinary: their own keys, group, and limits still apply, including to the admin routes themselves. |
 
 ### `RedisConfig`
 
@@ -252,6 +256,20 @@ own is governed purely by their group's — see
 | `enabled` | `bool` | `false` | `false`: no retry, one upstream attempt per request. `true`: retry per [Retry](#retry) below. |
 | `attempts` | `int` | `1` | Retries performed **after** the first try, not the total try count. `1` (default) allows one retry — two tries total. The maximum, `3`, allows three retries — four tries total. A value outside `1`-`3` is a construction error. |
 | `backoff` | `string` (Go duration) | `250ms` | Base wait before the first retry; doubles on each further retry, capped at 2s per wait. Invalid duration string is a construction error. |
+
+### `CacheConfig`
+
+| Field | Type | Default | Semantics |
+|---|---|---|---|
+| `enabled` | `bool` | `false` | `false`: no caching, `/v1/chat/completions` and `/v1/embeddings` behave byte-identically to a gateway built before this field existed. `true`: caching per [Caching](#caching) below — requires `redis` to be configured too, or it silently stays off (one warning logged). |
+| `ttl` | `string` (Go duration) | `5m` | How long a cached response stays valid. Invalid duration string is a construction error. |
+| `maxBodyBytes` | `int` | `1048576` (1MiB) | Largest response body still eligible for caching; a larger one is skipped (never stored, never an error). Maximum accepted value is `8388608` (8MiB) — above that is a construction error. |
+
+### `AdminConfig`
+
+| Field | Type | Default | Semantics |
+|---|---|---|---|
+| `enabled` | `bool` | `false` | `false`: the `/admin*` routes are not registered at all — a request to any of them falls through to the plugin's existing 404/`passthroughUnknown` handling like any other unrecognized path. `true`: the read-only dashboard per [Admin](#admin) below. |
 
 ### `ModelPricing`
 
@@ -422,6 +440,59 @@ request.
   is never double-counted. Request counters still increment once per
   client request, unchanged.
 
+## Caching
+
+An opt-in, Redis-backed response cache for the unified, non-streaming
+`POST /v1/chat/completions` and `POST /v1/embeddings` routes. Off by
+default (`cache.enabled: false`); every config that predates this field
+keeps calling the upstream on every request. Caching also requires
+`redis` to be configured — without it, `cache.enabled: true` is silently
+disabled with one warning logged at construction, never a per-replica
+in-process fallback: divergent replicas would otherwise serve different
+cached bodies for the same request.
+
+- **What's cacheable**: a non-streaming request to either route, whose
+  upstream response was HTTP 200 and no larger than `cache.maxBodyBytes`.
+  Never cached: a streaming request, native passthrough, MCP/A2A, the
+  image/audio endpoints (see [Image and audio endpoints](#image-and-audio-endpoints)),
+  or any non-200 upstream response.
+- **Key**: `llmgw:cache:` plus a hex SHA-256 digest of the provider name,
+  the resolved upstream model id, the client's own exactly-as-sent
+  `model` string (`requestedModel`), the endpoint (`chat` or
+  `embeddings`), and the canonical JSON of the request body with
+  `stream_options` and `user` removed. `requestedModel` and the endpoint
+  are both part of the key so that two different alias forms of the same
+  upstream model (`claude-x` versus `anthropic/claude-x`) never collide
+  into one cache entry: a translating adapter (`anthropic`, `gemini`)
+  bakes the client's own alias into the cached response body's `model`
+  field, so a second client using the other alias form would otherwise
+  receive an id it never sent.
+- **User identity is not part of the key.** Identical requests share one
+  cache entry across every user and group that can reach the model — by
+  design, since a provider's response to an identical request is
+  provider-deterministic and carries no per-user data.
+- **Hit/miss header**: every cacheable request's response carries
+  `X-Llmgw-Cache: hit` or `X-Llmgw-Cache: miss`, set before the body is
+  written either way.
+- **Accounting**: a cache hit increments request counters exactly like
+  any other request — `limiter.checkAndCount` runs before the cache
+  lookup — but never touches token or cost counters, and never runs the
+  streaming-response-with-no-usage estimate. Only a genuine upstream call
+  (a miss) accounts real tokens and cost. This means a cache hit is
+  request-quota-counted but token/cost-free.
+- **Group override**: `GroupConfig.cache` (a `*bool`) overrides the
+  top-level `cache.enabled` setting per group — `nil` inherits it, `false`
+  opts the group out even when caching is globally on, `true` opts the
+  group in. Setting `true` on a group when the top-level `cache` block is
+  absent entirely is a construction error: there is nothing configured to
+  inherit `ttl`/`maxBodyBytes` from.
+- **Storage**: values are stored via the same hand-rolled RESP2 client
+  (`resp.go`) the limiter's distributed counters use — the identical
+  Redis/Valkey/Dragonfly connection, not a second one. A Redis error
+  during a cache read or write is treated as a miss (logged,
+  rate-limited) and never fails the request; the upstream call still
+  happens and the client still gets a correct answer.
+
 ## Unified vs. passthrough
 
 | | Unified (`/v1/...`) | Native passthrough (`/{provider}/...`) |
@@ -486,6 +557,63 @@ adapter call — minus response caching and token/cost accounting (below).
   streaming `audio/speech` response is retried only before the first
   response byte reaches the client, the same zero-bytes rule as chat's
   streaming path.
+
+## Admin
+
+A read-only dashboard and JSON API for operational visibility — providers,
+groups, and per-user/per-group usage against configured limits. No
+mutation of any kind; config stays owned by GitOps/Traefik as usual. Off
+by default (`admin.enabled: false`, or the `admin` block omitted
+entirely): the three routes below are not registered at all, and a
+request to any of them falls through to the plugin's existing
+404/`passthroughUnknown` handling.
+
+- **Enabling it**: set `admin.enabled: true`, then flag at least one user
+  `admin: true` (`UserConfig.admin`) so someone can actually reach
+  `/admin/api/*`. An admin user is otherwise ordinary — their own keys,
+  group, and limits still apply, including to the admin routes
+  themselves.
+- **`GET /admin`** serves the dashboard's HTML/CSS/JS shell. This route is
+  deliberately served **with no authentication at all** once
+  `admin.enabled` is true (disabled still 404s): a browser navigating
+  straight to the URL has no way to attach a custom `Authorization` or
+  `x-api-key` header, so gating the page itself would make it unreachable
+  from a browser in the first place. This is safe because the shell
+  carries **zero data of its own** — every value is fetched client-side
+  from the two JSON routes below, which stay fully gated.
+- **Browser key-entry flow**: the page's script reads an admin API key
+  from the current tab's `sessionStorage`. Absent a stored key, or on any
+  `401`/`403` from either JSON route, it shows an inline key-entry form
+  instead of the dashboard. A submitted key is kept **only in
+  `sessionStorage`** — never a cookie, `localStorage`, or any persistent
+  store — so it disappears when the tab closes, and it is sent only as
+  the `x-api-key` header on this page's own `/admin/api/*` fetches.
+- **`GET /admin/api/overview`** and **`GET /admin/api/usage`** share one
+  gate: unauthenticated → 401, authenticated non-admin → 403, admin →
+  serve. `overview` returns the provider list, groups, redis/cache
+  status, and the plugin version string. `usage` returns every user's and
+  every group's current-window counter values (req/min, req/day, tok/day,
+  tok/month, cost/day, cost/month) alongside their configured limits.
+- **What's exposed**: provider names, types, base URLs (with any
+  userinfo/query string stripped before it's ever echoed), model counts,
+  discovery status, group/user names, membership, limits, and live usage
+  counters. **Never exposed**: API keys (not even digests), provider
+  keys, the Redis password, or users-file path contents — every
+  secret-bearing field is redacted from every response.
+- **Poll counts against quota**: the dashboard's own JavaScript polls
+  both JSON routes every 5 seconds while open. Each poll is a real
+  authenticated request and increments the admin user's own request
+  counters exactly like any other route — leaving a dashboard tab open
+  against a tightly limited admin user can itself exhaust their
+  `requestsPerMinute`/`requestsPerDay` budget.
+- **`GET /admin` counts nothing**: it is unauthenticated, so there is no
+  identified user to count a request against.
+- **Response headers**: both JSON routes set
+  `X-Content-Type-Options: nosniff` and `Cache-Control: no-store`, and all
+  three routes share one `Content-Security-Policy` header
+  (`default-src 'none'; script-src 'unsafe-inline'; style-src
+  'unsafe-inline'; connect-src 'self'`) — the dashboard loads no external
+  asset of any kind and works in an air-gapped cluster.
 
 ## MCP and A2A
 
@@ -575,6 +703,22 @@ adapter call — minus response caching and token/cost accounting (below).
   Go's `Transport` auto-negotiates; an upstream that used a different
   encoding on its own initiative (never observed against OpenAI,
   Anthropic, or Gemini) would pass through unmodified instead.
+- **Image and audio responses are never cost-accounted.** Request
+  counters (`requestsPerMinute`/`requestsPerDay`) increment as usual, but
+  `images/generations`, `audio/speech`, and `audio/transcriptions` never
+  move a token counter and always record cost as 0, regardless of what a
+  provider itself would charge for them — a real gap for an operator
+  billing on these endpoints, not just an accounting nuance.
+- **The response cache shares entries across every user and group that
+  can reach a model.** `cache`'s key (see [Caching](#caching)) carries no
+  user identity by design, so two different callers sending the same
+  request receive the exact same cached response, including the exact
+  same `id`/timing-shaped fields a provider embeds in it. This is
+  intentional — a provider's response to an identical request is
+  provider-deterministic — but it means the cache is not a per-tenant
+  isolation boundary: don't enable it for a deployment where two callers
+  must never observe evidence that another caller made the identical
+  request.
 
 ## Kubernetes
 

@@ -60,6 +60,23 @@ configs:
                     - name: demo
                       group: default
                       apiKey: "${LLMGW_DEMO_KEY:-sk-demo-local}"
+                # v0.2 features — see ../README.md#retry, #caching, #admin.
+                retry:
+                  enabled: true
+                  attempts: 1
+                  backoff: 250ms
+                cache:
+                  # Left disabled: this minimal demo runs no Redis, and
+                  # cache.enabled: true with no `redis` block configured
+                  # silently stays off anyway (one warning logged) — see
+                  # ../README.md#caching. Add a `redis` service and block
+                  # to this compose file to actually exercise it.
+                  enabled: false
+                admin:
+                  # Flip to true, then add `admin: true` to the "demo"
+                  # user above, to try the dashboard at
+                  # http://localhost:${LLMGW_DEMO_PORT:-8080}/admin.
+                  enabled: false
 
 services:
   whoami:

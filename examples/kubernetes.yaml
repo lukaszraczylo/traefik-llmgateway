@@ -86,6 +86,16 @@ spec:
             requestsPerDay: 500
       users:
         file: /secrets/llmgw-users/users.json
+        inline:
+          # Grants the admin dashboard (see the "admin" block above),
+          # which stays unreachable until admin.enabled is true. In a
+          # real deployment this key still belongs in a Secret via
+          # env:/file: the same as every other apiKey here — inline only
+          # to keep this one example self-contained.
+          - name: dashboard-admin
+            group: engineering
+            apiKey: "env:LLMGW_ADMIN_KEY"
+            admin: true
       redis:
         address: redis.shared-resources.svc:6379
         password: "env:REDIS_PASSWORD"
@@ -94,6 +104,19 @@ spec:
         enabled: true
         attempts: 2 # retries after the first try: 3 tries total
         backoff: 250ms
+      # Opt-in response cache for non-streaming chat/embeddings — see
+      # ../README.md#caching. Requires the redis block above; without it,
+      # this would silently stay disabled (one warning logged) rather than
+      # fail construction.
+      cache:
+        enabled: true
+        ttl: 5m
+      # Disabled here deliberately: flip to `enabled: true`, then flag at
+      # least one user `admin: true` (see the inline "dashboard-admin"
+      # user under users.inline below) to try the read-only dashboard at
+      # https://llm.example.com/admin — see ../README.md#admin.
+      admin:
+        enabled: false
       pricing:
         gpt-5-mini: {inputPerM: 0.25, outputPerM: 2.0}
       mcpServers:

@@ -12,7 +12,8 @@ import (
 // read-only in GET /admin/api/overview (spec §4, v0.2). Bumped alongside
 // the module's own release process — not read from anywhere else in the
 // package, since Yaegi interpretation has no build-info mechanism to pull
-// it from automatically.
+// it from automatically. Keep in sync with the release tag: bump this
+// alongside `git tag`, not before or after it.
 const pluginVersion = "0.2.0"
 
 // The three routes the read-only admin dashboard registers (spec §4,
