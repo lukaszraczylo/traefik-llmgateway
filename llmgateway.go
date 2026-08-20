@@ -101,13 +101,13 @@ func CreateConfig() *Config {
 
 // Gateway is the Traefik middleware handler.
 type Gateway struct {
-	next    http.Handler
-	cfg     *Config
-	auth    *authStore
-	limiter *limiter
-	name    string
-	// wired in later tasks: registry *modelRegistry, adapters
-	// map[string]providerAdapter
+	next     http.Handler
+	cfg      *Config
+	auth     *authStore
+	limiter  *limiter
+	registry *modelRegistry
+	adapters map[string]providerAdapter
+	name     string
 }
 
 // New creates the middleware. NOTE: no tail call — Yaegi zeroes
@@ -142,6 +142,21 @@ func newGateway(ctx context.Context, next http.Handler, config *Config, name str
 	}
 	lim.logf = g.errorf
 	g.limiter = lim
+
+	adapters, err := buildAdapters(config)
+	if err != nil {
+		return nil, err
+	}
+	g.adapters = adapters
+
+	registry, err := newModelRegistry(adapters, config, g.errorf)
+	if err != nil {
+		return nil, err
+	}
+	warmCtx, warmCancel := context.WithTimeout(ctx, warmFillTimeout)
+	defer warmCancel()
+	registry.warmFill(warmCtx)
+	g.registry = registry
 
 	setPricingWarnFn(func(msg string) {
 		if msg == warnCapMessage {
@@ -226,6 +241,13 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	sw := &statusTrackingWriter{ResponseWriter: w}
 	defer recoverPanic(sw, g)
 	g.auth.maybeReload()
+	g.registry.maybeRefresh(r.Context())
+
+	if r.Method == http.MethodGet && r.URL.Path == "/v1/models" {
+		g.handleModels(sw, r)
+		return
+	}
+
 	if g.cfg.PassthroughUnknown {
 		g.next.ServeHTTP(sw, r)
 		return
