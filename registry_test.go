@@ -1254,6 +1254,14 @@ func TestModelRegistry_ListFor_Alias_NotAuthorized_Omitted(t *testing.T) {
 // and a second, duplicate one from the alias loop. resolve's own
 // precedence (registry.go's resolve doc comment) must still have the
 // alias win at request time regardless of which entry the listing shows.
+//
+// A second scenario (review fix, second pass) shares this fixture: when
+// grp cannot reach the COLLIDING provider at all (provider-denied), the
+// real model's own entry is never emitted in the first place — the
+// dedupe must key off entries actually LISTED, not the raw,
+// authorization-blind owners map, or the id would vanish from the
+// listing entirely (neither the real entry nor the alias appears) even
+// though resolve still serves it through the alias.
 func TestModelRegistry_ListFor_Alias_DedupedAgainstDiscoveredCollision(t *testing.T) {
 	t.Parallel()
 	adapters := map[string]providerAdapter{
@@ -1298,5 +1306,28 @@ func TestModelRegistry_ListFor_Alias_DedupedAgainstDiscoveredCollision(t *testin
 	}
 	if canonical != "openai/gpt-test" {
 		t.Errorf("canonical = %q, want %q", canonical, "openai/gpt-test")
+	}
+
+	// Provider-denied variant: grp can reach only "openai" — "acme", the
+	// colliding discovered model's own provider, is denied, so its raw
+	// entry is never emitted at all. The alias must still be listed
+	// exactly once, owned by its own target's provider ("openai") — the
+	// earlier owners-keyed dedupe would have wrongly skipped it too here,
+	// vanishing "shared-id" from the listing entirely.
+	narrowGrp := &group{name: "openai-only", providers: []string{"openai"}}
+	gotNarrow := reg.listFor(narrowGrp)
+	var narrowCount int
+	var ownedBy string
+	for _, entry := range gotNarrow {
+		if entry["id"] == "shared-id" {
+			narrowCount++
+			ownedBy, _ = entry["owned_by"].(string)
+		}
+	}
+	if narrowCount != 1 {
+		t.Fatalf("listFor (provider-denied collision) has %d entries for id %q, want exactly 1 (the alias)", narrowCount, "shared-id")
+	}
+	if ownedBy != "openai" {
+		t.Errorf("owned_by = %q, want %q (the alias's own target provider)", ownedBy, "openai")
 	}
 }

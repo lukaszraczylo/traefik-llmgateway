@@ -664,10 +664,19 @@ func (m *modelRegistry) listFor(grp *group) []map[string]any {
 	}
 
 	out := make([]map[string]any, 0, len(owners))
+	// listed tracks every id actually APPENDED to out below — not merely
+	// present in the raw, authorization-blind owners map — so the alias
+	// dedupe loop further down only skips an alias whose real-model entry
+	// this group can actually see (review fix, second pass): keying the
+	// dedupe on owners itself made a group-denied collision vanish the id
+	// from the listing entirely (neither the real entry nor the alias
+	// appeared), even though resolve still serves it through the alias.
+	listed := make(map[string]bool, len(owners))
 	for id, provs := range owners {
 		winner := provs[0]
 		if grp.allowsModel(id) && grp.allowsProvider(winner) {
 			out = append(out, modelObject(id, winner))
+			listed[id] = true
 		}
 		if len(provs) < 2 {
 			continue
@@ -680,6 +689,7 @@ func (m *modelRegistry) listFor(grp *group) []map[string]any {
 			// for the equivalent client request.
 			if (grp.allowsModel(pid) || grp.allowsModel(id)) && grp.allowsProvider(p) {
 				out = append(out, modelObject(pid, p))
+				listed[pid] = true
 			}
 		}
 	}
@@ -699,15 +709,15 @@ func (m *modelRegistry) listFor(grp *group) []map[string]any {
 	// An alias id that also happens to collide with a since-discovered
 	// model's own bare id (impossible for an EXPLICIT model —
 	// validateModelAliases already rejects that at construction) is
-	// SKIPPED here (review fix), not appended a second time: owners
-	// already holds a real-model entry for that id from the loop above,
-	// and adding another with the same id would list it twice —
+	// SKIPPED here (review fix) only when that real model's own entry was
+	// actually EMITTED above (listed[alias], not merely present in
+	// owners) — otherwise adding it a second time would list it twice,
 	// duplicate, order-nondeterministic-looking entries in an
 	// OpenAI-shaped model list. resolve's own precedence (its doc
 	// comment) still has the alias win at REQUEST time regardless of
 	// which entry the listing shows; only the listing itself is deduped.
 	for alias, target := range m.aliases {
-		if _, collides := owners[alias]; collides {
+		if listed[alias] {
 			continue
 		}
 		_, _, canonical, err := m.resolveAliasTarget(alias, target, grp)
