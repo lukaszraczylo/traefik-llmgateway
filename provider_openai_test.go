@@ -557,13 +557,32 @@ func TestBuildAdapters(t *testing.T) {
 		}
 	})
 
-	t.Run("edge: anthropic type not yet implemented", func(t *testing.T) {
+	t.Run("good: anthropic with an API key builds successfully", func(t *testing.T) {
 		cfg := &Config{Providers: map[string]*ProviderConfig{
 			"p1": {Type: "anthropic", APIKey: "sk-test"},
 		}}
-		_, err := buildAdapters(cfg)
-		if err == nil {
-			t.Fatalf("buildAdapters: want placeholder error for anthropic, got nil")
+		adapters, err := buildAdapters(cfg)
+		if err != nil {
+			t.Fatalf("buildAdapters: %v", err)
+		}
+		a, ok := adapters["p1"]
+		if !ok {
+			t.Fatalf("adapters[%q] missing", "p1")
+		}
+		if a.typeName() != "anthropic" {
+			t.Errorf("typeName() = %q, want %q", a.typeName(), "anthropic")
+		}
+		if a.base() != defaultBaseAnthropic {
+			t.Errorf("base() = %q, want %q", a.base(), defaultBaseAnthropic)
+		}
+	})
+
+	t.Run("bad: anthropic without an API key is a constructor error", func(t *testing.T) {
+		cfg := &Config{Providers: map[string]*ProviderConfig{
+			"p1": {Type: "anthropic"},
+		}}
+		if _, err := buildAdapters(cfg); err == nil {
+			t.Fatalf("buildAdapters: want error for keyless anthropic provider, got nil")
 		}
 	})
 

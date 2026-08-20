@@ -172,12 +172,14 @@ func upstreamJSON(ctx context.Context, client *http.Client, method, url string, 
 
 // buildAdapters resolves cfg.Providers into a map of providerAdapter keyed
 // by provider name. For each provider it resolves APIKey via resolveSecret
-// (propagating that error, but treating a resolved empty key as a valid
-// keyless upstream rather than an error) and defaults BaseURL by provider
-// type when the config omits one, trimming any trailing slash either way.
-// An unknown provider type is a config error. A configured anthropic or
-// gemini provider currently errors too — Tasks 9 and 10 fill in those
-// switch cases; every other case here is unaffected by that.
+// (propagating that error) and defaults BaseURL by provider type when the
+// config omits one, trimming any trailing slash either way. An unknown
+// provider type is a config error. A resolved empty key is a valid
+// keyless upstream for openai-type providers, but a constructor error for
+// anthropic-type ones — newAnthropicAdapter enforces that, per ruling (c);
+// this function just propagates whatever error it returns. A configured
+// gemini provider currently errors too — Task 10 fills in that switch
+// case.
 func buildAdapters(cfg *Config) (map[string]providerAdapter, error) {
 	adapters := make(map[string]providerAdapter, len(cfg.Providers))
 	for name, pc := range cfg.Providers {
@@ -195,7 +197,11 @@ func buildAdapters(cfg *Config) (map[string]providerAdapter, error) {
 		case providerTypeOpenAI:
 			adapters[name] = newOpenAIAdapter(name, base, apiKey)
 		case providerTypeAnthropic:
-			return nil, fmt.Errorf("llmgateway: provider %q: type %q not yet implemented", name, pc.Type)
+			a, err := newAnthropicAdapter(name, base, apiKey)
+			if err != nil {
+				return nil, err
+			}
+			adapters[name] = a
 		case providerTypeGemini:
 			return nil, fmt.Errorf("llmgateway: provider %q: type %q not yet implemented", name, pc.Type)
 		default:

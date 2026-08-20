@@ -1,0 +1,14 @@
+{
+  "id": "chatcmpl-msg_01TRUNC",
+  "object": "chat.completion",
+  "created": 1734000000,
+  "model": "gw-anthropic-model",
+  "choices": [
+    {
+      "index": 0,
+      "message": {"role": "assistant", "content": "This response was cut"},
+      "finish_reason": "length"
+    }
+  ],
+  "usage": {"prompt_tokens": 5, "completion_tokens": 100, "total_tokens": 105}
+}

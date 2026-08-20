@@ -1,0 +1,20 @@
+{
+  "id": "chatcmpl-msg_01ABC",
+  "object": "chat.completion",
+  "created": 1734000000,
+  "model": "gw-anthropic-model",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "Let me check the weather.",
+        "tool_calls": [
+          {"id": "toolu_01DEF", "type": "function", "function": {"name": "get_weather", "arguments": "{\"location\":\"Paris\"}"}}
+        ]
+      },
+      "finish_reason": "tool_calls"
+    }
+  ],
+  "usage": {"prompt_tokens": 20, "completion_tokens": 15, "total_tokens": 35}
+}

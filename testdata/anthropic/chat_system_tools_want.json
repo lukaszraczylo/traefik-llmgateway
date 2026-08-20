@@ -1,0 +1,19 @@
+{
+  "model": "claude-opus-5",
+  "system": "You are a helpful assistant.\n\nAlways be concise.",
+  "messages": [
+    {"role": "user", "content": "What's the weather in Paris?"},
+    {"role": "assistant", "content": [
+      {"type": "tool_use", "id": "call_abc123", "name": "get_weather", "input": {"location": "Paris"}}
+    ]},
+    {"role": "user", "content": [
+      {"type": "tool_result", "tool_use_id": "call_abc123", "content": "72F and sunny"}
+    ]}
+  ],
+  "max_tokens": 512,
+  "stop_sequences": ["END", "STOP"],
+  "tools": [
+    {"name": "get_weather", "description": "Get current weather for a location", "input_schema": {"type": "object", "properties": {"location": {"type": "string"}}, "required": ["location"]}}
+  ],
+  "tool_choice": {"type": "auto"}
+}

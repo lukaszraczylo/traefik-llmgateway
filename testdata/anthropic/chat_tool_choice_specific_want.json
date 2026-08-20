@@ -1,0 +1,9 @@
+{
+  "model": "claude-opus-5",
+  "messages": [{"role": "user", "content": "Do something"}],
+  "max_tokens": 100,
+  "tools": [
+    {"name": "act", "description": "acts", "input_schema": {"type": "object", "properties": {}}}
+  ],
+  "tool_choice": {"type": "tool", "name": "act"}
+}

@@ -1,0 +1,9 @@
+{
+  "model": "claude-opus-5",
+  "messages": [{"role": "user", "content": "Do something"}],
+  "max_tokens": 100,
+  "tools": [
+    {"type": "function", "function": {"name": "noop", "description": "does nothing", "parameters": {"type": "object", "properties": {}}}}
+  ],
+  "tool_choice": "none"
+}
