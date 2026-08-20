@@ -1,0 +1,95 @@
+# Minimal, runnable local demo of the LLM Gateway plugin: one Traefik
+# instance, loading this repository as a localPlugin, in front of a single
+# OpenAI-type provider and a `whoami` dummy backend (every route the plugin
+# recognizes is short-circuited by the middleware itself; whoami only
+# answers a request that falls through as passthroughUnknown).
+#
+# Run from the repository root:
+#
+#   OPENAI_API_KEY=sk-... docker compose -f examples/docker-compose.yml up
+#
+# Try it once traefik1 is healthy:
+#
+#   curl -s http://localhost:8080/v1/models \
+#     -H "Authorization: Bearer sk-demo-local"
+#
+#   curl -s http://localhost:8080/v1/chat/completions \
+#     -H "Authorization: Bearer sk-demo-local" \
+#     -H "Content-Type: application/json" \
+#     -d '{"model":"gpt-5-mini","messages":[{"role":"user","content":"hi"}]}'
+#
+# Override the demo API key with LLMGW_DEMO_KEY=... if you don't want the
+# default "sk-demo-local" in your shell history, and the published port
+# with LLMGW_DEMO_PORT=... if 8080 is already taken on your machine. See
+# ../README.md for the full configuration reference; see ../.traefik.yml
+# for the catalog-facing plugin manifest.
+
+configs:
+  dynamic:
+    content: |
+      http:
+        routers:
+          llmgateway-router:
+            rule: "PathPrefix(`/`)"
+            entryPoints: ["web"]
+            service: whoami
+            middlewares: ["llmgateway"]
+        services:
+          whoami:
+            loadBalancer:
+              servers:
+                - url: "http://whoami:80"
+        middlewares:
+          llmgateway:
+            plugin:
+              llmgateway:
+                providers:
+                  openai:
+                    type: openai
+                    apiKey: "env:OPENAI_API_KEY"
+                    # Explicit rather than discovery:true, so the demo
+                    # starts cleanly with no outbound network call — flip
+                    # this to discovery:true (and drop models) to pull the
+                    # live catalog from api.openai.com instead.
+                    models: ["gpt-5-mini", "gpt-5", "gpt-4o"]
+                groups:
+                  default:
+                    providers: []
+                users:
+                  inline:
+                    - name: demo
+                      group: default
+                      apiKey: "${LLMGW_DEMO_KEY:-sk-demo-local}"
+
+services:
+  whoami:
+    image: traefik/whoami:v1.10
+    networks: ["llmgw-demo"]
+
+  traefik1:
+    image: traefik:v3.5
+    command:
+      - "--entrypoints.web.address=:80"
+      - "--experimental.localPlugins.llmgateway.moduleName=github.com/lukaszraczylo/traefik-llmgateway"
+      - "--providers.file.filename=/etc/traefik/dynamic.yml"
+      - "--log.level=INFO"
+    environment:
+      # ":?" fails `docker compose config`/`up` immediately, with a clear
+      # message, instead of starting a plugin whose provider has no key.
+      OPENAI_API_KEY: "${OPENAI_API_KEY:?set OPENAI_API_KEY before running this demo}"
+    ports:
+      - "${LLMGW_DEMO_PORT:-8080}:80"
+    volumes:
+      # The plugin's own module, mounted read-only exactly as Traefik's
+      # localPlugins loader expects: <plugins-local>/src/<moduleName>.
+      - ..:/plugins-local/src/github.com/lukaszraczylo/traefik-llmgateway:ro
+    configs:
+      - source: dynamic
+        target: /etc/traefik/dynamic.yml
+    networks: ["llmgw-demo"]
+    depends_on:
+      - whoami
+
+networks:
+  llmgw-demo:
+    driver: bridge

@@ -1,0 +1,160 @@
+# Example Kubernetes deployment of the LLM Gateway Traefik plugin: a
+# Secret holding the file-backed users list, a Middleware custom resource
+# carrying the plugin's own configuration, and a router wiring both onto a
+# host. See ../README.md for the full configuration reference and
+# ../.traefik.yml for the catalog-facing plugin manifest.
+#
+# Provider API keys are NOT put in this file. They are read by the plugin
+# at startup via "env:VAR_NAME" (see the Middleware below), which means
+# they must be set as environment variables on the Traefik pod itself —
+# see the Helm values snippet at the bottom of this file.
+#
+# The empty-map gotcha: write an empty group as `providers: []`, never a
+# bare `{}`. Traefik's own dynamic-config decode pipeline (which the
+# Kubernetes CRD provider funnels plugin config through, same as the file
+# provider) can fail to round-trip a truly empty nested object with
+# "expected a map, got 'string'" — verified against this exact shape in
+# examples/docker-compose.yml. An explicit empty list decodes correctly
+# and means the same thing (all values allowed).
+
+apiVersion: v1
+kind: Secret
+metadata:
+  name: llmgw-users
+  namespace: traefik
+type: Opaque
+stringData:
+  # Read by the plugin via users.file (mounted below), and hot-reloaded —
+  # no Traefik restart needed to add, remove, or rotate a user. Shape is
+  # fixed by users_file.go: {"users":[{"name","group","apiKey","limits"}]}.
+  # limits is optional per user; omit it to inherit the user's group limits.
+  users.json: |
+    {
+      "users": [
+        {"name": "alice", "group": "engineering", "apiKey": "sk-llmgw-alice-CHANGE-ME"},
+        {"name": "bob", "group": "general", "apiKey": "sk-llmgw-bob-CHANGE-ME"}
+      ]
+    }
+
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: llmgateway
+  namespace: traefik
+spec:
+  plugin:
+    llmgateway:
+      providers:
+        openai:
+          type: openai
+          apiKey: "env:OPENAI_API_KEY"
+          discovery: true
+          discoveryInterval: 1h
+        anthropic:
+          type: anthropic
+          apiKey: "env:ANTHROPIC_API_KEY"
+          models: ["claude-opus-4-5", "claude-sonnet-4-5", "claude-haiku-4-5"]
+        gemini:
+          type: gemini
+          apiKey: "env:GEMINI_API_KEY"
+          models: ["gemini-2.5-pro", "gemini-2.5-flash"]
+      groups:
+        engineering:
+          # Empty lists, not omitted fields, so this block is a real map
+          # entry (see the empty-map gotcha note above) — every provider
+          # and model stays allowed either way (empty = all).
+          providers: []
+          models: []
+          limits:
+            requestsPerMinute: 60
+            requestsPerDay: 5000
+            tokensPerDay: 1000000
+            tokensPerMonth: 20000000
+            costPerDayUSD: 25.0
+            costPerMonthUSD: 250.0
+          mcpServers: []
+          agents: []
+        general:
+          providers: ["openai"]
+          models: ["gpt-5-mini", "gpt-4o"]
+          limits:
+            requestsPerMinute: 10
+            requestsPerDay: 500
+      users:
+        file: /secrets/llmgw-users/users.json
+      redis:
+        address: redis.shared-resources.svc:6379
+        password: "env:REDIS_PASSWORD"
+        failOpen: true
+      pricing:
+        gpt-5-mini: {inputPerM: 0.25, outputPerM: 2.0}
+      mcpServers:
+        github:
+          url: http://mcp-github.tools.svc:8080
+      agents:
+        summarizer:
+          url: http://summarizer.agents.svc:8080
+      passthroughUnknown: false
+
+---
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: llmgateway
+  namespace: traefik
+spec:
+  entryPoints:
+    - websecure
+  routes:
+    - match: Host(`llm.example.com`)
+      kind: Rule
+      middlewares:
+        - name: llmgateway
+      # Traefik requires a real backing Service for a router even though
+      # this middleware short-circuits every path it recognizes; a small
+      # dummy such as traefik/whoami (see ../examples/docker-compose.yml)
+      # or any always-up internal service works, since it is only ever
+      # reached via passthroughUnknown (default false, which 404s instead).
+      services:
+        - name: llmgateway-dummy-backend
+          port: 80
+
+---
+# Helm values snippet (traefik/traefik-helm-chart) — illustrative, verify
+# field names against the chart version you deploy. Two things are
+# required beyond a stock install:
+#
+# 1. Load the plugin. Either the catalog form (once this plugin is listed
+#    in the Traefik Plugin Catalog, see ../.traefik.yml) or localPlugins,
+#    mounting this repository's source into the Traefik pod the same way
+#    ../examples/docker-compose.yml does for its local demo:
+#
+#      experimental:
+#        plugins:
+#          llmgateway:
+#            moduleName: "github.com/lukaszraczylo/traefik-llmgateway"
+#            version: "v0.1.0"
+#
+# 2. Provider keys as env vars, sourced from Secrets — never inlined into
+#    the Middleware CR above, which is why every apiKey field there reads
+#    "env:VAR_NAME" instead of a literal:
+#
+#      env:
+#        - name: OPENAI_API_KEY
+#          valueFrom: {secretKeyRef: {name: llmgw-provider-keys, key: openai}}
+#        - name: ANTHROPIC_API_KEY
+#          valueFrom: {secretKeyRef: {name: llmgw-provider-keys, key: anthropic}}
+#        - name: GEMINI_API_KEY
+#          valueFrom: {secretKeyRef: {name: llmgw-provider-keys, key: gemini}}
+#        - name: REDIS_PASSWORD
+#          valueFrom: {secretKeyRef: {name: llmgw-redis, key: password}}
+#
+#      additionalVolumes:
+#        - name: llmgw-users
+#          secret: {secretName: llmgw-users}
+#      deployment:
+#        additionalVolumeMounts:
+#          - name: llmgw-users
+#            mountPath: /secrets/llmgw-users
+#            readOnly: true
