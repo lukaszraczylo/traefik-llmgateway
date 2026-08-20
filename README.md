@@ -473,9 +473,31 @@ http:
   `usageMetadata`. When a **non-streaming** unified-route response reports
   no usage at all, the gateway falls back to a rough estimate —
   `ceil(request-body-bytes / 4)` counted as prompt tokens, no completion
-  estimate — and marks it `estimated`. A **streaming** unified-route
-  response with no usage is logged and the request itself is still
-  counted, but no token estimate is applied.
+  estimate — and marks it `estimated`. Estimated usage therefore lands
+  entirely in the `tokin` counter below; `tokout` never moves for an
+  estimated request. A **streaming** unified-route response with no usage
+  is logged and the request itself is still counted, but no token
+  estimate is applied.
+- **Tokens are tracked in two directions**: every prompt token increments
+  a `tokin` counter, every completion token a separate `tokout` counter —
+  the same split the admin usage API and usage-history API both expose
+  (see [Admin](#admin)). `tokensPerDay`/`tokensPerMonth` limits are
+  unchanged by this: they still enforce one TOTAL budget, read as
+  `tokin + tokout` in a single batched store read at evaluation time. A
+  violation message still says "tokens", regardless of which direction
+  pushed the scope over.
+- **A synthetic total scope** (`kind: "total"`, `id: "all"`) is counted
+  alongside every request's own user/group scopes on every metered route
+  (unified chat/embeddings, the media endpoints, native passthrough, and
+  the MCP/A2A proxy) — the sum of all LLM traffic combined. It carries no
+  limit and is never evaluated: no configuration can throttle it. The
+  admin usage API's `total` row and every `scope=total` usage-history
+  query read this scope.
+- **An hour window** (`req`/`tokin`/`tokout`/`cost`, UTC calendar hour)
+  is counted alongside minute/day/month on every metered route, purely
+  for charting — no `LimitsConfig` field ever names it, so it is never
+  evaluated against a limit. It is the finest granularity the usage-
+  history API (below) can query.
 - Cost is `tokens × price`, computed in integer **micro-USD**
   (1,000,000ths of a dollar) throughout to avoid float drift, from the
   built-in per-model table (`pricing.go`) or a configured `pricing`
@@ -495,7 +517,18 @@ http:
   configured, or when it errors and `failOpen: true`, counters live in an
   in-process map — correct for one Traefik replica, only approximate
   across several, since each replica counts independently. Exact limits
-  across multiple Traefik replicas require the shared Redis.
+  across multiple Traefik replicas require the shared Redis. Every
+  counter, including the fallback in-process one, works as the usage-
+  history API's data source: a fallback-only deployment gets charts of
+  whatever the process itself accumulated, not an empty series.
+- **Retention** (counter key TTL, distinct from a window's own length):
+  a minute key lives 2 minutes, an hour key 48 hours, a day key 35 days,
+  a month key 400 days — long enough for the usage-history API's largest
+  span (48 hourly / 35 daily / 13 monthly buckets) to always find a live
+  key, not just long enough to survive that bucket's own single rollover.
+  **Migration**: none — a deployed process's old, unsplit `tok` counter
+  keys simply expire on their existing TTL and are never read again;
+  nothing needs backfilling.
 
 ## Retry
 
@@ -682,7 +715,7 @@ A read-only dashboard and JSON API for operational visibility — providers,
 groups, and per-user/per-group usage against configured limits. No
 mutation of any kind; config stays owned by GitOps/Traefik as usual. Off
 by default (`admin.enabled: false`, or the `admin` block omitted
-entirely): the three routes below are not registered at all, and a
+entirely): the four routes below are not registered at all, and a
 request to any of them falls through to the plugin's existing
 404/`passthroughUnknown` handling.
 
@@ -699,10 +732,10 @@ request to any of them falls through to the plugin's existing
   `x-api-key` header, so gating the page itself would make it unreachable
   from a browser in the first place. This is safe because the shell
   carries **zero data of its own** — every value is fetched client-side
-  from the two JSON routes below, which stay fully gated.
+  from the JSON routes below, which stay fully gated.
 - **Browser key-entry flow**: the page's script reads an admin API key
   from the current tab's `sessionStorage`. Absent a stored key, or on any
-  `401`/`403` from either JSON route, it shows an inline key-entry form
+  `401`/`403` from a JSON route, it shows an inline key-entry form
   instead of the dashboard. A submitted key is kept **only in
   `sessionStorage`** — never a cookie, `localStorage`, or any persistent
   store — so it disappears when the tab closes, and it is sent only as
@@ -716,8 +749,31 @@ request to any of them falls through to the plugin's existing
   [Retry](#retry)'s own defaulting, not the raw config — `attempts` and
   `backoff` are both omitted when retry is disabled), and the plugin
   version string. `usage` returns every user's and every group's
-  current-window counter values (req/min, req/day, tok/day, tok/month,
-  cost/day, cost/month) alongside their configured limits.
+  current-window counter values — `requestsPerMinute`, `requestsPerDay`,
+  `tokensInPerDay`/`tokensOutPerDay`, `tokensInPerMonth`/
+  `tokensOutPerMonth`, `costPerDayMicroUsd`, `costPerMonthMicroUsd` —
+  alongside their configured limits, plus one extra `total` row: the
+  synthetic all-traffic scope (see [Limits and accounting](
+  #limits-and-accounting)), limits always `null`.
+- **`GET /admin/api/usage/history`** returns a bucketed series for one
+  scope/metric/window — the data source for per-user/per-group/total
+  usage charts. Query parameters:
+  - `scope`: `user:{id}`, `group:{id}`, or the literal `total`.
+  - `metric`: `req`, `tokin`, `tokout`, or `cost`.
+  - `window`: `hour`, `day`, or `month`.
+  - `span` (optional): number of buckets, oldest-first, inclusive of the
+    current (possibly partial) bucket. Defaults to the window's max —
+    `48` for `hour`, `35` for `day`, `13` for `month` — and a larger
+    value is a `400`.
+
+  An unrecognized `scope`/`metric`/`window`, or an out-of-range `span`,
+  is `400`; a `user`/`group` id that names no configured entity is `404`;
+  the configured store being unreachable is `503` (a chart must never
+  read an outage as "zero usage"). Response shape:
+  `{"scope","metric","window","points":[{"bucket":"2026082114","value":123},...]}`.
+  Unlike the other two JSON routes, this one **never counts request
+  statistics** — it skips `checkAndCount` entirely, ahead of the same
+  change landing for every `/admin/api/*` route in a later change.
 - **What's exposed**: provider names, types, base URLs (with any
   userinfo/query string stripped before it's ever echoed), model counts,
   discovery status, group/user names, membership, limits, and live usage
@@ -725,16 +781,17 @@ request to any of them falls through to the plugin's existing
   keys, the Redis password, or users-file path contents — every
   secret-bearing field is redacted from every response.
 - **Poll counts against quota**: the dashboard's own JavaScript polls
-  both JSON routes every 5 seconds while open. Each poll is a real
+  `overview` and `usage` every 5 seconds while open. Each poll is a real
   authenticated request and increments the admin user's own request
-  counters exactly like any other route — leaving a dashboard tab open
-  against a tightly limited admin user can itself exhaust their
+  counters exactly like any other route (the `usage/history` route above
+  is the one exception) — leaving a dashboard tab open against a tightly
+  limited admin user can itself exhaust their
   `requestsPerMinute`/`requestsPerDay` budget.
 - **`GET /admin` counts nothing**: it is unauthenticated, so there is no
   identified user to count a request against.
-- **Response headers**: both JSON routes set
+- **Response headers**: all three JSON routes set
   `X-Content-Type-Options: nosniff` and `Cache-Control: no-store`, and all
-  three routes share one `Content-Security-Policy` header
+  four routes share one `Content-Security-Policy` header
   (`default-src 'none'; script-src 'unsafe-inline'; style-src
   'unsafe-inline'; connect-src 'self'`) — the dashboard loads no external
   asset of any kind and works in an air-gapped cluster.
