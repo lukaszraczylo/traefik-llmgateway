@@ -44,6 +44,19 @@ http:
               baseUrl: "http://mockgemini:8080"
               apiKey: "mock-gemini-key"
               models: ["gemini-mock"]
+            # Backs test 8's retry coverage only: baseUrl points at the
+            # SAME mockopenai container, under its dedicated /flaky prefix
+            # (see integration/mock/main.go's handleFlakyOpenAIChat), so
+            # a.baseURL+"/v1/chat/completions" (provider_openai.go)
+            # resolves to /flaky/v1/chat/completions. discovery is left
+            # off — GET /flaky/v1/models isn't served — so the explicit
+            # "flaky-mock" model id below is the only way this provider's
+            # model is known.
+            flaky:
+              type: openai
+              baseUrl: "http://mockopenai:8080/flaky"
+              apiKey: "mock-openai-key"
+              models: ["flaky-mock"]
           groups:
             eng:
               limits:
@@ -53,15 +66,47 @@ http:
                 requestsPerMinute: 3
           users:
             inline:
+              # limits.requestsPerDay is set (generously — every test in
+              # this suite together never approaches it) purely so
+              # buildLimitScopes (routes_unified.go/routes_media.go/
+              # admin.go) builds a "user" counter scope for alice at all:
+              # a nil per-user Limits means only the group's own counters
+              # ever increment, which would make the admin usage test's
+              # "alice's own request counters are > 0" assertion always
+              # read zero regardless of how much traffic she generated.
               - name: alice
                 group: eng
                 apiKey: "sk-int-alice"
+                limits:
+                  requestsPerDay: 1000000
+              # Admin-flagged user for the admin dashboard integration
+              # coverage (spec §4, v0.2): same "eng" group as alice, so
+              # polling /admin/api/* repeatedly never hits a rate limit
+              # meant for a different scenario. limits.requestsPerDay is
+              # set for the same reason as alice's above.
+              - name: admin
+                group: eng
+                apiKey: "sk-int-admin"
+                admin: true
+                limits:
+                  requestsPerDay: 1000000
             file: "/users/users.json"
           redis:
             address: "redis:6379"
           mcpServers:
             tool:
               url: "http://mocktool:8080"
+          # v0.2 features (spec §1, §2, §4), all opt-in and off by default
+          # in v0.1: enabled here so the integration suite exercises every
+          # one under real Traefik+Yaegi, not just go test.
+          retry:
+            enabled: true
+            attempts: 1 # one retry after the first try — matches handleFlakyOpenAIChat's single forced 503
+          cache:
+            enabled: true
+            ttl: "2m"
+          admin:
+            enabled: true
 
     # Second, separate middleware instance carrying only the optional
     # real-upstream smoke test's "uni" provider (task 7, INTEGRATION_REAL=1

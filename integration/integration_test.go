@@ -37,6 +37,7 @@ const (
 	aliceKey = "sk-int-alice" // eng group, high limit, inline user
 	bobKey   = "sk-int-bob"   // limited group (requestsPerMinute: 3), file-sourced user
 	carolKey = "sk-int-carol" // added to users.json mid-run by TestUsersFileHotReload
+	adminKey = "sk-int-admin" // eng group, inline user, admin: true (spec §4, v0.2)
 )
 
 // composeFile returns the path to docker-compose.yml relative to this
@@ -518,5 +519,252 @@ func TestRealUpstreamSmoke(t *testing.T) {
 	}
 	if content := firstChoiceContent(t, body); strings.TrimSpace(content) == "" {
 		t.Errorf("real upstream: response content is empty, body=%#v", body)
+	}
+}
+
+// --- v0.2: retry, cache, images/audio, admin (task 5) ---
+
+// TestRetryFlakyRecovers covers v0.2 integration coverage: the "flaky"
+// mock provider (dynamic.yml.tmpl) fails its first request with 503 and
+// succeeds on its second; with retry.enabled (dynamic.yml.tmpl's
+// top-level retry block) the client sees a single 200. The mock's own
+// "mock_attempt" response field — forwarded verbatim by the openai-type
+// adapter's passthrough (forwardJSON, provider_openai.go) — proves the
+// retry made exactly two upstream tries, not merely that the mock
+// happened to succeed on a fresh process.
+//
+// This test is NOT safe to re-run against a `make integration-keep`
+// stack without restarting mockopenai first: handleFlakyOpenAIChat's own
+// hit counter is process-lifetime state with no reset endpoint (see its
+// doc comment, integration/mock/main.go) — a second run against the same
+// container never observes the forced-503-then-success sequence again.
+func TestRetryFlakyRecovers(t *testing.T) {
+	reqBody := map[string]any{
+		"model":    "flaky/flaky-mock",
+		"messages": []map[string]any{{"role": "user", "content": "hi"}},
+	}
+	resp, body := doJSON(t, http.MethodPost, traefik1URL+"/v1/chat/completions", aliceKey, reqBody)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("flaky chat: status = %d, want 200 (retry should have recovered the forced 503), body=%#v", resp.StatusCode, body)
+	}
+	if content := firstChoiceContent(t, body); content != "mock flaky response" {
+		t.Errorf("flaky chat: content = %q, want %q", content, "mock flaky response")
+	}
+	attempt, ok := body["mock_attempt"].(float64)
+	if !ok {
+		t.Fatalf("flaky chat: response has no numeric mock_attempt field, body=%#v", body)
+	}
+	if attempt != 2 {
+		t.Errorf("flaky chat: mock_attempt = %v, want 2 (one forced 503 plus one retry success = exactly two upstream hits)", attempt)
+	}
+}
+
+// adminUsageEntry issues GET /admin/api/usage as adminKey and returns the
+// named user's or group's raw JSON entry. kind is "users" or "groups" —
+// the top-level keys adminUsageResponse (admin.go) marshals to.
+func adminUsageEntry(t *testing.T, kind, id string) map[string]any {
+	t.Helper()
+	resp, body := doJSON(t, http.MethodGet, traefik1URL+"/admin/api/usage", adminKey, nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /admin/api/usage: status = %d, body=%#v", resp.StatusCode, body)
+	}
+	entries, ok := body[kind].([]any)
+	if !ok {
+		t.Fatalf("GET /admin/api/usage: body[%q] is not an array, body=%#v", kind, body)
+	}
+	for _, e := range entries {
+		entry, ok := e.(map[string]any)
+		if ok && entry["id"] == id {
+			return entry
+		}
+	}
+	t.Fatalf("GET /admin/api/usage: no %q entry for id %q, body=%#v", kind, id, body)
+	return nil
+}
+
+// TestResponseCache covers v0.2 integration coverage: two identical chat
+// completions get X-Llmgw-Cache: miss then hit, and the admin usage API
+// (spec §4) proves the hit added zero tokens — only the miss's real
+// upstream call did (spec §2's "cached hits increment request counters,
+// never token/cost counters"). The request content is a unique string
+// found nowhere else in this suite, so this test's result never depends
+// on what any other test cached first.
+func TestResponseCache(t *testing.T) {
+	reqBody := map[string]any{
+		"model":    "openai/gpt-mock",
+		"messages": []map[string]any{{"role": "user", "content": "cache-probe-8f2c1a9d"}},
+	}
+
+	resp1, body1 := doJSON(t, http.MethodPost, traefik1URL+"/v1/chat/completions", aliceKey, reqBody)
+	if resp1.StatusCode != http.StatusOK {
+		t.Fatalf("first (miss) request: status = %d, body=%#v", resp1.StatusCode, body1)
+	}
+	if got := resp1.Header.Get("X-Llmgw-Cache"); got != "miss" {
+		t.Fatalf("first request: X-Llmgw-Cache = %q, want %q", got, "miss")
+	}
+	if content := firstChoiceContent(t, body1); content != "mock openai response" {
+		t.Errorf("first request: content = %q, want %q", content, "mock openai response")
+	}
+
+	tokensAfterMiss, _ := adminUsageEntry(t, "users", "alice")["tokensPerDay"].(float64)
+	if tokensAfterMiss <= 0 {
+		t.Fatalf("tokensPerDay after the miss = %v, want > 0 (the mock's real usage should have been accounted)", tokensAfterMiss)
+	}
+
+	resp2, body2 := doJSON(t, http.MethodPost, traefik1URL+"/v1/chat/completions", aliceKey, reqBody)
+	if resp2.StatusCode != http.StatusOK {
+		t.Fatalf("second (hit) request: status = %d, body=%#v", resp2.StatusCode, body2)
+	}
+	if got := resp2.Header.Get("X-Llmgw-Cache"); got != "hit" {
+		t.Fatalf("second request: X-Llmgw-Cache = %q, want %q", got, "hit")
+	}
+	if content := firstChoiceContent(t, body2); content != "mock openai response" {
+		t.Errorf("second request: content = %q, want the cached %q", content, "mock openai response")
+	}
+
+	tokensAfterHit, _ := adminUsageEntry(t, "users", "alice")["tokensPerDay"].(float64)
+	if tokensAfterHit != tokensAfterMiss {
+		t.Errorf("tokensPerDay changed across the cache hit: after miss = %v, after hit = %v, want unchanged", tokensAfterMiss, tokensAfterHit)
+	}
+}
+
+// TestImagesGenerations covers v0.2 integration coverage: POST
+// /v1/images/generations native-forwards through the mock openai
+// upstream, and translates through Imagen's :predict for a gemini-routed
+// model (translate_gemini_images.go).
+func TestImagesGenerations(t *testing.T) {
+	openaiReq := map[string]any{
+		"model":  "openai/gpt-mock",
+		"prompt": "a cat",
+		"n":      1,
+		"size":   "1024x1024",
+	}
+	resp, body := doJSON(t, http.MethodPost, traefik1URL+"/v1/images/generations", aliceKey, openaiReq)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("openai images: status = %d, body=%#v", resp.StatusCode, body)
+	}
+	data, ok := body["data"].([]any)
+	if !ok || len(data) == 0 {
+		t.Fatalf("openai images: expected a non-empty data array, got %#v", body)
+	}
+
+	geminiReq := map[string]any{
+		"model":  "gemini/gemini-mock",
+		"prompt": "a cat",
+		"n":      1,
+		"size":   "1024x1024",
+	}
+	resp2, body2 := doJSON(t, http.MethodPost, traefik1URL+"/v1/images/generations", aliceKey, geminiReq)
+	if resp2.StatusCode != http.StatusOK {
+		t.Fatalf("gemini images: status = %d, body=%#v", resp2.StatusCode, body2)
+	}
+	data2, ok := body2["data"].([]any)
+	if !ok || len(data2) == 0 {
+		t.Fatalf("gemini images: expected a non-empty data array translated from Imagen predictions, got %#v", body2)
+	}
+	first, ok := data2[0].(map[string]any)
+	if !ok {
+		t.Fatalf("gemini images: data[0] is not an object: %#v", data2[0])
+	}
+	if b64, _ := first["b64_json"].(string); b64 == "" {
+		t.Errorf("gemini images: data[0].b64_json is empty, want the mock's Imagen bytesBase64Encoded translated through")
+	}
+}
+
+// TestAudioSpeech covers v0.2 integration coverage: POST /v1/audio/speech
+// round-trips a binary response byte-for-byte, with its Content-Type
+// forwarded (audioSpeech, provider_openai.go).
+func TestAudioSpeech(t *testing.T) {
+	reqBody := map[string]any{
+		"model": "openai/gpt-mock",
+		"input": "hello",
+		"voice": "alloy",
+	}
+	b, err := json.Marshal(reqBody)
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	req, err := http.NewRequest(http.MethodPost, traefik1URL+"/v1/audio/speech", bytes.NewReader(b))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+aliceKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("audio speech request: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("audio speech: status = %d", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); ct != "audio/mpeg" {
+		t.Errorf("audio speech: Content-Type = %q, want %q", ct, "audio/mpeg")
+	}
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read audio speech body: %v", err)
+	}
+	const want = "MOCK-AUDIO-BYTES-0123456789-DISTINCTIVE-PAYLOAD"
+	if string(raw) != want {
+		t.Errorf("audio speech: body = %q, want the mock's exact bytes %q", raw, want)
+	}
+}
+
+// TestAdminDashboard covers v0.2 integration coverage (spec §4): the
+// unauthenticated HTML shell carries no data, the two JSON routes gate
+// on admin vs. non-admin vs. unauthenticated, and GET /admin/api/usage
+// reflects the traffic this suite has generated by the time this test
+// runs — deliberately placed near the end of the file (Go runs tests in
+// source order with no -shuffle in this suite's Makefile target) so
+// alice's own request counters are already non-zero.
+func TestAdminDashboard(t *testing.T) {
+	pageReq, err := http.NewRequest(http.MethodGet, traefik1URL+"/admin", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	pageResp, err := http.DefaultClient.Do(pageReq)
+	if err != nil {
+		t.Fatalf("GET /admin: %v", err)
+	}
+	defer func() { _ = pageResp.Body.Close() }()
+	if pageResp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /admin (unauthenticated): status = %d, want 200", pageResp.StatusCode)
+	}
+	pageRaw, err := io.ReadAll(pageResp.Body)
+	if err != nil {
+		t.Fatalf("read /admin body: %v", err)
+	}
+	if !strings.Contains(string(pageRaw), "LLM Gateway") {
+		t.Errorf("GET /admin: body does not look like the dashboard shell:\n%s", pageRaw)
+	}
+	for _, key := range []string{aliceKey, bobKey, adminKey} {
+		if strings.Contains(string(pageRaw), key) {
+			t.Errorf("GET /admin: unauthenticated shell must carry no data of its own, but the body contains a live API key %q", key)
+		}
+	}
+
+	overviewResp, overviewBody := doJSON(t, http.MethodGet, traefik1URL+"/admin/api/overview", adminKey, nil)
+	if overviewResp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /admin/api/overview (admin): status = %d, body=%#v", overviewResp.StatusCode, overviewBody)
+	}
+	providers, ok := overviewBody["providers"].([]any)
+	if !ok || len(providers) == 0 {
+		t.Fatalf("GET /admin/api/overview: expected a non-empty providers list, got %#v", overviewBody)
+	}
+
+	nonAdminResp, nonAdminBody := doJSON(t, http.MethodGet, traefik1URL+"/admin/api/overview", aliceKey, nil)
+	if nonAdminResp.StatusCode != http.StatusForbidden {
+		t.Fatalf("GET /admin/api/overview (non-admin key): status = %d, want 403, body=%#v", nonAdminResp.StatusCode, nonAdminBody)
+	}
+
+	aliceUsage := adminUsageEntry(t, "users", "alice")
+	if reqDay, _ := aliceUsage["requestsPerDay"].(float64); reqDay <= 0 {
+		t.Errorf("alice requestsPerDay = %v, want > 0 (this suite's own earlier traffic)", reqDay)
+	}
+	adminUsage := adminUsageEntry(t, "users", "admin")
+	if reqDay, _ := adminUsage["requestsPerDay"].(float64); reqDay <= 0 {
+		t.Errorf("admin requestsPerDay = %v, want > 0 (this test's own admin API calls count too)", reqDay)
 	}
 }

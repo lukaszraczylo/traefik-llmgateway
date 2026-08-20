@@ -27,6 +27,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -71,6 +72,13 @@ func newServerMux(mode string) (*http.ServeMux, error) {
 	case "openai":
 		mux.HandleFunc("/v1/models", handleOpenAIModels)
 		mux.HandleFunc("/v1/chat/completions", handleOpenAIChat)
+		// flaky/v1/chat/completions backs the retry integration test (task
+		// 5): the plugin's "flaky" provider points its baseUrl at this
+		// mode's own address plus "/flaky", so a.baseURL+"/v1/chat/
+		// completions" (provider_openai.go) resolves to exactly this path.
+		mux.HandleFunc("/flaky/v1/chat/completions", handleFlakyOpenAIChat)
+		mux.HandleFunc("/v1/images/generations", handleOpenAIImages)
+		mux.HandleFunc("/v1/audio/speech", handleOpenAIAudioSpeech)
 	case "anthropic":
 		mux.HandleFunc("/v1/models", handleAnthropicModels)
 		mux.HandleFunc("/v1/messages", handleAnthropicMessages)
@@ -200,6 +208,89 @@ func handleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 	sw.write("", "[DONE]")
 }
 
+// flakyHits counts every request handleFlakyOpenAIChat has served across
+// this process's lifetime. It is package-level, process-lifetime state
+// deliberately, not reset per request: the retry integration test relies
+// on exactly the FIRST request this mock process ever receives on
+// /flaky/v1/chat/completions failing, and every one after succeeding, so
+// a fresh mockopenai container (one per `make integration` run) always
+// starts the scenario from a clean slate. Re-running the integration
+// suite against an already-up stack (`make integration-keep`, without
+// restarting mockopenai) will NOT reproduce the retry test a second time
+// — the same non-idempotence flushRedis exists to paper over for the
+// rate-limit counters has no equivalent reset here, since there is no
+// admin endpoint on this fixture server to clear it.
+var flakyHits int32
+
+// handleFlakyOpenAIChat answers the first request this process ever
+// receives with HTTP 503 (a transient failure retryPolicy.isTransient
+// classifies as retryable, retry.go) and every request after that with a
+// normal chat completion response carrying an extra top-level
+// "mock_attempt" field set to this handler's own call count — the
+// unified route's openai-type adapter forwards a JSON response body
+// verbatim (forwardJSON, provider_openai.go), so this field survives
+// straight through to the client and lets the retry integration test
+// prove the mock was hit exactly twice without needing to inspect
+// response headers forwardJSON never copies.
+func handleFlakyOpenAIChat(w http.ResponseWriter, r *http.Request) {
+	n := atomic.AddInt32(&flakyHits, 1)
+	if n == 1 {
+		http.Error(w, `{"error":{"message":"mock flaky failure","type":"server_error"}}`, http.StatusServiceUnavailable)
+		return
+	}
+
+	body := decodeJSONBody(r)
+	model, _ := body["model"].(string)
+	if model == "" {
+		model = "flaky-mock"
+	}
+	writeJSON(w, map[string]any{
+		"id":           "chatcmpl-flaky",
+		"object":       "chat.completion",
+		"model":        model,
+		"mock_attempt": n,
+		"choices": []map[string]any{
+			{
+				"index":         0,
+				"message":       map[string]any{"role": "assistant", "content": "mock flaky response"},
+				"finish_reason": "stop",
+			},
+		},
+		"usage": map[string]any{"prompt_tokens": 10, "completion_tokens": 5},
+	})
+}
+
+// handleOpenAIImages answers POST /v1/images/generations with a canned
+// OpenAI images.generations response — the images integration test's
+// openai-type case is a native forward (routes_media.go), so whatever
+// this returns reaches the client unmodified.
+func handleOpenAIImages(w http.ResponseWriter, r *http.Request) {
+	_ = decodeJSONBody(r) // request shape isn't asserted on; draining it is enough
+	writeJSON(w, map[string]any{
+		"created": 1755600000,
+		"data": []map[string]any{
+			{"b64_json": "bW9jay1vcGVuYWktaW1hZ2UtYnl0ZXM=", "revised_prompt": "mock revised prompt"},
+		},
+	})
+}
+
+// mockAudioBytes is the fixed binary payload handleOpenAIAudioSpeech
+// returns — deliberately not valid MP3 data, since nothing in the
+// gateway's audioSpeech path (a pure byte-for-byte stream,
+// provider_openai.go) ever parses it; only its content-type and byte
+// equality on round trip matter to the audio integration test.
+var mockAudioBytes = []byte("MOCK-AUDIO-BYTES-0123456789-DISTINCTIVE-PAYLOAD")
+
+// handleOpenAIAudioSpeech answers POST /v1/audio/speech with mockAudioBytes
+// under Content-Type audio/mpeg, mirroring a real TTS endpoint's binary
+// response.
+func handleOpenAIAudioSpeech(w http.ResponseWriter, r *http.Request) {
+	_ = decodeJSONBody(r)
+	w.Header().Set("Content-Type", "audio/mpeg")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(mockAudioBytes)
+}
+
 // --- anthropic mode ----------------------------------------------------------
 
 func handleAnthropicModels(w http.ResponseWriter, _ *http.Request) {
@@ -285,6 +376,17 @@ func handleGeminiGenerate(w http.ResponseWriter, r *http.Request) {
 			sw.write("", f) // Gemini's SSE stream carries no "event:" field.
 			time.Sleep(20 * time.Millisecond)
 		}
+	case "predict":
+		// Backs the images integration test's gemini case: the gateway's
+		// geminiAdapter.imagesGeneration (provider_gemini.go) POSTs to
+		// {base}/v1beta/models/{model}:predict and translates this
+		// Imagen-shaped response into OpenAI's images.generations shape
+		// (translate_gemini_images.go) before it ever reaches the client.
+		writeJSON(w, map[string]any{
+			"predictions": []map[string]any{
+				{"bytesBase64Encoded": "bW9jay1nZW1pbmktaW1hZ2UtYnl0ZXM="},
+			},
+		})
 	default:
 		http.NotFound(w, r)
 	}
