@@ -71,7 +71,7 @@ http:
       plugin:
         llmgateway:
           providers:
-            uni:
+            real:
               type: openai
               baseUrl: "__INTEGRATION_REAL_BASEURL__"
               apiKey: ""
@@ -79,7 +79,14 @@ http:
               # on this container reaching the real upstream at Traefik
               # startup (offline dev machines, CI with no egress). The
               # actual chat completion call in task 7 still goes out live.
-              models: ["deepseek-v4-flash-0731"]
+              #
+              # The provider is deliberately NOT named "uni": the upstream
+              # gateway's own model ids carry a "uni/" prefix, and a
+              # provider of that name would make the plugin strip it
+              # (provider-prefix resolution) before proxying. With a
+              # non-colliding name the whole slash-bearing id below is a
+              # bare model id and is forwarded verbatim.
+              models: ["uni/deepseek-v4-flash-0731"]
           groups:
             eng:
               limits:
