@@ -261,6 +261,16 @@ func (a *openaiAdapter) forwardStream(w http.ResponseWriter, body io.Reader, cli
 // cost-accounted (spec §3, v0.2), so this always returns a zero usage,
 // regardless of what the upstream response reports.
 func (a *openaiAdapter) imagesGeneration(ctx context.Context, w http.ResponseWriter, req map[string]any) (usage, error) {
+	// gatewayAliasKey must never reach the real provider, mirroring
+	// chatCompletion's identical delete above: routes_media.go never sets
+	// this key itself for a media route (its doc comment), but this
+	// adapter forwards req verbatim as the upstream wire body, so a
+	// client independently sending a literal "__alias" field of its own
+	// would otherwise leak straight through as an unrecognized request
+	// field. Unconditional, not conditional on whether the gateway set
+	// it — the same defensive posture chatCompletion/embeddings already
+	// take.
+	delete(req, gatewayAliasKey)
 	resp, err := upstreamJSON(ctx, a.client, http.MethodPost, a.baseURL+"/v1/images/generations", a.requestHeaders(true), req, a.retry)
 	if err != nil {
 		return usage{}, err

@@ -444,12 +444,22 @@ adapter call — minus response caching and token/cost accounting (below).
 |---|---|---|---|
 | `images/generations` | Native forward. | Translated to Imagen's `:predict` (below). | **501**. |
 | `audio/speech` | Native forward; the binary response is streamed to the client as it arrives. | **501** — no OpenAI-compatible text-to-speech endpoint. | **501**. |
-| `audio/transcriptions` | Native forward; the client's original multipart body is replayed upstream unchanged. | **501** — no OpenAI-compatible speech-to-text endpoint. | **501**. |
+| `audio/transcriptions` | Native forward; see below for how the multipart body is forwarded. | **501** — no OpenAI-compatible speech-to-text endpoint. | **501**. |
 
 - **Model routing**: `images/generations` and `audio/speech` read `model`
   from the JSON request body. `audio/transcriptions` reads it from the
   multipart request's `model` form field instead — the field can appear
-  in any position among the request's parts.
+  in any position among the request's parts, and a body with more than
+  one `model` field is a **400**.
+- **Multipart forwarding**: when the client's `model` field already
+  equals the resolved upstream model id (a bare id, the common case), the
+  original multipart body is replayed byte-for-byte, unchanged. When it
+  does not — a provider-prefixed id (`openai/whisper-1`) or another alias
+  resolves to a different upstream model string — the body is rebuilt
+  with every other part copied verbatim and only the `model` part's value
+  rewritten, so the alias never reaches the real provider. The rebuilt
+  body uses a new multipart boundary; the client's exact boundary is not
+  preserved, only an equivalent body.
 - **Gemini image translation**: `{model, prompt, n, size,
   response_format}` maps to Imagen's `{instances:[{prompt}], parameters:
   {sampleCount, aspectRatio}}`. `size` maps to `aspectRatio`:

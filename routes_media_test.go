@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"mime"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -162,6 +163,37 @@ func TestHandleImagesGenerations_OpenAI_HappyPath_NativeForward(t *testing.T) {
 	}
 	if tok, ok := gw.limiter.getCounter("user", "alice", metricTok, windowDay, time.Now()); ok && tok != 0 {
 		t.Errorf("user token/day counter = %d, want 0 (images are never token-accounted)", tok)
+	}
+}
+
+// TestHandleImagesGenerations_StripsClientSuppliedAliasKey proves a
+// client independently including a literal "__alias" field in its own
+// JSON body (never one the gateway itself injects for a media route —
+// routes_media.go never sets gatewayAliasKey here) never reaches the
+// upstream provider: openaiAdapter.imagesGeneration deletes it
+// unconditionally, mirroring chatCompletion's identical delete.
+func TestHandleImagesGenerations_StripsClientSuppliedAliasKey(t *testing.T) {
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"created":1,"data":[]}`))
+	}))
+	defer srv.Close()
+
+	gw := newMediaTestGateway(t, newMediaTestConfig(srv.URL, "img-test"))
+
+	body := map[string]any{"model": "img-test", "prompt": "a cat", gatewayAliasKey: "sneaky-client-value"}
+	req := newUnifiedRequest(t, http.MethodPost, imagesGenerationsPath, "sk-alice", body)
+	rec := httptest.NewRecorder()
+	gw.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	if _, leaked := gotBody[gatewayAliasKey]; leaked {
+		t.Errorf("upstream request body leaked client-supplied %q: %v", gatewayAliasKey, gotBody)
 	}
 }
 
@@ -383,6 +415,13 @@ func buildMultipartTranscription(t *testing.T, model string) (body []byte, conte
 	return buf.Bytes(), mw.FormDataContentType()
 }
 
+// TestHandleAudioTranscriptions_OpenAI_HappyPath_MultipartReplayed
+// exercises the bare-id fast path: the client's own "model" field
+// ("whisper-test") already equals the resolved upstream model id, so
+// handleAudioTranscriptions replays the original multipart bytes
+// byte-for-byte unchanged rather than calling rewriteMultipartModel — see
+// TestHandleAudioTranscriptions_PrefixedAlias_RewritesModelFieldOnly for
+// the alias case that does rewrite.
 func TestHandleAudioTranscriptions_OpenAI_HappyPath_MultipartReplayed(t *testing.T) {
 	const respBody = `{"text":"hello world"}`
 	var gotContentType string
@@ -449,6 +488,159 @@ func TestHandleAudioTranscriptions_InvalidContentType_400(t *testing.T) {
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400, body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "multipart/form-data") {
+		t.Errorf("body = %q, want it to mention %q", rec.Body.String(), "multipart/form-data")
+	}
+}
+
+// TestHandleAudioTranscriptions_ContentTypeNotFormData_400 covers the
+// case a plain "not multipart at all" Content-Type does not: a
+// syntactically valid multipart Content-Type, with a real boundary
+// parameter, whose subtype is not "form-data". Before the folded review
+// fix, this fell through the boundary check (a boundary was present) and
+// produced a misleading "model is required" 400 instead of naming the
+// actual problem.
+func TestHandleAudioTranscriptions_ContentTypeNotFormData_400(t *testing.T) {
+	gw := newMediaTestGateway(t, newMediaTestConfig("http://127.0.0.1:1", "whisper-test"))
+
+	req := httptest.NewRequest(http.MethodPost, audioTranscriptionsPath, strings.NewReader("--xyz--\r\n"))
+	req.Header.Set("Content-Type", "multipart/mixed; boundary=xyz")
+	req.Header.Set("Authorization", "Bearer sk-alice")
+	rec := httptest.NewRecorder()
+	gw.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400, body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "multipart/form-data") {
+		t.Errorf("body = %q, want it to mention %q", rec.Body.String(), "multipart/form-data")
+	}
+}
+
+// TestHandleAudioTranscriptions_DuplicateModelField_400 proves a
+// multipart body carrying two "model" parts is rejected outright (400)
+// rather than silently resolving to whichever one extractMultipartModel
+// happened to see first.
+func TestHandleAudioTranscriptions_DuplicateModelField_400(t *testing.T) {
+	gw := newMediaTestGateway(t, newMediaTestConfig("http://127.0.0.1:1", "whisper-test"))
+
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	for _, v := range []string{"whisper-test", "whisper-other"} {
+		fw, err := mw.CreateFormField("model")
+		if err != nil {
+			t.Fatalf("CreateFormField: %v", err)
+		}
+		if _, err := fw.Write([]byte(v)); err != nil {
+			t.Fatalf("write model field: %v", err)
+		}
+	}
+	if err := mw.Close(); err != nil {
+		t.Fatalf("close multipart writer: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, audioTranscriptionsPath, &buf)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	req.Header.Set("Authorization", "Bearer sk-alice")
+	rec := httptest.NewRecorder()
+	gw.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400, body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "duplicate model field") {
+		t.Errorf("body = %q, want it to mention %q", rec.Body.String(), "duplicate model field")
+	}
+}
+
+// TestHandleAudioTranscriptions_PrefixedAlias_RewritesModelFieldOnly
+// proves the controller ruling (2026-08-20, amends spec §3): a
+// provider-prefixed model id ("openai/whisper-test") must never reach
+// the real upstream verbatim. rewriteMultipartModel rebuilds the
+// multipart body with the bare upstream id in the "model" field, leaving
+// every other part (here, the audio file) byte-for-byte unchanged.
+func TestHandleAudioTranscriptions_PrefixedAlias_RewritesModelFieldOnly(t *testing.T) {
+	const fileContent = "FAKEAUDIOBYTES-DISTINCTIVE-PAYLOAD"
+	var gotContentType string
+	var gotBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotContentType = r.Header.Get("Content-Type")
+		gotBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"text":"ok"}`))
+	}))
+	defer srv.Close()
+
+	gw := newMediaTestGateway(t, newMediaTestConfig(srv.URL, "whisper-test"))
+
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	ffw, err := mw.CreateFormFile("file", "audio.wav")
+	if err != nil {
+		t.Fatalf("CreateFormFile: %v", err)
+	}
+	if _, err = ffw.Write([]byte(fileContent)); err != nil {
+		t.Fatalf("write file field: %v", err)
+	}
+	mfw, err := mw.CreateFormField("model")
+	if err != nil {
+		t.Fatalf("CreateFormField(model): %v", err)
+	}
+	// "openai/whisper-test" is a provider-prefixed alias resolving to the
+	// same upstream model the bare form registers under.
+	if _, err = mfw.Write([]byte("openai/whisper-test")); err != nil {
+		t.Fatalf("write model field: %v", err)
+	}
+	if err = mw.Close(); err != nil {
+		t.Fatalf("close multipart writer: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, audioTranscriptionsPath, &buf)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	req.Header.Set("Authorization", "Bearer sk-alice")
+	rec := httptest.NewRecorder()
+	gw.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+
+	_, params, err := mime.ParseMediaType(gotContentType)
+	if err != nil {
+		t.Fatalf("upstream Content-Type %q did not parse: %v", gotContentType, err)
+	}
+	mr := multipart.NewReader(bytes.NewReader(gotBody), params["boundary"])
+	var gotModel string
+	var gotFile []byte
+	var sawModel, sawFile bool
+	for {
+		part, perr := mr.NextPart()
+		if perr == io.EOF { //nolint:errorlint // multipart.Reader.NextPart's own contract returns io.EOF bare
+			break
+		}
+		if perr != nil {
+			t.Fatalf("parse upstream multipart body: %v", perr)
+		}
+		switch part.FormName() {
+		case "model":
+			b, _ := io.ReadAll(part)
+			gotModel = string(b)
+			sawModel = true
+		case "file":
+			b, _ := io.ReadAll(part)
+			gotFile = b
+			sawFile = true
+		}
+		_ = part.Close()
+	}
+
+	if !sawModel || gotModel != "whisper-test" {
+		t.Errorf("upstream model field = %q (present=%v), want the bare upstream id %q", gotModel, sawModel, "whisper-test")
+	}
+	if !sawFile || string(gotFile) != fileContent {
+		t.Errorf("upstream file part = %q (present=%v), want unchanged %q", gotFile, sawFile, fileContent)
 	}
 }
 

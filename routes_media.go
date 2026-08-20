@@ -8,6 +8,7 @@ import (
 	"mime"
 	"mime/multipart"
 	"net/http"
+	"strings"
 )
 
 // Route paths for the three unified media endpoints (spec §3, v0.2):
@@ -142,13 +143,16 @@ func (g *Gateway) handleAudioSpeech(w http.ResponseWriter, r *http.Request, u *u
 
 // handleAudioTranscriptions implements POST /v1/audio/transcriptions
 // (spec §3): an openai-type provider forwards natively; gemini and
-// anthropic both always answer 501. Unlike images/speech, the multipart
-// request body is replayed upstream byte-for-byte, unchanged — spec §3's
-// model routing only reads the "model" form field to pick a provider and
-// check authorization; it never rewrites the field a client's own model
-// alias occupies inside the multipart body, since editing one part of a
-// multipart payload in place while preserving its exact boundary framing
-// is unnecessary complexity this endpoint's contract does not require.
+// anthropic both always answer 501. The multipart request body is
+// replayed upstream unchanged only when the client's own "model" form
+// field already equals the resolved upstream model id (the common case —
+// a bare id); when it does not (a provider-prefixed or otherwise aliased
+// id resolves to a different upstream model string), the body is
+// rebuilt via rewriteMultipartModel so the alias never reaches the real
+// provider, the same invariant every other unified route enforces
+// (controller ruling, 2026-08-20, amends spec §3's original "REPLAY the
+// full body upstream unchanged" — see rewriteMultipartModel's doc
+// comment).
 func (g *Gateway) handleAudioTranscriptions(w http.ResponseWriter, r *http.Request, u *user, grp *group) {
 	sw := &statusTrackingWriter{ResponseWriter: w}
 
@@ -163,9 +167,13 @@ func (g *Gateway) handleAudioTranscriptions(w http.ResponseWriter, r *http.Reque
 	}
 
 	contentType := r.Header.Get("Content-Type")
-	_, params, err := mime.ParseMediaType(contentType)
+	mediaType, params, err := mime.ParseMediaType(contentType)
 	if err != nil {
 		writeOAIError(sw, http.StatusBadRequest, "invalid_request_error", "invalid Content-Type")
+		return
+	}
+	if !strings.HasPrefix(mediaType, "multipart/form-data") {
+		writeOAIError(sw, http.StatusBadRequest, "invalid_request_error", "Content-Type must be multipart/form-data")
 		return
 	}
 	boundary := params["boundary"]
@@ -175,17 +183,34 @@ func (g *Gateway) handleAudioTranscriptions(w http.ResponseWriter, r *http.Reque
 	}
 
 	requestedModel, err := extractMultipartModel(body, boundary)
-	if err != nil || requestedModel == "" {
+	switch {
+	case errors.Is(err, errDuplicateModelField):
+		writeOAIError(sw, http.StatusBadRequest, "invalid_request_error", "duplicate model field")
+		return
+	case err != nil || requestedModel == "":
 		writeOAIError(sw, http.StatusBadRequest, "invalid_request_error", "model is required")
 		return
 	}
 
-	adapter, _, ok := g.resolveMediaRequest(sw, u, grp, requestedModel)
+	adapter, upstreamModel, ok := g.resolveMediaRequest(sw, u, grp, requestedModel)
 	if !ok {
 		return
 	}
 
-	if _, err := adapter.audioTranscription(r.Context(), sw, body, contentType); err != nil {
+	uploadBody := body
+	uploadContentType := contentType
+	if upstreamModel != requestedModel {
+		rebuilt, rebuiltContentType, rerr := rewriteMultipartModel(body, boundary, upstreamModel)
+		if rerr != nil {
+			g.errorf("audio transcriptions: rewrite multipart model field: %v", rerr)
+			writeOAIError(sw, http.StatusInternalServerError, "server_error", "internal error")
+			return
+		}
+		uploadBody = rebuilt
+		uploadContentType = rebuiltContentType
+	}
+
+	if _, err := adapter.audioTranscription(r.Context(), sw, uploadBody, uploadContentType); err != nil {
 		g.handleAdapterError(sw, err, adapter.name())
 	}
 }
@@ -210,22 +235,34 @@ func readCapped(r io.Reader, limit int64) (body []byte, oversize bool, err error
 	return body, false, nil
 }
 
+// errDuplicateModelField is extractMultipartModel's sentinel for a
+// multipart body carrying more than one part named "model" — an
+// ambiguous request a first-found parser and a last-found parser would
+// resolve differently. handleAudioTranscriptions rejects it outright
+// (400) rather than silently picking one.
+var errDuplicateModelField = errors.New("multipart body has more than one model field")
+
 // extractMultipartModel scans body — a full multipart/form-data payload
 // already read into memory (bounded by handleAudioTranscriptions' own
 // readCapped call before this is ever reached) — for its "model" form
 // field, returning the field's value. It reads over a fresh
 // bytes.NewReader(body), never consuming or mutating body itself, so the
-// caller can replay the exact same bytes upstream afterward (spec §3).
+// caller can replay or rewrite the exact same bytes afterward (spec §3).
+// It always scans every part, never returning as soon as the first
+// "model" part is found, so a second "model" part later in the body is
+// caught as errDuplicateModelField instead of being silently ignored.
 // Parts are read in whatever order the client sent them — a "model"
 // field following a large audio-file part is found the same as one sent
 // first. Returns "" with a nil error when no part named "model" is
 // present; the caller treats an empty model the same as a missing one.
 func extractMultipartModel(body []byte, boundary string) (string, error) {
 	mr := multipart.NewReader(bytes.NewReader(body), boundary)
+	found := false
+	var model string
 	for {
 		part, err := mr.NextPart()
 		if errors.Is(err, io.EOF) {
-			return "", nil
+			return model, nil
 		}
 		if err != nil {
 			return "", err
@@ -234,11 +271,74 @@ func extractMultipartModel(body []byte, boundary string) (string, error) {
 			_ = part.Close() //nolint:errcheck // read-side close; nothing actionable on failure
 			continue
 		}
+		if found {
+			_ = part.Close() //nolint:errcheck // read-side close; nothing actionable on failure
+			return "", errDuplicateModelField
+		}
 		val, err := io.ReadAll(io.LimitReader(part, maxMultipartModelFieldBytes))
 		_ = part.Close() //nolint:errcheck // read-side close; nothing actionable on failure
 		if err != nil {
 			return "", err
 		}
-		return string(val), nil
+		model = string(val)
+		found = true
 	}
+}
+
+// rewriteMultipartModel rebuilds body — a multipart/form-data payload
+// already validated to parse and to carry exactly one "model" field
+// (extractMultipartModel) — with a fresh mime/multipart.Writer, copying
+// every part verbatim (its original headers and content, in the
+// client's original order) except the "model" part's value, which
+// becomes upstreamModel.
+//
+// Controller ruling (2026-08-20, amends spec §3's original "REPLAY the
+// full body upstream unchanged"): a client addressing a
+// provider-prefixed or otherwise aliased model id must never have that
+// alias reach the real upstream provider — the same invariant every
+// other unified route already enforces by rewriting "model" before
+// forwarding. handleAudioTranscriptions calls this only when the
+// client's own model string differs from the resolved upstream model
+// id; when they already match (the bare-id case), it replays the
+// original bytes untouched instead (the fast path, no rebuild cost).
+//
+// The rebuilt body uses the Writer's own new boundary, not body's
+// original one, and contentType is that Writer's own
+// FormDataContentType() — byte-identical boundary preservation is not
+// required, only a valid, equivalent multipart body.
+func rewriteMultipartModel(body []byte, boundary, upstreamModel string) ([]byte, string, error) {
+	mr := multipart.NewReader(bytes.NewReader(body), boundary)
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+
+	for {
+		part, err := mr.NextPart()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return nil, "", err
+		}
+
+		pw, err := mw.CreatePart(part.Header)
+		if err != nil {
+			_ = part.Close() //nolint:errcheck // read-side close; nothing actionable on failure
+			return nil, "", err
+		}
+
+		if part.FormName() == "model" {
+			_, err = pw.Write([]byte(upstreamModel))
+		} else {
+			_, err = io.Copy(pw, part)
+		}
+		_ = part.Close() //nolint:errcheck // read-side close; nothing actionable on failure
+		if err != nil {
+			return nil, "", err
+		}
+	}
+
+	if err := mw.Close(); err != nil {
+		return nil, "", err
+	}
+	return buf.Bytes(), mw.FormDataContentType(), nil
 }
