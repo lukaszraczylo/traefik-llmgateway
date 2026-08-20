@@ -1,6 +1,10 @@
 package traefikllmgateway
 
-import "testing"
+import (
+	"strconv"
+	"sync"
+	"testing"
+)
 
 // TestCostMicrosBuiltin exercises the integer micro-USD math against
 // builtinPricing entries directly, so a regression to float-based pricing
@@ -59,19 +63,42 @@ func TestCostMicrosOverrideNilEntryFallsBack(t *testing.T) {
 	}
 }
 
+// resetPricingWarnState snapshots and clears the package-level unknown-
+// model dedup state (warnedModels, warnCapNotified) and pricingWarnFn, and
+// registers a t.Cleanup to restore them — so tests exercising the
+// warn-once/warn-cap behavior are independent of each other and of test
+// order. All access goes through setPricingWarnFn / warnedModelsMu so
+// these tests stay race-clean.
+func resetPricingWarnState(t *testing.T) *[]string {
+	t.Helper()
+	warnedModelsMu.Lock()
+	prevWarn, prevWarned, prevCapNotified := pricingWarnFn, warnedModels, warnCapNotified
+	warnedModels = map[string]bool{}
+	warnCapNotified = false
+	warnedModelsMu.Unlock()
+
+	t.Cleanup(func() {
+		warnedModelsMu.Lock()
+		warnedModels, warnCapNotified = prevWarned, prevCapNotified
+		warnedModelsMu.Unlock()
+		setPricingWarnFn(prevWarn)
+	})
+
+	var warned []string
+	var mu sync.Mutex
+	setPricingWarnFn(func(model string) {
+		mu.Lock()
+		defer mu.Unlock()
+		warned = append(warned, model)
+	})
+	return &warned
+}
+
 // TestCostMicrosUnknownModelWarnsOnce asserts an unpriced model costs 0
 // and fires pricingWarnFn exactly once even across repeated calls, then
 // resumes warning for a second distinct unknown model.
 func TestCostMicrosUnknownModelWarnsOnce(t *testing.T) {
-	prevWarn, prevWarned := pricingWarnFn, warnedModels
-	t.Cleanup(func() {
-		pricingWarnFn = prevWarn
-		warnedModels = prevWarned
-	})
-	warnedModels = map[string]bool{}
-
-	var warned []string
-	pricingWarnFn = func(model string) { warned = append(warned, model) }
+	warned := resetPricingWarnState(t)
 
 	for i := 0; i < 3; i++ {
 		if got := costMicros("totally-unpriced-model", usage{prompt: 100, completion: 100}, nil); got != 0 {
@@ -83,13 +110,60 @@ func TestCostMicrosUnknownModelWarnsOnce(t *testing.T) {
 	}
 
 	want := []string{"totally-unpriced-model", "another-unpriced-model"}
-	if len(warned) != len(want) {
-		t.Fatalf("warned = %v, want %v", warned, want)
+	if len(*warned) != len(want) {
+		t.Fatalf("warned = %v, want %v", *warned, want)
 	}
 	for i, m := range want {
-		if warned[i] != m {
-			t.Errorf("warned[%d] = %q, want %q", i, warned[i], m)
+		if (*warned)[i] != m {
+			t.Errorf("warned[%d] = %q, want %q", i, (*warned)[i], m)
 		}
+	}
+}
+
+// TestCostMicrosUnknownModelWarnCap asserts warnedModels never grows past
+// unknownModelWarnCap, however many distinct unknown model ids costMicros
+// sees — the model id comes from client-controlled request bodies (a
+// group with an empty Models allowlist accepts any string), so an
+// unbounded dedup set would be a memory-growth vector. Once the cap is
+// reached, one summary warning fires and no more do.
+func TestCostMicrosUnknownModelWarnCap(t *testing.T) {
+	warned := resetPricingWarnState(t)
+
+	const distinctModels = 200
+	for i := 0; i < distinctModels; i++ {
+		model := "unpriced-model-" + strconv.Itoa(i)
+		if got := costMicros(model, usage{prompt: 1}, nil); got != 0 {
+			t.Fatalf("costMicros(%q, ...) = %d, want 0", model, got)
+		}
+	}
+
+	warnedModelsMu.Lock()
+	setSize := len(warnedModels)
+	warnedModelsMu.Unlock()
+	if setSize > unknownModelWarnCap {
+		t.Errorf("warnedModels size = %d, want <= %d", setSize, unknownModelWarnCap)
+	}
+
+	if got, max := len(*warned), unknownModelWarnCap+1; got > max {
+		t.Errorf("warn count = %d, want <= %d (cap distinct warnings + 1 summary)", got, max)
+	}
+
+	last := (*warned)[len(*warned)-1]
+	if last != warnCapMessage {
+		t.Errorf("last warning = %q, want the cap-reached summary %q", last, warnCapMessage)
+	}
+}
+
+// TestCostMicrosRoundsPriceConversion pins costMicros' per-1M-token price
+// conversion to round-to-nearest rather than truncate: at $8.20/M, a
+// truncating int64(8.2*1e6) undershoots to 8_199_999 (float64 can
+// represent 8.2 as very slightly under its true value); rounding must
+// yield the intended 8_200_000.
+func TestCostMicrosRoundsPriceConversion(t *testing.T) {
+	overrides := map[string]*ModelPricing{"round-test": {InputPerM: 8.2, OutputPerM: 8.2}}
+	u := usage{prompt: 1_000_000, completion: 1_000_000}
+	if got, want := costMicros("round-test", u, overrides), int64(16_400_000); got != want {
+		t.Errorf("costMicros with an 8.2 price = %d, want %d", got, want)
 	}
 }
 

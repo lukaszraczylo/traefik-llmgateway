@@ -38,6 +38,15 @@ const (
 // counterStore.
 const usdToMicroFactor = 1_000_000
 
+// usdToMicros converts a USD amount to micro-USD, rounded to the nearest
+// micro-USD. A bare int64(usd*usdToMicroFactor) truncates rather than
+// rounds — float64 can represent a value like 8.2 as very slightly under
+// its true value, so a truncating cast turns an intended $8.20 limit into
+// 8_199_999 micro-USD instead of 8_200_000, one micro-USD too strict.
+func usdToMicros(usd float64) int64 {
+	return int64(math.Round(usd * usdToMicroFactor))
+}
+
 // counterStore is the storage backend the limiter uses for atomic windowed
 // counters. memoryStore (below) is the in-process fallback; a distributed
 // (e.g. Redis-backed) implementation is wired in a later task.
@@ -57,37 +66,48 @@ type memoryEntry struct {
 	value  int64
 }
 
-// memoryStoreSweepThreshold is the key count above which incrBy
-// opportunistically deletes expired entries before writing. Kept well
-// above typical live-scope counts so the sweep is rare on a healthy
-// gateway and only fires when stale keys are actually accumulating.
-const memoryStoreSweepThreshold = 1024
+// sweepEvery is the minimum real time between incrBy's opportunistic
+// expired-entry sweeps, regardless of how many keys memoryStore holds. A
+// size-gated sweep (only above N keys) was measured to scan the whole map
+// on every incrBy once live keys exceeded that threshold, since a sweep
+// that frees nothing (all keys still live) never brings the count back
+// down — a 167x incrBy cliff. Gating on elapsed time instead bounds sweep
+// frequency independent of key count: worst case is one full-map scan
+// every 30s.
+const sweepEvery = 30 * time.Second
 
 // memoryStore is an in-process counterStore: a mutex-guarded map with
 // per-key expiry. It has no background goroutine — a Yaegi middleware
 // instance is rebuilt on every config reload, and any ticker or goroutine
 // started here would leak on rebuild instead of being collected with the
 // rest of the old instance. Expired entries are instead swept
-// opportunistically from incrBy once the map grows past
-// memoryStoreSweepThreshold keys.
+// opportunistically from incrBy, at most once every sweepEvery.
 type memoryStore struct {
-	data map[string]*memoryEntry
-	mu   sync.Mutex
+	data      map[string]*memoryEntry
+	nowFn     func() time.Time // injected for tests; defaults to time.Now
+	lastSweep time.Time        // guarded by mu; zero value sweeps on the first incrBy
+	mu        sync.Mutex
 }
 
 // newMemoryStore returns an empty memoryStore.
 func newMemoryStore() *memoryStore {
-	return &memoryStore{data: make(map[string]*memoryEntry)}
+	return &memoryStore{data: make(map[string]*memoryEntry), nowFn: time.Now}
+}
+
+// now returns m's current time, via nowFn.
+func (m *memoryStore) now() time.Time {
+	return m.nowFn()
 }
 
 // incrBy implements counterStore.
 func (m *memoryStore) incrBy(key string, n int64, ttl time.Duration) (int64, error) {
-	now := time.Now()
+	now := m.now()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if len(m.data) > memoryStoreSweepThreshold {
+	if now.Sub(m.lastSweep) >= sweepEvery {
 		m.sweepLocked(now)
+		m.lastSweep = now
 	}
 
 	e, ok := m.data[key]
@@ -101,7 +121,7 @@ func (m *memoryStore) incrBy(key string, n int64, ttl time.Duration) (int64, err
 
 // get implements counterStore.
 func (m *memoryStore) get(key string) (int64, error) {
-	now := time.Now()
+	now := m.now()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -314,10 +334,10 @@ func (l *limiter) evaluateScope(sc limitScope, minCount, dayCount int64, now tim
 	if v := l.budgetViolation(sc, metricTok, "tokens-per-month", lim.TokensPerMonth, windowMonth, now); v != nil {
 		return v
 	}
-	if v := l.budgetViolation(sc, metricCost, "cost-per-day", int64(lim.CostPerDayUSD*usdToMicroFactor), windowDay, now); v != nil {
+	if v := l.budgetViolation(sc, metricCost, "cost-per-day", usdToMicros(lim.CostPerDayUSD), windowDay, now); v != nil {
 		return v
 	}
-	if v := l.budgetViolation(sc, metricCost, "cost-per-month", int64(lim.CostPerMonthUSD*usdToMicroFactor), windowMonth, now); v != nil {
+	if v := l.budgetViolation(sc, metricCost, "cost-per-month", usdToMicros(lim.CostPerMonthUSD), windowMonth, now); v != nil {
 		return v
 	}
 	return nil

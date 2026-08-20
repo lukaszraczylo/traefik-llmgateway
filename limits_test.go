@@ -1,7 +1,6 @@
 package traefikllmgateway
 
 import (
-	"fmt"
 	"testing"
 	"time"
 )
@@ -227,40 +226,74 @@ func TestMemoryStoreExpiry(t *testing.T) {
 	}
 }
 
-// TestMemoryStoreSweepOnAccess grows the store past
-// memoryStoreSweepThreshold, backdates every entry's expiry directly
-// (rather than racing a short TTL against the insertion loop's own real
-// wall-clock time, which is inherently flaky), and asserts the next
-// incrBy's opportunistic sweep reclaims every expired entry.
-func TestMemoryStoreSweepOnAccess(t *testing.T) {
+// TestMemoryStoreSweepTimeGated asserts the sweep gate is purely
+// time-based (sweepEvery), independent of how many keys memoryStore
+// holds: an incrBy call before the gate elapses leaves an already-expired
+// key physically in place (no scan happened), and the first incrBy at or
+// past the gate reclaims it. Time is injected via m.nowFn so the test
+// needs no real sleep and no size threshold to trigger the behavior.
+func TestMemoryStoreSweepTimeGated(t *testing.T) {
 	m := newMemoryStore()
-	for i := 0; i < memoryStoreSweepThreshold+10; i++ {
-		key := fmt.Sprintf("k%d", i)
-		if _, err := m.incrBy(key, 1, time.Hour); err != nil {
-			t.Fatal(err)
-		}
-	}
+	fake := time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC)
+	m.nowFn = func() time.Time { return fake }
 
-	m.mu.Lock()
-	past := time.Now().Add(-time.Hour)
-	for _, e := range m.data {
-		e.expiry = past
-	}
-	setupCount := len(m.data)
-	m.mu.Unlock()
-	if setupCount != memoryStoreSweepThreshold+10 {
-		t.Fatalf("setup: got %d keys, want %d", setupCount, memoryStoreSweepThreshold+10)
-	}
-
-	if _, err := m.incrBy("trigger-sweep", 1, time.Minute); err != nil {
+	// lastSweep starts at the zero time, so this first incrBy always
+	// sweeps (a no-op on an empty store) and sets lastSweep to fake.
+	if _, err := m.incrBy("k1", 1, time.Nanosecond); err != nil {
 		t.Fatal(err)
 	}
 
+	// k1 is already expired (ttl was 1ns), but stay well inside the
+	// sweepEvery gate — the next incrBy must not scan, so k1 survives as
+	// a physical (if stale) map entry.
+	fake = fake.Add(time.Millisecond)
+	if _, err := m.incrBy("k2", 1, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if !memoryStoreHasKey(m, "k1") {
+		t.Fatal("k1 must still be present: the sweep gate has not elapsed yet")
+	}
+
+	// Cross the sweepEvery boundary from the last sweep: this incrBy must
+	// scan and reclaim k1.
+	fake = fake.Add(sweepEvery)
+	if _, err := m.incrBy("k3", 1, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if memoryStoreHasKey(m, "k1") {
+		t.Error("k1 should have been swept once sweepEvery elapsed")
+	}
+}
+
+// memoryStoreHasKey reports whether key is physically present in m.data,
+// bypassing get's expiry check — used to observe sweep timing directly.
+func memoryStoreHasKey(m *memoryStore, key string) bool {
 	m.mu.Lock()
-	n := len(m.data)
-	m.mu.Unlock()
-	if n != 1 {
-		t.Errorf("expected sweep to reclaim every expired entry, %d keys remain (want 1: trigger-sweep)", n)
+	defer m.mu.Unlock()
+	_, ok := m.data[key]
+	return ok
+}
+
+// TestLimiterCostBudgetRoundsUSDConversion pins usdToMicros' rounding
+// against a value (8.2) where float64 representation sits just under the
+// true value: a truncating int64(8.2*1e6) would undershoot to 8_199_999,
+// making a spend of exactly $8.199999 look already over an intended
+// $8.20 budget. With rounding, 8_199_999 must stay under budget and only
+// the exact $8.20 spend violates.
+func TestLimiterCostBudgetRoundsUSDConversion(t *testing.T) {
+	now := time.Date(2026, 8, 20, 10, 0, 0, 0, time.UTC)
+	l := newLimiter(nil, true)
+	l.nowFn = func() time.Time { return now }
+	scopes := []limitScope{{kind: "user", id: "u", limits: &LimitsConfig{CostPerDayUSD: 8.2}}}
+
+	l.account(scopes, usage{}, 8_199_999)
+	if v := l.checkAndCount(scopes); v != nil {
+		t.Fatalf("spending $8.199999 against an $8.20 budget must not violate, got %+v", v)
+	}
+
+	l.account(scopes, usage{}, 1) // now exactly at $8.20
+	if v := l.checkAndCount(scopes); v == nil {
+		t.Fatal("spending exactly $8.20 against an $8.20 budget must violate")
 	}
 }
 
