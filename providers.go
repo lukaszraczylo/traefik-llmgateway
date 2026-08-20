@@ -109,6 +109,13 @@ type providerAdapter interface {
 	embeddings(ctx context.Context, w http.ResponseWriter, req map[string]any) (usage, error)
 	// listModels returns the provider's available model ids, for discovery.
 	listModels(ctx context.Context) ([]string, error)
+	// httpClient returns the adapter's shared *http.Client, so a caller
+	// outside this file (the native passthrough route, routes_passthrough.go)
+	// can issue upstream requests through the same connection-pooled client
+	// every other adapter call uses, instead of building a fresh one per
+	// request. Named httpClient rather than client to avoid colliding with
+	// every implementation's own "client" struct field of the same name.
+	httpClient() *http.Client
 }
 
 // newAdapterHTTPClient returns an *http.Client for a provider adapter to

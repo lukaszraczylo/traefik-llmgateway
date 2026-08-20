@@ -268,6 +268,18 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if providerName, rest, ok := passthroughRoute(r.URL.Path); ok {
+		if _, known := g.adapters[providerName]; known {
+			u, grp, ok := g.auth.identify(r)
+			if !ok {
+				writeOAIError(sw, http.StatusUnauthorized, "authentication_error", "invalid or missing API key")
+				return
+			}
+			g.handlePassthrough(sw, r, u, grp, providerName, rest)
+			return
+		}
+	}
+
 	if g.cfg.PassthroughUnknown {
 		g.next.ServeHTTP(sw, r)
 		return

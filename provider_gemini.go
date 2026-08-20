@@ -45,6 +45,9 @@ func (a *geminiAdapter) typeName() string { return providerTypeGemini }
 // base implements providerAdapter.
 func (a *geminiAdapter) base() string { return a.baseURL }
 
+// httpClient implements providerAdapter.
+func (a *geminiAdapter) httpClient() *http.Client { return a.client }
+
 // injectAuth implements providerAdapter: Gemini's x-goog-api-key header
 // scheme. Never a no-op — the constructor already rejected an empty apiKey.
 func (a *geminiAdapter) injectAuth(r *http.Request) {

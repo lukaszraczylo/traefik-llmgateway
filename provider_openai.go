@@ -41,6 +41,9 @@ func (a *openaiAdapter) typeName() string { return providerTypeOpenAI }
 // base implements providerAdapter.
 func (a *openaiAdapter) base() string { return a.baseURL }
 
+// httpClient implements providerAdapter.
+func (a *openaiAdapter) httpClient() *http.Client { return a.client }
+
 // injectAuth implements providerAdapter: OpenAI's bearer-token scheme. A
 // no-op when a.apiKey is empty, per the keyless-upstream ruling — a request
 // against a keyless upstream must carry no Authorization header at all,

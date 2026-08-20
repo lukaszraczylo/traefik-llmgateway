@@ -52,6 +52,9 @@ func (a *anthropicAdapter) typeName() string { return providerTypeAnthropic }
 // base implements providerAdapter.
 func (a *anthropicAdapter) base() string { return a.baseURL }
 
+// httpClient implements providerAdapter.
+func (a *anthropicAdapter) httpClient() *http.Client { return a.client }
+
 // injectAuth implements providerAdapter: Anthropic's x-api-key scheme,
 // plus the anthropic-version header every request must carry. Unlike
 // openai-type's injectAuth, this is never a no-op — the constructor
