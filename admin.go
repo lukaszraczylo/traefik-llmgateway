@@ -590,17 +590,35 @@ const adminPageHTML = `<!doctype html>
     s.className = isErr ? "err" : "";
   }
 
+  // showAuthGate switches to the key-entry view. message is OPTIONAL
+  // (review sweep, 2026-08-20): passed with a string, it replaces the
+  // auth-error text; passed as undefined (refresh's own no-stored-key
+  // branch), it leaves whatever error text is already there untouched —
+  // otherwise a 5s poll running while no key is stored (the state right
+  // after a 401 already showed "invalid key, or not an admin") would call
+  // showAuthGate() on every tick and silently wipe that message back to
+  // empty before the user ever reads it.
   function showAuthGate(message) {
     document.getElementById("dashboard").classList.add("hidden");
     document.getElementById("auth-gate").classList.remove("hidden");
-    document.getElementById("auth-error").textContent = message || "";
+    if (message !== undefined) {
+      document.getElementById("auth-error").textContent = message;
+    }
   }
 
   function showDashboard() {
     document.getElementById("auth-gate").classList.add("hidden");
     document.getElementById("dashboard").classList.remove("hidden");
+    document.getElementById("auth-error").textContent = "";
   }
 
+  // fetchJSON captures the key it was actually sent with (key) onto a
+  // thrown auth error, rather than reading getStoredKey() again at the
+  // catch site: refresh's own Promise.all can still have this request's
+  // 401 in flight after the user has already submitted a newer key
+  // (setStoredKey then a fresh refresh() call) — capturing at throw time
+  // lets the catch handler tell that late, stale-key failure apart from a
+  // genuine rejection of the key currently stored.
   function fetchJSON(url) {
     var key = getStoredKey();
     var headers = key ? { "x-api-key": key } : {};
@@ -608,6 +626,7 @@ const adminPageHTML = `<!doctype html>
       if (resp.status === 401 || resp.status === 403) {
         var err = new Error("admin key rejected: HTTP " + resp.status);
         err.authFailed = true;
+        err.key = key;
         throw err;
       }
       if (!resp.ok) throw new Error(url + ": HTTP " + resp.status);
@@ -617,7 +636,7 @@ const adminPageHTML = `<!doctype html>
 
   function refresh() {
     if (!getStoredKey()) {
-      showAuthGate("");
+      showAuthGate();
       return;
     }
     Promise.all([fetchJSON(OVERVIEW_URL), fetchJSON(USAGE_URL)]).then(function (results) {
@@ -627,8 +646,15 @@ const adminPageHTML = `<!doctype html>
       setStatus("last updated " + new Date().toLocaleTimeString(), false);
     }).catch(function (err) {
       if (err.authFailed) {
-        clearStoredKey();
-        showAuthGate("invalid key, or not an admin");
+        // Guard against the late-401 race (review sweep, 2026-08-20): only
+        // clear the stored key and show the rejection when the FAILING
+        // request's own key still matches what is currently stored. A
+        // stale in-flight request for a key the user has since replaced
+        // must not clobber the newer key that may well be valid.
+        if (err.key === getStoredKey()) {
+          clearStoredKey();
+          showAuthGate("invalid key, or not an admin");
+        }
         return;
       }
       setStatus("refresh failed: " + err.message, true);
@@ -641,6 +667,7 @@ const adminPageHTML = `<!doctype html>
     var val = input.value;
     input.value = "";
     if (!val) return;
+    document.getElementById("auth-error").textContent = "";
     setStoredKey(val);
     refresh();
   });

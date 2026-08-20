@@ -465,6 +465,39 @@ func TestAdminPage_CSPHeaderAndFetchURLs(t *testing.T) {
 	}
 }
 
+// --- JSON routes: nosniff/no-store/CSP headers (review sweep, 2026-08-20) ---
+
+// TestAdmin_JSONSecurityHeaders proves both /admin/api/* routes carry
+// X-Content-Type-Options: nosniff and Cache-Control: no-store alongside
+// the same Content-Security-Policy the HTML page sends
+// (setAdminJSONHeaders, admin.go) — folded review item, 2026-08-20
+// review, moved from a bare doc-comment claim to an assertion here.
+func TestAdmin_JSONSecurityHeaders(t *testing.T) {
+	t.Parallel()
+	cfg := newAdminTestConfig()
+	h, _ := newAdminGatewayHandle(t, cfg)
+
+	wantCSP := "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'"
+	for _, p := range []string{adminOverviewPath, adminUsagePath} {
+		t.Run(p, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, adminRequest(http.MethodGet, p, "sk-admin1"))
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+			}
+			if got := rec.Header().Get("X-Content-Type-Options"); got != "nosniff" {
+				t.Errorf("X-Content-Type-Options = %q, want %q", got, "nosniff")
+			}
+			if got := rec.Header().Get("Cache-Control"); got != "no-store" {
+				t.Errorf("Cache-Control = %q, want %q", got, "no-store")
+			}
+			if got := rec.Header().Get("Content-Security-Policy"); got != wantCSP {
+				t.Errorf("Content-Security-Policy = %q, want %q", got, wantCSP)
+			}
+		})
+	}
+}
+
 // --- redaction: no secret literal, "apiKey", or key digest ever appears ---
 
 func TestAdmin_SecretRedaction(t *testing.T) {

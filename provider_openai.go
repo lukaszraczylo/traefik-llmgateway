@@ -319,11 +319,14 @@ func (a *openaiAdapter) audioSpeech(ctx context.Context, w http.ResponseWriter, 
 }
 
 // audioTranscription implements providerAdapter: a native forward to
-// {base}/v1/audio/transcriptions. body is the client's original raw
-// multipart request, replayed unchanged (routes_media.go never rewrites
-// it), and contentType is the client's original Content-Type header,
-// forwarded verbatim so the upstream sees the same multipart boundary the
-// client used. The response (JSON or plain text, depending on the
+// {base}/v1/audio/transcriptions. body is the multipart request
+// routes_media.go hands in — the client's original bytes when its "model"
+// field already named the resolved upstream model id, or a rewritten
+// body (a fresh boundary, every other part copied verbatim) when it did
+// not, per rewriteMultipartModel's controller ruling — and contentType
+// matches whichever body this call received, so the upstream always sees
+// a Content-Type whose boundary parameter is consistent with what
+// actually follows it. The response (JSON or plain text, depending on the
 // client's requested response_format) is copied through unchanged, the
 // same non-streaming path images.generations uses.
 func (a *openaiAdapter) audioTranscription(ctx context.Context, w http.ResponseWriter, body []byte, contentType string) (usage, error) {

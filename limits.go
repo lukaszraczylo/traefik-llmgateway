@@ -742,8 +742,15 @@ func (l *limiter) currentUsage(scopes []limitScope) []scopeUsage {
 	now := l.now()
 	out := make([]scopeUsage, len(scopes))
 	for i, sc := range scopes {
-		vals, ok := l.storeGetMulti(usageWindowKeys(sc, now))
-		if !ok {
+		keys := usageWindowKeys(sc, now)
+		vals, ok := l.storeGetMulti(keys)
+		// len(vals) != len(keys) is reachable only from a non-conforming
+		// counterStore implementation (a real respClient.getMulti and
+		// memoryStore.getMulti both always return one value per key) —
+		// guarded defensively so a future or test-only store's short
+		// slice reports storeDown instead of panicking on an
+		// out-of-range index below (review sweep, 2026-08-20).
+		if !ok || len(vals) != len(keys) {
 			out[i] = scopeUsage{kind: sc.kind, id: sc.id, storeDown: true}
 			continue
 		}

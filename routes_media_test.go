@@ -552,6 +552,54 @@ func TestHandleAudioTranscriptions_ContentTypeNotFormData_400(t *testing.T) {
 	}
 }
 
+// TestHandleAudioTranscriptions_MalformedTail_400 proves a syntactically
+// valid Content-Type and boundary, but a body whose closing boundary
+// marker is truncated, is reported as "malformed multipart body" — a
+// review-sweep fix (2026-08-20) distinct from "model is required": before
+// it, any error extractMultipartModel returned that was not
+// errDuplicateModelField collapsed into the same misleading
+// "model is required" 400, even though the body never got far enough to
+// evaluate whether a "model" part was present at all.
+func TestHandleAudioTranscriptions_MalformedTail_400(t *testing.T) {
+	gw := newMediaTestGateway(t, newMediaTestConfig("http://127.0.0.1:1", "whisper-test"))
+
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	fw, err := mw.CreateFormField("model")
+	if err != nil {
+		t.Fatalf("CreateFormField(model): %v", err)
+	}
+	if _, err := fw.Write([]byte("whisper-test")); err != nil {
+		t.Fatalf("write model field: %v", err)
+	}
+	if err := mw.Close(); err != nil {
+		t.Fatalf("close multipart writer: %v", err)
+	}
+	contentType := mw.FormDataContentType()
+
+	// Cut the last 20 bytes off — well within the closing "--boundary--"
+	// marker for Go's own (60-character) generated boundary — so reading
+	// the "model" part's content runs past the truncated tail without ever
+	// finding a delimiter, instead of cleanly reaching io.EOF.
+	truncated := buf.Bytes()[:buf.Len()-20]
+
+	req := httptest.NewRequest(http.MethodPost, audioTranscriptionsPath, bytes.NewReader(truncated))
+	req.Header.Set("Content-Type", contentType)
+	req.Header.Set("Authorization", "Bearer sk-alice")
+	rec := httptest.NewRecorder()
+	gw.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400, body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "malformed multipart body") {
+		t.Errorf("body = %q, want it to mention %q", rec.Body.String(), "malformed multipart body")
+	}
+	if strings.Contains(rec.Body.String(), "model is required") {
+		t.Errorf("body = %q, must not report the misleading %q for a body that never parsed far enough to know", rec.Body.String(), "model is required")
+	}
+}
+
 // TestHandleAudioTranscriptions_DuplicateModelField_400 proves a
 // multipart body carrying two "model" parts is rejected outright (400)
 // rather than silently resolving to whichever one extractMultipartModel

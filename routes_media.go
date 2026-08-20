@@ -8,7 +8,6 @@ import (
 	"mime"
 	"mime/multipart"
 	"net/http"
-	"strings"
 )
 
 // Route paths for the three unified media endpoints (spec §3, v0.2):
@@ -182,7 +181,7 @@ func (g *Gateway) handleAudioTranscriptions(w http.ResponseWriter, r *http.Reque
 		writeOAIError(sw, http.StatusBadRequest, "invalid_request_error", "invalid Content-Type")
 		return
 	}
-	if !strings.HasPrefix(mediaType, "multipart/form-data") {
+	if mediaType != "multipart/form-data" {
 		writeOAIError(sw, http.StatusBadRequest, "invalid_request_error", "Content-Type must be multipart/form-data")
 		return
 	}
@@ -192,12 +191,23 @@ func (g *Gateway) handleAudioTranscriptions(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	// The three failure shapes below are kept distinct rather than folded
+	// into one "model is required" 400 (review sweep, 2026-08-20): a
+	// duplicate "model" part is ambiguous, a body extractMultipartModel
+	// cannot even parse (a malformed or truncated tail) never reached a
+	// point where "model" could be evaluated at all, and only a
+	// successfully parsed body with no "model" part is actually missing
+	// one — each names its own actual problem instead of collapsing every
+	// case into the same misleading message.
 	requestedModel, err := extractMultipartModel(body, boundary)
 	switch {
 	case errors.Is(err, errDuplicateModelField):
 		writeOAIError(sw, http.StatusBadRequest, "invalid_request_error", "duplicate model field")
 		return
-	case err != nil || requestedModel == "":
+	case err != nil:
+		writeOAIError(sw, http.StatusBadRequest, "invalid_request_error", "malformed multipart body")
+		return
+	case requestedModel == "":
 		writeOAIError(sw, http.StatusBadRequest, "invalid_request_error", "model is required")
 		return
 	}
@@ -319,6 +329,13 @@ func extractMultipartModel(body []byte, boundary string) (string, error) {
 func rewriteMultipartModel(body []byte, boundary, upstreamModel string) ([]byte, string, error) {
 	mr := multipart.NewReader(bytes.NewReader(body), boundary)
 	var buf bytes.Buffer
+	// The rebuilt body is at least as large as the original (same parts,
+	// same content, only the "model" value and the boundary differ) plus
+	// the fresh Writer's own per-part header/boundary overhead — growing
+	// buf to body's length up front, with headroom, avoids the repeated
+	// reallocate-and-copy growth bytes.Buffer would otherwise do one
+	// io.Copy at a time.
+	buf.Grow(len(body) + 512)
 	mw := multipart.NewWriter(&buf)
 
 	for {
