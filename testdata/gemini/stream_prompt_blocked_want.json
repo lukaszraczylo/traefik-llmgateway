@@ -1,0 +1,4 @@
+[
+  {"id":"chatcmpl-resp_BLOCKSTREAM","object":"chat.completion.chunk","created":1734000000,"model":"gw-gemini-model","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]},
+  {"id":"chatcmpl-resp_BLOCKSTREAM","object":"chat.completion.chunk","created":1734000000,"model":"gw-gemini-model","choices":[{"index":0,"delta":{},"finish_reason":"content_filter"}]}
+]

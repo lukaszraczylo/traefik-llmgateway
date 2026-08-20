@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -91,15 +92,21 @@ func (a *geminiAdapter) chatCompletion(ctx context.Context, w http.ResponseWrite
 	}
 
 	hdr := a.requestHeaders(true)
-	url := a.baseURL + geminiAPIPrefix + model + ":generateContent"
+	// escapedModel guards against a model id smuggling extra path segments
+	// or query syntax ("/", "?", "..") into the upstream URL — url.PathEscape
+	// leaves ordinary ids (letters, digits, ":", ".", "-") untouched, per
+	// RFC 3986's pchar grammar, so a normal model id is byte-identical after
+	// escaping.
+	escapedModel := url.PathEscape(model)
+	endpoint := a.baseURL + geminiAPIPrefix + escapedModel + ":generateContent"
 	if streaming {
 		// Ask the upstream for an SSE response. The Content-Type check
 		// below still decides which forwarding path runs.
 		hdr.Set("Accept", "text/event-stream")
-		url = a.baseURL + geminiAPIPrefix + model + ":streamGenerateContent?alt=sse"
+		endpoint = a.baseURL + geminiAPIPrefix + escapedModel + ":streamGenerateContent?alt=sse"
 	}
 
-	resp, err := upstreamJSON(ctx, a.client, http.MethodPost, url, hdr, body)
+	resp, err := upstreamJSON(ctx, a.client, http.MethodPost, endpoint, hdr, body)
 	if err != nil {
 		return usage{}, err
 	}
@@ -189,16 +196,19 @@ func (a *geminiAdapter) embeddings(ctx context.Context, w http.ResponseWriter, r
 	}
 
 	var body map[string]any
-	var url string
+	var endpoint string
+	escapedModel := url.PathEscape(model)
 	if single {
 		body = geminiEmbedContentRequest(texts[0])
-		url = a.baseURL + geminiAPIPrefix + model + ":embedContent"
+		endpoint = a.baseURL + geminiAPIPrefix + escapedModel + ":embedContent"
 	} else {
+		// geminiBatchEmbedContentsRequest still takes the unescaped bare
+		// model — it writes "models/{model}" into the JSON body, not a URL.
 		body = geminiBatchEmbedContentsRequest(model, texts)
-		url = a.baseURL + geminiAPIPrefix + model + ":batchEmbedContents"
+		endpoint = a.baseURL + geminiAPIPrefix + escapedModel + ":batchEmbedContents"
 	}
 
-	resp, err := upstreamJSON(ctx, a.client, http.MethodPost, url, a.requestHeaders(true), body)
+	resp, err := upstreamJSON(ctx, a.client, http.MethodPost, endpoint, a.requestHeaders(true), body)
 	if err != nil {
 		return usage{}, err
 	}

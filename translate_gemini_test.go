@@ -236,6 +236,15 @@ func TestGeminiStreamGolden_TextThenFuncall(t *testing.T) {
 	geminiRunStreamGolden(t, "stream_text_then_funcall")
 }
 
+// TestGeminiStreamGolden_PromptBlocked covers a prompt-level safety block:
+// a single chunk with no "candidates" at all, only promptFeedback.
+// blockReason set — review fix (item 3). Proves the role chunk still
+// fires, followed by a finish chunk mapped to "content_filter" rather than
+// the stream silently ending with no finish signal at all.
+func TestGeminiStreamGolden_PromptBlocked(t *testing.T) {
+	geminiRunStreamGolden(t, "stream_prompt_blocked")
+}
+
 // TestGeminiStreamState_MalformedEventReturnsError proves a malformed
 // (invalid-JSON) SSE data payload returns an error wrapping errUpstream,
 // rather than being swallowed as (nil, nil) — lesson (c).
@@ -269,6 +278,65 @@ func TestGeminiStreamState_UsageMetadataOnlyOverwritesWhenPresent(t *testing.T) 
 	}
 	if got := st.usage(); got.prompt != 7 || got.completion != 2 {
 		t.Errorf("usage() after a usageMetadata-less chunk = %+v, want unchanged {prompt:7 completion:2}", got)
+	}
+}
+
+// TestGeminiStreamState_IDLockedOnFirstChunk proves the id resolves once,
+// on the first translated chunk, and never changes after — review fix
+// (item 5, folded minor). The first chunk here carries no responseId, so
+// every emitted chunk (including one after a later chunk arrives with a
+// real responseId) must share the same construction-time fallback id.
+func TestGeminiStreamState_IDLockedOnFirstChunk(t *testing.T) {
+	const created = int64(1734000000)
+	st := newGeminiStreamState(geminiGoldenGatewayModel, created)
+	wantID := "chatcmpl-gemini-1734000000"
+
+	chunks, err := st.translate(sseEvent{data: []byte(`{"candidates":[{"content":{"role":"model","parts":[{"text":"hi"}]}}]}`)})
+	if err != nil {
+		t.Fatalf("translate: %v", err)
+	}
+	for _, c := range chunks {
+		assertGeminiChunkID(t, c, wantID)
+	}
+
+	// A later chunk carries a real responseId — it must NOT override the
+	// fallback already locked in on the first chunk.
+	chunks, err = st.translate(sseEvent{data: []byte(`{"responseId":"resp_LATE","candidates":[{"content":{"role":"model","parts":[{"text":" there"}]},"finishReason":"STOP"}]}`)})
+	if err != nil {
+		t.Fatalf("translate: %v", err)
+	}
+	if len(chunks) == 0 {
+		t.Fatalf("translate: want at least one chunk, got none")
+	}
+	for _, c := range chunks {
+		assertGeminiChunkID(t, c, wantID)
+	}
+}
+
+// TestGeminiStreamState_IDAdoptsFirstChunkResponseID proves the opposite
+// side of the same rule: when the very first chunk DOES carry a
+// responseId, that id — not the construction-time fallback — is what
+// locks in for the rest of the stream.
+func TestGeminiStreamState_IDAdoptsFirstChunkResponseID(t *testing.T) {
+	st := newGeminiStreamState(geminiGoldenGatewayModel, geminiGoldenCreated)
+	chunks, err := st.translate(sseEvent{data: []byte(`{"responseId":"resp_FIRST","candidates":[{"content":{"role":"model","parts":[{"text":"hi"}]}}]}`)})
+	if err != nil {
+		t.Fatalf("translate: %v", err)
+	}
+	for _, c := range chunks {
+		assertGeminiChunkID(t, c, "chatcmpl-resp_FIRST")
+	}
+}
+
+// assertGeminiChunkID decodes chunk and asserts its "id" field equals want.
+func assertGeminiChunkID(t *testing.T, chunk []byte, want string) {
+	t.Helper()
+	var v map[string]any
+	if err := json.Unmarshal(chunk, &v); err != nil {
+		t.Fatalf("chunk is not valid JSON: %v (%s)", err, chunk)
+	}
+	if v["id"] != want {
+		t.Errorf("chunk id = %v, want %q (chunk: %s)", v["id"], want, chunk)
 	}
 }
 

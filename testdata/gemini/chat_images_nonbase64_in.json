@@ -1,0 +1,11 @@
+{
+  "model": "gemini-2.5-pro",
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        {"type": "image_url", "image_url": {"url": "data:text/plain,Hello"}}
+      ]
+    }
+  ]
+}

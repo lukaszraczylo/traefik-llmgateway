@@ -43,6 +43,36 @@ func unsupportedFieldError(field string) *translateError {
 	return &translateError{msg: fmt.Sprintf("%s is not supported for anthropic models", field)}
 }
 
+// isTruthy reports whether v — an OpenAI request field's already-decoded
+// JSON value — is one this translator's truthy-only unsupported-field
+// checks (logprobs, logit_bias) should treat as "the client actually asked
+// for this", rather than merely "the field key was present in the request
+// body". Controller ruling: reject only when truthy/non-empty across both
+// anthropic and gemini translators — a present-but-falsy value (false, 0,
+// "", an empty {} or [], or JSON null) must not 400 a request that would
+// otherwise translate cleanly. Shared by translate_anthropic.go and
+// translate_gemini.go so both providers apply the identical rule.
+func isTruthy(v any) bool {
+	switch t := v.(type) {
+	case nil:
+		return false
+	case bool:
+		return t
+	case float64:
+		return t != 0
+	case string:
+		return t != ""
+	case map[string]any:
+		return len(t) > 0
+	case []any:
+		return len(t) > 0
+	default:
+		// An unrecognized-but-non-nil type: conservatively truthy, since
+		// this translator has no basis to call it empty.
+		return true
+	}
+}
+
 // toFloat64 extracts a numeric value from v, which may be float64 (the
 // normal shape after json.Unmarshal into map[string]any) or a Go-native
 // int/int64/float32 (a test, or a caller that builds req by hand).
@@ -310,21 +340,22 @@ func anthropicToolsFromOpenAI(toolsRaw []any) []any {
 // anthropicRequestFromOpenAI maps an OpenAI chat-completion request body
 // to an Anthropic Messages API request body, per this file's request
 // mapping table. It returns a *translateError — never wrapped — for a
-// field Anthropic has no equivalent for (n>1, logit_bias, logprobs) or a
-// content part this translator cannot map (a non-data-URI image URL, a
-// malformed tool_calls argument string). Consecutive role:"tool" messages
-// are merged into one Anthropic user turn carrying all of their
-// tool_result blocks — see anthropicToolResultBlock's doc comment.
+// field Anthropic has no equivalent for (n>1; a truthy logit_bias or
+// logprobs, per isTruthy's doc comment) or a content part this translator
+// cannot map (a non-data-URI image URL, a malformed tool_calls argument
+// string). Consecutive role:"tool" messages are merged into one Anthropic
+// user turn carrying all of their tool_result blocks — see
+// anthropicToolResultBlock's doc comment.
 func anthropicRequestFromOpenAI(req map[string]any) (map[string]any, error) {
 	if v, ok := req["n"]; ok {
 		if n, ok2 := toFloat64(v); ok2 && n > 1 {
 			return nil, unsupportedFieldError("n")
 		}
 	}
-	if _, ok := req["logit_bias"]; ok {
+	if v, ok := req["logit_bias"]; ok && isTruthy(v) {
 		return nil, unsupportedFieldError("logit_bias")
 	}
-	if _, ok := req["logprobs"]; ok {
+	if v, ok := req["logprobs"]; ok && isTruthy(v) {
 		return nil, unsupportedFieldError("logprobs")
 	}
 

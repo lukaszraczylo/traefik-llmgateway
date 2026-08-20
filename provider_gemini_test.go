@@ -153,6 +153,79 @@ func TestGeminiAdapter_ChatCompletion_ModelsPrefixStripped(t *testing.T) {
 	}
 }
 
+// TestGeminiAdapter_ChatCompletion_ModelEscaped proves a model id
+// containing "/" is percent-escaped into the upstream URL rather than
+// smuggling an extra path segment in unescaped — review fix (item 2). Go's
+// net/http server auto-decodes r.URL.Path, which would make an escaped and
+// an unescaped "/" indistinguishable, so this asserts on r.URL.EscapedPath()
+// (and cross-checks RequestURI), the wire form the upstream actually
+// receives.
+func TestGeminiAdapter_ChatCompletion_ModelEscaped(t *testing.T) {
+	var gotEscapedPath, gotRequestURI string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotEscapedPath = r.URL.EscapedPath()
+		gotRequestURI = r.RequestURI
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]},"finishReason":"STOP"}]}`))
+	}))
+	defer srv.Close()
+
+	a, err := newGeminiAdapter("p1", srv.URL, "AIza-test")
+	if err != nil {
+		t.Fatalf("newGeminiAdapter: %v", err)
+	}
+	rec := httptest.NewRecorder()
+
+	_, err = a.chatCompletion(context.Background(), rec, map[string]any{
+		"model":    "org/gemini-2.5-pro",
+		"messages": []any{map[string]any{"role": "user", "content": "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("chatCompletion: %v", err)
+	}
+
+	const wantEscapedPath = "/v1beta/models/org%2Fgemini-2.5-pro:generateContent"
+	if gotEscapedPath != wantEscapedPath {
+		t.Errorf("EscapedPath() = %q, want %q (model id's \"/\" must stay percent-escaped, not become an extra path segment)", gotEscapedPath, wantEscapedPath)
+	}
+	if !strings.Contains(gotRequestURI, "org%2Fgemini-2.5-pro") {
+		t.Errorf("RequestURI = %q, want it to contain the escaped model id %q", gotRequestURI, "org%2Fgemini-2.5-pro")
+	}
+}
+
+// TestGeminiAdapter_Embeddings_ModelEscaped mirrors the chatCompletion
+// escaping test for the embeddings :embedContent URL.
+func TestGeminiAdapter_Embeddings_ModelEscaped(t *testing.T) {
+	var gotEscapedPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotEscapedPath = r.URL.EscapedPath()
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"embedding":{"values":[0.1]}}`))
+	}))
+	defer srv.Close()
+
+	a, err := newGeminiAdapter("p1", srv.URL, "AIza-test")
+	if err != nil {
+		t.Fatalf("newGeminiAdapter: %v", err)
+	}
+	rec := httptest.NewRecorder()
+
+	_, err = a.embeddings(context.Background(), rec, map[string]any{
+		"model": "org/embed-004",
+		"input": "hi",
+	})
+	if err != nil {
+		t.Fatalf("embeddings: %v", err)
+	}
+
+	const wantEscapedPath = "/v1beta/models/org%2Fembed-004:embedContent"
+	if gotEscapedPath != wantEscapedPath {
+		t.Errorf("EscapedPath() = %q, want %q", gotEscapedPath, wantEscapedPath)
+	}
+}
+
 // geminiStreamFrames are the raw SSE "data:" lines a fake streaming
 // upstream emits for the tests below: a role/text chunk, a text-only
 // continuation, then a finish chunk carrying usageMetadata. Gemini's SSE

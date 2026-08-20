@@ -1,0 +1,5 @@
+{
+  "promptFeedback": {"blockReason": "SAFETY"},
+  "usageMetadata": {"promptTokenCount": 15, "candidatesTokenCount": 0},
+  "responseId": "resp_BLOCKED1"
+}

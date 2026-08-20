@@ -1,0 +1,9 @@
+{
+  "candidates": [
+    {
+      "content": {"role": "model", "parts": [{"text": "ok"}]},
+      "finishReason": "STOP"
+    }
+  ],
+  "usageMetadata": {"promptTokenCount": 2, "candidatesTokenCount": 1}
+}

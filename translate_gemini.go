@@ -11,16 +11,6 @@ import (
 // and embedding-family URL is built under, followed by "{model}:{method}".
 const geminiAPIPrefix = "/v1beta/models/"
 
-// isTruthyMap reports whether v decodes to a non-empty JSON object. Per
-// lesson (i), an OpenAI field this translator rejects when present (
-// logit_bias) is only rejected when it actually carries content — a
-// present-but-empty {} or a JSON null must not 400 a request that would
-// otherwise translate cleanly.
-func isTruthyMap(v any) bool {
-	m, ok := v.(map[string]any)
-	return ok && len(m) > 0
-}
-
 // geminiUnsupportedFieldError returns a *translateError for an OpenAI
 // request field Gemini's API has no equivalent for. Deliberately not
 // translate_anthropic.go's unsupportedFieldError: that helper's message
@@ -55,14 +45,37 @@ func geminiSystemTextFromContentParts(parts []any) (string, error) {
 	return strings.Join(texts, "\n"), nil
 }
 
+// dataURIHasBase64Param reports whether rawParams — the ";"-joined
+// parameter segment of a data: URI header, after the media type and its
+// leading ";" have been cut away — contains a bare "base64" parameter.
+// Splitting on ";" rather than checking a suffix or prefix means a
+// "base64" token anywhere in the parameter list counts, regardless of
+// what other parameters (";charset=utf-8", say) surround it.
+func dataURIHasBase64Param(rawParams string) bool {
+	if rawParams == "" {
+		return false
+	}
+	for _, p := range strings.Split(rawParams, ";") {
+		if p == "base64" {
+			return true
+		}
+	}
+	return false
+}
+
 // geminiInlineDataFromDataURI parses an OpenAI image_url.url as a
 // "data:<media-type-and-params>,<data>" URI and returns Gemini's inlineData
 // object. Per lesson (d), the media type is everything before the first
 // ";" after "data:" — any parameters after it (";charset=utf-8;base64", for
-// instance) are stripped rather than rejected or included. Any URL that is
-// not a data: URI (an http(s) image URL, which Gemini's generateContent API
-// does not fetch) returns a *translateError, per the request mapping
-// table's image row.
+// instance) are stripped rather than rejected or included. Gemini's
+// inlineData.data is always base64, so a data: URI whose parameter list
+// does not include a "base64" token is rejected outright — review fix: a
+// non-base64 URI like "data:text/plain,Hello" was previously forwarded
+// with its raw text bytes labeled as base64 data, corrupting the upstream
+// request instead of failing loudly. Any URL that is not a data: URI (an
+// http(s) image URL, which Gemini's generateContent API does not fetch)
+// also returns a *translateError, per the request mapping table's image
+// row.
 func geminiInlineDataFromDataURI(uri string) (map[string]any, error) {
 	rest, ok := strings.CutPrefix(uri, "data:")
 	if !ok {
@@ -72,7 +85,10 @@ func geminiInlineDataFromDataURI(uri string) (map[string]any, error) {
 	if !ok {
 		return nil, &translateError{msg: "malformed data: URI in image_url"}
 	}
-	mimeType, _, _ := strings.Cut(header, ";")
+	mimeType, rawParams, _ := strings.Cut(header, ";")
+	if !dataURIHasBase64Param(rawParams) {
+		return nil, &translateError{msg: "data: URI in image_url must be base64-encoded"}
+	}
 	return map[string]any{"mimeType": mimeType, "data": data}, nil
 }
 
@@ -253,7 +269,9 @@ func geminiToolConfigFromOpenAI(tc any) map[string]any {
 // Gemini generateContent/streamGenerateContent request body, per this
 // file's request mapping table. It returns a *translateError — never
 // wrapped — for a field Gemini has no equivalent for (n>1, a truthy
-// logit_bias) or a content part this translator cannot map (a non-data-URI
+// logit_bias or logprobs — controller ruling: unified with anthropic's
+// same truthy-only semantics, see isTruthy's doc comment) or a content
+// part this translator cannot map (a non-data-URI
 // image URL, a malformed tool_calls argument string, a role:"tool" message
 // whose tool_call_id was never seen on a preceding assistant message).
 // Consecutive role:"tool" messages are merged into one Gemini {"role":
@@ -267,8 +285,11 @@ func geminiRequestFromOpenAI(req map[string]any) (map[string]any, error) {
 			return nil, geminiUnsupportedFieldError("n")
 		}
 	}
-	if v, ok := req["logit_bias"]; ok && isTruthyMap(v) {
+	if v, ok := req["logit_bias"]; ok && isTruthy(v) {
 		return nil, geminiUnsupportedFieldError("logit_bias")
+	}
+	if v, ok := req["logprobs"]; ok && isTruthy(v) {
+		return nil, geminiUnsupportedFieldError("logprobs")
 	}
 
 	out := map[string]any{}
@@ -433,9 +454,20 @@ type geminiUsageMetadata struct {
 // zero fields) — the stream mapping table's "last usageMetadata wins" rule
 // depends on that distinction.
 type geminiGenerateContentResponse struct {
-	ResponseID    string               `json:"responseId"`
-	UsageMetadata *geminiUsageMetadata `json:"usageMetadata"`
-	Candidates    []geminiCandidate    `json:"candidates"`
+	ResponseID     string               `json:"responseId"`
+	UsageMetadata  *geminiUsageMetadata `json:"usageMetadata"`
+	PromptFeedback geminiPromptFeedback `json:"promptFeedback"`
+	Candidates     []geminiCandidate    `json:"candidates"`
+}
+
+// geminiPromptFeedback is the "promptFeedback" object Gemini sets when the
+// prompt itself — not any generated candidate — was blocked. BlockReason
+// non-empty and Candidates empty together mean the model never produced
+// any output at all: review fix — this case was previously reported to the
+// client as an ordinary empty "stop" completion instead of a content-filter
+// rejection.
+type geminiPromptFeedback struct {
+	BlockReason string `json:"blockReason"`
 }
 
 // geminiFinishReason maps a Gemini finishReason to an OpenAI finish_reason,
@@ -471,12 +503,33 @@ func geminiToolCallID(ordinal int) string {
 	return "call_" + strconv.Itoa(ordinal)
 }
 
+// geminiResponseIDOrFallback returns responseID when non-empty, or else a
+// stable id derived from created — review fix (folded minor): Gemini does
+// not always set "responseId", and chatCompletionIDPrefix alone (yielding
+// a bare "chatcmpl-" with nothing after it) is not a usable per-response
+// id. created is always available (the adapter fixes it once, before any
+// upstream bytes arrive), so it is deterministic and collision-free across
+// requests issued in different seconds.
+func geminiResponseIDOrFallback(responseID string, created int64) string {
+	if responseID != "" {
+		return responseID
+	}
+	return fmt.Sprintf("gemini-%d", created)
+}
+
 // openAIResponseFromGemini maps a non-streaming Gemini
 // GenerateContentResponse body to an OpenAI chat.completion response, per
 // this file's response mapping table. Only candidates[0] is read, matching
 // the table. model and created are supplied by the caller — the gateway-
 // facing model id and a response timestamp, since Gemini's own response
 // carries neither.
+//
+// A prompt-level safety block — Candidates empty and promptFeedback.
+// blockReason set — is reported as finish_reason "content_filter" with a
+// null message content, rather than falling through to the "no candidates,
+// no finishReason" default of an ordinary "stop" completion (review fix:
+// that default previously misreported a blocked prompt as a normal empty
+// success).
 func openAIResponseFromGemini(body []byte, model string, created int64) (map[string]any, usage, error) {
 	var resp geminiGenerateContentResponse
 	if err := json.Unmarshal(body, &resp); err != nil {
@@ -526,17 +579,24 @@ func openAIResponseFromGemini(body []byte, model string, created int64) (map[str
 		message["tool_calls"] = toolCalls
 	}
 
+	finishReason := geminiFinishReason(finishReasonRaw, len(toolCalls) > 0)
+	promptBlocked := len(resp.Candidates) == 0 && resp.PromptFeedback.BlockReason != ""
+	if promptBlocked {
+		finishReason = "content_filter"
+		message["content"] = nil
+	}
+
 	u := usage{prompt: resp.UsageMetadata.safePrompt(), completion: resp.UsageMetadata.safeCompletion()}
 
 	out := map[string]any{
-		"id":      chatCompletionIDPrefix + resp.ResponseID,
+		"id":      chatCompletionIDPrefix + geminiResponseIDOrFallback(resp.ResponseID, created),
 		"object":  "chat.completion",
 		"created": created,
 		"model":   model,
 		"choices": []any{map[string]any{
 			"index":         0,
 			"message":       message,
-			"finish_reason": geminiFinishReason(finishReasonRaw, len(toolCalls) > 0),
+			"finish_reason": finishReason,
 		}},
 		"usage": map[string]any{
 			"prompt_tokens":     u.prompt,
@@ -565,11 +625,12 @@ func (m *geminiUsageMetadata) safeCompletion() int64 {
 }
 
 // geminiStreamState is one streaming chat completion's translation state:
-// the OpenAI-shaped chunk envelope fields (id, captured from the first
-// chunk that carries a non-empty "responseId"; model and created, fixed at
-// construction), the running usage total, and the per-stream tool-call
-// ordinal counter lesson (a) requires. A caller constructs one per stream
-// and calls translate once per upstream sseEvent, in order.
+// the OpenAI-shaped chunk envelope fields (id — set at construction to a
+// stable fallback derived from created, per geminiResponseIDOrFallback,
+// and locked in place after the first translated chunk; model and created,
+// fixed at construction), the running usage total, and the per-stream
+// tool-call ordinal counter lesson (a) requires. A caller constructs one
+// per stream and calls translate once per upstream sseEvent, in order.
 type geminiStreamState struct {
 	id      string
 	model   string
@@ -593,9 +654,13 @@ type geminiStreamState struct {
 
 // newGeminiStreamState returns a geminiStreamState for one streaming chat
 // completion. model is the gateway-facing model id and created the
-// response timestamp every emitted chunk carries.
+// response timestamp every emitted chunk carries. id starts at the
+// created-derived fallback (review fix, folded minor): if the first chunk
+// never carries a "responseId" of its own, every chunk in the stream still
+// shares one stable, non-empty id instead of drifting between an empty
+// string and whatever a later chunk happens to report.
 func newGeminiStreamState(model string, created int64) *geminiStreamState {
-	return &geminiStreamState{model: model, created: created}
+	return &geminiStreamState{model: model, created: created, id: geminiResponseIDOrFallback("", created)}
 }
 
 // usage returns the prompt/completion token counts captured so far, from
@@ -658,20 +723,37 @@ func (st *geminiStreamState) translate(ev sseEvent) ([][]byte, error) {
 	if err := json.Unmarshal(ev.data, &resp); err != nil {
 		return nil, fmt.Errorf("%w: decode gemini stream chunk: %w", errUpstream, err)
 	}
-	if resp.ResponseID != "" {
+
+	// isFirstChunk gates both the role-delta chunk below and the id
+	// adoption right after it: the id resolves exactly once, on the first
+	// translate call, per the "first one wins" ruling. A responseId
+	// arriving on any later chunk is ignored — st.id already holds either
+	// that first chunk's real id or the construction-time fallback, and
+	// stays there for the rest of the stream.
+	isFirstChunk := !st.startedRole
+	if isFirstChunk && resp.ResponseID != "" {
 		st.id = resp.ResponseID
 	}
+
 	if resp.UsageMetadata != nil {
 		st.u = usage{prompt: resp.UsageMetadata.PromptTokenCount, completion: resp.UsageMetadata.CandidatesTokenCount}
 	}
 
 	var chunks [][]byte
-	if !st.startedRole {
+	if isFirstChunk {
 		st.startedRole = true
 		chunks = append(chunks, st.chunk(map[string]any{"role": "assistant"}, nil))
 	}
 
 	if len(resp.Candidates) == 0 {
+		// A prompt-level safety block reports no candidates at all, only
+		// promptFeedback.blockReason — review fix: this chunk previously
+		// produced nothing beyond the role delta, so the stream ended with
+		// only "[DONE]" and no finish_reason for the client to act on.
+		if resp.PromptFeedback.BlockReason != "" {
+			reason := "content_filter"
+			chunks = append(chunks, st.chunk(map[string]any{}, &reason))
+		}
 		return chunks, nil
 	}
 	c := resp.Candidates[0]

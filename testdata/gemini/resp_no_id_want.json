@@ -1,0 +1,14 @@
+{
+  "id": "chatcmpl-gemini-1734000000",
+  "object": "chat.completion",
+  "created": 1734000000,
+  "model": "gw-gemini-model",
+  "choices": [
+    {
+      "index": 0,
+      "message": {"role": "assistant", "content": "ok"},
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {"prompt_tokens": 2, "completion_tokens": 1, "total_tokens": 3}
+}
