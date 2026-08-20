@@ -468,3 +468,129 @@ func TestRESPClient_HungServer_BoundedByCallDeadline(t *testing.T) {
 		t.Fatalf("elapsed = %v, want < 3s (one bounded call deadline, no retry-doubling on timeout)", elapsed)
 	}
 }
+
+// --- setEx / getBytes: the response cache's RESP primitives (task 2) ---
+
+// TestRESPClient_SetEx_SendsSETWithEXAndWholeSeconds asserts setEx frames
+// the command as "SET key val EX seconds", rounding a sub-second ttl up to
+// the next whole second — Redis's EX argument is whole seconds only,
+// matching redisStore.incrBy's own EXPIRE rounding.
+func TestRESPClient_SetEx_SendsSETWithEXAndWholeSeconds(t *testing.T) {
+	ln := newFakeListener(t)
+	runFakeRESPServer(t, ln, []respStep{
+		{wantArgs: []string{"SELECT", "0"}, reply: []byte("+OK\r\n")},
+		{wantArgs: []string{"SET", "llmgw:cache:abc", "hello", "EX", "5"}, reply: []byte("+OK\r\n")},
+	})
+
+	c := newRESPClient(ln.Addr().String(), "", 0)
+	if err := c.setEx("llmgw:cache:abc", []byte("hello"), 4500*time.Millisecond); err != nil {
+		t.Fatalf("setEx: %v", err)
+	}
+}
+
+// TestRESPClient_SetEx_FloorsSubSecondTTLAtOneSecond asserts a ttl under
+// one second is never sent as EX 0 (Redis would delete the key
+// immediately).
+func TestRESPClient_SetEx_FloorsSubSecondTTLAtOneSecond(t *testing.T) {
+	ln := newFakeListener(t)
+	runFakeRESPServer(t, ln, []respStep{
+		{wantArgs: []string{"SELECT", "0"}, reply: []byte("+OK\r\n")},
+		{wantArgs: []string{"SET", "k", "v", "EX", "1"}, reply: []byte("+OK\r\n")},
+	})
+
+	c := newRESPClient(ln.Addr().String(), "", 0)
+	if err := c.setEx("k", []byte("v"), 200*time.Millisecond); err != nil {
+		t.Fatalf("setEx: %v", err)
+	}
+}
+
+// TestRESPClient_SetEx_ServerErrorReplyIsReturned asserts a RESP error
+// reply to SET surfaces as a Go error, not a silently-successful call.
+func TestRESPClient_SetEx_ServerErrorReplyIsReturned(t *testing.T) {
+	ln := newFakeListener(t)
+	runFakeRESPServer(t, ln, []respStep{
+		{wantArgs: []string{"SELECT", "0"}, reply: []byte("+OK\r\n")},
+		{wantArgs: []string{"SET", "k", "v", "EX", "5"}, reply: []byte("-ERR oom\r\n")},
+	})
+
+	c := newRESPClient(ln.Addr().String(), "", 0)
+	if err := c.setEx("k", []byte("v"), 5*time.Second); err == nil {
+		t.Fatal("want an error for a RESP error reply to SET")
+	}
+}
+
+// TestRESPClient_GetBytes_HitReturnsBody covers the cache-hit case: a
+// bulk reply decodes to the stored bytes with found=true.
+func TestRESPClient_GetBytes_HitReturnsBody(t *testing.T) {
+	ln := newFakeListener(t)
+	runFakeRESPServer(t, ln, []respStep{
+		{wantArgs: []string{"SELECT", "0"}, reply: []byte("+OK\r\n")},
+		{wantArgs: []string{"GET", "k"}, reply: []byte("$5\r\nhello\r\n")},
+	})
+
+	c := newRESPClient(ln.Addr().String(), "", 0)
+	b, found, err := c.getBytes("k")
+	if err != nil {
+		t.Fatalf("getBytes: %v", err)
+	}
+	if !found {
+		t.Fatal("found = false, want true")
+	}
+	if string(b) != "hello" {
+		t.Errorf("b = %q, want %q", b, "hello")
+	}
+}
+
+// TestRESPClient_GetBytes_MissReturnsFoundFalse covers the null-bulk
+// ("$-1") case: a missing key is a miss, not an error.
+func TestRESPClient_GetBytes_MissReturnsFoundFalse(t *testing.T) {
+	ln := newFakeListener(t)
+	runFakeRESPServer(t, ln, []respStep{
+		{wantArgs: []string{"SELECT", "0"}, reply: []byte("+OK\r\n")},
+		{wantArgs: []string{"GET", "missing"}, reply: []byte("$-1\r\n")},
+	})
+
+	c := newRESPClient(ln.Addr().String(), "", 0)
+	b, found, err := c.getBytes("missing")
+	if err != nil {
+		t.Fatalf("getBytes: %v", err)
+	}
+	if found {
+		t.Fatal("found = true, want false for a null bulk reply")
+	}
+	if b != nil {
+		t.Errorf("b = %#v, want nil", b)
+	}
+}
+
+// TestRESPClient_GetBytes_ServerErrorReplyIsReturned asserts a RESP error
+// reply to GET surfaces as a Go error, not a false miss.
+func TestRESPClient_GetBytes_ServerErrorReplyIsReturned(t *testing.T) {
+	ln := newFakeListener(t)
+	runFakeRESPServer(t, ln, []respStep{
+		{wantArgs: []string{"SELECT", "0"}, reply: []byte("+OK\r\n")},
+		{wantArgs: []string{"GET", "k"}, reply: []byte("-ERR busy\r\n")},
+	})
+
+	c := newRESPClient(ln.Addr().String(), "", 0)
+	if _, _, err := c.getBytes("k"); err == nil {
+		t.Fatal("want an error for a RESP error reply to GET")
+	}
+}
+
+// TestRESPClient_GetBytes_DownServer_ReturnsError asserts getBytes
+// surfaces a transport failure (dead address) as an error, matching do's
+// own contract — the response cache (cache.go) relies on this to treat a
+// Redis outage as a miss rather than block or panic.
+func TestRESPClient_GetBytes_DownServer_ReturnsError(t *testing.T) {
+	ln := newFakeListener(t)
+	deadAddr := ln.Addr().String()
+	if err := ln.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	c := newRESPClient(deadAddr, "", 0)
+	if _, _, err := c.getBytes("k"); err == nil {
+		t.Fatal("want an error dialing a dead address")
+	}
+}

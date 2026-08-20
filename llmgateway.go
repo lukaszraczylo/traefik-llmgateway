@@ -28,7 +28,10 @@ type Config struct {
 	// encoding/json never treats a struct value as "empty" regardless of
 	// its fields, so "omitempty" here would be a no-op that misleadingly
 	// implies otherwise.
-	Retry              RetryConfig `json:"retry"`
+	Retry RetryConfig `json:"retry"`
+	// Cache is a struct value, not a pointer, for the same reason as Retry
+	// above: its own Enabled field is the on/off signal.
+	Cache              CacheConfig `json:"cache"`
 	PassthroughUnknown bool        `json:"passthroughUnknown,omitempty"`
 }
 
@@ -45,11 +48,18 @@ type ProviderConfig struct {
 // GroupConfig describes a group's access and limits. Empty/omitted
 // Providers, Models, MCPServers, Agents mean all are allowed.
 type GroupConfig struct {
-	Limits     *LimitsConfig `json:"limits,omitempty"`
-	Providers  []string      `json:"providers,omitempty"`
-	Models     []string      `json:"models,omitempty"`
-	MCPServers []string      `json:"mcpServers,omitempty"`
-	Agents     []string      `json:"agents,omitempty"`
+	Limits    *LimitsConfig `json:"limits,omitempty"`
+	Providers []string      `json:"providers,omitempty"`
+	Models    []string      `json:"models,omitempty"`
+	// Cache overrides the global cache.enabled setting for this group's
+	// requests (spec §2): nil inherits the global setting, false opts the
+	// group out even when caching is globally enabled, and true opts the
+	// group in — but only when the global cache block is actually
+	// configured (newAuthStore rejects true otherwise, a constructor
+	// error, since there is nothing to inherit ttl/maxBodyBytes from).
+	Cache      *bool    `json:"cache,omitempty"`
+	MCPServers []string `json:"mcpServers,omitempty"`
+	Agents     []string `json:"agents,omitempty"`
 }
 
 // LimitsConfig holds request/token/cost limits. Zero means unlimited.
@@ -104,6 +114,28 @@ type RetryConfig struct {
 	Enabled  bool `json:"enabled,omitempty"`
 }
 
+// CacheConfig configures the opt-in, Redis-backed response cache for
+// unified non-streaming chat/embeddings responses (spec §2). The zero
+// value (Enabled: false) disables caching, preserving v0.1 behavior
+// exactly. TTL and MaxBodyBytes are validated (and defaulted, when left
+// zero) by validateCacheConfig (cache.go) only when Enabled is true.
+// Caching additionally requires config.Redis (buildResponseCache disables
+// it with a one-time warning, not a constructor error, when Enabled is
+// true but Redis is not configured) — a per-replica cache without a
+// shared backend would serve divergent responses across replicas.
+type CacheConfig struct {
+	// TTL is how long a cached response stays valid (a Go duration
+	// string, e.g. "5m"). Defaults to defaultCacheTTL when Enabled and
+	// left empty.
+	TTL string `json:"ttl,omitempty"`
+	// MaxBodyBytes caps how large a response body may be to still be
+	// stored; a larger one is skipped (spec §2's "body ≤ maxBodyBytes").
+	// Defaults to defaultCacheMaxBodyBytes when Enabled and left at 0; a
+	// value above maxCacheMaxBodyBytes is a construction error.
+	MaxBodyBytes int  `json:"maxBodyBytes,omitempty"`
+	Enabled      bool `json:"enabled,omitempty"`
+}
+
 // ModelPricing overrides the built-in per-model price table.
 type ModelPricing struct {
 	InputPerM  float64 `json:"inputPerM"`
@@ -139,7 +171,13 @@ type Gateway struct {
 	// through — built once via newAdapterHTTPClient, the same constructor
 	// each provider adapter uses for its own client.
 	targetClient *http.Client
-	name         string
+	// cache is nil whenever response caching is not configured or not
+	// usable (cfg.Cache.Enabled is false, or true with no config.Redis —
+	// see buildResponseCache, cache.go). Every call site checks for nil
+	// before using it, rather than responseCache having its own
+	// always-disabled zero value.
+	cache *responseCache
+	name  string
 }
 
 // New creates the middleware. NOTE: no tail call — Yaegi zeroes
@@ -171,12 +209,25 @@ func newGateway(ctx context.Context, next http.Handler, config *Config, name str
 		}
 	}
 
-	lim, err := newConfiguredLimiter(config)
+	// The Redis client (nil when config.Redis is absent) is built once,
+	// here, and shared between the limiter's redisStore and the response
+	// cache below — spec §2's "reuse the SAME respClient instance as the
+	// limiter's redisStore (one connection, one config)". Building it
+	// separately per consumer would dial (and AUTH/SELECT) a second TCP
+	// connection to the exact same server for no benefit.
+	redisClient, err := buildRedisClient(config.Redis)
 	if err != nil {
 		return nil, err
 	}
+	lim := newConfiguredLimiter(config, redisClient)
 	lim.logf = g.errorf
 	g.limiter = lim
+
+	cache, err := buildResponseCache(config.Cache, redisClient, g.logf, g.errorf)
+	if err != nil {
+		return nil, err
+	}
+	g.cache = cache
 
 	adapters, err := buildAdapters(config)
 	if err != nil {
@@ -211,36 +262,45 @@ func newGateway(ctx context.Context, next http.Handler, config *Config, name str
 	return g, nil
 }
 
-// newConfiguredLimiter builds the limiter for config, wiring config.Redis
-// when set. A configured Redis block wires a respClient-backed redisStore
-// behind AUTH/SELECT and resolveSecret'd credentials; otherwise the
-// limiter runs on its in-process fallback alone. failOpen defaults to
-// true (a Redis outage must not take the whole gateway down unless an
-// operator opts into strict enforcement) unless RedisConfig.FailOpen is
-// explicitly set.
-func newConfiguredLimiter(config *Config) (*limiter, error) {
-	if config.Redis == nil {
-		return newLimiter(nil, true), nil
+// buildRedisClient validates rc and returns a respClient for it, or nil
+// when rc is nil (Redis not configured). Split out of what was previously
+// newConfiguredLimiter's own inline construction so newGateway can share
+// one respClient — one dialled connection, one AUTH/SELECT handshake —
+// between the limiter's redisStore and the response cache (cache.go),
+// instead of each dialing its own connection to the identical server.
+func buildRedisClient(rc *RedisConfig) (*respClient, error) {
+	if rc == nil {
+		return nil, nil
 	}
-	if config.Redis.Address == "" {
+	if rc.Address == "" {
 		return nil, errors.New("llmgateway: redis: address must not be empty")
 	}
-	if config.Redis.DB < 0 {
-		return nil, fmt.Errorf("llmgateway: redis: db must not be negative, got %d", config.Redis.DB)
+	if rc.DB < 0 {
+		return nil, fmt.Errorf("llmgateway: redis: db must not be negative, got %d", rc.DB)
 	}
 
-	password, err := resolveSecret(config.Redis.Password)
+	password, err := resolveSecret(rc.Password)
 	if err != nil {
 		return nil, fmt.Errorf("llmgateway: redis: %w", err)
 	}
 
+	return newRESPClient(rc.Address, password, rc.DB), nil
+}
+
+// newConfiguredLimiter builds the limiter for config, using client (nil
+// means config.Redis was absent) as its redisStore backend. failOpen
+// defaults to true (a Redis outage must not take the whole gateway down
+// unless an operator opts into strict enforcement) unless
+// RedisConfig.FailOpen is explicitly set.
+func newConfiguredLimiter(config *Config, client *respClient) *limiter {
+	if client == nil {
+		return newLimiter(nil, true)
+	}
 	failOpen := true
 	if config.Redis.FailOpen != nil {
 		failOpen = *config.Redis.FailOpen
 	}
-
-	client := newRESPClient(config.Redis.Address, password, config.Redis.DB)
-	return newLimiter(newRedisStore(client), failOpen), nil
+	return newLimiter(newRedisStore(client), failOpen)
 }
 
 // attachUsersFile performs the synchronous initial load of a Users.File path

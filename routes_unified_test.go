@@ -1,15 +1,20 @@
 package traefikllmgateway
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -733,5 +738,406 @@ func TestHandleChat_MidStreamDropAfterUsageChunk_AccountsPartialUsage(t *testing
 	tok, ok := gw.limiter.getCounter("user", "alice", metricTok, windowDay, time.Now())
 	if !ok || tok != 10 {
 		t.Errorf("user token/day counter = %d (ok=%v), want 10 (the usage chunk captured before the drop, 7 prompt + 3 completion)", tok, ok)
+	}
+}
+
+// --- response cache: end-to-end through Gateway.ServeHTTP (task 2) ---
+
+// behavioralRedisServer is a minimal in-memory RESP2 server implementing
+// just enough of the protocol (SELECT/AUTH, GET, SET ... EX, INCRBY,
+// EXPIRE) to drive a real Gateway end to end. Unlike resp_test.go's
+// respStep-scripted fake server — exact command count and order, used for
+// resp.go's own unit tests — this one behaves like a tiny real store: the
+// limiter's counters and the response cache share one respClient
+// (spec §2), so a scripted sequence would have to predict every INCRBY/
+// EXPIRE/GET/SET this test's whole request pipeline issues, in order.
+// Behaving like real Redis instead of asserting on the wire trace is more
+// robust for a multi-request end-to-end test, and no less faithful: the
+// wire-level framing (encodeCommand, RESP replies) is exactly what
+// resp_test.go's scripted tests already pin.
+type behavioralRedisServer struct {
+	data map[string]string
+	mu   sync.Mutex
+}
+
+// newBehavioralRedisServer starts the server on an OS-assigned port,
+// closed automatically at test cleanup (via newFakeListener), and returns
+// its listener.
+func newBehavioralRedisServer(t *testing.T) net.Listener {
+	t.Helper()
+	ln := newFakeListener(t)
+	srv := &behavioralRedisServer{data: make(map[string]string)}
+	go srv.acceptLoop(ln)
+	return ln
+}
+
+func (s *behavioralRedisServer) acceptLoop(ln net.Listener) {
+	for {
+		conn, err := ln.Accept()
+		if err != nil {
+			return // listener closed by t.Cleanup; test is finishing
+		}
+		go s.serve(conn)
+	}
+}
+
+func (s *behavioralRedisServer) serve(conn net.Conn) {
+	defer func() { _ = conn.Close() }()
+	r := bufio.NewReader(conn)
+	for {
+		args, err := readRESPCommand(r)
+		if err != nil {
+			return
+		}
+		if _, err := conn.Write(s.handle(args)); err != nil {
+			return
+		}
+	}
+}
+
+// handle dispatches one command to its RESP2 reply. SELECT and AUTH
+// always succeed (this fake never enforces auth or multiple databases);
+// EXPIRE always succeeds without tracking any real expiry — every test
+// using this server runs well within any TTL it configures.
+func (s *behavioralRedisServer) handle(args []string) []byte {
+	if len(args) == 0 {
+		return []byte("-ERR empty command\r\n")
+	}
+	switch strings.ToUpper(args[0]) {
+	case "SELECT", "AUTH", "EXPIRE":
+		return []byte("+OK\r\n")
+	case "GET":
+		s.mu.Lock()
+		v, ok := s.data[args[1]]
+		s.mu.Unlock()
+		if !ok {
+			return []byte("$-1\r\n")
+		}
+		return []byte(fmt.Sprintf("$%d\r\n%s\r\n", len(v), v))
+	case "SET":
+		s.mu.Lock()
+		s.data[args[1]] = args[2]
+		s.mu.Unlock()
+		return []byte("+OK\r\n")
+	case "INCRBY":
+		n, _ := strconv.ParseInt(args[2], 10, 64)
+		s.mu.Lock()
+		cur, _ := strconv.ParseInt(s.data[args[1]], 10, 64)
+		cur += n
+		s.data[args[1]] = strconv.FormatInt(cur, 10)
+		s.mu.Unlock()
+		return []byte(fmt.Sprintf(":%d\r\n", cur))
+	default:
+		return []byte("-ERR unknown command\r\n")
+	}
+}
+
+// newCacheTestGateway builds a *Gateway with cfg.Redis pointed at a
+// behavioralRedisServer and cfg.Cache enabled, an openai provider pointed
+// at srv, group "default" (its Cache override left to groupCache, nil
+// unless the caller sets it), and one user ("alice") with an (empty,
+// unlimited) LimitsConfig — required so buildLimitScopes actually
+// produces a scope for the limiter to count against; without one,
+// checkAndCount/account never touch the store at all, and this test's
+// counter assertions would trivially "pass" against uncounted zeros.
+func newCacheTestGateway(t *testing.T, srv *httptest.Server, groupCache *bool, maxBodyBytes int) *Gateway {
+	t.Helper()
+	redisLn := newBehavioralRedisServer(t)
+
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{
+		"openai": {Type: "openai", BaseURL: srv.URL, APIKey: "k", Models: []string{"gpt-test"}},
+	}
+	cfg.Groups = map[string]*GroupConfig{"default": {Cache: groupCache}}
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{
+		{Name: "alice", Group: "default", APIKey: "sk-alice", Limits: &LimitsConfig{}},
+	}}
+	cfg.Redis = &RedisConfig{Address: redisLn.Addr().String()}
+	cfg.Cache = CacheConfig{Enabled: true, TTL: "1m", MaxBodyBytes: maxBodyBytes}
+
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	gw, ok := h.(*Gateway)
+	if !ok {
+		t.Fatal("handler is not *Gateway")
+	}
+	return gw
+}
+
+// TestHandleChat_CacheHitMiss_EndToEnd_CountersAndHeaders drives two
+// identical chat-completion requests through a real Gateway with caching
+// enabled: the first is a miss (upstream called, response stored,
+// X-Llmgw-Cache: miss), the second is a hit served straight from the
+// cache (upstream NOT called again, X-Llmgw-Cache: hit) with the exact
+// same body. Counters prove the operator's "count requests, free tokens"
+// decision (spec §2): both requests increment req:day by 1, but only the
+// first (the real upstream call) moves tok:day — the hit adds zero.
+func TestHandleChat_CacheHitMiss_EndToEnd_CountersAndHeaders(t *testing.T) {
+	const respBody = `{"id":"chatcmpl-1","object":"chat.completion","model":"gpt-test","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5}}`
+	var upstreamCalls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalls++
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(respBody))
+	}))
+	defer srv.Close()
+
+	gw := newCacheTestGateway(t, srv, nil, defaultCacheMaxBodyBytes)
+	body := map[string]any{"model": "gpt-test", "messages": []any{map[string]any{"role": "user", "content": "hi"}}}
+
+	// First request: miss.
+	req1 := newUnifiedRequest(t, http.MethodPost, "/v1/chat/completions", "sk-alice", body)
+	rec1 := httptest.NewRecorder()
+	gw.ServeHTTP(rec1, req1)
+
+	if rec1.Code != http.StatusOK || rec1.Body.String() != respBody {
+		t.Fatalf("first request: status=%d body=%q, want 200 and the upstream body verbatim", rec1.Code, rec1.Body.String())
+	}
+	if got := rec1.Header().Get("X-Llmgw-Cache"); got != "miss" {
+		t.Errorf("first request X-Llmgw-Cache = %q, want %q", got, "miss")
+	}
+	if upstreamCalls != 1 {
+		t.Fatalf("upstreamCalls after first request = %d, want 1", upstreamCalls)
+	}
+
+	reqCount, ok := gw.limiter.getCounter("user", "alice", metricReq, windowDay, time.Now())
+	if !ok || reqCount != 1 {
+		t.Errorf("req:day after first request = %d (ok=%v), want 1", reqCount, ok)
+	}
+	tok, ok := gw.limiter.getCounter("user", "alice", metricTok, windowDay, time.Now())
+	if !ok || tok != 15 {
+		t.Errorf("tok:day after first request = %d (ok=%v), want 15 (10 prompt + 5 completion)", tok, ok)
+	}
+
+	// Second, identical request: hit.
+	req2 := newUnifiedRequest(t, http.MethodPost, "/v1/chat/completions", "sk-alice", body)
+	rec2 := httptest.NewRecorder()
+	gw.ServeHTTP(rec2, req2)
+
+	if rec2.Code != http.StatusOK || rec2.Body.String() != respBody {
+		t.Fatalf("second request: status=%d body=%q, want 200 and the identical cached body", rec2.Code, rec2.Body.String())
+	}
+	if got := rec2.Header().Get("X-Llmgw-Cache"); got != "hit" {
+		t.Errorf("second request X-Llmgw-Cache = %q, want %q", got, "hit")
+	}
+	if upstreamCalls != 1 {
+		t.Errorf("upstreamCalls after second (cache-hit) request = %d, want still 1 (upstream must not be called again)", upstreamCalls)
+	}
+
+	reqCount, ok = gw.limiter.getCounter("user", "alice", metricReq, windowDay, time.Now())
+	if !ok || reqCount != 2 {
+		t.Errorf("req:day after the cache hit = %d (ok=%v), want 2 (hit still counts as one more request)", reqCount, ok)
+	}
+	tok, ok = gw.limiter.getCounter("user", "alice", metricTok, windowDay, time.Now())
+	if !ok || tok != 15 {
+		t.Errorf("tok:day after the cache hit = %d (ok=%v), want still 15 (a hit accounts zero tokens, no estimation)", tok, ok)
+	}
+}
+
+// TestHandleChat_CacheGroupOptOut_NeverServesFromCache is spec §2's
+// per-group override: GroupConfig.Cache=false must opt the group out even
+// though the global cache is enabled — every request goes to the
+// upstream, and no X-Llmgw-Cache header is ever set.
+func TestHandleChat_CacheGroupOptOut_NeverServesFromCache(t *testing.T) {
+	const respBody = `{"id":"c1","object":"chat.completion","model":"gpt-test","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`
+	var upstreamCalls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalls++
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(respBody))
+	}))
+	defer srv.Close()
+
+	optOut := false
+	gw := newCacheTestGateway(t, srv, &optOut, defaultCacheMaxBodyBytes)
+	body := map[string]any{"model": "gpt-test", "messages": []any{map[string]any{"role": "user", "content": "hi"}}}
+
+	for i := 0; i < 2; i++ {
+		req := newUnifiedRequest(t, http.MethodPost, "/v1/chat/completions", "sk-alice", body)
+		rec := httptest.NewRecorder()
+		gw.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("request %d: status = %d, want 200", i, rec.Code)
+		}
+		if got := rec.Header().Get("X-Llmgw-Cache"); got != "" {
+			t.Errorf("request %d: X-Llmgw-Cache = %q, want unset (group opted out)", i, got)
+		}
+	}
+	if upstreamCalls != 2 {
+		t.Errorf("upstreamCalls = %d, want 2 (an opted-out group must never be served from cache)", upstreamCalls)
+	}
+}
+
+// TestHandleChat_CacheOversizeBody_SkipsStore_StillServesEveryRequest
+// proves an upstream body larger than cache.maxBodyBytes is served
+// normally but never cached: a second identical request still goes to
+// the upstream, since store() silently skipped the first one.
+func TestHandleChat_CacheOversizeBody_SkipsStore_StillServesEveryRequest(t *testing.T) {
+	respBody := `{"id":"c1","object":"chat.completion","model":"gpt-test","choices":[{"index":0,"message":{"role":"assistant","content":"` +
+		strings.Repeat("x", 200) + `"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`
+	var upstreamCalls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalls++
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(respBody))
+	}))
+	defer srv.Close()
+
+	gw := newCacheTestGateway(t, srv, nil, 32) // maxBodyBytes far smaller than respBody
+	body := map[string]any{"model": "gpt-test", "messages": []any{map[string]any{"role": "user", "content": "hi"}}}
+
+	for i := 0; i < 2; i++ {
+		req := newUnifiedRequest(t, http.MethodPost, "/v1/chat/completions", "sk-alice", body)
+		rec := httptest.NewRecorder()
+		gw.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK || rec.Body.String() != respBody {
+			t.Fatalf("request %d: status=%d body=%q, want 200 and the full upstream body regardless of the cache's maxBodyBytes", i, rec.Code, rec.Body.String())
+		}
+		if got := rec.Header().Get("X-Llmgw-Cache"); got != "miss" {
+			t.Errorf("request %d: X-Llmgw-Cache = %q, want %q (oversize is a store-time skip, not a lookup-time change)", i, got, "miss")
+		}
+	}
+	if upstreamCalls != 2 {
+		t.Errorf("upstreamCalls = %d, want 2 (an oversize response must never be served from cache on a later request)", upstreamCalls)
+	}
+}
+
+// TestHandleChat_CacheRedisDown_MissesAndServesNormallyWithLog proves
+// spec §2's "redis errors during cache ops → treat as miss ... never fail
+// the request because the cache is down": cfg.Redis points at an address
+// nothing listens on (a respClient dials lazily, so construction still
+// succeeds), so every lookup/store call fails, yet the request is served
+// normally every time, with a "miss" header and a rate-limited error log
+// line. The rate-limit behavior itself (once per storeErrorLogEvery) is
+// already pinned precisely at the responseCache level
+// (TestResponseCache_Lookup_RedisDown_MissWithRateLimitedLog,
+// cache_test.go); this test only proves the failure never surfaces to
+// the client end to end.
+func TestHandleChat_CacheRedisDown_MissesAndServesNormallyWithLog(t *testing.T) {
+	deadLn := newFakeListener(t)
+	deadAddr := deadLn.Addr().String()
+	if err := deadLn.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	const respBody = `{"id":"c1","object":"chat.completion","model":"gpt-test","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(respBody))
+	}))
+	defer srv.Close()
+
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{
+		"openai": {Type: "openai", BaseURL: srv.URL, APIKey: "k", Models: []string{"gpt-test"}},
+	}
+	cfg.Groups = map[string]*GroupConfig{"default": {}}
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{{Name: "alice", Group: "default", APIKey: "sk-alice"}}}
+	cfg.Redis = &RedisConfig{Address: deadAddr}
+	cfg.Cache = CacheConfig{Enabled: true, TTL: "1m"}
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	origStderr := os.Stderr
+	pr, pw, _ := os.Pipe()
+	os.Stderr = pw
+
+	body := map[string]any{"model": "gpt-test", "messages": []any{map[string]any{"role": "user", "content": "hi"}}}
+	req := newUnifiedRequest(t, http.MethodPost, "/v1/chat/completions", "sk-alice", body)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	_ = pw.Close()
+	os.Stderr = origStderr
+	var logBuf bytes.Buffer
+	if _, err := io.Copy(&logBuf, pr); err != nil {
+		t.Fatalf("io.Copy: %v", err)
+	}
+
+	if rec.Code != http.StatusOK || rec.Body.String() != respBody {
+		t.Fatalf("status=%d body=%q, want 200 and the upstream body served despite redis being down", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("X-Llmgw-Cache"); got != "miss" {
+		t.Errorf("X-Llmgw-Cache = %q, want %q (redis down is treated as a miss)", got, "miss")
+	}
+	if !strings.Contains(logBuf.String(), "response cache: redis error") {
+		t.Errorf("want a logged cache redis error, got %q", logBuf.String())
+	}
+}
+
+// TestHandleChat_AnthropicTranslatedResponse_CachedAboveAdapter proves
+// the cache sits above the adapter layer: an anthropic-type provider's
+// translated, OpenAI-shaped response is what gets cached, and a second
+// identical request is served that exact translated body from the cache
+// — with the anthropic upstream called only once.
+func TestHandleChat_AnthropicTranslatedResponse_CachedAboveAdapter(t *testing.T) {
+	const anthResp = `{"id":"msg_01ABC","type":"message","role":"assistant","content":[{"type":"text","text":"hi there"}],"model":"claude-x","stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":4}}`
+	var upstreamCalls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalls++
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(anthResp))
+	}))
+	defer srv.Close()
+
+	redisLn := newBehavioralRedisServer(t)
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{
+		"anthropic": {Type: "anthropic", BaseURL: srv.URL, APIKey: "sk-ant", Models: []string{"claude-x"}},
+	}
+	cfg.Groups = map[string]*GroupConfig{"default": {}}
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{{Name: "alice", Group: "default", APIKey: "sk-alice"}}}
+	cfg.Redis = &RedisConfig{Address: redisLn.Addr().String()}
+	cfg.Cache = CacheConfig{Enabled: true, TTL: "1m"}
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	body := map[string]any{"model": "claude-x", "messages": []any{map[string]any{"role": "user", "content": "hi"}}}
+
+	req1 := newUnifiedRequest(t, http.MethodPost, "/v1/chat/completions", "sk-alice", body)
+	rec1 := httptest.NewRecorder()
+	h.ServeHTTP(rec1, req1)
+	if rec1.Code != http.StatusOK {
+		t.Fatalf("first request: status = %d, body=%s", rec1.Code, rec1.Body.String())
+	}
+	if got := rec1.Header().Get("X-Llmgw-Cache"); got != "miss" {
+		t.Errorf("first request X-Llmgw-Cache = %q, want %q", got, "miss")
+	}
+	var out1 map[string]any
+	if err := json.Unmarshal(rec1.Body.Bytes(), &out1); err != nil {
+		t.Fatalf("decode first response: %v", err)
+	}
+	if _, ok := out1["choices"]; !ok {
+		t.Fatalf("first response is not OpenAI-shaped (no \"choices\"): %s", rec1.Body.String())
+	}
+
+	req2 := newUnifiedRequest(t, http.MethodPost, "/v1/chat/completions", "sk-alice", body)
+	rec2 := httptest.NewRecorder()
+	h.ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("second request: status = %d, body=%s", rec2.Code, rec2.Body.String())
+	}
+	if got := rec2.Header().Get("X-Llmgw-Cache"); got != "hit" {
+		t.Errorf("second request X-Llmgw-Cache = %q, want %q", got, "hit")
+	}
+	if rec2.Body.String() != rec1.Body.String() {
+		t.Errorf("second (cached) response body = %q, want identical to the first translated response %q", rec2.Body.String(), rec1.Body.String())
+	}
+	if upstreamCalls != 1 {
+		t.Errorf("upstreamCalls = %d, want 1 (the anthropic upstream must not be called again on a cache hit)", upstreamCalls)
 	}
 }

@@ -20,7 +20,11 @@ type user struct {
 // group describes a group's access rules and default limits. Empty
 // providers, models, mcpServers, or agents means all are allowed.
 type group struct {
-	limits                                *LimitsConfig
+	limits *LimitsConfig
+	// cache is GroupConfig.Cache carried through unchanged: nil inherits
+	// the global cache.enabled setting, non-nil overrides it for this
+	// group's requests. Resolved by groupCacheEnabled (cache.go).
+	cache                                 *bool
 	name                                  string
 	providers, models, mcpServers, agents []string
 }
@@ -125,8 +129,18 @@ func newAuthStore(cfg *Config) (*authStore, error) {
 		if err := gc.Limits.validate(); err != nil {
 			return nil, fmt.Errorf("llmgateway: group %q: %w", name, err)
 		}
+		// A group cannot opt into caching (Cache: true) when the global
+		// cache block itself is not configured (cfg.Cache.Enabled false)
+		// — there is no ttl/maxBodyBytes to inherit, and nothing for
+		// newGateway to wire g.cache from either way (spec §2). Cache:
+		// false or nil never hits this check: a group can always opt out
+		// of, or inherit, caching regardless of the global setting.
+		if gc.Cache != nil && *gc.Cache && !cfg.Cache.Enabled {
+			return nil, fmt.Errorf("llmgateway: group %q enables cache but global cache is not configured", name)
+		}
 		a.groups[name] = &group{
 			limits:     gc.Limits,
+			cache:      gc.Cache,
 			name:       name,
 			providers:  gc.Providers,
 			models:     gc.Models,

@@ -399,6 +399,54 @@ func decodeArray(r *bufio.Reader, lenField string, depth int) (any, error) {
 	return arr, nil
 }
 
+// setEx sets key to val with an expiry of ttl via RESP2 "SET key val EX
+// seconds", used by the response cache (cache.go) to store a cached
+// response. ttl is rounded up to whole seconds and floored at 1s — Redis's
+// EX argument is whole seconds only — matching redisStore.incrBy's EXPIRE
+// rounding exactly. val is converted to a string via a bare string(val): a
+// Go string is just a byte sequence, so this conversion, and
+// encodeCommand's own len(a)-based framing, are lossless for arbitrary
+// binary data, not just UTF-8 text.
+func (c *respClient) setEx(key string, val []byte, ttl time.Duration) error {
+	ttlSeconds := int64(ttl / time.Second)
+	if ttl%time.Second != 0 {
+		ttlSeconds++
+	}
+	if ttlSeconds < 1 {
+		ttlSeconds = 1
+	}
+
+	reply, err := c.do("SET", key, string(val), "EX", strconv.FormatInt(ttlSeconds, 10))
+	if err != nil {
+		return fmt.Errorf("resp: setEx %q: %w", key, err)
+	}
+	if e, ok := reply.(respErr); ok {
+		return fmt.Errorf("resp: setEx %q: %w", key, e)
+	}
+	return nil
+}
+
+// getBytes reads key's value as a bulk reply. found is false for a missing
+// key (RESP null bulk, "$-1") — not an error — mirroring redisStore.get's
+// treatment of a missing counter key.
+func (c *respClient) getBytes(key string) ([]byte, bool, error) {
+	reply, err := c.do("GET", key)
+	if err != nil {
+		return nil, false, fmt.Errorf("resp: getBytes %q: %w", key, err)
+	}
+	if reply == nil {
+		return nil, false, nil
+	}
+	if e, ok := reply.(respErr); ok {
+		return nil, false, fmt.Errorf("resp: getBytes %q: %w", key, e)
+	}
+	b, ok := reply.([]byte)
+	if !ok {
+		return nil, false, fmt.Errorf("resp: getBytes %q: unexpected reply type %T", key, reply)
+	}
+	return b, true, nil
+}
+
 // readLine reads one CRLF-terminated line from r, with the trailing CRLF
 // (or bare LF) stripped. It reads a byte at a time so it can bail out
 // after respMaxLineLen bytes without ever finding '\n' — a peer that

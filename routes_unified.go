@@ -1,6 +1,7 @@
 package traefikllmgateway
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -117,9 +118,56 @@ func (g *Gateway) runUnified(w http.ResponseWriter, r *http.Request, u *user, gr
 	}
 
 	req["model"] = upstreamModel
+
+	// cacheable gates every cache step below on spec §2's scope: a
+	// non-streaming request, with a working cache (g.cache is nil
+	// whenever caching is off or Redis was absent — buildResponseCache,
+	// cache.go), for a group that has not opted out (groupCacheEnabled).
+	// cacheKey is computed here — after "model" is rewritten to
+	// upstreamModel but deliberately BEFORE gatewayAliasKey is injected
+	// below — so the hashed request body reflects exactly what goes
+	// upstream and never includes gatewayAliasKey, a purely internal
+	// echo-back key with no bearing on upstream request equivalence: two
+	// different aliases resolving to the same upstream model must share
+	// one cache entry.
+	cacheable := !streaming && g.cache != nil && groupCacheEnabled(grp)
+	var cacheKeyStr string
+	if cacheable {
+		cacheKeyStr = cacheKey(adapter.name(), upstreamModel, req)
+		if cached, hit := g.cache.lookup(cacheKeyStr); hit {
+			// A cache hit accounts the request only — checkAndCount
+			// above already counted it — never token/cost, and never
+			// runs the zero-usage estimate branch below: the client
+			// never reached the upstream provider its body size would
+			// be estimating against.
+			sw.Header().Set("X-Llmgw-Cache", "hit")
+			if cached.ContentType != "" {
+				sw.Header().Set("Content-Type", cached.ContentType)
+			}
+			sw.WriteHeader(cached.Status)
+			_, _ = sw.Write(cached.Body)
+			return
+		}
+		// Set before call() below writes anything — headers must precede
+		// the body a miss is about to produce (spec §2).
+		sw.Header().Set("X-Llmgw-Cache", "miss")
+	}
+
 	req[gatewayAliasKey] = requestedModel
 
-	result, callErr := call(adapter, r.Context(), sw, req)
+	// respWriter is sw, wrapped in a capture tee only when this request
+	// is cacheable — cacheCaptureWriter buffers everything written so a
+	// 200 non-stream response can be stored after call() returns, without
+	// any adapter knowing caching exists (routes_unified.go's adapterCall
+	// contract is unchanged either way).
+	var respWriter http.ResponseWriter = sw
+	var capture *cacheCaptureWriter
+	if cacheable {
+		capture = newCacheCaptureWriter(sw)
+		respWriter = capture
+	}
+
+	result, callErr := call(adapter, r.Context(), respWriter, req)
 
 	// Usage is accounted before the error branch below runs, not after:
 	// every adapter that can fail mid-stream (forwardStream in each of the
@@ -142,6 +190,18 @@ func (g *Gateway) runUnified(w http.ResponseWriter, r *http.Request, u *user, gr
 	g.limiter.account(scopes, result, unifiedCostMicros(canonical, upstreamModel, result, g.cfg.Pricing))
 	if result.estimated {
 		g.logf("unified route: usage for model %q logged as estimated (%d prompt tokens derived from request body size, not the provider's reported usage)", canonical, result.prompt)
+	}
+
+	// A miss stores the response after everything above has already run —
+	// accounting must never be skipped or delayed waiting on a cache
+	// write. Only a genuine upstream 200 is stored (spec §2's "on 200
+	// non-stream, tee and SET"): a non-2xx status never reaches here as
+	// capture.status (forwardJSON/translate error paths return
+	// *providerHTTPError/*translateError instead of writing through
+	// respWriter, so callErr is non-nil and capture.status stays 0), and
+	// callErr == nil is checked directly regardless.
+	if cacheable && callErr == nil && capture.status == http.StatusOK {
+		g.cache.store(cacheKeyStr, capture.status, capture.contentType, capture.buf.Bytes())
 	}
 
 	if callErr != nil {
@@ -286,4 +346,53 @@ func writeProviderUpstreamError(w http.ResponseWriter, providerName string, perr
 			"upstream": upstream,
 		},
 	})
+}
+
+// cacheCaptureWriter tees a cacheable request's response into an
+// in-memory buffer while writing everything through to the wrapped
+// *statusTrackingWriter unchanged — the mechanism runUnified uses to fill
+// the response cache (cache.go) on a miss without any adapter, or
+// forwardJSON/forwardStream inside one, needing to know caching exists.
+//
+// It embeds *statusTrackingWriter rather than holding one in a named
+// field: every promoted method (Flush included) delegates automatically,
+// so only WriteHeader and Write — the two that must also capture — need
+// overriding here. This is what "preserve statusTrackingWriter semantics"
+// means in practice: Flush passes through for free, and wroteHeader stays
+// the single shared bookkeeping field statusTrackingWriter already
+// maintains (handleAdapterError inspects it via the original sw pointer,
+// not through this wrapper, so a cacheCaptureWriter's WriteHeader/Write
+// must delegate to the embedded pointer, never shadow its state).
+type cacheCaptureWriter struct {
+	*statusTrackingWriter
+	contentType string
+	buf         bytes.Buffer
+	status      int
+}
+
+// newCacheCaptureWriter returns a cacheCaptureWriter teeing into sw.
+func newCacheCaptureWriter(sw *statusTrackingWriter) *cacheCaptureWriter {
+	return &cacheCaptureWriter{statusTrackingWriter: sw}
+}
+
+// WriteHeader records status and the Content-Type header already set on
+// w.Header() at this point (matching forwardJSON's own ordering: it sets
+// Content-Type, then calls WriteHeader), then delegates.
+func (w *cacheCaptureWriter) WriteHeader(status int) {
+	w.status = status
+	w.contentType = w.Header().Get("Content-Type")
+	w.statusTrackingWriter.WriteHeader(status)
+}
+
+// Write buffers b (unbounded here — the caller, runUnified, only stores
+// the buffer for a genuine upstream 200, and the adapter response it
+// captures is itself already capped at maxResponseBytes, so this never
+// buffers more than that), applies net/http's implicit-200 default when
+// no WriteHeader call preceded it, and delegates to the wrapped writer.
+func (w *cacheCaptureWriter) Write(b []byte) (int, error) {
+	if w.status == 0 {
+		w.status = http.StatusOK
+	}
+	_, _ = w.buf.Write(b) // bytes.Buffer.Write never returns an error
+	return w.statusTrackingWriter.Write(b)
 }
