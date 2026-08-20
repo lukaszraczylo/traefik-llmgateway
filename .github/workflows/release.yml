@@ -8,6 +8,11 @@ on:
       - "**.go"
       - "go.mod"
       - "go.sum"
+      - ".goreleaser.yaml"
+      - ".gitattributes"
+      - ".traefik.yml"
+      - "version.go"
+      - "workflow-prepare.sh"
   workflow_dispatch:
 
 permissions:

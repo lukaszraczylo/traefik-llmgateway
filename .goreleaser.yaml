@@ -20,6 +20,13 @@ source:
   enabled: true
   format: tar.gz
   name_template: "{{ .ProjectName }}_v{{ .Version }}_source"
+  # Extracting the tarball must land everything under one directory, not
+  # loose at the archive root, the same way GitHub's own source tarballs
+  # behave — without this, `tar xzf` scatters the plugin's files straight
+  # into the extracting directory. Verified with `goreleaser release
+  # --snapshot --clean`: the tarball's top-level entry is exactly
+  # traefik-llmgateway_v{version}/ (v0.2 final review wave, 2026-08-20).
+  prefix_template: "{{ .ProjectName }}_v{{ .Version }}/"
 
 checksum:
   name_template: "{{ .ProjectName }}_v{{ .Version }}_checksums.txt"

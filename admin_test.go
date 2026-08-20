@@ -263,6 +263,12 @@ func TestAdminOverview_SortedShapeAndVersion(t *testing.T) {
 	if got.Redis.Configured {
 		t.Error("redis.configured must be false: cfg.Redis was never configured")
 	}
+	if got.Retry.Enabled {
+		t.Error("retry.enabled must be false: cfg.Retry was never configured")
+	}
+	if got.Retry.Attempts != 0 || got.Retry.Backoff != "" {
+		t.Errorf("retry.attempts/backoff must be omitted when disabled, got %+v", got.Retry)
+	}
 
 	wantAliases := []adminAliasView{
 		{Alias: "aaliased/y", Target: "alpha/a-model-1"},
@@ -275,6 +281,38 @@ func TestAdminOverview_SortedShapeAndVersion(t *testing.T) {
 		if got.Aliases[i] != want {
 			t.Errorf("aliases[%d] = %+v, want %+v (sorted by alias)", i, got.Aliases[i], want)
 		}
+	}
+}
+
+// TestAdminOverview_RetryEffectiveValues proves GET /admin/api/overview's
+// retry block reports the EFFECTIVE, defaulted values newRetryPolicy
+// (retry.go) resolves an enabled retry block to, not the raw config —
+// Attempts and Backoff are both left at their zero value here specifically
+// to exercise that defaulting (v0.2 final review wave, 2026-08-20).
+func TestAdminOverview_RetryEffectiveValues(t *testing.T) {
+	t.Parallel()
+	cfg := newAdminTestConfig()
+	cfg.Retry = RetryConfig{Enabled: true}
+	h, _ := newAdminGatewayHandle(t, cfg)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, adminRequest(http.MethodGet, adminOverviewPath, "sk-admin1"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+
+	var got adminOverviewResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !got.Retry.Enabled {
+		t.Fatal("retry.enabled must be true")
+	}
+	if got.Retry.Attempts != defaultRetryAttempts {
+		t.Errorf("retry.attempts = %d, want the default %d (raw config left Attempts at 0)", got.Retry.Attempts, defaultRetryAttempts)
+	}
+	if got.Retry.Backoff != defaultRetryBackoff {
+		t.Errorf("retry.backoff = %q, want the default %q (raw config left Backoff empty)", got.Retry.Backoff, defaultRetryBackoff)
 	}
 }
 
@@ -478,7 +516,7 @@ func TestAdminPage_CSPHeaderAndFetchURLs(t *testing.T) {
 	if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "text/html") {
 		t.Errorf("content-type = %q, want text/html", ct)
 	}
-	wantCSP := "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'"
+	wantCSP := "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
 	if got := rec.Header().Get("Content-Security-Policy"); got != wantCSP {
 		t.Errorf("CSP = %q, want %q", got, wantCSP)
 	}
@@ -506,7 +544,7 @@ func TestAdmin_JSONSecurityHeaders(t *testing.T) {
 	cfg := newAdminTestConfig()
 	h, _ := newAdminGatewayHandle(t, cfg)
 
-	wantCSP := "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'"
+	wantCSP := "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
 	for _, p := range []string{adminOverviewPath, adminUsagePath} {
 		t.Run(p, func(t *testing.T) {
 			rec := httptest.NewRecorder()
@@ -660,8 +698,9 @@ func TestAdminOverview_BaseURLStripsCredentials(t *testing.T) {
 
 // countingMultiStore is a counterStore stub whose getMulti serves a fixed
 // value per key and counts how many times it was called — it proves
-// limiter.currentUsage batches a scope's six counter reads into one
-// getMulti call rather than issuing them as six separate get calls.
+// limiter.currentUsage flattens every scope's six counter reads into ONE
+// getMulti call total (v0.2 final review wave, 2026-08-20), rather than
+// six separate get calls or even one getMulti call per scope.
 // incrBy/get are never exercised by currentUsage and just return zero
 // values.
 type countingMultiStore struct {
@@ -682,7 +721,7 @@ func (s *countingMultiStore) getMulti(keys []string) ([]int64, error) {
 	return out, nil
 }
 
-func TestLimiterCurrentUsage_BatchesOneGetMultiCallPerScope(t *testing.T) {
+func TestLimiterCurrentUsage_BatchesOneGetMultiCallForAllScopes(t *testing.T) {
 	t.Parallel()
 	fixedNow := time.Date(2026, 8, 20, 10, 0, 0, 0, time.UTC)
 	store := &countingMultiStore{values: map[string]int64{
@@ -703,8 +742,8 @@ func TestLimiterCurrentUsage_BatchesOneGetMultiCallPerScope(t *testing.T) {
 	}
 	got := l.currentUsage(scopes)
 
-	if store.getMultiCalls != len(scopes) {
-		t.Errorf("getMultiCalls = %d, want %d (one pipelined getMulti per scope, not six separate get calls)", store.getMultiCalls, len(scopes))
+	if store.getMultiCalls != 1 {
+		t.Errorf("getMultiCalls = %d, want 1 (all scopes' keys flattened into one pipelined getMulti call)", store.getMultiCalls)
 	}
 	if len(got) != 2 {
 		t.Fatalf("len(got) = %d, want 2", len(got))

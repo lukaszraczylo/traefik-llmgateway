@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 )
 
@@ -22,8 +23,16 @@ const (
 // folded review item, 2026-08-20 review): no external assets of any
 // kind, only this page's own inline script/style, and fetch calls
 // restricted to same-origin — the dashboard works air-gapped and cannot
-// be coerced into loading anything off-host.
-const adminCSP = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'"
+// be coerced into loading anything off-host. frame-ancestors/base-uri/
+// form-action are all 'none' (v0.2 final review wave, 2026-08-20): the
+// page carries a password-type key-entry input, so it must never be
+// embeddable in another site's frame (clickjacking), never have its
+// <base> href hijacked to retarget a relative script/fetch URL, and never
+// have its auth-form submitted anywhere but nowhere at all — the form's
+// own submit handler already intercepts and cancels the real submit
+// (adminPageHTML's "submit" listener calls preventDefault()), so
+// form-action has nothing legitimate to allow.
+const adminCSP = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
 
 // adminEnabled reports whether cfg's Admin block is present and enabled —
 // the single gate ServeHTTP checks before matching any /admin* route at
@@ -139,6 +148,29 @@ func sanitizeBaseURL(raw string) string {
 	return u.String()
 }
 
+// sanitizeProviderErr applies sanitizeBaseURL's userinfo/query-stripping
+// treatment to lastErr before it is ever echoed by GET /admin/api/overview
+// (v0.2 final review wave, 2026-08-20): a provider's discovery/refresh
+// error commonly embeds the request URL it failed against (Go's
+// net/http wraps a *url.Error carrying it verbatim), so a baseUrl
+// misconfigured with embedded credentials would otherwise leak straight
+// back out through this field, even though adminProviderView.BaseURL
+// itself is already sanitized.
+//
+// This is best-effort, not a general URL scrubber: it looks only for
+// rawBaseURL appearing verbatim inside lastErr and replaces every such
+// occurrence with sanitizeBaseURL's cleaned form. An error naming some
+// OTHER URL — a redirect target, a differently-formatted variant of the
+// same host — is not caught; recognizing every URL shape a wrapped error
+// might embed, without risking mangling ordinary error text, is not
+// attempted here.
+func sanitizeProviderErr(lastErr, rawBaseURL string) string {
+	if lastErr == "" || rawBaseURL == "" || !strings.Contains(lastErr, rawBaseURL) {
+		return lastErr
+	}
+	return strings.ReplaceAll(lastErr, rawBaseURL, sanitizeBaseURL(rawBaseURL))
+}
+
 // adminProviderView is one provider's read-only view in GET
 // /admin/api/overview (spec §4, v0.2). baseUrl is not secret — the
 // spec's NEVER-exposed list is API keys (not even digests), provider
@@ -179,6 +211,21 @@ type adminCacheView struct {
 	Enabled bool   `json:"enabled"`
 }
 
+// adminRetryView is the retry config summary in GET /admin/api/overview
+// (v0.2 final review wave, 2026-08-20): the EFFECTIVE enabled/attempts/
+// backoff a `retry: {enabled: true}` block resolves to, after
+// newRetryPolicy's own zero-value defaulting (retry.go) — not the raw,
+// possibly-empty RetryConfig fields, so an operator sees what actually
+// governs upstream calls, not just what they left unset. Attempts and
+// Backoff are both omitted (zero value / empty string) when retry is
+// disabled, mirroring adminCacheView's own omitempty convention for a
+// disabled feature's now-meaningless detail fields.
+type adminRetryView struct {
+	Backoff  string `json:"backoff,omitempty"`
+	Enabled  bool   `json:"enabled"`
+	Attempts int    `json:"attempts,omitempty"`
+}
+
 // adminGroupView is one group's summary in GET /admin/api/overview.
 type adminGroupView struct {
 	Limits      *LimitsConfig `json:"limits,omitempty"`
@@ -205,6 +252,7 @@ type adminOverviewResponse struct {
 	Aliases   []adminAliasView    `json:"aliases"`
 	Redis     adminRedisView      `json:"redis"`
 	Cache     adminCacheView      `json:"cache"`
+	Retry     adminRetryView      `json:"retry"`
 }
 
 // buildAdminOverview assembles adminOverviewResponse from the registry,
@@ -220,7 +268,7 @@ func (g *Gateway) buildAdminOverview() adminOverviewResponse {
 			BaseURL:     sanitizeBaseURL(s.baseURL),
 			ModelCount:  s.modelCount,
 			LastRefresh: s.lastRefresh,
-			LastErr:     s.lastErr,
+			LastErr:     sanitizeProviderErr(s.lastErr, s.baseURL),
 		}
 	}
 
@@ -230,6 +278,19 @@ func (g *Gateway) buildAdminOverview() adminOverviewResponse {
 	var ttl string
 	if cacheEnabled {
 		ttl = g.cache.ttl.String()
+	}
+
+	// newRetryPolicy is pure (no I/O) and already ran once, successfully,
+	// when this Gateway was constructed (providers.go's buildAdapters) —
+	// g.cfg.Retry cannot have changed since a running Gateway never
+	// mutates its own config, so this second call is guaranteed to return
+	// the identical result with a nil error; the error return is
+	// intentionally discarded rather than propagated.
+	rp, _ := newRetryPolicy(g.cfg.Retry)
+	retryView := adminRetryView{Enabled: rp.enabled}
+	if rp.enabled {
+		retryView.Attempts = rp.attempts
+		retryView.Backoff = rp.backoff.String()
 	}
 
 	_, groupSummaries := g.auth.snapshot()
@@ -248,6 +309,7 @@ func (g *Gateway) buildAdminOverview() adminOverviewResponse {
 		Providers: providers,
 		Redis:     adminRedisView{Configured: configured, LastErr: redisLastErr, LastErrAt: redisLastErrAt},
 		Cache:     adminCacheView{Enabled: cacheEnabled, TTL: ttl},
+		Retry:     retryView,
 		Groups:    groups,
 		Aliases:   aliases,
 		Version:   pluginVersion,
@@ -309,25 +371,28 @@ func usageEntryView(su scopeUsage, limits *LimitsConfig) adminUsageEntryView {
 // buildAdminUsage assembles adminUsageResponse: authStore.snapshot lists
 // every currently active user and every configured group (names, group
 // membership, and limits only — never a key or its digest), and
-// limiter.currentUsage reads each one's six current-window counters —
-// one batched round trip per scope (limits.go's storeGetMulti) rather
-// than six separate ones. Unlike buildLimitScopes (routes_unified.go),
-// this never omits an entity for having nil limits — the dashboard shows
-// usage for every user and group, limited or not.
+// limiter.currentUsage reads every one's six current-window counters in
+// ONE storeGetMulti round trip total (v0.2 final review wave, 2026-08-20;
+// see limiter.currentUsage's own doc comment for the tradeoff this
+// supersedes) — users and groups are concatenated into a single scopes
+// slice before that one call, then the flat result is sliced back into
+// the two response sections at the same split point, order preserved.
+// Unlike buildLimitScopes (routes_unified.go), this never omits an
+// entity for having nil limits — the dashboard shows usage for every
+// user and group, limited or not.
 func (g *Gateway) buildAdminUsage() adminUsageResponse {
 	userSummaries, groupSummaries := g.auth.snapshot()
 
-	userScopes := make([]limitScope, len(userSummaries))
-	for i, us := range userSummaries {
-		userScopes[i] = limitScope{kind: "user", id: us.name, limits: us.limits}
+	scopes := make([]limitScope, 0, len(userSummaries)+len(groupSummaries))
+	for _, us := range userSummaries {
+		scopes = append(scopes, limitScope{kind: "user", id: us.name, limits: us.limits})
 	}
-	groupScopes := make([]limitScope, len(groupSummaries))
-	for i, gs := range groupSummaries {
-		groupScopes[i] = limitScope{kind: "group", id: gs.name, limits: gs.limits}
+	for _, gs := range groupSummaries {
+		scopes = append(scopes, limitScope{kind: "group", id: gs.name, limits: gs.limits})
 	}
 
-	userUsage := g.limiter.currentUsage(userScopes)
-	groupUsage := g.limiter.currentUsage(groupScopes)
+	allUsage := g.limiter.currentUsage(scopes)
+	userUsage, groupUsage := allUsage[:len(userSummaries)], allUsage[len(userSummaries):]
 
 	users := make([]adminUsageEntryView, len(userUsage))
 	for i, su := range userUsage {
@@ -571,6 +636,8 @@ const adminPageHTML = `<!doctype html>
     infra.appendChild(el("div", redisText, "infra-line"));
     var cacheText = "Cache: " + (data.cache.enabled ? "enabled (ttl " + data.cache.ttl + ")" : "disabled");
     infra.appendChild(el("div", cacheText, "infra-line"));
+    var retryText = "Retry: " + (data.retry.enabled ? "enabled (attempts " + data.retry.attempts + ", backoff " + data.retry.backoff + ")" : "disabled");
+    infra.appendChild(el("div", retryText, "infra-line"));
     infra.appendChild(el("div", "Version: " + data.version, "infra-line muted"));
 
     groupMeta = {};

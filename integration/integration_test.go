@@ -21,6 +21,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"os"
 	"os/exec"
@@ -85,6 +86,61 @@ func doJSON(t *testing.T, method, url, apiKey string, body any) (*http.Response,
 	var out map[string]any
 	if len(raw) > 0 {
 		_ = json.Unmarshal(raw, &out) // non-JSON body (e.g. an SSE stream) just yields a nil map
+	}
+	return resp, out
+}
+
+// buildMultipartAudio builds a multipart/form-data body carrying a dummy
+// "file" part and a "model" part set to model, mirroring what an
+// OpenAI-SDK client sends to POST /v1/audio/transcriptions. It returns the
+// encoded body and its matching Content-Type (including the boundary
+// parameter multipart.Writer generated).
+func buildMultipartAudio(t *testing.T, model string) ([]byte, string) {
+	t.Helper()
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	fw, err := mw.CreateFormFile("file", "audio.wav")
+	if err != nil {
+		t.Fatalf("create form file part: %v", err)
+	}
+	if _, err := fw.Write([]byte("mock-audio-bytes")); err != nil {
+		t.Fatalf("write file part: %v", err)
+	}
+	if err := mw.WriteField("model", model); err != nil {
+		t.Fatalf("write model field: %v", err)
+	}
+	if err := mw.Close(); err != nil {
+		t.Fatalf("close multipart writer: %v", err)
+	}
+	return buf.Bytes(), mw.FormDataContentType()
+}
+
+// doMultipart issues one multipart/form-data POST, mirroring doJSON's
+// contract: the returned *http.Response has already had its body read and
+// closed, and a non-JSON or empty body decodes to a nil map.
+func doMultipart(t *testing.T, url, apiKey, contentType string, body []byte) (*http.Response, map[string]any) {
+	t.Helper()
+
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("new request POST %s: %v", url, err)
+	}
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	req.Header.Set("Content-Type", contentType)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("do request POST %s: %v", url, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read response body from POST %s: %v", url, err)
+	}
+	var out map[string]any
+	if len(raw) > 0 {
+		_ = json.Unmarshal(raw, &out)
 	}
 	return resp, out
 }
@@ -825,6 +881,39 @@ func TestAudioSpeech(t *testing.T) {
 	if string(raw) != want {
 		t.Errorf("audio speech: body = %q, want the mock's exact bytes %q", raw, want)
 	}
+}
+
+// TestAudioTranscriptions covers the review wave's highest-value Yaegi gap:
+// POST /v1/audio/transcriptions' multipart handling under real
+// Traefik+Yaegi. A provider-prefixed model ("openai/gpt-mock") drives
+// rewriteMultipartModel (routes_media.go), which rebuilds the multipart
+// body with the "model" part rewritten to the resolved bare upstream id
+// before it reaches the mock — asserted via mock/main.go's
+// handleOpenAIAudioTranscriptions echoing "model_received" back. A second,
+// already-bare request ("gpt-mock") exercises the byte-identical replay
+// path instead: no rebuild, same bare id reported back verbatim.
+func TestAudioTranscriptions(t *testing.T) {
+	t.Run("provider-prefixed model is rewritten before upload", func(t *testing.T) {
+		body, contentType := buildMultipartAudio(t, "openai/gpt-mock")
+		resp, decoded := doMultipart(t, traefik1URL+"/v1/audio/transcriptions", aliceKey, contentType, body)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status = %d, body=%#v", resp.StatusCode, decoded)
+		}
+		if got, _ := decoded["model_received"].(string); got != "gpt-mock" {
+			t.Errorf("model_received = %q, want %q (rewritten from the provider-prefixed id)", got, "gpt-mock")
+		}
+	})
+
+	t.Run("bare model replays the original body unchanged", func(t *testing.T) {
+		body, contentType := buildMultipartAudio(t, "gpt-mock")
+		resp, decoded := doMultipart(t, traefik1URL+"/v1/audio/transcriptions", aliceKey, contentType, body)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status = %d, body=%#v", resp.StatusCode, decoded)
+		}
+		if got, _ := decoded["model_received"].(string); got != "gpt-mock" {
+			t.Errorf("model_received = %q, want %q (byte-identical replay, no rewrite needed)", got, "gpt-mock")
+		}
+	})
 }
 
 // TestAdminDashboard covers v0.2 integration coverage (spec §4): the

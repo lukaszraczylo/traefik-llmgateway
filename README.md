@@ -171,7 +171,17 @@ config accepts them as YAML, which decodes to the same JSON shape.
 | `cache` | `CacheConfig` | `{}` (disabled) | Opt-in Redis-backed response cache for unified non-streaming chat/embeddings — see [Caching](#caching). Omitted or `enabled: false` means no caching, byte-identical to a gateway built before this field existed. |
 | `admin` | `*AdminConfig` | `nil` (disabled) | Read-only admin dashboard — see [Admin](#admin). `nil` or `enabled: false` means the `/admin*` routes are not registered at all. |
 | `modelAliases` | `map[string]string` | `{}` | Operator-defined alias id → target model id — see [Model aliases](#model-aliases). Omitted or empty means no aliases, byte-identical to a gateway built before this field existed. |
-| `passthroughUnknown` | `bool` | `false` | `false`: a request matching none of the plugin's routes gets a 404 JSON envelope. `true`: it falls through to the router's own backing service. |
+| `passthroughUnknown` | `bool` | `false` | `false`: a request matching none of the plugin's routes gets a 404 JSON envelope. `true`: it falls through to the router's own backing service. **Does not cover the three media routes** — see the upgrade note below. |
+
+> **Upgrading from v0.1**: `POST /v1/images/generations`, `POST
+> /v1/audio/speech`, and `POST /v1/audio/transcriptions` are now handled by
+> the gateway itself, unconditionally — see [Image and audio
+> endpoints](#image-and-audio-endpoints). They no longer fall through to
+> `next` even when `passthroughUnknown: true`. A v0.1 deployment that
+> served its own backend on any of these three exact paths, relying on
+> passthrough to reach it, must move that backend to a different path
+> before upgrading to v0.2 — the gateway now intercepts these paths first,
+> every time.
 
 Provider, `mcpServers`, and `agents` map **keys** (names) must match
 `^[a-zA-Z0-9._-]+$` and must not be `v1`, `mcp`, or `a2a` — those names are
@@ -348,10 +358,15 @@ kept — a bad edit to the file never breaks already-authenticated traffic.
   through the explicit `provider/model` form regardless of who won the
   bare id, and `GET /v1/models` lists both the bare (winner's) form and
   every `provider/model` form.
-- Authorization always requires both `group.allowsModel` and
+- **On the unified routes** (`modelRegistry.resolve`, used by
+  `/v1/chat/completions`, `/v1/embeddings`, and the three media
+  endpoints), authorization requires both `group.allowsModel` and
   `group.allowsProvider` for the resolved provider — a model that exists
   but the caller's group cannot reach returns 403, distinct from a model no
-  configured provider knows at all (404).
+  configured provider knows at all (404). Native passthrough
+  (`/{provider}/...`) resolves no model at all and checks
+  `group.allowsProvider` only — see the authorization row in [Unified vs.
+  passthrough](#unified-vs-passthrough).
 - **Discovery**: `GET {baseUrl}/v1/models` for an `openai`-type provider,
   `GET {baseUrl}/v1/models` for `anthropic`, `GET {baseUrl}/v1beta/models`
   for `gemini`. Runs once at plugin construction (bounded to 5s per
@@ -489,9 +504,11 @@ predates this field keeps making exactly one upstream attempt per
 request.
 
 - **Scope**: every adapter upstream call — chat, embeddings, model
-  listing — across all three provider types. Native passthrough
-  (`/{provider}/...`) and the MCP/A2A proxy are raw reverse proxies and
-  are never retried; the client owns retry semantics there.
+  listing, and the three media endpoints (`images/generations`,
+  `audio/speech`, `audio/transcriptions`) — across all three provider
+  types. Native passthrough (`/{provider}/...`) and the MCP/A2A proxy are
+  raw reverse proxies and are never retried; the client owns retry
+  semantics there.
 - **Attempts is retries, not tries**: `attempts` counts retries
   performed **after** the first try. The default, `1`, allows one retry
   — two tries total, not one. The maximum, `3`, allows three retries —
@@ -579,6 +596,7 @@ cached bodies for the same request.
 | | Unified (`/v1/...`) | Native passthrough (`/{provider}/...`) |
 |---|---|---|
 | Wire format | Always OpenAI-shaped in, OpenAI-shaped out. | The provider's own native format, untouched. |
+| Authorization | `group.allowsModel` AND `group.allowsProvider`, both checked against the resolved provider (`modelRegistry.resolve` — see [Model routing](#model-routing)). | `group.allowsProvider` only. Passthrough resolves no model at all, so there is nothing for `allowsModel` to gate. |
 | Translation | `openai`-type: body forwarded verbatim (model id rewritten). `anthropic`/`gemini`: full bidirectional translation, including streaming, chunk by chunk. | None — a raw reverse proxy. |
 | Model alias in the response | Translated providers (`anthropic`, `gemini`) echo back the client's exact requested model string in the response's `model` field, even though the upstream call used the resolved provider model id. An `openai`-type response is a verbatim passthrough of the upstream body, so it carries whatever model id the upstream itself returned — this asymmetry is intentional, not a bug. | The upstream's own `model` field, verbatim — there is no alias to echo. |
 | Embeddings | `openai`-type: passthrough. `gemini`: mapped to `:embedContent`/`:batchEmbedContents`. `anthropic`: **501** — Anthropic's API has no embeddings endpoint. | Whatever the provider itself supports at that path; the gateway does not gate it. |
@@ -591,6 +609,14 @@ cached bodies for the same request.
 `POST /v1/audio/transcriptions` follow the same pipeline as
 `/v1/chat/completions` — auth, model routing, group authorization, limits,
 adapter call — minus response caching and token/cost accounting (below).
+
+> **Upgrading from v0.1**: these three routes are now handled by the
+> gateway unconditionally. They are matched and served before
+> `passthroughUnknown` is ever consulted, so a request to any of them
+> **never** falls through to `next` — not even with `passthroughUnknown:
+> true`. If a v0.1 deployment pointed its router's backing service at one
+> of these exact paths and relied on passthrough to reach it, that backend
+> must move to a different path before upgrading.
 
 | | `openai`-type | `gemini` | `anthropic` |
 |---|---|---|---|
@@ -674,7 +700,10 @@ request to any of them falls through to the plugin's existing
   gate: unauthenticated → 401, authenticated non-admin → 403, admin →
   serve. `overview` returns the provider list, groups, the configured
   model alias table (`alias`/`target` pairs, sorted by alias — see
-  [Model aliases](#model-aliases)), redis/cache status, and the plugin
+  [Model aliases](#model-aliases)), redis/cache/retry status (`retry`'s
+  `enabled`/`attempts`/`backoff` are the EFFECTIVE values after
+  [Retry](#retry)'s own defaulting, not the raw config — `attempts` and
+  `backoff` are both omitted when retry is disabled), and the plugin
   version string. `usage` returns every user's and every group's
   current-window counter values (req/min, req/day, tok/day, tok/month,
   cost/day, cost/month) alongside their configured limits.
@@ -793,6 +822,18 @@ request to any of them falls through to the plugin's existing
   move a token counter and always record cost as 0, regardless of what a
   provider itself would charge for them — a real gap for an operator
   billing on these endpoints, not just an accounting nuance.
+- **An upstream response over 32MiB (`maxResponseBytes`, `providers.go`)
+  is silently truncated, not rejected.** Every adapter response read — the
+  unified chat/embeddings JSON, and the three media endpoints — is capped
+  at this limit. `audio/speech`'s streaming copy (`openaiAdapter.audioSpeech`,
+  `provider_openai.go`) already committed the upstream's 200 status before
+  it starts copying bytes, so a response over the cap simply ends early: no
+  error, no truncation signal of any kind, a shorter audio file
+  indistinguishable from a genuinely short one. `images/generations` and
+  `audio/transcriptions` (`forwardMediaBody`) read their whole response
+  before writing a status, so they hit the identical cap with the same
+  silent-truncation-into-200 outcome. 32MiB is generous for any of these
+  payloads in practice, but nothing enforces or signals the cutoff.
 - **The response cache shares entries across every user and group that
   can reach a model.** `cache`'s key (see [Caching](#caching)) carries no
   user identity by design, so two different callers sending the same

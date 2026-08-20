@@ -3,6 +3,17 @@
 # (.goreleaser.yaml), so these entries are the actual filter for the
 # release source tarball — not the archive block's own file globs, which
 # have no negation syntax and cannot exclude anything.
+# WARNING (v0.2 final review wave, 2026-08-20): vendor/ is safe to
+# export-ignore ONLY because every current go.mod dependency
+# (github.com/stretchr/testify, its go.yaml.in/yaml/v3 indirect) is a
+# TEST-only dependency, imported solely by *_test.go files — which are
+# themselves export-ignored below, so the released tarball never contains
+# code that imports them and never needs vendor/ to build. go.mod itself
+# is NOT export-ignored and ships in every release tarball as-is. The
+# moment any non-test .go file (production code, not *_test.go) imports a
+# third-party package, this line MUST be removed: otherwise the tarball
+# ships a go.mod requiring a module its own vendor/ was stripped out of,
+# and the extracted source cannot build standalone.
 vendor/ export-ignore
 integration/ export-ignore
 tools/ export-ignore

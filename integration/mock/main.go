@@ -84,6 +84,7 @@ func newServerMux(mode string) (*http.ServeMux, error) {
 		mux.HandleFunc("/flaky/reset", handleFlakyReset)
 		mux.HandleFunc("/v1/images/generations", handleOpenAIImages)
 		mux.HandleFunc("/v1/audio/speech", handleOpenAIAudioSpeech)
+		mux.HandleFunc("/v1/audio/transcriptions", handleOpenAIAudioTranscriptions)
 	case "anthropic":
 		mux.HandleFunc("/v1/models", handleAnthropicModels)
 		mux.HandleFunc("/v1/messages", handleAnthropicMessages)
@@ -307,6 +308,27 @@ func handleOpenAIAudioSpeech(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "audio/mpeg")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(mockAudioBytes)
+}
+
+// handleOpenAIAudioTranscriptions answers POST /v1/audio/transcriptions by
+// parsing the multipart body Traefik forwarded and echoing back the "model"
+// form field it finds — this is the review wave's highest-value Yaegi
+// coverage gap closed: the audio-transcriptions integration test sends a
+// provider-prefixed model ("openai/gpt-mock") and asserts this handler
+// receives the bare, rewritten form ("gpt-mock"), proving
+// rewriteMultipartModel (routes_media.go) actually rebuilds the multipart
+// body under real Traefik+Yaegi, not just in the compiled unit tests. A
+// second, already-bare request exercises the byte-identical replay path
+// instead, so this same field still reads back "gpt-mock" with no rebuild.
+func handleOpenAIAudioTranscriptions(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseMultipartForm(1 << 20); err != nil { //nolint:gosec // G120: maxMemory is set (1MiB) and the whole handler is behind readCapped's 10MiB gateway-side cap (routes_media.go) before this mock ever sees the body; test-only fixture server, not production code
+		http.Error(w, `{"error":{"message":"invalid multipart body","type":"invalid_request_error"}}`, http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, map[string]any{
+		"text":           "mock transcription",
+		"model_received": r.FormValue("model"),
+	})
 }
 
 // --- anthropic mode ----------------------------------------------------------

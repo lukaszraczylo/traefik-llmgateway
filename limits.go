@@ -723,42 +723,60 @@ func usageWindowKeys(sc limitScope, now time.Time) []string {
 // does, and it is read-only: unlike checkAndCount, it never increments
 // anything.
 //
-// One storeGetMulti call per scope (controller-approved amendment,
-// 2026-08-20 review): the original per-metric l.getCounter loop issued
-// six separate round trips per scope against the single shared Redis
-// connection — GET /admin/api/usage serialized 6×(users+groups) of them.
-// Batching all scopes' keys into one single storeGetMulti call would cut
-// that further, to one round trip total, but was not taken here: it
-// would need buildAdminUsage to flatten and later re-split two
-// differently-sized scope lists (users, groups) around one shared call,
-// for a further win only realized when both lists are non-trivially
-// large. One call per scope already turns 6N round trips into N, keeps
-// currentUsage's per-scope iteration shape identical to
-// checkAndCount/evaluateScope's, and keeps a single scope's store
-// failure from forcing every other scope in the same request to look
-// storeDown too. Order is preserved: currentUsage(scopes)[i] corresponds
-// to scopes[i].
+// ONE storeGetMulti call for the whole scopes slice (v0.2 final review
+// wave, 2026-08-20; supersedes the "one call per scope" amendment this
+// comment previously described, 2026-08-20 review): every scope's six
+// keys are flattened into a single round trip against the shared store,
+// rather than N separate ones. The reviewer-confirmed reason for this
+// second amendment: GET /admin/api/usage's per-scope loop was contending
+// with request admission on the same store connection as live traffic,
+// and N round trips (even pipelined 6-at-a-time) scales with the number
+// of configured users and groups in a way one round trip does not.
+// buildAdminUsage (admin.go) drives this by concatenating its users and
+// groups into one scopes slice before calling in, then slicing the flat
+// result back into its two response sections at the same split point.
+//
+// Tradeoff given up by this second amendment: a transient store error
+// now marks every scope in the call storeDown together, where the
+// previous per-scope loop could let one scope's failure land mid-batch
+// while a later scope's own independent call still succeeded. That
+// isolation was never a documented guarantee of this method, only an
+// incidental property of how it was written — cutting N round trips to 1
+// is the reviewer-confirmed right side of this tradeoff. Order is
+// preserved: currentUsage(scopes)[i] corresponds to scopes[i].
 func (l *limiter) currentUsage(scopes []limitScope) []scopeUsage {
-	now := l.now()
 	out := make([]scopeUsage, len(scopes))
-	for i, sc := range scopes {
-		keys := usageWindowKeys(sc, now)
-		vals, ok := l.storeGetMulti(keys)
-		// len(vals) != len(keys) is reachable only from a non-conforming
-		// counterStore implementation (a real respClient.getMulti and
-		// memoryStore.getMulti both always return one value per key) —
-		// guarded defensively so a future or test-only store's short
-		// slice reports storeDown instead of panicking on an
-		// out-of-range index below (review sweep, 2026-08-20).
-		if !ok || len(vals) != len(keys) {
+	if len(scopes) == 0 {
+		return out
+	}
+
+	now := l.now()
+	allKeys := make([]string, 0, len(scopes)*6)
+	for _, sc := range scopes {
+		allKeys = append(allKeys, usageWindowKeys(sc, now)...)
+	}
+
+	vals, ok := l.storeGetMulti(allKeys)
+	// len(vals) != len(allKeys) is reachable only from a non-conforming
+	// counterStore implementation (a real respClient.getMulti and
+	// memoryStore.getMulti both always return one value per key) —
+	// guarded defensively so a future or test-only store's short slice
+	// reports every scope storeDown instead of panicking on an
+	// out-of-range index below (review sweep, 2026-08-20).
+	if !ok || len(vals) != len(allKeys) {
+		for i, sc := range scopes {
 			out[i] = scopeUsage{kind: sc.kind, id: sc.id, storeDown: true}
-			continue
 		}
+		return out
+	}
+
+	for i, sc := range scopes {
+		v := vals[i*6 : i*6+6]
 		out[i] = scopeUsage{
 			kind: sc.kind, id: sc.id,
-			requestsPerMinute: vals[0], requestsPerDay: vals[1],
-			tokensPerDay: vals[2], tokensPerMonth: vals[3],
-			costPerDayMicros: vals[4], costPerMonthMicros: vals[5],
+			requestsPerMinute: v[0], requestsPerDay: v[1],
+			tokensPerDay: v[2], tokensPerMonth: v[3],
+			costPerDayMicros: v[4], costPerMonthMicros: v[5],
 		}
 	}
 	return out
