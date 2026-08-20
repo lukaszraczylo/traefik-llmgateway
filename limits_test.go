@@ -6,6 +6,9 @@ import (
 	"math"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestLimiterRequestWindow is the brief's Step-1 case: a per-minute
@@ -628,6 +631,31 @@ func TestLimitsConfigValidate(t *testing.T) {
 			err := c.lc.validate()
 			if (err != nil) != c.wantErr {
 				t.Errorf("validate() error = %v, wantErr %v", err, c.wantErr)
+			}
+		})
+	}
+}
+
+// TestLimiter_FailPolicyGet covers failPolicyGet's own fail-open/fail-closed
+// branching in isolation (storeGet's error/latched paths already drive it
+// indirectly elsewhere in this file): failOpen=true reads through to the
+// in-process fallback, failOpen=false refuses outright.
+func TestLimiter_FailPolicyGet(t *testing.T) {
+	cases := []struct {
+		name     string
+		failOpen bool
+		wantOK   bool
+	}{
+		{name: "failOpen true reads the fallback", failOpen: true, wantOK: true},
+		{name: "failOpen false refuses", failOpen: false, wantOK: false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			l := newLimiter(nil, c.failOpen)
+			v, ok := l.failPolicyGet("k")
+			require.Equal(t, c.wantOK, ok)
+			if c.wantOK {
+				assert.Equal(t, int64(0), v)
 			}
 		})
 	}

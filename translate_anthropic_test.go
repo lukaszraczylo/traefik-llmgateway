@@ -12,6 +12,8 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
 )
 
 // goldenTestdataDir is where every fixture this file walks lives.
@@ -446,5 +448,62 @@ func TestAnthropicRequestFromOpenAI_MaxCompletionTokensPrecedence(t *testing.T) 
 	}
 	if got["max_tokens"] != int64(200) {
 		t.Errorf("max_tokens = %v, want 200 (max_completion_tokens takes precedence)", got["max_tokens"])
+	}
+}
+
+// TestIsTruthy pins isTruthy's truthy-only semantics (per its own doc
+// comment): only a present AND non-empty value counts as "the client
+// actually asked for this" — nil, false, 0, "", and an empty map/slice
+// must not trip a truthy-only unsupported-field check.
+func TestIsTruthy(t *testing.T) {
+	cases := []struct {
+		v    any
+		name string
+		want bool
+	}{
+		{name: "nil is falsy", v: nil, want: false},
+		{name: "bool true is truthy", v: true, want: true},
+		{name: "bool false is falsy", v: false, want: false},
+		{name: "nonzero float64 is truthy", v: float64(1.5), want: true},
+		{name: "zero float64 is falsy", v: float64(0), want: false},
+		{name: "nonempty string is truthy", v: "x", want: true},
+		{name: "empty string is falsy", v: "", want: false},
+		{name: "nonempty map is truthy", v: map[string]any{"a": 1}, want: true},
+		{name: "empty map is falsy", v: map[string]any{}, want: false},
+		{name: "nonempty slice is truthy", v: []any{1}, want: true},
+		{name: "empty slice is falsy", v: []any{}, want: false},
+		{name: "an unrecognized non-nil type is conservatively truthy", v: 42, want: true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			assert.Equal(t, c.want, isTruthy(c.v))
+		})
+	}
+}
+
+// TestToFloat64 covers every numeric shape toFloat64 accepts — the normal
+// post-json.Unmarshal float64, plus the Go-native int/int64/float32 shapes
+// a test or hand-built request can supply — and the fallback for anything
+// else.
+func TestToFloat64(t *testing.T) {
+	cases := []struct {
+		v      any
+		name   string
+		want   float64
+		wantOK bool
+	}{
+		{name: "float64", v: float64(3.5), want: 3.5, wantOK: true},
+		{name: "float32", v: float32(2.5), want: 2.5, wantOK: true},
+		{name: "int", v: int(7), want: 7, wantOK: true},
+		{name: "int64", v: int64(9), want: 9, wantOK: true},
+		{name: "unsupported type returns ok=false", v: "7", want: 0, wantOK: false},
+		{name: "nil returns ok=false", v: nil, want: 0, wantOK: false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, ok := toFloat64(c.v)
+			assert.Equal(t, c.wantOK, ok)
+			assert.Equal(t, c.want, got)
+		})
 	}
 }

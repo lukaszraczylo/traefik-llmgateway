@@ -13,6 +13,9 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // newMultipartTranscriptionRequest builds a POST /v1/audio/transcriptions
@@ -1034,4 +1037,57 @@ func TestAnthropicMediaEndpoints_Return501_NeverCallUpstream(t *testing.T) {
 			t.Fatalf("status = %d, want 501, body=%s", rec.Code, rec.Body.String())
 		}
 	})
+}
+
+// ---- resolveMediaRequest: the shared resolve/limit failure branches ----
+//
+// Every other media-route test above drives resolveMediaRequest's success
+// path only; these two cover its two failure returns (routes_media.go) —
+// a model no configured provider knows, and a limit violation — using
+// images.generations as the representative caller, since all three media
+// routes share the same resolveMediaRequest call.
+
+// TestHandleImagesGenerations_UnknownModel_404 covers resolveMediaRequest's
+// registry.resolve error branch: a model id no configured provider knows at
+// all.
+func TestHandleImagesGenerations_UnknownModel_404(t *testing.T) {
+	gw := newMediaTestGateway(t, newMediaTestConfig("http://127.0.0.1:1", "img-test"))
+
+	body := map[string]any{"model": "no-such-model", "prompt": "a cat"}
+	req := newUnifiedRequest(t, http.MethodPost, imagesGenerationsPath, "sk-alice", body)
+	rec := httptest.NewRecorder()
+	gw.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusNotFound, rec.Code, "body=%s", rec.Body.String())
+}
+
+// TestHandleImagesGenerations_LimitExceeded_429WithRetryAfter covers
+// resolveMediaRequest's checkAndCount violation branch: a second request
+// past a one-per-minute limit is refused before the adapter is ever called.
+func TestHandleImagesGenerations_LimitExceeded_429WithRetryAfter(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"created":1734000000,"data":[{"b64_json":"xyz"}]}`))
+	}))
+	defer srv.Close()
+
+	cfg := newMediaTestConfig(srv.URL, "img-test")
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{
+		{Name: "alice", Group: "default", APIKey: "sk-alice", Limits: &LimitsConfig{RequestsPerMinute: 1}},
+	}}
+	gw := newMediaTestGateway(t, cfg)
+
+	body := map[string]any{"model": "img-test", "prompt": "a cat"}
+	req1 := newUnifiedRequest(t, http.MethodPost, imagesGenerationsPath, "sk-alice", body)
+	rec1 := httptest.NewRecorder()
+	gw.ServeHTTP(rec1, req1)
+	require.Equal(t, http.StatusOK, rec1.Code, "first request body=%s", rec1.Body.String())
+
+	req2 := newUnifiedRequest(t, http.MethodPost, imagesGenerationsPath, "sk-alice", body)
+	rec2 := httptest.NewRecorder()
+	gw.ServeHTTP(rec2, req2)
+
+	assert.Equal(t, http.StatusTooManyRequests, rec2.Code, "body=%s", rec2.Body.String())
+	assert.NotEmpty(t, rec2.Header().Get("Retry-After"))
 }

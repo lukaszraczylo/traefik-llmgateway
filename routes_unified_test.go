@@ -17,6 +17,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
 )
 
 // newUnifiedRequest builds a POST request against the unified routes,
@@ -1607,5 +1609,50 @@ func TestCacheCaptureWriter_ImplicitStatus_CapturesContentType(t *testing.T) {
 	}
 	if cw.contentType != "application/json" {
 		t.Errorf("contentType = %q, want %q (must be captured on the implicit-200 path too)", cw.contentType, "application/json")
+	}
+}
+
+// TestUnifiedCostMicros covers ruling (d)'s two-id price lookup order:
+// canonical ("provider/model") first, falling back to bare — the upstream
+// model id alone — only when canonical has no configured price at all, in
+// neither overrides nor the built-in table.
+func TestUnifiedCostMicros(t *testing.T) {
+	u := usage{prompt: 1_000_000, completion: 1_000_000}
+
+	cases := []struct {
+		overrides map[string]*ModelPricing
+		name      string
+		canonical string
+		bare      string
+		want      int64
+	}{
+		{
+			name:      "canonical override price wins over bare",
+			canonical: "openai/gpt-5",
+			bare:      "gpt-5",
+			overrides: map[string]*ModelPricing{
+				"openai/gpt-5": {InputPerM: 1, OutputPerM: 2},
+			},
+			want: 3_000_000, // (1M prompt * $1/M) + (1M completion * $2/M), in micros
+		},
+		{
+			name:      "canonical unpriced falls back to bare's built-in price",
+			canonical: "unknown-provider/gpt-5",
+			bare:      "gpt-5",
+			overrides: nil,
+			want:      costMicros("gpt-5", u, nil),
+		},
+		{
+			name:      "neither id priced returns zero",
+			canonical: "unknown-provider/unknown-model",
+			bare:      "unknown-model",
+			overrides: nil,
+			want:      0,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			assert.Equal(t, c.want, unifiedCostMicros(c.canonical, c.bare, u, c.overrides))
+		})
 	}
 }

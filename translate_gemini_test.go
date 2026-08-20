@@ -9,6 +9,8 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
 )
 
 // geminiGoldenTestdataDir is where every fixture this file walks lives.
@@ -506,5 +508,62 @@ func TestGeminiEmbeddingInputTexts_RejectsNonStringArrayEntry(t *testing.T) {
 	var terr *translateError
 	if !errors.As(err, &terr) {
 		t.Fatalf("err = %v (%T), want *translateError", err, err)
+	}
+}
+
+// TestGeminiToolConfigFromOpenAI covers every tool_choice shape the request
+// mapping table lists: the three recognized string modes, a function-name
+// object, and the two "no mapping" cases (an unrecognized string, and an
+// object without a valid function.name) that must return nil so the caller
+// omits toolConfig entirely rather than sending a malformed one.
+func TestGeminiToolConfigFromOpenAI(t *testing.T) {
+	cases := []struct {
+		tc   any
+		want map[string]any
+		name string
+	}{
+		{
+			name: "none",
+			tc:   "none",
+			want: map[string]any{"functionCallingConfig": map[string]any{"mode": "NONE"}},
+		},
+		{
+			name: "auto",
+			tc:   "auto",
+			want: map[string]any{"functionCallingConfig": map[string]any{"mode": "AUTO"}},
+		},
+		{
+			name: "required",
+			tc:   "required",
+			want: map[string]any{"functionCallingConfig": map[string]any{"mode": "ANY"}},
+		},
+		{
+			name: "function object names the allowed function",
+			tc:   map[string]any{"type": "function", "function": map[string]any{"name": "get_weather"}},
+			want: map[string]any{"functionCallingConfig": map[string]any{
+				"mode":                 "ANY",
+				"allowedFunctionNames": []any{"get_weather"},
+			}},
+		},
+		{
+			name: "unrecognized string has no mapping",
+			tc:   "bogus",
+			want: nil,
+		},
+		{
+			name: "object without a function.name has no mapping",
+			tc:   map[string]any{"type": "function"},
+			want: nil,
+		},
+		{
+			name: "an unrecognized type has no mapping",
+			tc:   42,
+			want: nil,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			assert.Equal(t, c.want, geminiToolConfigFromOpenAI(c.tc))
+		})
 	}
 }

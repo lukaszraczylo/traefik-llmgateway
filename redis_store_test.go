@@ -3,6 +3,8 @@ package traefikllmgateway
 import (
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
 // TestRedisStore_IncrBy_PipelinesIncrbyAndExpire is the brief's Step-1
@@ -165,4 +167,18 @@ func TestLimiter_FailOpenTrue_HungRedisServer_FallsBackQuickly(t *testing.T) {
 	if elapsed >= 3*time.Second {
 		t.Fatalf("elapsed = %v, want < 3s (one respCallTimeout for the first op, the second latched and skipping the network entirely)", elapsed)
 	}
+}
+
+// TestRedisStore_Get_DownServer_ReturnsError asserts get surfaces a
+// transport failure (dead address) as an error, mirroring incrBy's own
+// contract for the same failure — the limiter's storeGet relies on this to
+// treat a Redis outage as a store error rather than a false zero reading.
+func TestRedisStore_Get_DownServer_ReturnsError(t *testing.T) {
+	ln := newFakeListener(t)
+	deadAddr := ln.Addr().String()
+	require.NoError(t, ln.Close())
+
+	store := newRedisStore(newRESPClient(deadAddr, "", 0))
+	_, err := store.get("k")
+	require.Error(t, err)
 }

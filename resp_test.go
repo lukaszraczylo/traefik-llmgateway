@@ -3,6 +3,7 @@ package traefikllmgateway
 import (
 	"bufio"
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -10,6 +11,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestEncodeCommand pins the exact RESP2 wire format every command must
@@ -592,5 +596,253 @@ func TestRESPClient_GetBytes_DownServer_ReturnsError(t *testing.T) {
 	c := newRESPClient(deadAddr, "", 0)
 	if _, _, err := c.getBytes("k"); err == nil {
 		t.Fatal("want an error dialing a dead address")
+	}
+}
+
+// --- fakeConn: a net.Conn whose Write/SetDeadline fail on command, for
+// the handful of respClient error branches a real TCP connection cannot be
+// coaxed into deterministically (a write failing on an otherwise-live
+// connection, SetDeadline failing on a reused connection) ---
+
+// fakeAddr is a trivial net.Addr for fakeConn's LocalAddr/RemoteAddr.
+type fakeAddr struct{}
+
+func (fakeAddr) Network() string { return "fake" }
+func (fakeAddr) String() string  { return "fake" }
+
+// fakeConn implements net.Conn, returning writeErr from Write and
+// setDeadlineErr from SetDeadline when set, so a test can drive respClient
+// methods directly against a connection already known bad — bypassing
+// ensureConnLocked's real net.DialTimeout, which always succeeds against a
+// live listener and so cannot itself be made to fail this way.
+type fakeConn struct {
+	writeErr       error
+	setDeadlineErr error
+}
+
+func (fakeConn) Read([]byte) (int, error) { return 0, io.EOF }
+
+func (c fakeConn) Write(b []byte) (int, error) {
+	if c.writeErr != nil {
+		return 0, c.writeErr
+	}
+	return len(b), nil
+}
+
+func (fakeConn) Close() error         { return nil }
+func (fakeConn) LocalAddr() net.Addr  { return fakeAddr{} }
+func (fakeConn) RemoteAddr() net.Addr { return fakeAddr{} }
+
+func (c fakeConn) SetDeadline(time.Time) error {
+	if c.setDeadlineErr != nil {
+		return c.setDeadlineErr
+	}
+	return nil
+}
+
+func (fakeConn) SetReadDeadline(time.Time) error  { return nil }
+func (fakeConn) SetWriteDeadline(time.Time) error { return nil }
+
+// --- dialTimeoutFor / respDeadlineExceededErr ---
+
+// TestDialTimeoutFor covers dialTimeoutFor's clamp: a deadline farther away
+// than respDialTimeout gets the fixed respDialTimeout, never the (larger)
+// remaining time — only a near deadline gets clamped down to the smaller
+// remaining value.
+func TestDialTimeoutFor(t *testing.T) {
+	cases := []struct {
+		check func(t *testing.T, got time.Duration)
+		name  string
+		delta time.Duration
+	}{
+		{
+			name:  "deadline farther away than respDialTimeout clamps to respDialTimeout",
+			delta: 10 * time.Second,
+			check: func(t *testing.T, got time.Duration) {
+				assert.Equal(t, respDialTimeout, got)
+			},
+		},
+		{
+			name:  "deadline closer than respDialTimeout returns the remaining time",
+			delta: 50 * time.Millisecond,
+			check: func(t *testing.T, got time.Duration) {
+				assert.Greater(t, got, time.Duration(0))
+				assert.Less(t, got, respDialTimeout)
+			},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			c.check(t, dialTimeoutFor(time.Now().Add(c.delta)))
+		})
+	}
+}
+
+// TestRespDeadlineExceededErr pins the three methods that let pipeline's
+// isTimeout check treat an already-elapsed call deadline exactly like any
+// other timed-out I/O error.
+func TestRespDeadlineExceededErr(t *testing.T) {
+	var err respDeadlineExceededErr
+	assert.Equal(t, "resp: call deadline already elapsed", err.Error())
+	assert.True(t, err.Timeout())
+	assert.True(t, err.Temporary())
+}
+
+// --- ensureConnLocked / attemptPipelineLocked / handshakeLocked error
+// branches only reachable via a pre-set connection, not a real dial ---
+
+// TestRESPClient_EnsureConnLocked_Errors covers ensureConnLocked's two
+// error returns that never touch the network: a reused connection whose
+// SetDeadline itself fails, and a deadline that has already elapsed before
+// a fresh dial would even start.
+func TestRESPClient_EnsureConnLocked_Errors(t *testing.T) {
+	cases := []struct {
+		name            string
+		client          func() *respClient
+		deadline        time.Time
+		wantErrContains string
+	}{
+		{
+			name: "reused connection: SetDeadline failure surfaces",
+			client: func() *respClient {
+				return &respClient{conn: fakeConn{setDeadlineErr: errors.New("stub: set deadline failed")}}
+			},
+			deadline:        time.Now().Add(time.Second),
+			wantErrContains: "set deadline",
+		},
+		{
+			name: "no connection yet: an already-elapsed deadline never dials",
+			client: func() *respClient {
+				return &respClient{addr: "127.0.0.1:1"}
+			},
+			deadline:        time.Now().Add(-time.Second),
+			wantErrContains: "call deadline already elapsed",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			err := c.client().ensureConnLocked(c.deadline)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), c.wantErrContains)
+		})
+	}
+}
+
+// TestRESPClient_AttemptPipelineLocked_WriteError covers the command-write
+// failure attemptPipelineLocked returns when an already-connected socket
+// refuses a write (a broken pipe) — distinct from a dial failure, which
+// never reaches this code path.
+func TestRESPClient_AttemptPipelineLocked_WriteError(t *testing.T) {
+	c := &respClient{
+		conn: fakeConn{writeErr: errors.New("stub: broken pipe")},
+		r:    bufio.NewReader(strings.NewReader("")),
+	}
+	_, err := c.attemptPipelineLocked([][]string{{"GET", "k"}}, time.Now().Add(time.Second))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "write")
+}
+
+// TestRESPClient_HandshakeLocked_WriteError covers handshakeLocked's own
+// write failure, the same broken-pipe shape as
+// TestRESPClient_AttemptPipelineLocked_WriteError but for the AUTH/SELECT
+// handshake command specifically.
+func TestRESPClient_HandshakeLocked_WriteError(t *testing.T) {
+	c := &respClient{conn: fakeConn{writeErr: errors.New("stub: broken pipe")}}
+	err := c.handshakeLocked("AUTH", "pw")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "AUTH")
+}
+
+// TestRESPClient_AuthHandshakeFailure_ErrorReplySurfaces covers
+// ensureConnLocked's AUTH-failure branch and handshakeLocked's respErr
+// branch together: a RESP error reply to AUTH must fail the call, not be
+// silently treated as success. It calls attemptPipelineLocked directly
+// (one attempt, one scripted connection) rather than the public do/
+// pipeline, which would retry once more against a second connection the
+// fakeRESPServer fixture — built for a server-initiated closeConn, not a
+// client-initiated close on handshake failure — cannot script cleanly.
+func TestRESPClient_AuthHandshakeFailure_ErrorReplySurfaces(t *testing.T) {
+	ln := newFakeListener(t)
+	runFakeRESPServer(t, ln, []respStep{
+		{wantArgs: []string{"AUTH", "wrong-pw"}, reply: []byte("-ERR invalid password\r\n")},
+	})
+
+	c := newRESPClient(ln.Addr().String(), "wrong-pw", 0)
+	_, err := c.attemptPipelineLocked([][]string{{"GET", "k"}}, time.Now().Add(2*time.Second))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "AUTH failed")
+}
+
+// --- getBatch ---
+
+// TestRESPClient_GetBatch covers every reply shape getBatch's decode loop
+// handles: a mix of hits and a missing key (RESP null bulk -> 0) on
+// success, and the three ways a single bad reply fails the whole batch —
+// a RESP error reply, an unexpected (non-bulk) reply type, and a bulk
+// value that is not a base-10 integer.
+func TestRESPClient_GetBatch(t *testing.T) {
+	cases := []struct {
+		name          string
+		wantErrSubstr string
+		keys          []string
+		steps         []respStep
+		want          []int64
+		wantErr       bool
+	}{
+		{
+			name: "mixed hits and a missing key",
+			keys: []string{"a", "b", "c"},
+			steps: []respStep{
+				{wantArgs: []string{"GET", "a"}, reply: []byte("$3\r\n123\r\n")},
+				{wantArgs: []string{"GET", "b"}, reply: []byte("$-1\r\n")},
+				{wantArgs: []string{"GET", "c"}, reply: []byte("$3\r\n456\r\n")},
+			},
+			want: []int64{123, 0, 456},
+		},
+		{
+			name: "a RESP error reply fails the whole batch",
+			keys: []string{"a", "b"},
+			steps: []respStep{
+				{wantArgs: []string{"GET", "a"}, reply: []byte("$1\r\n1\r\n")},
+				{wantArgs: []string{"GET", "b"}, reply: []byte("-ERR busy\r\n")},
+			},
+			wantErr:       true,
+			wantErrSubstr: "ERR busy",
+		},
+		{
+			name: "an unexpected reply type fails the whole batch",
+			keys: []string{"a"},
+			steps: []respStep{
+				{wantArgs: []string{"GET", "a"}, reply: []byte(":5\r\n")},
+			},
+			wantErr:       true,
+			wantErrSubstr: "unexpected reply type",
+		},
+		{
+			name: "a non-integer value fails the whole batch",
+			keys: []string{"a"},
+			steps: []respStep{
+				{wantArgs: []string{"GET", "a"}, reply: []byte("$3\r\nabc\r\n")},
+			},
+			wantErr:       true,
+			wantErrSubstr: "non-integer value",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			ln := newFakeListener(t)
+			steps := append([]respStep{{wantArgs: []string{"SELECT", "0"}, reply: []byte("+OK\r\n")}}, c.steps...)
+			runFakeRESPServer(t, ln, steps)
+
+			client := newRESPClient(ln.Addr().String(), "", 0)
+			got, err := client.getBatch(c.keys)
+			if c.wantErr {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), c.wantErrSubstr)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, c.want, got)
+		})
 	}
 }

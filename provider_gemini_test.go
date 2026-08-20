@@ -10,6 +10,9 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestNewGeminiAdapter_KeylessIsAConstructorError proves an empty resolved
@@ -565,4 +568,14 @@ func TestGeminiAdapter_ListModels(t *testing.T) {
 	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
 		t.Errorf("got %#v, want %#v", got, want)
 	}
+}
+
+// TestGeminiAdapter_HTTPClient proves httpClient returns the adapter's own
+// *http.Client — the one newGeminiAdapter constructed via
+// newAdapterHTTPClient — not a fresh or nil client.
+func TestGeminiAdapter_HTTPClient(t *testing.T) {
+	a, err := newGeminiAdapter("p1", "https://generativelanguage.googleapis.com", "AIza-test")
+	require.NoError(t, err)
+	require.NotNil(t, a.httpClient())
+	assert.Same(t, a.client, a.httpClient())
 }
