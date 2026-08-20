@@ -75,9 +75,12 @@ func (g *Gateway) handleEmbeddings(w http.ResponseWriter, r *http.Request, u *us
 
 // runUnified is the shared chat/embeddings pipeline: decode the request,
 // resolve its model, enforce per-user and per-group limits, invoke the
-// adapter via call, then account the resulting usage. w is wrapped in its
-// own statusTrackingWriter so a mid-stream adapter error (headers already
-// sent) can be told apart from one that failed before any write.
+// adapter via call, then account the resulting usage — even when call
+// itself returned an error, so usage captured before a mid-stream failure
+// still gets billed — before translating that error into a response. w is
+// wrapped in its own statusTrackingWriter so a mid-stream adapter error
+// (headers already sent) can be told apart from one that failed before any
+// write.
 func (g *Gateway) runUnified(w http.ResponseWriter, r *http.Request, u *user, grp *group, call adapterCall) {
 	sw := &statusTrackingWriter{ResponseWriter: w}
 
@@ -116,12 +119,18 @@ func (g *Gateway) runUnified(w http.ResponseWriter, r *http.Request, u *user, gr
 	req[gatewayAliasKey] = requestedModel
 
 	result, callErr := call(adapter, r.Context(), sw, req)
-	if callErr != nil {
-		g.handleAdapterError(sw, callErr, adapter.name())
-		return
-	}
 
-	if result.total() == 0 {
+	// Usage is accounted before the error branch below runs, not after:
+	// every adapter that can fail mid-stream (forwardStream in each of the
+	// three provider files) still returns whatever usage it had already
+	// captured alongside the error — a usage chunk that arrived just before
+	// a dropped connection must still be billed, or a client that aborts
+	// right after that frame arrives could repeat the trick to dodge every
+	// token/cost budget. A non-streaming failure (providerHTTPError,
+	// translateError, or a connection failure before any write) always
+	// carries zero usage by contract, so accounting it here is a no-op —
+	// account skips every write once both total tokens and cost are zero.
+	if callErr == nil && result.total() == 0 {
 		if streaming {
 			g.logf("unified route: zero usage reported for a streaming response from model %q; accounting the request only", canonical)
 		} else {
@@ -129,8 +138,12 @@ func (g *Gateway) runUnified(w http.ResponseWriter, r *http.Request, u *user, gr
 			result.estimated = true
 		}
 	}
-
 	g.limiter.account(scopes, result, unifiedCostMicros(canonical, upstreamModel, result, g.cfg.Pricing))
+
+	if callErr != nil {
+		g.handleAdapterError(sw, callErr, adapter.name())
+		return
+	}
 }
 
 // buildLimitScopes returns the limitScope slice runUnified passes to the

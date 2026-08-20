@@ -499,9 +499,14 @@ func (l *limiter) checkAndCount(scopes []limitScope) *limitViolation {
 
 // evaluateScope checks one scope's already-set limits against its
 // just-incremented request counts and its accumulated token/cost counts.
-// A nil limits field means nothing to evaluate — the scope's req counters
-// still incremented above, feeding other scopes' aggregates and future
-// observability, but this scope itself never blocks a request.
+// A nil limits field means nothing to evaluate for this scope. In
+// principle a nil-limits scope can still reach here with its req counters
+// already incremented by checkAndCount, since that increment runs before
+// any evaluation; in practice the unified route's buildLimitScopes
+// (routes_unified.go, ruling e) never builds one — it omits a user or
+// group scope from the slice entirely whenever that scope's own limits
+// are nil — so this check is a defensive no-op today, not a path any
+// current caller exercises.
 func (l *limiter) evaluateScope(sc limitScope, minCount, dayCount int64, now time.Time) *limitViolation {
 	if sc.limits == nil {
 		return nil

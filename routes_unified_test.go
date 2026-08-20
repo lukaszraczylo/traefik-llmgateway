@@ -373,6 +373,101 @@ func TestHandleEmbeddings_HappyPath(t *testing.T) {
 	}
 }
 
+// TestHandleChat_OpenAI_AliasKeyStrippedFromUpstreamBody asserts the
+// gatewayAliasKey convention field never reaches a real openai-type
+// provider on POST /v1/chat/completions: unlike anthropic/gemini, this
+// adapter marshals req verbatim as the upstream wire body, so a leftover
+// alias entry would arrive as an unrecognized request field. This test
+// fails if provider_openai.go's chatCompletion ever drops its
+// delete(req, gatewayAliasKey) call.
+func TestHandleChat_OpenAI_AliasKeyStrippedFromUpstreamBody(t *testing.T) {
+	const respBody = `{"id":"c1","choices":[{"message":{"role":"assistant","content":"hi"}}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`
+
+	var gotBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(respBody))
+	}))
+	defer srv.Close()
+
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{
+		"openai": {Type: "openai", BaseURL: srv.URL, APIKey: "k", Models: []string{"gpt-test"}},
+	}
+	cfg.Groups = map[string]*GroupConfig{"default": {}}
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{{Name: "alice", Group: "default", APIKey: "sk-alice"}}}
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	const requestedID = "openai/gpt-test"
+	body := map[string]any{"model": requestedID, "messages": []any{}}
+	req := newUnifiedRequest(t, http.MethodPost, "/v1/chat/completions", "sk-alice", body)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	sentUpstream := decodeJSONBody(t, gotBody)
+	if _, present := sentUpstream[gatewayAliasKey]; present {
+		t.Errorf("gatewayAliasKey %q leaked into the openai chat upstream request body: %v", gatewayAliasKey, sentUpstream)
+	}
+	if sentUpstream["model"] != "gpt-test" {
+		t.Errorf("upstream request model = %v, want bare upstream id %q", sentUpstream["model"], "gpt-test")
+	}
+}
+
+// TestHandleEmbeddings_OpenAI_AliasKeyStrippedFromUpstreamBody mirrors
+// TestHandleChat_OpenAI_AliasKeyStrippedFromUpstreamBody for POST
+// /v1/embeddings: this test fails if provider_openai.go's embeddings ever
+// drops its delete(req, gatewayAliasKey) call.
+func TestHandleEmbeddings_OpenAI_AliasKeyStrippedFromUpstreamBody(t *testing.T) {
+	const respBody = `{"object":"list","data":[{"embedding":[0.1]}],"usage":{"prompt_tokens":1,"total_tokens":1}}`
+
+	var gotBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(respBody))
+	}))
+	defer srv.Close()
+
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{
+		"openai": {Type: "openai", BaseURL: srv.URL, APIKey: "k", Models: []string{"text-embedding-3"}},
+	}
+	cfg.Groups = map[string]*GroupConfig{"default": {}}
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{{Name: "alice", Group: "default", APIKey: "sk-alice"}}}
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	const requestedID = "openai/text-embedding-3"
+	body := map[string]any{"model": requestedID, "input": "hello"}
+	req := newUnifiedRequest(t, http.MethodPost, "/v1/embeddings", "sk-alice", body)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	sentUpstream := decodeJSONBody(t, gotBody)
+	if _, present := sentUpstream[gatewayAliasKey]; present {
+		t.Errorf("gatewayAliasKey %q leaked into the openai embeddings upstream request body: %v", gatewayAliasKey, sentUpstream)
+	}
+	if sentUpstream["model"] != "text-embedding-3" {
+		t.Errorf("upstream request model = %v, want bare upstream id %q", sentUpstream["model"], "text-embedding-3")
+	}
+}
+
 // TestHandleChat_AnthropicProviderPrefixedModel_EchoesAliasInResponse
 // requests a provider-prefixed model id ("anthropic/claude-x"): the
 // upstream call must use the bare upstream id, but the translated
@@ -554,5 +649,89 @@ func TestHandleChat_MidStreamUpstreamDrop_NoTrailingEnvelope(t *testing.T) {
 	}
 	if !strings.Contains(logBuf.String(), "llmgw[llmgw] ERROR") {
 		t.Errorf("want the mid-stream error logged, got %q", logBuf.String())
+	}
+}
+
+// TestHandleChat_MidStreamDropAfterUsageChunk_AccountsPartialUsage is the
+// regression test for the critical accounting gap: an adapter that
+// captures a usage frame before the connection drops must still have that
+// usage billed, even though the request as a whole fails. The fake
+// upstream sends one content chunk, then the terminal usage-only chunk
+// (openaiAdapter.forwardStream always captures this into its returned
+// usage, whether or not the client asked to see it), then hijacks and
+// closes the connection without a clean chunked terminator — forcing
+// readSSE to return a genuine error after the usage frame was already
+// parsed. Without ruling (the CRITICAL fix), that captured usage would be
+// silently discarded instead of reaching the limiter, letting a client
+// dodge every token/cost budget by aborting right after the usage chunk
+// arrives.
+func TestHandleChat_MidStreamDropAfterUsageChunk_AccountsPartialUsage(t *testing.T) {
+	const contentChunk = "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"delta\":{\"content\":\"Hi\"}}]}\n\n"
+	const usageChunk = "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":3}}\n\n"
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		fl, ok := w.(http.Flusher)
+		if !ok {
+			t.Fatal("fake upstream ResponseWriter does not support Flush")
+		}
+		_, _ = w.Write([]byte(contentChunk))
+		fl.Flush()
+		_, _ = w.Write([]byte(usageChunk))
+		fl.Flush()
+
+		hj, ok := w.(http.Hijacker)
+		if !ok {
+			t.Fatal("fake upstream ResponseWriter does not support Hijack")
+		}
+		conn, _, hjErr := hj.Hijack()
+		if hjErr == nil {
+			_ = conn.Close()
+		}
+	}))
+	defer srv.Close()
+
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{
+		"openai": {Type: "openai", BaseURL: srv.URL, APIKey: "k", Models: []string{"gpt-test"}},
+	}
+	cfg.Groups = map[string]*GroupConfig{"default": {}}
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{
+		{Name: "alice", Group: "default", APIKey: "sk-alice", Limits: &LimitsConfig{}},
+	}}
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	gw, ok := h.(*Gateway)
+	if !ok {
+		t.Fatal("handler is not *Gateway")
+	}
+
+	origStderr := os.Stderr
+	pr, pw, _ := os.Pipe()
+	os.Stderr = pw
+	defer func() { os.Stderr = origStderr }()
+
+	body := map[string]any{"model": "gpt-test", "stream": true, "messages": []any{}}
+	req := newUnifiedRequest(t, http.MethodPost, "/v1/chat/completions", "sk-alice", body)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	_ = pw.Close() // closing the pipe write end to unblock the read; error not actionable in a test
+	os.Stderr = origStderr
+	var logBuf bytes.Buffer
+	if _, err := io.Copy(&logBuf, pr); err != nil {
+		t.Fatalf("io.Copy: %v", err)
+	}
+	if !strings.Contains(logBuf.String(), "llmgw[llmgw] ERROR") {
+		t.Errorf("want the mid-stream error logged, got %q", logBuf.String())
+	}
+
+	tok, ok := gw.limiter.getCounter("user", "alice", metricTok, windowDay, time.Now())
+	if !ok || tok != 10 {
+		t.Errorf("user token/day counter = %d (ok=%v), want 10 (the usage chunk captured before the drop, 7 prompt + 3 completion)", tok, ok)
 	}
 }
