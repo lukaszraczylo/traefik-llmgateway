@@ -513,6 +513,120 @@ func TestHandleTargetProxy_A2A_ProxiesToAgent(t *testing.T) {
 	}
 }
 
+// --- rate limiting: rejected-before-upstream requests still count, and a
+// breached limit is enforced before the upstream is ever called ---
+
+// TestHandleTargetProxy_RateLimited_Returns429WithRetryAfter proves the
+// target proxy enforces the caller's group requestsPerMinute limit: the
+// first request within the window succeeds, the second is refused with
+// 429 and a Retry-After header, and the upstream is only ever called
+// once.
+func TestHandleTargetProxy_RateLimited_Returns429WithRetryAfter(t *testing.T) {
+	upstreamCalls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalls++
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{"openai": {Type: "openai", APIKey: "k"}}
+	cfg.MCPServers = map[string]*TargetConfig{"alpha": {URL: srv.URL}}
+	cfg.Groups = map[string]*GroupConfig{"limited": {Limits: &LimitsConfig{RequestsPerMinute: 1}}}
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{{Name: "alice", Group: "limited", APIKey: "sk-alice"}}}
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	req := func() *http.Request {
+		req := httptest.NewRequest(http.MethodGet, "/mcp/alpha/x", nil)
+		req.Header.Set("Authorization", "Bearer sk-alice")
+		return req
+	}
+
+	rec1 := httptest.NewRecorder()
+	h.ServeHTTP(rec1, req())
+	if rec1.Code != http.StatusOK {
+		t.Fatalf("first request status = %d, want 200, body=%s", rec1.Code, rec1.Body.String())
+	}
+
+	rec2 := httptest.NewRecorder()
+	h.ServeHTTP(rec2, req())
+	if rec2.Code != http.StatusTooManyRequests {
+		t.Fatalf("second request status = %d, want 429, body=%s", rec2.Code, rec2.Body.String())
+	}
+	if rec2.Header().Get("Retry-After") == "" {
+		t.Error("want a Retry-After header on the 429 response")
+	}
+
+	if upstreamCalls != 1 {
+		t.Errorf("upstream calls = %d, want exactly 1 (the rejected second request must never reach the upstream)", upstreamCalls)
+	}
+}
+
+// --- accounting: a target request counts only against request-rate
+// counters, never token/cost, even for a JSON response shaped like a
+// usage-bearing one ---
+
+// TestHandleTargetProxy_JSONResponse_OnlyRequestCounterMoves proves the
+// target proxy never tees or parses a response for usage accounting
+// (unlike native passthrough): a JSON body carrying usage-shaped fields
+// leaves the caller's token/cost counters untouched, while the
+// request-rate counter checkAndCount always increments still moves.
+func TestHandleTargetProxy_JSONResponse_OnlyRequestCounterMoves(t *testing.T) {
+	const respBody = `{"model":"gpt-native-x","usage":{"prompt_tokens":7,"completion_tokens":3}}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(respBody))
+	}))
+	defer srv.Close()
+
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{"openai": {Type: "openai", APIKey: "k"}}
+	cfg.MCPServers = map[string]*TargetConfig{"alpha": {URL: srv.URL}}
+	cfg.Groups = map[string]*GroupConfig{"default": {}}
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{
+		{Name: "alice", Group: "default", APIKey: "sk-alice", Limits: &LimitsConfig{}},
+	}}
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	gw, ok := h.(*Gateway)
+	if !ok {
+		t.Fatal("handler is not *Gateway")
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/mcp/alpha/tools/list", nil)
+	req.Header.Set("Authorization", "Bearer sk-alice")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	if rec.Body.String() != respBody {
+		t.Errorf("body = %q, want verbatim upstream body", rec.Body.String())
+	}
+
+	tok, ok := gw.limiter.getCounter("user", "alice", metricTok, windowDay, time.Now())
+	if !ok || tok != 0 {
+		t.Errorf("user token/day counter = %d (ok=%v), want 0 — target proxy must never account response usage", tok, ok)
+	}
+	cost, ok := gw.limiter.getCounter("user", "alice", metricCost, windowDay, time.Now())
+	if !ok || cost != 0 {
+		t.Errorf("user cost/day counter = %d (ok=%v), want 0 — target proxy must never account response cost", cost, ok)
+	}
+	reqCount, ok := gw.limiter.getCounter("user", "alice", metricReq, windowMin, time.Now())
+	if !ok || reqCount != 1 {
+		t.Errorf("user request/min counter = %d (ok=%v), want 1 — the request itself is still accounted", reqCount, ok)
+	}
+}
+
 // --- config validation at construction ---
 
 func TestNewGateway_TargetURLValidation(t *testing.T) {

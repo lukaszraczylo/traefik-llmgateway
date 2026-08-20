@@ -139,11 +139,13 @@ func (g *Gateway) resolveTarget(kind, name string, grp *group) (targetURL string
 // is never teed off for token/cost usage extraction.
 //
 // Checks run: unknown name (404) before group authorization (403) before
-// rate limits (429/503) before the capability/path checks (Upgrade→501,
-// traversal→400) that gate the proxy call itself — a caller addressing a
-// target that does not exist, or that they may not use, or that their
-// group is already over budget on, learns that before any detail of how
-// they tried to use it.
+// capability/path checks (Upgrade→501, traversal→400) before rate limits
+// (429/503) — matching handlePassthrough's own order (403 → 501 → 400 →
+// limit), with the unknown-name check slotted in first since a target
+// proxy request can fail that in a way native passthrough never can. A
+// request rejected on any check before checkAndCount must never burn the
+// caller's or their group's rate-limit quota for a call that was never
+// going to reach the upstream.
 func (g *Gateway) handleTargetProxy(w http.ResponseWriter, r *http.Request, u *user, grp *group, kind, name, rest string) {
 	targetURL, allowed, known := g.resolveTarget(kind, name, grp)
 	if !known {
@@ -155,18 +157,18 @@ func (g *Gateway) handleTargetProxy(w http.ResponseWriter, r *http.Request, u *u
 		return
 	}
 
-	scopes := buildLimitScopes(u, grp)
-	if violation := g.limiter.checkAndCount(scopes); violation != nil {
-		writeLimitViolation(w, violation)
-		return
-	}
-
 	if r.Header.Get("Upgrade") != "" {
 		writeOAIError(w, http.StatusNotImplemented, "invalid_request_error", "websocket/upgrade passthrough not supported")
 		return
 	}
 	if hasTraversalSegment(rest) {
 		writeOAIError(w, http.StatusBadRequest, "invalid_request_error", "invalid path")
+		return
+	}
+
+	scopes := buildLimitScopes(u, grp)
+	if violation := g.limiter.checkAndCount(scopes); violation != nil {
+		writeLimitViolation(w, violation)
 		return
 	}
 
