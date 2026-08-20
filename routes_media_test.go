@@ -373,6 +373,40 @@ func TestHandleAudioSpeech_OpenAI_StreamsBinary_WithFlushes(t *testing.T) {
 	}
 }
 
+// TestHandleAudioSpeech_StripsClientSuppliedAliasKey mirrors
+// TestHandleImagesGenerations_StripsClientSuppliedAliasKey: a client
+// independently including a literal "__alias" field in its own JSON body
+// (never one the gateway itself injects for a media route —
+// routes_media.go never sets gatewayAliasKey here) must never reach the
+// upstream provider. handleAudioSpeech re-marshals req into the []byte
+// body it hands openaiAdapter.audioSpeech, so the delete has to happen
+// in routes_media.go itself rather than in the adapter (audioSpeech's
+// interface method takes []byte, not a map, unlike imagesGeneration).
+func TestHandleAudioSpeech_StripsClientSuppliedAliasKey(t *testing.T) {
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		w.Header().Set("Content-Type", "audio/mpeg")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("fake-audio-bytes"))
+	}))
+	defer srv.Close()
+
+	gw := newMediaTestGateway(t, newMediaTestConfig(srv.URL, "tts-test"))
+
+	body := map[string]any{"model": "tts-test", "input": "hello", gatewayAliasKey: "sneaky-client-value"}
+	req := newUnifiedRequest(t, http.MethodPost, audioSpeechPath, "sk-alice", body)
+	rec := httptest.NewRecorder()
+	gw.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	if _, leaked := gotBody[gatewayAliasKey]; leaked {
+		t.Errorf("upstream request body leaked client-supplied %q: %v", gatewayAliasKey, gotBody)
+	}
+}
+
 func TestHandleAudioSpeech_MissingModel_400(t *testing.T) {
 	gw := newMediaTestGateway(t, newMediaTestConfig("http://127.0.0.1:1", "tts-test"))
 

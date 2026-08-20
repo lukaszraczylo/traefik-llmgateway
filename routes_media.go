@@ -124,6 +124,16 @@ func (g *Gateway) handleAudioSpeech(w http.ResponseWriter, r *http.Request, u *u
 		return
 	}
 	req["model"] = upstreamModel
+	// gatewayAliasKey must never reach the real provider, mirroring
+	// openaiAdapter.imagesGeneration's identical delete
+	// (provider_openai.go): routes_media.go never sets this key itself
+	// for a media route, but a client independently sending a literal
+	// "__alias" field of its own would otherwise survive the re-marshal
+	// below and leak straight through as an unrecognized request field.
+	// Unconditional, not conditional on whether the gateway set it — the
+	// same defensive posture chatCompletion/embeddings/imagesGeneration
+	// already take.
+	delete(req, gatewayAliasKey)
 
 	body, err := json.Marshal(req)
 	if err != nil {
