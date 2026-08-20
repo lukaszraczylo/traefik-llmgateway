@@ -526,6 +526,68 @@ func TestLimiter_LogsStoreErrorOncePerRateLimit(t *testing.T) {
 	}
 }
 
+// countingErrorStore is a counterStore stub that always errors and counts
+// how many times each method is actually invoked. It proves the
+// store-down latch (limits.go) skips the network call entirely during
+// its window, rather than merely tolerating the error each time.
+type countingErrorStore struct {
+	err       error
+	incrCalls int
+	getCalls  int
+}
+
+func (s *countingErrorStore) incrBy(string, int64, time.Duration) (int64, error) {
+	s.incrCalls++
+	return 0, s.err
+}
+
+func (s *countingErrorStore) get(string) (int64, error) {
+	s.getCalls++
+	return 0, s.err
+}
+
+// TestLimiter_StoreDownLatch_SkipsStoreCallsWithinWindow is review-round-3
+// item 2: after a store operation fails, every operation for the next
+// storeDownLatchFor must short-circuit straight to the fail-open policy
+// without calling the store at all — a request that touches several
+// counters (min/day/month, tokens/cost, user/group) must not pay a fresh
+// bounded wait against a store that just proved unreachable for each one.
+// failOpen=true is used so checkAndCount completes both its req:min and
+// req:day increments per call instead of short-circuiting after the
+// first — this is what makes the "zero additional store calls" assertion
+// meaningful, rather than trivially true because checkAndCount stops
+// after one op regardless of the latch.
+func TestLimiter_StoreDownLatch_SkipsStoreCallsWithinWindow(t *testing.T) {
+	store := &countingErrorStore{err: errors.New("boom")}
+	l := newLimiter(store, true)
+	now := time.Date(2026, 8, 20, 10, 0, 0, 0, time.UTC)
+	l.nowFn = func() time.Time { return now }
+	scopes := []limitScope{{kind: "user", id: "u", limits: nil}}
+
+	if v := l.checkAndCount(scopes); v != nil {
+		t.Fatalf("want no violation with failOpen=true, got %+v", v)
+	}
+	firstCalls := store.incrCalls
+	if firstCalls == 0 {
+		t.Fatal("want the first call to actually reach the store at least once")
+	}
+
+	if v := l.checkAndCount(scopes); v != nil {
+		t.Fatalf("want no violation with failOpen=true, got %+v", v)
+	}
+	if store.incrCalls != firstCalls {
+		t.Errorf("incrBy calls = %d after a second checkAndCount within the latch window, want unchanged at %d (the store must not be called)", store.incrCalls, firstCalls)
+	}
+
+	now = now.Add(storeDownLatchFor) // latch expires
+	if v := l.checkAndCount(scopes); v != nil {
+		t.Fatalf("want no violation with failOpen=true, got %+v", v)
+	}
+	if store.incrCalls <= firstCalls {
+		t.Errorf("incrBy calls = %d after the latch window elapsed, want more than %d (the store must be probed again)", store.incrCalls, firstCalls)
+	}
+}
+
 // TestLimitsConfigValidate is carried-item (a): validate rejects
 // NaN/±Inf/negative cost limits and negative int64 count limits, accepts
 // zero/positive values, and treats a nil receiver (no limits configured

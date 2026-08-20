@@ -36,11 +36,11 @@ const (
 // actually reads (integer counter values and short simple/error strings).
 const respMaxBulkLen = 64 << 20
 
-// respMaxArrayLen caps a RESP2 array's declared element count, for the
-// same reason as respMaxBulkLen: this client only ever pipelines a
-// handful of commands, so a reply claiming millions of elements is
-// malformed or hostile, not legitimate.
-const respMaxArrayLen = 1 << 20
+// respMaxArrayLen caps a RESP2 array's declared element count. None of
+// this client's commands (AUTH, SELECT, INCRBY, EXPIRE, GET) ever return
+// an array reply, so 1024 is already generous headroom, not a limit tuned
+// to real traffic.
+const respMaxArrayLen = 1024
 
 // respMaxLineLen caps a single RESP2 header line (the "+", "-", ":", "$",
 // or "*" line preceding any body) read by readLine. Without a cap, a peer
@@ -137,6 +137,32 @@ func isTimeout(err error) bool {
 	return errors.As(err, &netErr) && netErr.Timeout()
 }
 
+// dialTimeoutFor returns the duration a dial starting now should use to
+// avoid running past deadline: the smaller of respDialTimeout and the
+// time remaining until deadline. Without this clamp, a dial always
+// spending its own full respDialTimeout regardless of deadline would let
+// a future change to respDialTimeout alone (leaving respCallTimeout
+// untouched) silently widen how much of one call's budget a stalled dial
+// can consume.
+func dialTimeoutFor(deadline time.Time) time.Duration {
+	if remaining := time.Until(deadline); remaining < respDialTimeout {
+		return remaining
+	}
+	return respDialTimeout
+}
+
+// respDeadlineExceededErr signals that a call's deadline had already
+// elapsed before an attempt could even dial — e.g. this call queued
+// behind respClient's mutex for the whole budget while an earlier call
+// was stuck. It implements net.Error so pipeline's isTimeout check treats
+// it the same as any other timed-out I/O: no retry, since retrying an
+// already-elapsed deadline can only fail the same way again.
+type respDeadlineExceededErr struct{}
+
+func (respDeadlineExceededErr) Error() string   { return "resp: call deadline already elapsed" }
+func (respDeadlineExceededErr) Timeout() bool   { return true }
+func (respDeadlineExceededErr) Temporary() bool { return true }
+
 // attemptPipelineLocked runs one full attempt of cmds over c's connection,
 // connecting first if needed, with every read and write bound by
 // deadline. Callers must hold c.mu.
@@ -155,7 +181,7 @@ func (c *respClient) attemptPipelineLocked(cmds [][]string, deadline time.Time) 
 
 	replies := make([]any, len(cmds))
 	for i := range cmds {
-		v, err := decodeReply(c.r)
+		v, err := decodeReply(c.r, 0)
 		if err != nil {
 			return nil, fmt.Errorf("resp: read reply %d/%d: %w", i+1, len(cmds), err)
 		}
@@ -177,7 +203,11 @@ func (c *respClient) ensureConnLocked(deadline time.Time) error {
 		return nil
 	}
 
-	conn, err := net.DialTimeout("tcp", c.addr, respDialTimeout)
+	dialTimeout := dialTimeoutFor(deadline)
+	if dialTimeout <= 0 {
+		return fmt.Errorf("resp: dial %q: %w", c.addr, respDeadlineExceededErr{})
+	}
+	conn, err := net.DialTimeout("tcp", c.addr, dialTimeout)
 	if err != nil {
 		return fmt.Errorf("resp: dial %q: %w", c.addr, err)
 	}
@@ -209,7 +239,7 @@ func (c *respClient) handshakeLocked(cmd, arg string) error {
 	if _, err := io.WriteString(c.conn, encodeCommand([]string{cmd, arg})); err != nil {
 		return fmt.Errorf("resp: %s: write: %w", cmd, err)
 	}
-	v, err := decodeReply(c.r)
+	v, err := decodeReply(c.r, 0)
 	if err != nil {
 		return fmt.Errorf("resp: %s: read reply: %w", cmd, err)
 	}
@@ -241,22 +271,27 @@ func encodeCommand(args []string) string {
 	return b.String()
 }
 
-// decodeReply reads and decodes one RESP2 reply from r:
+// decodeReply reads and decodes one RESP2 reply from r. depth is 0 for a
+// top-level reply and depth+1 for each element decodeArray recurses into;
+// an array is only accepted at depth 0 (see the '*' case) — none of this
+// client's commands (AUTH, SELECT, INCRBY, EXPIRE, GET) ever return a
+// nested array, so a server or attacker sending one is malformed input,
+// not legitimate traffic worth the recursion:
 //
 //   - "+simple\r\n"  -> string
 //   - "-error\r\n"   -> respErr (implements error; not returned as err)
 //   - ":123\r\n"     -> int64
 //   - "$len\r\n...\r\n" -> []byte, or nil for a null bulk ("$-1\r\n")
 //   - "*n\r\n..."    -> []any of n decoded elements, or nil for a null
-//     array ("*-1\r\n")
+//     array ("*-1\r\n"); only at depth 0
 //
 // The returned error is non-nil only for a transport or protocol failure
 // (short read, malformed line, unknown type byte, an out-of-range or
-// mistrailed bulk/array) — a well-formed RESP error reply decodes
-// successfully to a respErr value, not to a non-nil error, so a caller
-// pipelining several commands can still read every reply after one of
-// them fails server-side.
-func decodeReply(r *bufio.Reader) (any, error) {
+// mistrailed bulk/array, a nested array) — a well-formed RESP error reply
+// decodes successfully to a respErr value, not to a non-nil error, so a
+// caller pipelining several commands can still read every reply after one
+// of them fails server-side.
+func decodeReply(r *bufio.Reader, depth int) (any, error) {
 	line, err := readLine(r)
 	if err != nil {
 		return nil, err
@@ -280,7 +315,16 @@ func decodeReply(r *bufio.Reader) (any, error) {
 	case '$':
 		return decodeBulk(r, rest)
 	case '*':
-		return decodeArray(r, rest)
+		if depth > 0 {
+			// A nested array reply — "*1\r\n*1\r\n..." repeated — could
+			// otherwise recurse to Go's stack limit (a fatal, unrecoverable
+			// error, not a panic recoverPanic could catch) with only a few
+			// megabytes of crafted wire input. No command this client sends
+			// ever gets one back, so reject it outright instead of
+			// recursing.
+			return nil, fmt.Errorf("resp: nested array reply not supported")
+		}
+		return decodeArray(r, rest, depth)
 	default:
 		return nil, fmt.Errorf("resp: unknown reply type %q", prefix)
 	}
@@ -318,8 +362,12 @@ func decodeBulk(r *bufio.Reader, lenField string) (any, error) {
 // decodeArray reads n elements given the already-parsed "*" length field
 // lenField, returning nil for a null array ("*-1"). It rejects a negative
 // length other than -1 and a length exceeding respMaxArrayLen before
-// allocating, for the same reason as decodeBulk's cap.
-func decodeArray(r *bufio.Reader, lenField string) (any, error) {
+// allocating, for the same reason as decodeBulk's cap. depth is the
+// depth decodeReply was called at for this array's own "*" line (always
+// 0 — see decodeReply's '*' case); each element decodes at depth+1, so an
+// element that is itself an array is rejected by decodeReply rather than
+// recursed into.
+func decodeArray(r *bufio.Reader, lenField string, depth int) (any, error) {
 	n, err := strconv.Atoi(lenField)
 	if err != nil {
 		return nil, fmt.Errorf("resp: malformed array length %q: %w", lenField, err)
@@ -333,7 +381,7 @@ func decodeArray(r *bufio.Reader, lenField string) (any, error) {
 
 	arr := make([]any, n)
 	for i := 0; i < n; i++ {
-		v, err := decodeReply(r)
+		v, err := decodeReply(r, depth+1)
 		if err != nil {
 			return nil, fmt.Errorf("resp: array element %d/%d: %w", i+1, n, err)
 		}

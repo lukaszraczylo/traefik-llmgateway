@@ -138,14 +138,17 @@ func TestLimiter_FailOpenTrue_DeadRedisAddress_FallsBackAndAllows(t *testing.T) 
 }
 
 // TestLimiter_FailOpenTrue_HungRedisServer_FallsBackQuickly is review item
-// 1's limiter-level proof: a hung (accepts the connection, never replies)
-// Redis-compatible server must not make a failOpen=true request wait out
-// several stacked multi-second timeouts (the pre-fix behavior for a
-// checkAndCount call that performs several store operations) — each of
-// checkAndCount's two store ops here (req:min, req:day) is bounded by one
-// respCallTimeout, not respCallTimeout times every read/write step it
-// happens to perform, so the whole call stays well under the old
-// multi-times-respCallTimeout stall.
+// 1's limiter-level proof (round 1), tightened by the round-3 store-down
+// latch: a hung (accepts the connection, never replies) Redis-compatible
+// server must not make a failOpen=true request wait out several stacked
+// multi-second timeouts (the pre-fix behavior for a checkAndCount call
+// that performs several store operations). checkAndCount's two store ops
+// here (req:min, req:day) would each independently be bounded by one
+// respCallTimeout — already a large improvement over the old
+// per-operation-multiplied stall — but the store-down latch (limits.go)
+// goes further: the first op's failure latches the store down, so the
+// second op skips the network call entirely and the whole call costs
+// only ~one respCallTimeout, not two.
 func TestLimiter_FailOpenTrue_HungRedisServer_FallsBackQuickly(t *testing.T) {
 	ln := newHungListener(t)
 	store := newRedisStore(newRESPClient(ln.Addr().String(), "", 0))
@@ -159,7 +162,7 @@ func TestLimiter_FailOpenTrue_HungRedisServer_FallsBackQuickly(t *testing.T) {
 	if v != nil {
 		t.Fatalf("want no violation with failOpen=true and a hung store, got %+v", v)
 	}
-	if elapsed >= 6*time.Second {
-		t.Fatalf("elapsed = %v, want well under the old worst case (two bounded store ops, not many stacked timeouts)", elapsed)
+	if elapsed >= 3*time.Second {
+		t.Fatalf("elapsed = %v, want < 3s (one respCallTimeout for the first op, the second latched and skipping the network entirely)", elapsed)
 	}
 }

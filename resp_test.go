@@ -36,10 +36,13 @@ func TestEncodeCommand(t *testing.T) {
 
 // TestDecodeReply covers every RESP2 type respClient must decode: simple
 // string, error, integer, bulk string (including the null bulk "$-1"), and
-// array (including the null array "*-1" and nesting).
+// a single top-level array (including the null array "*-1"). Every call
+// passes depth 0 — a top-level reply, matching every real call site in
+// resp.go (attemptPipelineLocked, handshakeLocked, and decodeArray's own
+// element loop, which passes depth+1).
 func TestDecodeReply(t *testing.T) {
 	t.Run("simple string", func(t *testing.T) {
-		v, err := decodeReply(newReader("+OK\r\n"))
+		v, err := decodeReply(newReader("+OK\r\n"), 0)
 		if err != nil {
 			t.Fatalf("decodeReply: %v", err)
 		}
@@ -49,7 +52,7 @@ func TestDecodeReply(t *testing.T) {
 	})
 
 	t.Run("error reply decodes to respErr, not a decode error", func(t *testing.T) {
-		v, err := decodeReply(newReader("-ERR wrong number of arguments\r\n"))
+		v, err := decodeReply(newReader("-ERR wrong number of arguments\r\n"), 0)
 		if err != nil {
 			t.Fatalf("decodeReply returned an error for a well-formed RESP error reply: %v", err)
 		}
@@ -63,7 +66,7 @@ func TestDecodeReply(t *testing.T) {
 	})
 
 	t.Run("integer", func(t *testing.T) {
-		v, err := decodeReply(newReader(":42\r\n"))
+		v, err := decodeReply(newReader(":42\r\n"), 0)
 		if err != nil {
 			t.Fatalf("decodeReply: %v", err)
 		}
@@ -73,7 +76,7 @@ func TestDecodeReply(t *testing.T) {
 	})
 
 	t.Run("negative integer", func(t *testing.T) {
-		v, err := decodeReply(newReader(":-7\r\n"))
+		v, err := decodeReply(newReader(":-7\r\n"), 0)
 		if err != nil {
 			t.Fatalf("decodeReply: %v", err)
 		}
@@ -83,7 +86,7 @@ func TestDecodeReply(t *testing.T) {
 	})
 
 	t.Run("bulk string", func(t *testing.T) {
-		v, err := decodeReply(newReader("$5\r\nhello\r\n"))
+		v, err := decodeReply(newReader("$5\r\nhello\r\n"), 0)
 		if err != nil {
 			t.Fatalf("decodeReply: %v", err)
 		}
@@ -94,7 +97,7 @@ func TestDecodeReply(t *testing.T) {
 	})
 
 	t.Run("null bulk (missing key)", func(t *testing.T) {
-		v, err := decodeReply(newReader("$-1\r\n"))
+		v, err := decodeReply(newReader("$-1\r\n"), 0)
 		if err != nil {
 			t.Fatalf("decodeReply: %v", err)
 		}
@@ -103,8 +106,8 @@ func TestDecodeReply(t *testing.T) {
 		}
 	})
 
-	t.Run("array", func(t *testing.T) {
-		v, err := decodeReply(newReader("*2\r\n:5\r\n:1\r\n"))
+	t.Run("array (flat, not nested)", func(t *testing.T) {
+		v, err := decodeReply(newReader("*2\r\n:5\r\n:1\r\n"), 0)
 		if err != nil {
 			t.Fatalf("decodeReply: %v", err)
 		}
@@ -115,7 +118,7 @@ func TestDecodeReply(t *testing.T) {
 	})
 
 	t.Run("null array", func(t *testing.T) {
-		v, err := decodeReply(newReader("*-1\r\n"))
+		v, err := decodeReply(newReader("*-1\r\n"), 0)
 		if err != nil {
 			t.Fatalf("decodeReply: %v", err)
 		}
@@ -125,12 +128,12 @@ func TestDecodeReply(t *testing.T) {
 	})
 
 	t.Run("malformed type byte is a decode error", func(t *testing.T) {
-		if _, err := decodeReply(newReader("?nope\r\n")); err == nil {
+		if _, err := decodeReply(newReader("?nope\r\n"), 0); err == nil {
 			t.Fatal("want error for an unknown reply type byte")
 		}
 	})
 
-	// The following four subtests are review item 3: decodeBulk/
+	// The following subtests are review item 3 (round 1): decodeBulk/
 	// decodeArray must reject an out-of-range wire length before
 	// allocating, and decodeBulk must validate its CRLF trailer.
 
@@ -139,25 +142,25 @@ func TestDecodeReply(t *testing.T) {
 		// slice length; make([]byte, n+2) with that unguarded would
 		// panic. Reaching this line without panicking already proves the
 		// fix; the error check confirms it fails cleanly too.
-		if _, err := decodeReply(newReader("$9223372036854775807\r\n")); err == nil {
+		if _, err := decodeReply(newReader("$9223372036854775807\r\n"), 0); err == nil {
 			t.Fatal("want an error for a bulk length exceeding respMaxBulkLen")
 		}
 	})
 
 	t.Run("bulk length just over the cap is a protocol error", func(t *testing.T) {
-		if _, err := decodeReply(newReader(fmt.Sprintf("$%d\r\n", respMaxBulkLen+1))); err == nil {
+		if _, err := decodeReply(newReader(fmt.Sprintf("$%d\r\n", respMaxBulkLen+1)), 0); err == nil {
 			t.Fatal("want an error for a bulk length one over respMaxBulkLen")
 		}
 	})
 
 	t.Run("huge array length is a protocol error", func(t *testing.T) {
-		if _, err := decodeReply(newReader("*1000000000\r\n")); err == nil {
+		if _, err := decodeReply(newReader("*1000000000\r\n"), 0); err == nil {
 			t.Fatal("want an error for an array length exceeding respMaxArrayLen")
 		}
 	})
 
 	t.Run("bulk with wrong trailer is a protocol error", func(t *testing.T) {
-		if _, err := decodeReply(newReader("$5\r\nhelloXX")); err == nil {
+		if _, err := decodeReply(newReader("$5\r\nhelloXX"), 0); err == nil {
 			t.Fatal("want an error when a bulk reply's trailing bytes are not CRLF")
 		}
 	})
@@ -167,8 +170,31 @@ func TestDecodeReply(t *testing.T) {
 		// readLine would keep buffering every byte offered until the
 		// reader errors (e.g. EOF) rather than bailing out early.
 		huge := strings.Repeat("x", respMaxLineLen+10)
-		if _, err := decodeReply(newReader("+" + huge)); err == nil {
+		if _, err := decodeReply(newReader("+"+huge), 0); err == nil {
 			t.Fatal("want an error for a reply line exceeding respMaxLineLen")
+		}
+	})
+
+	// The following subtests are review item 1 (round 3): decodeReply
+	// must reject an array nested inside another array's elements — the
+	// only way a reply could otherwise recurse — and the array cap must
+	// be the new, much lower respMaxArrayLen (1024), since no command
+	// this client sends ever gets an array reply back at all.
+
+	t.Run("nested array reply is a protocol error, not unbounded recursion", func(t *testing.T) {
+		// A one-element array whose element is itself a one-element array.
+		// Repeated, this pattern is what would otherwise recurse to Go's
+		// stack limit (a fatal, unrecoverable error) from only a few
+		// megabytes of wire input; one level already exercises the guard,
+		// since decodeReply rejects any '*' at depth > 0 outright.
+		if _, err := decodeReply(newReader("*1\r\n*1\r\n:1\r\n"), 0); err == nil {
+			t.Fatal("want an error for an array nested inside another array")
+		}
+	})
+
+	t.Run("array length just over the new (1024) cap is a protocol error", func(t *testing.T) {
+		if _, err := decodeReply(newReader(fmt.Sprintf("*%d\r\n", respMaxArrayLen+1)), 0); err == nil {
+			t.Fatal("want an error for an array length one over respMaxArrayLen")
 		}
 	})
 }

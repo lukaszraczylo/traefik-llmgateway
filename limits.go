@@ -13,6 +13,19 @@ import (
 // the log with one line per request.
 const storeErrorLogEvery = 30 * time.Second
 
+// storeDownLatchFor bounds how long the limiter avoids a configured store
+// after any operation against it fails: for this long after the failure,
+// every store operation short-circuits straight to the fail-open/
+// fail-closed policy without attempting the network call at all. Each
+// respClient call is already bounded to ~respCallTimeout on its own
+// (resp.go), but one request can still touch several counters (its own
+// and its group's, request/token/cost, day/month) — without this latch,
+// every one of those pays a fresh bounded wait against a store that just
+// told the previous op it was unreachable. After the window, the next
+// operation probes the real store again: a natural half-open retry, no
+// separate recovery state needed.
+const storeDownLatchFor = 5 * time.Second
+
 // Window identifiers used throughout windowKey, counter metrics, and
 // retry-after calculation.
 const (
@@ -236,13 +249,14 @@ type limitViolation struct {
 // limiter enforces per-minute/day/month request, token, and cost limits
 // using fixed windows keyed by windowKey.
 type limiter struct {
-	store     counterStore                     // configured backend; nil means always use fallback (see newLimiter)
-	fallback  *memoryStore                     // in-process counter store, always available
-	nowFn     func() time.Time                 // injected for tests; defaults to time.Now
-	logf      func(format string, args ...any) // injectable store-error log; defaults to a no-op
-	lastLogAt time.Time                        // guarded by logMu; last time a store error was logged
-	logMu     sync.Mutex
-	failOpen  bool // store-error policy: true falls back to fallback, false refuses the request
+	store            counterStore                     // configured backend; nil means always use fallback (see newLimiter)
+	fallback         *memoryStore                     // in-process counter store, always available
+	nowFn            func() time.Time                 // injected for tests; defaults to time.Now
+	logf             func(format string, args ...any) // injectable store-error log; defaults to a no-op
+	lastLogAt        time.Time                        // guarded by logMu; last time a store error was logged
+	lastStoreFailure time.Time                        // guarded by logMu; zero means the store-down latch is not open (see storeLatched)
+	logMu            sync.Mutex
+	failOpen         bool // store-error policy: true falls back to fallback, false refuses the request
 }
 
 // newLimiter returns a limiter. A nil store means every operation uses the
@@ -283,45 +297,88 @@ func (l *limiter) logStoreError(err error) {
 	}
 }
 
+// storeLatched reports whether l is within storeDownLatchFor of its last
+// recorded store failure. When true, storeIncrBy/storeGet must skip the
+// network call entirely and go straight to the fail-open/fail-closed
+// policy — the same outcome a fresh call would reach anyway, just without
+// paying respCallTimeout again to find out. Guarded by logMu, the same
+// mutex lastLogAt already uses for this kind of small timestamp state.
+func (l *limiter) storeLatched() bool {
+	l.logMu.Lock()
+	defer l.logMu.Unlock()
+	return !l.lastStoreFailure.IsZero() && l.now().Sub(l.lastStoreFailure) < storeDownLatchFor
+}
+
+// recordStoreFailure logs err (rate-limited, see logStoreError) and opens
+// the store-down latch: every storeIncrBy/storeGet call for the next
+// storeDownLatchFor skips the network call and applies the fail-open/
+// fail-closed policy directly.
+func (l *limiter) recordStoreFailure(err error) {
+	l.logStoreError(err)
+	l.logMu.Lock()
+	l.lastStoreFailure = l.now()
+	l.logMu.Unlock()
+}
+
 // storeIncrBy increments key by n with the given ttl, applying the
-// limiter's fail-open/fail-closed policy when a configured store errors.
-// ok is false only when the store errored and failOpen is false — the
-// fail-closed case a caller must refuse the request for, rather than
-// treating a zero value as a real counter reading.
+// limiter's fail-open/fail-closed policy when a configured store errors
+// or when the store-down latch (storeLatched) is already open from a
+// recent failure. ok is false only in the fail-closed case — a caller
+// must refuse the request for that, rather than treating a zero value as
+// a real counter reading.
 func (l *limiter) storeIncrBy(key string, n int64, ttl time.Duration) (v int64, ok bool) {
 	if l.store == nil {
 		v, _ = l.fallback.incrBy(key, n, ttl) // fallback never errors
 		return v, true
 	}
+	if l.storeLatched() {
+		return l.failPolicyIncrBy(key, n, ttl)
+	}
 	v, err := l.store.incrBy(key, n, ttl)
 	if err == nil {
 		return v, true
 	}
-	l.logStoreError(err)
-	if !l.failOpen {
-		return 0, false
-	}
-	v, _ = l.fallback.incrBy(key, n, ttl)
-	return v, true
+	l.recordStoreFailure(err)
+	return l.failPolicyIncrBy(key, n, ttl)
 }
 
-// storeGet mirrors storeIncrBy for a read: it applies the same fail-open
-// (transparently reads the fallback) / fail-closed (ok=false) policy on a
-// configured store's error.
+// storeGet mirrors storeIncrBy for a read: it applies the same fail-open/
+// fail-closed/latched handling on a configured store's error.
 func (l *limiter) storeGet(key string) (v int64, ok bool) {
 	if l.store == nil {
 		v, _ = l.fallback.get(key)
 		return v, true
 	}
+	if l.storeLatched() {
+		return l.failPolicyGet(key)
+	}
 	v, err := l.store.get(key)
 	if err == nil {
 		return v, true
 	}
-	l.logStoreError(err)
+	l.recordStoreFailure(err)
+	return l.failPolicyGet(key)
+}
+
+// failPolicyIncrBy applies the limiter's fail-open/fail-closed policy for
+// an incrBy the caller has decided not to attempt against the configured
+// store (it just failed, or the store-down latch is open): failOpen=true
+// counts key in the fallback instead; failOpen=false reports the
+// operation as failed.
+func (l *limiter) failPolicyIncrBy(key string, n int64, ttl time.Duration) (int64, bool) {
 	if !l.failOpen {
 		return 0, false
 	}
-	v, _ = l.fallback.get(key)
+	v, _ := l.fallback.incrBy(key, n, ttl)
+	return v, true
+}
+
+// failPolicyGet mirrors failPolicyIncrBy for a read.
+func (l *limiter) failPolicyGet(key string) (int64, bool) {
+	if !l.failOpen {
+		return 0, false
+	}
+	v, _ := l.fallback.get(key)
 	return v, true
 }
 
