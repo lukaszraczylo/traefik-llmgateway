@@ -1640,7 +1640,9 @@ func TestUnifiedCostMicros(t *testing.T) {
 			canonical: "unknown-provider/gpt-5",
 			bare:      "gpt-5",
 			overrides: nil,
-			want:      costMicros("gpt-5", u, nil),
+			// builtinPricing["gpt-5"] = {InputPerM: 1.25, OutputPerM: 10}:
+			// (1M prompt * $1.25/M) + (1M completion * $10/M), in micros.
+			want: 11_250_000,
 		},
 		{
 			name:      "neither id priced returns zero",

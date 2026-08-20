@@ -721,36 +721,61 @@ func TestRESPClient_EnsureConnLocked_Errors(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			err := c.client().ensureConnLocked(c.deadline)
+			client := c.client()
+			// ensureConnLocked documents "callers must hold c.mu" — honor
+			// that precondition even though this test is single-goroutine.
+			client.mu.Lock()
+			err := client.ensureConnLocked(c.deadline)
+			client.mu.Unlock()
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), c.wantErrContains)
 		})
 	}
 }
 
-// TestRESPClient_AttemptPipelineLocked_WriteError covers the command-write
-// failure attemptPipelineLocked returns when an already-connected socket
-// refuses a write (a broken pipe) — distinct from a dial failure, which
-// never reaches this code path.
-func TestRESPClient_AttemptPipelineLocked_WriteError(t *testing.T) {
-	c := &respClient{
-		conn: fakeConn{writeErr: errors.New("stub: broken pipe")},
-		r:    bufio.NewReader(strings.NewReader("")),
+// TestRESPClient_WriteError_BrokenPipe covers the identical broken-pipe
+// shape shared by attemptPipelineLocked's command write and
+// handshakeLocked's own write: both fail deterministically on an
+// already-connected socket that refuses a write — distinct from a dial
+// failure, which never reaches either code path.
+func TestRESPClient_WriteError_BrokenPipe(t *testing.T) {
+	cases := []struct {
+		run             func(c *respClient) error
+		name            string
+		wantErrContains string
+	}{
+		{
+			name: "attemptPipelineLocked: command write fails",
+			run: func(c *respClient) error {
+				_, err := c.attemptPipelineLocked([][]string{{"GET", "k"}}, time.Now().Add(time.Second))
+				return err
+			},
+			wantErrContains: "write",
+		},
+		{
+			name: "handshakeLocked: AUTH write fails",
+			run: func(c *respClient) error {
+				return c.handshakeLocked("AUTH", "pw")
+			},
+			wantErrContains: "AUTH",
+		},
 	}
-	_, err := c.attemptPipelineLocked([][]string{{"GET", "k"}}, time.Now().Add(time.Second))
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "write")
-}
-
-// TestRESPClient_HandshakeLocked_WriteError covers handshakeLocked's own
-// write failure, the same broken-pipe shape as
-// TestRESPClient_AttemptPipelineLocked_WriteError but for the AUTH/SELECT
-// handshake command specifically.
-func TestRESPClient_HandshakeLocked_WriteError(t *testing.T) {
-	c := &respClient{conn: fakeConn{writeErr: errors.New("stub: broken pipe")}}
-	err := c.handshakeLocked("AUTH", "pw")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "AUTH")
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			client := &respClient{
+				conn: fakeConn{writeErr: errors.New("stub: broken pipe")},
+				r:    bufio.NewReader(strings.NewReader("")),
+			}
+			// attemptPipelineLocked/handshakeLocked document "callers must
+			// hold c.mu" — honor that precondition even though this test
+			// is single-goroutine.
+			client.mu.Lock()
+			err := c.run(client)
+			client.mu.Unlock()
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), c.wantErrContains)
+		})
+	}
 }
 
 // TestRESPClient_AuthHandshakeFailure_ErrorReplySurfaces covers
@@ -768,7 +793,11 @@ func TestRESPClient_AuthHandshakeFailure_ErrorReplySurfaces(t *testing.T) {
 	})
 
 	c := newRESPClient(ln.Addr().String(), "wrong-pw", 0)
+	// attemptPipelineLocked documents "callers must hold c.mu" — honor that
+	// precondition even though this test is single-goroutine.
+	c.mu.Lock()
 	_, err := c.attemptPipelineLocked([][]string{{"GET", "k"}}, time.Now().Add(2*time.Second))
+	c.mu.Unlock()
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "AUTH failed")
 }

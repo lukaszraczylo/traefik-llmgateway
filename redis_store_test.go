@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -181,4 +182,5 @@ func TestRedisStore_Get_DownServer_ReturnsError(t *testing.T) {
 	store := newRedisStore(newRESPClient(deadAddr, "", 0))
 	_, err := store.get("k")
 	require.Error(t, err)
+	assert.Contains(t, err.Error(), "redisStore: get")
 }
