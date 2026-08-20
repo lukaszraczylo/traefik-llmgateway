@@ -1,0 +1,61 @@
+version: 2
+
+# Traefik plugins are source-only - no binary builds
+# Traefik loads plugins via Yaegi interpreter at runtime
+builds:
+  - skip: true
+
+# Create source archive for GitHub releases
+archives:
+  - formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_v{{ .Version }}_source"
+    files:
+      - "*.go"
+      - "**/*.go"
+      - go.mod
+      - go.sum
+      - .traefik.yml
+      - LICENSE*
+      - README*
+      # Exclude test files and non-shipped dirs from release archive
+      - "!**/*_test.go"
+      - "!testdata/**"
+      - "!tools/**"
+      - "!integration/**"
+      - "!docs/**"
+      - "!examples/**"
+      - "!vendor/**"
+      - "!.superpowers/**"
+
+checksum:
+  name_template: "{{ .ProjectName }}_v{{ .Version }}_checksums.txt"
+  algorithm: sha256
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^Merge"
+      - "^WIP"
+      - "^chore:"
+
+release:
+  github:
+    owner: lukaszraczylo
+    name: traefik-llmgateway
+  name_template: "v{{ .Version }}"
+  draft: false
+  prerelease: auto
+
+signs:
+  - cmd: cosign
+    signature: "${artifact}.sigstore.json"
+    args:
+      - sign-blob
+      - "--bundle=${signature}"
+      - "${artifact}"
+      - "--yes"
+    artifacts: checksum
+    output: true
