@@ -204,6 +204,53 @@ func TestHandleTargetProxy_StripsGatewayAuth_NoUpstreamInjection(t *testing.T) {
 	}
 }
 
+// TestHandleTargetProxy_ClientAPIKeyHeaderStripped_NoUpstreamInjection
+// proves the client's gateway credential, presented via x-api-key rather
+// than Authorization, never reaches an MCP target. handleTargetProxy
+// injects no credential at all (unlike a provider adapter's injectAuth),
+// so if gatewayCredentialHeaders' X-Api-Key entry were ever dropped from
+// the strip set, the client's own key would pass straight through
+// copyHeadersExcept to the upstream target (I1: the sibling test above
+// authenticates via Authorization and never sends x-api-key at all, so it
+// never exercised this strip entry).
+func TestHandleTargetProxy_ClientAPIKeyHeaderStripped_NoUpstreamInjection(t *testing.T) {
+	var gotAPIKeyHeader string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAPIKeyHeader = r.Header.Get("x-api-key")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("mcp-ok"))
+	}))
+	defer srv.Close()
+
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{"openai": {Type: "openai", APIKey: "k"}}
+	cfg.MCPServers = map[string]*TargetConfig{"alpha": {URL: srv.URL}}
+	cfg.Groups = map[string]*GroupConfig{"default": {}}
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{{Name: "alice", Group: "default", APIKey: "gateway-key-must-not-leak"}}}
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/mcp/alpha/tools/list", nil)
+	// Gateway auth presented via x-api-key only (no Authorization header) —
+	// presentedKey falls back to x-api-key when Authorization is absent.
+	req.Header.Set("x-api-key", "gateway-key-must-not-leak")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	if rec.Body.String() != "mcp-ok" {
+		t.Errorf("body = %q, want verbatim upstream body", rec.Body.String())
+	}
+	if gotAPIKeyHeader != "" {
+		t.Errorf("upstream saw x-api-key = %q, want empty (MCP target proxy injects nothing; the client's gateway credential must be stripped)", gotAPIKeyHeader)
+	}
+}
+
 // --- SSE-safe streaming through the target proxy ---
 
 func TestHandleTargetProxy_SSE_FlushesIncrementally(t *testing.T) {

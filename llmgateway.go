@@ -265,6 +265,7 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	if r.Method == http.MethodPost && (r.URL.Path == "/v1/chat/completions" || r.URL.Path == "/v1/embeddings") {
 		u, grp, ok := g.auth.identify(r)
+		g.logAuthEvent(ok, authEventUserName(u), r)
 		if !ok {
 			writeOAIError(sw, http.StatusUnauthorized, "authentication_error", "invalid or missing API key")
 			return
@@ -278,7 +279,8 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if r.Method == http.MethodGet && (r.URL.Path == "/v1/mcp/servers" || r.URL.Path == "/v1/agents") {
-		_, grp, ok := g.auth.identify(r)
+		u, grp, ok := g.auth.identify(r)
+		g.logAuthEvent(ok, authEventUserName(u), r)
 		if !ok {
 			writeOAIError(sw, http.StatusUnauthorized, "authentication_error", "invalid or missing API key")
 			return
@@ -293,6 +295,7 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	if name, rest, ok := targetRoute(r.URL.EscapedPath(), targetKindMCP); ok {
 		u, grp, authOK := g.auth.identify(r)
+		g.logAuthEvent(authOK, authEventUserName(u), r)
 		if !authOK {
 			writeOAIError(sw, http.StatusUnauthorized, "authentication_error", "invalid or missing API key")
 			return
@@ -302,6 +305,7 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if name, rest, ok := targetRoute(r.URL.EscapedPath(), targetKindAgent); ok {
 		u, grp, authOK := g.auth.identify(r)
+		g.logAuthEvent(authOK, authEventUserName(u), r)
 		if !authOK {
 			writeOAIError(sw, http.StatusUnauthorized, "authentication_error", "invalid or missing API key")
 			return
@@ -313,6 +317,7 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if providerName, rest, ok := passthroughRoute(r.URL.EscapedPath()); ok {
 		if _, known := g.adapters[providerName]; known {
 			u, grp, ok := g.auth.identify(r)
+			g.logAuthEvent(ok, authEventUserName(u), r)
 			if !ok {
 				writeOAIError(sw, http.StatusUnauthorized, "authentication_error", "invalid or missing API key")
 				return

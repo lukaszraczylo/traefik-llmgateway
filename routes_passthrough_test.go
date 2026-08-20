@@ -182,6 +182,51 @@ func TestHandlePassthrough_ClientKeySwappedForProviderKey(t *testing.T) {
 	}
 }
 
+// TestHandlePassthrough_OpenAI_ClientAPIKeyHeaderStripped proves the
+// client's gateway credential, presented via x-api-key rather than
+// Authorization, never reaches an OpenAI passthrough upstream. openai's
+// injectAuth only ever sets Authorization, so if gatewayCredentialHeaders'
+// X-Api-Key entry were ever dropped from the strip set, this exact header
+// would pass straight through copyHeadersExcept to the upstream (I1: the
+// sibling test above authenticates via Authorization and never sends
+// x-api-key at all, so it never exercised this strip entry; the anthropic
+// coverage sends x-api-key but targets a provider whose own injectAuth
+// always overwrites it regardless of whether the strip ran).
+func TestHandlePassthrough_OpenAI_ClientAPIKeyHeaderStripped(t *testing.T) {
+	var gotAPIKeyHeader string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAPIKeyHeader = r.Header.Get("x-api-key")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{
+		"openai": {Type: "openai", BaseURL: srv.URL, APIKey: "sk-provider-real"},
+	}
+	cfg.Groups = map[string]*GroupConfig{"default": {}}
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{{Name: "alice", Group: "default", APIKey: "gateway-key-must-not-leak"}}}
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/openai/v1/audio/speech", strings.NewReader(`{"foo":"bar"}`))
+	// Gateway auth presented via x-api-key only (no Authorization header) —
+	// presentedKey falls back to x-api-key when Authorization is absent.
+	req.Header.Set("x-api-key", "gateway-key-must-not-leak")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	if gotAPIKeyHeader != "" {
+		t.Errorf("upstream saw x-api-key = %q, want empty (openai adapter only ever sets Authorization; the client's gateway credential must be stripped)", gotAPIKeyHeader)
+	}
+}
+
 // syncFlushWriter is an http.ResponseWriter/http.Flusher test double that
 // signals writeCh (non-blocking) after every Write, so a test can prove
 // two upstream chunks reached the client as two distinct Write calls

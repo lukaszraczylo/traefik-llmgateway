@@ -28,7 +28,7 @@ func resolveSecret(v string) (string, error) {
 		return val, nil
 	}
 	if path, ok := strings.CutPrefix(v, "file:"); ok {
-		b, err := os.ReadFile(path)
+		b, err := os.ReadFile(path) // #nosec G304 -- operator-supplied file path from middleware config
 		if err != nil {
 			return "", fmt.Errorf("llmgateway: cannot read secret file %q: %w", path, err)
 		}

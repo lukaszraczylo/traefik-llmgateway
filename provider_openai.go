@@ -88,12 +88,17 @@ type chatStreamChunk struct {
 
 // chatCompletion implements providerAdapter.
 //
-// When req["stream"] is true, chatCompletion injects
-// stream_options.include_usage=true into the upstream request only when
-// the client did not already set stream_options itself — remembering
-// whether the client asked, so the streaming response can suppress the
-// resulting usage-only chunk from a client that never asked for it while
-// still capturing its usage for accounting.
+// When req["stream"] is true, chatCompletion always forces
+// stream_options.include_usage=true on the outgoing request — a client
+// sending include_usage=false must not be able to suppress upstream usage
+// reporting and escape token/cost budgets (controller ruling C1). It merges
+// that into a copy of the client's own stream_options map when present, so
+// the caller's map is never mutated in place. clientAskedUsage records
+// whether the client itself asked for usage (via isTruthy on the client's
+// own include_usage value, never the forced upstream one), so the
+// streaming response can still suppress the resulting usage-only chunk
+// from a client that never asked for it, while always capturing the usage
+// for accounting.
 func (a *openaiAdapter) chatCompletion(ctx context.Context, w http.ResponseWriter, req map[string]any) (usage, error) {
 	// gatewayAliasKey must never reach the real provider: an openai-type
 	// adapter forwards req verbatim as the upstream wire body, so a
@@ -106,11 +111,15 @@ func (a *openaiAdapter) chatCompletion(ctx context.Context, w http.ResponseWrite
 	streaming, _ := req["stream"].(bool)
 	clientAskedUsage := false
 	if streaming {
-		if _, present := req["stream_options"]; present {
-			clientAskedUsage = true
-		} else {
-			req["stream_options"] = map[string]any{"include_usage": true}
+		merged := map[string]any{}
+		if existing, ok := req["stream_options"].(map[string]any); ok {
+			for k, v := range existing {
+				merged[k] = v
+			}
+			clientAskedUsage = isTruthy(existing["include_usage"])
 		}
+		merged["include_usage"] = true
+		req["stream_options"] = merged
 	}
 
 	hdr := a.requestHeaders(true)

@@ -40,7 +40,8 @@ const gatewayAliasKey = "__alias"
 // an OpenAI-compatible {"object":"list","data":[...]} envelope of the
 // models their group can see, via modelRegistry.listFor.
 func (g *Gateway) handleModels(w http.ResponseWriter, r *http.Request) {
-	_, grp, ok := g.auth.identify(r)
+	u, grp, ok := g.auth.identify(r)
+	g.logAuthEvent(ok, authEventUserName(u), r)
 	if !ok {
 		writeOAIError(w, http.StatusUnauthorized, "authentication_error", "invalid or missing API key")
 		return
@@ -139,6 +140,9 @@ func (g *Gateway) runUnified(w http.ResponseWriter, r *http.Request, u *user, gr
 		}
 	}
 	g.limiter.account(scopes, result, unifiedCostMicros(canonical, upstreamModel, result, g.cfg.Pricing))
+	if result.estimated {
+		g.logf("unified route: usage for model %q logged as estimated (%d prompt tokens derived from request body size, not the provider's reported usage)", canonical, result.prompt)
+	}
 
 	if callErr != nil {
 		g.handleAdapterError(sw, callErr, adapter.name())

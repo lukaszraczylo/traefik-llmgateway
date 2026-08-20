@@ -176,6 +176,95 @@ func TestGateway_Logf_WritesInfoPrefix(t *testing.T) {
 	}
 }
 
+// TestServeHTTP_AuthFailed_LogsMethodPathNotKey proves a failed
+// authentication attempt (I3) emits a log line naming the method and path,
+// and proves the presented (wrong) API key never appears in that line —
+// key material must never be logged, even on a failure.
+func TestServeHTTP_AuthFailed_LogsMethodPathNotKey(t *testing.T) {
+	const presentedKey = "sk-wrong-should-never-be-logged"
+
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{"openai": {Type: "openai", APIKey: "k"}}
+	cfg.Groups = map[string]*GroupConfig{"default": {}}
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{{Name: "alice", Group: "default", APIKey: "sk-alice"}}}
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	origStderr := os.Stderr
+	r, w, _ := os.Pipe()
+	os.Stderr = w
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{}`))
+	req.Header.Set("Authorization", "Bearer "+presentedKey)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	_ = w.Close() // closing the pipe write end to unblock the read; error not actionable in a test
+	os.Stderr = origStderr
+	var buf bytes.Buffer
+	if _, err := io.Copy(&buf, r); err != nil {
+		t.Fatalf("io.Copy: %v", err)
+	}
+	logged := buf.String()
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401, body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(logged, "auth failed") || !strings.Contains(logged, "POST") || !strings.Contains(logged, "/v1/chat/completions") {
+		t.Fatalf("want stderr to contain an auth-failed line with method and path, got %q", logged)
+	}
+	if strings.Contains(logged, presentedKey) {
+		t.Fatalf("stderr contains the presented API key %q — key material must never be logged: %q", presentedKey, logged)
+	}
+}
+
+// TestServeHTTP_AuthOK_LogsUserNameAndRoute proves a successful
+// authentication attempt logs the resolved user's name and the route,
+// without ever logging the API key that authenticated them.
+func TestServeHTTP_AuthOK_LogsUserNameAndRoute(t *testing.T) {
+	const presentedKey = "sk-alice-should-never-be-logged"
+
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{"openai": {Type: "openai", APIKey: "k"}}
+	cfg.Groups = map[string]*GroupConfig{"default": {}}
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{{Name: "alice", Group: "default", APIKey: presentedKey}}}
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	origStderr := os.Stderr
+	r, w, _ := os.Pipe()
+	os.Stderr = w
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	req.Header.Set("Authorization", "Bearer "+presentedKey)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	_ = w.Close() // closing the pipe write end to unblock the read; error not actionable in a test
+	os.Stderr = origStderr
+	var buf bytes.Buffer
+	if _, err := io.Copy(&buf, r); err != nil {
+		t.Fatalf("io.Copy: %v", err)
+	}
+	logged := buf.String()
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(logged, "auth ok") || !strings.Contains(logged, `"alice"`) || !strings.Contains(logged, "/v1/models") {
+		t.Fatalf("want stderr to contain an auth-ok line naming user alice and route /v1/models, got %q", logged)
+	}
+	if strings.Contains(logged, presentedKey) {
+		t.Fatalf("stderr contains the presented API key %q — key material must never be logged: %q", presentedKey, logged)
+	}
+}
+
 func TestGateway_Errorf_WritesErrorPrefix(t *testing.T) {
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
 	cfg := CreateConfig()

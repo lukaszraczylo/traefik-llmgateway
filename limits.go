@@ -212,9 +212,13 @@ func (m *memoryStore) sweepLocked(now time.Time) {
 // arrived).
 type usage struct {
 	prompt, completion int64
-	// estimated is set by a later task's streaming/estimation path; this
-	// task only produces the field for that interface, never reads it.
-	estimated bool //nolint:unused // interface field for a later task, see comment above
+	// estimated is true when prompt/completion were derived from a
+	// tokenizer estimate (request body size ÷ 4) rather than the
+	// provider's own reported usage. routes_unified.go's runUnified reads
+	// this to log the estimate explicitly, so a caller reading logs can
+	// tell an estimated cost from a provider-reported one, per the spec's
+	// "logged as estimated" requirement.
+	estimated bool
 }
 
 // total returns the request's combined prompt and completion tokens.

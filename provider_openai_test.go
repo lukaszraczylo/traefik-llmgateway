@@ -200,9 +200,10 @@ func TestOpenAIAdapter_ChatCompletion_Streaming_ClientDidNotAskUsage(t *testing.
 }
 
 // TestOpenAIAdapter_ChatCompletion_Streaming_ClientAskedUsage proves that
-// when the client already set stream_options itself, chatCompletion leaves
-// it untouched (does not overwrite it) and forwards the usage-only chunk
-// through to the client instead of suppressing it.
+// when the client already set stream_options.include_usage=true itself,
+// chatCompletion preserves that value (forcing true on top of true is a
+// no-op) and forwards the usage-only chunk through to the client instead
+// of suppressing it.
 func TestOpenAIAdapter_ChatCompletion_Streaming_ClientAskedUsage(t *testing.T) {
 	var gotBody []byte
 	srv := newStreamingFakeUpstream(t, &gotBody)
@@ -244,6 +245,59 @@ func TestOpenAIAdapter_ChatCompletion_Streaming_ClientAskedUsage(t *testing.T) {
 	}
 	if so["include_usage"] != true {
 		t.Errorf("stream_options.include_usage = %v, want true (must not be overwritten)", so["include_usage"])
+	}
+}
+
+// TestOpenAIAdapter_ChatCompletion_Streaming_ClientSuppressesUsage proves
+// the C1 fix: a client sending stream_options.include_usage=false must not
+// be able to suppress upstream usage reporting and escape token/cost
+// budgets. chatCompletion forces include_usage=true upstream regardless,
+// still captures the resulting usage for accounting, but derives
+// clientAskedUsage from the client's own (false) value — so the usage-only
+// chunk is not forwarded to this client. It also proves the merge copies
+// the client's stream_options map instead of mutating it in place.
+func TestOpenAIAdapter_ChatCompletion_Streaming_ClientSuppressesUsage(t *testing.T) {
+	var gotBody []byte
+	srv := newStreamingFakeUpstream(t, &gotBody)
+	defer srv.Close()
+
+	a := newOpenAIAdapter("p1", srv.URL, "sk-test")
+	rec := newRecordingResponseWriter()
+
+	clientStreamOptions := map[string]any{"include_usage": false}
+	req := map[string]any{
+		"model":          "gpt-5",
+		"stream":         true,
+		"stream_options": clientStreamOptions,
+	}
+	u, err := a.chatCompletion(context.Background(), rec, req)
+	if err != nil {
+		t.Fatalf("chatCompletion: %v", err)
+	}
+
+	if u.prompt != 7 || u.completion != 9 {
+		t.Errorf("usage = %+v, want {prompt:7 completion:9} (must still be captured despite include_usage=false)", u)
+	}
+
+	want := "data: " + streamFrames[0] + "\n\n" +
+		"data: " + streamFrames[1] + "\n\n" +
+		"data: " + streamFrames[2] + "\n\n" +
+		"data: [DONE]\n\n"
+	if got := rec.body.String(); got != want {
+		t.Errorf("forwarded body = %q, want %q (usage chunk must be suppressed, client never asked)", got, want)
+	}
+
+	sent := decodeJSONBody(t, gotBody)
+	so, ok := sent["stream_options"].(map[string]any)
+	if !ok {
+		t.Fatalf("upstream request missing stream_options: %v", sent)
+	}
+	if so["include_usage"] != true {
+		t.Errorf("stream_options.include_usage = %v, want true (must be forced regardless of client value — quota bypass otherwise)", so["include_usage"])
+	}
+
+	if clientStreamOptions["include_usage"] != false {
+		t.Errorf("client's own stream_options map was mutated in place: %v, want include_usage still false", clientStreamOptions)
 	}
 }
 
