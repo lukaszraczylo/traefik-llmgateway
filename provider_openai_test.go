@@ -247,6 +247,123 @@ func TestOpenAIAdapter_ChatCompletion_Streaming_ClientAskedUsage(t *testing.T) {
 	}
 }
 
+// TestOpenAIAdapter_ChatCompletion_Streaming_UsageCapturedBeforeAbruptClose
+// proves that when the upstream sends the usage-only chunk and then the
+// connection drops (no [DONE], no clean EOF), chatCompletion still returns
+// the usage it had already captured alongside the error — a dropped
+// connection after usage arrived must not read as zero usage.
+func TestOpenAIAdapter_ChatCompletion_Streaming_UsageCapturedBeforeAbruptClose(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintf(w, "data: %s\n\n", streamFrames[3]) // usage-only chunk: {prompt:7 completion:9}
+		w.(http.Flusher).Flush()
+
+		hj, ok := w.(http.Hijacker)
+		if !ok {
+			t.Fatalf("httptest ResponseWriter does not implement http.Hijacker")
+		}
+		conn, _, err := hj.Hijack()
+		if err != nil {
+			t.Fatalf("hijack: %v", err)
+		}
+		// Abrupt close: no [DONE], no terminating chunk — the client must
+		// see a genuine read error, not a clean EOF.
+		_ = conn.Close()
+	}))
+	defer srv.Close()
+
+	a := newOpenAIAdapter("p1", srv.URL, "sk-test")
+	rec := newRecordingResponseWriter()
+
+	req := map[string]any{"model": "gpt-5", "stream": true}
+	u, err := a.chatCompletion(context.Background(), rec, req)
+	if err == nil {
+		t.Fatalf("chatCompletion: want error from abrupt close, got nil (usage=%+v)", u)
+	}
+	if !errors.Is(err, errUpstream) {
+		t.Errorf("err = %v, want errors.Is(err, errUpstream) == true", err)
+	}
+	if u.prompt != 7 || u.completion != 9 {
+		t.Errorf("usage = %+v, want {prompt:7 completion:9} (captured before the drop)", u)
+	}
+}
+
+// TestOpenAIAdapter_ChatCompletion_ContextCanceledMidStream proves that
+// canceling the caller's context while a streaming response is still being
+// read surfaces as errors.Is(err, context.Canceled) at chatCompletion's
+// caller — required so Task 12 can tell a client hang-up apart from a real
+// upstream failure.
+func TestOpenAIAdapter_ChatCompletion_ContextCanceledMidStream(t *testing.T) {
+	block := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintf(w, "data: %s\n\n", streamFrames[0])
+		w.(http.Flusher).Flush()
+		<-block // hold the connection open past the context cancellation below
+	}))
+	defer srv.Close()
+	defer close(block) // unblock the handler before srv.Close() waits on it
+
+	a := newOpenAIAdapter("p1", srv.URL, "sk-test")
+	rec := newRecordingResponseWriter()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+
+	_, err := a.chatCompletion(ctx, rec, map[string]any{"model": "gpt-5", "stream": true})
+	if err == nil {
+		t.Fatalf("chatCompletion: want error from context cancellation, got nil")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want errors.Is(err, context.Canceled) == true", err)
+	}
+}
+
+// TestOpenAIAdapter_ChatCompletion_Streaming_UpstreamIgnoresStreamFallsBackToJSON
+// proves that when a streaming request's upstream answers with a plain
+// JSON body instead of SSE (Content-Type not text/event-stream), and sends
+// "Accept: text/event-stream" on the outgoing request, chatCompletion falls
+// back to the non-streaming passthrough — the client gets the JSON body
+// verbatim and usage is still extracted — instead of emitting an empty or
+// broken SSE stream.
+func TestOpenAIAdapter_ChatCompletion_Streaming_UpstreamIgnoresStreamFallsBackToJSON(t *testing.T) {
+	const respBody = `{"id":"chatcmpl-1","choices":[{"message":{"role":"assistant","content":"hi"}}],"usage":{"prompt_tokens":3,"completion_tokens":4}}`
+
+	var gotAccept string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAccept = r.Header.Get("Accept")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(respBody))
+	}))
+	defer srv.Close()
+
+	a := newOpenAIAdapter("p1", srv.URL, "sk-test")
+	rec := httptest.NewRecorder()
+
+	u, err := a.chatCompletion(context.Background(), rec, map[string]any{"model": "gpt-5", "stream": true})
+	if err != nil {
+		t.Fatalf("chatCompletion: %v", err)
+	}
+	if u.prompt != 3 || u.completion != 4 {
+		t.Errorf("usage = %+v, want {prompt:3 completion:4}", u)
+	}
+	if rec.Body.String() != respBody {
+		t.Errorf("body = %q, want %q (JSON fallback, verbatim passthrough)", rec.Body.String(), respBody)
+	}
+	if got := rec.Header().Get("Content-Type"); got != "application/json" {
+		t.Errorf("Content-Type = %q, want application/json", got)
+	}
+	if gotAccept != "text/event-stream" {
+		t.Errorf("Accept header sent = %q, want %q", gotAccept, "text/event-stream")
+	}
+}
+
 // TestOpenAIAdapter_ChatCompletion_Upstream429 proves a non-2xx upstream
 // response returns a *providerHTTPError carrying the status and body,
 // with nothing written to the client — the caller decides envelope vs

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 )
 
 // openaiAdapter is the providerAdapter for provider type "openai": OpenAI
@@ -101,7 +102,16 @@ func (a *openaiAdapter) chatCompletion(ctx context.Context, w http.ResponseWrite
 		}
 	}
 
-	resp, err := upstreamJSON(ctx, a.client, http.MethodPost, a.baseURL+"/v1/chat/completions", a.requestHeaders(true), req)
+	hdr := a.requestHeaders(true)
+	if streaming {
+		// Ask the upstream for an SSE response. The Content-Type check below
+		// still decides which forwarding path runs — an upstream that
+		// ignores stream=true may answer with JSON regardless of this
+		// header.
+		hdr.Set("Accept", "text/event-stream")
+	}
+
+	resp, err := upstreamJSON(ctx, a.client, http.MethodPost, a.baseURL+"/v1/chat/completions", hdr, req)
 	if err != nil {
 		return usage{}, err
 	}
@@ -111,9 +121,13 @@ func (a *openaiAdapter) chatCompletion(ctx context.Context, w http.ResponseWrite
 		return usage{}, newProviderHTTPError(resp)
 	}
 
-	if streaming {
+	if streaming && strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream") {
 		return a.forwardStream(w, resp.Body, clientAskedUsage)
 	}
+	// Either a non-streaming request, or a streaming one whose upstream
+	// ignored stream=true and answered with a normal JSON body: forward it
+	// through the same verbatim passthrough non-streaming responses use,
+	// instead of emitting an empty SSE stream for a body that was never SSE.
 	return a.forwardJSON(w, resp)
 }
 
@@ -151,7 +165,7 @@ type chatUsagePayload struct {
 func (a *openaiAdapter) forwardJSON(w http.ResponseWriter, resp *http.Response) (usage, error) {
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
 	if err != nil {
-		return usage{}, fmt.Errorf("%w: read response body: %v", errUpstream, err) //nolint:errorlint
+		return usage{}, fmt.Errorf("%w: read response body: %w", errUpstream, err)
 	}
 
 	var payload chatUsagePayload
@@ -176,7 +190,11 @@ const sseDoneMarker = "[DONE]"
 // the returned usage either way, but only forwarded to the client when
 // clientAskedUsage is true — otherwise it is dropped, since the client
 // never asked for it and chatCompletion only requested it upstream for
-// accounting. The "[DONE]" sentinel is always forwarded.
+// accounting. The "[DONE]" sentinel is always forwarded. On a mid-stream
+// read error (upstream drops the connection, client context is canceled),
+// forwardStream still returns whatever usage it had already captured
+// alongside the error — a usage chunk that arrived before the break must
+// not be discarded and billed as zero.
 func (a *openaiAdapter) forwardStream(w http.ResponseWriter, body io.Reader, clientAskedUsage bool) (usage, error) {
 	sw := newSSEWriter(w)
 	var u usage
@@ -201,7 +219,10 @@ func (a *openaiAdapter) forwardStream(w http.ResponseWriter, body io.Reader, cli
 		return sw.writeData(ev.data)
 	})
 	if err != nil {
-		return usage{}, fmt.Errorf("%w: stream: %v", errUpstream, err) //nolint:errorlint
+		// u carries whatever usage was already captured before the stream
+		// broke — a usage chunk that arrived, then a dropped connection,
+		// must not report as zero and get treated as an unbilled request.
+		return u, fmt.Errorf("%w: stream: %w", errUpstream, err)
 	}
 	return u, nil
 }
@@ -228,12 +249,12 @@ func (a *openaiAdapter) listModels(ctx context.Context) ([]string, error) {
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
 	if err != nil {
-		return nil, fmt.Errorf("%w: read response body: %v", errUpstream, err) //nolint:errorlint
+		return nil, fmt.Errorf("%w: read response body: %w", errUpstream, err)
 	}
 
 	var payload modelsPayload
 	if err := json.Unmarshal(body, &payload); err != nil {
-		return nil, fmt.Errorf("%w: decode models response: %v", errUpstream, err) //nolint:errorlint
+		return nil, fmt.Errorf("%w: decode models response: %w", errUpstream, err)
 	}
 
 	ids := make([]string, len(payload.Data))

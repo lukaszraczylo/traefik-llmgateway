@@ -115,7 +115,17 @@ type providerAdapter interface {
 // pool, since every request from one adapter targets the same upstream
 // host.
 func newAdapterHTTPClient() *http.Client {
-	tr := http.DefaultTransport.(*http.Transport).Clone() //nolint:forcetypeassert // http.DefaultTransport is always *http.Transport
+	tr, ok := http.DefaultTransport.(*http.Transport)
+	if ok {
+		tr = tr.Clone()
+	} else {
+		// Defensive fallback: something in the shared Traefik process
+		// replaced http.DefaultTransport with a type that is not
+		// *http.Transport. A fresh zero-value Transport (Go's own defaults)
+		// is safer than panicking at adapter construction over a type
+		// assertion this package does not control.
+		tr = &http.Transport{}
+	}
 	tr.MaxIdleConnsPerHost = adapterIdleConnsPerHost
 	return &http.Client{Transport: tr}
 }
@@ -135,14 +145,14 @@ func upstreamJSON(ctx context.Context, client *http.Client, method, url string, 
 	if body != nil {
 		b, err := json.Marshal(body)
 		if err != nil {
-			return nil, fmt.Errorf("%w: encode request body: %v", errUpstream, err) //nolint:errorlint // errUpstream is a sentinel wrapped for errors.Is, %v is fine for the inner cause
+			return nil, fmt.Errorf("%w: encode request body: %w", errUpstream, err)
 		}
 		r = bytes.NewReader(b)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, method, url, r)
 	if err != nil {
-		return nil, fmt.Errorf("%w: build request: %v", errUpstream, err) //nolint:errorlint
+		return nil, fmt.Errorf("%w: build request: %w", errUpstream, err)
 	}
 	for k, vs := range hdr {
 		for _, v := range vs {
@@ -155,7 +165,7 @@ func upstreamJSON(ctx context.Context, client *http.Client, method, url string, 
 
 	resp, err := client.Do(req) //nolint:bodyclose // caller closes resp.Body; upstreamJSON hands the response, not its lifecycle, back
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", errUpstream, err) //nolint:errorlint
+		return nil, fmt.Errorf("%w: %w", errUpstream, err)
 	}
 	return resp, nil
 }
