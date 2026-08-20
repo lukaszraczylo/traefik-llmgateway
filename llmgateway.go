@@ -15,15 +15,21 @@ import (
 // the middleware's YAML/testData. Every limit or list field follows the
 // convention: zero/empty/omitted means unlimited/all.
 type Config struct {
-	Providers          map[string]*ProviderConfig `json:"providers,omitempty"`
-	Groups             map[string]*GroupConfig    `json:"groups,omitempty"`
-	Pricing            map[string]*ModelPricing   `json:"pricing,omitempty"`
-	MCPServers         map[string]*TargetConfig   `json:"mcpServers,omitempty"`
-	Agents             map[string]*AgentConfig    `json:"agents,omitempty"`
-	Users              *UsersConfig               `json:"users,omitempty"`
-	Redis              *RedisConfig               `json:"redis,omitempty"`
-	Retry              RetryConfig                `json:"retry,omitempty"`
-	PassthroughUnknown bool                       `json:"passthroughUnknown,omitempty"`
+	Providers  map[string]*ProviderConfig `json:"providers,omitempty"`
+	Groups     map[string]*GroupConfig    `json:"groups,omitempty"`
+	Pricing    map[string]*ModelPricing   `json:"pricing,omitempty"`
+	MCPServers map[string]*TargetConfig   `json:"mcpServers,omitempty"`
+	Agents     map[string]*AgentConfig    `json:"agents,omitempty"`
+	Users      *UsersConfig               `json:"users,omitempty"`
+	Redis      *RedisConfig               `json:"redis,omitempty"`
+	// Retry is a struct value, not a pointer, because its own Enabled
+	// field is the on/off signal (unlike Redis/Users, where the block's
+	// mere presence is the signal) — so its tag omits "omitempty":
+	// encoding/json never treats a struct value as "empty" regardless of
+	// its fields, so "omitempty" here would be a no-op that misleadingly
+	// implies otherwise.
+	Retry              RetryConfig `json:"retry"`
+	PassthroughUnknown bool        `json:"passthroughUnknown,omitempty"`
 }
 
 // ProviderConfig describes one upstream LLM provider.
@@ -85,9 +91,17 @@ type RedisConfig struct {
 // Attempts and Backoff are validated (and defaulted, when left zero) by
 // newRetryPolicy (retry.go) only when Enabled is true.
 type RetryConfig struct {
-	Backoff  string `json:"backoff,omitempty"`
-	Attempts int    `json:"attempts,omitempty"`
-	Enabled  bool   `json:"enabled,omitempty"`
+	// Backoff is the base wait before the first retry (a Go duration
+	// string, e.g. "250ms"); it doubles on each further retry, capped at
+	// 2s per wait. Defaults to "250ms" when Enabled and left empty.
+	Backoff string `json:"backoff,omitempty"`
+	// Attempts is the number of retries performed AFTER the first try —
+	// not the total try count. 1 (the default, applied when Enabled and
+	// left at 0) allows one retry: two tries total. The maximum, 3,
+	// allows three retries: four tries total. A value outside 1..3 is a
+	// construction error.
+	Attempts int  `json:"attempts,omitempty"`
+	Enabled  bool `json:"enabled,omitempty"`
 }
 
 // ModelPricing overrides the built-in per-model price table.

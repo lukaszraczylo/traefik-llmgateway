@@ -167,6 +167,7 @@ config accepts them as YAML, which decodes to the same JSON shape.
 | `agents` | `map[string]AgentConfig` | `{}` | A2A agent registry; see [MCP/A2A](#mcp-and-a2a). |
 | `users` | `UsersConfig` | — | Inline and/or file-backed API-key holders. With none configured, every request is unauthenticated and gets 401. |
 | `redis` | `RedisConfig` | — | Distributed limit-counter backend. Omitted means in-process counters only (per-replica, approximate across multiple Traefik instances). |
+| `retry` | `RetryConfig` | `{}` (disabled) | Same-provider retry for transient upstream failures — see [Retry](#retry). Omitted or `enabled: false` means no retry: every request makes exactly one upstream attempt, byte-identical to a gateway built before this field existed. |
 | `passthroughUnknown` | `bool` | `false` | `false`: a request matching none of the plugin's routes gets a 404 JSON envelope. `true`: it falls through to the router's own backing service. |
 
 Provider, `mcpServers`, and `agents` map **keys** (names) must match
@@ -243,6 +244,14 @@ own is governed purely by their group's — see
 | `password` | `string` | `""` (no `AUTH`) | Secret form. |
 | `db` | `int` | `0` | Must be `≥ 0`. Sent via `SELECT` on every new connection. |
 | `failOpen` | `*bool` | `true` | `true`: a Redis error switches that operation to the in-process fallback store and logs (rate-limited to once per 30s). `false`: a Redis error returns 503 instead of enforcing against a non-shared fallback. |
+
+### `RetryConfig`
+
+| Field | Type | Default | Semantics |
+|---|---|---|---|
+| `enabled` | `bool` | `false` | `false`: no retry, one upstream attempt per request. `true`: retry per [Retry](#retry) below. |
+| `attempts` | `int` | `1` | Retries performed **after** the first try, not the total try count. `1` (default) allows one retry — two tries total. The maximum, `3`, allows three retries — four tries total. A value outside `1`-`3` is a construction error. |
+| `backoff` | `string` (Go duration) | `250ms` | Base wait before the first retry; doubles on each further retry, capped at 2s per wait. Invalid duration string is a construction error. |
 
 ### `ModelPricing`
 
@@ -373,6 +382,45 @@ kept — a bad edit to the file never breaks already-authenticated traffic.
   in-process map — correct for one Traefik replica, only approximate
   across several, since each replica counts independently. Exact limits
   across multiple Traefik replicas require the shared Redis.
+
+## Retry
+
+Same-provider retry for a transient upstream failure — no cross-provider
+failover. Off by default (`retry.enabled: false`); every config that
+predates this field keeps making exactly one upstream attempt per
+request.
+
+- **Scope**: every adapter upstream call — chat, embeddings, model
+  listing — across all three provider types. Native passthrough
+  (`/{provider}/...`) and the MCP/A2A proxy are raw reverse proxies and
+  are never retried; the client owns retry semantics there.
+- **Attempts is retries, not tries**: `attempts` counts retries
+  performed **after** the first try. The default, `1`, allows one retry
+  — two tries total, not one. The maximum, `3`, allows three retries —
+  four tries total.
+- **Transient classification**: a connection error (dial/EOF/reset), HTTP
+  429, or HTTP 5xx. Never a non-429 4xx, a translation error, a request
+  that failed to build in the first place (a malformed method or URL
+  fails identically on every attempt), or a context
+  cancellation/deadline.
+- **Zero-bytes rule**: retry only runs before any response byte reaches
+  the client. A non-streaming call may retry its whole exchange. A
+  streaming call retries only the initial request, up to the point the
+  upstream's headers and status arrive — once the first chunk is
+  forwarded, a stream that then dies mid-flight is not retried, since the
+  client already holds partial data.
+- **Waiting**: a 429 response carrying a `Retry-After` header that parses
+  as a non-negative whole-second count no greater than 2s waits exactly
+  that long. Every other case — no header, an unparseable value (for
+  example the HTTP-date form), a negative value, a value over 2s, or a
+  `Retry-After` on a non-429 5xx — falls back to exponential backoff
+  (`backoff × 2^(attempt-1)`), capped at 2s per wait either way. A
+  context canceled or timed out during a wait aborts the remaining
+  retries immediately, rather than blocking out the wait in full.
+- **Accounting**: only the final attempt's usage is recorded — a failed
+  attempt's body is drained and discarded, never parsed for usage, so it
+  is never double-counted. Request counters still increment once per
+  client request, unchanged.
 
 ## Unified vs. passthrough
 

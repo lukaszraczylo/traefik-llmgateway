@@ -85,6 +85,16 @@ func newProviderHTTPError(resp *http.Response) *providerHTTPError {
 // with a non-2xx status.
 var errUpstream = errors.New("llmgateway: upstream request failed")
 
+// errRequestBuildFailed marks an upstreamJSON failure that happened
+// before any network I/O — http.NewRequestWithContext rejected the
+// method or URL. It is chained alongside errUpstream (Go's multi-%w), so
+// an existing errors.Is(err, errUpstream) check still matches, while
+// retryPolicy's isTransient (retry.go) checks specifically for this
+// sentinel to treat it as non-transient: retrying an identically
+// malformed request produces the identical failure every time, so a
+// retry only wastes attempts.
+var errRequestBuildFailed = errors.New("llmgateway: build upstream request failed")
+
 // providerAdapter is the gateway's uniform interface over one configured
 // upstream LLM provider. Task 9 (anthropic) and Task 10 (gemini) implement
 // it alongside this task's openai-type adapter; Tasks 11-12 wire a built
@@ -188,7 +198,7 @@ func upstreamJSON(ctx context.Context, client *http.Client, method, url string, 
 		}
 		req, err := http.NewRequestWithContext(ctx, method, url, r)
 		if err != nil {
-			return nil, fmt.Errorf("%w: build request: %w", errUpstream, err)
+			return nil, fmt.Errorf("%w: %w: build request: %w", errUpstream, errRequestBuildFailed, err)
 		}
 		for k, vs := range hdr {
 			for _, v := range vs {

@@ -90,6 +90,10 @@ spec:
         address: redis.shared-resources.svc:6379
         password: "env:REDIS_PASSWORD"
         failOpen: true
+      retry:
+        enabled: true
+        attempts: 2 # retries after the first try: 3 tries total
+        backoff: 250ms
       pricing:
         gpt-5-mini: {inputPerM: 0.25, outputPerM: 2.0}
       mcpServers:
