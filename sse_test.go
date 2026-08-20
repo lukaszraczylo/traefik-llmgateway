@@ -199,6 +199,60 @@ func TestReadSSE_EventFieldAloneDoesNotDispatch(t *testing.T) {
 	}
 }
 
+// TestReadSSE_EmptyDataFieldDoesNotDispatch proves a "data:" line with no
+// value produces no event: the joined data buffer is empty, and the
+// specification discards a dispatch in that case. "data: {}" still
+// dispatches, since "{}" is a non-empty payload.
+func TestReadSSE_EmptyDataFieldDoesNotDispatch(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+		want []sseEvent
+	}{
+		{name: "empty data value", raw: "data:\n\n", want: nil},
+		{name: "empty JSON object payload", raw: "data: {}\n\n", want: []sseEvent{{event: "", data: []byte("{}")}}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var got []sseEvent
+			err := readSSE(strings.NewReader(c.raw), func(ev sseEvent) error {
+				got = append(got, ev)
+				return nil
+			})
+			if err != nil {
+				t.Fatalf("readSSE: %v", err)
+			}
+			if !reflect.DeepEqual(got, c.want) {
+				t.Errorf("got %#v, want %#v", got, c.want)
+			}
+		})
+	}
+}
+
+// TestReadSSE_StripsLeadingBOM proves a UTF-8 byte-order mark on the
+// stream's first line does not attach to the first field name and drop
+// the first event.
+func TestReadSSE_StripsLeadingBOM(t *testing.T) {
+	raw := string(rune(0xFEFF)) + "data: first\n\ndata: second\n\n"
+
+	var got []sseEvent
+	err := readSSE(strings.NewReader(raw), func(ev sseEvent) error {
+		got = append(got, ev)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("readSSE: %v", err)
+	}
+
+	want := []sseEvent{
+		{event: "", data: []byte("first")},
+		{event: "", data: []byte("second")},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %#v, want %#v", got, want)
+	}
+}
+
 // TestNewSSEWriter_SetsHeaders proves newSSEWriter sets the three SSE
 // response headers on construction, before any body write.
 func TestNewSSEWriter_SetsHeaders(t *testing.T) {
@@ -320,4 +374,38 @@ func TestFlushWriter_NilFlusher(t *testing.T) {
 	if got := buf.String(); got != "ok" {
 		t.Errorf("buf = %q, want %q", got, "ok")
 	}
+}
+
+// TestNewFlushWriter_AssertsFlusherOnce proves newFlushWriter captures
+// the http.Flusher assertion at construction: a wrapped writer that
+// implements http.Flusher gets flushed on every Write, and one that does
+// not still writes correctly, with no panic.
+func TestNewFlushWriter_AssertsFlusherOnce(t *testing.T) {
+	t.Run("flusher present", func(t *testing.T) {
+		w := newRecordingResponseWriter()
+		fw := newFlushWriter(w)
+
+		if _, err := fw.Write([]byte("x")); err != nil {
+			t.Fatalf("Write: %v", err)
+		}
+		if w.flushed != 1 {
+			t.Errorf("flushed = %d, want 1", w.flushed)
+		}
+	})
+
+	t.Run("flusher absent", func(t *testing.T) {
+		var buf bytes.Buffer
+		fw := newFlushWriter(&buf)
+
+		n, err := fw.Write([]byte("ok"))
+		if err != nil {
+			t.Fatalf("Write: %v", err)
+		}
+		if n != len("ok") {
+			t.Errorf("n = %d, want %d", n, len("ok"))
+		}
+		if got := buf.String(); got != "ok" {
+			t.Errorf("buf = %q, want %q", got, "ok")
+		}
+	})
 }

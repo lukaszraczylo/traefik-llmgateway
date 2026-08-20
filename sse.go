@@ -22,6 +22,12 @@ const sseScannerMaxLineSize = 4 * 1024 * 1024
 // event payload, per the text/event-stream wire format.
 const sseDataPrefix = "data: "
 
+// sseBOM is the UTF-8 byte-order mark. Some proxies still add one at the
+// start of a stream. Left in place, it attaches to the first field name.
+// "data:" becomes "\ufeffdata:", and readSSE drops the first event as an
+// unknown field. readSSE removes one leading BOM from the first line.
+const sseBOM = "\ufeff"
+
 // sseEvent is one parsed text/event-stream event: its "event:" field
 // (empty when the stream omits it) and its "data:" field, with multi-line
 // data joined by "\n" per the SSE spec.
@@ -31,19 +37,27 @@ type sseEvent struct {
 }
 
 // readSSE parses r as a text/event-stream body and calls fn once per
-// event. It accumulates "event:" and "data:" field lines — multiple
-// "data:" lines join with "\n" — and dispatches fn on a blank line, then
-// resets the accumulated fields. Comment lines (starting with ":") and
-// "id:"/"retry:" fields are recognized and silently ignored. Line endings
-// may be "\n" or "\r\n": bufio.ScanLines, the scanner's split function,
-// strips an optional trailing "\r" itself.
+// event. It accumulates "event:" and "data:" field lines. Multiple
+// "data:" lines join with "\n". It dispatches fn on a blank line, then
+// resets the accumulated fields. Comment lines that start with ":", and
+// "id:"/"retry:" fields, are recognized and silently ignored. Line
+// endings can be "\n" or "\r\n": bufio.ScanLines, the scanner's split
+// function, strips an optional trailing "\r" itself. A leading UTF-8
+// byte-order mark on the stream's first line is stripped before field
+// parsing.
+//
+// readSSE follows the EventSource specification: it fires fn only when
+// the data buffer is not empty. An "event:" field alone, or a lone
+// "data:\n\n" line, produces no event.
 //
 // readSSE stops and returns fn's error the first time fn returns one. On
-// a clean EOF it returns nil, first dispatching a final un-terminated
-// event (fields accumulated with no trailing blank line) if the stream
-// ended with one pending. A field line longer than sseScannerMaxLineSize
-// makes the underlying scanner fail; that error (bufio.ErrTooLong) is
-// returned as-is.
+// a clean EOF it returns nil, and first dispatches one final event if
+// fields were pending with no trailing blank line. This EOF flush is a
+// deliberate deviation from the specification, which discards an
+// unterminated event instead. Callers must treat that final event as
+// possibly incomplete, since the upstream connection can drop mid-frame.
+// A field line longer than sseScannerMaxLineSize makes the underlying
+// scanner fail. That error, bufio.ErrTooLong, is returned as-is.
 func readSSE(r io.Reader, fn func(sseEvent) error) error {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, sseScannerInitialBufSize), sseScannerMaxLineSize)
@@ -53,15 +67,17 @@ func readSSE(r io.Reader, fn func(sseEvent) error) error {
 		dataLines []string
 		hasData   bool
 	)
+	firstLine := true
 
-	// dispatch fires fn on a blank line, but only when at least one
-	// "data:" line was accumulated — matching the EventSource spec, an
-	// "event:" field alone (no data) discards silently rather than
-	// producing a data-less event. It always resets the accumulated
+	// dispatch fires fn on a blank line, but only when the data buffer is
+	// not empty. The specification discards an event whose data buffer
+	// is empty even when a "data:" line was seen, so a lone "data:\n\n"
+	// line must not reach fn. dispatch always resets the accumulated
 	// fields, dispatched or not.
 	dispatch := func() error {
-		fire := hasData
-		ev := sseEvent{event: event, data: []byte(strings.Join(dataLines, "\n"))}
+		joined := strings.Join(dataLines, "\n")
+		fire := hasData && joined != ""
+		ev := sseEvent{event: event, data: []byte(joined)}
 		event, dataLines, hasData = "", nil, false
 		if !fire {
 			return nil
@@ -71,6 +87,10 @@ func readSSE(r io.Reader, fn func(sseEvent) error) error {
 
 	for scanner.Scan() {
 		line := scanner.Text()
+		if firstLine {
+			firstLine = false
+			line = strings.TrimPrefix(line, sseBOM)
+		}
 		if line == "" {
 			if err := dispatch(); err != nil {
 				return err
@@ -124,8 +144,12 @@ func newSSEWriter(w http.ResponseWriter) *sseWriter {
 	return &sseWriter{w: w, f: f}
 }
 
-// writeData writes one SSE data event — "data: " + b + "\n\n" — as a
-// single Write call, then flushes when the underlying writer supports it.
+// writeData writes one SSE data event, "data: " + b + "\n\n", as a
+// single Write call. It flushes when the underlying writer supports
+// that. b must not contain a newline. The text/event-stream format reads
+// everything up to the first newline as the field value, so a raw
+// newline inside b splits the frame into two malformed lines. Callers
+// must pass compact JSON, not pretty-printed JSON, as b.
 func (s *sseWriter) writeData(b []byte) error {
 	buf := make([]byte, 0, len(sseDataPrefix)+len(b)+2)
 	buf = append(buf, sseDataPrefix...)
@@ -159,6 +183,15 @@ func (s *sseWriter) writeDone() {
 type flushWriter struct {
 	w io.Writer
 	f http.Flusher
+}
+
+// newFlushWriter returns a flushWriter wrapping w, asserting once
+// whether w implements http.Flusher. Callers that stream a
+// reverse-proxy copy build one flushWriter per response, instead of
+// repeating the same type assertion at every call site.
+func newFlushWriter(w io.Writer) *flushWriter {
+	f, _ := w.(http.Flusher)
+	return &flushWriter{w: w, f: f}
 }
 
 // Write delegates to the wrapped io.Writer, then flushes when f is
