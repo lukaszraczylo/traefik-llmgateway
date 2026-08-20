@@ -87,11 +87,17 @@ spec:
       users:
         file: /secrets/llmgw-users/users.json
         inline:
-          # Grants the admin dashboard (see the "admin" block above),
-          # which stays unreachable until admin.enabled is true. In a
-          # real deployment this key still belongs in a Secret via
-          # env:/file: the same as every other apiKey here — inline only
-          # to keep this one example self-contained.
+          # Grants the admin dashboard (see the "admin" block below),
+          # which stays unreachable until admin.enabled is true. Declared
+          # inline here — rather than added to the users.json Secret
+          # above — only to keep this admin-granting example visible in
+          # one file; the key itself is NOT a literal, it uses the same
+          # env: form as every other apiKey in this Middleware, and its
+          # env var (LLMGW_ADMIN_KEY) must be set on the Traefik pod
+          # regardless of whether admin.enabled is true or false below —
+          # every inline user's apiKey resolves at construction time, not
+          # lazily on first admin request. See the Helm env snippet at
+          # the bottom of this file.
           - name: dashboard-admin
             group: engineering
             apiKey: "env:LLMGW_ADMIN_KEY"
@@ -111,10 +117,12 @@ spec:
       cache:
         enabled: true
         ttl: 5m
-      # Disabled here deliberately: flip to `enabled: true`, then flag at
-      # least one user `admin: true` (see the inline "dashboard-admin"
-      # user under users.inline below) to try the read-only dashboard at
-      # https://llm.example.com/admin — see ../README.md#admin.
+      # Disabled here deliberately: flip to `enabled: true` to try the
+      # read-only dashboard at https://llm.example.com/admin — the
+      # "dashboard-admin" user above (users.inline) already grants access
+      # once this is on, and its LLMGW_ADMIN_KEY env var is already
+      # required regardless (see that user's own comment) — see
+      # ../README.md#admin.
       admin:
         enabled: false
       pricing:
@@ -201,9 +209,13 @@ spec:
 #            moduleName: "github.com/lukaszraczylo/traefik-llmgateway"
 #            version: "v0.1.0"
 #
-# 2. Provider keys as env vars, sourced from Secrets — never inlined into
-#    the Middleware CR above, which is why every apiKey field there reads
-#    "env:VAR_NAME" instead of a literal:
+# 2. Every "env:VAR_NAME" secret this Middleware references as env vars,
+#    sourced from Secrets — never inlined into the Middleware CR above.
+#    This is NOT just the three provider keys and the Redis password:
+#    LLMGW_ADMIN_KEY (the "dashboard-admin" user above) resolves at
+#    construction time too, so it must be set here even while
+#    admin.enabled is false — an unset "env:" var is a hard construction
+#    error regardless of whether the feature it gates is on.
 #
 #      env:
 #        - name: OPENAI_API_KEY
@@ -214,6 +226,8 @@ spec:
 #          valueFrom: {secretKeyRef: {name: llmgw-provider-keys, key: gemini}}
 #        - name: REDIS_PASSWORD
 #          valueFrom: {secretKeyRef: {name: llmgw-redis, key: password}}
+#        - name: LLMGW_ADMIN_KEY
+#          valueFrom: {secretKeyRef: {name: llmgw-admin-key, key: apiKey}}
 #
 #      additionalVolumes:
 #        - name: llmgw-users

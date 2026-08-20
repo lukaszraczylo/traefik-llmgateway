@@ -44,14 +44,16 @@ http:
               baseUrl: "http://mockgemini:8080"
               apiKey: "mock-gemini-key"
               models: ["gemini-mock"]
-            # Backs test 8's retry coverage only: baseUrl points at the
+            # Backs task 5's retry coverage only: baseUrl points at the
             # SAME mockopenai container, under its dedicated /flaky prefix
             # (see integration/mock/main.go's handleFlakyOpenAIChat), so
             # a.baseURL+"/v1/chat/completions" (provider_openai.go)
-            # resolves to /flaky/v1/chat/completions. discovery is left
-            # off — GET /flaky/v1/models isn't served — so the explicit
-            # "flaky-mock" model id below is the only way this provider's
-            # model is known.
+            # resolves to /flaky/v1/chat/completions, and this provider's
+            # own native passthrough route (/flaky/reset) reaches
+            # handleFlakyReset the same way. discovery is left off — GET
+            # /flaky/v1/models isn't served — so the explicit "flaky-mock"
+            # model id below is the only way this provider's model is
+            # known.
             flaky:
               type: openai
               baseUrl: "http://mockopenai:8080/flaky"

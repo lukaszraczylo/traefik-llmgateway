@@ -76,7 +76,12 @@ func newServerMux(mode string) (*http.ServeMux, error) {
 		// 5): the plugin's "flaky" provider points its baseUrl at this
 		// mode's own address plus "/flaky", so a.baseURL+"/v1/chat/
 		// completions" (provider_openai.go) resolves to exactly this path.
+		// flaky/reset is reachable the same way, through the "flaky"
+		// provider's native passthrough route (adapter.base()+"/"+rest,
+		// routes_passthrough.go) — the test calls it directly, never this
+		// mock process's own network address.
 		mux.HandleFunc("/flaky/v1/chat/completions", handleFlakyOpenAIChat)
+		mux.HandleFunc("/flaky/reset", handleFlakyReset)
 		mux.HandleFunc("/v1/images/generations", handleOpenAIImages)
 		mux.HandleFunc("/v1/audio/speech", handleOpenAIAudioSpeech)
 	case "anthropic":
@@ -208,24 +213,37 @@ func handleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 	sw.write("", "[DONE]")
 }
 
-// flakyHits counts every request handleFlakyOpenAIChat has served across
-// this process's lifetime. It is package-level, process-lifetime state
-// deliberately, not reset per request: the retry integration test relies
-// on exactly the FIRST request this mock process ever receives on
-// /flaky/v1/chat/completions failing, and every one after succeeding, so
-// a fresh mockopenai container (one per `make integration` run) always
-// starts the scenario from a clean slate. Re-running the integration
-// suite against an already-up stack (`make integration-keep`, without
-// restarting mockopenai) will NOT reproduce the retry test a second time
-// — the same non-idempotence flushRedis exists to paper over for the
-// rate-limit counters has no equivalent reset here, since there is no
-// admin endpoint on this fixture server to clear it.
+// flakyHits counts every request handleFlakyOpenAIChat has served since
+// the last reset (handleFlakyReset, below), or since process start if
+// never reset. It is package-level state deliberately, not reset per
+// request: the retry integration test relies on exactly the FIRST
+// request counted this way failing, and every one after succeeding.
+// TestRetryFlakyRecovers calls handleFlakyReset (via the gateway's own
+// "flaky" passthrough provider) at its own start, so a re-run against an
+// already-up stack (`make integration-keep`, no mockopenai restart)
+// reproduces the same forced-503-then-success scenario every time — the
+// same idempotence flushRedis gives the rate-limit counters via
+// TestCrossReplicaLimits.
 var flakyHits int32
 
-// handleFlakyOpenAIChat answers the first request this process ever
-// receives with HTTP 503 (a transient failure retryPolicy.isTransient
-// classifies as retryable, retry.go) and every request after that with a
-// normal chat completion response carrying an extra top-level
+// handleFlakyReset resets flakyHits to 0, letting the retry integration
+// test reproduce its forced-503-then-success scenario on demand rather
+// than only on this process's true first request. POST only — a GET (or
+// any other method) must never mutate state; it answers 405 instead.
+func handleFlakyReset(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	atomic.StoreInt32(&flakyHits, 0)
+	writeJSON(w, map[string]any{"reset": true})
+}
+
+// handleFlakyOpenAIChat answers the first request since the last reset
+// (handleFlakyReset, or process start if never reset) with HTTP 503 (a
+// transient failure retryPolicy.isTransient classifies as retryable,
+// retry.go) and every request after that with a normal chat completion
+// response carrying an extra top-level
 // "mock_attempt" field set to this handler's own call count — the
 // unified route's openai-type adapter forwards a JSON response body
 // verbatim (forwardJSON, provider_openai.go), so this field survives

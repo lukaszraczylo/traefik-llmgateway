@@ -483,9 +483,10 @@ cached bodies for the same request.
 - **Group override**: `GroupConfig.cache` (a `*bool`) overrides the
   top-level `cache.enabled` setting per group — `nil` inherits it, `false`
   opts the group out even when caching is globally on, `true` opts the
-  group in. Setting `true` on a group when the top-level `cache` block is
-  absent entirely is a construction error: there is nothing configured to
-  inherit `ttl`/`maxBodyBytes` from.
+  group in. Setting `true` on a group when the top-level `cache` is not
+  enabled — the block omitted entirely, or present with `enabled: false`,
+  both read the same way — is a construction error: there is nothing
+  configured to inherit `ttl`/`maxBodyBytes` from.
 - **Storage**: values are stored via the same hand-rolled RESP2 client
   (`resp.go`) the limiter's distributed counters use — the identical
   Redis/Valkey/Dragonfly connection, not a second one. A Redis error
@@ -575,7 +576,8 @@ request to any of them falls through to the plugin's existing
   themselves.
 - **`GET /admin`** serves the dashboard's HTML/CSS/JS shell. This route is
   deliberately served **with no authentication at all** once
-  `admin.enabled` is true (disabled still 404s): a browser navigating
+  `admin.enabled` is true (disabled still falls through to the same
+  404/`passthroughUnknown` handling described above): a browser navigating
   straight to the URL has no way to attach a custom `Authorization` or
   `x-api-key` header, so gating the page itself would make it unreachable
   from a browser in the first place. This is safe because the shell

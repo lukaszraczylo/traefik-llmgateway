@@ -339,6 +339,26 @@ func flushRedis(t *testing.T) {
 	}
 }
 
+// redisKeys returns every key in the shared Redis matching pattern (a
+// redis-cli KEYS glob), via the same docker compose exec pattern
+// flushRedis uses above. KEYS is O(n) and blocks Redis briefly — fine
+// against this suite's tiny keyspace, and used only for a one-off test
+// assertion, never on a hot path.
+func redisKeys(t *testing.T, pattern string) []string {
+	t.Helper()
+	out, err := exec.Command("docker", "compose", "-f", composeFile(), "exec", "-T", "redis", "redis-cli", "KEYS", pattern).CombinedOutput()
+	if err != nil {
+		t.Fatalf("redis-cli KEYS %s: %v\n%s", pattern, err, out)
+	}
+	var keys []string
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if line != "" {
+			keys = append(keys, line)
+		}
+	}
+	return keys
+}
+
 // TestCrossReplicaLimits covers integration test 4: bob's limited group
 // (requestsPerMinute: 3) is enforced globally across both Traefik
 // "replicas" via the Redis they share, regardless of which one a given
@@ -533,12 +553,19 @@ func TestRealUpstreamSmoke(t *testing.T) {
 // retry made exactly two upstream tries, not merely that the mock
 // happened to succeed on a fresh process.
 //
-// This test is NOT safe to re-run against a `make integration-keep`
-// stack without restarting mockopenai first: handleFlakyOpenAIChat's own
-// hit counter is process-lifetime state with no reset endpoint (see its
-// doc comment, integration/mock/main.go) — a second run against the same
-// container never observes the forced-503-then-success sequence again.
+// Resets the mock's hit counter first via POST /flaky/reset — reachable
+// through the "flaky" provider's own native passthrough route
+// (routes_passthrough.go), which reaches handleFlakyReset
+// (integration/mock/main.go) — so this test reproduces the same
+// forced-503-then-success sequence on every run, including a re-run
+// against an already-up `make integration-keep` stack with no
+// mockopenai restart.
 func TestRetryFlakyRecovers(t *testing.T) {
+	resetResp, resetBody := doJSON(t, http.MethodPost, traefik1URL+"/flaky/reset", aliceKey, nil)
+	if resetResp.StatusCode != http.StatusOK {
+		t.Fatalf("reset flaky counter: status = %d, body=%#v", resetResp.StatusCode, resetBody)
+	}
+
 	reqBody := map[string]any{
 		"model":    "flaky/flaky-mock",
 		"messages": []map[string]any{{"role": "user", "content": "hi"}},
@@ -604,6 +631,9 @@ func TestResponseCache(t *testing.T) {
 	}
 	if content := firstChoiceContent(t, body1); content != "mock openai response" {
 		t.Errorf("first request: content = %q, want %q", content, "mock openai response")
+	}
+	if keys := redisKeys(t, "llmgw:cache:*"); len(keys) == 0 {
+		t.Error("redis holds no llmgw:cache:* key after a cache miss, want the entry the miss's SET (cache.go) should have written")
 	}
 
 	tokensAfterMiss, _ := adminUsageEntry(t, "users", "alice")["tokensPerDay"].(float64)
