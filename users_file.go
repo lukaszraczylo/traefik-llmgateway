@@ -53,19 +53,29 @@ type gatewayLogger interface {
 }
 
 // maybeReload reloads a's file-sourced users when a.usersFile is configured,
-// reloadEvery has elapsed since the last check, and the file's mtime has
-// changed since the last successful load. It runs on the request path
-// (ServeHTTP calls it at entry), so it must stay cheap when nothing changed
-// and must never panic: on any error — stat, load, or replaceFileUsers
-// rejecting the new set — it logs via a.log.errorf and keeps the last good
-// set. A successful reload that changes the file-sourced user count logs via
-// a.log.logf.
+// reloadEvery has elapsed since the last check, and the file's mtime differs
+// from the last observed mtime (forward or backward). It runs on the request
+// path (ServeHTTP calls it at entry), so it must stay cheap when nothing
+// changed and must never panic: on any error — stat, load, or
+// replaceFileUsers rejecting the new set — it logs via a.log.errorf and
+// keeps the last good set. A successful reload that changes the
+// file-sourced user count logs via a.log.logf.
 func (a *authStore) maybeReload() {
 	if a.usersFile == nil {
 		return
 	}
 
-	a.reloadMu.Lock()
+	// TryLock, not Lock: ServeHTTP calls maybeReload on every request, and a
+	// reload's build phase can block on file I/O (resolveSecret's "file:"
+	// reads inside replaceFileUsers). Blocking every concurrent request
+	// behind one full reload would undo the auth.go buildMu/mu lock split's
+	// benefit one layer up. A request that finds a reload already in flight
+	// just skips this cycle — the next request's check (or the next
+	// throttle window) covers it. Reload is deliberately best-effort and
+	// throttled, not "every change lands on the very next request."
+	if !a.reloadMu.TryLock() {
+		return
+	}
 	defer a.reloadMu.Unlock()
 
 	now := a.nowFn()
@@ -79,7 +89,11 @@ func (a *authStore) maybeReload() {
 		a.log.errorf("llmgateway: cannot stat users file %q: %v", a.usersFile.path, err)
 		return
 	}
-	if !info.ModTime().After(a.lastModTime) {
+	// Equal, not After: an After-only check misses a backward mtime move —
+	// a restore from backup, or a `cp -p` from an older file. Any
+	// difference from the last observed mtime, forward or backward, must
+	// trigger a reload; only an unchanged mtime skips it.
+	if info.ModTime().Equal(a.lastModTime) {
 		return
 	}
 

@@ -271,6 +271,28 @@ func TestAuthStore_MaybeReload_UnchangedMtime_DoesNotReload(t *testing.T) {
 	}
 }
 
+// TestAuthStore_MaybeReload_BackwardMtimeMove_TriggersReload is the
+// regression for the Equal-vs-After mtime check: a file restored from a
+// backup, or copied with `cp -p` from an older file, can move the mtime
+// backward. That must still trigger a reload — only an mtime equal to the
+// last observed one may skip it.
+func TestAuthStore_MaybeReload_BackwardMtimeMove_TriggersReload(t *testing.T) {
+	a, fp, _, clock := newReloadableAuthStore(t, nil, []*UserConfig{{Name: "f1", Group: "eng", APIKey: "sk-f1"}})
+
+	past := time.Now().Add(-time.Hour)
+	writeUsersDoc(t, fp, []*UserConfig{{Name: "f2", Group: "eng", APIKey: "sk-f2"}}, past)
+
+	clock.Advance(reloadEvery + time.Second)
+	a.maybeReload()
+
+	if _, _, ok := identifyWithKey(a, "sk-f2"); !ok {
+		t.Fatal("want a backward mtime move to still trigger a reload")
+	}
+	if _, _, ok := identifyWithKey(a, "sk-f1"); ok {
+		t.Fatal("want f1 no longer identifiable once the backward-mtime reload replaced the file-sourced set")
+	}
+}
+
 func TestAuthStore_MaybeReload_UserCountChange_LogsViaLogf(t *testing.T) {
 	a, fp, log, clock := newReloadableAuthStore(t, nil, []*UserConfig{{Name: "f1", Group: "eng", APIKey: "sk-f1"}})
 

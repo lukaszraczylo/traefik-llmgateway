@@ -143,6 +143,18 @@ func newGateway(ctx context.Context, next http.Handler, config *Config, name str
 // constructor error — fail fast on bad config rather than start with an
 // empty file-sourced user set.
 func attachUsersFile(auth *authStore, path string, log gatewayLogger) error {
+	// Stat before load, matching maybeReload's ordering: capturing the mtime
+	// before reading content means a write landing between the stat and the
+	// read still shows up as a further mtime change on the first post-
+	// startup reload check, instead of being silently lost forever — a
+	// stat-after-load can observe a newer mtime for content it never read.
+	//
+	// statErr is intentionally ignored here: if the stat fails, lastModTime
+	// stays at its zero value, so the first maybeReload call sees any real
+	// mtime as "changed" and reloads once more — a harmless extra reload of
+	// content already loaded, not a correctness problem.
+	info, statErr := os.Stat(path)
+
 	uf := newUsersFile(path)
 	initial, err := uf.load()
 	if err != nil {
@@ -154,7 +166,7 @@ func attachUsersFile(auth *authStore, path string, log gatewayLogger) error {
 
 	auth.usersFile = uf
 	auth.log = log
-	if info, statErr := os.Stat(path); statErr == nil {
+	if statErr == nil {
 		auth.lastModTime = info.ModTime()
 	}
 	auth.lastCheck = auth.nowFn()
