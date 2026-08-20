@@ -168,6 +168,9 @@ func newConfiguredLimiter(config *Config) (*limiter, error) {
 	if config.Redis.Address == "" {
 		return nil, errors.New("llmgateway: redis: address must not be empty")
 	}
+	if config.Redis.DB < 0 {
+		return nil, fmt.Errorf("llmgateway: redis: db must not be negative, got %d", config.Redis.DB)
+	}
 
 	password, err := resolveSecret(config.Redis.Password)
 	if err != nil {

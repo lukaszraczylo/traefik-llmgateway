@@ -3,11 +3,13 @@ package traefikllmgateway
 import (
 	"bufio"
 	"bytes"
+	"fmt"
 	"io"
 	"net"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestEncodeCommand pins the exact RESP2 wire format every command must
@@ -125,6 +127,48 @@ func TestDecodeReply(t *testing.T) {
 	t.Run("malformed type byte is a decode error", func(t *testing.T) {
 		if _, err := decodeReply(newReader("?nope\r\n")); err == nil {
 			t.Fatal("want error for an unknown reply type byte")
+		}
+	})
+
+	// The following four subtests are review item 3: decodeBulk/
+	// decodeArray must reject an out-of-range wire length before
+	// allocating, and decodeBulk must validate its CRLF trailer.
+
+	t.Run("oversized bulk length is a protocol error, not a panic", func(t *testing.T) {
+		// n+2 (9223372036854775807+2) overflows int64 into a negative
+		// slice length; make([]byte, n+2) with that unguarded would
+		// panic. Reaching this line without panicking already proves the
+		// fix; the error check confirms it fails cleanly too.
+		if _, err := decodeReply(newReader("$9223372036854775807\r\n")); err == nil {
+			t.Fatal("want an error for a bulk length exceeding respMaxBulkLen")
+		}
+	})
+
+	t.Run("bulk length just over the cap is a protocol error", func(t *testing.T) {
+		if _, err := decodeReply(newReader(fmt.Sprintf("$%d\r\n", respMaxBulkLen+1))); err == nil {
+			t.Fatal("want an error for a bulk length one over respMaxBulkLen")
+		}
+	})
+
+	t.Run("huge array length is a protocol error", func(t *testing.T) {
+		if _, err := decodeReply(newReader("*1000000000\r\n")); err == nil {
+			t.Fatal("want an error for an array length exceeding respMaxArrayLen")
+		}
+	})
+
+	t.Run("bulk with wrong trailer is a protocol error", func(t *testing.T) {
+		if _, err := decodeReply(newReader("$5\r\nhelloXX")); err == nil {
+			t.Fatal("want an error when a bulk reply's trailing bytes are not CRLF")
+		}
+	})
+
+	t.Run("reply line exceeding the cap is a protocol error, not unbounded buffering", func(t *testing.T) {
+		// No trailing "\r\n" at all: without the byte-by-byte cap check,
+		// readLine would keep buffering every byte offered until the
+		// reader errors (e.g. EOF) rather than bailing out early.
+		huge := strings.Repeat("x", respMaxLineLen+10)
+		if _, err := decodeReply(newReader("+" + huge)); err == nil {
+			t.Fatal("want an error for a reply line exceeding respMaxLineLen")
 		}
 	})
 }
@@ -259,6 +303,38 @@ func newFakeListener(t *testing.T) net.Listener {
 	return ln
 }
 
+// newHungListener returns a listener whose accepted connections read (and
+// discard) anything the client sends but never reply — simulating a
+// server that accepted the TCP connection and then went silent (a
+// black-holed network path, a wedged process), as opposed to actively
+// refusing or resetting. Used by review item 1's tests to prove a call's
+// latency is bounded by respCallTimeout rather than left to block
+// indefinitely. Each accepted connection's reader goroutine exits once
+// the connection is closed — by the client's own closeLocked after its
+// deadline fires, or by the listener's t.Cleanup at test end.
+func newHungListener(t *testing.T) net.Listener {
+	t.Helper()
+	ln := newFakeListener(t)
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer func() { _ = c.Close() }()
+				buf := make([]byte, 4096)
+				for {
+					if _, err := c.Read(buf); err != nil {
+						return
+					}
+				}
+			}(conn)
+		}
+	}()
+	return ln
+}
+
 // TestRESPClient_ConnectSendsAuthThenSelect is the brief's Step-1
 // connection-setup case: a configured password sends AUTH before SELECT,
 // both requiring a non-error reply, and SELECT is sent with the
@@ -343,5 +419,26 @@ func TestRESPClient_ReconnectFailsTwice_ReturnsError(t *testing.T) {
 	c := newRESPClient(deadAddr, "", 0)
 	if _, err := c.do("GET", "k"); err == nil {
 		t.Fatal("want an error dialing a dead address")
+	}
+}
+
+// TestRESPClient_HungServer_BoundedByCallDeadline is review item 1: a
+// server that accepts the connection and then never replies must not
+// block a call past respCallTimeout, and — because that failure is a
+// timeout, not a reset/refusal — must not be retried, which would double
+// the wait for the exact same non-answer.
+func TestRESPClient_HungServer_BoundedByCallDeadline(t *testing.T) {
+	ln := newHungListener(t)
+	c := newRESPClient(ln.Addr().String(), "", 0)
+
+	start := time.Now()
+	_, err := c.do("GET", "k")
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("want an error from a server that never replies")
+	}
+	if elapsed >= 3*time.Second {
+		t.Fatalf("elapsed = %v, want < 3s (one bounded call deadline, no retry-doubling on timeout)", elapsed)
 	}
 }

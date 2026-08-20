@@ -26,6 +26,18 @@ func newRedisStore(client *respClient) *redisStore {
 // the count. ttl is rounded up to whole seconds (Redis EXPIRE's unit),
 // with a floor of 1s so a sub-second ttl never turns into EXPIRE 0 (an
 // immediate delete).
+//
+// Semantics are deliberately at-least-once, not exactly-once, both in the
+// conservative direction (never under-counts): respClient.pipeline's
+// reconnect-once retry can re-send this same INCRBY if the first attempt's
+// reply was lost after the server already applied it (e.g. the connection
+// dropped between the server processing INCRBY and the client reading its
+// reply), which can over-count by n on that key; and the limiter's
+// failOpen path can additionally count the same request in its in-process
+// fallback store when a call to this method errors out after a partial
+// success upstream. Both are accepted trade-offs — a rate/budget counter
+// that occasionally over-counts by one request's worth is fail-safe (more
+// restrictive than reality), never fail-open in the unsafe direction.
 func (s *redisStore) incrBy(key string, n int64, ttl time.Duration) (int64, error) {
 	ttlSeconds := int64(ttl / time.Second)
 	if ttl%time.Second != 0 {

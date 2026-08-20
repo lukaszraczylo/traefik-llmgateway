@@ -547,6 +547,19 @@ func TestNewGateway_RedisConfigured_EmptyAddress_ReturnsConstructorError(t *test
 	}
 }
 
+// TestNewGateway_RedisConfigured_NegativeDB_ReturnsConstructorError is
+// review item 5: a negative Redis.DB must fail construction immediately,
+// same as an empty address, rather than reaching SELECT -1 on the wire.
+func TestNewGateway_RedisConfigured_NegativeDB_ReturnsConstructorError(t *testing.T) {
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{"openai": {Type: "openai", APIKey: "k"}}
+	cfg.Redis = &RedisConfig{Address: "127.0.0.1:0", DB: -1}
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	if _, err := New(context.Background(), next, cfg, "llmgw"); err == nil {
+		t.Fatal("want constructor error for a negative Redis db")
+	}
+}
+
 // TestNewGateway_RedisPassword_ResolvedViaSecret is an end-to-end proof
 // that newGateway resolves Config.Redis.Password through resolveSecret
 // (env:/file:/literal) before handing it to respClient: an "env:" password

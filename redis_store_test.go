@@ -136,3 +136,30 @@ func TestLimiter_FailOpenTrue_DeadRedisAddress_FallsBackAndAllows(t *testing.T) 
 		t.Errorf("fallback req:day counter = %d, want 1 (the request must have been counted in the fallback)", got)
 	}
 }
+
+// TestLimiter_FailOpenTrue_HungRedisServer_FallsBackQuickly is review item
+// 1's limiter-level proof: a hung (accepts the connection, never replies)
+// Redis-compatible server must not make a failOpen=true request wait out
+// several stacked multi-second timeouts (the pre-fix behavior for a
+// checkAndCount call that performs several store operations) — each of
+// checkAndCount's two store ops here (req:min, req:day) is bounded by one
+// respCallTimeout, not respCallTimeout times every read/write step it
+// happens to perform, so the whole call stays well under the old
+// multi-times-respCallTimeout stall.
+func TestLimiter_FailOpenTrue_HungRedisServer_FallsBackQuickly(t *testing.T) {
+	ln := newHungListener(t)
+	store := newRedisStore(newRESPClient(ln.Addr().String(), "", 0))
+	l := newLimiter(store, true)
+	scopes := []limitScope{{kind: "user", id: "u", limits: &LimitsConfig{RequestsPerMinute: 100}}}
+
+	start := time.Now()
+	v := l.checkAndCount(scopes)
+	elapsed := time.Since(start)
+
+	if v != nil {
+		t.Fatalf("want no violation with failOpen=true and a hung store, got %+v", v)
+	}
+	if elapsed >= 6*time.Second {
+		t.Fatalf("elapsed = %v, want well under the old worst case (two bounded store ops, not many stacked timeouts)", elapsed)
+	}
+}

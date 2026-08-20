@@ -433,18 +433,38 @@ func TestLimiter_FailClosed_StoreErrorReturnsStoreDownViolation(t *testing.T) {
 	}
 }
 
+// succeedIncrFailGetStore is a counterStore stub whose incrBy always
+// succeeds and whose get always errors. It isolates budgetViolation's own
+// storeDown branch (limits.go) from checkAndCount's earlier incrCounter
+// one: an erroringStore that fails both methods makes checkAndCount's
+// initial req:min/req:day increments fail closed and return before
+// evaluateScope — and therefore budgetViolation — ever runs, so a test
+// built on it cannot actually prove budgetViolation's own branch works.
+type succeedIncrFailGetStore struct {
+	getErr error
+}
+
+func (s *succeedIncrFailGetStore) incrBy(string, int64, time.Duration) (int64, error) {
+	return 1, nil
+}
+func (s *succeedIncrFailGetStore) get(string) (int64, error) { return 0, s.getErr }
+
 // TestLimiter_FailClosed_BudgetReadReturnsStoreDownViolation covers the
 // budgetViolation fail-closed path specifically (as opposed to the
-// request-counter incrCounter path covered above): a store error on a
+// request-counter incrCounter path TestLimiter_FailClosed_
+// StoreErrorReturnsStoreDownViolation covers above): a store error on a
 // token/cost budget read also refuses the request when failOpen is false.
+// The store's incrBy succeeds so checkAndCount's req:min/req:day
+// increments pass and evaluateScope actually reaches budgetViolation; a
+// TokensPerDay limit makes evaluateScope call it.
 func TestLimiter_FailClosed_BudgetReadReturnsStoreDownViolation(t *testing.T) {
-	store := &erroringStore{err: errors.New("boom")}
+	store := &succeedIncrFailGetStore{getErr: errors.New("boom")}
 	l := newLimiter(store, false)
 	scopes := []limitScope{{kind: "user", id: "u", limits: &LimitsConfig{TokensPerDay: 100}}}
 
 	v := l.checkAndCount(scopes)
 	if v == nil {
-		t.Fatal("want a storeDown violation on a store error with failOpen=false")
+		t.Fatal("want a storeDown violation from the budget-read path with failOpen=false")
 	}
 	if !v.storeDown {
 		t.Error("v.storeDown = false, want true")
