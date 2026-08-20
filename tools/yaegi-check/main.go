@@ -50,14 +50,19 @@ const (
 )
 
 // excludedTopLevelDirs lists repo-root directories the GOPATH copy must
-// never include: build tooling, integration fixtures, planning docs, and
-// VCS metadata have nothing to do with the plugin package Yaegi imports.
+// never include: build tooling, integration fixtures, planning docs, VCS
+// metadata, and vendor (task-8's test-only testify dependency — _test.go
+// files are never interpreted by Yaegi, so vendor/ has nothing this check
+// needs, and copying its "go.yaml.in"-style nested module dirs into a
+// module-less GOPATH tree would otherwise confuse Yaegi's own import
+// resolution) have nothing to do with the plugin package Yaegi imports.
 var excludedTopLevelDirs = map[string]bool{
 	"tools":        true,
 	"integration":  true,
 	".superpowers": true,
 	"docs":         true,
 	".git":         true,
+	"vendor":       true,
 }
 
 func main() {
