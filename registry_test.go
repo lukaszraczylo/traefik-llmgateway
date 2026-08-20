@@ -228,6 +228,59 @@ func TestModelRegistry_Resolve_AllowedByBothProviderAndModel_Succeeds(t *testing
 	}
 }
 
+// --- resolve: exact-glob model authorization, no spurious prefix-strip
+// (fix(registry) ruling 3) ---
+
+// TestModelRegistry_Resolve_BareIDWithSlash_ModelGlobMustNotMatchViaSpuriousStrip
+// is the regression: allowsModel used to strip at any first slash, so a
+// pattern like "deepseek-*" would spuriously match a bare model id that
+// merely contains a slash — an upstream's own "uni/deepseek-v4-flash-0731"
+// naming, where "uni" is not a configured provider and there is no
+// legitimate prefix to strip at all. resolveAgainst must not invent that
+// candidate for a request that was never provider-prefixed in the first
+// place.
+func TestModelRegistry_Resolve_BareIDWithSlash_ModelGlobMustNotMatchViaSpuriousStrip(t *testing.T) {
+	t.Parallel()
+	adapters := map[string]providerAdapter{"acme": newFakeAdapter("acme")}
+	cfg := &Config{Providers: map[string]*ProviderConfig{"acme": {Models: []string{"uni/deepseek-v4-flash-0731"}}}}
+	reg, err := newModelRegistry(adapters, cfg, func(string, ...any) {})
+	if err != nil {
+		t.Fatalf("newModelRegistry: %v", err)
+	}
+
+	const id = "uni/deepseek-v4-flash-0731"
+	grp := &group{name: "narrow", models: []string{"deepseek-*"}}
+	if _, _, _, err := reg.resolve(id, grp); err != errModelDenied {
+		t.Errorf("err = %v, want errModelDenied (deepseek-* must not spuriously match via a bare-suffix strip)", err)
+	}
+
+	// Positive control: a pattern that legitimately targets the full bare
+	// id, slash included, still matches via plain exact-glob.
+	grp.models = []string{"uni/deepseek*"}
+	if _, _, _, err := reg.resolve(id, grp); err != nil {
+		t.Errorf("resolve with a full-string-matching pattern: %v, want success", err)
+	}
+}
+
+// TestModelRegistry_Resolve_ProviderPrefixed_ModelGlobMatchesViaBareCandidate
+// is the positive half of the same ruling: a provider-prefixed request's
+// bare suffix is still checked against the model glob — resolveAgainst
+// generates that candidate itself now that allowsModel no longer strips.
+func TestModelRegistry_Resolve_ProviderPrefixed_ModelGlobMatchesViaBareCandidate(t *testing.T) {
+	t.Parallel()
+	adapters := map[string]providerAdapter{"openai": newFakeAdapter("openai")}
+	cfg := &Config{Providers: map[string]*ProviderConfig{"openai": {Models: []string{"gpt-test"}}}}
+	reg, err := newModelRegistry(adapters, cfg, func(string, ...any) {})
+	if err != nil {
+		t.Fatalf("newModelRegistry: %v", err)
+	}
+
+	grp := &group{name: "narrow", models: []string{"gpt-*"}}
+	if _, _, _, err := reg.resolve("openai/gpt-test", grp); err != nil {
+		t.Errorf("resolve: %v, want success (gpt-* must match via the bare-suffix candidate)", err)
+	}
+}
+
 // --- resolve: collision precedence (ruling g) ---
 
 func TestModelRegistry_Resolve_BareIDCollision_PicksSortedFirstProvider(t *testing.T) {
@@ -374,6 +427,54 @@ func TestModelRegistry_WarmFill_NonDiscoveryProvider_NeverCallsListModels(t *tes
 	}
 }
 
+// TestModelRegistry_WarmFill_EachProviderGetsFullBudget_NotSharedAcrossProviders
+// is the regression for llmgateway.go's old outer 5s wrap around the whole
+// warmFill call (fix(registry) ruling 2): that outer wrap made
+// warmFillTimeout a total budget shared across every discovery-enabled
+// provider instead of a fresh one per provider, so a slow first provider
+// ate into a later provider's deadline and could leave it resolving
+// nothing for the whole first interval. warmFill derives each provider's
+// timeout via context.WithTimeout(ctx, warmFillTimeout) fresh per
+// iteration; this proves that yields close to the full budget for a later
+// provider even after an earlier one took real wall-clock time, as long as
+// ctx itself (as llmgateway.go now passes it) carries no deadline of its
+// own.
+func TestModelRegistry_WarmFill_EachProviderGetsFullBudget_NotSharedAcrossProviders(t *testing.T) {
+	t.Parallel()
+	slow := newFakeAdapter("a-slow")
+	slow.listModelsFn = func(context.Context) ([]string, error) {
+		time.Sleep(1200 * time.Millisecond) // wall-clock cost, not budget shared with b-fast
+		return []string{"slow-model"}, nil
+	}
+	var fastRemaining time.Duration
+	fast := newFakeAdapter("b-fast")
+	fast.listModelsFn = func(ctx context.Context) ([]string, error) {
+		if dl, ok := ctx.Deadline(); ok {
+			fastRemaining = time.Until(dl)
+		}
+		return []string{"fast-model"}, nil
+	}
+	adapters := map[string]providerAdapter{"a-slow": slow, "b-fast": fast}
+	cfg := &Config{Providers: map[string]*ProviderConfig{
+		// Sorted provider-name order drives warmFill's iteration: "a-slow"
+		// runs before "b-fast" for this test to be meaningful.
+		"a-slow": {Discovery: true},
+		"b-fast": {Discovery: true},
+	}}
+	reg, err := newModelRegistry(adapters, cfg, func(string, ...any) {})
+	if err != nil {
+		t.Fatalf("newModelRegistry: %v", err)
+	}
+
+	// Mirrors llmgateway.go's fixed call site: an unbounded parent ctx, not
+	// one pre-wrapped to warmFillTimeout.
+	reg.warmFill(context.Background())
+
+	if fastRemaining < 4*time.Second {
+		t.Errorf("b-fast's received context deadline was %v from expiry, want >4s (its 5s warm-fill budget must not be reduced by a-slow's 1.2s elapsed time)", fastRemaining)
+	}
+}
+
 // --- maybeRefresh: throttling, in-flight guard, stale-while-error ---
 
 func TestModelRegistry_MaybeRefresh_Throttled_OnePerInterval(t *testing.T) {
@@ -450,6 +551,59 @@ func TestModelRegistry_MaybeRefresh_InFlightGuard_BlocksConcurrentFetch(t *testi
 
 	close(release)
 	waitUntil(t, time.Second, func() bool { return atomic.LoadInt32(&calls) == 1 && reg.states["openai"].hasModel("m1") })
+}
+
+// TestModelRegistry_RefreshProvider_AdapterPanics_RecoversAndReleasesInFlight
+// is the regression for the missing recover() in refreshProvider (fix
+// (registry) ruling 1): refreshProvider's "go" statement is the plugin's
+// only background goroutine, running off any request's stack. An
+// unrecovered panic there would crash the whole Traefik process, not just
+// fail one refresh — there is no ServeHTTP caller above it to catch it.
+// Reaching the end of this test at all is part of the proof: if recover()
+// were missing, the panicking listModels call below would have already
+// crashed the test binary.
+func TestModelRegistry_RefreshProvider_AdapterPanics_RecoversAndReleasesInFlight(t *testing.T) {
+	t.Parallel()
+	var calls int32
+	fa := newFakeAdapter("openai")
+	fa.listModelsFn = func(context.Context) ([]string, error) {
+		n := atomic.AddInt32(&calls, 1)
+		if n == 1 {
+			panic("boom: adapter blew up")
+		}
+		return []string{"m1"}, nil
+	}
+	adapters := map[string]providerAdapter{"openai": fa}
+	cfg := &Config{Providers: map[string]*ProviderConfig{"openai": {Discovery: true, DiscoveryInterval: "1h"}}}
+	rl := &recordingLog{}
+	reg, err := newModelRegistry(adapters, cfg, rl.fn)
+	if err != nil {
+		t.Fatalf("newModelRegistry: %v", err)
+	}
+	now := time.Now()
+	reg.nowFn = func() time.Time { return now }
+
+	reg.maybeRefresh(context.Background())
+	// The log write happens strictly after finishRefresh inside
+	// refreshProvider's deferred recover handler (both under the same
+	// goroutine, in that order), so waiting for it also proves inFlight was
+	// released and lastRefresh advanced — not merely that the panic
+	// occurred. recordingLog's own mutex gives this a proper happens-before
+	// edge with the write, so this is race-safe without touching
+	// providerState's fields directly.
+	waitUntil(t, time.Second, func() bool { return rl.count() > 0 })
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("listModels called %d times, want exactly 1 before the panic", got)
+	}
+
+	// The guard was released, not left stuck true: a second attempt after
+	// the interval elapses retries rather than being throttled forever.
+	now = now.Add(2 * time.Hour)
+	reg.maybeRefresh(context.Background())
+	waitUntil(t, time.Second, func() bool { return reg.states["openai"].hasModel("m1") })
+	if got := atomic.LoadInt32(&calls); got != 2 {
+		t.Errorf("listModels called %d times after the retry window, want 2", got)
+	}
 }
 
 func TestModelRegistry_MaybeRefresh_DiscoveryError_KeepsPreviousDiscoveredSet(t *testing.T) {

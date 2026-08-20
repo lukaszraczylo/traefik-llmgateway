@@ -30,8 +30,14 @@ func TestIdentify(t *testing.T) {
 	if !grp.allowsModel("gpt-5-mini") {
 		t.Error("glob should match")
 	}
-	if !grp.allowsModel("openai/gpt-5-mini") {
-		t.Error("prefixed form should match")
+	// allowsModel is an exact glob against the given string only — it no
+	// longer strips a "provider/" prefix itself (fix(registry) ruling 3): a
+	// pattern like "gpt-5*" reaching a provider-prefixed request like
+	// "openai/gpt-5-mini" is now the caller's job (modelRegistry.
+	// resolveAgainst / listFor build the bare-suffix candidate themselves),
+	// covered at the registry level in registry_test.go, not here.
+	if grp.allowsModel("openai/gpt-5-mini") {
+		t.Error("allowsModel must not match a provider-prefixed id on its own; prefix-stripping now lives in the caller")
 	}
 	if grp.allowsModel("claude-4") {
 		t.Error("should not match")

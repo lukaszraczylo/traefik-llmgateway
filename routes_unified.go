@@ -16,7 +16,7 @@ func (g *Gateway) handleModels(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{
+	_ = json.NewEncoder(w).Encode(map[string]any{ // headers already committed; nothing useful to do on encode failure
 		"object": "list",
 		"data":   g.registry.listFor(grp),
 	})

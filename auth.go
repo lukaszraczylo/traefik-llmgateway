@@ -32,18 +32,19 @@ func (grp *group) allowsProvider(name string) bool {
 }
 
 // allowsModel reports whether id matches one of the group's model glob
-// patterns. An empty pattern list allows every model. A pattern is checked
-// against id as given and, when id has a "provider/model" form, against the
-// part after the "/" — so a pattern like "gpt-5*" matches both "gpt-5-mini"
-// and "openai/gpt-5-mini".
+// patterns, exactly as given. An empty pattern list allows every model.
+//
+// allowsModel does no "provider/model" prefix-splitting of its own — a
+// pattern like "deepseek-*" must not spuriously match a bare model id that
+// merely happens to contain a slash (e.g. an upstream's own
+// "uni/deepseek-v4-flash-0731" naming, where "uni" is not a configured
+// provider: there is no legitimate prefix to strip there at all). A caller
+// that genuinely knows an id's leading segment names a configured provider
+// (modelRegistry.resolveAgainst, modelRegistry.listFor) generates both the
+// full and bare-suffix candidate strings itself and calls allowsModel once
+// per candidate.
 func (grp *group) allowsModel(id string) bool {
-	if matchesGlob(grp.models, id) {
-		return true
-	}
-	if _, bare, found := strings.Cut(id, "/"); found {
-		return matchesGlob(grp.models, bare)
-	}
-	return false
+	return matchesGlob(grp.models, id)
 }
 
 // allowsMCP reports whether name matches one of the group's MCP-server glob

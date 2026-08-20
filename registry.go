@@ -239,14 +239,38 @@ func (m *modelRegistry) maybeRefresh(ctx context.Context) {
 // already marked inFlight by tryBeginRefresh, and records its outcome via
 // finishRefresh. Split out from maybeRefresh so the goroutine closes over
 // named parameters, not loop variables.
+//
+// This goroutine (maybeRefresh's only "go" statement in the whole plugin)
+// is a deliberate, narrow exception to memoryStore's no-background-goroutine
+// rule (limits.go:144-149): unlike a ticker that would outlive a Yaegi
+// middleware instance rebuilt on every config reload, this goroutine is
+// self-terminating — at most one per provider per interval
+// (tryBeginRefresh's inFlight guard), bounded to backgroundRefreshTimeout
+// (30s). A rebuild mid-flight can transiently leak one goroutine for at
+// most 30s; that is accepted, not a steady-state leak.
+//
+// The deferred recover below is required precisely because this runs off
+// any request's goroutine: an unrecovered panic here has no ServeHTTP
+// caller to unwind into and would crash the whole Traefik process, not just
+// fail one request. finishRefresh still runs on the panic path (with a
+// synthetic error) so inFlight is always released and the next interval
+// retries, exactly as a normal fetch failure would.
 func (m *modelRegistry) refreshProvider(name string, st *providerState, adapter providerAdapter) {
+	var ids []string
+	var err error
+	defer func() {
+		if rec := recover(); rec != nil {
+			err = fmt.Errorf("panic: %v", rec)
+		}
+		st.finishRefresh(m.now(), ids, err)
+		if err != nil {
+			m.log("model registry: discovery refresh for provider %q failed: %v", name, err)
+		}
+	}()
+
 	fctx, cancel := context.WithTimeout(context.Background(), backgroundRefreshTimeout)
 	defer cancel()
-	ids, err := adapter.listModels(fctx)
-	st.finishRefresh(m.now(), ids, err)
-	if err != nil {
-		m.log("model registry: discovery refresh for provider %q failed: %v", name, err)
-	}
+	ids, err = adapter.listModels(fctx)
 }
 
 // splitConfiguredProvider reports whether id has "prefix/rest" form where
@@ -314,15 +338,24 @@ func (m *modelRegistry) resolve(id string, grp *group) (providerAdapter, string,
 // upstreamModel is actually known to that provider, then checks
 // authorization, in that order — so a real model behind a provider the
 // group cannot use reports errModelDenied, not errModelUnknown.
-// requestedID is the id form passed to grp.allowsModel; it is the
-// provider-prefixed form for a direct request, or the bare id for a
-// bare-id request — allowsModel already checks both a pattern's full-string
-// and bare-suffix match, so either form is checked correctly either way.
+//
+// allowsModel is an exact glob match (auth.go) with no prefix-stripping of
+// its own, so resolveAgainst generates both candidate strings itself:
+// requestedID (the provider-prefixed form for a direct request, e.g.
+// "openai/gpt-test") and upstreamModel (its bare suffix, e.g. "gpt-test"),
+// and allows if either matches — that is what lets a pattern like "gpt-*"
+// reach a provider-prefixed request. For a bare-id request the caller
+// passes the same string as both arguments, so the two checks collapse to
+// one: no bare-suffix candidate is invented for an id that was never
+// legitimately provider-prefixed in the first place (ruling: a pattern like
+// "deepseek-*" must not match a bare id that merely contains a slash, e.g.
+// "uni/deepseek-v4-flash-0731", when "uni" is not a configured provider).
 func (m *modelRegistry) resolveAgainst(providerName, upstreamModel, requestedID string, grp *group) (providerAdapter, string, string, error) {
 	if !m.states[providerName].hasModel(upstreamModel) {
 		return nil, "", "", errModelUnknown
 	}
-	if !grp.allowsModel(requestedID) || !grp.allowsProvider(providerName) {
+	allowed := grp.allowsModel(requestedID) || grp.allowsModel(upstreamModel)
+	if !allowed || !grp.allowsProvider(providerName) {
 		return nil, "", "", errModelDenied
 	}
 	return m.adapters[providerName], upstreamModel, providerName + "/" + upstreamModel, nil
@@ -370,7 +403,10 @@ func (m *modelRegistry) listFor(grp *group) []map[string]any {
 		m.warnCollisionOnce(id, winner, provs)
 		for _, p := range provs {
 			pid := p + "/" + id
-			if grp.allowsModel(pid) && grp.allowsProvider(p) {
+			// allowsModel does no prefix-stripping (auth.go): check both the
+			// prefixed form and its bare suffix, same as resolveAgainst does
+			// for the equivalent client request.
+			if (grp.allowsModel(pid) || grp.allowsModel(id)) && grp.allowsProvider(p) {
 				out = append(out, modelObject(pid, p))
 			}
 		}

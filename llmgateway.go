@@ -153,9 +153,15 @@ func newGateway(ctx context.Context, next http.Handler, config *Config, name str
 	if err != nil {
 		return nil, err
 	}
-	warmCtx, warmCancel := context.WithTimeout(ctx, warmFillTimeout)
-	defer warmCancel()
-	registry.warmFill(warmCtx)
+	// ctx is passed through unwrapped, not re-bounded to warmFillTimeout here:
+	// warmFill already gives each discovery-enabled provider its own fresh
+	// warmFillTimeout budget per provider (registry.go). Wrapping ctx to a
+	// single shared warmFillTimeout here would make that per-provider budget
+	// a lie — provider 2..N would inherit whatever is left of the first
+	// provider's deadline instead of a full one. Construction's worst case is
+	// therefore N * warmFillTimeout (N = discovery-enabled providers), which
+	// is accepted.
+	registry.warmFill(ctx)
 	g.registry = registry
 
 	setPricingWarnFn(func(msg string) {
