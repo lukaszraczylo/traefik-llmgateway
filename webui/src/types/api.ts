@@ -15,14 +15,16 @@ export interface LimitsConfig {
 /**
  * One upstream model's current-window attempt/failure counters within its
  * provider (admin.go: adminModelRateView) — Feature A, v0.22 per-model
- * success-rate breakdown. Field shape matches AdminProviderView's own
- * attempts/failures counters below, just scoped to one model.
+ * success-rate breakdown. Day window only, no attemptsMinute/
+ * failuresMinute (SHOULD-2, v0.22 review round): a dashboard with N
+ * configured models was paying N wasted minute-window store reads on
+ * every 5s poll for a figure that only ever fed a badge's title text,
+ * never its own displayed tier. See lib/provider-rate.ts's dayRateTitle
+ * for the fallback title text a per-model badge renders instead.
  */
 export interface AdminModelRateView {
   attemptsDay: number
   failuresDay: number
-  attemptsMinute: number
-  failuresMinute: number
 }
 
 export interface AdminProviderView {

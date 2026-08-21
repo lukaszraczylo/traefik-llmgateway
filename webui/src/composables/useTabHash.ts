@@ -18,6 +18,20 @@ import { onMounted, onUnmounted, ref, watch } from 'vue'
  * validTabs. Matching is a plain string comparison: a tab value is
  * already a fixed lowercase identifier (App.vue's TabsTrigger value=
  * strings), never re-cased anywhere in this pipeline.
+ *
+ * Two intentional URL-normalization quirks (folded review minors, v0.22
+ * review round), both worth naming rather than leaving implicit:
+ *
+ * 1. Case sensitivity: "#Providers" does NOT match "providers" — it falls
+ *    back to defaultTab like any other unrecognized hash, rather than
+ *    being normalized case-insensitively. A URL a person typed or edited
+ *    by hand with different casing is treated as invalid, not corrected.
+ * 2. An invalid or absent hash is normalized only in memory (this
+ *    function's own return value), never in the address bar itself:
+ *    useTabHash's initial read below never calls history.replaceState —
+ *    only a LATER tab change does (see its own doc comment) — so loading
+ *    "#bogus" shows the Providers tab while the address bar still reads
+ *    "#bogus" until the reader switches tabs at least once.
  */
 export function hashToTab<T extends string>(hash: string, validTabs: readonly T[], defaultTab: T): T {
   const raw = hash.startsWith('#') ? hash.slice(1) : hash

@@ -34,14 +34,19 @@ export type ProviderRateStatus = 'no-traffic' | 'healthy' | 'degraded' | 'severe
 
 /**
  * providerSuccessRate computes the (attempts-failures)/attempts success
- * rate as a 0-1 fraction, or null when attempts is 0 or negative — the
- * "no traffic yet" case a caller must render as its own state, never as a
- * fraction (a 0/0 division would otherwise read as NaN, or worse, as a
- * misleading 100%).
+ * rate as a 0-1 fraction, or null when attempts is 0, negative, or not a
+ * finite number — the "no traffic yet" case a caller must render as its
+ * own state, never as a fraction (a 0/0 division would otherwise read as
+ * NaN, or worse, as a misleading 100%). failures is defensively treated
+ * as 0 when it is not a finite number (folded review minor, v0.22 review
+ * round): every real caller sources both counters from the same
+ * admin.go response, so this only guards a version-skew or malformed-
+ * response case, not a path normal operation reaches.
  */
 export function providerSuccessRate(attempts: number, failures: number): number | null {
-  if (attempts <= 0) return null
-  return (attempts - failures) / attempts
+  if (!Number.isFinite(attempts) || attempts <= 0) return null
+  const safeFailures = Number.isFinite(failures) ? failures : 0
+  return (attempts - safeFailures) / attempts
 }
 
 /**
@@ -69,24 +74,56 @@ export function isModelDegraded(attemptsDay: number, failuresDay: number): boole
   return rate !== null && rate < PROVIDER_RATE_AMBER_THRESHOLD
 }
 
-/** formatRatePercent renders a 0-1 fraction as a rounded whole-percent string, e.g. 0.994 -> "99%", 1 -> "100%". */
+/**
+ * formatRatePercent renders a 0-1 fraction as a whole-percent string,
+ * FLOORED rather than rounded (folded review minor, v0.22 review round):
+ * only a true 100% rate — zero failures — ever renders "100%"; a rate
+ * like 0.996 (unrounded, sub-1% failure) renders "99%", not a
+ * round-tripped "100%" that would read as flawless when it is not quite.
+ * A rate at or above 1 (the only way to reach exactly 100%, given
+ * providerSuccessRate's own (attempts-failures)/attempts shape) is
+ * special-cased rather than left to Math.floor's own rounding, purely for
+ * clarity at the boundary.
+ */
 export function formatRatePercent(rate: number): string {
-  return `${Math.round(rate * 100)}%`
+  if (rate >= 1) return '100%'
+  return `${Math.floor(rate * 100)}%`
+}
+
+/** countWord returns singular when n is exactly 1, plural otherwise — shared by minuteRateTitle and dayRateTitle so their wording never drifts apart. */
+function countWord(n: number, singular: string, plural: string): string {
+  return n === 1 ? singular : plural
 }
 
 /**
- * minuteRateTitle builds the badge's title attribute — the "right now"
- * minute-window detail the spec asks for beside the day-window badge text
- * itself, e.g. "12 attempts, 1 failure in the last minute (92%)". Singular/
- * plural wording follows the actual count, and a zero-attempt minute reads
- * as its own sentence rather than a "0%" that would misread as a total
- * outage.
+ * minuteRateTitle builds the provider-level badge's title/aria-label —
+ * the "right now" minute-window detail the spec asks for beside the
+ * day-window badge text itself, e.g. "12 attempts, 1 failure in the last
+ * minute (92%)". Singular/plural wording follows the actual count, and a
+ * zero-attempt minute reads as its own sentence rather than a "0%" that
+ * would misread as a total outage. Provider-level only — a per-model
+ * badge no longer has minute-window counters to build this from at all
+ * (SHOULD-2, v0.22 review round: see dayRateTitle, its own fallback).
  */
 export function minuteRateTitle(attemptsMinute: number, failuresMinute: number): string {
   if (attemptsMinute <= 0) return 'no traffic in the last minute'
   const rate = providerSuccessRate(attemptsMinute, failuresMinute)
   const pct = rate === null ? '' : ` (${formatRatePercent(rate)})`
-  const attemptWord = attemptsMinute === 1 ? 'attempt' : 'attempts'
-  const failureWord = failuresMinute === 1 ? 'failure' : 'failures'
-  return `${attemptsMinute} ${attemptWord}, ${failuresMinute} ${failureWord} in the last minute${pct}`
+  return `${attemptsMinute} ${countWord(attemptsMinute, 'attempt', 'attempts')}, ${failuresMinute} ${countWord(failuresMinute, 'failure', 'failures')} in the last minute${pct}`
+}
+
+/**
+ * dayRateTitle is minuteRateTitle's day-window equivalent — the per-model
+ * badge's title/aria-label (SHOULD-2, v0.22 review round): a model
+ * scope's minute-window counters are no longer fetched anywhere
+ * (admin.go's buildAdminOverview, limits.go's providerCounterKeys), so a
+ * per-model badge cannot build minuteRateTitle's "in the last minute"
+ * sentence — this is the "today" equivalent, built from the same day
+ * counters the badge's own visible percent already uses.
+ */
+export function dayRateTitle(attemptsDay: number, failuresDay: number): string {
+  if (attemptsDay <= 0) return 'no traffic today'
+  const rate = providerSuccessRate(attemptsDay, failuresDay)
+  const pct = rate === null ? '' : ` (${formatRatePercent(rate)})`
+  return `${attemptsDay} ${countWord(attemptsDay, 'attempt', 'attempts')}, ${failuresDay} ${countWord(failuresDay, 'failure', 'failures')} today${pct}`
 }

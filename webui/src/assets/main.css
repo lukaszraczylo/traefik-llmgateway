@@ -53,6 +53,7 @@
     --color-chart-tokens-in: var(--chart-tokens-in);
     --color-chart-tokens-out: var(--chart-tokens-out);
     --color-chart-cost: var(--chart-cost);
+    --color-status-warn: var(--status-warn);
     --radius-sm: calc(var(--radius) - 4px);
     --radius-md: calc(var(--radius) - 2px);
     --radius-lg: var(--radius);
@@ -86,6 +87,20 @@
     --chart-tokens-in: #0072b2;
     --chart-tokens-out: #e69f00;
     --chart-cost: #d55e00;
+
+    /*
+     * --status-warn: a semantic "degraded, not broken" indicator (the
+     * Providers tab's amber success-rate badge, ProviderRateBadge.vue) —
+     * deliberately its OWN token, not a reuse of --chart-tokens-out despite
+     * sharing that token's hue family. --chart-tokens-out is tuned to read
+     * against a chart's plot background at a small mark size, not as body
+     * text on --card; measured here at #e69f00-on-card it comes out to
+     * ~2.22:1, well under WCAG 1.4.3's 4.5:1 text-contrast minimum — a
+     * genuine accessibility bug on exactly the badge tier meant to say
+     * "something's wrong" (MUST-1, v0.22 review round). #a35c00 on the
+     * light --card measures ~5.06:1.
+     */
+    --status-warn: #a35c00;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -116,6 +131,14 @@
         --chart-tokens-in: #4098d7;
         --chart-tokens-out: #f0ac1f;
         --chart-cost: #e8763a;
+
+        /* #f0ac1f on the dark --card measures ~8.97:1 — no separate dark
+           value was needed to clear WCAG 1.4.3 here, unlike light mode
+           (see --status-warn's own doc comment above), but the token is
+           still redefined per-mode rather than left to fall through, so a
+           reader auditing this block sees every semantic-color token's
+           dark value in one place. */
+        --status-warn: #f0ac1f;
     }
 }
 

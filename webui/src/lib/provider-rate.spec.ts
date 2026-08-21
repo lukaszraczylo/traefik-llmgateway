@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  dayRateTitle,
   formatRatePercent,
   isModelDegraded,
   minuteRateTitle,
@@ -29,6 +30,15 @@ describe('providerSuccessRate', () => {
 
   it('returns null for a negative attempts count (defensive edge case)', () => {
     expect(providerSuccessRate(-1, 0)).toBeNull()
+  })
+
+  it('returns null for a non-finite attempts count (folded review minor: NaN-guard the badge props)', () => {
+    expect(providerSuccessRate(Number.NaN, 0)).toBeNull()
+    expect(providerSuccessRate(Number.POSITIVE_INFINITY, 0)).toBeNull()
+  })
+
+  it('treats a non-finite failures count as 0 rather than propagating NaN', () => {
+    expect(providerSuccessRate(10, Number.NaN)).toBe(1)
   })
 })
 
@@ -81,10 +91,19 @@ describe('isModelDegraded', () => {
 })
 
 describe('formatRatePercent', () => {
-  it('rounds to the nearest whole percent', () => {
+  it('floors rather than rounds, so only a true 100% rate ever shows 100%', () => {
     expect(formatRatePercent(0.994)).toBe('99%')
-    expect(formatRatePercent(0.995)).toBe('100%')
+    // Round would have bumped this to "100%" (99.5 rounds up) — floor
+    // correctly keeps it "99%": the rate is not actually a perfect 100%.
+    expect(formatRatePercent(0.995)).toBe('99%')
+    expect(formatRatePercent(0.999)).toBe('99%')
+  })
+
+  it('shows 100% only for an exact rate of 1', () => {
     expect(formatRatePercent(1)).toBe('100%')
+  })
+
+  it('floors 0 to "0%"', () => {
     expect(formatRatePercent(0)).toBe('0%')
   })
 })
@@ -98,11 +117,29 @@ describe('minuteRateTitle', () => {
     expect(minuteRateTitle(1, 1)).toBe('1 attempt, 1 failure in the last minute (0%)')
   })
 
-  it('pluralizes attempts independently of a singular failure count, with the rounded percent', () => {
-    expect(minuteRateTitle(12, 1)).toBe('12 attempts, 1 failure in the last minute (92%)')
+  it('pluralizes attempts independently of a singular failure count, with the floored percent', () => {
+    expect(minuteRateTitle(12, 1)).toBe('12 attempts, 1 failure in the last minute (91%)')
   })
 
   it('omits failures from wording only via the count itself (0 failures still says "0 failures")', () => {
     expect(minuteRateTitle(5, 0)).toBe('5 attempts, 0 failures in the last minute (100%)')
+  })
+})
+
+describe('dayRateTitle', () => {
+  it('reports no traffic distinctly when attemptsDay is 0 (per-model badge fallback, SHOULD-2)', () => {
+    expect(dayRateTitle(0, 0)).toBe('no traffic today')
+  })
+
+  it('uses singular attempt/failure wording for a count of exactly 1', () => {
+    expect(dayRateTitle(1, 1)).toBe('1 attempt, 1 failure today (0%)')
+  })
+
+  it('pluralizes independently, with the floored percent', () => {
+    expect(dayRateTitle(12, 1)).toBe('12 attempts, 1 failure today (91%)')
+  })
+
+  it('says "today" rather than "in the last minute" — the only wording difference from minuteRateTitle', () => {
+    expect(dayRateTitle(5, 0)).toBe('5 attempts, 0 failures today (100%)')
   })
 })

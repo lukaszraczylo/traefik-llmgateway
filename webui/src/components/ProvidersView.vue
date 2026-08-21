@@ -21,7 +21,7 @@ import {
   CardTitle,
 } from '@/components/ui/card'
 import { useSearchQuery } from '@/composables/useSearchQuery'
-import { formatAgo, formatTimestamp, refreshLabel, routableModelId } from '@/lib/format'
+import { formatAgo, refreshDetailLabel, refreshLabel, routableModelId } from '@/lib/format'
 import { isModelDegraded } from '@/lib/provider-rate'
 import { type ExpandState, clearExpandOverrides, computeExpandedItems, toggleItemExpand } from '@/lib/search-expand'
 import { useDashboardStore } from '@/stores/dashboard'
@@ -139,11 +139,20 @@ function visibleModels(p: AdminProviderView): string[] {
 }
 
 /** ZERO_MODEL_RATE is the fallback ProviderRateBadge reads for a model p.modelRates has no entry for — should not happen (admin.go's buildAdminOverview populates one entry per Models id, unconditionally), but a defensive fallback keeps a stale/mismatched client build from throwing rather than just under-reporting. */
-const ZERO_MODEL_RATE: AdminModelRateView = { attemptsDay: 0, failuresDay: 0, attemptsMinute: 0, failuresMinute: 0 }
+const ZERO_MODEL_RATE: AdminModelRateView = { attemptsDay: 0, failuresDay: 0 }
 
-/** modelRateFor looks up one model's counters within p.modelRates (Feature A, v0.22), falling back to ZERO_MODEL_RATE. */
+/**
+ * modelRateFor looks up one model's counters within p.modelRates (Feature
+ * A, v0.22), falling back to ZERO_MODEL_RATE. The optional-chain on
+ * modelRates itself (folded review minor, v0.22 review round), not just
+ * on the lookup, matches ZERO_MODEL_RATE's own doc comment: a stale
+ * client talking to an older server build (before this field existed at
+ * all) would otherwise throw on `.modelRates[model]` rather than fall
+ * back — the type says modelRates is always present, but a real response
+ * across a version skew is the one case that type cannot guarantee.
+ */
 function modelRateFor(p: AdminProviderView, model: string): AdminModelRateView {
-  return p.modelRates[model] ?? ZERO_MODEL_RATE
+  return p.modelRates?.[model] ?? ZERO_MODEL_RATE
 }
 
 /** modelIsDegraded gates the per-model rate badge (spec: "ONLY when that model is degraded") so a healthy or no-traffic model's ModelChip renders with no badge beside it at all. */
@@ -283,7 +292,7 @@ const aliasEmptyMessage = computed(() =>
                 </div>
                 <div>
                   <dt class="text-xs text-muted-foreground">Last refresh</dt>
-                  <dd>{{ formatTimestamp(p.lastRefresh) }}</dd>
+                  <dd>{{ refreshDetailLabel(p.discoveryEnabled, p.lastRefresh) }}</dd>
                 </div>
                 <div v-if="p.lastErr">
                   <dt class="text-xs text-muted-foreground">Last error</dt>
@@ -293,12 +302,18 @@ const aliasEmptyMessage = computed(() =>
               <div v-if="visibleModels(p).length" class="flex flex-wrap gap-1.5">
                 <span v-for="m in visibleModels(p)" :key="m" class="inline-flex items-center gap-1">
                   <ModelChip :id="routableModelId(p.name, m)" />
+                  <!--
+                    attempts-minute/failures-minute deliberately omitted
+                    (SHOULD-2, v0.22 review round): AdminModelRateView no
+                    longer carries them at all, so leaving them unbound
+                    (undefined) is what tells ProviderRateBadge to render
+                    its day-window-only detail (dayRateTitle) instead of
+                    claiming a live minute-window reading no data backs.
+                  -->
                   <ProviderRateBadge
                     v-if="modelIsDegraded(p, m)"
                     :attempts-day="modelRateFor(p, m).attemptsDay"
                     :failures-day="modelRateFor(p, m).failuresDay"
-                    :attempts-minute="modelRateFor(p, m).attemptsMinute"
-                    :failures-minute="modelRateFor(p, m).failuresMinute"
                   />
                 </span>
               </div>

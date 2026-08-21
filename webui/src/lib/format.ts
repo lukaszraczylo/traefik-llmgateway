@@ -40,22 +40,57 @@ export function formatTimestamp(iso: string | undefined): string {
 }
 
 /**
- * refreshLabel renders a provider's discovery/refresh status as the
- * Providers tab's own three-state label (Feature B, v0.22 — last-refresh
- * label honesty): discovery disabled reads "discovery off" regardless of
- * lastRefresh (a disabled provider's lastRefresh is always the unset
- * sentinel, registry.go's own maybeRefresh/warmFill never call
- * finishRefresh for it — but this checks discoveryEnabled first anyway,
- * not lastRefresh's value, so it stays correct even if that invariant
- * ever changes); discovery enabled but never yet refreshed reads
- * "pending"; otherwise it is the existing "refreshed (Ns ago)" relative-
- * time text, unchanged.
+ * refreshState is the Providers tab's three-state refresh classification
+ * (Feature B, v0.22 — last-refresh label honesty), shared by refreshLabel
+ * (the accordion trigger's compact text) and refreshDetailLabel (the
+ * accordion content's "Last refresh" detail row — folded review minor,
+ * v0.22 review round: that row still read raw formatTimestamp before this
+ * existed, so a discovery-off provider's expanded detail said "never"
+ * right next to a trigger that correctly said "discovery off"):
+ * discovery disabled reads 'off' regardless of lastRefresh (a disabled
+ * provider's lastRefresh is always the unset sentinel, registry.go's own
+ * maybeRefresh/warmFill never call finishRefresh for it — but this checks
+ * discoveryEnabled first anyway, not lastRefresh's value, so it stays
+ * correct even if that invariant ever changes); discovery enabled but
+ * never yet refreshed reads 'pending'; otherwise 'refreshed'.
+ */
+function refreshState(discoveryEnabled: boolean, lastRefresh: string | undefined): 'off' | 'pending' | 'refreshed' {
+  if (!discoveryEnabled) return 'off'
+  return formatAgo(lastRefresh) ? 'refreshed' : 'pending'
+}
+
+/**
+ * refreshLabel renders refreshState as the Providers tab's compact
+ * trigger-row text: "discovery off", "pending", or the existing
+ * "refreshed (Ns ago)" relative-time text.
  */
 export function refreshLabel(discoveryEnabled: boolean, lastRefresh: string | undefined): string {
-  if (!discoveryEnabled) return 'discovery off'
-  const ago = formatAgo(lastRefresh)
-  if (!ago) return 'pending'
-  return `refreshed${ago}`
+  switch (refreshState(discoveryEnabled, lastRefresh)) {
+    case 'off':
+      return 'discovery off'
+    case 'pending':
+      return 'pending'
+    case 'refreshed':
+      return `refreshed${formatAgo(lastRefresh)}`
+  }
+}
+
+/**
+ * refreshDetailLabel renders refreshState as the Providers tab's
+ * accordion-content "Last refresh" detail row: "discovery off", "pending",
+ * or the full formatTimestamp date/time (this row's own pre-existing
+ * convention — refreshLabel's relative "(Ns ago)" belongs on the compact
+ * trigger row only).
+ */
+export function refreshDetailLabel(discoveryEnabled: boolean, lastRefresh: string | undefined): string {
+  switch (refreshState(discoveryEnabled, lastRefresh)) {
+    case 'off':
+      return 'discovery off'
+    case 'pending':
+      return 'pending'
+    case 'refreshed':
+      return formatTimestamp(lastRefresh)
+  }
 }
 
 /** formatLimits renders a LimitsConfig as a short comma-joined summary, or "none" when unset. */
