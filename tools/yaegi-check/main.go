@@ -36,6 +36,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/traefik/yaegi/interp"
 	"github.com/traefik/yaegi/stdlib"
@@ -44,9 +45,19 @@ import (
 // testDataUserAPIKey and testDataWantModel are drawn directly from the
 // plugin's own .traefik.yml testData block (users.inline[0].apiKey and
 // providers.openai.models[0]) — see exerciseHandler.
+//
+// attemptAccountingAdminAPIKey names the second, admin-flagged user run()
+// layers on top of testData (see its own override comment) — SHOULD-4
+// (v0.22 review round): this harness proves recordProviderAttempt's
+// SHOULD-1 deadline/cancel classification (limits.go's matchesSentinel/
+// isDeadlineExceeded, a hand-rolled errors.Unwrap walk specifically
+// because errors.Is/errors.As are unsafe under Yaegi — see their own doc
+// comments) actually runs correctly INTERPRETED, not merely compiled: a
+// bug there would not show up under `go test`, only here.
 const (
-	testDataUserAPIKey = "test-user-key"
-	testDataWantModel  = "gpt-test"
+	testDataUserAPIKey           = "test-user-key"
+	testDataWantModel            = "gpt-test"
+	attemptAccountingAdminAPIKey = "sk-admin1"
 )
 
 // excludedTopLevelDirs lists repo-root directories the GOPATH copy must
@@ -147,6 +158,31 @@ func run() error {
 		return fmt.Errorf("decode .traefik.yml testData into the interpreted Config: %w", err)
 	}
 
+	// Feature A (v0.22) attempt-accounting harness (SHOULD-4, review
+	// round): a second json.Unmarshal into the same cfgVal layers this
+	// override on top of testData's own decode, rather than replacing it
+	// outright — encoding/json's own map/struct-merge semantics keep
+	// every testData field this override does not mention (Groups.default
+	// in particular, which .traefik.yml's own testData.groups block
+	// already provides and this override never touches). It replaces
+	// providers.openai wholesale (a real map key, not merged field-by-
+	// field) with one pointed at a local httptest upstream so the harness
+	// can drive a real chat completion without a live provider, and adds
+	// a second, admin-flagged user (Users.Inline is a slice — fully
+	// replaced, not merged, which is why the "tester" user from testData
+	// is respecified here too, identical apiKey/group, rather than
+	// silently dropped).
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"id":"c1","object":"chat.completion","model":"gpt-test","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`))
+	}))
+	defer upstream.Close()
+	attemptAccountingOverride := `{"providers":{"openai":{"type":"openai","baseUrl":"` + upstream.URL + `","apiKey":"sk-up","models":["` + testDataWantModel + `"]}},"admin":{"enabled":true},"users":{"inline":[{"name":"tester","group":"default","apiKey":"` + testDataUserAPIKey + `"},{"name":"admin1","group":"default","apiKey":"` + attemptAccountingAdminAPIKey + `","admin":true}]}}`
+	if err = json.Unmarshal([]byte(attemptAccountingOverride), cfgVal.Interface()); err != nil {
+		return fmt.Errorf("decode attempt-accounting harness override into the interpreted Config: %w", err)
+	}
+
 	newVal, err := i.Eval(pkgName + ".New")
 	if err != nil {
 		return fmt.Errorf("resolve %s.New under yaegi: %w", pkgName, err)
@@ -199,6 +235,10 @@ func exerciseHandler(handler http.Handler) error {
 		return fmt.Errorf("GET /v1/models body does not contain %q: %s", testDataWantModel, authedRec.Body.String())
 	}
 
+	if err := exerciseAttemptAccounting(handler); err != nil {
+		return err
+	}
+
 	unauthedReq := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
 	unauthedRec := httptest.NewRecorder()
 	handler.ServeHTTP(unauthedRec, unauthedReq)
@@ -206,6 +246,102 @@ func exerciseHandler(handler http.Handler) error {
 		return fmt.Errorf("GET /v1/models without a key: status = %d, want 401, body=%s", unauthedRec.Code, unauthedRec.Body.String())
 	}
 	return nil
+}
+
+// exerciseAttemptAccounting drives a real chat completion through
+// handler (against the local httptest upstream run's own override wired
+// in), then GET /admin/api/overview, asserting the resulting provider
+// reports exactly one attempt and zero failures — Feature A's (v0.22)
+// per-provider success-rate accounting, exercised end to end under
+// Yaegi: runUnified's attemptRecorder (routes_unified.go) ->
+// retryPolicy.do's context lookup (retry.go) ->
+// limiter.recordProviderAttempt's isTransient/isDeadlineExceeded
+// classification (limits.go) -> its fire-and-forget spawn (SHOULD-5) ->
+// buildAdminOverview's own batched providerUsage read (admin.go). Any
+// interpreter-only failure in that chain — a construct `go build`/`go
+// test` cannot catch, exactly the class of bug this harness exists for
+// (SHOULD-4, v0.22 review round) — surfaces here as a non-1/non-0 count
+// or an outright panic under Yaegi.
+func exerciseAttemptAccounting(handler http.Handler) error {
+	chatReq := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(
+		`{"model":"`+testDataWantModel+`","messages":[{"role":"user","content":"hi"}]}`,
+	))
+	chatReq.Header.Set("Authorization", "Bearer "+testDataUserAPIKey)
+	chatReq.Header.Set("Content-Type", "application/json")
+	chatRec := httptest.NewRecorder()
+	handler.ServeHTTP(chatRec, chatReq)
+	if chatRec.Code != http.StatusOK {
+		return fmt.Errorf("POST /v1/chat/completions (attempt-accounting harness): status = %d, want 200, body=%s", chatRec.Code, chatRec.Body.String())
+	}
+
+	attemptsDay, failuresDay, err := pollProviderAttemptCounters(handler)
+	if err != nil {
+		return err
+	}
+	if attemptsDay != 1 {
+		return fmt.Errorf("admin overview providers[0].attemptsDay = %v, want 1 (Feature A attempt-accounting harness)", attemptsDay)
+	}
+	if failuresDay != 0 {
+		return fmt.Errorf("admin overview providers[0].failuresDay = %v, want 0", failuresDay)
+	}
+	return nil
+}
+
+// pollProviderAttemptCounters drives GET /admin/api/overview against
+// handler repeatedly until providers[0].attemptsDay is non-zero or a 2s
+// budget elapses, then returns its final reading either way — SHOULD-5
+// (v0.22 review round): recordProviderAttempt's store write runs on its
+// own goroutine (limiter.spawn), off the chat request that triggered it,
+// so a single immediate read right after that request returns could race
+// ahead of the write landing. A real goroutine still schedules promptly
+// under Yaegi (only the INTERPRETED code driving it runs slower, not the
+// underlying Go runtime's scheduler), so this is a short poll, not a
+// long one.
+func pollProviderAttemptCounters(handler http.Handler) (attemptsDay, failuresDay float64, err error) {
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		attemptsDay, failuresDay, err = readProviderAttemptCounters(handler)
+		if err != nil {
+			return 0, 0, err
+		}
+		if attemptsDay != 0 || time.Now().After(deadline) {
+			return attemptsDay, failuresDay, nil
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// readProviderAttemptCounters reads GET /admin/api/overview's first
+// provider's attemptsDay/failuresDay fields via a generic map[string]any
+// decode — this harness module is compiled, not interpreted, so it could
+// import the plugin's own admin.go types directly, but they are
+// unexported (adminOverviewResponse, adminProviderView); decoding
+// generically here is simpler than exporting test-only types across that
+// boundary just for this one harness.
+func readProviderAttemptCounters(handler http.Handler) (attemptsDay, failuresDay float64, err error) {
+	req := httptest.NewRequest(http.MethodGet, "/admin/api/overview", nil)
+	req.Header.Set("Authorization", "Bearer "+attemptAccountingAdminAPIKey)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		return 0, 0, fmt.Errorf("GET /admin/api/overview: status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		return 0, 0, fmt.Errorf("decode GET /admin/api/overview body: %w", err)
+	}
+	providers, ok := body["providers"].([]any)
+	if !ok || len(providers) == 0 {
+		return 0, 0, fmt.Errorf("admin overview body has no providers: %s", rec.Body.String())
+	}
+	p, ok := providers[0].(map[string]any)
+	if !ok {
+		return 0, 0, fmt.Errorf("admin overview providers[0] is not an object: %s", rec.Body.String())
+	}
+	attemptsDay, _ = p["attemptsDay"].(float64)
+	failuresDay, _ = p["failuresDay"].(float64)
+	return attemptsDay, failuresDay, nil
 }
 
 // readModulePath returns the module path declared by goModPath's
