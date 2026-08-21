@@ -1,9 +1,8 @@
 <script setup lang="ts">
-import { faMagnifyingGlass, faXmark } from '@fortawesome/free-solid-svg-icons'
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, watch } from 'vue'
 
+import SearchInput from '@/components/SearchInput.vue'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
-import { Input } from '@/components/ui/input'
 import {
   Select,
   SelectContent,
@@ -13,6 +12,7 @@ import {
 } from '@/components/ui/select'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import UsageChart from '@/components/UsageChart.vue'
+import { useSearchQuery } from '@/composables/useSearchQuery'
 import { groupMatches, userMatches } from '@/lib/usage-search'
 import { useDashboardStore } from '@/stores/dashboard'
 import { type ChartTab, useHistoryStore, WINDOW_LABEL } from '@/stores/history'
@@ -28,15 +28,9 @@ const history = useHistoryStore()
 // CURRENTLY SELECTED scope is always kept in the list even if it stops
 // matching a new query: the filter narrows what's OFFERED, it must never
 // force-switch (or hide the label of) whatever chart is already rendered.
-// Same matching helpers as UsageView.vue (lib/usage-search.ts) — one
-// implementation, no second copy.
-const scopeQuery = ref('')
-const normalizedScopeQuery = computed(() => scopeQuery.value.trim().toLowerCase())
-const hasScopeQuery = computed(() => normalizedScopeQuery.value.length > 0)
-
-function clearScopeQuery(): void {
-  scopeQuery.value = ''
-}
+// Same shared SearchInput/useSearchQuery and lib/usage-search.ts matching
+// helpers as UsageView.vue — one implementation, no second copy.
+const { query: scopeQuery, normalized: normalizedScopeQuery, hasQuery: hasScopeQuery } = useSearchQuery()
 
 const scopeOptions = computed(() => {
   const allUsers = dashboard.usage?.users ?? []
@@ -85,29 +79,7 @@ watch(scopeOptions, (options) => {
     <CardHeader class="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
       <CardTitle>Usage charts</CardTitle>
       <div class="flex flex-wrap items-center gap-3">
-        <div class="relative w-48">
-          <FontAwesomeIcon
-            :icon="faMagnifyingGlass"
-            class="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground"
-            aria-hidden="true"
-          />
-          <Input
-            v-model="scopeQuery"
-            type="text"
-            placeholder="Filter users or groups"
-            aria-label="Filter users or groups"
-            class="pr-8 pl-8"
-          />
-          <button
-            v-if="hasScopeQuery"
-            type="button"
-            aria-label="Clear search"
-            class="absolute top-1/2 right-2 -translate-y-1/2 rounded text-muted-foreground hover:text-foreground"
-            @click="clearScopeQuery"
-          >
-            <FontAwesomeIcon :icon="faXmark" class="size-3.5" />
-          </button>
-        </div>
+        <SearchInput v-model="scopeQuery" placeholder="Filter users or groups" class="w-56" />
 
         <Select :model-value="history.scope" @update:model-value="onScopeChange">
           <SelectTrigger class="w-56">

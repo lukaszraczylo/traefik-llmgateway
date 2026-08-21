@@ -34,10 +34,12 @@ export interface ExpandState {
  * manuallyExpanded plus every id in matchingIds that is not in
  * manuallyCollapsed (auto-expand every match, unless the user explicitly
  * closed that one). The caller decides what "matching" means for its own
- * view — OverviewView.vue passes every provider with a matching model;
- * UsageView.vue passes every group that matches ONLY via a member, not via
- * its own name (see that view's own doc comment for why a name match
- * alone does not force-expand there).
+ * view, and this module has no opinion on it either way — OverviewView.vue
+ * passes every provider that itself matched at all (every match there
+ * implies at least one matching model, so every match auto-expands);
+ * UsageView.vue instead passes only the subset of its own matches that
+ * matched via a member rather than via the group's own name (see that
+ * view's own doc comment for why it draws that narrower distinction).
  */
 export function computeExpandedItems(state: ExpandState, hasQuery: boolean, matchingIds: string[]): Set<string> {
   if (!hasQuery) return new Set(state.manuallyExpanded)

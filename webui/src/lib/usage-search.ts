@@ -28,9 +28,12 @@ export function groupNameMatches(group: Pick<AdminUsageEntryView, 'id'>, query: 
  * `groupName === group.id` — a user's row already carries its own group
  * name (admin.go's adminUsageEntryView.GroupName, set in buildAdminUsage),
  * so this is a plain client-side join against the already-polled
- * GET /admin/api/usage response, no extra fetch. Shared so UsageView.vue
- * and ChartsView.vue never re-derive this join differently (it replaces
- * UsageView.vue's own former local membersOf helper).
+ * GET /admin/api/usage response, no extra fetch. UsageView.vue calls this
+ * directly (replacing its own former local membersOf helper);
+ * matchingMembersOfGroup below builds on it too, which is how
+ * ChartsView.vue's groupMatches call ends up depending on this same join
+ * — indirectly, through matchingMembersOfGroup — without calling
+ * membersOfGroup itself.
  */
 export function membersOfGroup(group: Pick<AdminUsageEntryView, 'id'>, users: AdminUsageEntryView[]): AdminUsageEntryView[] {
   return users.filter((u) => u.groupName === group.id)

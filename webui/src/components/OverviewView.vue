@@ -3,14 +3,13 @@ import type { ColumnDef } from '@tanstack/vue-table'
 import {
   faCircleCheck,
   faCircleXmark,
-  faMagnifyingGlass,
   faTriangleExclamation,
-  faXmark,
 } from '@fortawesome/free-solid-svg-icons'
-import { computed, h, reactive, ref, watch } from 'vue'
+import { computed, h, reactive, watch } from 'vue'
 
 import DataTable from '@/components/DataTable.vue'
 import ModelChip from '@/components/ModelChip.vue'
+import SearchInput from '@/components/SearchInput.vue'
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/components/ui/accordion'
 import { Badge } from '@/components/ui/badge'
 import {
@@ -20,7 +19,7 @@ import {
   CardHeader,
   CardTitle,
 } from '@/components/ui/card'
-import { Input } from '@/components/ui/input'
+import { useSearchQuery } from '@/composables/useSearchQuery'
 import { formatAgo, formatTimestamp, routableModelId } from '@/lib/format'
 import { type ExpandState, clearExpandOverrides, computeExpandedItems, toggleItemExpand } from '@/lib/search-expand'
 import { useDashboardStore } from '@/stores/dashboard'
@@ -56,9 +55,7 @@ const expandState: ExpandState = reactive({
 })
 
 // --- model/alias search filter (operator feature) ---
-const modelQuery = ref('')
-const normalizedQuery = computed(() => modelQuery.value.trim().toLowerCase())
-const hasQuery = computed(() => normalizedQuery.value.length > 0)
+const { query: modelQuery, normalized: normalizedQuery, hasQuery } = useSearchQuery()
 
 /**
  * Matching is against each model's full ROUTABLE id
@@ -132,10 +129,6 @@ watch(modelQuery, (value) => {
 /** visibleModels is p's own model list, filtered to matches while a query is active — p only appears in filteredProviders at all because it has one, so this is never empty in that case; it exists so the accordion shows WHICH models matched instead of re-showing all 70+ with no distinction. */
 function visibleModels(p: AdminProviderView): string[] {
   return hasQuery.value ? p.models.filter((m) => modelMatches(p.name, m)) : p.models
-}
-
-function clearQuery(): void {
-  modelQuery.value = ''
 }
 
 // --- model aliases (sortable DataTable, operator directive) ---
@@ -229,29 +222,7 @@ const aliasEmptyMessage = computed(() =>
           Every configured upstream and its last discovery refresh. Search filters providers and aliases by
           model id.
         </CardDescription>
-        <div class="relative mt-2 max-w-sm">
-          <FontAwesomeIcon
-            :icon="faMagnifyingGlass"
-            class="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground"
-            aria-hidden="true"
-          />
-          <Input
-            v-model="modelQuery"
-            type="text"
-            placeholder="Search models or aliases..."
-            aria-label="Search models or aliases"
-            class="pr-8 pl-8"
-          />
-          <button
-            v-if="hasQuery"
-            type="button"
-            aria-label="Clear search"
-            class="absolute top-1/2 right-2 -translate-y-1/2 rounded text-muted-foreground hover:text-foreground"
-            @click="clearQuery"
-          >
-            <FontAwesomeIcon :icon="faXmark" class="size-3.5" />
-          </button>
-        </div>
+        <SearchInput v-model="modelQuery" placeholder="Search models or aliases..." class="mt-2 max-w-sm" />
       </CardHeader>
       <CardContent>
         <p v-if="!overview?.providers.length" class="py-6 text-center text-sm text-muted-foreground">none</p>

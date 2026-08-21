@@ -1,19 +1,19 @@
 <script setup lang="ts">
 import type { SortingState } from '@tanstack/vue-table'
-import { faMagnifyingGlass, faXmark } from '@fortawesome/free-solid-svg-icons'
 import { getCoreRowModel, getSortedRowModel, useVueTable } from '@tanstack/vue-table'
 import { computed, reactive, ref, watch } from 'vue'
 
+import SearchInput from '@/components/SearchInput.vue'
 import SortHeaderButton from '@/components/SortHeaderButton.vue'
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/components/ui/accordion'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
-import { Input } from '@/components/ui/input'
 import { valueUpdater } from '@/components/ui/table'
 import UsageTable from '@/components/UsageTable.vue'
+import { useSearchQuery } from '@/composables/useSearchQuery'
 import { formatCost, formatLimits } from '@/lib/format'
 import { type ExpandState, clearExpandOverrides, computeExpandedItems, toggleItemExpand } from '@/lib/search-expand'
 import { usageColumns } from '@/lib/usage-columns'
-import { groupMatches, groupNameMatches, membersOfGroup, userMatches } from '@/lib/usage-search'
+import { groupMatches, groupNameMatches, matchingMembersOfGroup, membersOfGroup, userMatches } from '@/lib/usage-search'
 import { useDashboardStore } from '@/stores/dashboard'
 import type { AdminUsageEntryView } from '@/types/api'
 
@@ -36,17 +36,12 @@ function memberCountOf(entry: AdminUsageEntryView): string {
 }
 
 // --- user/group search filter (operator feature, mirrors
-// OverviewView.vue's model search: same Input component, styling, and
-// clear-button pattern; matching logic lives in lib/usage-search.ts so
-// ChartsView.vue's own scope-picker filter reuses the identical helpers —
-// no second copy of "does this user/group match?") ---
-const userQuery = ref('')
-const normalizedQuery = computed(() => userQuery.value.trim().toLowerCase())
-const hasQuery = computed(() => normalizedQuery.value.length > 0)
-
-function clearQuery(): void {
-  userQuery.value = ''
-}
+// OverviewView.vue's model search via the shared SearchInput component and
+// useSearchQuery composable — same styling, same clear-button behavior.
+// Matching logic lives in lib/usage-search.ts, which ChartsView.vue's own
+// scope-picker filter calls directly too (groupMatches, userMatches) — no
+// second copy of "does this user/group match?") ---
+const { query: userQuery, normalized: normalizedQuery, hasQuery } = useSearchQuery()
 
 /**
  * filteredGroups is every group matching the query — own name OR a
@@ -67,14 +62,27 @@ const filteredGroups = computed<AdminUsageEntryView[]>(() => {
 /**
  * memberOnlyMatchIds is filteredGroups narrowed to groups that matched
  * ONLY via a member, never via their own name — the auto-expand target
- * set (search-expand.ts's computeExpandedItems `matchingIds`). A group
- * whose OWN name matched the query is already visibly identified by its
- * collapsed trigger row, so forcing it open too would just be noisy;
- * unlike OverviewView.vue, where a provider only ever matches via a
- * model (there is no provider-name search there — see that view's own
- * CardDescription), so every match auto-expands there. search-expand.ts
- * itself has no opinion on this; it is purely this view's own choice of
- * matchingIds.
+ * set (search-expand.ts's computeExpandedItems `matchingIds`).
+ *
+ * This is a DELIBERATE divergence from OverviewView.vue, not an
+ * oversight, and NOT because Overview lacks a provider-name match —
+ * it doesn't lack one: providerMatches there (OverviewView.vue) checks
+ * each model's full ROUTABLE id, `${provider}/${model}`
+ * (lib/format.ts's routableModelId), so a query like "openai" matches
+ * every "openai/..." model id and the whole provider auto-expands with
+ * every one of them showing. That is correct there — a provider's own
+ * model list IS what the search is for, so revealing it is the point,
+ * and EVERY provider match (name-flavored or not) auto-expands.
+ *
+ * Groups differ: a group's own name is already fully legible on its
+ * COLLAPSED trigger row (the `<AccordionTrigger>` below) — no expansion
+ * needed to read a name match. Auto-expanding every name-matched group too
+ * would dump every one of their full member rosters onto the screen for a
+ * query that only needed the trigger row to already be visible. A member-ONLY
+ * match has no such shortcut — the member that matched stays invisible
+ * until the group opens — so that case alone still auto-expands.
+ * search-expand.ts itself has no opinion on any of this; it is purely
+ * this view's own choice of matchingIds.
  */
 const memberOnlyMatchIds = computed<string[]>(() => {
   if (!hasQuery.value) return []
@@ -83,21 +91,23 @@ const memberOnlyMatchIds = computed<string[]>(() => {
 
 /**
  * visibleMembers implements the members-table distinction (binding
- * semantics): a group matched by its OWN name shows every member; a group
- * that matched only via a member shows only the matching ones. No active
- * query behaves like a name match — show everyone, today's behavior
- * unchanged. Replaces the former local membersOf helper — the join itself
- * now lives in lib/usage-search.ts's membersOfGroup, shared with
- * ChartsView.vue.
+ * semantics): a group matched by its OWN name shows every member
+ * (membersOfGroup); a group that matched only via a member shows only
+ * the matching ones — the exported, tested matchingMembersOfGroup
+ * helper (lib/usage-search.ts), not a re-filter of userMatches here. No
+ * active query behaves like a name match — show everyone, today's
+ * behavior unchanged. Replaces the former local membersOf helper.
  */
 function visibleMembers(group: AdminUsageEntryView): AdminUsageEntryView[] {
   const users = usage.value?.users ?? []
-  const all = membersOfGroup(group, users)
-  if (!hasQuery.value || groupNameMatches(group, normalizedQuery.value)) return all
-  return all.filter((u) => userMatches(u, normalizedQuery.value))
+  if (!hasQuery.value || groupNameMatches(group, normalizedQuery.value)) return membersOfGroup(group, users)
+  return matchingMembersOfGroup(group, users, normalizedQuery.value)
 }
 
-const groupsEmptyMessage = computed(() => (hasQuery.value ? `no groups match "${userQuery.value}"` : 'none'))
+/** groupsEmptyMessage mirrors OverviewView.vue's aliasEmptyMessage three-way pattern: distinguishes nothing configured from nothing matching the active query, so an empty Groups card never reads the same regardless of why it's empty. */
+const groupsEmptyMessage = computed(() =>
+  !usage.value?.groups.length ? 'none configured' : hasQuery.value ? `no groups match "${userQuery.value}"` : 'none',
+)
 
 /**
  * filteredUsers is every user matching the query directly, PLUS every
@@ -119,7 +129,10 @@ const filteredUsers = computed<AdminUsageEntryView[]>(() => {
     (u) => userMatches(u, normalizedQuery.value) || (u.groupName !== undefined && nameMatchedGroupIds.has(u.groupName)),
   )
 })
-const usersEmptyMessage = computed(() => (hasQuery.value ? `no users match "${userQuery.value}"` : 'none'))
+/** usersEmptyMessage mirrors groupsEmptyMessage's three-way pattern (see its own doc comment). */
+const usersEmptyMessage = computed(() =>
+  !usage.value?.users.length ? 'none configured' : hasQuery.value ? `no users match "${userQuery.value}"` : 'none',
+)
 
 // --- Groups accordion (operator directive) ---
 //
@@ -216,29 +229,7 @@ watch(userQuery, (value) => {
 
 <template>
   <div class="flex flex-col gap-6">
-    <div class="relative max-w-sm">
-      <FontAwesomeIcon
-        :icon="faMagnifyingGlass"
-        class="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground"
-        aria-hidden="true"
-      />
-      <Input
-        v-model="userQuery"
-        type="text"
-        placeholder="Filter users or groups"
-        aria-label="Filter users or groups"
-        class="pr-8 pl-8"
-      />
-      <button
-        v-if="hasQuery"
-        type="button"
-        aria-label="Clear search"
-        class="absolute top-1/2 right-2 -translate-y-1/2 rounded text-muted-foreground hover:text-foreground"
-        @click="clearQuery"
-      >
-        <FontAwesomeIcon :icon="faXmark" class="size-3.5" />
-      </button>
-    </div>
+    <SearchInput v-model="userQuery" placeholder="Filter users or groups" class="max-w-sm" />
 
     <Card v-if="usage">
       <CardHeader>
