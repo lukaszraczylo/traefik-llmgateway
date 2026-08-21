@@ -504,9 +504,19 @@ func TestLimiterCurrentUsage_StoreDown(t *testing.T) {
 	}
 }
 
-// --- rate limit applies to admin routes ---
+// --- admin routes never rate-limit and never move usage counters (operator directive, 2026-08-21) ---
 
-func TestAdmin_RateLimitApplies(t *testing.T) {
+// TestAdmin_NeverRateLimitedAndCountersUntouched proves the operator
+// directive (progress ledger, 2026-08-21 — "admin requests must NOT touch
+// req/min-req/day statistics"): GET /admin/api/overview and GET
+// /admin/api/usage never call checkAndCount, so an admin key with a
+// requestsPerMinute limit tight enough to 429 on any other authenticated
+// route never 429s here, no matter how many requests it makes — and its
+// own req/min counter stays at exactly 0 throughout. This inverts the
+// pre-directive TestAdmin_RateLimitApplies, which asserted the opposite
+// (a 2nd request 429ing); it mirrors TestAdminUsageHistory_DoesNotCountStats,
+// which already proved this for the third admin route from the start.
+func TestAdmin_NeverRateLimitedAndCountersUntouched(t *testing.T) {
 	t.Parallel()
 	cfg := newAdminTestConfig()
 	cfg.Users.Inline[1].Limits = &LimitsConfig{RequestsPerMinute: 1} // admin1
@@ -515,19 +525,19 @@ func TestAdmin_RateLimitApplies(t *testing.T) {
 	fixedNow := time.Date(2026, 8, 20, 9, 0, 0, 0, time.UTC)
 	gw.limiter.nowFn = func() time.Time { return fixedNow }
 
-	rec1 := httptest.NewRecorder()
-	h.ServeHTTP(rec1, adminRequest(http.MethodGet, adminOverviewPath, "sk-admin1"))
-	if rec1.Code != http.StatusOK {
-		t.Fatalf("1st request status = %d, want 200, body=%s", rec1.Code, rec1.Body.String())
+	for _, p := range []string{adminOverviewPath, adminUsagePath} {
+		for i := 0; i < 5; i++ {
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, adminRequest(http.MethodGet, p, "sk-admin1"))
+			if rec.Code != http.StatusOK {
+				t.Fatalf("%s request %d: status = %d, want 200 (never 429), body=%s", p, i, rec.Code, rec.Body.String())
+			}
+		}
 	}
 
-	rec2 := httptest.NewRecorder()
-	h.ServeHTTP(rec2, adminRequest(http.MethodGet, adminOverviewPath, "sk-admin1"))
-	if rec2.Code != http.StatusTooManyRequests {
-		t.Fatalf("2nd request status = %d, want 429 (admin over req/min limit)", rec2.Code)
-	}
-	if rec2.Header().Get("Retry-After") == "" {
-		t.Error("429 response must carry a Retry-After header")
+	reqCount, ok := gw.limiter.getCounter("user", "admin1", metricReq, windowMin, fixedNow)
+	if !ok || reqCount != 0 {
+		t.Errorf("admin1 req/min counter = %d (ok=%v), want 0 (admin routes never call checkAndCount)", reqCount, ok)
 	}
 }
 

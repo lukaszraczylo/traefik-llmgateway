@@ -100,21 +100,23 @@ func (g *Gateway) handleAdmin(sw *statusTrackingWriter, r *http.Request) {
 
 // handleAdminAPI is the gate for the three /admin/api/* JSON routes,
 // applying spec §4's gate order: unauthenticated → 401, authenticated
-// non-admin → 403, admin → serve. GET /admin/api/overview and GET
-// /admin/api/usage count request counters via checkAndCount before
-// serving, like every other authenticated route: an admin over their own
-// req/min limit gets a 429 here exactly as they would on any other route
-// (spec §4's "Accounting: admin routes count request counters like any
-// authed route").
+// non-admin → 403, admin → serve.
 //
-// GET /admin/api/usage/history (v0.2 data-layer task) is the one
-// exception: it skips checkAndCount entirely. The operator-directed
-// removal of admin-route stat counting (progress ledger, 2026-08-20)
-// lands for every /admin/api/* route in a later task; this new route is
-// built consistent with that direction from the start, rather than
-// counted now and un-counted later.
+// None of the three routes call checkAndCount (operator directive:
+// progress ledger, 2026-08-20 — "admin requests must NOT touch req/min,
+// req/day statistics"): admin traffic must never appear in usage
+// statistics, which exist to measure real LLM traffic only. GET
+// /admin/api/usage/history was built this way from the start (v0.2
+// data-layer task); this change extends the same treatment to GET
+// /admin/api/overview and GET /admin/api/usage, which previously counted
+// like any other authenticated route (spec §4 amended accordingly). An
+// admin's own req/min or req/day limit, if configured, is therefore never
+// enforced against admin-route traffic either — the accepted trade-off
+// the operator directive names: these are admin-gated, cheap reads, and
+// an admin holder polling the dashboard aggressively is a self-inflicted,
+// not a shared, resource cost.
 func (g *Gateway) handleAdminAPI(sw *statusTrackingWriter, r *http.Request) {
-	u, grp, ok := g.auth.identify(r)
+	u, _, ok := g.auth.identify(r)
 	g.logAuthEvent(ok, authEventUserName(u), r)
 	if !ok {
 		writeOAIError(sw, http.StatusUnauthorized, "authentication_error", "invalid or missing API key")
@@ -125,21 +127,13 @@ func (g *Gateway) handleAdminAPI(sw *statusTrackingWriter, r *http.Request) {
 		return
 	}
 
-	if r.URL.Path == adminUsageHistoryPath {
-		g.serveAdminUsageHistory(sw, r)
-		return
-	}
-
-	if violation := g.limiter.checkAndCount(buildLimitScopes(u, grp)); violation != nil {
-		writeLimitViolation(sw, violation)
-		return
-	}
-
 	switch r.URL.Path {
 	case adminOverviewPath:
 		g.serveAdminOverview(sw)
 	case adminUsagePath:
 		g.serveAdminUsage(sw)
+	case adminUsageHistoryPath:
+		g.serveAdminUsageHistory(sw, r)
 	}
 }
 
