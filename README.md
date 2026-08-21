@@ -738,34 +738,48 @@ adapter call — minus response caching and token/cost accounting (below).
 ## Admin
 
 A read-only dashboard and JSON API for operational visibility — providers,
-groups, and per-user/per-group usage against configured limits. No
-mutation of any kind; config stays owned by GitOps/Traefik as usual. Off
-by default (`admin.enabled: false`, or the `admin` block omitted
-entirely): the four routes below are not registered at all, and a
-request to any of them falls through to the plugin's existing
-404/`passthroughUnknown` handling.
+groups, model aliases, and per-user/per-group/total usage against
+configured limits, plus usage charts. No mutation of any kind; config
+stays owned by GitOps/Traefik as usual. Off by default (`admin.enabled:
+false`, or the `admin` block omitted entirely): none of the routes below
+are registered at all, and a request to any of them falls through to the
+plugin's existing 404/`passthroughUnknown` handling.
+
+The dashboard itself is a small Vue 3 + Pinia + Chart.js single-page app
+([`webui/`](webui/)), built once with `vite build` and baked into the
+plugin as generated Go source (`admin_assets_gen.go` — see
+[Development](#development)); nothing under `webui/` is needed at runtime
+or in CI.
 
 - **Enabling it**: set `admin.enabled: true`, then flag at least one user
   `admin: true` (`UserConfig.admin`) so someone can actually reach
   `/admin/api/*`. An admin user is otherwise ordinary — their own keys,
-  group, and limits still apply, including to the admin routes
-  themselves.
-- **`GET /admin`** serves the dashboard's HTML/CSS/JS shell. This route is
-  deliberately served **with no authentication at all** once
+  group, and limits still apply everywhere except the admin routes
+  themselves (see "Admin traffic is never counted" below).
+- **`GET /admin`** serves the built app's `index.html` shell, and
+  **`GET /admin/assets/{hashedname}`** serves its content-hashed JS/CSS.
+  Both are deliberately served **with no authentication at all** once
   `admin.enabled` is true (disabled still falls through to the same
   404/`passthroughUnknown` handling described above): a browser navigating
   straight to the URL has no way to attach a custom `Authorization` or
   `x-api-key` header, so gating the page itself would make it unreachable
-  from a browser in the first place. This is safe because the shell
-  carries **zero data of its own** — every value is fetched client-side
-  from the JSON routes below, which stay fully gated.
-- **Browser key-entry flow**: the page's script reads an admin API key
-  from the current tab's `sessionStorage`. Absent a stored key, or on any
-  `401`/`403` from a JSON route, it shows an inline key-entry form
-  instead of the dashboard. A submitted key is kept **only in
-  `sessionStorage`** — never a cookie, `localStorage`, or any persistent
-  store — so it disappears when the tab closes, and it is sent only as
-  the `x-api-key` header on this page's own `/admin/api/*` fetches.
+  from a browser in the first place. This is safe because the shell and
+  its assets carry **zero data of their own** — every value is fetched
+  client-side from the JSON routes below, which stay fully gated — and the
+  built JS/CSS is exactly what `vite build` emits from `webui/`, publicly
+  inspectable by any admin dashboard user already. Each asset response
+  carries a long-lived `Cache-Control: public, max-age=31536000,
+  immutable` (the hash in the filename changes whenever the content does,
+  so a cached response never goes stale); an unrecognized asset name is a
+  `404` in the same error envelope every other unknown route returns.
+- **Browser key-entry flow**: the page reads an admin API key from the
+  current tab's `sessionStorage` (a Pinia store owns this). Absent a
+  stored key, or on any `401`/`403` from a JSON route, it shows an inline
+  key-entry form instead of the dashboard. A submitted key is kept **only
+  in `sessionStorage`** — never a cookie, `localStorage`, or any
+  persistent store — so it disappears when the tab closes, and it is sent
+  only as the `x-api-key` header on this page's own `/admin/api/*`
+  fetches.
 - **`GET /admin/api/overview`** and **`GET /admin/api/usage`** share one
   gate: unauthenticated → 401, authenticated non-admin → 403, admin →
   serve. `overview` returns the provider list, groups, the configured
@@ -780,10 +794,12 @@ request to any of them falls through to the plugin's existing
   `tokensOutPerMonth`, `costPerDayMicroUsd`, `costPerMonthMicroUsd` —
   alongside their configured limits, plus one extra `total` row: the
   synthetic all-traffic scope (see [Limits and accounting](
-  #limits-and-accounting)), limits always `null`.
+  #limits-and-accounting)), limits always `null`. The dashboard's Overview
+  and Usage views poll both every 5 seconds while open.
 - **`GET /admin/api/usage/history`** returns a bucketed series for one
-  scope/metric/window — the data source for per-user/per-group/total
-  usage charts. Query parameters:
+  scope/metric/window — the data source for the dashboard's Charts view
+  (per-user/per-group/total, stacked tokens-in/tokens-out, with a
+  24h/30d/12mo window switcher). Query parameters:
   - `scope`: `user:{id}`, `group:{id}`, or the literal `total`.
   - `metric`: `req`, `tokin`, `tokout`, or `cost`.
   - `window`: `hour`, `day`, or `month`.
@@ -797,34 +813,41 @@ request to any of them falls through to the plugin's existing
   the configured store being unreachable is `503` (a chart must never
   read an outage as "zero usage"). Response shape:
   `{"scope","metric","window","points":[{"bucket":"2026082114","value":123},...]}`.
-  Unlike the other two JSON routes, this one **never counts request
-  statistics** — it skips `checkAndCount` entirely, ahead of the same
-  change landing for every `/admin/api/*` route in a later change. It is
-  therefore also **unthrottled**: no `requestsPerMinute`/`requestsPerDay`
-  limit ever applies to it, so its only trust boundary is the admin gate
-  itself (a valid admin key). An admin key holder can poll it as fast as
-  they like.
+  The Charts view fetches this once per selection change, plus a 30s
+  auto-refresh of the current selection.
 - **What's exposed**: provider names, types, base URLs (with any
   userinfo/query string stripped before it's ever echoed), model counts,
   discovery status, group/user names, membership, limits, and live usage
   counters. **Never exposed**: API keys (not even digests), provider
   keys, the Redis password, or users-file path contents — every
   secret-bearing field is redacted from every response.
-- **Poll counts against quota**: the dashboard's own JavaScript polls
-  `overview` and `usage` every 5 seconds while open. Each poll is a real
-  authenticated request and increments the admin user's own request
-  counters exactly like any other route (the `usage/history` route above
-  is the one exception) — leaving a dashboard tab open against a tightly
-  limited admin user can itself exhaust their
-  `requestsPerMinute`/`requestsPerDay` budget.
-- **`GET /admin` counts nothing**: it is unauthenticated, so there is no
-  identified user to count a request against.
+- **Admin traffic is never counted**: none of the three `/admin/api/*`
+  JSON routes call `checkAndCount` — admin polling never moves any
+  user's or group's `requestsPerMinute`/`requestsPerDay` counters, and
+  usage statistics reflect real LLM traffic only (operator directive: an
+  admin dashboard tab left open, however aggressively it polls, must
+  never itself distort the numbers it displays). The direct consequence:
+  an admin's own `requestsPerMinute`/`requestsPerDay` limit, if
+  configured, is never enforced against admin-route traffic either — an
+  admin key holder can poll any of the three routes as fast as they like.
+  This is an accepted trade-off, not an oversight: these are admin-gated,
+  cheap reads, and an admin holder polling aggressively is a
+  self-inflicted, not a shared, resource cost. `GET /admin` and
+  `GET /admin/assets/*` count nothing either, for the simpler reason that
+  they are unauthenticated — there is no identified user to count a
+  request against.
 - **Response headers**: all three JSON routes set
-  `X-Content-Type-Options: nosniff` and `Cache-Control: no-store`, and all
-  four routes share one `Content-Security-Policy` header
-  (`default-src 'none'; script-src 'unsafe-inline'; style-src
-  'unsafe-inline'; connect-src 'self'`) — the dashboard loads no external
-  asset of any kind and works in an air-gapped cluster.
+  `X-Content-Type-Options: nosniff` and `Cache-Control: no-store`; every
+  hashed asset sets `X-Content-Type-Options: nosniff` and its own
+  immutable `Cache-Control` (above). `GET /admin` and the three JSON
+  routes share one `Content-Security-Policy` header (`default-src 'none';
+  script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'
+  data:; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`) —
+  no `'unsafe-inline'`, since the built app has no inline script or style
+  of any kind, only external `/admin/assets/*` references; `img-src`
+  additionally allows `data:` for the page's inlined favicon. The
+  dashboard loads no external asset of any kind and works in an
+  air-gapped cluster.
 
 ## MCP and A2A
 
@@ -1048,11 +1071,19 @@ uses `directory:` rather than `filename:`.
 make test            # go test ./... -count=1
 make lint            # gofmt -l . && go vet ./...
 make yaegi-check      # interprets the plugin with Yaegi, exercises .traefik.yml's testData
+make admin-ui         # rebuilds webui/ (npm ci && vite build) and regenerates
+                      # admin_assets_gen.go — needed only after a webui/ source change
 make integration      # docker-compose: real Traefik, real Redis, mock providers; brings the
                       # stack up, waits for it, runs the suite, always tears it down after
 make integration-keep # same run, but leaves the stack up afterward for debugging —
                       # tear it down yourself with `make integration-down` when done
 ```
+
+`make admin-ui` needs Node (developed against v22 / npm 11) but nothing
+else does: `admin_assets_gen.go` is committed, so `make test`/`make
+lint`/`make yaegi-check`/`make integration`/CI never invoke Node at all.
+Regenerate it after editing anything under `webui/`, then commit both the
+`webui/` change and the regenerated `admin_assets_gen.go` together.
 
 Also run before committing (not wired into `make lint`, since it needs a
 separate binary): `golangci-lint run ./...` and
