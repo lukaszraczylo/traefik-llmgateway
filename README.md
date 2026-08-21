@@ -229,6 +229,11 @@ that is negative, `NaN`, or `±Inf`, is a construction error.
 | `costPerDayUSD` | `float64` | Fixed calendar-day window, UTC. |
 | `costPerMonthUSD` | `float64` | Fixed calendar-month window, UTC. |
 
+Every window enforces correctly on the in-process fallback too, not only Redis —
+see [Limits and accounting](#limits-and-accounting)'s "Fallback" bullet for the
+retention floor that keeps `tokensPerMonth`/`costPerMonthUSD` a true calendar-month
+budget rather than a rolling one when Redis is absent or down.
+
 A user's own `limits`, when set, are checked **in addition to** their
 group's limits, not instead of them — a request is refused the moment it
 breaches whichever of the two is tighter. A user with no `limits` of their
@@ -523,16 +528,21 @@ http:
   `failOpen: true`): counters live in an in-process map — correct for one
   Traefik replica, only approximate across several, since each replica
   counts independently. Exact limits across multiple Traefik replicas
-  require the shared Redis. Every counter, including this fallback one,
-  works as the usage-history API's data source, but its retention is
-  capped at **48 hours regardless of window** (`memoryStoreMaxTTL`,
-  limits.go — ruling, 2026-08-21: the in-process fallback is continuity,
-  not history; applying the real day/month TTLs to it would grow its live
-  key count roughly 30x, multiplying the cost of its own periodic sweep by
-  the same factor). A fallback-only deployment's usage-history charts
-  therefore show at most the trailing 48 hours, never the full day/month
-  span Redis-backed deployments get — full retention needs the shared
-  Redis.
+  require the shared Redis. **Enforcement stays correct on the fallback at
+  every window**, including `tokensPerMonth`/`costPerMonthUSD`: a
+  window's counter always outlives its own natural length
+  (`enforceTTLFor`, limits.go), so a month budget is still a true
+  calendar-month budget, never a rolling one, whether Redis is configured
+  or not. **Usage-history CHARTING retention is shorter on the fallback,
+  though**: capped at 48 hours regardless of window
+  (`memoryStoreMaxTTL`, limits.go — ruling, 2026-08-21: the in-process
+  fallback is continuity for charting, not full history; applying the
+  real day/month retention TTLs to it purely for charting purposes would
+  grow its live key count roughly 30x, multiplying the cost of its own
+  periodic sweep by the same factor). A month counter itself still lives
+  its full ~32 days on the fallback (enforcement needs that), it just
+  cannot be charted past the trailing 48 hours there — full
+  usage-history retention needs the shared Redis.
 - **Retention** (Redis counter key TTL, distinct from a window's own
   length): a minute key lives 2 minutes, an hour key 48 hours, a day key
   35 days, a month key 400 days — long enough for the usage-history API's
@@ -989,11 +999,15 @@ A rebuilt instance keeps some state and resets the rest:
   counters the old one wrote. The response cache's keys work the same way.
 - **Resets on a rebuild**: the in-process fallback counters (used whenever
   no Redis is configured, and also transparently during a Redis outage
-  when `failOpen` is true — the default; see `limiter.storeIncrBy`,
+  when `failOpen` is true — the default; see `limiter.storeIncrMulti`,
   `limits.go`), the limiter's and cache's own Redis-outage down-latches,
   and the model registry's discovery cache — a new instance always runs
   its own full warm-fill before serving, rather than inheriting the old
-  instance's listing.
+  instance's listing. This is separate from the fallback's own
+  TTL-bounded retention (a window's counter still expires and resets on
+  its own, per-window schedule, even between rebuilds — see [Limits and
+  accounting](#limits-and-accounting)'s "Fallback" bullet): a rebuild
+  loses every fallback counter at once, TTL or not.
 
 Two practical implications follow:
 

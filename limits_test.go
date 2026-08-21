@@ -1256,3 +1256,121 @@ func TestTokenBudget_ExactBoundaryViolates(t *testing.T) {
 		t.Error("storeDown must be false for a real limit breach")
 	}
 }
+
+// --- review round 2, 2026-08-21: enforcement-aware fallback TTL clamp ---
+
+// TestClampTTL_ExactMathTable pins clampTTL's ceiling-vs-floor precedence
+// for every window's real (ttl, enforceTTL) pair. Round 1's clamp applied
+// memoryStoreMaxTTL unconditionally; round 2 corrects it so a window's
+// own enforceTTL floor always wins a conflict with that ceiling — this is
+// the exact math that keeps min/hour/day capped at 48h while month lands
+// back at its own ~32-day floor.
+func TestClampTTL_ExactMathTable(t *testing.T) {
+	cases := []struct {
+		name       string
+		ttl        time.Duration
+		enforceTTL time.Duration
+		want       time.Duration
+	}{
+		{"min: 2m sits under both ceiling and floor, unchanged", minWindowTTL, enforceTTLFor(windowMin), minWindowTTL},
+		{"hour: 48h ttl equals the 48h ceiling; its own 2h floor never applies", hourWindowTTL, enforceTTLFor(windowHour), memoryStoreMaxTTL},
+		{"day: 35d ttl clamped down to the 48h ceiling, still above the 25h floor", dayWindowTTL, enforceTTLFor(windowDay), memoryStoreMaxTTL},
+		{"month: 400d ttl would clamp to 48h, but the 32d floor wins instead", monthWindowTTL, enforceTTLFor(windowMonth), enforceTTLFor(windowMonth)},
+		{"enforceTTL=0 (incrBy's own single-key path): pure ceiling, no floor", 400 * 24 * time.Hour, 0, memoryStoreMaxTTL},
+		{"ttl already under both ceiling and floor passes through unchanged", 90 * time.Minute, time.Hour, 90 * time.Minute},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := clampTTL(c.ttl, c.enforceTTL); got != c.want {
+				t.Errorf("clampTTL(%v, %v) = %v, want %v", c.ttl, c.enforceTTL, got, c.want)
+			}
+		})
+	}
+}
+
+// TestEnforceTTLFor_MatchesTheOriginalPreHistoryBumpValues pins
+// enforceTTLFor's four values directly — they are not arbitrary, they
+// match dayWindowTTL/monthWindowTTL's values from before the v0.2
+// data-layer task's history-retention bump (25h/32d), which were
+// themselves already windowLength+margin for correct single-window
+// enforcement.
+func TestEnforceTTLFor_MatchesTheOriginalPreHistoryBumpValues(t *testing.T) {
+	cases := []struct {
+		window string
+		want   time.Duration
+	}{
+		{windowMin, 2 * time.Minute},
+		{windowHour, 2 * time.Hour},
+		{windowDay, 25 * time.Hour},
+		{windowMonth, 32 * 24 * time.Hour},
+	}
+	for _, c := range cases {
+		if got := enforceTTLFor(c.window); got != c.want {
+			t.Errorf("enforceTTLFor(%q) = %v, want %v", c.window, got, c.want)
+		}
+	}
+}
+
+// TestMemoryStore_IncrMulti_MonthCounterSurvivesPast48hAndStillEnforces
+// is the review-round-2 regression case: a month counter written via
+// incrMulti — the real production path, checkAndCount/account — must
+// stay alive, not silently reset to 0, well past 48h, and a
+// TokensPerMonth limit must still enforce correctly at that point. This
+// is exactly what round 1's unconditional 48h ceiling broke: a month
+// counter's key would have expired and reset roughly every two days,
+// turning the budget into a rolling ~48h one instead of a true
+// calendar-month one whenever Redis is absent or down.
+func TestMemoryStore_IncrMulti_MonthCounterSurvivesPast48hAndStillEnforces(t *testing.T) {
+	l := newLimiter(nil, true) // nil store -> every operation uses the in-process fallback
+	now := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+	l.nowFn = func() time.Time { return now }
+	scopes := []limitScope{{kind: "group", id: "g", limits: &LimitsConfig{TokensPerMonth: 100}}}
+
+	l.account(scopes, usage{prompt: 60, completion: 20}, 0) // 80 tokens on day 1
+
+	// Advance 5 days: well past memoryStoreMaxTTL's 48h ceiling, far short
+	// of monthWindowTTL's own natural rollover.
+	now = now.Add(5 * 24 * time.Hour)
+	l.nowFn = func() time.Time { return now }
+
+	tokIn, ok := l.getCounter("group", "g", metricTokIn, windowMonth, now)
+	if !ok || tokIn != 60 {
+		t.Fatalf("tokin:month after 5 days = %d, ok=%v, want 60 (the key must not have expired at 48h)", tokIn, ok)
+	}
+
+	// Push the total over budget and confirm enforcement still fires —
+	// proves the surviving counter is actually read by
+	// tokenBudgetViolation, not merely present.
+	l.account(scopes, usage{completion: 21}, 0) // 60 + 41 = 101 > 100
+	if v := l.checkAndCount(scopes); v == nil {
+		t.Fatal("want a TokensPerMonth violation 5 days in; the round-1 clamp bug would have reset the counter well before this")
+	}
+}
+
+// TestMemoryStore_IncrMulti_DayCounterStillClampsAt48h asserts the
+// round-1 clamp's original goal — bounding the fallback's own live-key
+// growth — still holds for day, whose own enforcement floor (25h) sits
+// below the 48h ceiling: a day counter written via incrMulti expires and
+// resets once its key crosses 48h, well before dayWindowTTL's own 35-day
+// retention would otherwise have kept it alive.
+func TestMemoryStore_IncrMulti_DayCounterStillClampsAt48h(t *testing.T) {
+	m := newMemoryStore()
+	now := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+	m.nowFn = func() time.Time { return now }
+
+	entry := counterIncr{key: "k", delta: 10, ttl: dayWindowTTL, enforceTTL: enforceTTLFor(windowDay)}
+	if _, err := m.incrMulti([]counterIncr{entry}); err != nil {
+		t.Fatal(err)
+	}
+
+	now = now.Add(49 * time.Hour) // just past the 48h ceiling
+	m.nowFn = func() time.Time { return now }
+
+	got, err := m.get("k")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != 0 {
+		t.Errorf("day counter at 49h past write = %d, want 0 (expired at the 48h ceiling; day's own 25h floor never raises it)", got)
+	}
+}

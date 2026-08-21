@@ -57,14 +57,29 @@ const (
 // so a key stays readable for the whole window it belongs to; the bucket
 // embedded in the key (see windowKey) already makes a rolled-over window
 // use a different key, so these TTLs only bound how long a stale key
-// lingers in memoryStore before an opportunistic sweep reclaims it.
-// dayWindowTTL/monthWindowTTL were bumped from their original 25h/32d
-// (v0.2 data-layer task): the admin usage-history API's day/month charts
-// need a bucket to stay readable for the whole retention span a chart
-// can request (historyMaxSpan, admin.go — 35 daily, 13 monthly buckets),
-// not just long enough to survive its own single rollover. The TTL >
-// window-length invariant this comment already documented still holds at
-// the new values, and at hourWindowTTL for the new hour window.
+// lingers before an opportunistic sweep (memoryStore) or Redis itself
+// reclaims it. dayWindowTTL/monthWindowTTL were bumped from their
+// original 25h/32d (v0.2 data-layer task): the admin usage-history API's
+// day/month charts need a bucket to stay readable for the whole
+// retention span a chart can request (historyMaxSpan, admin.go — 35
+// daily, 13 monthly buckets), not just long enough to survive its own
+// single rollover. The TTL > window-length invariant this comment
+// already documented still holds for these consts exactly as applied to
+// Redis (35d > 1d, 400d > ~31d, 48h > 1h, 2m > 1m).
+//
+// That invariant does NOT automatically extend to what memoryStore
+// actually applies, though: its own ceiling (memoryStoreMaxTTL, 48h,
+// applied only to bound the in-process fallback's live-key count) is
+// shorter than a day or month window's natural length on its own. A
+// round-1 fix (perf review, 2026-08-21) clamped every fallback TTL to
+// that ceiling unconditionally, which broke the invariant for month —
+// silently turning TokensPerMonth/CostPerMonthUSD into a rolling ~48h
+// budget under the fallback. Round 2 restores it: memoryStore's clampTTL
+// never cuts a TTL below enforceTTLFor's window-specific floor, so the
+// EFFECTIVE TTL memoryStore ever applies still exceeds its window's
+// natural length, exactly like these consts do for Redis — see
+// clampTTL/enforceTTLFor/memoryStoreMaxTTL's own doc comments for the
+// mechanism.
 const (
 	minWindowTTL   = 2 * time.Minute
 	hourWindowTTL  = 48 * time.Hour
@@ -139,6 +154,27 @@ type counterIncr struct {
 	key   string
 	delta int64
 	ttl   time.Duration
+	// enforceTTL is the minimum TTL window's own enforcement correctness
+	// requires (enforceTTLFor) — the floor memoryStore's clampTTL never
+	// cuts below, even when memoryStoreMaxTTL's history-retention ceiling
+	// is lower (review round 2, 2026-08-21, fixing a bug in round 1's
+	// single-floor clamp: unconditionally capping every TTL at 48h turned
+	// TokensPerMonth/CostPerMonthUSD into a rolling ~48h budget under the
+	// fallback, since a month counter's own key would expire and reset
+	// roughly every two days instead of once a month). redisStore ignores
+	// this field entirely — ttl is applied in full there; the ceiling and
+	// this floor only ever matter for the in-process fallback.
+	enforceTTL time.Duration
+}
+
+// newCounterIncr builds one counterIncr for (kind, id, metric, window) at
+// t: key from windowKey, delta and the history-retention ttl exactly as
+// the caller gives them, and enforceTTL derived from window itself
+// (enforceTTLFor). checkAndCount and account build every entry through
+// this one helper so a (window, ttl) pair can never reach incrMulti
+// without its matching enforcement floor.
+func newCounterIncr(kind, id, metric, window string, t time.Time, delta int64, ttl time.Duration) counterIncr {
+	return counterIncr{key: windowKey(kind, id, metric, window, t), delta: delta, ttl: ttl, enforceTTL: enforceTTLFor(window)}
 }
 
 // counterStore is the storage backend the limiter uses for atomic windowed
@@ -147,7 +183,11 @@ type counterIncr struct {
 type counterStore interface {
 	// incrBy adds n to key's counter, creating it with an expiry of ttl
 	// from now if it does not exist or has expired, and returns the
-	// counter's new value.
+	// counter's new value. incrBy has no production caller since
+	// checkAndCount/account moved to the batched incrMulti below (perf
+	// review, 2026-08-21) — it is kept for direct counter seeding in
+	// tests (5 call sites, all in admin_test.go) and for counterStore
+	// interface conformance.
 	incrBy(key string, n int64, ttl time.Duration) (int64, error)
 	// get returns key's current counter value, or 0 if it does not exist
 	// or has expired.
@@ -192,28 +232,71 @@ type memoryEntry struct {
 // every 30s.
 const sweepEvery = 30 * time.Second
 
-// memoryStoreMaxTTL caps any TTL memoryStore actually applies, regardless
-// of what a caller requests. Ruling (perf review, 2026-08-21): the
-// in-process fallback is continuity, not history. Applying the real
-// hourWindowTTL/dayWindowTTL/monthWindowTTL values (48h/35d/400d) to the
-// fallback map was measured to grow its live key count roughly 30x over
-// the original three-window (min/day/month) shape — and sweepEvery's own
-// doc comment above already records that a full-map sweep which frees
-// nothing is a "167x incrBy cliff" once live keys cross a threshold;
-// growing the map ~30x bigger multiplies that same cliff's cost by
-// roughly the same factor. Clamping every fallback TTL to 48h keeps
-// per-scope live keys bounded (a handful of metrics across four windows,
-// not 35-400 days' worth) independent of which window a caller asks for.
-// This is a documented capability gap, not a bug: with no Redis
-// configured, or during a Redis outage under failOpen, memoryStore-backed
-// usage-history charts only ever show the trailing 48h, never longer —
-// see README's "fallback works too, but only for 48h" note.
+// memoryStoreMaxTTL caps how long memoryStore keeps a counter alive
+// purely for HISTORY-chart purposes, when that is safe to shorten.
+// Ruling (perf review round 1, 2026-08-21): the in-process fallback's
+// long-tail retention is continuity for charting, not enforcement itself
+// — applying the real hourWindowTTL/dayWindowTTL/monthWindowTTL values
+// (48h/35d/400d) to the fallback map was measured to grow its live key
+// count roughly 30x over the original three-window (min/day/month)
+// shape, and sweepEvery's own doc comment above already records that a
+// full-map sweep which frees nothing is a "167x incrBy cliff" once live
+// keys cross a threshold — growing the map ~30x bigger multiplies that
+// same cliff's cost by roughly the same factor.
+//
+// This ceiling must never win over a window's own enforcement floor,
+// though (round 2, 2026-08-21 — corrects a round-1 bug): clampTTL applies
+// this ceiling AND enforceTTLFor's floor together, and the floor always
+// wins where the two would conflict. Concretely: min/hour/day windows sit
+// entirely under 48h already, so they are unaffected; month's own floor
+// (enforceTTLFor's 32*24h) sits above this ceiling, so a month counter on
+// the fallback keeps its full ~32-day life (1-2 live keys per scope/
+// metric — negligible next to the day-key savings that motivated this
+// ceiling in the first place) instead of expiring every 48h. Only the
+// CHARTING tail — a fallback-only deployment's usage-history buckets
+// beyond 48h — is what this ceiling actually shortens; see README's
+// "fallback retention" note.
 const memoryStoreMaxTTL = 48 * time.Hour
 
-// clampTTL caps ttl at memoryStoreMaxTTL — see that const's doc comment.
-func clampTTL(ttl time.Duration) time.Duration {
+// enforceTTLFor returns the minimum TTL window's own counter must stay
+// alive for to enforce correctly, independent of how long history
+// retention (hourWindowTTL/dayWindowTTL/monthWindowTTL) asks the same key
+// to live for charting. These are windowLength + margin, and not
+// coincidentally match dayWindowTTL/monthWindowTTL's ORIGINAL,
+// pre-history-retention-bump values (25h/32d, v0.2 data-layer task) —
+// that bump only ever existed to serve the usage-history API's charts;
+// enforcement itself only ever needed a key to outlive its own window's
+// single rollover. Called by newCounterIncr for every checkAndCount/
+// account entry; a window not among the four handled here is a
+// programming error, mirroring windowKey/windowEnd/bucketFor's own panic
+// convention.
+func enforceTTLFor(window string) time.Duration {
+	switch window {
+	case windowMin:
+		return minWindowTTL
+	case windowHour:
+		return 2 * time.Hour
+	case windowDay:
+		return 25 * time.Hour
+	case windowMonth:
+		return 32 * 24 * time.Hour
+	default:
+		panic(fmt.Sprintf("llmgateway: enforceTTLFor: unknown window %q", window))
+	}
+}
+
+// clampTTL bounds ttl to at most memoryStoreMaxTTL, but never below
+// enforceTTL — see both consts'/enforceTTLFor's own doc comments for why
+// the floor must always win a conflict with the ceiling. enforceTTL=0
+// (incrBy's own single-key path, which has no window to derive a floor
+// from) means "ceiling only, no floor" — identical to memoryStore's
+// pre-round-2 behavior for that path.
+func clampTTL(ttl, enforceTTL time.Duration) time.Duration {
 	if ttl > memoryStoreMaxTTL {
-		return memoryStoreMaxTTL
+		ttl = memoryStoreMaxTTL
+	}
+	if ttl < enforceTTL {
+		ttl = enforceTTL
 	}
 	return ttl
 }
@@ -241,10 +324,27 @@ func (m *memoryStore) now() time.Time {
 	return m.nowFn()
 }
 
-// incrBy implements counterStore. ttl is clamped to memoryStoreMaxTTL
-// before it is ever applied — see that const's doc comment.
+// incrBy implements counterStore. ttl is clamped by clampTTL with no
+// enforcement floor (enforceTTL=0) — incrBy has no window to derive one
+// from, since it takes a bare key rather than a (kind, id, metric,
+// window) tuple. incrBy has had no production caller since checkAndCount/
+// account moved to the batched incrMulti below (perf review,
+// 2026-08-21); it is kept for direct counter seeding in tests (5 call
+// sites, all in admin_test.go's TestAdminUsage_MathAgainstSeededCounters)
+// and for counterStore interface conformance.
 func (m *memoryStore) incrBy(key string, n int64, ttl time.Duration) (int64, error) {
-	ttl = clampTTL(ttl)
+	return m.applyIncr(key, n, clampTTL(ttl, 0)), nil
+}
+
+// applyIncr increments key by n — creating it fresh, expiring at
+// now+ttl, if absent or already expired — and returns its new value. ttl
+// must already be clamped by the caller: incrBy clamps with no
+// enforcement floor, incrMulti clamps per entry with that entry's own
+// enforceTTL floor (see clampTTL). Sharing this one map-mutation-plus-
+// opportunistic-sweep implementation between both callers means the
+// sweep logic, and the "already expired counts as absent" rule, exist
+// exactly once.
+func (m *memoryStore) applyIncr(key string, n int64, ttl time.Duration) int64 {
 	now := m.now()
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -260,7 +360,7 @@ func (m *memoryStore) incrBy(key string, n int64, ttl time.Duration) (int64, err
 		m.data[key] = e
 	}
 	e.value += n
-	return e.value, nil
+	return e.value
 }
 
 // get implements counterStore.
@@ -289,16 +389,19 @@ func (m *memoryStore) getMulti(keys []string) ([]int64, error) {
 	return out, nil
 }
 
-// incrMulti implements counterStore by looping over incrBy: memoryStore's
-// in-process map access is already effectively free per key, so there is
-// no round-trip cost to batch away — this exists purely so memoryStore
-// satisfies counterStore's incrMulti contract for the limiter's nil-store
-// fallback path (storeIncrMulti). Each entry's ttl is still clamped by
-// incrBy itself.
+// incrMulti implements counterStore by looping over applyIncr:
+// memoryStore's in-process map access is already effectively free per
+// key, so there is no round-trip cost to batch away — this exists purely
+// so memoryStore satisfies counterStore's incrMulti contract for the
+// limiter's nil-store fallback path (storeIncrMulti). Each entry's own
+// ttl is clamped with ITS OWN enforceTTL floor (clampTTL), not incrBy's
+// floor-less clamp — this is the window-aware path real enforcement
+// (checkAndCount/account) relies on; see counterIncr.enforceTTL's own
+// doc comment for the bug this fixes.
 func (m *memoryStore) incrMulti(entries []counterIncr) ([]int64, error) {
 	out := make([]int64, len(entries))
 	for i, e := range entries {
-		out[i], _ = m.incrBy(e.key, e.delta, e.ttl) // memoryStore.incrBy never errors
+		out[i] = m.applyIncr(e.key, e.delta, clampTTL(e.ttl, e.enforceTTL))
 	}
 	return out, nil
 }
@@ -481,7 +584,10 @@ func (l *limiter) redisStatus() (configured bool, lastErr string, lastErrAt time
 // or when the store-down latch (storeLatched) is already open from a
 // recent failure. ok is false only in the fail-closed case — a caller
 // must refuse the request for that, rather than treating a zero value as
-// a real counter reading.
+// a real counter reading. storeIncrBy has no production caller since
+// checkAndCount/account moved to the batched storeIncrMulti (perf review,
+// 2026-08-21) — its only caller, incrCounter below, is itself only
+// called from tests, for direct counter seeding.
 func (l *limiter) storeIncrBy(key string, n int64, ttl time.Duration) (v int64, ok bool) {
 	if l.store == nil {
 		v, _ = l.fallback.incrBy(key, n, ttl) // fallback never errors
@@ -672,7 +778,11 @@ func retryAfterSeconds(t time.Time, window string) int {
 // and returns its new value, together with whether the operation
 // succeeded under the limiter's fail-open/fail-closed policy (see
 // storeIncrBy). ok is false only in the fail-closed case: a configured
-// store errored and failOpen is false.
+// store errored and failOpen is false. incrCounter has no production
+// caller since checkAndCount/account moved to the batched incrMulti
+// (perf review, 2026-08-21) — it is kept for direct counter seeding in
+// tests (5 call sites, all in admin_test.go's
+// TestAdminUsage_MathAgainstSeededCounters).
 func (l *limiter) incrCounter(kind, id, metric, window string, t time.Time, n int64, ttl time.Duration) (int64, bool) {
 	return l.storeIncrBy(windowKey(kind, id, metric, window, t), n, ttl)
 }
@@ -720,9 +830,9 @@ func (l *limiter) checkAndCount(scopes []limitScope) *limitViolation {
 	entries := make([]counterIncr, 0, len(scopes)*checkAndCountKeysPerScope)
 	for _, sc := range scopes {
 		entries = append(entries,
-			counterIncr{key: windowKey(sc.kind, sc.id, metricReq, windowMin, now), delta: 1, ttl: minWindowTTL},
-			counterIncr{key: windowKey(sc.kind, sc.id, metricReq, windowDay, now), delta: 1, ttl: dayWindowTTL},
-			counterIncr{key: windowKey(sc.kind, sc.id, metricReq, windowHour, now), delta: 1, ttl: hourWindowTTL},
+			newCounterIncr(sc.kind, sc.id, metricReq, windowMin, now, 1, minWindowTTL),
+			newCounterIncr(sc.kind, sc.id, metricReq, windowDay, now, 1, dayWindowTTL),
+			newCounterIncr(sc.kind, sc.id, metricReq, windowHour, now, 1, hourWindowTTL),
 		)
 	}
 
@@ -869,23 +979,23 @@ func (l *limiter) account(scopes []limitScope, u usage, costMicros int64) {
 	for _, sc := range scopes {
 		if u.prompt != 0 {
 			entries = append(entries,
-				counterIncr{key: windowKey(sc.kind, sc.id, metricTokIn, windowHour, now), delta: u.prompt, ttl: hourWindowTTL},
-				counterIncr{key: windowKey(sc.kind, sc.id, metricTokIn, windowDay, now), delta: u.prompt, ttl: dayWindowTTL},
-				counterIncr{key: windowKey(sc.kind, sc.id, metricTokIn, windowMonth, now), delta: u.prompt, ttl: monthWindowTTL},
+				newCounterIncr(sc.kind, sc.id, metricTokIn, windowHour, now, u.prompt, hourWindowTTL),
+				newCounterIncr(sc.kind, sc.id, metricTokIn, windowDay, now, u.prompt, dayWindowTTL),
+				newCounterIncr(sc.kind, sc.id, metricTokIn, windowMonth, now, u.prompt, monthWindowTTL),
 			)
 		}
 		if u.completion != 0 {
 			entries = append(entries,
-				counterIncr{key: windowKey(sc.kind, sc.id, metricTokOut, windowHour, now), delta: u.completion, ttl: hourWindowTTL},
-				counterIncr{key: windowKey(sc.kind, sc.id, metricTokOut, windowDay, now), delta: u.completion, ttl: dayWindowTTL},
-				counterIncr{key: windowKey(sc.kind, sc.id, metricTokOut, windowMonth, now), delta: u.completion, ttl: monthWindowTTL},
+				newCounterIncr(sc.kind, sc.id, metricTokOut, windowHour, now, u.completion, hourWindowTTL),
+				newCounterIncr(sc.kind, sc.id, metricTokOut, windowDay, now, u.completion, dayWindowTTL),
+				newCounterIncr(sc.kind, sc.id, metricTokOut, windowMonth, now, u.completion, monthWindowTTL),
 			)
 		}
 		if costMicros != 0 {
 			entries = append(entries,
-				counterIncr{key: windowKey(sc.kind, sc.id, metricCost, windowHour, now), delta: costMicros, ttl: hourWindowTTL},
-				counterIncr{key: windowKey(sc.kind, sc.id, metricCost, windowDay, now), delta: costMicros, ttl: dayWindowTTL},
-				counterIncr{key: windowKey(sc.kind, sc.id, metricCost, windowMonth, now), delta: costMicros, ttl: monthWindowTTL},
+				newCounterIncr(sc.kind, sc.id, metricCost, windowHour, now, costMicros, hourWindowTTL),
+				newCounterIncr(sc.kind, sc.id, metricCost, windowDay, now, costMicros, dayWindowTTL),
+				newCounterIncr(sc.kind, sc.id, metricCost, windowMonth, now, costMicros, monthWindowTTL),
 			)
 		}
 	}
