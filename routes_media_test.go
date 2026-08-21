@@ -76,11 +76,13 @@ func newMediaTestConfig(openaiURL string, models ...string) *Config {
 		"openai": {Type: "openai", BaseURL: openaiURL, APIKey: "sk-up", Models: models},
 	}
 	cfg.Groups = map[string]*GroupConfig{"default": {}}
-	// Limits is a non-nil (if all-zero, i.e. unlimited) *LimitsConfig so
-	// buildLimitScopes (routes_media.go/routes_unified.go) includes a
-	// "user" scope for alice — matching routes_unified_test.go's own
-	// happy-path fixture — otherwise checkAndCount has no scope to
-	// increment a counter for at all.
+	// Limits is a non-nil (if all-zero, i.e. unlimited) *LimitsConfig —
+	// matching routes_unified_test.go's own happy-path fixture. Since the
+	// v0.21 accounting fix, buildLimitScopes (routes_media.go/
+	// routes_unified.go) always builds a "user" scope for alice regardless
+	// of whether Limits is set at all; this fixture keeps a non-nil value
+	// only for parity with the other unified-route fixtures, not because it
+	// is required for checkAndCount to have a scope to increment.
 	cfg.Users = &UsersConfig{Inline: []*UserConfig{{Name: "alice", Group: "default", APIKey: "sk-alice", Limits: &LimitsConfig{}}}}
 	return cfg
 }

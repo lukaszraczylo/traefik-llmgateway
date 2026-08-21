@@ -83,13 +83,14 @@ http:
           users:
             inline:
               # limits.requestsPerDay is set (generously — every test in
-              # this suite together never approaches it) purely so
-              # buildLimitScopes (routes_unified.go/routes_media.go/
-              # admin.go) builds a "user" counter scope for alice at all:
-              # a nil per-user Limits means only the group's own counters
-              # ever increment, which would make the admin usage test's
-              # "alice's own request counters are > 0" assertion always
-              # read zero regardless of how much traffic she generated.
+              # this suite together never approaches it) to exercise real
+              # per-user ENFORCEMENT alongside accounting, not because it is
+              # required for alice's own counters to move at all: since the
+              # v0.21 accounting fix, buildLimitScopes (routes_unified.go/
+              # routes_media.go/admin.go) always builds a "user" counter
+              # scope, limits or not, so the admin usage test's "alice's own
+              # request counters are > 0" assertion would hold even with
+              # this field unset.
               - name: alice
                 group: eng
                 apiKey: "sk-int-alice"

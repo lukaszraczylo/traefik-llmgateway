@@ -220,11 +220,28 @@ func (g *Gateway) runUnified(w http.ResponseWriter, r *http.Request, u *user, gr
 }
 
 // buildLimitScopes returns the limitScope slice runUnified passes to the
-// limiter: a user scope only when u has its own limits configured, then a
-// group scope only when grp does (ruling e) — either, both, or neither may
-// apply to a given request. The user scope is listed first, so
-// checkAndCount reports a user's own violation ahead of their group's when
-// both are breached by the same request.
+// limiter: a user scope and a group scope, ALWAYS both, unconditionally
+// (v0.21 fix — see this function's doc comment history below for the bug
+// this closes). The user scope is listed first, so checkAndCount reports a
+// user's own violation ahead of their group's when both are breached by the
+// same request.
+//
+// u.limits or grp.limits may be nil — that scope simply carries no limit for
+// evaluateScope (limits.go) to enforce, and evaluateScope's own nil-limits
+// check skips it during evaluation. It is NOT omitted from the slice: usage
+// accounting (checkAndCount's own counting half, and account) is
+// unconditional and must never be coupled to whether a limit happens to be
+// configured. Production bug (root-caused live, 2026-08-21): the previous
+// version of this function omitted a user or group scope entirely whenever
+// that entity had no configured Limits, which meant a limit-less user or
+// group never accumulated ANY usage counters at all — the admin dashboard's
+// per-user rows all read zero while the total kept climbing, until an
+// operator worked around it by adding a phantom, deliberately-unreachable
+// requestsPerDay limit to every user/group just to make buildLimitScopes
+// build a counter scope for them. That workaround is no longer needed:
+// accounting and enforcement are now fully decoupled, matching
+// buildAdminUsage's own "never omits an entity for having nil limits"
+// contract (admin.go) that the dashboard's usage table already promised.
 //
 // Callers metering actual LLM traffic wrap this result in withTotalScope
 // before passing it to checkAndCount/account; handleAdminAPI (admin.go)
@@ -232,14 +249,10 @@ func (g *Gateway) runUnified(w http.ResponseWriter, r *http.Request, u *user, gr
 // req/min-req/day accounting never contributes to the total-scope
 // LLM-traffic series (v0.2 data-layer task).
 func buildLimitScopes(u *user, grp *group) []limitScope {
-	scopes := make([]limitScope, 0, 2)
-	if u.limits != nil {
-		scopes = append(scopes, limitScope{limits: u.limits, kind: "user", id: u.name})
+	return []limitScope{
+		{limits: u.limits, kind: "user", id: u.name},
+		{limits: grp.limits, kind: "group", id: grp.name},
 	}
-	if grp.limits != nil {
-		scopes = append(scopes, limitScope{limits: grp.limits, kind: "group", id: grp.name})
-	}
-	return scopes
 }
 
 // withTotalScope returns scopes with the synthetic total scope

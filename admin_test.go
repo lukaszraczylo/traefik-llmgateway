@@ -450,13 +450,18 @@ func TestAdminUsage_MathAgainstSeededCounters(t *testing.T) {
 	}
 
 	// admin1 itself must also be listed (buildAdminUsage lists every
-	// active user/group, not just ones with seeded traffic): admin1 has
-	// no user-level limits configured, so buildLimitScopes never builds a
-	// "user"/admin1 scope for its own requests (ruling e) and its own
-	// counters stay at zero — but the row must still be present.
+	// active user/group, not just ones with seeded traffic): this test
+	// never seeds any counter for admin1 (only alice/agroup/total above),
+	// so its row reads genuinely zero — but the row must still be present.
+	// This is unrelated to buildLimitScopes (routes_unified.go): since the
+	// v0.21 accounting fix, that function always builds a scope regardless
+	// of limits, and separately, handleAdminAPI itself never calls
+	// checkAndCount for ANY admin route caller (admin.go's own doc
+	// comment) — admin1's zero here is simply "no traffic was ever
+	// generated for it in this test".
 	admin1 := findUsageEntry(t, got.Users, "admin1")
 	if admin1.RequestsPerMinute != 0 {
-		t.Errorf("admin1 requestsPerMinute = %d, want 0 (admin1 has no user-level limits, so its own requests never build a user scope)", admin1.RequestsPerMinute)
+		t.Errorf("admin1 requestsPerMinute = %d, want 0 (no traffic was seeded for admin1 in this test)", admin1.RequestsPerMinute)
 	}
 	if admin1.StoreDown {
 		t.Error("admin1.storeDown must be false")
@@ -494,6 +499,84 @@ func findUsageEntry(t *testing.T, entries []adminUsageEntryView, id string) admi
 	}
 	t.Fatalf("no usage entry for id %q in %+v", id, entries)
 	return adminUsageEntryView{}
+}
+
+// TestAdminUsage_LimitlessUserAndGroup_AccumulateRealTraffic is the
+// regression test for the production accounting bug (v0.21, root-caused
+// live): buildLimitScopes (routes_unified.go) used to build a counter scope
+// for a user or group ONLY when that entity had its own Limits configured,
+// so a limit-less user/group never accumulated usage at all — the
+// dashboard's total kept climbing while every such row stayed zero, until
+// an operator worked around it by adding phantom, deliberately-unreachable
+// requestsPerDay limits everywhere. "nolim" and "nolimgroup" here carry no
+// Limits whatsoever (both nil, never set), yet after one real, end-to-end
+// chat-completion request — driven through the actual unified route, not a
+// direct counter seed — their rows in GET /admin/api/usage must already
+// show real, non-zero request and token counters.
+func TestAdminUsage_LimitlessUserAndGroup_AccumulateRealTraffic(t *testing.T) {
+	t.Parallel()
+	const respBody = `{"id":"c1","object":"chat.completion","model":"gpt-test","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":7,"completion_tokens":3}}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(respBody))
+	}))
+	defer srv.Close()
+
+	cfg := CreateConfig()
+	cfg.Admin = &AdminConfig{Enabled: true}
+	cfg.Providers = map[string]*ProviderConfig{
+		"openai": {Type: "openai", BaseURL: srv.URL, APIKey: "sk-up", Models: []string{"gpt-test"}},
+	}
+	cfg.Groups = map[string]*GroupConfig{
+		"nolimgroup": {}, // no Limits configured
+		"admingroup": {},
+	}
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{
+		{Name: "nolim", Group: "nolimgroup", APIKey: "sk-nolim"}, // no Limits configured
+		{Name: "admin1", Group: "admingroup", APIKey: "sk-admin1", Admin: true},
+	}}
+	h, _ := newAdminGatewayHandle(t, cfg)
+
+	body := map[string]any{"model": "gpt-test", "messages": []any{map[string]any{"role": "user", "content": "hi"}}}
+	chatReq := newUnifiedRequest(t, http.MethodPost, "/v1/chat/completions", "sk-nolim", body)
+	chatRec := httptest.NewRecorder()
+	h.ServeHTTP(chatRec, chatReq)
+	if chatRec.Code != http.StatusOK {
+		t.Fatalf("chat completion status = %d, want 200, body=%s", chatRec.Code, chatRec.Body.String())
+	}
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, adminRequest(http.MethodGet, adminUsagePath, "sk-admin1"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /admin/api/usage status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	var got adminUsageResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	nolim := findUsageEntry(t, got.Users, "nolim")
+	if nolim.Limits != nil {
+		t.Errorf("nolim.Limits = %+v, want nil (no limits configured)", nolim.Limits)
+	}
+	if nolim.RequestsPerDay != 1 || nolim.RequestsPerMinute != 1 {
+		t.Errorf("nolim requests = min:%d day:%d, want 1/1 (the bug this test guards: a limit-less user never accumulated usage)", nolim.RequestsPerMinute, nolim.RequestsPerDay)
+	}
+	if nolim.TokensInPerDay != 7 || nolim.TokensOutPerDay != 3 {
+		t.Errorf("nolim tokens = in/day:%d out/day:%d, want 7/3", nolim.TokensInPerDay, nolim.TokensOutPerDay)
+	}
+
+	nolimgroup := findUsageEntry(t, got.Groups, "nolimgroup")
+	if nolimgroup.Limits != nil {
+		t.Errorf("nolimgroup.Limits = %+v, want nil (no limits configured)", nolimgroup.Limits)
+	}
+	if nolimgroup.RequestsPerDay != 1 || nolimgroup.RequestsPerMinute != 1 {
+		t.Errorf("nolimgroup requests = min:%d day:%d, want 1/1 (the bug this test guards: a limit-less group never accumulated usage)", nolimgroup.RequestsPerMinute, nolimgroup.RequestsPerDay)
+	}
+	if nolimgroup.TokensInPerDay != 7 || nolimgroup.TokensOutPerDay != 3 {
+		t.Errorf("nolimgroup tokens = in/day:%d out/day:%d, want 7/3", nolimgroup.TokensInPerDay, nolimgroup.TokensOutPerDay)
+	}
 }
 
 // accessListKeys are adminUsageEntryView's four group-access JSON keys

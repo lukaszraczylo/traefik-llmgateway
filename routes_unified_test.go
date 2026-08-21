@@ -1139,10 +1139,10 @@ func (s *behavioralRedisServer) handle(args []string) []byte {
 // behavioralRedisServer and cfg.Cache enabled, an openai provider pointed
 // at srv, group "default" (its Cache override left to groupCache, nil
 // unless the caller sets it), and one user ("alice") with an (empty,
-// unlimited) LimitsConfig — required so buildLimitScopes actually
-// produces a scope for the limiter to count against; without one,
-// checkAndCount/account never touch the store at all, and this test's
-// counter assertions would trivially "pass" against uncounted zeros.
+// unlimited) LimitsConfig — kept for parity with the other unified-route
+// fixtures in this file, though since the v0.21 accounting fix
+// buildLimitScopes always produces alice's own scope regardless of whether
+// Limits is set at all.
 func newCacheTestGateway(t *testing.T, srv *httptest.Server, groupCache *bool, maxBodyBytes int) *Gateway {
 	t.Helper()
 	redisLn := newBehavioralRedisServer(t)
@@ -1751,6 +1751,43 @@ func TestCacheCaptureWriter_ImplicitStatus_CapturesContentType(t *testing.T) {
 // canonical ("provider/model") first, falling back to bare — the upstream
 // model id alone — only when canonical has no configured price at all, in
 // neither overrides nor the built-in table.
+// TestBuildLimitScopes_AlwaysBuildsBothScopes proves buildLimitScopes
+// builds a user AND a group limitScope unconditionally (v0.21 accounting
+// fix): whether either entity has Limits configured or not, both scopes
+// must always be present — a nil Limits field turns off ENFORCEMENT
+// (evaluateScope's own nil check, limits.go) for that scope, never
+// accounting. Table-driven over every nil/non-nil combination of user and
+// group limits.
+func TestBuildLimitScopes_AlwaysBuildsBothScopes(t *testing.T) {
+	cases := []struct {
+		userLimits *LimitsConfig
+		grpLimits  *LimitsConfig
+		name       string
+	}{
+		{name: "both nil (the exact bug scenario)"},
+		{name: "user limited, group unlimited", userLimits: &LimitsConfig{RequestsPerMinute: 5}},
+		{name: "user unlimited, group limited", grpLimits: &LimitsConfig{RequestsPerMinute: 5}},
+		{name: "both limited", userLimits: &LimitsConfig{RequestsPerMinute: 5}, grpLimits: &LimitsConfig{RequestsPerMinute: 9}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			u := &user{name: "u1", limits: tc.userLimits}
+			grp := &group{name: "g1", limits: tc.grpLimits}
+			scopes := buildLimitScopes(u, grp)
+
+			if len(scopes) != 2 {
+				t.Fatalf("len(scopes) = %d, want 2 (unconditional user+group accounting)", len(scopes))
+			}
+			if scopes[0].kind != "user" || scopes[0].id != "u1" || scopes[0].limits != tc.userLimits {
+				t.Errorf("scopes[0] = %+v, want user scope for u1 with limits %+v", scopes[0], tc.userLimits)
+			}
+			if scopes[1].kind != "group" || scopes[1].id != "g1" || scopes[1].limits != tc.grpLimits {
+				t.Errorf("scopes[1] = %+v, want group scope for g1 with limits %+v", scopes[1], tc.grpLimits)
+			}
+		})
+	}
+}
+
 func TestUnifiedCostMicros(t *testing.T) {
 	u := usage{prompt: 1_000_000, completion: 1_000_000}
 
