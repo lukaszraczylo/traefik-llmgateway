@@ -132,6 +132,15 @@ func (lc *LimitsConfig) validate() error {
 	return nil
 }
 
+// counterIncr is one entry in an incrMulti batch: increment key by delta,
+// creating it with an expiry of ttl from now if it does not exist or has
+// expired — the same per-entry contract incrBy applies to a single key.
+type counterIncr struct {
+	key   string
+	delta int64
+	ttl   time.Duration
+}
+
 // counterStore is the storage backend the limiter uses for atomic windowed
 // counters. memoryStore (below) is the in-process fallback; a distributed
 // (e.g. Redis-backed) implementation is wired in a later task.
@@ -152,6 +161,19 @@ type counterStore interface {
 	// whole batch (mirrored by the limiter's storeGetMulti as a single
 	// fail-open/fail-closed decision), never a partial result.
 	getMulti(keys []string) ([]int64, error)
+	// incrMulti applies incrBy's own per-entry contract to every entry in
+	// entries in one round trip where the backend supports it (redisStore
+	// pipelines one INCRBY+EXPIRE pair per entry into a single pipeline
+	// call; memoryStore's in-process map needs no such optimization but
+	// implements the same contract for interface conformance), returning
+	// each entry's new counter value in the same order (perf review,
+	// 2026-08-21: checkAndCount/account previously paid one round trip per
+	// counter — up to 9 and 27 respectively for a 3-scope request — this
+	// collapses each down to one). An error fails the whole batch, never a
+	// partial result, mirrored by the limiter's storeIncrMulti as a single
+	// fail-open/fail-closed decision, the same shape storeGetMulti already
+	// applies to a batch read.
+	incrMulti(entries []counterIncr) ([]int64, error)
 }
 
 // memoryEntry is one counter's value and expiry in memoryStore.
@@ -169,6 +191,32 @@ type memoryEntry struct {
 // frequency independent of key count: worst case is one full-map scan
 // every 30s.
 const sweepEvery = 30 * time.Second
+
+// memoryStoreMaxTTL caps any TTL memoryStore actually applies, regardless
+// of what a caller requests. Ruling (perf review, 2026-08-21): the
+// in-process fallback is continuity, not history. Applying the real
+// hourWindowTTL/dayWindowTTL/monthWindowTTL values (48h/35d/400d) to the
+// fallback map was measured to grow its live key count roughly 30x over
+// the original three-window (min/day/month) shape — and sweepEvery's own
+// doc comment above already records that a full-map sweep which frees
+// nothing is a "167x incrBy cliff" once live keys cross a threshold;
+// growing the map ~30x bigger multiplies that same cliff's cost by
+// roughly the same factor. Clamping every fallback TTL to 48h keeps
+// per-scope live keys bounded (a handful of metrics across four windows,
+// not 35-400 days' worth) independent of which window a caller asks for.
+// This is a documented capability gap, not a bug: with no Redis
+// configured, or during a Redis outage under failOpen, memoryStore-backed
+// usage-history charts only ever show the trailing 48h, never longer —
+// see README's "fallback works too, but only for 48h" note.
+const memoryStoreMaxTTL = 48 * time.Hour
+
+// clampTTL caps ttl at memoryStoreMaxTTL — see that const's doc comment.
+func clampTTL(ttl time.Duration) time.Duration {
+	if ttl > memoryStoreMaxTTL {
+		return memoryStoreMaxTTL
+	}
+	return ttl
+}
 
 // memoryStore is an in-process counterStore: a mutex-guarded map with
 // per-key expiry. It has no background goroutine — a Yaegi middleware
@@ -193,8 +241,10 @@ func (m *memoryStore) now() time.Time {
 	return m.nowFn()
 }
 
-// incrBy implements counterStore.
+// incrBy implements counterStore. ttl is clamped to memoryStoreMaxTTL
+// before it is ever applied — see that const's doc comment.
 func (m *memoryStore) incrBy(key string, n int64, ttl time.Duration) (int64, error) {
+	ttl = clampTTL(ttl)
 	now := m.now()
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -235,6 +285,20 @@ func (m *memoryStore) getMulti(keys []string) ([]int64, error) {
 	out := make([]int64, len(keys))
 	for i, k := range keys {
 		out[i], _ = m.get(k) // memoryStore.get never errors
+	}
+	return out, nil
+}
+
+// incrMulti implements counterStore by looping over incrBy: memoryStore's
+// in-process map access is already effectively free per key, so there is
+// no round-trip cost to batch away — this exists purely so memoryStore
+// satisfies counterStore's incrMulti contract for the limiter's nil-store
+// fallback path (storeIncrMulti). Each entry's ttl is still clamped by
+// incrBy itself.
+func (m *memoryStore) incrMulti(entries []counterIncr) ([]int64, error) {
+	out := make([]int64, len(entries))
+	for i, e := range entries {
+		out[i], _ = m.incrBy(e.key, e.delta, e.ttl) // memoryStore.incrBy never errors
 	}
 	return out, nil
 }
@@ -505,6 +569,38 @@ func (l *limiter) failPolicyGetMulti(keys []string) ([]int64, bool) {
 	return v, true
 }
 
+// storeIncrMulti mirrors storeIncrBy for a batch of increments: one round
+// trip against the configured store (or the in-process fallback) for the
+// whole slice, applying the identical fail-open/fail-closed/latched
+// policy storeIncrBy applies per key. ok is false only in the fail-closed
+// case — a caller must refuse the request (checkAndCount) or drop the
+// sample (account) for that, rather than treating a nil/short slice as
+// real counter readings.
+func (l *limiter) storeIncrMulti(entries []counterIncr) (v []int64, ok bool) {
+	if l.store == nil {
+		v, _ = l.fallback.incrMulti(entries) // fallback never errors
+		return v, true
+	}
+	if l.storeLatched() {
+		return l.failPolicyIncrMulti(entries)
+	}
+	v, err := l.store.incrMulti(entries)
+	if err == nil {
+		return v, true
+	}
+	l.recordStoreFailure(err)
+	return l.failPolicyIncrMulti(entries)
+}
+
+// failPolicyIncrMulti mirrors failPolicyIncrBy for a batch increment.
+func (l *limiter) failPolicyIncrMulti(entries []counterIncr) ([]int64, bool) {
+	if !l.failOpen {
+		return nil, false
+	}
+	v, _ := l.fallback.incrMulti(entries)
+	return v, true
+}
+
 // storeDownViolation is the violation checkAndCount/budgetViolation return
 // when the configured store is unreachable and failOpen is false: the
 // request is refused instead of silently enforcing limits against a
@@ -588,15 +684,30 @@ func (l *limiter) getCounter(kind, id, metric, window string, t time.Time) (int6
 	return l.storeGet(windowKey(kind, id, metric, window, t))
 }
 
-// checkAndCount increments every scope's req:min and req:day counters —
-// unconditionally, before any evaluation, so a request that ultimately
-// gets refused by one scope's limit still counts toward every other
-// scope's rate tracking — then evaluates each scope's set limits in order
-// and returns the first violation found, or nil if the request may
-// proceed. If any store operation fails closed (a configured store errored
-// and failOpen is false), it returns a storeDownViolation immediately —
-// the request is refused rather than evaluated against partial or
+// checkAndCountKeysPerScope is the number of counterIncr entries
+// checkAndCount builds per scope (req:min, req:day, req:hour), and the
+// stride its flat storeIncrMulti result is sliced back into per-scope
+// counts by.
+const checkAndCountKeysPerScope = 3
+
+// checkAndCount increments every scope's req:min, req:day, and req:hour
+// counters — unconditionally, before any evaluation, so a request that
+// ultimately gets refused by one scope's limit still counts toward every
+// other scope's rate tracking — then evaluates each scope's set limits in
+// order and returns the first violation found, or nil if the request may
+// proceed. If the batch fails closed (a configured store errored and
+// failOpen is false), it returns a storeDownViolation immediately — the
+// request is refused rather than evaluated against partial or
 // fallback-only counters.
+//
+// Every scope's three counters are built into ONE storeIncrMulti call
+// (perf review, 2026-08-21): a 3-scope request (user, group, total —
+// withTotalScope, routes_unified.go) previously paid up to 9 separate
+// round trips here, one per counter. incrMulti's own reply already
+// carries each entry's post-increment value in order, so no extra read
+// is needed to recover req:min/req:day for evaluation below — only
+// req:hour's slot goes unread, since windowHour is stats-only (its own
+// doc comment) and never evaluated.
 //
 // Requests limits compare against the value just incremented in this call.
 // Token and cost limits compare against the value already accumulated by
@@ -606,32 +717,26 @@ func (l *limiter) getCounter(kind, id, metric, window string, t time.Time) (int6
 func (l *limiter) checkAndCount(scopes []limitScope) *limitViolation {
 	now := l.now()
 
-	minCounts := make([]int64, len(scopes))
-	dayCounts := make([]int64, len(scopes))
-	for i, sc := range scopes {
-		v, ok := l.incrCounter(sc.kind, sc.id, metricReq, windowMin, now, 1, minWindowTTL)
-		if !ok {
-			return storeDownViolation()
-		}
-		minCounts[i] = v
+	entries := make([]counterIncr, 0, len(scopes)*checkAndCountKeysPerScope)
+	for _, sc := range scopes {
+		entries = append(entries,
+			counterIncr{key: windowKey(sc.kind, sc.id, metricReq, windowMin, now), delta: 1, ttl: minWindowTTL},
+			counterIncr{key: windowKey(sc.kind, sc.id, metricReq, windowDay, now), delta: 1, ttl: dayWindowTTL},
+			counterIncr{key: windowKey(sc.kind, sc.id, metricReq, windowHour, now), delta: 1, ttl: hourWindowTTL},
+		)
+	}
 
-		v, ok = l.incrCounter(sc.kind, sc.id, metricReq, windowDay, now, 1, dayWindowTTL)
-		if !ok {
-			return storeDownViolation()
-		}
-		dayCounts[i] = v
-
-		// Hour is stats-only (windowHour's own doc comment): its value is
-		// never read back here, only written, so the admin usage-history
-		// API (admin.go) has an hour-granularity req series to read
-		// later.
-		if _, ok = l.incrCounter(sc.kind, sc.id, metricReq, windowHour, now, 1, hourWindowTTL); !ok {
-			return storeDownViolation()
-		}
+	vals, ok := l.storeIncrMulti(entries)
+	if !ok || len(vals) != len(entries) {
+		return storeDownViolation()
 	}
 
 	for i, sc := range scopes {
-		if v := l.evaluateScope(sc, minCounts[i], dayCounts[i], now); v != nil {
+		minCount := vals[i*checkAndCountKeysPerScope]
+		dayCount := vals[i*checkAndCountKeysPerScope+1]
+		// vals[i*checkAndCountKeysPerScope+2] is the req:hour count —
+		// stats-only, deliberately never read here.
+		if v := l.evaluateScope(sc, minCount, dayCount, now); v != nil {
 			return v
 		}
 	}
@@ -746,31 +851,48 @@ func (l *limiter) tokenBudgetViolation(sc limitScope, name string, limit int64, 
 // scope's hour, day, and month counters. Each metric/direction is skipped
 // independently when its own value is 0 — no store write for a direction
 // this call has nothing to report, so a streaming response cut off before
-// any completion tokens arrived still writes tokin alone. A sample that
-// hits a fail-closed store error (see storeIncrBy) is dropped silently:
-// account has no error return to signal it, and dropping — rather than
-// counting it in the fallback — avoids double-counting once the store
-// recovers.
+// any completion tokens arrived still writes tokin alone.
+//
+// Every scope's writes are collected into ONE storeIncrMulti call (perf
+// review, 2026-08-21): a 3-scope request (user, group, total) with all
+// three metrics nonzero previously paid up to 9 round trips per scope —
+// 27 total — one incrCounter call each. account's return-value discipline
+// is unchanged by the batching: it has no error return, and a sample that
+// hits a fail-closed batch (see storeIncrMulti) is dropped in full,
+// silently, rather than counting it in the fallback — dropping avoids
+// double-counting once the store recovers, the same reasoning that
+// applied per-key before this call became one batch.
 func (l *limiter) account(scopes []limitScope, u usage, costMicros int64) {
 	now := l.now()
 
+	entries := make([]counterIncr, 0, len(scopes)*9)
 	for _, sc := range scopes {
 		if u.prompt != 0 {
-			l.incrCounter(sc.kind, sc.id, metricTokIn, windowHour, now, u.prompt, hourWindowTTL)
-			l.incrCounter(sc.kind, sc.id, metricTokIn, windowDay, now, u.prompt, dayWindowTTL)
-			l.incrCounter(sc.kind, sc.id, metricTokIn, windowMonth, now, u.prompt, monthWindowTTL)
+			entries = append(entries,
+				counterIncr{key: windowKey(sc.kind, sc.id, metricTokIn, windowHour, now), delta: u.prompt, ttl: hourWindowTTL},
+				counterIncr{key: windowKey(sc.kind, sc.id, metricTokIn, windowDay, now), delta: u.prompt, ttl: dayWindowTTL},
+				counterIncr{key: windowKey(sc.kind, sc.id, metricTokIn, windowMonth, now), delta: u.prompt, ttl: monthWindowTTL},
+			)
 		}
 		if u.completion != 0 {
-			l.incrCounter(sc.kind, sc.id, metricTokOut, windowHour, now, u.completion, hourWindowTTL)
-			l.incrCounter(sc.kind, sc.id, metricTokOut, windowDay, now, u.completion, dayWindowTTL)
-			l.incrCounter(sc.kind, sc.id, metricTokOut, windowMonth, now, u.completion, monthWindowTTL)
+			entries = append(entries,
+				counterIncr{key: windowKey(sc.kind, sc.id, metricTokOut, windowHour, now), delta: u.completion, ttl: hourWindowTTL},
+				counterIncr{key: windowKey(sc.kind, sc.id, metricTokOut, windowDay, now), delta: u.completion, ttl: dayWindowTTL},
+				counterIncr{key: windowKey(sc.kind, sc.id, metricTokOut, windowMonth, now), delta: u.completion, ttl: monthWindowTTL},
+			)
 		}
 		if costMicros != 0 {
-			l.incrCounter(sc.kind, sc.id, metricCost, windowHour, now, costMicros, hourWindowTTL)
-			l.incrCounter(sc.kind, sc.id, metricCost, windowDay, now, costMicros, dayWindowTTL)
-			l.incrCounter(sc.kind, sc.id, metricCost, windowMonth, now, costMicros, monthWindowTTL)
+			entries = append(entries,
+				counterIncr{key: windowKey(sc.kind, sc.id, metricCost, windowHour, now), delta: costMicros, ttl: hourWindowTTL},
+				counterIncr{key: windowKey(sc.kind, sc.id, metricCost, windowDay, now), delta: costMicros, ttl: dayWindowTTL},
+				counterIncr{key: windowKey(sc.kind, sc.id, metricCost, windowMonth, now), delta: costMicros, ttl: monthWindowTTL},
+			)
 		}
 	}
+	if len(entries) == 0 {
+		return // every metric was zero for every scope — nothing to write
+	}
+	l.storeIncrMulti(entries) // no error return by contract (doc comment above); ok is intentionally discarded
 }
 
 // usageKeysPerScope is the number of windowKey strings usageWindowKeys

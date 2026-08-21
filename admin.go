@@ -450,11 +450,13 @@ func (g *Gateway) serveAdminUsage(w http.ResponseWriter) {
 // per window (v0.2 data-layer task), matching each window's own retention
 // (limits.go: hourWindowTTL/dayWindowTTL/monthWindowTTL) rounded down to
 // whole buckets: 48 hourly buckets, 35 daily buckets, 13 monthly buckets
-// (a one-month margin over monthWindowTTL's 400*24h ≈ 13.3 months). A
-// span beyond what its window's TTL could ever have kept alive would only
-// echo zeros for the missing tail, so the cap keeps every requested
-// bucket meaningful. window is assumed already validated by
-// validHistoryWindow — the default case is a programming error, not a
+// (roughly a 4-day margin, not a full month: 13 average-length ~30.4-day
+// months is ~396 days, against monthWindowTTL's 400*24h = 400 days —
+// review sweep, 2026-08-21, corrects an earlier "one-month margin"
+// overclaim here). A span beyond what its window's TTL could ever have
+// kept alive would only echo zeros for the missing tail, so the cap keeps
+// every requested bucket meaningful. window is assumed already validated
+// by validHistoryWindow — the default case is a programming error, not a
 // client input, mirroring windowKey/windowEnd's own panic convention.
 func historyMaxSpan(window string) int {
 	switch window {

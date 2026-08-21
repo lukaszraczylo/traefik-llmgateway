@@ -1003,10 +1003,15 @@ func TestAdminDashboard(t *testing.T) {
 	}
 
 	// v0.2 data-layer task: GET /admin/api/usage/history's hour series for
-	// alice and for the synthetic total scope both must show a non-zero
-	// current-hour bucket, reflecting the real LLM traffic this suite
-	// already generated (TestRetryFlakyRecovers, TestResponseCache, ...)
-	// against a real Redis-backed limiter, not just a unit-test stub.
+	// alice and for the synthetic total scope both must show non-zero
+	// traffic, reflecting the real requests this suite already generated
+	// (TestRetryFlakyRecovers, TestResponseCache, ...) against a real
+	// Redis-backed limiter, not just a unit-test stub. Summed across every
+	// returned point (review sweep, 2026-08-21), not just the last one: an
+	// hour rollover landing between this suite's earlier traffic and this
+	// very read would otherwise split the count across two buckets and
+	// leave the current (now-empty) one at zero — a real flake this
+	// integration run cannot control the wall-clock timing of.
 	for _, scope := range []string{"user:alice", "total"} {
 		hist := adminUsageHistory(t, scope, "req", "hour")
 		if got, _ := hist["scope"].(string); got != scope {
@@ -1016,12 +1021,17 @@ func TestAdminDashboard(t *testing.T) {
 		if !ok || len(points) == 0 {
 			t.Fatalf("history scope=%q: points = %#v, want a non-empty array", scope, hist["points"])
 		}
-		current, ok := points[len(points)-1].(map[string]any)
-		if !ok {
-			t.Fatalf("history scope=%q: last point is not an object, got %#v", scope, points[len(points)-1])
+		var total float64
+		for _, p := range points {
+			point, ok := p.(map[string]any)
+			if !ok {
+				t.Fatalf("history scope=%q: point is not an object, got %#v", scope, p)
+			}
+			val, _ := point["value"].(float64)
+			total += val
 		}
-		if val, _ := current["value"].(float64); val <= 0 {
-			t.Errorf("history scope=%q: current-hour bucket value = %v, want > 0 (this suite's own traffic)", scope, val)
+		if total <= 0 {
+			t.Errorf("history scope=%q: sum of all hour buckets = %v, want > 0 (this suite's own traffic)", scope, total)
 		}
 	}
 }

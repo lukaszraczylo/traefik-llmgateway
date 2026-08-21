@@ -509,26 +509,38 @@ http:
   accuracy.
 - **Storage**: `redis` configured wires a hand-rolled, stdlib-only RESP2
   client (`resp.go`) — no `go-redis`, which is not Yaegi-interpretable —
-  against Redis, Valkey, or Dragonfly. Semantics are deliberately
-  **at-least-once, never under-counting**: a lost reply after the server
-  already applied an `INCRBY` can cause a resend that over-counts by one
-  request's worth on that key. This is a fail-*safe* trade-off (more
-  restrictive than reality), never a fail-*open* one. Without `redis`
-  configured, or when it errors and `failOpen: true`, counters live in an
-  in-process map — correct for one Traefik replica, only approximate
-  across several, since each replica counts independently. Exact limits
-  across multiple Traefik replicas require the shared Redis. Every
-  counter, including the fallback in-process one, works as the usage-
-  history API's data source: a fallback-only deployment gets charts of
-  whatever the process itself accumulated, not an empty series.
-- **Retention** (counter key TTL, distinct from a window's own length):
-  a minute key lives 2 minutes, an hour key 48 hours, a day key 35 days,
-  a month key 400 days — long enough for the usage-history API's largest
-  span (48 hourly / 35 daily / 13 monthly buckets) to always find a live
-  key, not just long enough to survive that bucket's own single rollover.
-  **Migration**: none — a deployed process's old, unsplit `tok` counter
-  keys simply expire on their existing TTL and are never read again;
-  nothing needs backfilling.
+  against Redis, Valkey, or Dragonfly. Every counter write (`checkAndCount`,
+  `account`) goes through ONE pipelined round trip for the whole request,
+  regardless of how many user/group/total counters it touches (perf
+  review, 2026-08-21) — a 3-scope request previously paid up to 9 (request
+  counting) or 27 (usage accounting) separate round trips. Semantics are
+  deliberately **at-least-once, never under-counting**: a lost reply after
+  the server already applied the pipeline can cause a resend that
+  over-counts every counter in it by its own delta. This is a
+  fail-*safe* trade-off (more restrictive than reality), never a
+  fail-*open* one.
+- **Fallback** (no `redis` configured, or a Redis error with
+  `failOpen: true`): counters live in an in-process map — correct for one
+  Traefik replica, only approximate across several, since each replica
+  counts independently. Exact limits across multiple Traefik replicas
+  require the shared Redis. Every counter, including this fallback one,
+  works as the usage-history API's data source, but its retention is
+  capped at **48 hours regardless of window** (`memoryStoreMaxTTL`,
+  limits.go — ruling, 2026-08-21: the in-process fallback is continuity,
+  not history; applying the real day/month TTLs to it would grow its live
+  key count roughly 30x, multiplying the cost of its own periodic sweep by
+  the same factor). A fallback-only deployment's usage-history charts
+  therefore show at most the trailing 48 hours, never the full day/month
+  span Redis-backed deployments get — full retention needs the shared
+  Redis.
+- **Retention** (Redis counter key TTL, distinct from a window's own
+  length): a minute key lives 2 minutes, an hour key 48 hours, a day key
+  35 days, a month key 400 days — long enough for the usage-history API's
+  largest span (48 hourly / 35 daily / 13 monthly buckets) to always find
+  a live key, not just long enough to survive that bucket's own single
+  rollover. **Migration**: none — a deployed process's old, unsplit `tok`
+  counter keys simply expire on their existing TTL and are never read
+  again; nothing needs backfilling.
 
 ## Retry
 
@@ -773,7 +785,11 @@ request to any of them falls through to the plugin's existing
   `{"scope","metric","window","points":[{"bucket":"2026082114","value":123},...]}`.
   Unlike the other two JSON routes, this one **never counts request
   statistics** — it skips `checkAndCount` entirely, ahead of the same
-  change landing for every `/admin/api/*` route in a later change.
+  change landing for every `/admin/api/*` route in a later change. It is
+  therefore also **unthrottled**: no `requestsPerMinute`/`requestsPerDay`
+  limit ever applies to it, so its only trust boundary is the admin gate
+  itself (a valid admin key). An admin key holder can poll it as fast as
+  they like.
 - **What's exposed**: provider names, types, base URLs (with any
   userinfo/query string stripped before it's ever echoed), model counts,
   discovery status, group/user names, membership, limits, and live usage

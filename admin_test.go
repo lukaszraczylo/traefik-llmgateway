@@ -751,6 +751,9 @@ func (s *countingMultiStore) getMulti(keys []string) ([]int64, error) {
 	}
 	return out, nil
 }
+func (s *countingMultiStore) incrMulti(entries []counterIncr) ([]int64, error) {
+	return make([]int64, len(entries)), nil
+}
 
 func TestLimiterCurrentUsage_BatchesOneGetMultiCallForAllScopes(t *testing.T) {
 	t.Parallel()

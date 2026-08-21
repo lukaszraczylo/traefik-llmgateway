@@ -29,6 +29,47 @@ func TestRedisStore_IncrBy_PipelinesIncrbyAndExpire(t *testing.T) {
 	}
 }
 
+// TestRedisStore_IncrMulti_PipelinesAllPairsInOneCall is the perf-review
+// (2026-08-21) case: incrMulti sends every entry's INCRBY+EXPIRE pair as
+// ONE pipeline — no SELECT (or any other command) interleaved between
+// entries, which would only happen if incrMulti dialled a fresh
+// connection or made a separate call per entry instead of the single
+// s.client.pipeline call it actually makes — and returns each entry's
+// INCRBY reply in the same order as entries, not the reply's position in
+// the full 2*N command/reply stream.
+func TestRedisStore_IncrMulti_PipelinesAllPairsInOneCall(t *testing.T) {
+	ln := newFakeListener(t)
+	runFakeRESPServer(t, ln, []respStep{
+		{wantArgs: []string{"SELECT", "0"}, reply: []byte("+OK\r\n")},
+		{wantArgs: []string{"INCRBY", "llmgw:user:a:req:hour:2026082014", "1"}, reply: []byte(":11\r\n")},
+		{wantArgs: []string{"EXPIRE", "llmgw:user:a:req:hour:2026082014", "172800"}, reply: []byte(":1\r\n")},
+		{wantArgs: []string{"INCRBY", "llmgw:user:a:tokin:day:20260820", "40"}, reply: []byte(":140\r\n")},
+		{wantArgs: []string{"EXPIRE", "llmgw:user:a:tokin:day:20260820", "3024000"}, reply: []byte(":1\r\n")},
+		{wantArgs: []string{"INCRBY", "llmgw:total:all:cost:month:202608", "500"}, reply: []byte(":9500\r\n")},
+		{wantArgs: []string{"EXPIRE", "llmgw:total:all:cost:month:202608", "34560000"}, reply: []byte(":1\r\n")},
+	})
+
+	store := newRedisStore(newRESPClient(ln.Addr().String(), "", 0))
+	entries := []counterIncr{
+		{key: "llmgw:user:a:req:hour:2026082014", delta: 1, ttl: hourWindowTTL},
+		{key: "llmgw:user:a:tokin:day:20260820", delta: 40, ttl: dayWindowTTL},
+		{key: "llmgw:total:all:cost:month:202608", delta: 500, ttl: monthWindowTTL},
+	}
+	got, err := store.incrMulti(entries)
+	if err != nil {
+		t.Fatalf("incrMulti: %v", err)
+	}
+	want := []int64{11, 140, 9500}
+	if len(got) != len(want) {
+		t.Fatalf("len(got) = %d, want %d", len(got), len(want))
+	}
+	for i, w := range want {
+		if got[i] != w {
+			t.Errorf("got[%d] = %d, want %d (entry order, not reply-stream position)", i, got[i], w)
+		}
+	}
+}
+
 // TestRedisStore_IncrBy_RoundsSubSecondTTLUp asserts a ttl under one
 // second is never sent to EXPIRE as 0 (which would delete the key
 // immediately) — it is rounded up to a 1s floor.

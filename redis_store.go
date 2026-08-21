@@ -18,14 +18,26 @@ func newRedisStore(client *respClient) *redisStore {
 	return &redisStore{client: client}
 }
 
-// incrBy implements counterStore: INCRBY key n, then EXPIRE key
-// ttlSeconds, sent as one pipeline so the two commands share a single round
-// trip. It returns INCRBY's resulting counter value; EXPIRE's reply is not
-// otherwise inspected — a failed EXPIRE right after a successful INCRBY on
-// the same key would only leave that key without a fresh TTL, not corrupt
-// the count. ttl is rounded up to whole seconds (Redis EXPIRE's unit),
+// ttlToSeconds converts ttl to whole Redis EXPIRE seconds, rounded up,
 // with a floor of 1s so a sub-second ttl never turns into EXPIRE 0 (an
-// immediate delete).
+// immediate delete). Shared by incrBy and incrMulti.
+func ttlToSeconds(ttl time.Duration) int64 {
+	s := int64(ttl / time.Second)
+	if ttl%time.Second != 0 {
+		s++
+	}
+	if s < 1 {
+		s = 1
+	}
+	return s
+}
+
+// incrBy implements counterStore: INCRBY key n, then EXPIRE key
+// ttlToSeconds(ttl), sent as one pipeline so the two commands share a
+// single round trip. It returns INCRBY's resulting counter value;
+// EXPIRE's reply is not otherwise inspected — a failed EXPIRE right after
+// a successful INCRBY on the same key would only leave that key without a
+// fresh TTL, not corrupt the count.
 //
 // Semantics are deliberately at-least-once, not exactly-once, both in the
 // conservative direction (never under-counts): respClient.pipeline's
@@ -39,17 +51,9 @@ func newRedisStore(client *respClient) *redisStore {
 // that occasionally over-counts by one request's worth is fail-safe (more
 // restrictive than reality), never fail-open in the unsafe direction.
 func (s *redisStore) incrBy(key string, n int64, ttl time.Duration) (int64, error) {
-	ttlSeconds := int64(ttl / time.Second)
-	if ttl%time.Second != 0 {
-		ttlSeconds++
-	}
-	if ttlSeconds < 1 {
-		ttlSeconds = 1
-	}
-
 	replies, err := s.client.pipeline([][]string{
 		{"INCRBY", key, strconv.FormatInt(n, 10)},
-		{"EXPIRE", key, strconv.FormatInt(ttlSeconds, 10)},
+		{"EXPIRE", key, strconv.FormatInt(ttlToSeconds(ttl), 10)},
 	})
 	if err != nil {
 		return 0, fmt.Errorf("redisStore: incrBy %q: %w", key, err)
@@ -65,6 +69,55 @@ func (s *redisStore) incrBy(key string, n int64, ttl time.Duration) (int64, erro
 		return 0, fmt.Errorf("redisStore: incrBy %q: unexpected INCRBY reply type %T", key, replies[0])
 	}
 	return v, nil
+}
+
+// incrMulti implements counterStore: every entry's INCRBY+EXPIRE pair sent
+// as ONE pipeline (perf review, 2026-08-21) — 2*len(entries) commands, one
+// round trip regardless of len(entries), extending incrBy's own
+// single-key pipelining to a whole batch of counters at once. Reply i*2
+// is entry i's INCRBY result (returned in out[i]); reply i*2+1 is its
+// EXPIRE result, not otherwise inspected — same reasoning as incrBy's own
+// doc comment: a failed EXPIRE right after a successful INCRBY only
+// leaves that one key without a fresh TTL, not a corrupted count. The
+// same at-least-once semantics as incrBy (see its own doc comment) apply
+// here too, extended to the whole batch: a lost reply after the server
+// already applied the pipeline can cause respClient.pipeline's
+// reconnect-once retry to re-send it, over-counting every entry in it by
+// its own delta.
+func (s *redisStore) incrMulti(entries []counterIncr) ([]int64, error) {
+	if len(entries) == 0 {
+		return nil, nil
+	}
+
+	cmds := make([][]string, 0, len(entries)*2)
+	for _, e := range entries {
+		cmds = append(cmds,
+			[]string{"INCRBY", e.key, strconv.FormatInt(e.delta, 10)},
+			[]string{"EXPIRE", e.key, strconv.FormatInt(ttlToSeconds(e.ttl), 10)},
+		)
+	}
+
+	replies, err := s.client.pipeline(cmds)
+	if err != nil {
+		return nil, fmt.Errorf("redisStore: incrMulti: %w", err)
+	}
+	if len(replies) != len(cmds) {
+		return nil, fmt.Errorf("redisStore: incrMulti: expected %d replies, got %d", len(cmds), len(replies))
+	}
+
+	out := make([]int64, len(entries))
+	for i, e := range entries {
+		reply := replies[i*2]
+		if re, ok := reply.(error); ok {
+			return nil, fmt.Errorf("redisStore: incrMulti %q: INCRBY failed: %w", e.key, re)
+		}
+		v, ok := reply.(int64)
+		if !ok {
+			return nil, fmt.Errorf("redisStore: incrMulti %q: unexpected INCRBY reply type %T", e.key, reply)
+		}
+		out[i] = v
+	}
+	return out, nil
 }
 
 // getMulti implements counterStore: one pipelined GET per key
