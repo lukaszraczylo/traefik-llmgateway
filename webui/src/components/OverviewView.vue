@@ -45,11 +45,13 @@ const overview = computed(() => dashboard.overview)
 // string, so the HTML5 parser's "foster parenting" algorithm — which
 // only runs while building a DOM tree FROM a token stream — never fires
 // here at all; a <div> placed as a <tbody> child by direct DOM
-// manipulation stays exactly where it was put. What actually breaks is
-// layout: CSS table rendering (CSS2.1 §17.2.1's anonymous-table-object
-// generation) does not know what to do with a block-level box sitting
-// directly inside a table-row-group box, so the table's visual layout
-// misbehaves around it. Either way, a <div> does not belong there.
+// manipulation stays exactly where it was put. CSS2.1 §17.2.1 does
+// define this case: a non-row child of a row-group box is wrapped in
+// an anonymous table-row plus an anonymous table-cell, not left
+// undefined. What actually breaks is column alignment: that one
+// anonymous cell holds the div's entire contents, outside the table's
+// real column structure, so none of it lines up with the table's
+// actual columns. Either way, a <div> does not belong there.
 // (reka-ui's Collapsible primitives DO support an `as` prop that could in
 // principle render Root as a <tbody> and Trigger/Content as <tr> —
 // installed and inspected via the CLI to check, then not used:
@@ -292,7 +294,7 @@ function clearQuery(): void {
                   -->
                   <button
                     type="button"
-                    class="flex items-center gap-2 rounded focus-visible:ring-3 focus-visible:ring-ring/50 focus-visible:outline-1 focus-visible:outline-ring"
+                    class="-my-1 flex items-center gap-2 rounded py-1 focus-visible:ring-3 focus-visible:ring-ring/50 focus-visible:outline-1 focus-visible:outline-ring"
                     :aria-expanded="expandedProviders.has(p.name)"
                     :aria-controls="expandedProviders.has(p.name) ? providerModelsId(p.name) : undefined"
                   >

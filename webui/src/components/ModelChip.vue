@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { faCheck, faCopy, faTriangleExclamation } from '@fortawesome/free-solid-svg-icons'
-import { ref, useTemplateRef } from 'vue'
+import { computed, onUnmounted, ref, useTemplateRef } from 'vue'
 
 import { Badge } from '@/components/ui/badge'
 import { copyText } from '@/lib/clipboard'
@@ -50,12 +50,16 @@ const icon = {
   selected: faCheck,
   failed: faTriangleExclamation,
 }
-const title = {
+const title = computed(() => ({
   idle: `Copy ${props.id}`,
   copied: 'Copied',
   selected: 'Selected — press Ctrl/Cmd+C',
   failed: 'Copy failed',
-}
+}))
+
+onUnmounted(() => {
+  clearTimeout(resetTimer)
+})
 </script>
 
 <template>
@@ -68,7 +72,7 @@ const title = {
     :title="title[state]"
     @click="onClick"
   >
-    <span ref="label">{{ id }}</span>
+    <span ref="label" class="select-text">{{ id }}</span>
     <FontAwesomeIcon :icon="icon[state]" class="size-2.5 shrink-0" aria-hidden="true" />
   </Badge>
 </template>
