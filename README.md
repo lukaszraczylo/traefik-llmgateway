@@ -801,8 +801,10 @@ or in CI.
   `tokensOutPerMonth`, `costPerDayMicroUsd`, `costPerMonthMicroUsd` —
   alongside their configured limits, plus one extra `total` row: the
   synthetic all-traffic scope (see [Limits and accounting](
-  #limits-and-accounting)), limits always `null`. The dashboard's Overview
-  and Usage views poll both every 5 seconds while open.
+  #limits-and-accounting)), limits always `null`. A group row also carries
+  its configured `providers`/`models`/`mcpServers`/`agents` access lists,
+  omitted when unrestricted. The dashboard's Providers and Usage views
+  poll both every 5 seconds while open.
 - **`GET /admin/api/usage/history`** returns a bucketed series for one
   scope/metric/window — the data source for the dashboard's Charts view
   (per-user/per-group/total, stacked tokens-in/tokens-out, with a

@@ -82,6 +82,24 @@ func (grp *group) allowsAgent(name string) bool {
 	return matchesGlob(grp.agents, name)
 }
 
+// cloneStringSlice returns an independent copy of s, preserving nil (a nil
+// s returns nil, never an empty non-nil slice — groupSummary's own
+// providers/models/mcpServers/agents fields rely on that nil-ness to stay
+// "omitempty" all the way to the JSON response, admin.go's
+// adminUsageEntryView). Plain builtins only (make/copy, no generics, no
+// non-stdlib package): the plugin runs interpreted under Yaegi (see
+// tools/yaegi-check), whose stdlib symbol table does not resolve the
+// generic "slices" package's type parameters — this is why a
+// slices.Clone call is not used here.
+func cloneStringSlice(s []string) []string {
+	if s == nil {
+		return nil
+	}
+	out := make([]string, len(s))
+	copy(out, s)
+	return out
+}
+
 // matchesGlob reports whether candidate matches any shell-style pattern in
 // patterns (path.Match semantics). An empty pattern list matches anything.
 // A malformed pattern (path.ErrBadPattern) is treated as a non-match rather
@@ -340,6 +358,13 @@ type userSummary struct {
 // provider/model/MCP server/agent is allowed (matchesGlob's own contract,
 // auth.go), never expanded to the full catalog here — the admin dashboard
 // echoes the configured glob list, not a resolved membership set.
+//
+// snapshot (below) clones all four slices rather than aliasing group's own
+// — group.providers/models/mcpServers/agents are the live authorization
+// data every allowsX call reads on the request path; groupSummary is a
+// read-only, dashboard-facing COPY, so a future caller that sorts or
+// otherwise mutates a groupSummary's list in place can never reorder or
+// corrupt the slice authorization itself still relies on.
 type groupSummary struct {
 	limits      *LimitsConfig
 	name        string
@@ -371,10 +396,10 @@ func (a *authStore) snapshot() ([]userSummary, []groupSummary) {
 		groups = append(groups, groupSummary{
 			limits:      grp.limits,
 			name:        name,
-			providers:   grp.providers,
-			models:      grp.models,
-			mcpServers:  grp.mcpServers,
-			agents:      grp.agents,
+			providers:   cloneStringSlice(grp.providers),
+			models:      cloneStringSlice(grp.models),
+			mcpServers:  cloneStringSlice(grp.mcpServers),
+			agents:      cloneStringSlice(grp.agents),
 			memberCount: memberCounts[name],
 		})
 	}

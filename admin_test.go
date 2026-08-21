@@ -496,14 +496,76 @@ func findUsageEntry(t *testing.T, entries []adminUsageEntryView, id string) admi
 	return adminUsageEntryView{}
 }
 
+// accessListKeys are adminUsageEntryView's four group-access JSON keys
+// (admin.go) — the set TestAdminUsage_GroupAccessLists checks both at the
+// typed-struct level and, since a nil Go slice and an absent JSON key
+// decode identically into a struct field either way, at the raw-JSON
+// level too (assertRawAccessList below): a struct-only assertion would
+// stay green even if the "omitempty" json tags were removed, since
+// encoding/json would then emit "null" for an unset field and
+// json.Unmarshal reads a JSON null back into a nil []string all the same.
+var accessListKeys = []string{"providers", "models", "mcpServers", "agents"}
+
+// findRawUsageEntry finds row id's raw JSON object (one element of GET
+// /admin/api/usage's users/groups array, or the total object) among rows —
+// the raw-JSON counterpart to findUsageEntry, used where a typed-struct
+// decode cannot distinguish "key absent" from "key present but null" (see
+// accessListKeys' own doc comment).
+func findRawUsageEntry(t *testing.T, rows []map[string]json.RawMessage, id string) map[string]json.RawMessage {
+	t.Helper()
+	for _, row := range rows {
+		var rowID string
+		if err := json.Unmarshal(row["id"], &rowID); err != nil {
+			t.Fatalf("decode id: %v", err)
+		}
+		if rowID == id {
+			return row
+		}
+	}
+	t.Fatalf("no raw usage entry for id %q", id)
+	return nil
+}
+
+// assertRawAccessList asserts one access-list key's raw JSON presence and
+// value on row: want == nil means the key must be ENTIRELY ABSENT from the
+// JSON object (not present-as-null, not present-as-"[]") — the omitempty
+// contract adminUsageEntryView's doc comment promises; a non-nil want means
+// the key must be present with exactly that value.
+func assertRawAccessList(t *testing.T, row map[string]json.RawMessage, key string, want []string) {
+	t.Helper()
+	raw, present := row[key]
+	if want == nil {
+		if present {
+			t.Errorf("key %q = %s, want entirely absent (unrestricted/non-group row)", key, raw)
+		}
+		return
+	}
+	if !present {
+		t.Errorf("key %q absent, want present with value %v", key, want)
+		return
+	}
+	var got []string
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("decode %q: %v", key, err)
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("key %q = %v, want %v", key, got, want)
+	}
+}
+
 // TestAdminUsage_GroupAccessLists proves GET /admin/api/usage's per-group
 // rows (group-access-display task) echo GroupConfig's Providers/Models/
 // MCPServers/Agents exactly as configured — no server-side expansion to the
 // full provider/model catalog — and that a group with none of those set
-// carries empty/omitted lists rather than a resolved "everything" set,
-// matching group.allowsX's own empty-means-all contract (auth.go). A user
-// row and the synthetic total row must never carry these fields at all —
-// they are group-only, same convention as GroupName's own user-only field.
+// carries the keys entirely absent (json:",omitempty") rather than present
+// with a resolved "everything" set, matching group.allowsX's own
+// empty-means-all contract (auth.go). A user row and the synthetic total
+// row must never carry these fields at all — they are group-only, same
+// convention as GroupName's own user-only field. Assertions run at both the
+// typed-struct level (adminUsageResponse) and the raw-JSON level
+// (assertRawAccessList) — the typed level alone cannot prove the field was
+// actually omitted from the wire, only that it decoded to nil, which a
+// present-but-null field would do identically.
 func TestAdminUsage_GroupAccessLists(t *testing.T) {
 	t.Parallel()
 	cfg := CreateConfig()
@@ -537,6 +599,15 @@ func TestAdminUsage_GroupAccessLists(t *testing.T) {
 		t.Fatalf("decode: %v", err)
 	}
 
+	var raw struct {
+		Total  map[string]json.RawMessage   `json:"total"`
+		Users  []map[string]json.RawMessage `json:"users"`
+		Groups []map[string]json.RawMessage `json:"groups"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("decode raw: %v", err)
+	}
+
 	tests := []struct {
 		name           string
 		group          string
@@ -554,7 +625,7 @@ func TestAdminUsage_GroupAccessLists(t *testing.T) {
 			wantAgents:     []string{"agent1"},
 		},
 		{
-			name:  "unrestricted group carries empty/omitted lists",
+			name:  "unrestricted group carries empty or omitted lists",
 			group: "open",
 		},
 	}
@@ -573,6 +644,12 @@ func TestAdminUsage_GroupAccessLists(t *testing.T) {
 			if !slices.Equal(entry.Agents, tc.wantAgents) {
 				t.Errorf("agents = %v, want %v", entry.Agents, tc.wantAgents)
 			}
+
+			rawEntry := findRawUsageEntry(t, raw.Groups, tc.group)
+			assertRawAccessList(t, rawEntry, "providers", tc.wantProviders)
+			assertRawAccessList(t, rawEntry, "models", tc.wantModels)
+			assertRawAccessList(t, rawEntry, "mcpServers", tc.wantMCPServers)
+			assertRawAccessList(t, rawEntry, "agents", tc.wantAgents)
 		})
 	}
 
@@ -584,6 +661,13 @@ func TestAdminUsage_GroupAccessLists(t *testing.T) {
 	if got.Total.Providers != nil || got.Total.Models != nil || got.Total.MCPServers != nil || got.Total.Agents != nil {
 		t.Errorf("total entry must never carry group access lists, got providers=%v models=%v mcpServers=%v agents=%v",
 			got.Total.Providers, got.Total.Models, got.Total.MCPServers, got.Total.Agents)
+	}
+
+	rawAdmin1 := findRawUsageEntry(t, raw.Users, "admin1")
+	rawTotal := raw.Total
+	for _, key := range accessListKeys {
+		assertRawAccessList(t, rawAdmin1, key, nil)
+		assertRawAccessList(t, rawTotal, key, nil)
 	}
 }
 

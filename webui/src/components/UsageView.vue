@@ -227,6 +227,32 @@ const expandedGroupValues = computed<string[]>({
 watch(userQuery, (value) => {
   if (value.trim() === '') clearExpandOverrides(groupExpandState)
 })
+
+// --- Access block (group-access-display task, review round) ---
+//
+// GLOB_HINT is the title attribute on every Access label (Providers,
+// Models, MCP servers, Agents): group.allowsX (auth.go) matches every one
+// of these four configured lists via matchesGlob/path.Match semantics, not
+// literal equality — a heading that just says "Models" leaves that
+// invisible. One constant, not four copies of the same string (vue.md:
+// "if you've written it twice, you owe an abstraction").
+const GLOB_HINT = 'Glob pattern — matches like a shell wildcard (*, ?, [...])'
+
+/**
+ * isGlobPattern reports whether one configured models entry is a glob
+ * pattern rather than a literal model id — the same special characters
+ * path.Match recognizes (auth.go's matchesGlob, which group.allowsModel
+ * calls). Only Models needs this distinction rendered differently: a
+ * literal id gets the copyable ModelChip treatment (it IS a routable id a
+ * caller can paste into a request's `model` field); a pattern like
+ * "gpt-4*" is not a valid id and must not invite copying it as one, so it
+ * renders as a plain, non-copyable Badge instead (see the template below).
+ * Providers/MCPServers/Agents render every entry as a plain Badge either
+ * way, so they need no such split.
+ */
+function isGlobPattern(entry: string): boolean {
+  return /[*?[]/.test(entry)
+}
 </script>
 
 <template>
@@ -288,35 +314,79 @@ watch(userQuery, (value) => {
             <AccordionContent>
               <!--
                 Access block (group-access-display task): the group's
-                configured provider/model access, display-only — not part
-                of the user/group search filter above (row.original.providers/
-                models are plain display data, never touched by
-                groupMatches/userMatches in lib/usage-search.ts).
+                configured provider/model/MCP-server/agent access,
+                display-only — not part of the user/group search filter
+                above (row.original.providers/models/mcpServers/agents are
+                plain display data, never touched by groupMatches/
+                userMatches in lib/usage-search.ts). Same dl/dt/dd
+                convention as the stat grid immediately below — one
+                convention per panel.
               -->
-              <div class="mb-3 grid gap-3 sm:grid-cols-2">
+              <dl class="mb-3 grid grid-cols-2 gap-x-6 gap-y-1.5 text-sm sm:grid-cols-4">
                 <div>
-                  <p class="mb-1.5 text-xs font-medium text-muted-foreground">Providers</p>
-                  <div v-if="row.original.providers?.length" class="flex flex-wrap gap-1.5">
-                    <Badge
-                      v-for="providerName in row.original.providers"
-                      :key="providerName"
-                      as="span"
-                      variant="secondary"
-                      class="font-normal"
-                    >
-                      {{ providerName }}
-                    </Badge>
-                  </div>
-                  <p v-else class="text-sm text-muted-foreground">All providers</p>
+                  <dt class="text-xs text-muted-foreground" :title="GLOB_HINT">Providers</dt>
+                  <dd>
+                    <div v-if="row.original.providers?.length" class="flex flex-wrap gap-1.5">
+                      <Badge
+                        v-for="providerName in row.original.providers"
+                        :key="providerName"
+                        as="span"
+                        variant="secondary"
+                        class="font-mono font-normal"
+                      >
+                        {{ providerName }}
+                      </Badge>
+                    </div>
+                    <span v-else class="text-muted-foreground">All providers</span>
+                  </dd>
                 </div>
                 <div>
-                  <p class="mb-1.5 text-xs font-medium text-muted-foreground">Models</p>
-                  <div v-if="row.original.models?.length" class="flex flex-wrap gap-1.5">
-                    <ModelChip v-for="modelId in row.original.models" :key="modelId" :id="modelId" />
-                  </div>
-                  <p v-else class="text-sm text-muted-foreground">All models</p>
+                  <dt class="text-xs text-muted-foreground" :title="GLOB_HINT">Models</dt>
+                  <dd>
+                    <div v-if="row.original.models?.length" class="flex flex-wrap gap-1.5">
+                      <template v-for="modelId in row.original.models" :key="modelId">
+                        <ModelChip v-if="!isGlobPattern(modelId)" :id="modelId" />
+                        <Badge v-else as="span" variant="secondary" class="font-mono font-normal">{{ modelId }}</Badge>
+                      </template>
+                    </div>
+                    <span v-else class="text-muted-foreground">All models</span>
+                  </dd>
                 </div>
-              </div>
+                <div>
+                  <dt class="text-xs text-muted-foreground" :title="GLOB_HINT">MCP servers</dt>
+                  <dd>
+                    <div v-if="row.original.mcpServers?.length" class="flex flex-wrap gap-1.5">
+                      <Badge
+                        v-for="serverName in row.original.mcpServers"
+                        :key="serverName"
+                        as="span"
+                        variant="secondary"
+                        class="font-mono font-normal"
+                      >
+                        {{ serverName }}
+                      </Badge>
+                    </div>
+                    <span v-else class="text-muted-foreground">All MCP servers</span>
+                  </dd>
+                </div>
+                <div>
+                  <dt class="text-xs text-muted-foreground" :title="GLOB_HINT">Agents</dt>
+                  <dd>
+                    <div v-if="row.original.agents?.length" class="flex flex-wrap gap-1.5">
+                      <Badge
+                        v-for="agentName in row.original.agents"
+                        :key="agentName"
+                        as="span"
+                        variant="secondary"
+                        class="font-mono font-normal"
+                      >
+                        {{ agentName }}
+                      </Badge>
+                    </div>
+                    <span v-else class="text-muted-foreground">All agents</span>
+                  </dd>
+                </div>
+              </dl>
               <dl class="mb-3 grid grid-cols-2 gap-x-6 gap-y-1.5 text-sm sm:grid-cols-4">
                 <div>
                   <dt class="text-xs text-muted-foreground">Limits</dt>
