@@ -915,35 +915,78 @@ or in CI.
   decodes the request itself, answers `initialize`/`ping` locally, and for
   `tools/list`/`tools/call` issues its own outbound JSON-RPC call(s) to
   the relevant server(s) as part of handling that one request — no
-  session state is cached across separate calls (per-request upstream
-  sessions, matching the per-server proxy's own complete absence of
-  gateway-side session tracking).
-  - `tools/list` fans out to every allowed server concurrently and merges
-    the results, prefixing each tool's name `"<serverName>_<toolName>"` —
-    the same underscore-separator convention the earlier agentgateway used
-    and that existing MCP clients (pugbot's `mcpclient`, agentkit) already
-    persist in their own tool-id records (e.g.
-    `brave-search_brave_web_search`). A server that errors or is
-    unreachable is skipped, not surfaced as a whole-call failure — the
-    aggregate degrades to every other server's tools.
+  session state is cached across separate CLIENT requests (per-request
+  upstream sessions, matching the per-server proxy's own complete absence
+  of gateway-side session tracking); a session a handshake retry opens
+  (below) lives entirely inside the one client request that triggered it.
+  Any other HTTP method on exactly `/mcp` is a `405` with an
+  `Allow: POST` header, checked before authentication.
+  - `tools/list` fans out to every allowed server concurrently — each
+    under its own 20s timeout — and merges the results, prefixing each
+    tool's name `"<serverName>_<toolName>"` — the same underscore-
+    separator convention the earlier agentgateway used and that existing
+    MCP clients (pugbot's `mcpclient`, agentkit) already persist in their
+    own tool-id records (e.g. `brave-search_brave_web_search`). A server
+    that errors, times out, or answers with a response that is not valid
+    JSON-RPC is skipped, not surfaced as a whole-call failure — the
+    aggregate degrades to every other server's tools. If EVERY attempted
+    server fails, the response is a JSON-RPC `internal error`
+    (`"no MCP server reachable"`) instead of a silently-empty tools list,
+    which would otherwise be indistinguishable from "this caller's group
+    has no MCP access at all".
   - `tools/call` resolves the target server by the LONGEST matching
     `"<serverName>_"` prefix against the caller's allowed servers (so two
     configured servers where one name prefixes the other, e.g. `foo` and
     `foo_bar`, resolve unambiguously), strips the prefix, forwards the
-    call, and relays the result under the caller's own JSON-RPC `id`. An
-    unresolvable prefix — including one that names a real but
-    group-restricted server — is a JSON-RPC `invalid params` error
-    (`-32602`), not an HTTP `404`: the request reached a real route and
-    method, it just named a tool nothing could route.
+    call under a 120s timeout, and relays the result under the caller's
+    own JSON-RPC `id`. An unresolvable prefix — including one that names a
+    real but group-restricted or transport-excluded server (below) — is a
+    JSON-RPC `invalid params` error (`-32602`), not an HTTP `404`: the
+    request reached a real route and method, it just named a tool nothing
+    could route.
+  - **Session handshake fallback**: each outbound backend call tries bare
+    (no session) first. A backend that answers with a JSON-RPC error or an
+    HTTP `4xx` — signalling "you need a session" — gets ONE retry: `POST
+    initialize` (this gateway's own protocol version and minimal
+    `clientInfo`), capture the `Mcp-Session-Id` response header if the
+    backend sets one, re-issue the real call carrying that header, then
+    best-effort `DELETE` the session afterward (failure logged, never
+    surfaced). A network failure, timeout, or `5xx` never triggers this
+    retry — only a response that specifically signals "missing session" is
+    worth a second attempt. This ruling was verified against all 11
+    production MCP servers behind this gateway: 8 answer bare outright, 2
+    (`readitall`, `fetch`) need exactly this handshake, and one — see
+    below — needs neither because it cannot be reached this way at all.
+  - **Legacy HTTP+SSE transport is excluded, not handshaken around**: an
+    MCP server configured with a URL whose path ends in `/sse` speaks the
+    superseded HTTP+SSE transport, not Streamable HTTP — its client must
+    drive a persistent SSE session no simple POST-per-call model (with or
+    without a session handshake) can replicate. Such a server never
+    appears in `tools/list`'s aggregate and can never be resolved by
+    `tools/call` — it is invisible to federation for every caller,
+    independent of group access — but stays fully reachable via the
+    per-server proxy (`/mcp/{name}/...` above), where the real client
+    drives the transport end to end.
   - `notifications/*` gets a `202 Accepted` with no body (no response is
     ever due for a JSON-RPC notification); any other method is a JSON-RPC
     `method not found` (`-32601`). Malformed JSON is a JSON-RPC `parse
-    error` (`-32700`) with `id: null`, per spec.
+    error` (`-32700`) with `id: null`, per spec. A non-2xx backend
+    response, or one whose body is valid JSON but carries neither
+    `result` nor `error`, is always treated as a failure — never silently
+    relayed as an empty success.
+  - `initialize`'s `protocolVersion` echoes the caller's own requested
+    value only when it names one of a small, explicit set of recognized
+    revisions (`2024-11-05`, `2025-03-26`, `2025-06-18`, `2025-11-25`);
+    an unrecognized or omitted value gets this gateway's own default
+    (`2025-11-25`) instead — never an arbitrary caller string echoed back
+    as a capability claim this plugin cannot back up.
   - `checkAndCount` runs once per request (the caller's own user/group/
-    total scopes); each backend server actually contacted is additionally
-    attributed its own per-target counters — see `GET /admin/api/targets`
-    above and the request-rate note below. Applies to MCP servers only,
-    not agents: there is no equivalent aggregated `/a2a` endpoint.
+    total scopes); each backend server actually ATTEMPTED — not
+    necessarily reached or succeeded — is additionally attributed its own
+    per-target counters, batched into one write per request, see `GET
+    /admin/api/targets` above and the request-rate note below. Applies to
+    MCP servers only, not agents: there is no equivalent aggregated
+    `/a2a` endpoint.
 
 ## Security notes
 
