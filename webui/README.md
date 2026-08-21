@@ -73,12 +73,17 @@ npm run build     # what `make admin-ui` runs, plus webui/generate.mjs
 - `src/components/` — `AuthGate`, `OverviewView`, `UsageView`,
   `ChartsView`/`UsageChart`, `UsageTable`, `DataTable` (the shared
   sortable-table wrapper — shadcn-vue's DataTable pattern, `@tanstack/
-  vue-table`, generic over row type); `ui/` holds the shadcn-vue
-  primitives this panel actually uses (Accordion, Card, Table, Tabs,
-  Button, Input, Alert, Select, Badge) — nothing installed and unused.
-  Providers (Overview) and Groups (Usage) render as a real Accordion —
-  expanding a group shows its member users' own usage rows, a
-  client-side join on `AdminUsageEntryView.groupName`.
+  vue-table`, generic over row type), `SearchInput` (the shared search-box
+  — icon + shadcn `Input` + shadcn `Button` clear button — every search
+  filter in the panel renders); `ui/` holds the shadcn-vue primitives this
+  panel actually uses (Accordion, Card, Table, Tabs, Button, Input, Alert,
+  Select, Badge) — nothing installed and unused. Providers (Overview) and
+  Groups (Usage) render as a real Accordion — expanding a group shows its
+  member users' own usage rows, a client-side join on
+  `AdminUsageEntryView.groupName`.
+- `src/composables/` — `useThemeColors` (Chart.js axis/grid/legend colors
+  off the current design tokens), `useSearchQuery` (the shared
+  `query`/`normalized`/`hasQuery` state every `SearchInput` pairs with).
 - `src/lib/` — `api.ts` (the `/admin/api/*` fetch wrapper), `format.ts`,
   `key-storage.ts`, `chart-setup.ts`, `search-expand.ts` (search-aware
   expand state, adapted to drive Accordion's v-model — shared by
