@@ -568,6 +568,36 @@ http:
   rollover. **Migration**: none — a deployed process's old, unsplit `tok`
   counter keys simply expire on their existing TTL and are never read
   again; nothing needs backfilling.
+- **Provider/model success rates** (`limits.go`): a separate counter
+  family from request/token/cost accounting above, tracking upstream
+  HEALTH rather than usage — `llmgw:prov:{provider}:attempt:{window}:
+  {bucket}` and `llmgw:prov:{provider}:fail:{window}:{bucket}` per
+  provider, `llmgw:provmodel:{provider}/{model}:attempt:{window}:{bucket}`
+  and the `fail` counterpart per `(provider, model)` pair. `window` is
+  `min` (2-minute TTL) or `day` (35-day TTL) only — no `hour` or `month`:
+  provider health is a now-and-today question, not a billing one. Every
+  upstream HTTP attempt increments `attempt`; only a provider-fault
+  outcome increments `fail` — the SAME transient classification [Retry](
+  #retry)'s own retry decision uses (connection error, HTTP 429, HTTP
+  5xx), **plus one addition this counter family alone applies**: a
+  request that hit the gateway's own configured deadline
+  (`context.DeadlineExceeded`) also counts as a failure here, even though
+  retry itself never retries a deadline it already knows has passed. A
+  request the CLIENT canceled (`context.Canceled`) still counts as an
+  attempt only, from both — not the provider's fault either way. A
+  non-429 4xx (the provider answered, just didn't like the request) is
+  never a failure. Retried attempts are all counted individually: a
+  request retried twice before succeeding writes three attempts here (two
+  failures, one success), not one. The admin overview API (see
+  [Admin](#admin)) is the only reader; the write itself runs off the
+  request's own goroutine (fire-and-forget — this is telemetry, and
+  nothing in the request path waits on or gates against it), so it never
+  adds latency to a response, streaming included.
+- **Native passthrough accounts provider-level only, never per-model.**
+  `POST /{provider}/...` has no resolved model at request time — the
+  upstream model, if any, only appears in the response body, read after
+  the attempt has already resolved — so it never writes a `provmodel`
+  counter, only the provider-level ones above.
 
 ## Retry
 
@@ -801,7 +831,17 @@ or in CI.
   `enabled`/`attempts`/`backoff` are the EFFECTIVE values after
   [Retry](#retry)'s own defaulting, not the raw config — `attempts` and
   `backoff` are both omitted when retry is disabled), and the plugin
-  version string. `usage` returns every user's and every group's
+  version string. Each provider entry also carries `discoveryEnabled`
+  (the configured `discovery` flag, so the dashboard can tell "discovery
+  is off" apart from "discovery is on but has not refreshed yet" — both
+  otherwise show the identical zero `lastRefresh`), `attemptsDay`/
+  `failuresDay`/`attemptsMinute`/`failuresMinute` (the provider's own
+  current-window success-rate counters — see [Limits and
+  accounting](#limits-and-accounting)), and `modelRates` (the identical
+  `attemptsDay`/`failuresDay` pair per known model, keyed by model id — no
+  per-model minute figures, since nothing displays them; the dashboard's
+  per-model badge falls back to a day-window-only detail instead). `usage`
+  returns every user's and every group's
   current-window counter values — `requestsPerMinute`, `requestsPerDay`,
   `tokensInPerDay`/`tokensOutPerDay`, `tokensInPerMonth`/
   `tokensOutPerMonth`, `costPerDayMicroUsd`, `costPerMonthMicroUsd` —
