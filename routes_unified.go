@@ -244,10 +244,15 @@ func (g *Gateway) runUnified(w http.ResponseWriter, r *http.Request, u *user, gr
 // contract (admin.go) that the dashboard's usage table already promised.
 //
 // Callers metering actual LLM traffic wrap this result in withTotalScope
-// before passing it to checkAndCount/account; handleAdminAPI (admin.go)
-// calls this directly, without withTotalScope, so an admin request's own
-// req/min-req/day accounting never contributes to the total-scope
-// LLM-traffic series (v0.2 data-layer task).
+// before passing it to checkAndCount/account. handleAdminAPI (admin.go)
+// never calls buildLimitScopes at all — its own buildAdminUsage builds
+// {kind, id, limits} literals directly from authStore.snapshot's user/group
+// listing, for currentUsage's read-only purposes — and, separately, never
+// calls checkAndCount either (handleAdminAPI's own doc comment: admin
+// traffic must never move req/min-req/day statistics). Fixed a stale
+// version of this comment (review round 2, 2026-08-21) that claimed
+// handleAdminAPI "calls this directly, without withTotalScope" — it never
+// called this function at all, on any version of this file.
 func buildLimitScopes(u *user, grp *group) []limitScope {
 	return []limitScope{
 		{limits: u.limits, kind: "user", id: u.name},
@@ -259,12 +264,16 @@ func buildLimitScopes(u *user, grp *group) []limitScope {
 // (totalScopeKind/totalScopeID, limits.go) appended — the single helper
 // every metered route (runUnified above; resolveMediaRequest,
 // routes_media.go; handlePassthrough, routes_passthrough.go;
-// handleTargetProxy, mcp_a2a.go) calls around its own buildLimitScopes
-// result, so none of them can forget it and none of them duplicate the
-// scope literal. Deliberately not folded into buildLimitScopes itself:
-// that helper is also called directly by handleAdminAPI (admin.go) for
-// its own req/min-req/day accounting, and admin traffic must never
-// contribute to the total LLM-traffic scope.
+// handleTargetProxy, mcp_a2a.go; handleMCPFederated, mcp_federation.go)
+// calls around its own buildLimitScopes result, so none of them can forget
+// it and none of them duplicate the scope literal. Deliberately not folded
+// into buildLimitScopes itself: buildLimitScopes' own doc comment now
+// explains why admin traffic needs no special-casing here at all —
+// handleAdminAPI never calls either function, so there was never a real
+// "admin traffic must not contribute to total" case for this split to
+// guard against; the split is kept anyway because buildLimitScopes'
+// {user, group} pair and the synthetic total scope are conceptually
+// different additions, worth two names.
 func withTotalScope(scopes []limitScope) []limitScope {
 	return append(scopes, limitScope{kind: totalScopeKind, id: totalScopeID, limits: nil})
 }

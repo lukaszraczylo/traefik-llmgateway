@@ -455,7 +455,22 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// there is no ambiguity between the two, but this ordering keeps every
 	// exact-path route grouped together (mirroring "/v1/mcp/servers" and
 	// "/v1/agents" immediately above) ahead of the prefix-matched one.
-	if r.Method == http.MethodPost && r.URL.Path == federatedMCPPath {
+	//
+	// Checked on r.URL.Path alone, BEFORE the method check: a GET or
+	// DELETE to exactly "/mcp" is a real, well-known route addressed with
+	// the wrong verb (SF8, review round 2, 2026-08-21) — 405 with an
+	// Allow header naming the one method this route accepts, matching
+	// RFC 9110 §15.5.6, rather than falling through to passthroughUnknown/
+	// 404 the way a path this handler has never heard of would. No
+	// auth check runs first: which HTTP method a route accepts is
+	// unauthenticated request-shape information, not something worth
+	// gating behind a valid API key.
+	if r.URL.Path == federatedMCPPath {
+		if r.Method != http.MethodPost {
+			sw.Header().Set("Allow", http.MethodPost)
+			writeOAIError(sw, http.StatusMethodNotAllowed, "invalid_request_error", "method not allowed")
+			return
+		}
 		u, grp, ok := g.auth.identify(r)
 		g.logAuthEvent(ok, authEventUserName(u), r)
 		if !ok {

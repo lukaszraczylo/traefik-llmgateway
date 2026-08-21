@@ -4,8 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -179,6 +182,84 @@ func newMockJSONRPCServer(t *testing.T, tools []mcpTool) *mockJSONRPCServer {
 	}))
 	t.Cleanup(m.srv.Close)
 	return m
+}
+
+// sessionRequiredMockServer simulates a backend that rejects a bare
+// (session-less) call with a JSON-RPC error but honors a proper
+// initialize -> session -> retry handshake — modeling readitall/fetch's
+// real, live-probed behavior (mcpBackendCall's own doc comment). It
+// records the exact sequence of calls it received (method plus whichever
+// session header, if any, accompanied it) so a test can assert the
+// handshake shape precisely: bare attempt, initialize, retried real call
+// carrying the session header, best-effort DELETE.
+type sessionRequiredMockServer struct {
+	srv       *httptest.Server
+	sessionID string
+	tools     []mcpTool
+	calls     []string
+	mu        sync.Mutex
+	failInit  bool
+}
+
+func newSessionRequiredMockServer(t *testing.T, tools []mcpTool) *sessionRequiredMockServer {
+	t.Helper()
+	m := &sessionRequiredMockServer{tools: tools, sessionID: "sess-1"}
+	m.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotSession := r.Header.Get(mcpSessionHeader)
+
+		if r.Method == http.MethodDelete {
+			m.mu.Lock()
+			m.calls = append(m.calls, "DELETE:session="+gotSession)
+			m.mu.Unlock()
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+
+		var req jsonrpcRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("session-required mock: decode request: %v", err)
+		}
+		m.mu.Lock()
+		m.calls = append(m.calls, req.Method+":session="+gotSession)
+		m.mu.Unlock()
+
+		w.Header().Set("Content-Type", "application/json")
+		if req.Method == "initialize" {
+			if m.failInit {
+				_ = json.NewEncoder(w).Encode(jsonrpcResponse{ID: req.ID, Error: &jsonrpcError{Code: -32000, Message: "initialize refused"}})
+				return
+			}
+			w.Header().Set(mcpSessionHeader, m.sessionID)
+			result, _ := json.Marshal(map[string]any{"protocolVersion": defaultMCPProtocolVersion, "capabilities": map[string]any{}})
+			_ = json.NewEncoder(w).Encode(jsonrpcResponse{ID: req.ID, Result: result})
+			return
+		}
+
+		if gotSession != m.sessionID {
+			_ = json.NewEncoder(w).Encode(jsonrpcResponse{ID: req.ID, Error: &jsonrpcError{Code: -32000, Message: "session required: call initialize first"}})
+			return
+		}
+		switch req.Method {
+		case "tools/list":
+			result, _ := json.Marshal(mcpToolsListResult{Tools: m.tools})
+			_ = json.NewEncoder(w).Encode(jsonrpcResponse{ID: req.ID, Result: result})
+		case "tools/call":
+			var params mcpToolCallParams
+			_ = json.Unmarshal(req.Params, &params)
+			echo, _ := json.Marshal(map[string]any{"calledName": params.Name})
+			_ = json.NewEncoder(w).Encode(jsonrpcResponse{ID: req.ID, Result: echo})
+		default:
+			_ = json.NewEncoder(w).Encode(jsonrpcResponse{ID: req.ID, Error: &jsonrpcError{Code: jsonrpcMethodNotFound, Message: "method not found"}})
+		}
+	}))
+	t.Cleanup(m.srv.Close)
+	return m
+}
+
+func (m *sessionRequiredMockServer) callSequence() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]string(nil), m.calls...)
 }
 
 // newFederationTestConfig builds a Config with two MCP servers ("alpha",
@@ -701,5 +782,701 @@ func TestHandleMCPFederated_RateLimited_Returns429(t *testing.T) {
 	h.ServeHTTP(rec2, newFederatedRequest(t, "sk-alice", jsonrpcRequest{JSONRPC: jsonrpcVersion, Method: "ping", ID: json.RawMessage("2")}))
 	if rec2.Code != http.StatusTooManyRequests {
 		t.Fatalf("second request status = %d, want 429, body=%s", rec2.Code, rec2.Body.String())
+	}
+}
+
+// --- MF1: per-backend-call timeouts ---
+
+func TestBackendTimeoutConstants(t *testing.T) {
+	if toolsListBackendTimeout != 20*time.Second {
+		t.Errorf("toolsListBackendTimeout = %v, want 20s", toolsListBackendTimeout)
+	}
+	if toolsCallBackendTimeout != 120*time.Second {
+		t.Errorf("toolsCallBackendTimeout = %v, want 120s", toolsCallBackendTimeout)
+	}
+}
+
+// TestHandleMCPFederated_ToolsList_SlowBackend_BoundedByRequestContext
+// proves the per-server context.WithTimeout(r.Context(), toolsListBackendTimeout)
+// (MF1) actually derives its deadline from the INCOMING request's own
+// context, not a freestanding timer: context.WithTimeout always resolves
+// to the EARLIER of its parent's existing deadline and its own duration,
+// so giving the incoming request a context with a much shorter deadline
+// than toolsListBackendTimeout (20s) and confirming the whole call
+// returns in well under a second — against a backend that hangs
+// indefinitely — proves the wiring without ever waiting anywhere near the
+// real 20s budget in this test suite.
+func TestHandleMCPFederated_ToolsList_SlowBackend_BoundedByRequestContext(t *testing.T) {
+	block := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-block
+	}))
+	t.Cleanup(srv.Close)
+	t.Cleanup(func() { close(block) }) // must unblock the handler BEFORE srv.Close (which waits for it) — registered after, so it runs first (t.Cleanup is LIFO)
+
+	cfg := newFederationTestConfig(srv.URL, "http://beta.invalid", true) // alphaOnly: only the hanging server is reachable
+	h, err := New(context.Background(), http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	req := newFederatedRequest(t, "sk-alice", jsonrpcRequest{JSONRPC: jsonrpcVersion, Method: "tools/list", ID: json.RawMessage("1")})
+	shortCtx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	req = req.WithContext(shortCtx)
+
+	start := time.Now()
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	elapsed := time.Since(start)
+
+	if elapsed > 3*time.Second {
+		t.Fatalf("elapsed = %v, want well under toolsListBackendTimeout (20s) — the per-server timeout must derive from r.Context(), not ignore it", elapsed)
+	}
+	var got jsonrpcResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Error == nil || got.Error.Code != jsonrpcInternalError {
+		t.Errorf("error = %+v, want internal error (the only allowed server timed out, degrading to 'no MCP server reachable')", got.Error)
+	}
+}
+
+// TestHandleMCPFederated_ToolsCall_SlowBackend_BoundedByRequestContext
+// mirrors the tools/list timeout test above for tools/call's own,
+// separate context.WithTimeout(r.Context(), toolsCallBackendTimeout) call
+// site.
+func TestHandleMCPFederated_ToolsCall_SlowBackend_BoundedByRequestContext(t *testing.T) {
+	block := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-block
+	}))
+	t.Cleanup(srv.Close)
+	t.Cleanup(func() { close(block) })
+
+	cfg := newFederationTestConfig(srv.URL, "http://beta.invalid", true)
+	h, err := New(context.Background(), http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	callParams, _ := json.Marshal(mcpToolCallParams{Name: "alpha_lookup"})
+	req := newFederatedRequest(t, "sk-alice", jsonrpcRequest{JSONRPC: jsonrpcVersion, Method: "tools/call", ID: json.RawMessage("1"), Params: callParams})
+	shortCtx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	req = req.WithContext(shortCtx)
+
+	start := time.Now()
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	elapsed := time.Since(start)
+
+	if elapsed > 3*time.Second {
+		t.Fatalf("elapsed = %v, want well under toolsCallBackendTimeout (120s) — the per-call timeout must derive from r.Context(), not ignore it", elapsed)
+	}
+	var got jsonrpcResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Error == nil || got.Error.Code != jsonrpcInternalError {
+		t.Errorf("error = %+v, want internal error (the resolved server timed out)", got.Error)
+	}
+}
+
+// --- MF2: non-2xx status and empty-envelope guards ---
+
+// TestHandleMCPFederated_ToolsCall_BackendNon2xxStatus_IsError proves a
+// non-2xx upstream response is always an error, even when its body
+// happens to be a validly-shaped JSON-RPC success object — a 5xx (or any
+// non-2xx) status is a transport-level failure the body's own content can
+// never override.
+func TestHandleMCPFederated_ToolsCall_BackendNon2xxStatus_IsError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":"federated","result":{}}`))
+	}))
+	defer srv.Close()
+
+	cfg := newFederationTestConfig(srv.URL, "http://beta.invalid", true)
+	h, err := New(context.Background(), http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	callParams, _ := json.Marshal(mcpToolCallParams{Name: "alpha_lookup"})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, newFederatedRequest(t, "sk-alice", jsonrpcRequest{JSONRPC: jsonrpcVersion, Method: "tools/call", ID: json.RawMessage("1"), Params: callParams}))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	var got jsonrpcResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Error == nil || got.Error.Code != jsonrpcInternalError {
+		t.Errorf("error = %+v, want internal error — a 5xx status must never be rescued by a well-shaped body", got.Error)
+	}
+}
+
+// TestHandleMCPFederated_ToolsCall_BackendEmptyEnvelope_ConvertsToInternalError
+// is the reviewer's named silent-failure scenario (MF2): a backend answers
+// 200 with valid JSON that is NOT a real JSON-RPC response (neither
+// "result" nor "error") — without the guard, this decodes into an
+// all-zero-fields jsonrpcResponse and the client would silently receive
+// {"jsonrpc":"2.0","id":1} with no indication anything went wrong.
+func TestHandleMCPFederated_ToolsCall_BackendEmptyEnvelope_ConvertsToInternalError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":"federated","status":"ok"}`))
+	}))
+	defer srv.Close()
+
+	cfg := newFederationTestConfig(srv.URL, "http://beta.invalid", true)
+	h, err := New(context.Background(), http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	callParams, _ := json.Marshal(mcpToolCallParams{Name: "alpha_lookup"})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, newFederatedRequest(t, "sk-alice", jsonrpcRequest{JSONRPC: jsonrpcVersion, Method: "tools/call", ID: json.RawMessage("1"), Params: callParams}))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	var got jsonrpcResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Error == nil {
+		t.Fatal("want a JSON-RPC error, not a silent empty success — this is the reviewer's exact silent-failure scenario")
+	}
+	if got.Error.Code != jsonrpcInternalError {
+		t.Errorf("error code = %d, want %d", got.Error.Code, jsonrpcInternalError)
+	}
+	if len(got.Result) != 0 {
+		t.Errorf(`result = %s, want empty — must never emit {"jsonrpc":"2.0","id":1} silently`, got.Result)
+	}
+}
+
+// --- MF3: bare-first-with-fallback handshake retry ---
+
+// TestMcpBackendCall_HandshakeFallbackTrigger proves the fallback fires
+// ONLY on a JSON-RPC-level error or an HTTP 4xx status from the bare
+// attempt — never on a 5xx — table-driven over exactly the two trigger
+// shapes and the one non-trigger shape (a network failure is covered
+// separately below, since it needs a different mock shape entirely: no
+// server to answer at all).
+func TestMcpBackendCall_HandshakeFallbackTrigger(t *testing.T) {
+	cases := []struct {
+		bareHandler   http.HandlerFunc
+		name          string
+		wantHandshake bool
+	}{
+		{
+			name: "bare JSON-RPC error triggers the handshake",
+			bareHandler: func(w http.ResponseWriter, r *http.Request) {
+				var req jsonrpcRequest
+				_ = json.NewDecoder(r.Body).Decode(&req)
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(jsonrpcResponse{ID: req.ID, Error: &jsonrpcError{Code: -32000, Message: "session required"}})
+			},
+			wantHandshake: true,
+		},
+		{
+			name: "HTTP 403 with no JSON-RPC body triggers the handshake",
+			bareHandler: func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusForbidden)
+			},
+			wantHandshake: true,
+		},
+		{
+			name: "HTTP 500 never triggers the handshake",
+			bareHandler: func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusInternalServerError)
+			},
+			wantHandshake: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var callCount atomic.Int32
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if callCount.Add(1) == 1 {
+					tc.bareHandler(w, r)
+					return
+				}
+				if r.Method == http.MethodDelete {
+					w.WriteHeader(http.StatusNoContent)
+					return
+				}
+				body, _ := io.ReadAll(r.Body)
+				var req jsonrpcRequest
+				_ = json.Unmarshal(body, &req)
+				w.Header().Set("Content-Type", "application/json")
+				result, _ := json.Marshal(map[string]any{})
+				_ = json.NewEncoder(w).Encode(jsonrpcResponse{ID: req.ID, Result: result})
+			}))
+			defer srv.Close()
+
+			cfg := newFederationTestConfig("http://alpha.invalid", "http://beta.invalid", false)
+			h, err := New(context.Background(), http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), cfg, "llmgw")
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			gw, ok := h.(*Gateway)
+			if !ok {
+				t.Fatal("handler is not *Gateway")
+			}
+
+			_, _ = gw.mcpBackendCall(context.Background(), srv.URL, "tools/list", struct{}{})
+
+			gotCalls := callCount.Load()
+			if tc.wantHandshake && gotCalls < 2 {
+				t.Errorf("calls = %d, want >=2 (bare attempt + initialize handshake)", gotCalls)
+			}
+			if !tc.wantHandshake && gotCalls != 1 {
+				t.Errorf("calls = %d, want exactly 1 (bare attempt only, no handshake retry against a 5xx)", gotCalls)
+			}
+		})
+	}
+}
+
+// TestMcpBackendCall_NetworkFailure_NeverAttemptsHandshake proves a
+// connection-level failure (nothing listening at all) never triggers the
+// handshake fallback either — the same "not retry-eligible" rule as a
+// 5xx, verified against a genuinely different failure shape (doBackendJSONRPC
+// never even gets an HTTP status back).
+func TestMcpBackendCall_NetworkFailure_NeverAttemptsHandshake(t *testing.T) {
+	cfg := newFederationTestConfig("http://alpha.invalid", "http://beta.invalid", false)
+	h, err := New(context.Background(), http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	gw, ok := h.(*Gateway)
+	if !ok {
+		t.Fatal("handler is not *Gateway")
+	}
+
+	_, err = gw.mcpBackendCall(context.Background(), "http://127.0.0.1:1", "tools/list", struct{}{})
+	if err == nil {
+		t.Fatal("want an error (nothing listening on 127.0.0.1:1)")
+	}
+}
+
+// TestHandleMCPFederated_ToolsList_HandshakeFallback_SucceedsAfterSessionRetry
+// is MF3's core proof: a server that rejects a bare tools/list call
+// (readitall/fetch's real, live-probed behavior — sessionRequiredMockServer's
+// own doc comment) still ends up contributing its tools to the federated
+// aggregate, via exactly the documented bare -> initialize -> retry ->
+// close sequence.
+func TestHandleMCPFederated_ToolsList_HandshakeFallback_SucceedsAfterSessionRetry(t *testing.T) {
+	strict := newSessionRequiredMockServer(t, []mcpTool{{Name: "search"}})
+	cfg := newFederationTestConfig(strict.srv.URL, "http://beta.invalid", true) // alphaOnly: only "alpha" (the strict server) is reachable
+	h, err := New(context.Background(), http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, newFederatedRequest(t, "sk-alice", jsonrpcRequest{JSONRPC: jsonrpcVersion, Method: "tools/list", ID: json.RawMessage("1")}))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	var got jsonrpcResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Error != nil {
+		t.Fatalf("error = %+v, want nil (the handshake fallback should have recovered)", got.Error)
+	}
+	var result mcpToolsListResult
+	if err := json.Unmarshal(got.Result, &result); err != nil {
+		t.Fatalf("decode result: %v", err)
+	}
+	if len(result.Tools) != 1 || result.Tools[0].Name != "alpha_search" {
+		t.Fatalf("tools = %+v, want exactly alpha_search", result.Tools)
+	}
+
+	seq := strict.callSequence()
+	if len(seq) != 4 {
+		t.Fatalf("call sequence = %v, want exactly 4 calls (bare attempt, initialize, retried real call, best-effort close — the DELETE runs synchronously inside mcpBackendCall's own defer, before it returns)", seq)
+	}
+	if seq[0] != "tools/list:session=" {
+		t.Errorf("call[0] = %q, want a bare tools/list attempt with no session header", seq[0])
+	}
+	if seq[1] != "initialize:session=" {
+		t.Errorf("call[1] = %q, want an initialize handshake with no session header", seq[1])
+	}
+	if seq[2] != "tools/list:session=sess-1" {
+		t.Errorf("call[2] = %q, want the retried tools/list carrying the session header the handshake returned", seq[2])
+	}
+	if seq[3] != "DELETE:session=sess-1" {
+		t.Errorf("call[3] = %q, want the best-effort session close carrying the same session header", seq[3])
+	}
+}
+
+// TestHandleMCPFederated_ToolsCall_HandshakeFallback_SucceedsAfterSessionRetry
+// mirrors the tools/list handshake test above for tools/call's own
+// single-target path, additionally asserting the best-effort session
+// close (DELETE) actually happened.
+func TestHandleMCPFederated_ToolsCall_HandshakeFallback_SucceedsAfterSessionRetry(t *testing.T) {
+	strict := newSessionRequiredMockServer(t, nil)
+	cfg := newFederationTestConfig(strict.srv.URL, "http://beta.invalid", true)
+	h, err := New(context.Background(), http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	callParams, _ := json.Marshal(mcpToolCallParams{Name: "alpha_search"})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, newFederatedRequest(t, "sk-alice", jsonrpcRequest{JSONRPC: jsonrpcVersion, Method: "tools/call", ID: json.RawMessage(`"client-7"`), Params: callParams}))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	var got jsonrpcResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Error != nil {
+		t.Fatalf("error = %+v, want nil (the handshake fallback should have recovered)", got.Error)
+	}
+	if string(got.ID) != `"client-7"` {
+		t.Errorf("id = %s, want the client's own id echoed back", got.ID)
+	}
+
+	seq := strict.callSequence()
+	if !slices.Contains(seq, "tools/call:session=") {
+		t.Errorf("call sequence = %v, want a bare tools/call attempt with no session header", seq)
+	}
+	if !slices.Contains(seq, "initialize:session=") {
+		t.Errorf("call sequence = %v, want an initialize handshake", seq)
+	}
+	if !slices.Contains(seq, "tools/call:session=sess-1") {
+		t.Errorf("call sequence = %v, want the retried tools/call carrying the session header", seq)
+	}
+	if !slices.Contains(seq, "DELETE:session=sess-1") {
+		t.Errorf("call sequence = %v, want a best-effort DELETE closing the session", seq)
+	}
+}
+
+// TestHandleMCPFederated_ToolsList_HandshakeFallback_GivesUpWhenInitializeAlsoFails
+// proves a server that rejects the handshake's own initialize call too
+// ends up in the failed/skipped list (not a crash, not a hang) — and,
+// since it is the only allowed server, the aggregate degrades all the way
+// to the "no MCP server reachable" loud failure (MF3), not an empty
+// success.
+func TestHandleMCPFederated_ToolsList_HandshakeFallback_GivesUpWhenInitializeAlsoFails(t *testing.T) {
+	strict := newSessionRequiredMockServer(t, []mcpTool{{Name: "search"}})
+	strict.failInit = true
+	cfg := newFederationTestConfig(strict.srv.URL, "http://beta.invalid", true)
+	h, err := New(context.Background(), http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, newFederatedRequest(t, "sk-alice", jsonrpcRequest{JSONRPC: jsonrpcVersion, Method: "tools/list", ID: json.RawMessage("1")}))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	var got jsonrpcResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Error == nil || got.Error.Code != jsonrpcInternalError || got.Error.Message != "no MCP server reachable" {
+		t.Errorf("error = %+v, want internal error %q", got.Error, "no MCP server reachable")
+	}
+}
+
+// TestHandleMCPFederated_ToolsList_AllServersFail_ReturnsInternalError
+// proves that when every attempted server fails, the response is a loud
+// JSON-RPC error, not a silently-empty tools list that would look
+// identical to "this caller's group has no MCP access at all".
+func TestHandleMCPFederated_ToolsList_AllServersFail_ReturnsInternalError(t *testing.T) {
+	cfg := newFederationTestConfig("http://127.0.0.1:1", "http://127.0.0.1:2", false)
+	h, err := New(context.Background(), http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, newFederatedRequest(t, "sk-alice", jsonrpcRequest{JSONRPC: jsonrpcVersion, Method: "tools/list", ID: json.RawMessage("1")}))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	var got jsonrpcResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Error == nil || got.Error.Code != jsonrpcInternalError || got.Error.Message != "no MCP server reachable" {
+		t.Errorf("error = %+v, want internal error %q", got.Error, "no MCP server reachable")
+	}
+}
+
+// --- MF3: legacy HTTP+SSE transport exclusion ---
+
+func TestIsLegacySSETransportURL(t *testing.T) {
+	cases := []struct {
+		url  string
+		want bool
+	}{
+		{"http://playwright.internal:8080/sse", true},
+		{"http://playwright.internal:8080/sse?foo=bar", true},
+		{"http://mcp.internal:8080", false},
+		{"http://mcp.internal:8080/mcp", false},
+		{"http://mcp.internal:8080/sse/extra", false},
+		{"://not a valid url", false}, // malformed -> safe default: not excluded
+	}
+	for _, tc := range cases {
+		t.Run(tc.url, func(t *testing.T) {
+			if got := isLegacySSETransportURL(tc.url); got != tc.want {
+				t.Errorf("isLegacySSETransportURL(%q) = %v, want %v", tc.url, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestAllowedMCPServerNames_ExcludesLegacySSETransport(t *testing.T) {
+	cfg := CreateConfig()
+	cfg.MCPServers = map[string]*TargetConfig{
+		"alpha":      {URL: "http://alpha.internal"},
+		"playwright": {URL: "http://playwright.internal/sse"},
+		"beta":       {URL: "http://beta.internal"},
+	}
+	grp := &group{name: "g"} // unrestricted mcpServers: matches everything except the transport exclusion
+	got := allowedMCPServerNames(cfg, grp)
+	want := []string{"alpha", "beta"}
+	if !slices.Equal(got, want) {
+		t.Errorf("allowedMCPServerNames = %v, want %v (playwright excluded: legacy HTTP+SSE transport)", got, want)
+	}
+}
+
+// TestHandleMCPFederated_ToolsList_ExcludesLegacySSEServer_NeverContacted
+// proves a legacy-SSE-transport server is not merely omitted from the
+// aggregate's RESULT, but never contacted by the fan-out at all.
+func TestHandleMCPFederated_ToolsList_ExcludesLegacySSEServer_NeverContacted(t *testing.T) {
+	alpha := newMockJSONRPCServer(t, []mcpTool{{Name: "lookup"}})
+	legacy := newMockJSONRPCServer(t, []mcpTool{{Name: "browse"}})
+
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{"openai": {Type: "openai", APIKey: "k"}}
+	cfg.MCPServers = map[string]*TargetConfig{
+		"alpha":      {URL: alpha.srv.URL},
+		"playwright": {URL: legacy.srv.URL + "/sse"},
+	}
+	cfg.Groups = map[string]*GroupConfig{"default": {}}
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{{Name: "alice", Group: "default", APIKey: "sk-alice"}}}
+	h, err := New(context.Background(), http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, newFederatedRequest(t, "sk-alice", jsonrpcRequest{JSONRPC: jsonrpcVersion, Method: "tools/list", ID: json.RawMessage("1")}))
+	var got jsonrpcResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	var result mcpToolsListResult
+	if err := json.Unmarshal(got.Result, &result); err != nil {
+		t.Fatalf("decode result: %v", err)
+	}
+	if len(result.Tools) != 1 || result.Tools[0].Name != "alpha_lookup" {
+		t.Fatalf("tools = %+v, want exactly alpha_lookup (playwright excluded)", result.Tools)
+	}
+	if legacy.called.Load() != 0 {
+		t.Error("the legacy-SSE-transport server must never be contacted by tools/list fan-out")
+	}
+}
+
+// TestHandleMCPFederated_ToolsCall_LegacySSEServer_UnresolvableLikeUnconfigured
+// proves tools/call cannot route to a legacy-SSE-transport server either —
+// unresolvable, same as an unconfigured name, and never contacted.
+func TestHandleMCPFederated_ToolsCall_LegacySSEServer_UnresolvableLikeUnconfigured(t *testing.T) {
+	legacy := newMockJSONRPCServer(t, nil)
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{"openai": {Type: "openai", APIKey: "k"}}
+	cfg.MCPServers = map[string]*TargetConfig{"playwright": {URL: legacy.srv.URL + "/sse"}}
+	cfg.Groups = map[string]*GroupConfig{"default": {}}
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{{Name: "alice", Group: "default", APIKey: "sk-alice"}}}
+	h, err := New(context.Background(), http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	callParams, _ := json.Marshal(mcpToolCallParams{Name: "playwright_click"})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, newFederatedRequest(t, "sk-alice", jsonrpcRequest{JSONRPC: jsonrpcVersion, Method: "tools/call", ID: json.RawMessage("1"), Params: callParams}))
+	var got jsonrpcResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Error == nil || got.Error.Code != jsonrpcInvalidParams {
+		t.Errorf("error = %+v, want invalid params (legacy-SSE server must be unresolvable via tools/call, same as unconfigured)", got.Error)
+	}
+	if legacy.called.Load() != 0 {
+		t.Error("the legacy-SSE-transport server must never be contacted")
+	}
+}
+
+// --- SF6: protocol-version allowlist ---
+
+func TestHandleMCPFederated_Initialize_AllowlistedVersionsEchoedVerbatim(t *testing.T) {
+	for version := range knownMCPProtocolVersions {
+		t.Run(version, func(t *testing.T) {
+			cfg := newFederationTestConfig("http://alpha.invalid", "http://beta.invalid", false)
+			h, err := New(context.Background(), http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), cfg, "llmgw")
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			params, _ := json.Marshal(map[string]any{"protocolVersion": version})
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, newFederatedRequest(t, "sk-alice", jsonrpcRequest{JSONRPC: jsonrpcVersion, Method: "initialize", ID: json.RawMessage("1"), Params: params}))
+
+			var got jsonrpcResponse
+			if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			var result struct {
+				ProtocolVersion string `json:"protocolVersion"`
+			}
+			if err := json.Unmarshal(got.Result, &result); err != nil {
+				t.Fatalf("decode result: %v", err)
+			}
+			if result.ProtocolVersion != version {
+				t.Errorf("protocolVersion = %q, want the allowlisted caller-supplied version %q echoed verbatim", result.ProtocolVersion, version)
+			}
+		})
+	}
+}
+
+func TestHandleMCPFederated_Initialize_UnrecognizedVersion_FallsBackToDefault(t *testing.T) {
+	cfg := newFederationTestConfig("http://alpha.invalid", "http://beta.invalid", false)
+	h, err := New(context.Background(), http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	params, _ := json.Marshal(map[string]any{"protocolVersion": "1999-01-01"})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, newFederatedRequest(t, "sk-alice", jsonrpcRequest{JSONRPC: jsonrpcVersion, Method: "initialize", ID: json.RawMessage("1"), Params: params}))
+
+	var got jsonrpcResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	var result struct {
+		ProtocolVersion string `json:"protocolVersion"`
+	}
+	if err := json.Unmarshal(got.Result, &result); err != nil {
+		t.Fatalf("decode result: %v", err)
+	}
+	if result.ProtocolVersion != defaultMCPProtocolVersion {
+		t.Errorf("protocolVersion = %q, want the fallback default %q for an unrecognized caller-supplied version", result.ProtocolVersion, defaultMCPProtocolVersion)
+	}
+}
+
+// --- SF8: explicit 405 for a disallowed method on exactly /mcp ---
+
+func TestHandleMCPFederated_DisallowedMethod_Returns405WithAllowHeader(t *testing.T) {
+	cfg := newFederationTestConfig("http://alpha.invalid", "http://beta.invalid", false)
+	h, err := New(context.Background(), http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	for _, method := range []string{http.MethodGet, http.MethodDelete, http.MethodPut} {
+		t.Run(method, func(t *testing.T) {
+			req := httptest.NewRequest(method, federatedMCPPath, nil)
+			req.Header.Set("Authorization", "Bearer sk-alice")
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			if rec.Code != http.StatusMethodNotAllowed {
+				t.Fatalf("status = %d, want 405, body=%s", rec.Code, rec.Body.String())
+			}
+			if got := rec.Header().Get("Allow"); got != http.MethodPost {
+				t.Errorf("Allow header = %q, want %q", got, http.MethodPost)
+			}
+		})
+	}
+
+	t.Run("no auth still 405 (method check precedes auth)", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, federatedMCPPath, nil)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusMethodNotAllowed {
+			t.Fatalf("status = %d, want 405 even without a valid API key, body=%s", rec.Code, rec.Body.String())
+		}
+	})
+}
+
+// TestMcpBackendCall_SessionCloseFailure_NeverSurfacedToCaller proves
+// mcpBackendCloseSession's own "best-effort... failure logged, never
+// surfaced" contract: the server accepts the handshake and the retried
+// real call normally, but drops the connection outright on the
+// best-effort DELETE — the caller must still see the real call's own
+// successful result, not a failure manufactured by cleanup.
+func TestMcpBackendCall_SessionCloseFailure_NeverSurfacedToCaller(t *testing.T) {
+	const sessionID = "sess-close-fail"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete {
+			// A network-level failure on close, not merely a non-2xx
+			// status: mcpBackendCloseSession never even inspects the
+			// response status, only whether Do() itself returned an
+			// error — hijacking and dropping the raw connection is what
+			// actually exercises that path.
+			hj, ok := w.(http.Hijacker)
+			if !ok {
+				t.Fatal("mock server: ResponseWriter does not support Hijack")
+			}
+			conn, _, err := hj.Hijack()
+			if err != nil {
+				t.Fatalf("hijack: %v", err)
+			}
+			_ = conn.Close()
+			return
+		}
+
+		var req jsonrpcRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case req.Method == "initialize":
+			w.Header().Set(mcpSessionHeader, sessionID)
+			result, _ := json.Marshal(map[string]any{})
+			_ = json.NewEncoder(w).Encode(jsonrpcResponse{ID: req.ID, Result: result})
+		case req.Method == "tools/list" && r.Header.Get(mcpSessionHeader) == "":
+			_ = json.NewEncoder(w).Encode(jsonrpcResponse{ID: req.ID, Error: &jsonrpcError{Code: -32000, Message: "session required"}})
+		default:
+			result, _ := json.Marshal(mcpToolsListResult{Tools: []mcpTool{{Name: "search"}}})
+			_ = json.NewEncoder(w).Encode(jsonrpcResponse{ID: req.ID, Result: result})
+		}
+	}))
+	defer srv.Close()
+
+	cfg := newFederationTestConfig(srv.URL, "http://beta.invalid", true)
+	h, err := New(context.Background(), http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, newFederatedRequest(t, "sk-alice", jsonrpcRequest{JSONRPC: jsonrpcVersion, Method: "tools/list", ID: json.RawMessage("1")}))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	var got jsonrpcResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Error != nil {
+		t.Fatalf("error = %+v, want nil — a failed best-effort session close must never surface as a call failure", got.Error)
+	}
+	var result mcpToolsListResult
+	if err := json.Unmarshal(got.Result, &result); err != nil {
+		t.Fatalf("decode result: %v", err)
+	}
+	if len(result.Tools) != 1 || result.Tools[0].Name != "alpha_search" {
+		t.Fatalf("tools = %+v, want alpha_search despite the session-close failure", result.Tools)
 	}
 }

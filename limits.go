@@ -1011,14 +1011,16 @@ func (l *limiter) account(scopes []limitScope, u usage, costMicros int64) {
 	l.storeIncrMulti(entries) // no error return by contract (doc comment above); ok is intentionally discarded
 }
 
-// countTargetRequest increments one MCP-server's or A2A agent's per-target
-// request counters (Feature B, v0.21) at min, hour, day, AND month — the
-// only scope kind this package tracks a month window of REQUESTS for.
-// kind is targetScopeKind's own output ("mcp" or scopeKindAgent —
-// mcp_a2a.go), id is the configured target name; both come embedded in
-// windowKey's own key string, so a target scope can never collide with a
-// user/group/total scope of the same id even by coincidence — kind is
-// part of the key, not just a struct field.
+// countTargetRequests increments MULTIPLE target scopes' per-target request
+// counters (Feature B, v0.21) — each at min, hour, day, AND month, the only
+// scope kind this package tracks a month window of REQUESTS for — in ONE
+// storeIncrMulti call. kind is targetScopeKind's own output ("mcp" or
+// scopeKindAgent — mcp_a2a.go), id is the configured target name; both come
+// embedded in windowKey's own key string, so a target scope can never
+// collide with a user/group/total scope of the same id even by coincidence
+// — kind is part of the key, not just a struct field. A scope's own
+// `limits` field is ignored entirely (never read); callers pass plain
+// {kind, id} pairs.
 //
 // This is deliberately NOT folded into checkAndCount: a target scope
 // carries no limits by design (this round adds no config surface for
@@ -1033,20 +1035,44 @@ func (l *limiter) account(scopes []limitScope, u usage, costMicros int64) {
 // rejected as scope creep touching user/group accounting nothing else in
 // this round asked to change.
 //
-// Callers: handleTargetProxy (mcp_a2a.go, once per proxied request, after
-// its own user/group/total admission check passes) and the federated /mcp
-// endpoint (mcp_federation.go, once per actual backend server contacted —
-// tools/list may contact several in one incoming client request, tools/call
-// exactly one), so a call attributed to a specific target is counted the
-// same way regardless of which route reached it.
-func (l *limiter) countTargetRequest(kind, id string) {
+// Batching (review round 2, 2026-08-21): the federated /mcp endpoint's own
+// tools/list fan-out can attempt several backend servers for ONE incoming
+// client request — the earlier per-server countTargetRequest call inside
+// each fan-out goroutine paid one round trip per server; this collects
+// every scope from the whole fan-out into a single call after the fan-out's
+// own wg.Wait(), the same "one request in, one round trip out" discipline
+// checkAndCount/account already apply per scope-slice.
+//
+// Callers: handleTargetProxy (mcp_a2a.go, a 1-element slice, once per
+// proxied request, after its own user/group/total admission check passes)
+// and the federated /mcp endpoint (mcp_federation.go: a 1-element slice for
+// tools/call's single resolved target, or one element per server ATTEMPTED
+// — not necessarily reached or succeeded — for tools/list's fan-out; see
+// mcpFederatedToolsList's own doc comment for why "attempted" is the
+// correct word here).
+func (l *limiter) countTargetRequests(scopes []limitScope) {
+	if len(scopes) == 0 {
+		return
+	}
 	now := l.now()
-	l.storeIncrMulti([]counterIncr{
-		newCounterIncr(kind, id, metricReq, windowMin, now, 1, minWindowTTL),
-		newCounterIncr(kind, id, metricReq, windowHour, now, 1, hourWindowTTL),
-		newCounterIncr(kind, id, metricReq, windowDay, now, 1, dayWindowTTL),
-		newCounterIncr(kind, id, metricReq, windowMonth, now, 1, monthWindowTTL),
-	})
+	entries := make([]counterIncr, 0, len(scopes)*4)
+	for _, sc := range scopes {
+		entries = append(entries,
+			newCounterIncr(sc.kind, sc.id, metricReq, windowMin, now, 1, minWindowTTL),
+			newCounterIncr(sc.kind, sc.id, metricReq, windowHour, now, 1, hourWindowTTL),
+			newCounterIncr(sc.kind, sc.id, metricReq, windowDay, now, 1, dayWindowTTL),
+			newCounterIncr(sc.kind, sc.id, metricReq, windowMonth, now, 1, monthWindowTTL),
+		)
+	}
+	l.storeIncrMulti(entries)
+}
+
+// countTargetRequest is countTargetRequests for exactly one target scope —
+// handleTargetProxy's own single-target shape (mcp_a2a.go), where a batch
+// of one buys nothing but keeps the call site a plain two-argument call
+// instead of a one-element slice literal.
+func (l *limiter) countTargetRequest(kind, id string) {
+	l.countTargetRequests([]limitScope{{kind: kind, id: id}})
 }
 
 // targetCounterKeysPerScope is the number of windowKey strings
