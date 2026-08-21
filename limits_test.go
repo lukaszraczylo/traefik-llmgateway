@@ -1421,7 +1421,7 @@ func TestRecordProviderAttempt_ClassifiesUsingIsTransient(t *testing.T) {
 		{name: "network error", err: errors.New("dial tcp: connection refused"), wantFail: true},
 		{name: "context canceled (not a provider fault)", err: context.Canceled, wantFail: false},
 		{name: "context deadline exceeded (hung upstream timed out — SHOULD-1)", err: context.DeadlineExceeded, wantFail: true},
-		{name: "wrapped context deadline exceeded (proves the manual Unwrap walk)", err: fmt.Errorf("%w: dial timeout", context.DeadlineExceeded), wantFail: true},
+		{name: "wrapped context deadline exceeded (proves errors.Is walks the chain)", err: fmt.Errorf("%w: dial timeout", context.DeadlineExceeded), wantFail: true},
 		{name: "wrapped context canceled stays non-failure too", err: fmt.Errorf("%w: client hung up", context.Canceled), wantFail: false},
 	}
 
@@ -1494,14 +1494,63 @@ func TestRecordProviderAttempt_EmptyProvider_NoOp(t *testing.T) {
 	l.recordProviderAttempt("", "some-model", &http.Response{StatusCode: http.StatusOK}, nil) // must not panic
 }
 
-// TestIsDeadlineExceeded_YaegiSafeUnwrap exercises matchesSentinel's
-// hand-rolled Unwrap walk directly (SHOULD-1, v0.22 review round): a bare
-// context.DeadlineExceeded, one wrapped once, one wrapped twice (proving
-// the loop actually loops, not just unwraps one level), a non-matching
-// error that implements Unwrap (must walk to its end and report false,
-// not stop after one failed comparison), and a plain error with no
-// Unwrap method at all (the comma-ok assertion's negative case).
-func TestIsDeadlineExceeded_YaegiSafeUnwrap(t *testing.T) {
+// TestRecordProviderAttempt_ProductionSpawn_WriteEventuallyLandsAsync
+// leaves limiter.spawn at its real production default (newLimiter's own
+// bounded, goroutine-spawning closure) instead of overriding it to run
+// synchronously like every other recordProviderAttempt test in this file
+// — FOLDED-2 (v0.22 review round, round 2): every other test here proves
+// the WRITE is correct, but only by bypassing the actual async code path
+// (limiter.spawn's own doc comment) entirely; this is the one test that
+// exercises it for real, closing a real -race async-path gap. Polls
+// (waitUntil, registry_test.go) rather than sleeping a fixed duration —
+// a fixed sleep is either flaky (too short, especially under `-race`,
+// which distorts goroutine scheduling) or wastefully slow (too long); a
+// deadline-bounded poll is neither.
+func TestRecordProviderAttempt_ProductionSpawn_WriteEventuallyLandsAsync(t *testing.T) {
+	l := newLimiter(nil, true) // production default spawn — deliberately NOT newSyncLimiter
+	now := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
+	l.nowFn = func() time.Time { return now }
+
+	l.recordProviderAttempt("openai", "gpt-4o", &http.Response{StatusCode: http.StatusOK}, nil)
+
+	waitUntil(t, time.Second, func() bool {
+		attempts, _ := l.getCounter(kindProvider, "openai", metricProvAttempt, windowDay, now)
+		return attempts == 1
+	})
+	fails, _ := l.getCounter(kindProvider, "openai", metricProvFail, windowDay, now)
+	if fails != 0 {
+		t.Errorf("fails/day = %d, want 0 (a 200 response is never a failure)", fails)
+	}
+}
+
+// TestIsDeadlineExceeded_Classification exercises isDeadlineExceeded's
+// observable classification across every wrap shape that matters: bare,
+// wrapped once, wrapped twice, an unrelated sentinel (context.Canceled,
+// which must never match), an unrelated wrapped error, a plain error
+// with no Unwrap method — PLUS the prod-shape double-%w/triple-%w rows a
+// review round-2 blocker demanded, byte-for-byte the exact format
+// strings providers.go's three upstreamJSON/upstreamBytes call sites use.
+//
+// A load-bearing caveat this test's own name used to hide (it was
+// TestIsDeadlineExceeded_YaegiSafeUnwrap): every case here runs COMPILED,
+// under `go test`, and compiled-Go correctness is not the same claim as
+// Yaegi-interpreted correctness. Round 2's original fix — a hand-rolled
+// Unwrap walk against two locally declared interfaces, matched with bare
+// comma-ok type assertions — passed every one of these exact rows
+// (including the double-/triple-%w ones) under `go test`, while
+// SHOULD-A's yaegi-check harness (tools/yaegi-check/main.go's
+// exerciseAttemptAccounting) proved it silently returned false for the
+// double-%w case under the REAL interpreter: an interpreted interface
+// type does not correctly match a compiled concrete value's method set
+// in Yaegi, the reverse direction of the already-documented errors.As-
+// on-interpreted-types trap. matchesSentinel now calls real errors.Is
+// instead (limits.go's own doc comment there has the full account of why
+// that is safe here specifically, unlike errors.As on an interpreted
+// type) — this table still pins the OBSERVABLE behavior, but
+// tools/yaegi-check is what actually proves it under the interpreter;
+// this table alone would not have caught the round-2 regression, and a
+// future change here must keep running yaegi-check, not just `go test`.
+func TestIsDeadlineExceeded_Classification(t *testing.T) {
 	tests := []struct {
 		err  error
 		name string
@@ -1514,6 +1563,31 @@ func TestIsDeadlineExceeded_YaegiSafeUnwrap(t *testing.T) {
 		{name: "unrelated sentinel (context.Canceled)", err: context.Canceled, want: false},
 		{name: "unrelated wrapped error", err: fmt.Errorf("dial: %w", errors.New("connection refused")), want: false},
 		{name: "plain error, no Unwrap method", err: errors.New("boom"), want: false},
+		{
+			name: "double-%w, upstreamBytes' client.Do shape — the blocker's own reproduction",
+			err:  fmt.Errorf("%w: %w", errUpstream, context.DeadlineExceeded),
+			want: true,
+		},
+		{
+			name: "double-%w, upstreamJSON's encode-failure shape",
+			err:  fmt.Errorf("%w: encode request body: %w", errUpstream, context.DeadlineExceeded),
+			want: true,
+		},
+		{
+			name: "triple-%w, upstreamBytes' build-request shape",
+			err:  fmt.Errorf("%w: %w: build request: %w", errUpstream, errRequestBuildFailed, context.DeadlineExceeded),
+			want: true,
+		},
+		{
+			name: "double-%w wrapping context.Canceled must still NOT match — multi-wrap does not blur the two sentinels apart",
+			err:  fmt.Errorf("%w: %w", errUpstream, context.Canceled),
+			want: false,
+		},
+		{
+			name: "double-%w wrapping an unrelated error must still NOT match",
+			err:  fmt.Errorf("%w: %w", errUpstream, errors.New("connection refused")),
+			want: false,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

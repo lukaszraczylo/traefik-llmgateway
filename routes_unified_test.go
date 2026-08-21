@@ -1830,3 +1830,67 @@ func TestUnifiedCostMicros(t *testing.T) {
 		})
 	}
 }
+
+// TestHandleChat_ContextDeadlineExceeded_RecordsProviderFailure is the
+// route-level regression test the review's blocker (v0.22, round 2)
+// specifically demanded: TestIsDeadlineExceeded_YaegiSafeUnwrap's
+// hand-built error shapes (limits_test.go) proved matchesSentinel's own
+// unwrap logic works in isolation, but that alone is exactly what let the
+// real bug ship — every hand-built shape there was single-%w, while the
+// live chain through upstreamBytes' client.Do call is providers.go's
+// own double-%w `fmt.Errorf("%w: %w", errUpstream, err)`, one layer
+// short of what a table test alone would ever exercise. This drives a
+// REAL request whose context deadline expires while a REAL httptest
+// upstream is still sleeping — client.Do, *url.Error, and the wrap chain
+// providers.go actually builds, all for real — and asserts the resulting
+// provider counters directly, not a synthetic error value.
+func TestHandleChat_ContextDeadlineExceeded_RecordsProviderFailure(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(600 * time.Millisecond) // well past the request's own 60ms deadline below
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"c1","object":"chat.completion","model":"gpt-test","choices":[],"usage":{}}`))
+	}))
+	defer srv.Close()
+
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{
+		"openai": {Type: "openai", BaseURL: srv.URL, APIKey: "sk-up", Models: []string{"gpt-test"}},
+	}
+	cfg.Groups = map[string]*GroupConfig{"default": {}}
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{
+		{Name: "alice", Group: "default", APIKey: "sk-alice", Limits: &LimitsConfig{}},
+	}}
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	gw, ok := h.(*Gateway)
+	if !ok {
+		t.Fatal("handler is not *Gateway")
+	}
+	// SHOULD-5: run recordProviderAttempt's store write synchronously so
+	// the counter read below is deterministic (see limiter.spawn's own
+	// doc comment, limits.go). FOLDED-2's own test (limits_test.go)
+	// covers the production async default separately.
+	gw.limiter.spawn = func(f func()) { f() }
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Millisecond)
+	defer cancel()
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"gpt-test","messages":[{"role":"user","content":"hi"}]}`)).WithContext(ctx)
+	req.Header.Set("Authorization", "Bearer sk-alice")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	now := time.Now()
+	attempts, _ := gw.limiter.getCounter(kindProvider, "openai", metricProvAttempt, windowDay, now)
+	if attempts != 1 {
+		t.Errorf("provider attempts/day = %d, want 1", attempts)
+	}
+	fails, _ := gw.limiter.getCounter(kindProvider, "openai", metricProvFail, windowDay, now)
+	if fails != 1 {
+		t.Errorf("provider fails/day = %d, want 1 — a real context-deadline timeout must count as a provider-health failure (SHOULD-1)", fails)
+	}
+}

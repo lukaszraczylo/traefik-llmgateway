@@ -934,3 +934,56 @@ func TestHandlePassthrough_AnthropicClientAPIKeyStripped_ProviderKeyInjected(t *
 		t.Errorf("x-api-key = %q, want the provider's own key injected", gotAPIKeyHeader)
 	}
 }
+
+// TestHandlePassthrough_ContextDeadlineExceeded_RecordsProviderFailure is
+// the passthrough half of the route-level regression the review's
+// blocker demanded (v0.22, round 2) — a real context deadline against a
+// real sleeping httptest upstream. Passthrough was NEVER actually broken
+// by the multi-%w bug (proxyUpstream's client.Do error reaches
+// attemptRecorderFromContext bare, never re-wrapped by upstreamBytes —
+// see recordProviderAttempt's own call site here, routes_passthrough.go),
+// but the review round proved that by observation, not a route-level
+// assertion; this pins it so a future refactor cannot silently regress
+// it the same way the unified route regressed.
+func TestHandlePassthrough_ContextDeadlineExceeded_RecordsProviderFailure(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(600 * time.Millisecond) // well past the request's own 60ms deadline below
+	}))
+	defer srv.Close()
+
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{
+		"openai": {Type: "openai", BaseURL: srv.URL, APIKey: "sk-up"},
+	}
+	cfg.Groups = map[string]*GroupConfig{"default": {}}
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{
+		{Name: "alice", Group: "default", APIKey: "sk-alice", Limits: &LimitsConfig{}},
+	}}
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	gw, ok := h.(*Gateway)
+	if !ok {
+		t.Fatal("handler is not *Gateway")
+	}
+	gw.limiter.spawn = func(f func()) { f() }
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Millisecond)
+	defer cancel()
+	req := httptest.NewRequest(http.MethodPost, "/openai/v1/native-endpoint", strings.NewReader(`{}`)).WithContext(ctx)
+	req.Header.Set("Authorization", "Bearer sk-alice")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	now := time.Now()
+	attempts, _ := gw.limiter.getCounter(kindProvider, "openai", metricProvAttempt, windowDay, now)
+	if attempts != 1 {
+		t.Errorf("provider attempts/day = %d, want 1", attempts)
+	}
+	fails, _ := gw.limiter.getCounter(kindProvider, "openai", metricProvFail, windowDay, now)
+	if fails != 1 {
+		t.Errorf("provider fails/day = %d, want 1 — a real context-deadline timeout must count as a provider-health failure (SHOULD-1)", fails)
+	}
+}

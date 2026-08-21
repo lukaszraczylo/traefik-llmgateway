@@ -50,14 +50,44 @@ import (
 // layers on top of testData (see its own override comment) — SHOULD-4
 // (v0.22 review round): this harness proves recordProviderAttempt's
 // SHOULD-1 deadline/cancel classification (limits.go's matchesSentinel/
-// isDeadlineExceeded, a hand-rolled errors.Unwrap walk specifically
-// because errors.Is/errors.As are unsafe under Yaegi — see their own doc
-// comments) actually runs correctly INTERPRETED, not merely compiled: a
-// bug there would not show up under `go test`, only here.
+// isDeadlineExceeded) actually runs correctly INTERPRETED, not merely
+// compiled: a bug there would not show up under `go test`, only here —
+// which is exactly what happened in round 2 (see slowProviderName's own
+// doc comment immediately below, and matchesSentinel's in limits.go, for
+// the full account of the interpreter-only bug this harness caught).
+//
+// slowProviderName/slowProviderModel/slowUpstreamSleep/
+// slowRequestDeadline back exerciseAttemptAccounting's SECOND request
+// (SHOULD-A, v0.22 review round, round 2): the FIRST version of this
+// harness only ever drove an upstream that answers instantly, so
+// isDeadlineExceeded never actually saw a non-nil error, interpreted or
+// otherwise — a comment claiming to prove the interpreted deadline path
+// while never exercising it. Once fixed to actually drive a timeout, it
+// caught a real bug: round 2's original matchesSentinel (a hand-rolled
+// Unwrap walk against two locally declared interfaces, comma-ok matched)
+// passed every compiled `go test` row for a double-%w error shape but
+// silently misclassified it under the real interpreter — an interpreted
+// interface type failing to match a compiled concrete value's method
+// set. matchesSentinel now calls real errors.Is instead (limits.go's own
+// doc comment has the full account of why that is safe here
+// specifically). The second request below: a second, DELIBERATELY slow
+// provider, addressed by its own provider-prefixed model id
+// (`slowProviderName+"/"+slowProviderModel`, routableModelId's own
+// "provider/model" convention) so it can never collide with
+// testDataWantModel's bare "gpt-test" on the "openai" provider, driven
+// with a request context deadline shorter than the upstream's own
+// sleep — the exact shape the route-level Go test regression (routes_
+// unified_test.go's TestHandleChat_ContextDeadlineExceeded_
+// RecordsProviderFailure) already proves compiled; this proves it
+// interpreted.
 const (
 	testDataUserAPIKey           = "test-user-key"
 	testDataWantModel            = "gpt-test"
 	attemptAccountingAdminAPIKey = "sk-admin1"
+	slowProviderName             = "slow"
+	slowProviderModel            = "gpt-test"
+	slowUpstreamSleep            = 600 * time.Millisecond
+	slowRequestDeadline          = 60 * time.Millisecond
 )
 
 // excludedTopLevelDirs lists repo-root directories the GOPATH copy must
@@ -178,7 +208,20 @@ func run() error {
 		_, _ = w.Write([]byte(`{"id":"c1","object":"chat.completion","model":"gpt-test","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`))
 	}))
 	defer upstream.Close()
-	attemptAccountingOverride := `{"providers":{"openai":{"type":"openai","baseUrl":"` + upstream.URL + `","apiKey":"sk-up","models":["` + testDataWantModel + `"]}},"admin":{"enabled":true},"users":{"inline":[{"name":"tester","group":"default","apiKey":"` + testDataUserAPIKey + `"},{"name":"admin1","group":"default","apiKey":"` + attemptAccountingAdminAPIKey + `","admin":true}]}}`
+
+	// slowUpstream never answers within slowRequestDeadline — see
+	// slowProviderName's own doc comment above (SHOULD-A) for why this
+	// second provider exists at all.
+	slowUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(slowUpstreamSleep)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"c2","object":"chat.completion","model":"gpt-test","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`))
+	}))
+	defer slowUpstream.Close()
+
+	attemptAccountingOverride := `{"providers":{"openai":{"type":"openai","baseUrl":"` + upstream.URL + `","apiKey":"sk-up","models":["` + testDataWantModel + `"]},"` +
+		slowProviderName + `":{"type":"openai","baseUrl":"` + slowUpstream.URL + `","apiKey":"sk-up","models":["` + slowProviderModel + `"]}},` +
+		`"admin":{"enabled":true},"users":{"inline":[{"name":"tester","group":"default","apiKey":"` + testDataUserAPIKey + `"},{"name":"admin1","group":"default","apiKey":"` + attemptAccountingAdminAPIKey + `","admin":true}]}}`
 	if err = json.Unmarshal([]byte(attemptAccountingOverride), cfgVal.Interface()); err != nil {
 		return fmt.Errorf("decode attempt-accounting harness override into the interpreted Config: %w", err)
 	}
@@ -248,20 +291,35 @@ func exerciseHandler(handler http.Handler) error {
 	return nil
 }
 
-// exerciseAttemptAccounting drives a real chat completion through
-// handler (against the local httptest upstream run's own override wired
-// in), then GET /admin/api/overview, asserting the resulting provider
-// reports exactly one attempt and zero failures — Feature A's (v0.22)
-// per-provider success-rate accounting, exercised end to end under
-// Yaegi: runUnified's attemptRecorder (routes_unified.go) ->
-// retryPolicy.do's context lookup (retry.go) ->
+// exerciseAttemptAccounting drives two real requests through handler —
+// Feature A's (v0.22) per-provider success-rate accounting, exercised
+// end to end under Yaegi: runUnified's attemptRecorder (routes_unified.
+// go) -> retryPolicy.do's context lookup (retry.go) ->
 // limiter.recordProviderAttempt's isTransient/isDeadlineExceeded
-// classification (limits.go) -> its fire-and-forget spawn (SHOULD-5) ->
-// buildAdminOverview's own batched providerUsage read (admin.go). Any
-// interpreter-only failure in that chain — a construct `go build`/`go
-// test` cannot catch, exactly the class of bug this harness exists for
-// (SHOULD-4, v0.22 review round) — surfaces here as a non-1/non-0 count
-// or an outright panic under Yaegi.
+// classification (limits.go, including matchesSentinel's errors.Is call
+// through providers.go's own multi-%w wrapping) -> its fire-and-forget
+// spawn (SHOULD-5) -> buildAdminOverview's own batched providerUsage read
+// (admin.go). Any interpreter-only failure in that chain — a construct
+// `go build`/`go test` cannot catch, exactly the class of bug this
+// harness exists for (SHOULD-4, v0.22 review round) — surfaces here as a
+// non-1/non-0 count or an outright panic under Yaegi.
+//
+// The first request (against "openai", instant upstream) proves the
+// success path: one attempt, zero failures. The second (against
+// slowProviderName, an upstream that never answers within
+// slowRequestDeadline — SHOULD-A, round 2) proves the FAILURE path:
+// exactly what round 1 of this harness claimed to prove but never
+// actually drove — the interpreted plugin never saw a non-nil error at
+// all, so isDeadlineExceeded was never exercised under this harness even
+// while it ran (and passed) under `go test`. THIS is what SHOULD-A was
+// for: the first version of this second request, run against round 2's
+// hand-rolled comma-ok Unwrap-walk fix (limits.go's matchesSentinel,
+// since replaced), FAILED right here — under the interpreter only,
+// despite passing every compiled `go test` row for the identical error
+// shape — because an interpreted interface type does not correctly match
+// a compiled concrete value's method set in Yaegi. matchesSentinel now
+// uses real errors.Is instead (its own doc comment in limits.go has the
+// full account); this harness is what caught the difference.
 func exerciseAttemptAccounting(handler http.Handler) error {
 	chatReq := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(
 		`{"model":"`+testDataWantModel+`","messages":[{"role":"user","content":"hi"}]}`,
@@ -274,33 +332,61 @@ func exerciseAttemptAccounting(handler http.Handler) error {
 		return fmt.Errorf("POST /v1/chat/completions (attempt-accounting harness): status = %d, want 200, body=%s", chatRec.Code, chatRec.Body.String())
 	}
 
-	attemptsDay, failuresDay, err := pollProviderAttemptCounters(handler)
+	attemptsDay, failuresDay, err := pollProviderAttemptCounters(handler, "openai")
 	if err != nil {
 		return err
 	}
 	if attemptsDay != 1 {
-		return fmt.Errorf("admin overview providers[0].attemptsDay = %v, want 1 (Feature A attempt-accounting harness)", attemptsDay)
+		return fmt.Errorf(`admin overview provider "openai" attemptsDay = %v, want 1 (Feature A attempt-accounting harness)`, attemptsDay)
 	}
 	if failuresDay != 0 {
-		return fmt.Errorf("admin overview providers[0].failuresDay = %v, want 0", failuresDay)
+		return fmt.Errorf(`admin overview provider "openai" failuresDay = %v, want 0`, failuresDay)
+	}
+
+	// SHOULD-A: a real, interpreted context-deadline timeout against a
+	// deliberately slow upstream must record a FAILURE — the whole
+	// reason this harness exists after round 2's blocker.
+	slowCtx, cancel := context.WithTimeout(context.Background(), slowRequestDeadline)
+	defer cancel()
+	slowReq := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(
+		`{"model":"`+slowProviderName+`/`+slowProviderModel+`","messages":[{"role":"user","content":"hi"}]}`,
+	)).WithContext(slowCtx)
+	slowReq.Header.Set("Authorization", "Bearer "+testDataUserAPIKey)
+	slowReq.Header.Set("Content-Type", "application/json")
+	slowRec := httptest.NewRecorder()
+	handler.ServeHTTP(slowRec, slowReq)
+	// No status assertion here on purpose: the point of interest is the
+	// PROVIDER-HEALTH counter a timed-out upstream attempt leaves behind,
+	// not what status code a canceled/timed-out client request itself
+	// gets back (which the existing route-level Go tests already pin).
+
+	slowAttemptsDay, slowFailuresDay, err := pollProviderAttemptCounters(handler, slowProviderName)
+	if err != nil {
+		return err
+	}
+	if slowAttemptsDay != 1 {
+		return fmt.Errorf("admin overview provider %q attemptsDay = %v, want 1 (SHOULD-A timeout harness)", slowProviderName, slowAttemptsDay)
+	}
+	if slowFailuresDay != 1 {
+		return fmt.Errorf("admin overview provider %q failuresDay = %v, want 1 — a real interpreted context-deadline timeout must count as a provider-health failure (SHOULD-A, closes the round-2 blocker)", slowProviderName, slowFailuresDay)
 	}
 	return nil
 }
 
 // pollProviderAttemptCounters drives GET /admin/api/overview against
-// handler repeatedly until providers[0].attemptsDay is non-zero or a 2s
+// handler repeatedly until providerName's attemptsDay is non-zero or a 2s
 // budget elapses, then returns its final reading either way — SHOULD-5
 // (v0.22 review round): recordProviderAttempt's store write runs on its
-// own goroutine (limiter.spawn), off the chat request that triggered it,
-// so a single immediate read right after that request returns could race
+// own goroutine (limiter.spawn), off the request that triggered it, so a
+// single immediate read right after that request returns could race
 // ahead of the write landing. A real goroutine still schedules promptly
 // under Yaegi (only the INTERPRETED code driving it runs slower, not the
 // underlying Go runtime's scheduler), so this is a short poll, not a
 // long one.
-func pollProviderAttemptCounters(handler http.Handler) (attemptsDay, failuresDay float64, err error) {
+func pollProviderAttemptCounters(handler http.Handler, providerName string) (attemptsDay, failuresDay float64, err error) {
 	deadline := time.Now().Add(2 * time.Second)
 	for {
-		attemptsDay, failuresDay, err = readProviderAttemptCounters(handler)
+		attemptsDay, failuresDay, err = readProviderAttemptCounters(handler, providerName)
 		if err != nil {
 			return 0, 0, err
 		}
@@ -311,14 +397,18 @@ func pollProviderAttemptCounters(handler http.Handler) (attemptsDay, failuresDay
 	}
 }
 
-// readProviderAttemptCounters reads GET /admin/api/overview's first
-// provider's attemptsDay/failuresDay fields via a generic map[string]any
-// decode — this harness module is compiled, not interpreted, so it could
-// import the plugin's own admin.go types directly, but they are
-// unexported (adminOverviewResponse, adminProviderView); decoding
-// generically here is simpler than exporting test-only types across that
-// boundary just for this one harness.
-func readProviderAttemptCounters(handler http.Handler) (attemptsDay, failuresDay float64, err error) {
+// readProviderAttemptCounters reads GET /admin/api/overview, finds the
+// entry named providerName, and returns its attemptsDay/failuresDay
+// fields via a generic map[string]any decode — this harness module is
+// compiled, not interpreted, so it could import the plugin's own admin.go
+// types directly, but they are unexported (adminOverviewResponse,
+// adminProviderView); decoding generically here is simpler than exporting
+// test-only types across that boundary just for this one harness. Looked
+// up by name, not index 0 (round 1 of this harness only ever had one
+// configured provider): buildAdminOverview sorts providers by name
+// (registry.go), so adding slowProviderName ("slow") after "openai"
+// changed which index held which provider.
+func readProviderAttemptCounters(handler http.Handler, providerName string) (attemptsDay, failuresDay float64, err error) {
 	req := httptest.NewRequest(http.MethodGet, "/admin/api/overview", nil)
 	req.Header.Set("Authorization", "Bearer "+attemptAccountingAdminAPIKey)
 	rec := httptest.NewRecorder()
@@ -332,16 +422,22 @@ func readProviderAttemptCounters(handler http.Handler) (attemptsDay, failuresDay
 		return 0, 0, fmt.Errorf("decode GET /admin/api/overview body: %w", err)
 	}
 	providers, ok := body["providers"].([]any)
-	if !ok || len(providers) == 0 {
-		return 0, 0, fmt.Errorf("admin overview body has no providers: %s", rec.Body.String())
-	}
-	p, ok := providers[0].(map[string]any)
 	if !ok {
-		return 0, 0, fmt.Errorf("admin overview providers[0] is not an object: %s", rec.Body.String())
+		return 0, 0, fmt.Errorf("admin overview body has no providers array: %s", rec.Body.String())
 	}
-	attemptsDay, _ = p["attemptsDay"].(float64)
-	failuresDay, _ = p["failuresDay"].(float64)
-	return attemptsDay, failuresDay, nil
+	for _, raw := range providers {
+		p, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		if name, _ := p["name"].(string); name != providerName {
+			continue
+		}
+		attemptsDay, _ = p["attemptsDay"].(float64)
+		failuresDay, _ = p["failuresDay"].(float64)
+		return attemptsDay, failuresDay, nil
+	}
+	return 0, 0, fmt.Errorf("admin overview body has no provider named %q: %s", providerName, rec.Body.String())
 }
 
 // readModulePath returns the module path declared by goModPath's

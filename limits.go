@@ -2,6 +2,7 @@ package traefikllmgateway
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"net/http"
@@ -503,9 +504,13 @@ type limiter struct {
 	// time-to-first-byte path (a synchronous storeIncrMulti round trip
 	// there would delay every first chunk by however long that write
 	// takes). newLimiter always wires a production limiter's spawn to a
-	// real `go f()`; a test that needs recordProviderAttempt's write to
-	// have already landed by the time it reads a counter back overrides
-	// spawn to run f synchronously instead — the same dependency-
+	// BOUNDED goroutine — see spawnTokens below (FOLDED-1, v0.22 review
+	// round, round 2): unbounded `go f()` could pile up an unlimited
+	// number of in-flight writes against a slow-but-alive Redis, since
+	// nothing here backpressures request volume. A test that needs
+	// recordProviderAttempt's write to have already landed by the time it
+	// reads a counter back overrides spawn to run f synchronously
+	// instead, bypassing spawnTokens entirely — the same dependency-
 	// injection idiom nowFn already uses on this struct, and waitFn uses
 	// on retryPolicy (retry.go). A goroutine spawned this way outlives
 	// the request that triggered it by design: a write still in flight at
@@ -514,6 +519,24 @@ type limiter struct {
 	// writes to are inherently approximate already (a counter reset at a
 	// bucket boundary loses whatever was in the previous bucket too).
 	spawn func(func())
+	// spawnTokens is the buffered-channel semaphore the production spawn
+	// closure (newLimiter) acquires from non-blockingly before starting a
+	// goroutine, and releases when that goroutine finishes — FOLDED-1
+	// (v0.22 review round, round 2): capped at providerAttemptSpawnCap
+	// in-flight writes per limiter. Acquiring a token that is not
+	// immediately available means the write is DROPPED, never queued or
+	// blocked — bounded AND lossy-under-pressure, by design: this is a
+	// telemetry counter family (recordProviderAttempt), not enforcement
+	// (checkAndCount/account never go through spawn at all), so losing an
+	// occasional attempt/failure increment under sustained store pressure
+	// is an accepted trade-off against the alternative, an unbounded
+	// goroutine pile-up that could itself become the outage. Per-limiter,
+	// not a package-level channel: this codebase's own test suite
+	// constructs many independent *limiter values in one process
+	// (including in parallel, via t.Parallel()), and a shared global
+	// semaphore would let one test's write volume starve an unrelated
+	// test's — see newLimiter's own construction of it.
+	spawnTokens chan struct{}
 	// lastErrMsg is the message of the most recent store operation
 	// failure, guarded by logMu alongside lastStoreFailure. It is never
 	// cleared on a later success — "last store error" for the admin
@@ -525,6 +548,16 @@ type limiter struct {
 	failOpen   bool // store-error policy: true falls back to fallback, false refuses the request
 }
 
+// providerAttemptSpawnCap bounds how many concurrent recordProviderAttempt
+// store writes one limiter's production spawn implementation will run at
+// once (FOLDED-1, v0.22 review round, round 2) — see limiter.spawnTokens'
+// own doc comment for the full rationale. 64 is generous headroom for
+// this telemetry path specifically (every real deployment's traffic
+// volume is expected to sit well under it in steady state) while still
+// bounding the worst case against a store that has gone slow but not
+// down.
+const providerAttemptSpawnCap = 64
+
 // newLimiter returns a limiter. A nil store means every operation uses the
 // limiter's own in-process fallback memoryStore — the plugin still
 // enforces limits with no distributed backend configured, just without
@@ -533,14 +566,27 @@ type limiter struct {
 // memoryStore for that operation, false refuses the request (see
 // storeIncrBy / storeGet).
 func newLimiter(store counterStore, failOpen bool) *limiter {
-	return &limiter{
-		store:    store,
-		fallback: newMemoryStore(),
-		nowFn:    time.Now,
-		logf:     func(string, ...any) {},
-		failOpen: failOpen,
-		spawn:    func(f func()) { go f() },
+	l := &limiter{
+		store:       store,
+		fallback:    newMemoryStore(),
+		nowFn:       time.Now,
+		logf:        func(string, ...any) {},
+		failOpen:    failOpen,
+		spawnTokens: make(chan struct{}, providerAttemptSpawnCap),
 	}
+	l.spawn = func(f func()) {
+		select {
+		case l.spawnTokens <- struct{}{}:
+			go func() {
+				defer func() { <-l.spawnTokens }()
+				f()
+			}()
+		default:
+			// Dropped: spawnTokens is full — bounded, lossy-under-pressure
+			// by design (FOLDED-1, its own doc comment above).
+		}
+	}
+	return l
 }
 
 // now returns the limiter's current time, via nowFn.
@@ -1204,43 +1250,50 @@ func providerModelScopeID(provider, model string) string {
 	return provider + "/" + model
 }
 
-// sentinelUnwrapper is the errors.Unwrap interface, matched bare (a comma-ok
-// type assertion, never errors.Is/errors.As) — see matchesSentinel's own
-// doc comment for why.
-type sentinelUnwrapper interface {
-	Unwrap() error
-}
-
-// matchesSentinel reports whether err IS, or wraps, sentinel — the exact
-// semantics errors.Is applies for a plain sentinel comparison (neither
-// context.DeadlineExceeded nor context.Canceled defines an Is(error)
-// method, so there is no behavioral difference to preserve), implemented
-// by hand-walking err's Unwrap chain instead of calling errors.Is itself.
+// matchesSentinel reports whether err IS, or wraps (through any
+// combination of single-%w and multi-%w Unwrap chains), sentinel —
+// implemented with a real errors.Is call, NOT a hand-rolled Unwrap walk.
 //
-// This is deliberate, not a style preference: providerHTTPError's own doc
-// comment (providers.go) already documents that errors.As panics under
-// Yaegi when checking whether an interpreted pointer type implements
-// error, which is why handleAdapterError uses a bare type assertion
-// instead. errors.Is walks the identical reflect-based machinery
-// internally (both live in package errors and share its Is/As helper
-// code) and carries the same risk — recordProviderAttempt is exercised
-// under Yaegi too (tools/yaegi-check's harness drives a real chat
-// completion through it), so this sidesteps the trap entirely: a bare
-// `err.(sentinelUnwrapper)` comma-ok assertion is plain interface
-// satisfaction, never reflection over a possibly-interpreted concrete
-// type.
+// This function used to hand-roll that walk instead, via two locally
+// declared interfaces (single-error Unwrap() error, multi-error
+// Unwrap() []error) matched with bare comma-ok type assertions — the
+// documented-safe pattern providerHTTPError's own doc comment
+// (providers.go) already established for a DIFFERENT direction: checking
+// whether an INTERPRETED plugin-defined type (like providerHTTPError
+// itself) satisfies the standard error interface, which is exactly what
+// makes errors.As panic under Yaegi (it needs to synthesize interpreted
+// type info for that check). That hand-rolled version was WRONG for
+// THIS direction, and the SHOULD-A yaegi-check harness (v0.22 review
+// round, round 2 — tools/yaegi-check/main.go's exerciseAttemptAccounting)
+// caught it empirically: under the interpreter, `err.(multiUnwrapper)`
+// — an INTERPRETED interface type (multiUnwrapper, declared in this
+// file) asserted against a value whose concrete type is COMPILED
+// (*fmt.wrapErrors, from a real fmt.Errorf call with more than one %w) —
+// silently returned ok=false even though %T correctly reported
+// *fmt.wrapErrors and that type genuinely implements Unwrap() []error in
+// real, compiled Go. Yaegi's interface-satisfaction check apparently
+// does not correctly match a compiled concrete type's method set against
+// an interpreter-declared interface signature, at least for this shape —
+// the reverse direction of the already-documented trap, not previously
+// known to this codebase.
+//
+// errors.Is does not have this problem here: sentinel (context.
+// DeadlineExceeded, context.Canceled — isDeadlineExceeded's only
+// callers) and every err this function is ever called with (the network/
+// context error chain client.Do and fmt.Errorf produce) are BOTH always
+// compiled-origin values — never an interpreted plugin type. errors.Is's
+// own internal Unwrap-chain walk (including its Go 1.20+ multi-error
+// support) therefore runs entirely within compiled code on compiled
+// types, the same safe shape retry.go's isTransient already relies on
+// for these identical two sentinels, proven correct under Yaegi across
+// every prior review round. The risk this file's earlier version was
+// trying to avoid — errors.As panicking on an INTERPRETED type — simply
+// does not arise for a plain sentinel comparison against a compiled
+// value. Verified directly: this replacement is what made SHOULD-A's
+// timeout-driving harness pass under the real interpreter (round 2's
+// hand-rolled fix, though it passed every compiled `go test`, did not).
 func matchesSentinel(err, sentinel error) bool {
-	for err != nil {
-		if err == sentinel { //nolint:errorlint // deliberate identity comparison; see doc comment above
-			return true
-		}
-		u, ok := err.(sentinelUnwrapper)
-		if !ok {
-			return false
-		}
-		err = u.Unwrap()
-	}
-	return false
+	return errors.Is(err, sentinel)
 }
 
 // isDeadlineExceeded reports whether err IS, or wraps, context.
