@@ -25,6 +25,11 @@ import { type ExpandState, clearExpandOverrides, computeExpandedItems, toggleIte
 import { useDashboardStore } from '@/stores/dashboard'
 import type { AdminAliasView, AdminProviderView } from '@/types/api'
 
+// This component backs the "Providers" tab (App.vue) — a UI-label rename
+// only. The data it renders still comes from GET /admin/api/overview
+// (admin.go's adminOverviewResponse) and the store field below keeps that
+// same "overview" name, since the backend route/type names are unchanged
+// API surface.
 const dashboard = useDashboardStore()
 const overview = computed(() => dashboard.overview)
 

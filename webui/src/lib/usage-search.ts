@@ -6,7 +6,7 @@ import type { AdminUsageEntryView } from '@/types/api'
  * identical semantics, ONE implementation — no second copy of this logic).
  *
  * Every `query` parameter here is expected to already be trimmed and
- * lowercased by the caller, mirroring OverviewView.vue's own
+ * lowercased by the caller, mirroring ProvidersView.vue's own
  * normalizedQuery convention (modelMatches/aliasMatches there never
  * re-normalize either) — these functions stay pure string/array
  * operations, with the caller owning the single source of truth for "is a

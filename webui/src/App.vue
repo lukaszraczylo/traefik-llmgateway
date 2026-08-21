@@ -4,7 +4,7 @@ import { faCircleExclamation } from '@fortawesome/free-solid-svg-icons'
 import { computed, defineAsyncComponent, onMounted, ref } from 'vue'
 
 import AuthGate from '@/components/AuthGate.vue'
-import OverviewView from '@/components/OverviewView.vue'
+import ProvidersView from '@/components/ProvidersView.vue'
 import { Button } from '@/components/ui/button'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import UsageView from '@/components/UsageView.vue'
@@ -13,7 +13,7 @@ import { useDashboardStore } from '@/stores/dashboard'
 
 // Lazy: Chart.js (UsageChart.vue's dependency, pulled in transitively) is
 // the single largest piece of this bundle, and most admin sessions open on
-// Overview/Usage. Splitting it into its own chunk keeps the initial load
+// Providers/Usage. Splitting it into its own chunk keeps the initial load
 // lean; it fetches once, on first visit to the Charts tab.
 const ChartsView = defineAsyncComponent(() => import('@/components/ChartsView.vue'))
 
@@ -24,7 +24,11 @@ const GITHUB_REPO_URL = 'https://github.com/lukaszraczylo/traefik-llmgateway'
 const auth = useAuthStore()
 const dashboard = useDashboardStore()
 
-const activeView = ref<'overview' | 'usage' | 'charts'>('overview')
+// The tab is labeled "Providers" (operator rename); the backend endpoint it
+// fetches from, GET /admin/api/overview, and the store's own `overview`
+// field (AdminOverviewResponse) keep their original names unchanged — the
+// rename is UI-only, not an API surface change.
+const activeView = ref<'providers' | 'usage' | 'charts'>('providers')
 
 const statusText = computed<string>(() => {
   if (dashboard.error) return `refresh failed: ${dashboard.error}`
@@ -65,12 +69,12 @@ onMounted(() => {
 
     <Tabs v-else v-model="activeView">
       <TabsList>
-        <TabsTrigger value="overview">Overview</TabsTrigger>
+        <TabsTrigger value="providers">Providers</TabsTrigger>
         <TabsTrigger value="usage">Usage</TabsTrigger>
         <TabsTrigger value="charts">Charts</TabsTrigger>
       </TabsList>
-      <TabsContent value="overview">
-        <OverviewView />
+      <TabsContent value="providers">
+        <ProvidersView />
       </TabsContent>
       <TabsContent value="usage">
         <UsageView />

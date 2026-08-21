@@ -4,12 +4,14 @@ import { AdminApiError, adminFetch } from '@/lib/api'
 import { useAuthStore } from '@/stores/auth'
 import type { AdminOverviewResponse, AdminUsageResponse } from '@/types/api'
 
-/** How often the Overview/Usage views poll (matches the replaced vanilla-JS page). */
+/** How often the Providers/Usage views poll (matches the replaced vanilla-JS page). */
 const POLL_MS = 5000
 
 /**
  * useDashboardStore polls GET /admin/api/overview and GET /admin/api/usage
- * together every POLL_MS, feeding the Overview and Usage views. A single
+ * together every POLL_MS, feeding the Providers and Usage views (the store's
+ * own `overview` field keeps the backend's name — see ProvidersView.vue's
+ * doc comment for the UI-label/API-name split). A single
  * store (not two) because both routes are always fetched together — the
  * old vanilla-JS page's own Promise.all([overview, usage]) pattern.
  */

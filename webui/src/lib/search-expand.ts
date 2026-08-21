@@ -1,6 +1,6 @@
 /**
  * Pure expand/collapse state for a search-filterable shadcn-vue Accordion —
- * shared by OverviewView.vue (providers) and UsageView.vue (groups), and
+ * shared by ProvidersView.vue (providers) and UsageView.vue (groups), and
  * generalized (originally provider-expand.ts) so both consume ONE tested
  * implementation instead of two copies of the same logic (vue.md: "if
  * you've written it twice, you owe an abstraction"). Extracted out of the
@@ -10,7 +10,7 @@
  * directly, including the full flagged sequence.
  *
  * Two sets track state, keyed on each accordion item's own string id (a
- * provider name in Overview, a group id in Usage — this module has no
+ * provider name in Providers, a group id in Usage — this module has no
  * opinion on what the id means or on what counts as a "match"; callers
  * decide that and pass the resulting id list in):
  * - manuallyExpanded: items the user explicitly opened, independent of any
@@ -34,7 +34,7 @@ export interface ExpandState {
  * manuallyExpanded plus every id in matchingIds that is not in
  * manuallyCollapsed (auto-expand every match, unless the user explicitly
  * closed that one). The caller decides what "matching" means for its own
- * view, and this module has no opinion on it either way — OverviewView.vue
+ * view, and this module has no opinion on it either way — ProvidersView.vue
  * passes every provider that itself matched at all (every match there
  * implies at least one matching model, so every match auto-expands);
  * UsageView.vue instead passes only the subset of its own matches that

@@ -9,7 +9,7 @@ import { cn } from '@/lib/utils'
 
 /**
  * SearchInput is the one search-box control every filter in this panel
- * uses — OverviewView's model search, UsageView's user/group search, and
+ * uses — ProvidersView's model search, UsageView's user/group search, and
  * ChartsView's scope-picker search each grew an identical ~22-line
  * magnifying-glass-icon + Input + clear-button block; extracted into one
  * component (vue.md: "if you've written it twice, you owe an

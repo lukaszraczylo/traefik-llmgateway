@@ -118,12 +118,12 @@ describe('an item manually opened before search, still matches, clicked closed d
 })
 
 // This module is domain-agnostic on what an "id" represents — it started as
-// OverviewView.vue's provider names, but UsageView.vue now feeds it group
+// ProvidersView.vue's provider names, but UsageView.vue now feeds it group
 // ids too (see that view's own doc comment: matchingIds there is every
 // group that matches ONLY via a member, never via its own name). These two
 // cases exist to pin that the module behaves identically for that second
 // domain, not because anything here differs by id shape.
-describe('generic ids (Usage group ids, not just Overview provider names)', () => {
+describe('generic ids (Usage group ids, not just Providers provider names)', () => {
   it('auto-expands and can be collapsed/overridden identically for a group id', () => {
     const state = newState()
     const matches = ['team-a']

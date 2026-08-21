@@ -36,7 +36,7 @@ function memberCountOf(entry: AdminUsageEntryView): string {
 }
 
 // --- user/group search filter (operator feature, mirrors
-// OverviewView.vue's model search via the shared SearchInput component and
+// ProvidersView.vue's model search via the shared SearchInput component and
 // useSearchQuery composable — same styling, same clear-button behavior.
 // Matching logic lives in lib/usage-search.ts, which ChartsView.vue's own
 // scope-picker filter calls directly too (groupMatches, userMatches) — no
@@ -64,9 +64,9 @@ const filteredGroups = computed<AdminUsageEntryView[]>(() => {
  * ONLY via a member, never via their own name — the auto-expand target
  * set (search-expand.ts's computeExpandedItems `matchingIds`).
  *
- * This is a DELIBERATE divergence from OverviewView.vue, not an
- * oversight, and NOT because Overview lacks a provider-name match —
- * it doesn't lack one: providerMatches there (OverviewView.vue) checks
+ * This is a DELIBERATE divergence from ProvidersView.vue, not an
+ * oversight, and NOT because Providers lacks a provider-name match —
+ * it doesn't lack one: providerMatches there (ProvidersView.vue) checks
  * each model's full ROUTABLE id, `${provider}/${model}`
  * (lib/format.ts's routableModelId), so a query like "openai" matches
  * every "openai/..." model id and the whole provider auto-expands with
@@ -104,7 +104,7 @@ function visibleMembers(group: AdminUsageEntryView): AdminUsageEntryView[] {
   return matchingMembersOfGroup(group, users, normalizedQuery.value)
 }
 
-/** groupsEmptyMessage mirrors OverviewView.vue's aliasEmptyMessage three-way pattern: distinguishes nothing configured from nothing matching the active query, so an empty Groups card never reads the same regardless of why it's empty. */
+/** groupsEmptyMessage mirrors ProvidersView.vue's aliasEmptyMessage three-way pattern: distinguishes nothing configured from nothing matching the active query, so an empty Groups card never reads the same regardless of why it's empty. */
 const groupsEmptyMessage = computed(() =>
   !usage.value?.groups.length ? 'none configured' : hasQuery.value ? `no groups match "${userQuery.value}"` : 'none',
 )
@@ -137,7 +137,7 @@ const usersEmptyMessage = computed(() =>
 // --- Groups accordion (operator directive) ---
 //
 // Groups render as a shadcn-vue Accordion, same component and rationale
-// as Providers (OverviewView.vue) — expanding a group shows its member
+// as Providers (ProvidersView.vue) — expanding a group shows its member
 // users' own usage rows below it. A group's row cannot ALSO be a literal
 // <table> row for the identical reason Providers' old expandable row was
 // retired: AccordionItem wraps its trigger+content in a <div>, illegal
@@ -188,7 +188,7 @@ const toolbarHeaders = computed(() =>
 
 /**
  * Which groups are open — driven by the SAME tested lib/search-expand.ts
- * state OverviewView.vue uses for providers (generalized from
+ * state ProvidersView.vue uses for providers (generalized from
  * provider-expand.ts specifically so this view could reuse it, rather
  * than fork a second copy — see that module's own doc comment). The
  * adapter shape is the identical get/set computed pattern
@@ -221,7 +221,7 @@ const expandedGroupValues = computed<string[]>({
 // A stale manuallyCollapsed suppression from one search must never
 // silently carry into a later, unrelated one — see ExpandState's own doc
 // comment. Watching userQuery (not just the clear button) covers
-// backspacing to empty too — same convention as OverviewView.vue.
+// backspacing to empty too — same convention as ProvidersView.vue.
 watch(userQuery, (value) => {
   if (value.trim() === '') clearExpandOverrides(groupExpandState)
 })

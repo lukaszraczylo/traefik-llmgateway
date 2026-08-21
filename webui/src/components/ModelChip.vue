@@ -7,7 +7,7 @@ import { copyText } from '@/lib/clipboard'
 
 /**
  * ModelChip is one clickable, copyable model-id chip in a provider's
- * expanded model list (OverviewView.vue's provider-model accordion). id
+ * expanded model list (ProvidersView.vue's provider-model accordion). id
  * is the full routable id (lib/format.ts's routableModelId) — what
  * actually gets copied, so a pasted value works straight into a
  * `model: "..."` request field.

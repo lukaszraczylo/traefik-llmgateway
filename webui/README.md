@@ -68,17 +68,19 @@ npm run build     # what `make admin-ui` runs, plus webui/generate.mjs
 ## Structure
 
 - `src/stores/` — Pinia: `auth` (the sessionStorage key gate), `dashboard`
-  (Overview/Usage, 5s poll), `history` (Charts, fetch-on-selection + 30s
+  (Providers/Usage, 5s poll), `history` (Charts, fetch-on-selection + 30s
   refresh).
-- `src/components/` — `AuthGate`, `OverviewView`, `UsageView`,
+- `src/components/` — `AuthGate`, `ProvidersView` (the "Providers" tab —
+  named for its UI label; it still fetches GET /admin/api/overview, whose
+  own name is unchanged API surface), `UsageView`,
   `ChartsView`/`UsageChart`, `UsageTable`, `DataTable` (the shared
   sortable-table wrapper — shadcn-vue's DataTable pattern, `@tanstack/
   vue-table`, generic over row type), `SearchInput` (the shared search-box
   — icon + shadcn `Input` + shadcn `Button` clear button — every search
   filter in the panel renders); `ui/` holds the shadcn-vue primitives this
   panel actually uses (Accordion, Card, Table, Tabs, Button, Input, Alert,
-  Select, Badge) — nothing installed and unused. Providers (Overview) and
-  Groups (Usage) render as a real Accordion — expanding a group shows its
+  Select, Badge) — nothing installed and unused. Providers and Groups
+  (Usage) render as a real Accordion — expanding a group shows its
   member users' own usage rows, a client-side join on
   `AdminUsageEntryView.groupName`.
 - `src/composables/` — `useThemeColors` (Chart.js axis/grid/legend colors
@@ -87,13 +89,14 @@ npm run build     # what `make admin-ui` runs, plus webui/generate.mjs
 - `src/lib/` — `api.ts` (the `/admin/api/*` fetch wrapper), `format.ts`,
   `key-storage.ts`, `chart-setup.ts`, `search-expand.ts` (search-aware
   expand state, adapted to drive Accordion's v-model — shared by
-  OverviewView's providers and UsageView's groups), `usage-search.ts`
+  ProvidersView's providers and UsageView's groups), `usage-search.ts`
   (shared user/group query-matching helpers, used by UsageView and
   ChartsView), `usage-columns.ts` (shared `ColumnDef`s for every usage
   table).
 - `src/types/api.ts` — TypeScript mirrors of admin.go's JSON response
   shapes (`adminOverviewResponse`, `adminUsageResponse`,
-  `usageHistoryResponse`).
+  `usageHistoryResponse`) — these keep their backend names; only the
+  frontend tab label/component changed (see `ProvidersView` above).
 - `generate.mjs` — reads `dist/` after `vite build` and writes
   `../admin_assets_gen.go`; see its own header comment for why every
   asset is base64-encoded rather than embedded as a raw string literal.
