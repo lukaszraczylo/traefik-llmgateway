@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { faCheck, faEye, faEyeSlash, faKey } from '@fortawesome/free-solid-svg-icons'
-import { computed, nextTick, onMounted, ref } from 'vue'
+import { computed, nextTick, onMounted, ref, watch } from 'vue'
 
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
@@ -31,10 +31,22 @@ function submit(): void {
   void dashboard.refresh()
 }
 
-onMounted(() => {
-  // Autofocus the key field — this is the only control on the gate screen,
-  // so a keyboard/screen-reader user should land straight in it.
+function focusKeyInput(): void {
   void nextTick(() => keyInputEl.value?.$el?.focus())
+}
+
+onMounted(focusKeyInput)
+
+// Explicit refocus on a failed key: auth.submit() optimistically sets
+// apiKey before the server has validated it, which flips isAuthenticated
+// and makes App.vue unmount AuthGate; the ensuing 401 calls auth.reject()
+// (apiKey='', error=message), isAuthenticated flips back, and AuthGate
+// remounts — re-running onMounted's focus above as a side effect. That
+// chain is real and correct today, but silent: if optimistic auth is ever
+// removed, refocus would stop working with no signal. Watching auth.error
+// directly makes refocus explicit and no longer dependent on the remount.
+watch(() => auth.error, (err) => {
+  if (err) focusKeyInput()
 })
 </script>
 
@@ -46,14 +58,40 @@ onMounted(() => {
           <FontAwesomeIcon :icon="faKey" class="size-5" aria-hidden="true" />
         </div>
         <div class="flex flex-col items-center gap-1">
-          <span class="text-sm font-semibold text-foreground">LLM Gateway</span>
-          <CardTitle>Admin key required</CardTitle>
+          <span class="text-xs font-medium text-muted-foreground">LLM Gateway</span>
+          <CardTitle class="text-lg font-semibold">Admin key required</CardTitle>
         </div>
         <CardDescription>Enter an admin API key to continue.</CardDescription>
       </CardHeader>
       <CardContent class="flex flex-col gap-4">
+        <h2 id="authgate-security-heading" class="sr-only">
+          How this key is handled
+        </h2>
+        <ul aria-labelledby="authgate-security-heading" class="flex flex-col gap-1.5 text-xs text-muted-foreground">
+          <li class="flex items-start gap-1.5">
+            <FontAwesomeIcon :icon="faCheck" class="mt-0.5 size-3 shrink-0" aria-hidden="true" />
+            <span>Kept only in this tab's session storage</span>
+          </li>
+          <li class="flex items-start gap-1.5">
+            <FontAwesomeIcon :icon="faCheck" class="mt-0.5 size-3 shrink-0" aria-hidden="true" />
+            <span>Never written to disk</span>
+          </li>
+          <li class="flex items-start gap-1.5">
+            <FontAwesomeIcon :icon="faCheck" class="mt-0.5 size-3 shrink-0" aria-hidden="true" />
+            <span>Sent only to this page's own /admin/api/* requests</span>
+          </li>
+        </ul>
         <form class="flex flex-col gap-3" @submit.prevent="submit">
           <div class="relative">
+            <!--
+              authgate-shake retriggers via the AuthGate remount on a
+              failed submit (see the refocus watcher in <script> for the
+              exact chain) — a v-if unmount/remount recreates this
+              element, which replays the CSS animation. If that remount
+              chain ever changes, the shake stops retriggering silently
+              along with it (left as-is per review — the mechanism itself
+              is verified correct today).
+            -->
             <Input
               ref="keyInputEl"
               v-model="keyInput"
@@ -61,7 +99,9 @@ onMounted(() => {
               autocomplete="off"
               placeholder="API key"
               aria-label="Admin API key"
-              class="h-10 pr-10 text-base"
+              :aria-invalid="!!auth.error"
+              :aria-describedby="auth.error ? 'authgate-error' : undefined"
+              class="h-10 pr-10"
               :class="{ 'authgate-shake': auth.error }"
             />
             <Button
@@ -79,24 +119,10 @@ onMounted(() => {
             Continue
           </Button>
         </form>
-        <Alert v-if="auth.error" variant="destructive">
+        <Alert v-if="auth.error" id="authgate-error" variant="destructive">
           <AlertTitle>Authentication failed</AlertTitle>
           <AlertDescription>{{ auth.error }}</AlertDescription>
         </Alert>
-        <ul class="flex flex-col gap-1.5 text-xs text-muted-foreground">
-          <li class="flex items-start gap-1.5">
-            <FontAwesomeIcon :icon="faCheck" class="mt-0.5 size-3 shrink-0" aria-hidden="true" />
-            <span>Kept only in this tab's session storage</span>
-          </li>
-          <li class="flex items-start gap-1.5">
-            <FontAwesomeIcon :icon="faCheck" class="mt-0.5 size-3 shrink-0" aria-hidden="true" />
-            <span>Never written to disk</span>
-          </li>
-          <li class="flex items-start gap-1.5">
-            <FontAwesomeIcon :icon="faCheck" class="mt-0.5 size-3 shrink-0" aria-hidden="true" />
-            <span>Sent only to this page's own /admin/api/* requests</span>
-          </li>
-        </ul>
       </CardContent>
     </Card>
   </div>
