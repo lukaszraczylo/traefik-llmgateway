@@ -30,25 +30,49 @@ export const useDashboardStore = defineStore('dashboard', {
     async refresh(): Promise<void> {
       const auth = useAuthStore()
       if (!auth.isAuthenticated) return
-      try {
-        const [overview, usage, targets] = await Promise.all([
-          adminFetch<AdminOverviewResponse>('/admin/api/overview'),
-          adminFetch<AdminUsageResponse>('/admin/api/usage'),
-          adminFetch<AdminTargetsResponse>('/admin/api/targets'),
-        ])
-        this.overview = overview
-        this.usage = usage
-        this.targets = targets
+
+      const [overviewResult, usageResult, targetsResult] = await Promise.allSettled([
+        adminFetch<AdminOverviewResponse>('/admin/api/overview'),
+        adminFetch<AdminUsageResponse>('/admin/api/usage'),
+        adminFetch<AdminTargetsResponse>('/admin/api/targets'),
+      ])
+
+      // Each section is assigned independently (review round 2, v0.21
+      // fix): one endpoint failing (e.g. GET /admin/api/targets) must
+      // never blank the OTHER two, already-populated sections. The
+      // earlier Promise.all threw on the FIRST rejection and updated
+      // nothing at all — a single flaky route degraded every view in the
+      // dashboard, not just its own.
+      if (overviewResult.status === 'fulfilled') this.overview = overviewResult.value
+      if (usageResult.status === 'fulfilled') this.usage = usageResult.value
+      if (targetsResult.status === 'fulfilled') this.targets = targetsResult.value
+
+      const failures: { label: string; reason: unknown }[] = []
+      if (overviewResult.status === 'rejected') failures.push({ label: 'overview', reason: overviewResult.reason })
+      if (usageResult.status === 'rejected') failures.push({ label: 'usage', reason: usageResult.reason })
+      if (targetsResult.status === 'rejected') failures.push({ label: 'targets', reason: targetsResult.reason })
+
+      if (failures.length === 0) {
         this.lastUpdated = new Date()
         this.error = ''
-      } catch (err) {
-        // A 401/403 already rejected the key (lib/api.ts) — the AuthGate
-        // takes over the view, nothing left to report here.
-        if (err instanceof AdminApiError && (err.status === 401 || err.status === 403)) {
-          return
-        }
-        this.error = err instanceof Error ? err.message : String(err)
+        return
       }
+
+      // A 401/403 on ANY section already rejected the key (lib/api.ts) —
+      // the AuthGate takes over the whole view in that case, matching the
+      // pre-existing single-Promise.all behavior; nothing left to report.
+      const authRejected = failures.some(
+        ({ reason }) => reason instanceof AdminApiError && (reason.status === 401 || reason.status === 403),
+      )
+      if (authRejected) return
+
+      // A partial failure still advances lastUpdated: at least one
+      // section genuinely has fresh data, even though `error` (below)
+      // still surfaces that something is degraded.
+      if (failures.length < 3) this.lastUpdated = new Date()
+      this.error = failures
+        .map(({ label, reason }) => `${label}: ${reason instanceof Error ? reason.message : String(reason)}`)
+        .join('; ')
     },
     /** startPolling is idempotent and safe to call before a key is stored — refresh() no-ops until then. */
     startPolling(): void {

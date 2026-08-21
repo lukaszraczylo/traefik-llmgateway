@@ -33,12 +33,16 @@ export default defineConfig({
     modulePreload: { polyfill: false },
   },
   test: {
-    // Deliberately narrow: only lib/'s pure modules (search-expand.ts,
-    // usage-search.ts) are under vitest right now (webui's test infra
-    // starts here, on purpose — no snapshot/DOM/component testing this
-    // round). 'node' is enough since neither module touches browser
-    // globals; jsdom is not pulled in as a dependency for modules that
-    // don't need it.
+    // Deliberately narrow: lib/'s pure modules (search-expand.ts,
+    // usage-search.ts) plus, since review round 2 (v0.21), stores/
+    // dashboard.ts's own refresh() action — a Pinia store is plain
+    // reactive state and actions, no DOM or component mount involved, so
+    // it fits this same environment. Still no snapshot/DOM/component
+    // (.vue mount) testing. 'node' is enough since nothing under test
+    // touches a real browser global — dashboard.spec.ts mocks lib/api.ts
+    // entirely, so even sessionStorage access (auth.ts) never actually
+    // runs; jsdom is not pulled in as a dependency for modules that don't
+    // need it.
     environment: 'node',
     include: ['src/**/*.spec.ts'],
   },
