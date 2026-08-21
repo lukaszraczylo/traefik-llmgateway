@@ -583,20 +583,36 @@ func TestUsersFileHotReload(t *testing.T) {
 		t.Fatalf("write users.json: %v", err)
 	}
 
-	// 20s, not the plugin's 5s reload throttle alone: this is a real docker
-	// compose stack, not an in-process unit test, and needs margin for
-	// bind-mount propagation latency and scheduler jitter on a loaded host.
-	deadline := time.Now().Add(20 * time.Second)
+	// 60s, not the plugin's 5s reload throttle alone: this is a real docker
+	// compose stack, not an in-process unit test. On Docker Desktop for
+	// macOS, VirtioFS's host-write-to-guest-read propagation for a
+	// bind-mounted file is NOT bounded by the plugin's own reload logic —
+	// direct measurement (writing users.json on the host and polling the
+	// container's view of it via `docker compose exec`, independent of this
+	// plugin entirely) showed convergence times from under 1s up to ~18s,
+	// and one captured real run of this test took ~26s end to end (traefik1
+	// logged repeated "unexpected end of JSON input" reload errors — a torn
+	// read of an in-flight VirtioFS content update — every ~5s until the
+	// guest's view finally caught up). That is a VirtioFS-level cache
+	// staleness/coherency artifact of this host/mount combination, not a
+	// plugin bug: users_file.go already re-opens and re-reads the file by
+	// path on every reload (see its own comment), which is the correct,
+	// production-safe pattern for a Kubernetes ConfigMap/Secret atomic
+	// symlink-swap update too. 60s gives >2x margin over the worst
+	// convergence time observed so far.
+	start := time.Now()
+	deadline := start.Add(60 * time.Second)
 	var lastStatus int
 	for time.Now().Before(deadline) {
 		resp, _ := doJSON(t, http.MethodGet, traefik1URL+"/v1/models", carolKey, nil)
 		lastStatus = resp.StatusCode
 		if resp.StatusCode == http.StatusOK {
+			t.Logf("carol's key became valid %s after users.json changed", time.Since(start))
 			return
 		}
 		time.Sleep(time.Second)
 	}
-	t.Fatalf("carol's key did not become valid within 20s of users.json changing (last status=%d)", lastStatus)
+	t.Fatalf("carol's key did not become valid within 60s of users.json changing (last status=%d)", lastStatus)
 }
 
 // TestPassthroughAndMCPStream covers integration test 6: native passthrough
