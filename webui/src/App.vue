@@ -32,7 +32,7 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="mx-auto flex max-w-6xl flex-col gap-6 px-4 py-8">
+  <div class="flex w-full flex-col gap-6 px-4 py-8 sm:px-6 lg:px-8">
     <header class="flex flex-col gap-1">
       <h1 class="text-xl font-semibold tracking-tight">LLM Gateway &mdash; Admin</h1>
       <p class="flex items-center gap-1.5 text-sm text-muted-foreground">

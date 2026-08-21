@@ -1,15 +1,18 @@
 <script setup lang="ts">
+import type { ColumnDef } from '@tanstack/vue-table'
 import {
-  faChevronRight,
   faCircleCheck,
   faCircleXmark,
   faMagnifyingGlass,
   faTriangleExclamation,
   faXmark,
 } from '@fortawesome/free-solid-svg-icons'
-import { computed, reactive, ref, watch } from 'vue'
+import { computed, h, reactive, ref, watch } from 'vue'
 
+import DataTable from '@/components/DataTable.vue'
 import ModelChip from '@/components/ModelChip.vue'
+import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/components/ui/accordion'
+import { Badge } from '@/components/ui/badge'
 import {
   Card,
   CardContent,
@@ -18,15 +21,6 @@ import {
   CardTitle,
 } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableEmpty,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from '@/components/ui/table'
 import { formatAgo, formatTimestamp, routableModelId } from '@/lib/format'
 import { type ExpandState, clearExpandOverrides, computeExpandedProviders, toggleProviderExpand } from '@/lib/provider-expand'
 import { useDashboardStore } from '@/stores/dashboard'
@@ -35,42 +29,25 @@ import type { AdminAliasView, AdminProviderView } from '@/types/api'
 const dashboard = useDashboardStore()
 const overview = computed(() => dashboard.overview)
 
-// --- provider row expand/collapse ---
+// --- provider expand/collapse (shadcn-vue Accordion) ---
 //
-// Providers table rows expand to a model list (operator feature). This is
-// NOT shadcn-vue's Accordion or Collapsible component: both wrap
-// trigger+content in one <div>, which cannot legally sit between two
-// <tr> elements inside a <table>/<tbody>. This app renders entirely via
-// Vue's DOM APIs (createElement/appendChild), never by parsing an HTML
-// string, so the HTML5 parser's "foster parenting" algorithm — which
-// only runs while building a DOM tree FROM a token stream — never fires
-// here at all; a <div> placed as a <tbody> child by direct DOM
-// manipulation stays exactly where it was put. CSS2.1 §17.2.1 does
-// define this case: a non-row child of a row-group box is wrapped in
-// an anonymous table-row plus an anonymous table-cell, not left
-// undefined. What actually breaks is column alignment: that one
-// anonymous cell holds the div's entire contents, outside the table's
-// real column structure, so none of it lines up with the table's
-// actual columns. Either way, a <div> does not belong there.
-// (reka-ui's Collapsible primitives DO support an `as` prop that could in
-// principle render Root as a <tbody> and Trigger/Content as <tr> —
-// installed and inspected via the CLI to check, then not used:
-// CollapsibleContent's animation-measurement code calls
-// getBoundingClientRect() and sets inline transition/animation styles on
-// whatever element `as` names, an interaction with a <tr> this component
-// was never designed around and was not worth taking on for an instant
-// show/hide with no transition.) A second, plain <TableRow> toggled by
-// v-if is the correct table-native shape for an expandable row; it
-// reuses Accordion's own visual language (a rotating chevron, a
-// keyboard-accessible trigger) without misusing a component built for
-// block content.
+// Providers render as a real shadcn-vue Accordion (operator directive:
+// use the library component, restructure the layout to fit it — the
+// earlier hand-rolled table-row-toggle accordion is retired). The
+// trigger is one provider's summary line; the content holds its detail
+// (base URL, last refresh, last error) plus its model-id chips.
 //
-// Expand state itself (computeExpandedProviders/toggleProviderExpand/
-// clearExpandOverrides) is a plain, Vue-free module — lib/provider-expand.ts
-// — specifically so the exact toggle-during-search sequence a review
-// flagged is checkable by a throwaway assertion script outside Vue,
-// without standing up a component-test framework this project does not
-// otherwise have.
+// Expand STATE itself is unchanged: lib/provider-expand.ts's plain,
+// Vue-free two-set module (manuallyExpanded/manuallyCollapsed) — the
+// exact search-interaction bug fix a prior review flagged, checkable by
+// its own throwaway assertion script without mounting Vue. Only the
+// template-facing adapter changed: expandedProviderValues below is a
+// writable computed translating that Set-based state into the string[]
+// shape Accordion's `type="multiple"` v-model expects, and back —
+// clicking a trigger fires the setter with the new array; diffing it
+// against the previous effective set finds the one name that changed
+// and replays it through the SAME tested toggleProviderExpand used
+// before, so Accordion never owns this state itself, only displays it.
 const expandState: ExpandState = reactive({
   manuallyExpanded: new Set<string>(),
   manuallyCollapsed: new Set<string>(),
@@ -86,9 +63,8 @@ const hasQuery = computed(() => normalizedQuery.value.length > 0)
  * (routableModelId(p.name, m) — the same string ModelChip both displays
  * and copies), not the bare model id: copying a chip's text and pasting
  * it back into search must find it, and the routable form is strictly
- * more permissive (it contains the bare id as a substring, plus the
- * provider prefix), so this never hides a match the bare-id form would
- * have found.
+ * more permissive (it contains the bare id as a substring), so this
+ * never hides a match the bare-id form would have found.
  */
 function modelMatches(providerName: string, modelId: string): boolean {
   return routableModelId(providerName, modelId).toLowerCase().includes(normalizedQuery.value)
@@ -109,7 +85,7 @@ const filteredAliases = computed<AdminAliasView[]>(() => {
   return hasQuery.value ? all.filter(aliasMatches) : all
 })
 
-/** expandedProviders is what the template reads to decide which rows show their model list — see lib/provider-expand.ts's own doc comments for the manual/auto-expand/override semantics. */
+/** expandedProviders is the EFFECTIVE (possibly auto-expanded-by-search) set — see lib/provider-expand.ts's own doc comments for the manual/auto-expand/override semantics. */
 const expandedProviders = computed<Set<string>>(() =>
   computeExpandedProviders(
     expandState,
@@ -122,6 +98,26 @@ const expandedProviders = computed<Set<string>>(() =>
 function toggleProvider(name: string): void {
   toggleProviderExpand(expandState, name, expandedProviders.value.has(name))
 }
+
+/**
+ * expandedProviderValues adapts expandedProviders (a Set) to Accordion's
+ * `type="multiple"` v-model contract (a string[]): reads out as
+ * Array.from(expandedProviders.value); writes replay each name whose
+ * membership changed through toggleProvider — Accordion never mutates
+ * expandState directly, it only tells this setter what changed.
+ */
+const expandedProviderValues = computed<string[]>({
+  get: () => Array.from(expandedProviders.value),
+  set: (newValues) => {
+    const next = new Set(newValues)
+    for (const name of expandedProviders.value) {
+      if (!next.has(name)) toggleProvider(name)
+    }
+    for (const name of next) {
+      if (!expandedProviders.value.has(name)) toggleProvider(name)
+    }
+  },
+})
 
 // A stale manuallyCollapsed suppression from one search must never
 // silently carry into a later, unrelated one — see ExpandState's own doc
@@ -136,23 +132,32 @@ function visibleModels(p: AdminProviderView): string[] {
   return hasQuery.value ? p.models.filter((m) => modelMatches(p.name, m)) : p.models
 }
 
-/**
- * providerModelsId is the id shared by a provider's chevron button
- * (aria-controls, only set while expanded — see the template) and its
- * expanded content row (id). Provider names are not escaped before this
- * template-literal interpolation: buildAdapters (providers.go) rejects
- * any name that does not match configNamePattern
- * (`^[a-zA-Z0-9._-]+$`, providers.go) before this app ever sees it, so
- * no provider name this endpoint can return contains a character an
- * HTML id/attribute value needs escaped.
- */
-function providerModelsId(name: string): string {
-  return `provider-models-${name}`
-}
-
 function clearQuery(): void {
   modelQuery.value = ''
 }
+
+// --- model aliases (sortable DataTable, operator directive) ---
+//
+// The alias id gets the ModelChip copy treatment (an alias name IS the
+// routable string a caller sends as `model`); the target column stays
+// plain text.
+const aliasColumns: ColumnDef<AdminAliasView, unknown>[] = [
+  {
+    id: 'alias',
+    header: 'Alias',
+    accessorFn: (a) => a.alias,
+    cell: ({ row }) => h(ModelChip, { id: row.original.alias }),
+  },
+  {
+    id: 'target',
+    header: 'Target',
+    accessorFn: (a) => a.target,
+    cell: ({ row }) => h('span', { class: 'text-muted-foreground' }, row.original.target),
+  },
+]
+const aliasEmptyMessage = computed(() =>
+  !overview.value?.aliases.length ? 'none configured' : hasQuery.value ? `no aliases match "${modelQuery.value}"` : 'none',
+)
 </script>
 
 <template>
@@ -247,83 +252,51 @@ function clearQuery(): void {
         </div>
       </CardHeader>
       <CardContent>
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>Name</TableHead>
-              <TableHead>Type</TableHead>
-              <TableHead>Base URL</TableHead>
-              <TableHead class="text-right">Models</TableHead>
-              <TableHead>Last refresh</TableHead>
-              <TableHead>Last error</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            <TableEmpty v-if="!overview?.providers.length" :colspan="6" class="text-muted-foreground">
-              none
-            </TableEmpty>
-            <TableEmpty
-              v-else-if="hasQuery && filteredProviders.length === 0"
-              :colspan="6"
-              class="text-muted-foreground"
-            >
-              no providers match &quot;{{ modelQuery }}&quot;
-            </TableEmpty>
-            <template v-for="p in filteredProviders" :key="p.name">
-              <TableRow class="cursor-pointer select-none hover:bg-accent/50" @click="toggleProvider(p.name)">
-                <TableCell class="font-medium">
-                  <!--
-                    A real <button>, not role="button" on the <tr>: a <tr>
-                    carries table-row AT semantics (a screen reader
-                    announces it as part of the table's row/column
-                    structure), and overriding that to "button" strips
-                    those semantics from the whole row — exactly the kind
-                    of ARIA-over-native mistake the "semantics first"
-                    rule warns against. The button lives in the natural
-                    host, the chevron+name span, and needs no click
-                    handler of its own: its native click (mouse, or Enter/
-                    Space while focused — free, standard <button>
-                    behavior, no keydown handling to write) bubbles up to
-                    the row's own @click above, so exactly one place
-                    (the row) ever runs the actual toggle. aria-controls
-                    is set ONLY while expanded (not unconditionally): the
-                    content row is v-if, not v-show (Lazy rendering — see
-                    the models div below), so an id it would point to
-                    while collapsed does not exist in the DOM yet, and
-                    ARIA requires aria-controls name an id that exists.
-                  -->
-                  <button
-                    type="button"
-                    class="-my-1 flex items-center gap-2 rounded py-1 focus-visible:ring-3 focus-visible:ring-ring/50 focus-visible:outline-1 focus-visible:outline-ring"
-                    :aria-expanded="expandedProviders.has(p.name)"
-                    :aria-controls="expandedProviders.has(p.name) ? providerModelsId(p.name) : undefined"
-                  >
-                    <FontAwesomeIcon
-                      :icon="faChevronRight"
-                      class="size-3 shrink-0 text-muted-foreground transition-transform duration-150"
-                      :class="expandedProviders.has(p.name) ? 'rotate-90' : ''"
-                      aria-hidden="true"
-                    />
-                    {{ p.name }}
-                  </button>
-                </TableCell>
-                <TableCell class="text-muted-foreground">{{ p.type }}</TableCell>
-                <TableCell class="text-muted-foreground">{{ p.baseUrl }}</TableCell>
-                <TableCell class="text-right tabular-nums">{{ p.modelCount }}</TableCell>
-                <TableCell class="text-muted-foreground">{{ formatTimestamp(p.lastRefresh) }}</TableCell>
-                <TableCell class="text-destructive">{{ p.lastErr ?? '' }}</TableCell>
-              </TableRow>
-              <TableRow v-if="expandedProviders.has(p.name)" :id="providerModelsId(p.name)">
-                <TableCell colspan="6" class="whitespace-normal bg-muted/30">
-                  <div v-if="visibleModels(p).length" class="flex flex-wrap gap-1.5 py-1">
-                    <ModelChip v-for="m in visibleModels(p)" :key="m" :id="routableModelId(p.name, m)" />
-                  </div>
-                  <p v-else class="py-1 text-sm text-muted-foreground">no models known yet</p>
-                </TableCell>
-              </TableRow>
-            </template>
-          </TableBody>
-        </Table>
+        <p v-if="!overview?.providers.length" class="py-6 text-center text-sm text-muted-foreground">none</p>
+        <p
+          v-else-if="hasQuery && filteredProviders.length === 0"
+          class="py-6 text-center text-sm text-muted-foreground"
+        >
+          no providers match &quot;{{ modelQuery }}&quot;
+        </p>
+        <Accordion v-else v-model="expandedProviderValues" type="multiple" class="rounded-md border px-3">
+          <AccordionItem v-for="p in filteredProviders" :key="p.name" :value="p.name">
+            <AccordionTrigger>
+              <div class="flex flex-1 flex-wrap items-center gap-x-3 gap-y-1 pr-2 text-left">
+                <span class="font-medium">{{ p.name }}</span>
+                <Badge variant="secondary" class="font-normal">{{ p.type }}</Badge>
+                <span class="text-xs text-muted-foreground tabular-nums">{{ p.modelCount }} models</span>
+                <FontAwesomeIcon
+                  v-if="p.lastErr"
+                  :icon="faTriangleExclamation"
+                  class="size-3.5 shrink-0 text-destructive"
+                  aria-hidden="true"
+                />
+                <span class="text-xs text-muted-foreground">refreshed {{ formatAgo(p.lastRefresh) || 'never' }}</span>
+              </div>
+            </AccordionTrigger>
+            <AccordionContent>
+              <dl class="mb-3 grid grid-cols-2 gap-x-6 gap-y-1.5 text-sm sm:grid-cols-3">
+                <div>
+                  <dt class="text-xs text-muted-foreground">Base URL</dt>
+                  <dd class="break-all">{{ p.baseUrl }}</dd>
+                </div>
+                <div>
+                  <dt class="text-xs text-muted-foreground">Last refresh</dt>
+                  <dd>{{ formatTimestamp(p.lastRefresh) }}</dd>
+                </div>
+                <div v-if="p.lastErr">
+                  <dt class="text-xs text-muted-foreground">Last error</dt>
+                  <dd class="text-destructive">{{ p.lastErr }}</dd>
+                </div>
+              </dl>
+              <div v-if="visibleModels(p).length" class="flex flex-wrap gap-1.5">
+                <ModelChip v-for="m in visibleModels(p)" :key="m" :id="routableModelId(p.name, m)" />
+              </div>
+              <p v-else class="text-sm text-muted-foreground">no models known yet</p>
+            </AccordionContent>
+          </AccordionItem>
+        </Accordion>
       </CardContent>
     </Card>
 
@@ -333,30 +306,7 @@ function clearQuery(): void {
         <CardDescription>Operator-defined alias &rarr; target model mappings.</CardDescription>
       </CardHeader>
       <CardContent>
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>Alias</TableHead>
-              <TableHead>Target</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            <TableEmpty v-if="!overview?.aliases.length" :colspan="2" class="text-muted-foreground">
-              none configured
-            </TableEmpty>
-            <TableEmpty
-              v-else-if="hasQuery && filteredAliases.length === 0"
-              :colspan="2"
-              class="text-muted-foreground"
-            >
-              no aliases match &quot;{{ modelQuery }}&quot;
-            </TableEmpty>
-            <TableRow v-for="a in filteredAliases" :key="a.alias">
-              <TableCell class="font-medium">{{ a.alias }}</TableCell>
-              <TableCell class="text-muted-foreground">{{ a.target }}</TableCell>
-            </TableRow>
-          </TableBody>
-        </Table>
+        <DataTable :columns="aliasColumns" :data="filteredAliases" :empty-message="aliasEmptyMessage" />
       </CardContent>
     </Card>
 

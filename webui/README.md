@@ -71,11 +71,18 @@ npm run build     # what `make admin-ui` runs, plus webui/generate.mjs
   (Overview/Usage, 5s poll), `history` (Charts, fetch-on-selection + 30s
   refresh).
 - `src/components/` — `AuthGate`, `OverviewView`, `UsageView`,
-  `ChartsView`/`UsageChart`, `UsageTable`; `ui/` holds the shadcn-vue
-  primitives this panel actually uses (Card, Table, Tabs, Button, Input,
-  Alert, Select, Badge) — nothing installed and unused.
+  `ChartsView`/`UsageChart`, `UsageTable`, `DataTable` (the shared
+  sortable-table wrapper — shadcn-vue's DataTable pattern, `@tanstack/
+  vue-table`, generic over row type); `ui/` holds the shadcn-vue
+  primitives this panel actually uses (Accordion, Card, Table, Tabs,
+  Button, Input, Alert, Select, Badge) — nothing installed and unused.
+  Providers (Overview) and Groups (Usage) render as a real Accordion —
+  expanding a group shows its member users' own usage rows, a
+  client-side join on `AdminUsageEntryView.groupName`.
 - `src/lib/` — `api.ts` (the `/admin/api/*` fetch wrapper), `format.ts`,
-  `key-storage.ts`, `chart-setup.ts`.
+  `key-storage.ts`, `chart-setup.ts`, `provider-expand.ts` (search-aware
+  expand state, adapted to drive Accordion's v-model), `usage-columns.ts`
+  (shared `ColumnDef`s for every usage table).
 - `src/types/api.ts` — TypeScript mirrors of admin.go's JSON response
   shapes (`adminOverviewResponse`, `adminUsageResponse`,
   `usageHistoryResponse`).
