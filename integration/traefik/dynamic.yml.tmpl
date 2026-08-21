@@ -120,6 +120,19 @@ http:
           mcpServers:
             tool:
               url: "http://mocktool:8080"
+            # toolstrict backs the federated-/mcp handshake-fallback
+            # integration coverage (SF4, review round 2, v0.21): mocktool's
+            # own "/strict" route (integration/mock/main.go's
+            # handleToolJSONRPCStrict) rejects a bare, session-less
+            # tools/list or tools/call with a JSON-RPC error and only
+            # honors one carrying a session id its own "initialize"
+            # issued — the same shape readitall/fetch answer live, and the
+            # exact trigger the plugin's bare-first-with-fallback retry
+            # (mcp_federation.go's mcpBackendCall) exists for. Proves that
+            # retry works under real Traefik+Yaegi, not just go test's own
+            # mocks.
+            toolstrict:
+              url: "http://mocktool:8080/strict"
           # v0.2 features (spec §1, §2, §4, §5), all opt-in and off by
           # default in v0.1: enabled here so the integration suite
           # exercises every one under real Traefik+Yaegi, not just go

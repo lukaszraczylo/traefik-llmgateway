@@ -27,6 +27,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -93,6 +94,22 @@ func newServerMux(mode string) (*http.ServeMux, error) {
 		mux.HandleFunc("/v1beta/models/", handleGeminiGenerate)
 	case "tool":
 		mux.HandleFunc("/sse", handleToolSSE)
+		// "/" is this mode's own base URL (Config.MCPServers["tool"].URL,
+		// no path — an empty-path request's wire target normalizes to
+		// "/") — the LENIENT federated-/mcp JSON-RPC endpoint (SF4,
+		// review round 2, v0.21): every bare, session-less call succeeds
+		// outright, modeling the 8-of-11 majority the live production
+		// probe found (mcp_federation.go's own mcpBackendCall doc
+		// comment). "/strict" is the STRICT counterpart
+		// (Config.MCPServers["toolstrict"].URL,
+		// dynamic.yml.tmpl) — every method but "initialize" is rejected
+		// with a JSON-RPC error until a real Mcp-Session-Id header from a
+		// prior initialize accompanies it, modeling readitall/fetch's
+		// real, live-probed behavior — so the integration suite exercises
+		// BOTH the bare path and the plugin's handshake-fallback retry
+		// under real Traefik+Yaegi, not just go test's own mocks.
+		mux.HandleFunc("/", handleToolJSONRPC)
+		mux.HandleFunc("/strict", handleToolJSONRPCStrict)
 	default:
 		return nil, fmt.Errorf("unknown -mode %q (want openai, anthropic, gemini, or tool)", mode)
 	}
@@ -440,6 +457,157 @@ func handleToolSSE(w http.ResponseWriter, _ *http.Request) {
 		b, _ := json.Marshal(map[string]any{"seq": i, "msg": msg})
 		sw.write("", string(b))
 		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// --- tool mode: federated /mcp JSON-RPC endpoints (SF4, review round 2, v0.21) ---
+
+// mcpSessionHeader mirrors the plugin's own constant of the same name
+// (mcp_federation.go) — duplicated here rather than imported, since
+// integration/ is its own Go module (integration/go.mod) and this mock
+// process is a wire-protocol peer of the plugin, not a code dependent on
+// its internals.
+const mcpSessionHeader = "Mcp-Session-Id"
+
+// jsonrpcMsg is the minimal JSON-RPC 2.0 envelope this mock's tool-mode
+// handlers read and write — matching the plugin's own wire format
+// (mcp_federation.go's jsonrpcRequest/jsonrpcResponse) field for field,
+// without sharing Go types across the two separate modules.
+type jsonrpcMsg struct {
+	Params  json.RawMessage `json:"params,omitempty"`
+	Result  json.RawMessage `json:"result,omitempty"`
+	Error   *jsonrpcMsgErr  `json:"error,omitempty"`
+	JSONRPC string          `json:"jsonrpc"`
+	Method  string          `json:"method"`
+	ID      json.RawMessage `json:"id,omitempty"`
+}
+
+type jsonrpcMsgErr struct {
+	Message string `json:"message"`
+	Code    int    `json:"code"`
+}
+
+// toolMockTools is the fixed "tools/list" result both the lenient ("/")
+// and strict ("/strict") JSON-RPC endpoints answer with, once reachable.
+var toolMockTools = []map[string]any{
+	{"name": "echo", "description": "echoes its call arguments back"},
+}
+
+// writeJSONRPC writes msg as a JSON-RPC response body at HTTP 200 —
+// JSON-RPC errors are payload-level, matching the plugin's own
+// writeJSONRPCEnvelope convention (mcp_federation.go) this mock mirrors
+// so the integration suite exercises the real wire shape end to end.
+func writeJSONRPC(w http.ResponseWriter, msg jsonrpcMsg) {
+	msg.JSONRPC = "2.0"
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(msg)
+}
+
+// mcpToolCallParams is the "tools/call" params shape both endpoints below
+// decode — name and (optional) arguments, matching the plugin's own
+// mcpToolCallParams (mcp_federation.go).
+type mcpToolCallParams struct {
+	Name      string          `json:"name"`
+	Arguments json.RawMessage `json:"arguments,omitempty"`
+}
+
+// handleToolJSONRPC answers the LENIENT federated-/mcp endpoint
+// (Config.MCPServers["tool"].URL, dynamic.yml.tmpl): every bare,
+// session-less call succeeds outright — the majority-case behavior the
+// live production probe found (8 of 11 real servers), and the plugin's
+// own "bare-first" fast path (mcp_federation.go's mcpBackendCall) never
+// needs to retry against this server at all.
+func handleToolJSONRPC(w http.ResponseWriter, r *http.Request) {
+	var req jsonrpcMsg
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSONRPC(w, jsonrpcMsg{Error: &jsonrpcMsgErr{Code: -32700, Message: "parse error"}})
+		return
+	}
+	switch req.Method {
+	case "initialize":
+		result, _ := json.Marshal(map[string]any{"protocolVersion": "2025-11-25", "capabilities": map[string]any{}})
+		writeJSONRPC(w, jsonrpcMsg{ID: req.ID, Result: result})
+	case "tools/list":
+		result, _ := json.Marshal(map[string]any{"tools": toolMockTools})
+		writeJSONRPC(w, jsonrpcMsg{ID: req.ID, Result: result})
+	case "tools/call":
+		var params mcpToolCallParams
+		_ = json.Unmarshal(req.Params, &params)
+		result, _ := json.Marshal(map[string]any{"echoed": params.Name})
+		writeJSONRPC(w, jsonrpcMsg{ID: req.ID, Result: result})
+	default:
+		writeJSONRPC(w, jsonrpcMsg{ID: req.ID, Error: &jsonrpcMsgErr{Code: -32601, Message: "method not found"}})
+	}
+}
+
+// toolStrictSessions tracks the session ids "/strict" has issued via its
+// own "initialize" — guarded by toolStrictSessionsMu, since the compose
+// stack's traefik1 can serve concurrent requests against this one mock
+// process. toolStrictSessionSeq mints a new id per initialize call.
+var (
+	toolStrictSessionsMu sync.Mutex
+	toolStrictSessions   = map[string]bool{}
+	toolStrictSessionSeq atomic.Int64
+)
+
+// handleToolJSONRPCStrict answers the STRICT federated-/mcp endpoint
+// (Config.MCPServers["toolstrict"].URL, dynamic.yml.tmpl): "initialize"
+// always succeeds and mints a fresh Mcp-Session-Id (returned as a
+// response header); every OTHER method is rejected with a JSON-RPC error
+// unless the request carries a session id this handler itself issued —
+// modeling readitall/fetch's real, live-probed behavior (a JSON-RPC
+// error on a bare call, not an HTTP status) so the integration suite
+// exercises the plugin's bare-first-with-fallback handshake retry
+// (mcp_federation.go's mcpBackendCall) under real Traefik+Yaegi. DELETE
+// ends a session — the plugin's own best-effort cleanup call.
+func handleToolJSONRPCStrict(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodDelete {
+		toolStrictSessionsMu.Lock()
+		delete(toolStrictSessions, r.Header.Get(mcpSessionHeader))
+		toolStrictSessionsMu.Unlock()
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	var req jsonrpcMsg
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSONRPC(w, jsonrpcMsg{Error: &jsonrpcMsgErr{Code: -32700, Message: "parse error"}})
+		return
+	}
+
+	if req.Method == "initialize" {
+		sessionID := fmt.Sprintf("strict-session-%d", toolStrictSessionSeq.Add(1))
+		toolStrictSessionsMu.Lock()
+		toolStrictSessions[sessionID] = true
+		toolStrictSessionsMu.Unlock()
+		w.Header().Set(mcpSessionHeader, sessionID)
+		result, _ := json.Marshal(map[string]any{"protocolVersion": "2025-11-25", "capabilities": map[string]any{}})
+		writeJSONRPC(w, jsonrpcMsg{ID: req.ID, Result: result})
+		return
+	}
+
+	toolStrictSessionsMu.Lock()
+	valid := toolStrictSessions[r.Header.Get(mcpSessionHeader)]
+	toolStrictSessionsMu.Unlock()
+	if !valid {
+		writeJSONRPC(w, jsonrpcMsg{ID: req.ID, Error: &jsonrpcMsgErr{
+			Code:    -32000,
+			Message: "method " + req.Method + " is invalid during session-less access; call initialize first",
+		}})
+		return
+	}
+
+	switch req.Method {
+	case "tools/list":
+		result, _ := json.Marshal(map[string]any{"tools": toolMockTools})
+		writeJSONRPC(w, jsonrpcMsg{ID: req.ID, Result: result})
+	case "tools/call":
+		var params mcpToolCallParams
+		_ = json.Unmarshal(req.Params, &params)
+		result, _ := json.Marshal(map[string]any{"echoed": params.Name})
+		writeJSONRPC(w, jsonrpcMsg{ID: req.ID, Result: result})
+	default:
+		writeJSONRPC(w, jsonrpcMsg{ID: req.ID, Error: &jsonrpcMsgErr{Code: -32601, Message: "method not found"}})
 	}
 }
 

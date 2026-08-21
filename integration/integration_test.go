@@ -657,6 +657,72 @@ func TestPassthroughAndMCPStream(t *testing.T) {
 	}
 }
 
+// TestFederatedMCP covers integration test 8 (SF4, review round 2, v0.21):
+// POST /mcp aggregates both the lenient "tool" server (a bare tools/list
+// answers outright) and the strict "toolstrict" server (rejects a bare
+// call with a JSON-RPC error, only answers after the plugin's own
+// bare-first-with-fallback handshake retry — mcp_federation.go's
+// mcpBackendCall) into one federated tools/list, then routes a tools/call
+// to the correct one by its "<serverName>_" prefix — all under real
+// Traefik+Yaegi, not just go test's own mocks (closes the "only goroutine
+// in the package, zero real-interpreter coverage" review gap).
+func TestFederatedMCP(t *testing.T) {
+	listReq := map[string]any{"jsonrpc": "2.0", "id": 1, "method": "tools/list"}
+	resp, body := doJSON(t, http.MethodPost, traefik1URL+"/mcp", aliceKey, listReq)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("tools/list: status = %d, body=%#v", resp.StatusCode, body)
+	}
+	if body["error"] != nil {
+		t.Fatalf("tools/list: unexpected JSON-RPC error: %#v", body["error"])
+	}
+	result, ok := body["result"].(map[string]any)
+	if !ok {
+		t.Fatalf("tools/list: result = %#v, want an object", body["result"])
+	}
+	tools, ok := result["tools"].([]any)
+	if !ok {
+		t.Fatalf("tools/list: tools = %#v, want an array", result["tools"])
+	}
+
+	var names []string
+	for _, tool := range tools {
+		toolMap, ok := tool.(map[string]any)
+		if !ok {
+			continue
+		}
+		if name, ok := toolMap["name"].(string); ok {
+			names = append(names, name)
+		}
+	}
+	if !slices.Contains(names, "tool_echo") {
+		t.Errorf("tools/list names = %v, want tool_echo (the lenient server's bare tools/list)", names)
+	}
+	if !slices.Contains(names, "toolstrict_echo") {
+		t.Errorf("tools/list names = %v, want toolstrict_echo (the strict server, reachable ONLY via the plugin's own handshake-fallback retry)", names)
+	}
+
+	callReq := map[string]any{
+		"jsonrpc": "2.0",
+		"id":      2,
+		"method":  "tools/call",
+		"params":  map[string]any{"name": "toolstrict_echo", "arguments": map[string]any{"q": "hello"}},
+	}
+	callResp, callBody := doJSON(t, http.MethodPost, traefik1URL+"/mcp", aliceKey, callReq)
+	if callResp.StatusCode != http.StatusOK {
+		t.Fatalf("tools/call: status = %d, body=%#v", callResp.StatusCode, callBody)
+	}
+	if callBody["error"] != nil {
+		t.Fatalf("tools/call: unexpected JSON-RPC error: %#v", callBody["error"])
+	}
+	callResult, ok := callBody["result"].(map[string]any)
+	if !ok {
+		t.Fatalf("tools/call: result = %#v, want an object", callBody["result"])
+	}
+	if got, want := callResult["echoed"], "echo"; got != want {
+		t.Errorf("tools/call: echoed = %v, want %q (the server-name prefix must be stripped before forwarding to toolstrict)", got, want)
+	}
+}
+
 // TestRealUpstreamSmoke covers integration test 7 (optional): a live round
 // trip through a second middleware config carrying a keyless openai-type
 // "uni" provider pointed at the operator's real gateway. Gated on
