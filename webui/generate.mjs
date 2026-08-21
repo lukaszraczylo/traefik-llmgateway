@@ -80,7 +80,13 @@ function assertNoInlineAssets(html, sourceLabel) {
   const scriptTagRe = /<script\b([^>]*)>/gi
   let match
   while ((match = scriptTagRe.exec(html)) !== null) {
-    if (!/\bsrc\s*=/i.test(match[1])) {
+    // Anchored to attribute-start (start-of-string or preceding
+    // whitespace), not a bare \b word boundary: \b alone matches inside
+    // "data-src=" too (the "-" before "src" is itself a non-word
+    // character, so \b sits right before "src"), which would wrongly
+    // treat a data-src/nosrc/whatever-src attribute as the real src= that
+    // makes a <script> external.
+    if (!/(^|\s)src\s*=/i.test(match[1])) {
       console.error(
         `generate.mjs: ${sourceLabel} contains an inline <script> (no src= attribute): ${match[0]}\n` +
           `The admin CSP ships script-src 'self' with no 'unsafe-inline' — every script must be external.`,

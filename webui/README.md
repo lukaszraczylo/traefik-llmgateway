@@ -12,33 +12,47 @@ built, baked-in output, never `webui/` itself.
 
 ## Warning: `shadcn-vue add`/`init` regressions
 
-`components.json`'s `iconLibrary` and `font` fields are locked to
-`"lucide"` and `"inter"` — **not this project's real choices** (this
-project uses FontAwesome only, per `vue-web-development` house skill, and
-no external font at all). The shadcn-vue CLI's schema does not accept
-`"none"`/`"fontawesome"`/`"system"` for either field (checked directly:
-`node_modules/shadcn-vue/dist/preset-*.js`'s `PRESET_ICON_LIBRARIES` and
-`PRESET_FONTS` arrays — five fixed choices each, no escape hatch), and
-JSON supports no comment syntax to warn inline (the repo's own
-pre-commit JSON validator rejects JSONC comments — see `tsconfig.*.json`
-history). This warning is the only place the trap could be recorded.
+`components.json` has no `iconLibrary` or `font` key. **Do not add them
+back.** Their omission is the fix, not an oversight — read on before you
+"helpfully" restore either one.
 
-Both `npx shadcn-vue init` and `npx shadcn-vue add <component>` read
-these fields and **silently rewrite `src/assets/main.css`** — hit twice
-in this project's own history: `init` first, then a follow-up `add`
-call, both re-added a `@import url('https://fonts.googleapis.com/...')`
-line and switched the dark-mode `@custom-variant` back to a `.dark`-class
-toggle. If you ever run either command again:
+Earlier revisions of this file set `"iconLibrary": "lucide"` and
+`"font": "inter"`, both wrong for this project (FontAwesome only, per
+the `vue-web-development` house skill; no external font at all). Both
+`npx shadcn-vue init` and `npx shadcn-vue add <component>` read those two
+fields and, when set, rewrite `src/assets/main.css` — hit twice in this
+project's own history, `init` then a later `add`, both re-adding a
+`@import url('https://fonts.googleapis.com/...')` line and switching the
+dark-mode `@custom-variant` back to a `.dark`-class toggle.
 
-1. **Diff `src/assets/main.css` before committing.** Remove any
-   re-added `@import url('https://fonts.googleapis...')` line (external
-   font, blocked by the admin CSP's `style-src 'self'` anyway) and
-   restore the `@custom-variant dark` removal (see the file's own header
-   comment for why: `prefers-color-scheme`, not a class toggle).
-2. **Check the new component for a `lucide-vue-next`/`@lucide/vue`
-   import** and swap it for the FontAwesome equivalent (see
-   `src/components/ui/select/Select*.vue` for the pattern already
-   applied there).
+The actual shadcn-vue config schema
+(`node_modules/shadcn-vue/dist/schema/index.js`'s `rawConfigSchema`)
+declares both fields as `z.string().optional()` — not an enum, contrary
+to an earlier, incorrect claim in this project's own review notes that
+the CLI schema forced one of five fixed values. The CLI's `init --font`/
+`--icon-library` flags do offer five fixed choices each, but that is a
+flag-parsing constraint, not a `components.json` schema constraint.
+Deleting both keys leaves them `undefined` after parse, a valid state:
+verified empirically, running `npx shadcn-vue add badge -o -y` against a
+`components.json` with both keys removed left `src/assets/main.css`
+byte-for-byte unchanged.
+
+That verification also surfaced a narrower, remaining trap: the same run
+still added `@lucide/vue` back to `package.json`'s dependencies (Badge
+itself does not use it — some components' registry entries list an icon
+package regardless of `iconLibrary`). So after any future `shadcn-vue
+add`/`init` call:
+
+1. **Check `git diff webui/package.json`** for a re-added
+   `lucide-vue-next`/`@lucide/vue` dependency, and remove it
+   (`npm uninstall`) if nothing in `src/` imports from it.
+2. **Check the new component's own file** for a
+   `lucide-vue-next`/`@lucide/vue` import and swap it for the
+   FontAwesome equivalent (see `src/components/ui/select/Select*.vue`
+   for the pattern already applied there).
+3. **Diff `src/assets/main.css` anyway** before committing, in case a
+   future shadcn-vue release starts reading a different config key for
+   the same font-injection step.
 
 ## Local development
 

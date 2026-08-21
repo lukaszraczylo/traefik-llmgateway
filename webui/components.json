@@ -1,7 +1,6 @@
 {
   "$schema": "https://shadcn-vue.com/schema.json",
   "style": "reka-nova",
-  "font": "inter",
   "typescript": true,
   "tailwind": {
     "config": "",
@@ -10,7 +9,6 @@
     "cssVariables": true,
     "prefix": ""
   },
-  "iconLibrary": "lucide",
   "rtl": false,
   "pointer": false,
   "aliases": {

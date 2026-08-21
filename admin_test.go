@@ -696,9 +696,32 @@ func TestAdminAssets_GeneratedFilePresent(t *testing.T) {
 }
 
 // adminInlineScriptRe matches every <script ...> opening tag, capturing its
-// attribute text — TestAdminIndexHTML_NoInlineAssets checks each capture for
-// a src= attribute.
+// attribute text — hasInlineScript checks each capture against
+// adminSrcAttrRe for a real src= attribute.
 var adminInlineScriptRe = regexp.MustCompile(`(?i)<script\b([^>]*)>`)
+
+// adminSrcAttrRe matches a real src= attribute, anchored to the start of an
+// attribute (start-of-string or preceding whitespace) rather than a bare
+// \b word boundary: \b alone matches inside "data-src=" too (the "-" before
+// "src" is itself a non-word character, so \b sits right before "src"),
+// which would wrongly treat a data-src/nosrc/whatever-src attribute as the
+// real src= that makes a <script> external. Mirrors
+// webui/generate.mjs's assertNoInlineAssets, which guards the identical
+// invariant at build time.
+var adminSrcAttrRe = regexp.MustCompile(`(?i)(^|\s)src\s*=`)
+
+// hasInlineScript returns every <script> opening tag in html with no real
+// src= attribute — an inline script, forbidden under the admin CSP's
+// script-src 'self' (no 'unsafe-inline').
+func hasInlineScript(html string) []string {
+	var offenders []string
+	for _, m := range adminInlineScriptRe.FindAllStringSubmatch(html, -1) {
+		if !adminSrcAttrRe.MatchString(m[1]) {
+			offenders = append(offenders, m[0])
+		}
+	}
+	return offenders
+}
 
 // TestAdminIndexHTML_NoInlineAssets asserts, server-side, the exact CSP
 // invariant generate.mjs's own assertNoInlineAssets checks at build time
@@ -714,14 +737,27 @@ func TestAdminIndexHTML_NoInlineAssets(t *testing.T) {
 	t.Parallel()
 	html := string(adminIndexHTML)
 
-	for _, m := range adminInlineScriptRe.FindAllStringSubmatch(html, -1) {
-		attrs := m[1]
-		if !strings.Contains(strings.ToLower(attrs), "src=") {
-			t.Errorf("adminIndexHTML contains an inline <script> (no src= attribute): %q", m[0])
-		}
+	for _, tag := range hasInlineScript(html) {
+		t.Errorf("adminIndexHTML contains an inline <script> (no src= attribute): %q", tag)
 	}
 	if strings.Contains(strings.ToLower(html), "<style") {
 		t.Error("adminIndexHTML contains a <style> tag — every style must be an external <link rel=\"stylesheet\">")
+	}
+}
+
+// TestHasInlineScript_DataSrcIsNotExternal is the negative case
+// hasInlineScript's adminSrcAttrRe anchoring exists for: a <script
+// data-src="..."> tag has no REAL src= attribute — data-src is a
+// distinct, non-standard attribute name, not the src that makes a
+// <script> external — and must still be flagged as inline. A naive
+// strings.Contains(attrs, "src=") or a bare \bsrc\s*=\b regexp would both
+// wrongly treat this tag as external, since "src=" appears as a literal
+// substring of "data-src=".
+func TestHasInlineScript_DataSrcIsNotExternal(t *testing.T) {
+	t.Parallel()
+	got := hasInlineScript(`<script data-src="x">console.log(1)</script>`)
+	if len(got) != 1 {
+		t.Fatalf("hasInlineScript = %v, want exactly 1 offender (data-src is not src=)", got)
 	}
 }
 

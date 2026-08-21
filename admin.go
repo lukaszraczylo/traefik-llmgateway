@@ -24,9 +24,13 @@ const (
 	adminUsageHistoryPath = "/admin/api/usage/history"
 )
 
-// adminCSP is the Content-Security-Policy header served with GET /admin
-// and the three /admin/api/* JSON routes (spec §4, v0.2; extended to the
-// JSON routes by a folded review item, 2026-08-20 review). It was
+// adminCSP is the Content-Security-Policy header served with GET /admin,
+// every GET /admin/assets/{hashedname} response (serveAdminAsset), and
+// the three /admin/api/* JSON routes — every /admin* response this
+// gateway ever sends (spec §4, v0.2; extended to the JSON routes by a
+// folded review item, 2026-08-20 review; extended to the asset route by
+// a later review sweep — see serveAdminAsset's own doc comment for why).
+// It was
 // widened with `script-src 'unsafe-inline'`/`style-src 'unsafe-inline'`
 // for the original vanilla-JS single-file page; the baked Vue build (Vue
 // admin-panel task) needs neither: `vite build` emits index.html with
