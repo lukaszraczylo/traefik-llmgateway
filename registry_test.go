@@ -707,6 +707,39 @@ func TestModelRegistry_Snapshot_ModelsStaleWhileError(t *testing.T) {
 	}
 }
 
+// TestModelRegistry_Snapshot_DiscoveryEnabledReflectsConfig proves
+// providerSnapshot.discoveryEnabled (Feature B, v0.22 — last-refresh label
+// honesty) mirrors each provider's own configured Discovery flag exactly,
+// read straight from providerState rather than through providerState.
+// snapshot()'s mutex-guarded fields, since it never changes after
+// construction.
+func TestModelRegistry_Snapshot_DiscoveryEnabledReflectsConfig(t *testing.T) {
+	t.Parallel()
+	adapters := map[string]providerAdapter{
+		"on":  newFakeAdapter("on"),
+		"off": newFakeAdapter("off"),
+	}
+	cfg := &Config{Providers: map[string]*ProviderConfig{
+		"on":  {Discovery: true, DiscoveryInterval: "1h"},
+		"off": {Models: []string{"pinned"}},
+	}}
+	reg, err := newModelRegistry(adapters, cfg, func(string, ...any) {})
+	if err != nil {
+		t.Fatalf("newModelRegistry: %v", err)
+	}
+
+	byName := map[string]providerSnapshot{}
+	for _, s := range reg.snapshot() {
+		byName[s.name] = s
+	}
+	if !byName["on"].discoveryEnabled {
+		t.Error(`provider "on" discoveryEnabled = false, want true`)
+	}
+	if byName["off"].discoveryEnabled {
+		t.Error(`provider "off" discoveryEnabled = true, want false`)
+	}
+}
+
 // --- listFor: group filtering, sorting, collision presentation (ruling h) ---
 
 func TestModelRegistry_ListFor_GroupFiltered(t *testing.T) {

@@ -260,11 +260,20 @@ func sanitizeProviderErr(lastErr, rawBaseURL string) string {
 // userinfo/query an operator mistakenly embedded in it is stripped by
 // sanitizeBaseURL before this view is ever built.
 type adminProviderView struct {
-	Name        string    `json:"name"`
-	Type        string    `json:"type"`
-	BaseURL     string    `json:"baseUrl"`
 	LastRefresh time.Time `json:"lastRefresh"`
-	LastErr     string    `json:"lastErr,omitempty"`
+	// ModelRates is this provider's per-model breakdown of the Attempts*/
+	// Failures* counters below, keyed by upstream model id (Feature A,
+	// v0.22) — every entry in Models gets one, even a model with zero
+	// attempts, so the Providers tab's provider accordion can decide
+	// "degraded, show a badge" per model without a second round trip.
+	// Never nil, mirroring Models' own "never nil" convention below —
+	// marshals as "{}" for a provider with no known models yet, not
+	// omitted.
+	ModelRates map[string]adminModelRateView `json:"modelRates"`
+	Type       string                        `json:"type"`
+	BaseURL    string                        `json:"baseUrl"`
+	LastErr    string                        `json:"lastErr,omitempty"`
+	Name       string                        `json:"name"`
 	// Models is the sorted explicit∪discovered model id set
 	// (registry.go's providerSnapshot.models — provider-model-accordion
 	// task, Vue admin panel): the dashboard's expandable provider row.
@@ -273,6 +282,40 @@ type adminProviderView struct {
 	// from a field a stale client build does not know how to read.
 	Models     []string `json:"models"`
 	ModelCount int      `json:"modelCount"`
+	// AttemptsDay/FailuresDay/AttemptsMinute/FailuresMinute are this
+	// provider's current-window upstream-attempt counters (Feature A,
+	// v0.22 — see limiter.recordProviderAttempt, limits.go): every
+	// upstream HTTP attempt increments Attempts*; only a provider-fault
+	// outcome (isTransient's classification, retry.go) additionally
+	// increments Failures*. The Providers tab's success-rate badge is
+	// (AttemptsDay-FailuresDay)/AttemptsDay; AttemptsMinute/FailuresMinute
+	// exist only for the badge's "right now" title-attribute detail — no
+	// day-window figure alone tells an operator whether a spike is still
+	// happening. Both stay 0 for a provider with no traffic yet, which the
+	// webui renders as a distinct "no traffic" state rather than a
+	// (misleadingly perfect) 100% badge.
+	AttemptsDay    int64 `json:"attemptsDay"`
+	FailuresDay    int64 `json:"failuresDay"`
+	AttemptsMinute int64 `json:"attemptsMinute"`
+	FailuresMinute int64 `json:"failuresMinute"`
+	// DiscoveryEnabled mirrors providerSnapshot.discoveryEnabled (Feature
+	// B, v0.22): the Providers tab uses it to tell a provider whose
+	// discovery is off apart from one that is on but has not completed its
+	// first refresh yet — both otherwise show the same zero LastRefresh.
+	// See registry.go's providerSnapshot.discoveryEnabled doc comment.
+	DiscoveryEnabled bool `json:"discoveryEnabled"`
+}
+
+// adminModelRateView is one upstream model's current-window attempt/
+// failure counters within its provider — adminProviderView.ModelRates'
+// value type (Feature A, v0.22). Field shape and meaning are identical to
+// adminProviderView's own Attempts*/Failures* fields, just scoped to one
+// (provider, model) pair instead of the whole provider.
+type adminModelRateView struct {
+	AttemptsDay    int64 `json:"attemptsDay"`
+	FailuresDay    int64 `json:"failuresDay"`
+	AttemptsMinute int64 `json:"attemptsMinute"`
+	FailuresMinute int64 `json:"failuresMinute"`
 }
 
 // adminRedisView is the redis status line in GET /admin/api/overview.
@@ -348,16 +391,58 @@ type adminOverviewResponse struct {
 // them.
 func (g *Gateway) buildAdminOverview() adminOverviewResponse {
 	snaps := g.registry.snapshot()
+
+	// Feature A (v0.22): ONE batched limiter read for every provider's and
+	// every (provider, model) pair's current attempt/failure counters —
+	// scopes built here in two fixed passes (every provider, then every
+	// provider's models, in snaps' own order), so providerUsage's flat
+	// result slices back by plain index: the first len(snaps) entries are
+	// the provider-level counters, in order; the rest are the per-model
+	// counters, grouped by provider in the same order and, within a
+	// provider, in s.models' own order — exactly how the loop below
+	// consumes them.
+	scopes := make([]limitScope, 0, len(snaps))
+	for _, s := range snaps {
+		scopes = append(scopes, limitScope{kind: kindProvider, id: s.name})
+	}
+	for _, s := range snaps {
+		for _, model := range s.models {
+			scopes = append(scopes, limitScope{kind: kindProviderModel, id: providerModelScopeID(s.name, model)})
+		}
+	}
+	allCounters := g.limiter.providerUsage(scopes)
+	providerLevelCounters := allCounters[:len(snaps)]
+	modelCounters := allCounters[len(snaps):]
+
 	providers := make([]adminProviderView, len(snaps))
+	mi := 0
 	for i, s := range snaps {
+		pc := providerLevelCounters[i]
+		modelRates := make(map[string]adminModelRateView, len(s.models))
+		for _, model := range s.models {
+			mc := modelCounters[mi]
+			mi++
+			modelRates[model] = adminModelRateView{
+				AttemptsDay:    mc.attemptsDay,
+				FailuresDay:    mc.failuresDay,
+				AttemptsMinute: mc.attemptsMinute,
+				FailuresMinute: mc.failuresMinute,
+			}
+		}
 		providers[i] = adminProviderView{
-			Name:        s.name,
-			Type:        s.typeName,
-			BaseURL:     sanitizeBaseURL(s.baseURL),
-			Models:      s.models,
-			ModelCount:  s.modelCount,
-			LastRefresh: s.lastRefresh,
-			LastErr:     sanitizeProviderErr(s.lastErr, s.baseURL),
+			Name:             s.name,
+			Type:             s.typeName,
+			BaseURL:          sanitizeBaseURL(s.baseURL),
+			Models:           s.models,
+			ModelCount:       s.modelCount,
+			LastRefresh:      s.lastRefresh,
+			LastErr:          sanitizeProviderErr(s.lastErr, s.baseURL),
+			DiscoveryEnabled: s.discoveryEnabled,
+			AttemptsDay:      pc.attemptsDay,
+			FailuresDay:      pc.failuresDay,
+			AttemptsMinute:   pc.attemptsMinute,
+			FailuresMinute:   pc.failuresMinute,
+			ModelRates:       modelRates,
 		}
 	}
 

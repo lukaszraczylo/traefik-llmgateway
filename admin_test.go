@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -375,6 +376,169 @@ func TestAdminOverview_ProviderLastErrAfterFailedRefresh(t *testing.T) {
 	}
 	if p.LastRefresh.IsZero() {
 		t.Error("lastRefresh must be set even on a failed refresh (finishRefresh always advances it)")
+	}
+}
+
+// --- overview: Feature A (v0.22) per-provider/per-model success-rate accounting ---
+
+// TestAdminOverview_ProviderRates_NoTraffic_AllZeroWithModelRatesPopulated
+// proves a provider with no traffic yet reports every Attempts*/Failures*
+// field at 0 (the webui's "no traffic" state, not a misleadingly perfect
+// 100%), and ModelRates carries one zero-valued entry per configured
+// model — never an empty/omitted map, mirroring Models' own convention.
+func TestAdminOverview_ProviderRates_NoTraffic_AllZeroWithModelRatesPopulated(t *testing.T) {
+	t.Parallel()
+	cfg := newAdminTestConfig()
+	h, _ := newAdminGatewayHandle(t, cfg)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, adminRequest(http.MethodGet, adminOverviewPath, "sk-admin1"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	var got adminOverviewResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	for _, p := range got.Providers {
+		if p.AttemptsDay != 0 || p.FailuresDay != 0 || p.AttemptsMinute != 0 || p.FailuresMinute != 0 {
+			t.Errorf("provider %q rates = %+v, want all-zero (no traffic yet)", p.Name, p)
+		}
+		if p.ModelRates == nil {
+			t.Errorf("provider %q ModelRates is nil, want a non-nil map (marshals as {})", p.Name)
+		}
+		for _, model := range p.Models {
+			mr, ok := p.ModelRates[model]
+			if !ok {
+				t.Errorf("provider %q ModelRates missing entry for model %q", p.Name, model)
+				continue
+			}
+			if mr != (adminModelRateView{}) {
+				t.Errorf("provider %q model %q rates = %+v, want all-zero", p.Name, model, mr)
+			}
+		}
+	}
+}
+
+// TestAdminOverview_DiscoveryEnabledFlag proves adminProviderView.
+// DiscoveryEnabled mirrors each provider's own configured Discovery flag —
+// Feature B (v0.22): the webui needs this to tell "discovery is off" apart
+// from "discovery is on but has not refreshed yet", both of which
+// otherwise show the same zero LastRefresh.
+func TestAdminOverview_DiscoveryEnabledFlag(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"data":[]}`))
+	}))
+	defer srv.Close()
+
+	cfg := CreateConfig()
+	cfg.Admin = &AdminConfig{Enabled: true}
+	cfg.Providers = map[string]*ProviderConfig{
+		"discoverable": {Type: "openai", BaseURL: srv.URL, APIKey: "sk", Discovery: true},
+		"pinned":       {Type: "openai", BaseURL: srv.URL, APIKey: "sk", Models: []string{"pinned-model"}},
+	}
+	cfg.Groups = map[string]*GroupConfig{"g": {}}
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{{Name: "admin1", Group: "g", APIKey: "sk-admin1", Admin: true}}}
+	h, _ := newAdminGatewayHandle(t, cfg)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, adminRequest(http.MethodGet, adminOverviewPath, "sk-admin1"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	var got adminOverviewResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(got.Providers) != 2 {
+		t.Fatalf("providers = %+v, want 2 entries", got.Providers)
+	}
+	for _, p := range got.Providers {
+		switch p.Name {
+		case "discoverable":
+			if !p.DiscoveryEnabled {
+				t.Errorf("provider %q discoveryEnabled = false, want true", p.Name)
+			}
+		case "pinned":
+			if p.DiscoveryEnabled {
+				t.Errorf("provider %q discoveryEnabled = true, want false", p.Name)
+			}
+		default:
+			t.Fatalf("unexpected provider %q", p.Name)
+		}
+	}
+}
+
+// TestAdminOverview_ProviderRates_EndToEndAfterTraffic drives one
+// successful and one provider-fault (500) chat completion through the
+// SAME (provider, model), then asserts GET /admin/api/overview reports
+// exactly 2 attempts and 1 failure at both provider and model scope — end
+// to end from runUnified's attemptRecorder wiring (routes_unified.go)
+// through retryPolicy.do (retry.go) to recordProviderAttempt (limits.go)
+// to buildAdminOverview's own batched read (admin.go).
+func TestAdminOverview_ProviderRates_EndToEndAfterTraffic(t *testing.T) {
+	t.Parallel()
+	var callN int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if atomic.AddInt32(&callN, 1) == 1 {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"id":"c1","object":"chat.completion","model":"gpt-test","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`))
+			return
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":"boom"}`))
+	}))
+	defer srv.Close()
+
+	cfg := CreateConfig()
+	cfg.Admin = &AdminConfig{Enabled: true}
+	cfg.Providers = map[string]*ProviderConfig{
+		"openai": {Type: "openai", BaseURL: srv.URL, APIKey: "sk-up", Models: []string{"gpt-test"}},
+	}
+	cfg.Groups = map[string]*GroupConfig{"default": {}}
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{
+		{Name: "alice", Group: "default", APIKey: "sk-alice", Limits: &LimitsConfig{}},
+		{Name: "admin1", Group: "default", APIKey: "sk-admin1", Admin: true},
+	}}
+	h, _ := newAdminGatewayHandle(t, cfg)
+
+	body := map[string]any{"model": "gpt-test", "messages": []any{map[string]any{"role": "user", "content": "hi"}}}
+	for i := 0; i < 2; i++ {
+		req := newUnifiedRequest(t, http.MethodPost, "/v1/chat/completions", "sk-alice", body)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+	}
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, adminRequest(http.MethodGet, adminOverviewPath, "sk-admin1"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	var got adminOverviewResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(got.Providers) != 1 {
+		t.Fatalf("providers = %+v, want 1 entry", got.Providers)
+	}
+	p := got.Providers[0]
+	if p.AttemptsDay != 2 || p.FailuresDay != 1 {
+		t.Errorf("provider attempts/failures = %d/%d, want 2/1", p.AttemptsDay, p.FailuresDay)
+	}
+	if p.AttemptsMinute != 2 || p.FailuresMinute != 1 {
+		t.Errorf("provider attempts/failures (minute) = %d/%d, want 2/1", p.AttemptsMinute, p.FailuresMinute)
+	}
+	mr, ok := p.ModelRates["gpt-test"]
+	if !ok {
+		t.Fatalf("modelRates missing entry for gpt-test: %+v", p.ModelRates)
+	}
+	if mr.AttemptsDay != 2 || mr.FailuresDay != 1 {
+		t.Errorf("model attempts/failures = %d/%d, want 2/1", mr.AttemptsDay, mr.FailuresDay)
 	}
 }
 

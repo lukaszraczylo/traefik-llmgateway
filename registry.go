@@ -778,6 +778,22 @@ type providerSnapshot struct {
 	lastErr     string
 	models      []string
 	modelCount  int
+	// discoveryEnabled mirrors providerState.discoveryEnabled (Feature B,
+	// v0.22 last-refresh label honesty): read directly rather than through
+	// providerState.snapshot(), because it is set once at construction
+	// (newModelRegistry, from ProviderConfig.Discovery) and never
+	// reassigned afterward — every other providerState field warmFill/
+	// maybeRefresh/finishRefresh mutate only reads it, never writes it — so
+	// it needs neither the mutex snapshot() takes for the fields that DO
+	// mutate
+	// (models/lastRefresh/lastErr) nor a place in that method's return
+	// shape. The admin dashboard needs it to tell "discovery is off" apart
+	// from "discovery is on but has not refreshed yet" — both currently
+	// read identically as a zero LastRefresh, which GET /admin/api/overview
+	// (admin.go) and the Providers tab (webui) previously rendered as the
+	// misleading "refreshed never" for a provider that will never refresh
+	// by design.
+	discoveryEnabled bool
 }
 
 // aliasSnapshotEntry is one configured alias's read-only view for the
@@ -822,13 +838,14 @@ func (m *modelRegistry) snapshot() []providerSnapshot {
 		// that class of trap entirely.
 		models, lastRefresh, lastErr := m.states[name].snapshot()
 		out = append(out, providerSnapshot{
-			name:        adapter.name(),
-			typeName:    adapter.typeName(),
-			baseURL:     adapter.base(),
-			models:      models,
-			modelCount:  len(models),
-			lastRefresh: lastRefresh,
-			lastErr:     lastErr,
+			name:             adapter.name(),
+			typeName:         adapter.typeName(),
+			baseURL:          adapter.base(),
+			models:           models,
+			modelCount:       len(models),
+			lastRefresh:      lastRefresh,
+			lastErr:          lastErr,
+			discoveryEnabled: m.states[name].discoveryEnabled,
 		})
 	}
 	return out
