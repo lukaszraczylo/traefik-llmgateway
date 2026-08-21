@@ -1,15 +1,19 @@
 <script setup lang="ts">
 import type { SortingState } from '@tanstack/vue-table'
+import { faMagnifyingGlass, faXmark } from '@fortawesome/free-solid-svg-icons'
 import { getCoreRowModel, getSortedRowModel, useVueTable } from '@tanstack/vue-table'
-import { computed, ref } from 'vue'
+import { computed, reactive, ref, watch } from 'vue'
 
 import SortHeaderButton from '@/components/SortHeaderButton.vue'
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/components/ui/accordion'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import { Input } from '@/components/ui/input'
 import { valueUpdater } from '@/components/ui/table'
 import UsageTable from '@/components/UsageTable.vue'
 import { formatCost, formatLimits } from '@/lib/format'
+import { type ExpandState, clearExpandOverrides, computeExpandedItems, toggleItemExpand } from '@/lib/search-expand'
 import { usageColumns } from '@/lib/usage-columns'
+import { groupMatches, groupNameMatches, membersOfGroup, userMatches } from '@/lib/usage-search'
 import { useDashboardStore } from '@/stores/dashboard'
 import type { AdminUsageEntryView } from '@/types/api'
 
@@ -31,19 +35,91 @@ function memberCountOf(entry: AdminUsageEntryView): string {
   return count === undefined ? '' : String(count)
 }
 
-/**
- * membersOf returns one group's own member users' usage rows — a user's
- * row already carries its own group name (admin.go's
- * adminUsageEntryView.GroupName, set in buildAdminUsage), so this is a
- * plain client-side join against the SAME GET /admin/api/usage response
- * already in the store, no extra fetch. Verified this field already
- * exists and is already asserted by a backend test
- * (admin_test.go's TestAdminUsage_MathAgainstSeededCounters checks
- * alice.GroupName == "agroup") — no backend change was needed for this.
- */
-function membersOf(group: AdminUsageEntryView): AdminUsageEntryView[] {
-  return (usage.value?.users ?? []).filter((u) => u.groupName === group.id)
+// --- user/group search filter (operator feature, mirrors
+// OverviewView.vue's model search: same Input component, styling, and
+// clear-button pattern; matching logic lives in lib/usage-search.ts so
+// ChartsView.vue's own scope-picker filter reuses the identical helpers —
+// no second copy of "does this user/group match?") ---
+const userQuery = ref('')
+const normalizedQuery = computed(() => userQuery.value.trim().toLowerCase())
+const hasQuery = computed(() => normalizedQuery.value.length > 0)
+
+function clearQuery(): void {
+  userQuery.value = ''
 }
+
+/**
+ * filteredGroups is every group matching the query — own name OR a
+ * matching member (lib/usage-search.ts's groupMatches, binding semantics)
+ * — or every group when there is no query. This feeds groupsTable's
+ * `data()` below directly, so filtering happens upstream of sorting: the
+ * Groups sort toolbar and the Accordion both operate on the same
+ * (possibly narrowed) list, no separate filtering pass downstream of the
+ * table.
+ */
+const filteredGroups = computed<AdminUsageEntryView[]>(() => {
+  const all = usage.value?.groups ?? []
+  if (!hasQuery.value) return all
+  const users = usage.value?.users ?? []
+  return all.filter((g) => groupMatches(g, users, normalizedQuery.value))
+})
+
+/**
+ * memberOnlyMatchIds is filteredGroups narrowed to groups that matched
+ * ONLY via a member, never via their own name — the auto-expand target
+ * set (search-expand.ts's computeExpandedItems `matchingIds`). A group
+ * whose OWN name matched the query is already visibly identified by its
+ * collapsed trigger row, so forcing it open too would just be noisy;
+ * unlike OverviewView.vue, where a provider only ever matches via a
+ * model (there is no provider-name search there — see that view's own
+ * CardDescription), so every match auto-expands there. search-expand.ts
+ * itself has no opinion on this; it is purely this view's own choice of
+ * matchingIds.
+ */
+const memberOnlyMatchIds = computed<string[]>(() => {
+  if (!hasQuery.value) return []
+  return filteredGroups.value.filter((g) => !groupNameMatches(g, normalizedQuery.value)).map((g) => g.id)
+})
+
+/**
+ * visibleMembers implements the members-table distinction (binding
+ * semantics): a group matched by its OWN name shows every member; a group
+ * that matched only via a member shows only the matching ones. No active
+ * query behaves like a name match — show everyone, today's behavior
+ * unchanged. Replaces the former local membersOf helper — the join itself
+ * now lives in lib/usage-search.ts's membersOfGroup, shared with
+ * ChartsView.vue.
+ */
+function visibleMembers(group: AdminUsageEntryView): AdminUsageEntryView[] {
+  const users = usage.value?.users ?? []
+  const all = membersOfGroup(group, users)
+  if (!hasQuery.value || groupNameMatches(group, normalizedQuery.value)) return all
+  return all.filter((u) => userMatches(u, normalizedQuery.value))
+}
+
+const groupsEmptyMessage = computed(() => (hasQuery.value ? `no groups match "${userQuery.value}"` : 'none'))
+
+/**
+ * filteredUsers is every user matching the query directly, PLUS every
+ * member of a group that matched by NAME (semantics item 5: "a
+ * group-name match includes all of that group's member rows"). A group
+ * that matched only via ONE member must not pull its other, non-matching
+ * members into this flat table too — that narrower distinction is
+ * visibleMembers' job, scoped to the nested table inside an expanded
+ * group, not this one.
+ */
+const filteredUsers = computed<AdminUsageEntryView[]>(() => {
+  const all = usage.value?.users ?? []
+  if (!hasQuery.value) return all
+  const groups = usage.value?.groups ?? []
+  const nameMatchedGroupIds = new Set(
+    groups.filter((g) => groupNameMatches(g, normalizedQuery.value)).map((g) => g.id),
+  )
+  return all.filter(
+    (u) => userMatches(u, normalizedQuery.value) || (u.groupName !== undefined && nameMatchedGroupIds.has(u.groupName)),
+  )
+})
+const usersEmptyMessage = computed(() => (hasQuery.value ? `no users match "${userQuery.value}"` : 'none'))
 
 // --- Groups accordion (operator directive) ---
 //
@@ -67,7 +143,7 @@ const groupColumns = usageColumns('Name', 'Members', memberCountOf)
 const groupSorting = ref<SortingState>([])
 const groupsTable = useVueTable({
   get data() {
-    return usage.value?.groups ?? []
+    return filteredGroups.value
   },
   get columns() {
     return groupColumns
@@ -97,12 +173,73 @@ const toolbarHeaders = computed(() =>
   groupsTable.getHeaderGroups()[0].headers.filter((header) => TOOLBAR_COLUMN_IDS.has(header.column.id)),
 )
 
-/** Which groups are open — plain array state (no search-driven auto-expand exists for this view, unlike Providers, so the two-set provider-expand.ts module is not needed here). */
-const expandedGroups = ref<string[]>([])
+/**
+ * Which groups are open — driven by the SAME tested lib/search-expand.ts
+ * state OverviewView.vue uses for providers (generalized from
+ * provider-expand.ts specifically so this view could reuse it, rather
+ * than fork a second copy — see that module's own doc comment). The
+ * adapter shape is the identical get/set computed pattern
+ * expandedProviderValues uses there, translating the Set-based effective
+ * state into the string[] Accordion's `type="multiple"` v-model expects.
+ */
+const groupExpandState: ExpandState = reactive({
+  manuallyExpanded: new Set<string>(),
+  manuallyCollapsed: new Set<string>(),
+})
+const expandedGroups = computed<Set<string>>(() =>
+  computeExpandedItems(groupExpandState, hasQuery.value, memberOnlyMatchIds.value),
+)
+function toggleGroup(id: string): void {
+  toggleItemExpand(groupExpandState, id, expandedGroups.value.has(id))
+}
+const expandedGroupValues = computed<string[]>({
+  get: () => Array.from(expandedGroups.value),
+  set: (newValues) => {
+    const next = new Set(newValues)
+    for (const id of expandedGroups.value) {
+      if (!next.has(id)) toggleGroup(id)
+    }
+    for (const id of next) {
+      if (!expandedGroups.value.has(id)) toggleGroup(id)
+    }
+  },
+})
+
+// A stale manuallyCollapsed suppression from one search must never
+// silently carry into a later, unrelated one — see ExpandState's own doc
+// comment. Watching userQuery (not just the clear button) covers
+// backspacing to empty too — same convention as OverviewView.vue.
+watch(userQuery, (value) => {
+  if (value.trim() === '') clearExpandOverrides(groupExpandState)
+})
 </script>
 
 <template>
   <div class="flex flex-col gap-6">
+    <div class="relative max-w-sm">
+      <FontAwesomeIcon
+        :icon="faMagnifyingGlass"
+        class="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground"
+        aria-hidden="true"
+      />
+      <Input
+        v-model="userQuery"
+        type="text"
+        placeholder="Filter users or groups"
+        aria-label="Filter users or groups"
+        class="pr-8 pl-8"
+      />
+      <button
+        v-if="hasQuery"
+        type="button"
+        aria-label="Clear search"
+        class="absolute top-1/2 right-2 -translate-y-1/2 rounded text-muted-foreground hover:text-foreground"
+        @click="clearQuery"
+      >
+        <FontAwesomeIcon :icon="faXmark" class="size-3.5" />
+      </button>
+    </div>
+
     <Card v-if="usage">
       <CardHeader>
         <CardTitle>Total</CardTitle>
@@ -141,7 +278,7 @@ const expandedGroups = ref<string[]>([])
           <SortHeaderButton v-for="header in toolbarHeaders" :key="header.id" :header="header" />
         </div>
 
-        <Accordion v-if="sortedGroupRows.length" v-model="expandedGroups" type="multiple" class="rounded-md border px-3">
+        <Accordion v-if="sortedGroupRows.length" v-model="expandedGroupValues" type="multiple" class="rounded-md border px-3">
           <AccordionItem v-for="row in sortedGroupRows" :key="row.original.id" :value="row.original.id">
             <AccordionTrigger>
               <span class="flex flex-1 flex-wrap items-center gap-x-4 gap-y-1 pr-2 text-left">
@@ -190,13 +327,13 @@ const expandedGroups = ref<string[]>([])
               <UsageTable
                 id-label="Name"
                 secondary-column-label="Group"
-                :entries="membersOf(row.original)"
+                :entries="visibleMembers(row.original)"
                 :secondary-value="groupNameOf"
               />
             </AccordionContent>
           </AccordionItem>
         </Accordion>
-        <p v-else class="py-6 text-center text-sm text-muted-foreground">none</p>
+        <p v-else class="py-6 text-center text-sm text-muted-foreground">{{ groupsEmptyMessage }}</p>
       </CardContent>
     </Card>
 
@@ -208,8 +345,9 @@ const expandedGroups = ref<string[]>([])
         <UsageTable
           id-label="Name"
           secondary-column-label="Group"
-          :entries="usage?.users ?? []"
+          :entries="filteredUsers"
           :secondary-value="groupNameOf"
+          :empty-message="usersEmptyMessage"
         />
       </CardContent>
     </Card>

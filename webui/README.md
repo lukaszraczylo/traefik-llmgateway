@@ -80,9 +80,12 @@ npm run build     # what `make admin-ui` runs, plus webui/generate.mjs
   expanding a group shows its member users' own usage rows, a
   client-side join on `AdminUsageEntryView.groupName`.
 - `src/lib/` — `api.ts` (the `/admin/api/*` fetch wrapper), `format.ts`,
-  `key-storage.ts`, `chart-setup.ts`, `provider-expand.ts` (search-aware
-  expand state, adapted to drive Accordion's v-model), `usage-columns.ts`
-  (shared `ColumnDef`s for every usage table).
+  `key-storage.ts`, `chart-setup.ts`, `search-expand.ts` (search-aware
+  expand state, adapted to drive Accordion's v-model — shared by
+  OverviewView's providers and UsageView's groups), `usage-search.ts`
+  (shared user/group query-matching helpers, used by UsageView and
+  ChartsView), `usage-columns.ts` (shared `ColumnDef`s for every usage
+  table).
 - `src/types/api.ts` — TypeScript mirrors of admin.go's JSON response
   shapes (`adminOverviewResponse`, `adminUsageResponse`,
   `usageHistoryResponse`).

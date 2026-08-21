@@ -19,6 +19,8 @@ const props = defineProps<{
   entries: AdminUsageEntryView[]
   secondaryColumnLabel: string
   secondaryValue: (entry: AdminUsageEntryView) => string
+  /** Shown in the empty-state row when entries is empty — e.g. a filtered-search "no X match ..." message. Falls through to DataTable's own 'none' default when omitted. */
+  emptyMessage?: string
 }>()
 
 const columns = computed(() => usageColumns(props.idLabel, props.secondaryColumnLabel, props.secondaryValue))
@@ -28,6 +30,7 @@ const columns = computed(() => usageColumns(props.idLabel, props.secondaryColumn
   <DataTable
     :columns="columns"
     :data="entries"
+    :empty-message="emptyMessage"
     :row-class="(entry) => (entry.storeDown ? 'bg-destructive/10' : undefined)"
   />
 </template>

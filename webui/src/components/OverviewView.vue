@@ -22,7 +22,7 @@ import {
 } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { formatAgo, formatTimestamp, routableModelId } from '@/lib/format'
-import { type ExpandState, clearExpandOverrides, computeExpandedProviders, toggleProviderExpand } from '@/lib/provider-expand'
+import { type ExpandState, clearExpandOverrides, computeExpandedItems, toggleItemExpand } from '@/lib/search-expand'
 import { useDashboardStore } from '@/stores/dashboard'
 import type { AdminAliasView, AdminProviderView } from '@/types/api'
 
@@ -37,18 +37,19 @@ const overview = computed(() => dashboard.overview)
 // trigger is one provider's summary line; the content holds its detail
 // (base URL, last refresh, last error) plus its model-id chips.
 //
-// Expand STATE itself is unchanged: lib/provider-expand.ts's plain,
-// Vue-free two-set module (manuallyExpanded/manuallyCollapsed) — the
-// exact search-interaction bug fix a prior review flagged, covered by a
-// real vitest spec (lib/provider-expand.spec.ts) that exercises the
-// module directly, without mounting Vue. Only the template-facing
-// adapter changed: expandedProviderValues below is a
+// Expand STATE itself is unchanged: lib/search-expand.ts's plain,
+// Vue-free two-set module (manuallyExpanded/manuallyCollapsed, generalized
+// from provider-expand.ts so UsageView.vue's Groups accordion shares the
+// same tested logic) — the exact search-interaction bug fix a prior review
+// flagged, covered by a real vitest spec (lib/search-expand.spec.ts) that
+// exercises the module directly, without mounting Vue. Only the
+// template-facing adapter changed: expandedProviderValues below is a
 // writable computed translating that Set-based state into the string[]
 // shape Accordion's `type="multiple"` v-model expects, and back —
 // clicking a trigger fires the setter with the new array; diffing it
 // against the previous effective set finds the one name that changed
-// and replays it through the SAME tested toggleProviderExpand used
-// before, so Accordion never owns this state itself, only displays it.
+// and replays it through the SAME tested toggleItemExpand used before, so
+// Accordion never owns this state itself, only displays it.
 const expandState: ExpandState = reactive({
   manuallyExpanded: new Set<string>(),
   manuallyCollapsed: new Set<string>(),
@@ -86,18 +87,18 @@ const filteredAliases = computed<AdminAliasView[]>(() => {
   return hasQuery.value ? all.filter(aliasMatches) : all
 })
 
-/** expandedProviders is the EFFECTIVE (possibly auto-expanded-by-search) set — see lib/provider-expand.ts's own doc comments for the manual/auto-expand/override semantics. */
+/** expandedProviders is the EFFECTIVE (possibly auto-expanded-by-search) set — see lib/search-expand.ts's own doc comments for the manual/auto-expand/override semantics. */
 const expandedProviders = computed<Set<string>>(() =>
-  computeExpandedProviders(
+  computeExpandedItems(
     expandState,
     hasQuery.value,
     filteredProviders.value.map((p) => p.name),
   ),
 )
 
-/** toggleProvider reads the CURRENT effective (visible) state for name before flipping it — see toggleProviderExpand's own doc comment for exactly which bug this avoids. */
+/** toggleProvider reads the CURRENT effective (visible) state for name before flipping it — see toggleItemExpand's own doc comment for exactly which bug this avoids. */
 function toggleProvider(name: string): void {
-  toggleProviderExpand(expandState, name, expandedProviders.value.has(name))
+  toggleItemExpand(expandState, name, expandedProviders.value.has(name))
 }
 
 /**

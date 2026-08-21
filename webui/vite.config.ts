@@ -33,11 +33,12 @@ export default defineConfig({
     modulePreload: { polyfill: false },
   },
   test: {
-    // Deliberately narrow: only lib/provider-expand.ts's pure state module
-    // is under vitest right now (webui's test infra starts here, on
-    // purpose — no snapshot/DOM/component testing this round). 'node' is
-    // enough since the module touches no browser globals; jsdom is not
-    // pulled in as a dependency for a module that doesn't need it.
+    // Deliberately narrow: only lib/'s pure modules (search-expand.ts,
+    // usage-search.ts) are under vitest right now (webui's test infra
+    // starts here, on purpose — no snapshot/DOM/component testing this
+    // round). 'node' is enough since neither module touches browser
+    // globals; jsdom is not pulled in as a dependency for modules that
+    // don't need it.
     environment: 'node',
     include: ['src/**/*.spec.ts'],
   },
