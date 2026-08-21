@@ -592,7 +592,12 @@ http:
   [Admin](#admin)) is the only reader; the write itself runs off the
   request's own goroutine (fire-and-forget — this is telemetry, and
   nothing in the request path waits on or gates against it), so it never
-  adds latency to a response, streaming included.
+  adds latency to a response, streaming included. That goroutine is
+  bounded (64 in flight per process) and lossy under sustained pressure:
+  a write that cannot start immediately is dropped, not queued — a
+  deliberate trade-off against an unbounded goroutine pile-up if the
+  configured store ever goes slow without going fully down. Enforcement
+  (request/token/cost limits) never goes through this path at all.
 - **Native passthrough accounts provider-level only, never per-model.**
   `POST /{provider}/...` has no resolved model at request time — the
   upstream model, if any, only appears in the response body, read after
