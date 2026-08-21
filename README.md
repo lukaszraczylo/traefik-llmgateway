@@ -533,16 +533,20 @@ http:
   window's counter always outlives its own natural length
   (`enforceTTLFor`, limits.go), so a month budget is still a true
   calendar-month budget, never a rolling one, whether Redis is configured
-  or not. **Usage-history CHARTING retention is shorter on the fallback,
-  though**: capped at 48 hours regardless of window
-  (`memoryStoreMaxTTL`, limits.go — ruling, 2026-08-21: the in-process
-  fallback is continuity for charting, not full history; applying the
-  real day/month retention TTLs to it purely for charting purposes would
-  grow its live key count roughly 30x, multiplying the cost of its own
-  periodic sweep by the same factor). A month counter itself still lives
-  its full ~32 days on the fallback (enforcement needs that), it just
-  cannot be charted past the trailing 48 hours there — full
-  usage-history retention needs the shared Redis.
+  or not.
+- **Usage-history charting is more limited on the fallback**, and the
+  limit differs by window (`memoryStoreMaxTTL`'s 48h ceiling only binds
+  where a window's own `enforceTTLFor` floor sits under it — limits.go):
+  `hour` charts its full default span (48 buckets fit inside the 48h
+  ceiling); `day` only shows its most recent ~2-3 buckets out of the 35
+  a request can ask for (a day bucket's own key also sits under the
+  ceiling, so it expires long before a 35-day span would need it); `month`
+  charts its CURRENT bucket in full (a month's own floor, ~32 days, wins
+  over the ceiling — the in-progress month's key outlives the whole
+  month), but not any earlier one, since each past month's key already
+  expired ~32 days after its own creation. Redis applies the real
+  hour/day/month retention TTLs directly (no ceiling), so a Redis-backed
+  deployment charts the full span every window supports.
 - **Retention** (Redis counter key TTL, distinct from a window's own
   length): a minute key lives 2 minutes, an hour key 48 hours, a day key
   35 days, a month key 400 days — long enough for the usage-history API's

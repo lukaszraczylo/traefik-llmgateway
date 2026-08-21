@@ -185,9 +185,12 @@ type counterStore interface {
 	// from now if it does not exist or has expired, and returns the
 	// counter's new value. incrBy has no production caller since
 	// checkAndCount/account moved to the batched incrMulti below (perf
-	// review, 2026-08-21) — it is kept for direct counter seeding in
-	// tests (5 call sites, all in admin_test.go) and for counterStore
-	// interface conformance.
+	// review, 2026-08-21) — it is exercised directly by 11 test call
+	// sites (memoryStore.incrBy and redisStore.incrBy, across
+	// limits_test.go and redis_store_test.go) and kept for counterStore
+	// interface conformance. The limiter-level single-key seeding helper
+	// is incrCounter (5 call sites, all in admin_test.go's
+	// TestAdminUsage_MathAgainstSeededCounters).
 	incrBy(key string, n int64, ttl time.Duration) (int64, error)
 	// get returns key's current counter value, or 0 if it does not exist
 	// or has expired.
@@ -329,9 +332,11 @@ func (m *memoryStore) now() time.Time {
 // from, since it takes a bare key rather than a (kind, id, metric,
 // window) tuple. incrBy has had no production caller since checkAndCount/
 // account moved to the batched incrMulti below (perf review,
-// 2026-08-21); it is kept for direct counter seeding in tests (5 call
-// sites, all in admin_test.go's TestAdminUsage_MathAgainstSeededCounters)
-// and for counterStore interface conformance.
+// 2026-08-21); it is exercised directly by 11 test call sites (across
+// limits_test.go and redis_store_test.go's own store.incrBy calls) and
+// kept for counterStore interface conformance. incrCounter (below) is
+// the limiter-level single-key seeding helper tests use instead (5 call
+// sites, all in admin_test.go's TestAdminUsage_MathAgainstSeededCounters).
 func (m *memoryStore) incrBy(key string, n int64, ttl time.Duration) (int64, error) {
 	return m.applyIncr(key, n, clampTTL(ttl, 0)), nil
 }
