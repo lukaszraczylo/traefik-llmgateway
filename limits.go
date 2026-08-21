@@ -578,12 +578,28 @@ func newLimiter(store counterStore, failOpen bool) *limiter {
 		select {
 		case l.spawnTokens <- struct{}{}:
 			go func() {
-				defer func() { <-l.spawnTokens }()
+				// The deferred recover is required for the same reason
+				// modelRegistry.refreshProvider documents (registry.go):
+				// this runs off any request's goroutine, so an unrecovered
+				// panic has no ServeHTTP caller to unwind into and would
+				// crash the whole Traefik process — every router, not just
+				// this middleware. A panicking telemetry write must cost
+				// exactly one dropped write.
+				defer func() {
+					if rec := recover(); rec != nil {
+						l.logf("limit telemetry write panicked: %v", rec)
+					}
+					<-l.spawnTokens
+				}()
 				f()
 			}()
 		default:
 			// Dropped: spawnTokens is full — bounded, lossy-under-pressure
-			// by design (FOLDED-1, its own doc comment above).
+			// by design (FOLDED-1, its own doc comment above). The drop is
+			// logged (rate-limited) so a stressed store under-reporting
+			// provider health is distinguishable from a healthy provider —
+			// silence here would make the two identical.
+			l.logSpawnDrop()
 		}
 	}
 	return l
@@ -592,6 +608,23 @@ func newLimiter(store counterStore, failOpen bool) *limiter {
 // now returns the limiter's current time, via nowFn.
 func (l *limiter) now() time.Time {
 	return l.nowFn()
+}
+
+// logSpawnDrop logs a dropped telemetry write, rate-limited on the same
+// clock and interval as logStoreError (sharing lastLogAt deliberately:
+// drops and store errors are the same "the store is struggling" story,
+// and one line per storeErrorLogEvery is enough to tell it).
+func (l *limiter) logSpawnDrop() {
+	now := l.now()
+	l.logMu.Lock()
+	shouldLog := now.Sub(l.lastLogAt) >= storeErrorLogEvery
+	if shouldLog {
+		l.lastLogAt = now
+	}
+	l.logMu.Unlock()
+	if shouldLog {
+		l.logf("limit telemetry write dropped: %d concurrent writes in flight (bounded, lossy under pressure by design)", providerAttemptSpawnCap)
+	}
 }
 
 // logStoreError logs err via l.logf, rate-limited to once per
@@ -1271,11 +1304,16 @@ func providerModelScopeID(provider, model string) string {
 // (*fmt.wrapErrors, from a real fmt.Errorf call with more than one %w) —
 // silently returned ok=false even though %T correctly reported
 // *fmt.wrapErrors and that type genuinely implements Unwrap() []error in
-// real, compiled Go. Yaegi's interface-satisfaction check apparently
-// does not correctly match a compiled concrete type's method set against
-// an interpreter-declared interface signature, at least for this shape —
-// the reverse direction of the already-documented trap, not previously
-// known to this codebase.
+// real, compiled Go. The instrumented follow-up (v0.22 final review)
+// proved the rule is BROADER than the multi-%w shape: a comma-ok
+// assertion of ANY compiled concrete value against ANY
+// interpreter-declared interface type returns ok=false under Yaegi —
+// a bare *url.Error asserted against a single-method
+// interface{ Unwrap() error } declared in this file failed identically.
+// Method count is irrelevant, the failure is silent (never a panic), and
+// only the yaegi-check harness can catch it; compiled tests pass the
+// broken code. This is the reverse direction of the already-documented
+// errors.As trap, not previously known to this codebase.
 //
 // errors.Is does not have this problem here: sentinel (context.
 // DeadlineExceeded, context.Canceled — isDeadlineExceeded's only
@@ -1292,6 +1330,16 @@ func providerModelScopeID(provider, model string) string {
 // value. Verified directly: this replacement is what made SHOULD-A's
 // timeout-driving harness pass under the real interpreter (round 2's
 // hand-rolled fix, though it passed every compiled `go test`, did not).
+//
+// TRIP-WIRE, load-bearing and unenforced: the safety above depends on
+// every error reaching this function being compiled-origin. If anyone
+// ever wraps an upstream error in a PLUGIN-DECLARED error type before it
+// gets here, errors.Is would have to call Unwrap() on a yaegi-proxied
+// value from compiled code — the same reverse-direction dispatch that
+// broke the hand-rolled walk — and would silently return false. Keep
+// upstream error chains built exclusively from stdlib error types
+// (fmt.Errorf, net/url, context), and keep yaegi-check's timeout probe
+// in the gate: it is the only test that can see this class of failure.
 func matchesSentinel(err, sentinel error) bool {
 	return errors.Is(err, sentinel)
 }
