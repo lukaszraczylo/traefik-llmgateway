@@ -11,6 +11,13 @@ It runs as a [Yaegi](https://github.com/traefik/yaegi)-interpreted Go
 module, the same way [`traefikoidc`](https://github.com/lukaszraczylo/traefikoidc)
 does, configured per-middleware in Traefik's dynamic configuration.
 
+> [!WARNING]
+> **Experimental — proof of concept.** Until version 1.0 this project is an
+> experiment in PoC development stage, not production ready. Configuration
+> keys, endpoints, and behaviour can change between pre-1.0 releases without
+> a deprecation period. Evaluate it, test it, break it — but do not put it
+> in front of production traffic yet.
+
 **Status:** feature-complete, all gates green (unit tests, `-race`,
 `yaegi-check`, integration). Not yet published to the Traefik Plugin
 Catalog — see [Development](#development) for what that needs.

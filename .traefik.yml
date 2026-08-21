@@ -12,7 +12,7 @@ import: github.com/lukaszraczylo/traefik-llmgateway
 # integration suite). Required for both Traefik itself and the Plugin
 # Catalog analyzer (piceus), which uses this identical mechanism.
 basePkg: traefikllmgateway
-summary: Multi-provider LLM gateway with groups, per-user keys, token/cost limits, MCP/A2A proxy.
+summary: Multi-provider LLM gateway with groups, per-user keys, token/cost limits, MCP/A2A proxy. Experimental PoC until version 1.0 — not production ready.
 testData:
   providers:
     openai:
