@@ -61,6 +61,43 @@ function walk(dir, base = dir) {
   return out
 }
 
+/**
+ * assertNoInlineAssets fails the build if html contains an inline
+ * `<script>` (any `<script>` tag with no `src=` attribute) or any
+ * `<style>` tag. The admin CSP (admin.go's adminCSP) ships `script-src
+ * 'self'` and `style-src 'self'` with no `'unsafe-inline'` — that is only
+ * safe because `vite build`'s own output never needs it (an external
+ * `<script type="module" src="...">` plus an external `<link
+ * rel="stylesheet">`, nothing inline). This check is generate.mjs's own
+ * guard against that invariant silently breaking under a future Vite/
+ * plugin config change; admin_test.go's TestAdminIndexHTML_NoInlineAssets
+ * re-asserts the identical invariant server-side, against the DECODED
+ * adminIndexHTML admin.go actually serves — so a corrupted or
+ * hand-patched admin_assets_gen.go is still caught even if someone
+ * regenerates with a modified copy of this script.
+ */
+function assertNoInlineAssets(html, sourceLabel) {
+  const scriptTagRe = /<script\b([^>]*)>/gi
+  let match
+  while ((match = scriptTagRe.exec(html)) !== null) {
+    if (!/\bsrc\s*=/i.test(match[1])) {
+      console.error(
+        `generate.mjs: ${sourceLabel} contains an inline <script> (no src= attribute): ${match[0]}\n` +
+          `The admin CSP ships script-src 'self' with no 'unsafe-inline' — every script must be external.`,
+      )
+      return false
+    }
+  }
+  if (/<style\b/i.test(html)) {
+    console.error(
+      `generate.mjs: ${sourceLabel} contains a <style> tag.\n` +
+        `The admin CSP ships style-src 'self' with no 'unsafe-inline' — every style must be an external <link rel="stylesheet">.`,
+    )
+    return false
+  }
+  return true
+}
+
 /** goStringLiteral renders a Go double-quoted string literal for s, escaping the handful of characters that require it. base64 output never needs this (its alphabet is a strict subset of what a Go string literal permits unescaped), but this stays generic rather than assuming that forever. */
 function goStringLiteral(s) {
   return `"${s.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`
@@ -123,6 +160,10 @@ function main() {
   assetEntries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
 
   const indexBody = readFileSync(join(DIST_DIR, indexRel))
+  if (!assertNoInlineAssets(indexBody.toString('utf-8'), `${DIST_DIR}/${indexRel}`)) {
+    process.exitCode = 1
+    return
+  }
   const indexBase64 = indexBody.toString('base64')
 
   const sourceDigest = createHash('sha256')

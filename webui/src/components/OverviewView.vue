@@ -144,5 +144,7 @@ const overview = computed(() => dashboard.overview)
         </Table>
       </CardContent>
     </Card>
+
+    <p v-if="overview?.version" class="text-xs text-muted-foreground">Version: {{ overview.version }}</p>
   </div>
 </template>

@@ -160,7 +160,14 @@ func (g *Gateway) serveAdminPage(w http.ResponseWriter) {
 // produces new filenames, never mutates one this browser may have cached.
 // X-Content-Type-Options: nosniff matches the JSON routes' own header
 // (setAdminJSONHeaders) — the declared Content-Type must never be
-// second-guessed by the browser's MIME sniffer.
+// second-guessed by the browser's MIME sniffer. Content-Security-Policy
+// carries adminCSP too (review sweep): a browser only enforces CSP
+// against the top-level document that names it, so this header governs
+// nothing for a JS/CSS response fetched as a sub-resource of GET
+// /admin — but a browser navigated STRAIGHT to an asset URL (a pasted
+// link, a bookmark) treats that response as its own top-level document,
+// and every other admin route already sends the identical header, so
+// there is no reason for this one route to be the exception.
 func (g *Gateway) serveAdminAsset(w http.ResponseWriter, name string) {
 	asset, ok := adminAssets[name]
 	if !ok {
@@ -170,6 +177,7 @@ func (g *Gateway) serveAdminAsset(w http.ResponseWriter, name string) {
 	w.Header().Set("Content-Type", asset.contentType)
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	w.Header().Set("Content-Security-Policy", adminCSP)
 	_, _ = w.Write(asset.body)
 }
 

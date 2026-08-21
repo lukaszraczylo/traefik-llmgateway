@@ -839,15 +839,21 @@ or in CI.
 - **Response headers**: all three JSON routes set
   `X-Content-Type-Options: nosniff` and `Cache-Control: no-store`; every
   hashed asset sets `X-Content-Type-Options: nosniff` and its own
-  immutable `Cache-Control` (above). `GET /admin` and the three JSON
-  routes share one `Content-Security-Policy` header (`default-src 'none';
-  script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'
-  data:; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`) —
-  no `'unsafe-inline'`, since the built app has no inline script or style
-  of any kind, only external `/admin/assets/*` references; `img-src`
-  additionally allows `data:` for the page's inlined favicon. The
-  dashboard loads no external asset of any kind and works in an
-  air-gapped cluster.
+  immutable `Cache-Control` (above). Every one of the four routes — `GET
+  /admin`, every hashed asset, and the three JSON routes — shares one
+  `Content-Security-Policy` header (`default-src 'none'; script-src
+  'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:;
+  frame-ancestors 'none'; base-uri 'none'; form-action 'none'`) — no
+  `'unsafe-inline'`, since the built app has no inline script or style of
+  any kind, only external `/admin/assets/*` references; `img-src`
+  additionally allows `data:` for the page's inlined favicon. A browser
+  only enforces CSP against the top-level document that names it, so an
+  asset response's own header governs nothing when the browser fetched it
+  as a `<script src>`/`<link>` sub-resource of `GET /admin` — it matters
+  only if that asset URL is ever navigated to directly, and every other
+  admin route already sends the identical header, so there is no reason
+  for asset responses to be the exception. The dashboard loads no
+  external asset of any kind and works in an air-gapped cluster.
 
 ## MCP and A2A
 

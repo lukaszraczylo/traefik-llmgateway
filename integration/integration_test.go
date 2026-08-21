@@ -26,6 +26,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -944,6 +945,70 @@ func TestAudioTranscriptions(t *testing.T) {
 			t.Errorf("model_received = %q, want %q (byte-identical replay, no rewrite needed)", got, "gpt-mock")
 		}
 	})
+}
+
+// adminCSPHeader mirrors admin.go's adminCSP constant byte-for-byte. This
+// package is a separate Go module (integration/go.mod) and cannot import
+// the plugin's unexported const, so the value is duplicated by hand;
+// TestAdminAssetCSP below compares it against a real header the running
+// plugin sent, so a drift between the two shows up as a test failure
+// immediately, not as a silent divergence.
+const adminCSPHeader = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
+
+// adminAssetSrcRe extracts the `src` attribute of the first `<script>` tag
+// in the served /admin shell — the built Vue app's own entry-point asset
+// reference.
+var adminAssetSrcRe = regexp.MustCompile(`<script[^>]+src="([^"]+)"`)
+
+// TestAdminAssetCSP proves the Content-Security-Policy header under the
+// REAL, shipped pipeline: a Vite build baked into the plugin binary by
+// webui/generate.mjs, served by a real Traefik v3.5 process interpreting
+// the plugin with Yaegi — not the in-process httptest handler
+// admin_test.go's unit tests use. It fetches GET /admin, extracts the
+// asset URL its own <script src="..."> tag names, fetches that asset, and
+// asserts both responses carry the exact adminCSP string. Combined with
+// generate.mjs's own build-time assertion and admin_test.go's
+// TestAdminIndexHTML_NoInlineAssets (both check the CSP invariant holds —
+// no inline script/style — this test checks the header itself is what
+// actually reaches the wire), the loop from "build" to "real HTTP
+// response" is closed.
+func TestAdminAssetCSP(t *testing.T) {
+	pageResp, err := http.Get(traefik1URL + "/admin")
+	if err != nil {
+		t.Fatalf("GET /admin: %v", err)
+	}
+	defer func() { _ = pageResp.Body.Close() }()
+	if pageResp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /admin: status = %d, want 200", pageResp.StatusCode)
+	}
+	if got := pageResp.Header.Get("Content-Security-Policy"); got != adminCSPHeader {
+		t.Errorf("GET /admin: Content-Security-Policy = %q, want %q", got, adminCSPHeader)
+	}
+	pageBody, err := io.ReadAll(pageResp.Body)
+	if err != nil {
+		t.Fatalf("read /admin body: %v", err)
+	}
+
+	match := adminAssetSrcRe.FindSubmatch(pageBody)
+	if match == nil {
+		t.Fatalf("GET /admin: body has no <script src=\"...\"> reference, body=%s", pageBody)
+	}
+	assetPath := string(match[1])
+	if !strings.HasPrefix(assetPath, "/admin/assets/") {
+		t.Fatalf("extracted asset src = %q, want a path under /admin/assets/", assetPath)
+	}
+
+	assetResp, err := http.Get(traefik1URL + assetPath)
+	if err != nil {
+		t.Fatalf("GET %s: %v", assetPath, err)
+	}
+	defer func() { _ = assetResp.Body.Close() }()
+	if assetResp.StatusCode != http.StatusOK {
+		t.Fatalf("GET %s: status = %d, want 200", assetPath, assetResp.StatusCode)
+	}
+	if got := assetResp.Header.Get("Content-Security-Policy"); got != adminCSPHeader {
+		t.Errorf("GET %s: Content-Security-Policy = %q, want %q", assetPath, got, adminCSPHeader)
+	}
 }
 
 // TestAdminDashboard covers v0.2 integration coverage (spec §4): the

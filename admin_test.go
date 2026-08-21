@@ -629,6 +629,9 @@ func TestAdminAsset_Serving(t *testing.T) {
 	if got := rec.Header().Get("X-Content-Type-Options"); got != "nosniff" {
 		t.Errorf("X-Content-Type-Options = %q, want %q", got, "nosniff")
 	}
+	if got := rec.Header().Get("Content-Security-Policy"); got != adminCSP {
+		t.Errorf("Content-Security-Policy = %q, want %q", got, adminCSP)
+	}
 	cc := rec.Header().Get("Cache-Control")
 	if !strings.Contains(cc, "immutable") || !strings.Contains(cc, "max-age=31536000") {
 		t.Errorf("Cache-Control = %q, want a long-lived immutable directive", cc)
@@ -689,6 +692,36 @@ func TestAdminAssets_GeneratedFilePresent(t *testing.T) {
 		if asset.contentType == "" {
 			t.Errorf("adminAssets[%q].contentType is empty", name)
 		}
+	}
+}
+
+// adminInlineScriptRe matches every <script ...> opening tag, capturing its
+// attribute text — TestAdminIndexHTML_NoInlineAssets checks each capture for
+// a src= attribute.
+var adminInlineScriptRe = regexp.MustCompile(`(?i)<script\b([^>]*)>`)
+
+// TestAdminIndexHTML_NoInlineAssets asserts, server-side, the exact CSP
+// invariant generate.mjs's own assertNoInlineAssets checks at build time
+// (webui/generate.mjs): the decoded adminIndexHTML — what admin.go's
+// serveAdminPage actually serves — contains no inline <script> (a
+// <script> tag with no src= attribute) and no <style> tag anywhere. The
+// admin CSP (adminCSP, above) ships script-src/style-src 'self' with no
+// 'unsafe-inline'; either violation would silently break under that
+// policy. This test exists as a second, independent guard: it catches a
+// regression even if admin_assets_gen.go were regenerated with a
+// modified copy of generate.mjs that dropped or weakened its own check.
+func TestAdminIndexHTML_NoInlineAssets(t *testing.T) {
+	t.Parallel()
+	html := string(adminIndexHTML)
+
+	for _, m := range adminInlineScriptRe.FindAllStringSubmatch(html, -1) {
+		attrs := m[1]
+		if !strings.Contains(strings.ToLower(attrs), "src=") {
+			t.Errorf("adminIndexHTML contains an inline <script> (no src= attribute): %q", m[0])
+		}
+	}
+	if strings.Contains(strings.ToLower(html), "<style") {
+		t.Error("adminIndexHTML contains a <style> tag — every style must be an external <link rel=\"stylesheet\">")
 	}
 }
 

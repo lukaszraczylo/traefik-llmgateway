@@ -32,11 +32,28 @@ function toDisplayValue(metric: HistoryMetric, raw: number): number {
   return metric === 'cost' ? raw / 1_000_000 : raw
 }
 
-const labels = computed<string[]>(() => {
+/**
+ * canonicalBuckets is the union of every active dataset's bucket keys,
+ * sorted. The "tokens" tab fetches tokin and tokout as two separate HTTP
+ * requests (history.ts's metricsForTab) — not one atomic call — so a
+ * window rollover landing between the two requests can leave one series
+ * one bucket ahead of the other. Zipping the two arrays positionally
+ * would silently mis-stack that refresh's chart. Bucket strings are
+ * fixed-width, zero-padded digit strings (limits.go's windowKey: hour
+ * "2006010215", day "20060102", month "200601"), so a plain lexicographic
+ * sort is also a chronological sort — no date parsing needed to align
+ * them.
+ */
+const canonicalBuckets = computed<string[]>(() => {
   const specs = DATASET_SPECS[props.tab]
-  const points = props.seriesByMetric[specs[0]!.metric] ?? []
-  return points.map((p) => formatBucketLabel(p.bucket, props.window))
+  const bucketSet = new Set<string>()
+  for (const spec of specs) {
+    for (const p of props.seriesByMetric[spec.metric] ?? []) bucketSet.add(p.bucket)
+  }
+  return Array.from(bucketSet).sort()
 })
+
+const labels = computed<string[]>(() => canonicalBuckets.value.map((b) => formatBucketLabel(b, props.window)))
 
 /** resolveToken reads one of main.css's --chart-* custom properties from :root, live — so a chart already on screen repaints on a `prefers-color-scheme` flip exactly like useThemeColors does for axis/legend text. */
 function resolveToken(cssVar: string): string {
@@ -48,13 +65,24 @@ const chartData = computed<ChartData<'bar'>>(() => {
   // custom properties via resolveToken) on a `prefers-color-scheme` flip —
   // resolveToken's own getComputedStyle read is not itself reactive.
   void foreground.value
+  const buckets = canonicalBuckets.value
   return {
     labels: labels.value,
-    datasets: DATASET_SPECS[props.tab].map((spec) => ({
-      label: spec.label,
-      backgroundColor: resolveToken(spec.color),
-      data: (props.seriesByMetric[spec.metric] ?? []).map((p) => toDisplayValue(spec.metric, p.value)),
-    })),
+    datasets: DATASET_SPECS[props.tab].map((spec) => {
+      // Map<bucket, value> per series, so each canonical bucket looks up
+      // its own value rather than assuming index i means the same bucket
+      // across every dataset (the mis-stacking canonicalBuckets exists to
+      // avoid — see its own doc comment). A bucket this series has no
+      // point for reads as 0, matching the zero-based axis: a genuinely
+      // missing bucket (not yet reported by the store) is indistinguishable
+      // from zero usage, which is the honest reading for a bar chart.
+      const byBucket = new Map((props.seriesByMetric[spec.metric] ?? []).map((p) => [p.bucket, p.value]))
+      return {
+        label: spec.label,
+        backgroundColor: resolveToken(spec.color),
+        data: buckets.map((b) => toDisplayValue(spec.metric, byBucket.get(b) ?? 0)),
+      }
+    }),
   }
 })
 
