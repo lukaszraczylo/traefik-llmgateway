@@ -216,7 +216,7 @@ func (c *respClient) ensureConnLocked(deadline time.Time) error {
 	if dialTimeout <= 0 {
 		return fmt.Errorf("resp: dial %q: %w", c.addr, respDeadlineExceededErr{})
 	}
-	conn, err := net.DialTimeout("tcp", c.addr, dialTimeout)
+	conn, err := net.DialTimeout("tcp", c.addr, dialTimeout) // #nosec G704 -- c.addr is the operator-configured redis address from middleware config, never request-derived
 	if err != nil {
 		return fmt.Errorf("resp: dial %q: %w", c.addr, err)
 	}
