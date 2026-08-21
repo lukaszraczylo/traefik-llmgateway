@@ -27,6 +27,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -758,6 +759,34 @@ func adminUsageEntry(t *testing.T, kind, id string) map[string]any {
 	return nil
 }
 
+// adminProviderModels finds name's own "models" array within providers (an
+// already-decoded GET /admin/api/overview "providers" list) and returns it
+// as a []string — the provider-model-accordion feature's field
+// (adminProviderView.Models, admin.go).
+func adminProviderModels(t *testing.T, providers []any, name string) []string {
+	t.Helper()
+	for _, p := range providers {
+		provider, ok := p.(map[string]any)
+		if !ok || provider["name"] != name {
+			continue
+		}
+		raw, ok := provider["models"].([]any)
+		if !ok {
+			t.Fatalf("provider %q: models is not an array, got %#v", name, provider["models"])
+		}
+		out := make([]string, len(raw))
+		for i, m := range raw {
+			out[i], ok = m.(string)
+			if !ok {
+				t.Fatalf("provider %q: models[%d] is not a string, got %#v", name, i, m)
+			}
+		}
+		return out
+	}
+	t.Fatalf("no provider named %q in %#v", name, providers)
+	return nil
+}
+
 // adminTotalTokensPerDay sums an admin usage entry's tokensInPerDay and
 // tokensOutPerDay (v0.2 data-layer task: the JSON API split what was
 // previously a single combined tokensPerDay field into in/out — see
@@ -1054,6 +1083,18 @@ func TestAdminDashboard(t *testing.T) {
 	providers, ok := overviewBody["providers"].([]any)
 	if !ok || len(providers) == 0 {
 		t.Fatalf("GET /admin/api/overview: expected a non-empty providers list, got %#v", overviewBody)
+	}
+
+	// provider-model-accordion feature: each provider's own "models" array
+	// (registry.go's providerSnapshot.models, admin.go's
+	// adminProviderView.Models) drives the dashboard's expandable provider
+	// row. "openai" (dynamic.yml.tmpl) configures an explicit
+	// models: ["gpt-mock"] — present under real Traefik+Yaegi regardless
+	// of whether discovery has added anything else, unlike a
+	// discovery-only model this suite cannot control the timing of.
+	openaiModels := adminProviderModels(t, providers, "openai")
+	if !slices.Contains(openaiModels, "gpt-mock") {
+		t.Errorf("openai provider models = %v, want it to contain %q (dynamic.yml.tmpl's explicit model)", openaiModels, "gpt-mock")
 	}
 
 	nonAdminResp, nonAdminBody := doJSON(t, http.MethodGet, traefik1URL+"/admin/api/overview", aliceKey, nil)

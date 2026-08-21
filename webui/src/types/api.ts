@@ -18,6 +18,8 @@ export interface AdminProviderView {
   baseUrl: string
   lastRefresh: string
   lastErr?: string
+  /** Sorted explicit∪discovered model ids (admin.go: adminProviderView.Models) — always an array, never omitted, even when empty. */
+  models: string[]
   modelCount: number
 }
 

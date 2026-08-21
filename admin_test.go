@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -241,6 +242,16 @@ func TestAdminOverview_SortedShapeAndVersion(t *testing.T) {
 	if got.Providers[1].ModelCount != 1 {
 		t.Errorf("zeta modelCount = %d, want 1 (z-model)", got.Providers[1].ModelCount)
 	}
+	// models (provider-model-accordion task): the sorted id list backing
+	// modelCount above, not just its length.
+	wantAlphaModels := []string{"a-model-1", "a-model-2"}
+	if !slices.Equal(got.Providers[0].Models, wantAlphaModels) {
+		t.Errorf("alpha models = %v, want sorted %v", got.Providers[0].Models, wantAlphaModels)
+	}
+	wantZetaModels := []string{"z-model"}
+	if !slices.Equal(got.Providers[1].Models, wantZetaModels) {
+		t.Errorf("zeta models = %v, want %v", got.Providers[1].Models, wantZetaModels)
+	}
 	if got.Providers[0].LastErr != "" || got.Providers[1].LastErr != "" {
 		t.Errorf("providers with discovery disabled must have empty lastErr, got %+v", got.Providers)
 	}
@@ -355,6 +366,12 @@ func TestAdminOverview_ProviderLastErrAfterFailedRefresh(t *testing.T) {
 	}
 	if p.ModelCount != 0 {
 		t.Errorf("modelCount = %d, want 0 (no explicit models, discovery failed)", p.ModelCount)
+	}
+	if len(p.Models) != 0 {
+		t.Errorf("models = %v, want empty (no explicit models, discovery has never once succeeded)", p.Models)
+	}
+	if p.Models == nil {
+		t.Error("models must marshal as [] (a non-nil empty slice), not be omitted or null")
 	}
 	if p.LastRefresh.IsZero() {
 		t.Error("lastRefresh must be set even on a failed refresh (finishRefresh always advances it)")

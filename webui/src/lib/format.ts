@@ -2,6 +2,21 @@ import type { HistoryWindow, LimitsConfig } from '@/types/api'
 
 const ZERO_TIME = '0001-01-01T00:00:00Z'
 
+/**
+ * routableModelId joins a provider name and one of its own model ids into
+ * the id form the gateway actually routes on (routes_unified.go's
+ * "provider/model" prefix rule) — always `${providerName}/${modelId}`,
+ * even when modelId itself already contains a slash (a discovered id
+ * like "uni/deepseek-v4-flash-0731" on provider "real" becomes
+ * "real/uni/deepseek-v4-flash-0731": the FIRST path segment names the
+ * provider, everything after it is the model id verbatim, so this stays
+ * copy-paste-valid regardless of how many slashes the model id itself
+ * carries).
+ */
+export function routableModelId(providerName: string, modelId: string): string {
+  return `${providerName}/${modelId}`
+}
+
 /** formatCost renders a micro-USD integer (adminUsageEntryView's convention) as "$1.2345". */
 export function formatCost(micros: number): string {
   return `$${(micros / 1_000_000).toFixed(4)}`

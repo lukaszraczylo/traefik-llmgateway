@@ -259,7 +259,14 @@ type adminProviderView struct {
 	BaseURL     string    `json:"baseUrl"`
 	LastRefresh time.Time `json:"lastRefresh"`
 	LastErr     string    `json:"lastErr,omitempty"`
-	ModelCount  int       `json:"modelCount"`
+	// Models is the sorted explicit∪discovered model id set
+	// (registry.go's providerSnapshot.models — provider-model-accordion
+	// task, Vue admin panel): the dashboard's expandable provider row.
+	// Never nil for a real provider — even zero known models marshals as
+	// "[]", not omitted, so the dashboard can tell "no models yet" apart
+	// from a field a stale client build does not know how to read.
+	Models     []string `json:"models"`
+	ModelCount int      `json:"modelCount"`
 }
 
 // adminRedisView is the redis status line in GET /admin/api/overview.
@@ -341,6 +348,7 @@ func (g *Gateway) buildAdminOverview() adminOverviewResponse {
 			Name:        s.name,
 			Type:        s.typeName,
 			BaseURL:     sanitizeBaseURL(s.baseURL),
+			Models:      s.models,
 			ModelCount:  s.modelCount,
 			LastRefresh: s.lastRefresh,
 			LastErr:     sanitizeProviderErr(s.lastErr, s.baseURL),

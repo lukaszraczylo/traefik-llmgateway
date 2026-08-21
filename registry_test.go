@@ -653,6 +653,60 @@ func TestModelRegistry_MaybeRefresh_DiscoveryError_KeepsPreviousDiscoveredSet(t 
 	}
 }
 
+// TestModelRegistry_Snapshot_ModelsStaleWhileError proves
+// modelRegistry.snapshot()'s providerSnapshot.models — the admin
+// dashboard's provider-model-accordion field (registry.go's
+// providerState.snapshot) — reflects the same stale-while-error set
+// hasModel/knownIDs already do: a refresh that fails after an earlier
+// successful one leaves the previously discovered models in the
+// snapshot, not an empty list. This is the existing semantics
+// finishRefresh's own doc comment already documents; this test applies
+// no special handling for the mid-refresh/failed case, it only asserts
+// the models field is populated from whatever snapshot() already reads.
+func TestModelRegistry_Snapshot_ModelsStaleWhileError(t *testing.T) {
+	t.Parallel()
+	var fail atomic.Bool
+	fa := newFakeAdapter("openai")
+	fa.listModelsFn = func(context.Context) ([]string, error) {
+		if fail.Load() {
+			return nil, fmt.Errorf("upstream unreachable")
+		}
+		return []string{"m2", "m1"}, nil // deliberately unsorted at the source
+	}
+	adapters := map[string]providerAdapter{"openai": fa}
+	cfg := &Config{Providers: map[string]*ProviderConfig{"openai": {Discovery: true, DiscoveryInterval: "1h"}}}
+	rl := &recordingLog{}
+	reg, err := newModelRegistry(adapters, cfg, rl.fn)
+	if err != nil {
+		t.Fatalf("newModelRegistry: %v", err)
+	}
+	reg.warmFill(context.Background()) // succeeds, populates discovered={m1,m2}
+
+	snaps := reg.snapshot()
+	if len(snaps) != 1 {
+		t.Fatalf("snapshot = %+v, want 1 provider", snaps)
+	}
+	if got := snaps[0].models; len(got) != 2 || got[0] != "m1" || got[1] != "m2" {
+		t.Fatalf("models after a successful discovery = %v, want sorted [m1 m2]", got)
+	}
+
+	now := time.Now().Add(2 * time.Hour)
+	reg.nowFn = func() time.Time { return now }
+	fail.Store(true)
+	before := rl.count()
+
+	reg.maybeRefresh(context.Background())
+	waitUntil(t, time.Second, func() bool { return rl.count() > before })
+
+	snaps = reg.snapshot()
+	if got := snaps[0].models; len(got) != 2 || got[0] != "m1" || got[1] != "m2" {
+		t.Errorf("models after a failed refresh = %v, want the stale-while-error set [m1 m2] unchanged", got)
+	}
+	if snaps[0].lastErr == "" {
+		t.Error("lastErr must be non-empty after the failed refresh, even though models stayed populated")
+	}
+}
+
 // --- listFor: group filtering, sorting, collision presentation (ruling h) ---
 
 func TestModelRegistry_ListFor_GroupFiltered(t *testing.T) {

@@ -127,9 +127,33 @@ func (st *providerState) finishRefresh(now time.Time, ids []string, err error) {
 }
 
 // snapshot returns st's read-only view for the admin dashboard (spec §4,
-// v0.2): its known model count (explicit ∪ discovered, mirroring
-// knownIDs), last refresh time, and last refresh error message.
-func (st *providerState) snapshot() (modelCount int, lastRefresh time.Time, lastErr string) {
+// v0.2): its known model ids (explicit ∪ discovered, sorted — the
+// provider-model-accordion task; a caller wanting just the count uses
+// len(models)), last refresh time, and last refresh error message.
+//
+// models is computed in the SAME critical section as lastRefresh/lastErr
+// below, not via a separate call to knownIDs() (which does the identical
+// explicit∪discovered merge-and-sort): st.mu is a plain sync.Mutex, not
+// reentrant, so calling knownIDs() — which takes the same lock — from
+// inside this already-locked method would deadlock. The duplication
+// mirrors this method's own pre-existing pattern (it already rebuilt the
+// same union set as knownIDs() independently, before this change, purely
+// for the count) rather than introducing a new one. Keeping the merge
+// inside one lock/unlock, rather than one call for the count and a
+// second, later call to knownIDs() for the list, also matters
+// functionally, not just stylistically: a concurrent finishRefresh
+// landing between two separate locked sections could otherwise hand the
+// admin dashboard a models list whose length disagrees with a
+// separately-read modelCount — reading both from one locked pass makes
+// that impossible.
+//
+// A provider whose discovery is mid-refresh (or has never refreshed
+// since a config reload) returns exactly this stale-while-error set —
+// finishRefresh's own doc comment covers why: a failed refresh keeps the
+// previous discovered set rather than clearing it. This method applies
+// no special handling for that case; it is simply the same set every
+// other snapshot consumer (modelCount, listFor) already reads.
+func (st *providerState) snapshot() (models []string, lastRefresh time.Time, lastErr string) {
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	set := make(map[string]bool, len(st.explicit)+len(st.discovered))
@@ -139,7 +163,12 @@ func (st *providerState) snapshot() (modelCount int, lastRefresh time.Time, last
 	for id := range st.discovered {
 		set[id] = true
 	}
-	return len(set), st.lastRefresh, st.lastErr
+	ids := make([]string, 0, len(set))
+	for id := range set {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids, st.lastRefresh, st.lastErr
 }
 
 // modelRegistry aggregates every configured provider's explicit and
@@ -743,13 +772,18 @@ func modelObject(id, ownedBy string) map[string]any {
 // dashboard (spec §4, v0.2). baseURL is not secret (the spec's NEVER-
 // exposed list is API keys, digests, redis password, and users-file path
 // contents only) — it is included so an operator can see which upstream
-// a provider actually targets.
+// a provider actually targets. models — the sorted explicit∪discovered
+// id set (provider-model-accordion task) — is likewise not secret: a
+// model id names no credential, and this same set is already public
+// through /v1/models (listFor) to any authenticated caller the group
+// allows.
 type providerSnapshot struct {
 	lastRefresh time.Time
 	name        string
 	typeName    string
 	baseURL     string
 	lastErr     string
+	models      []string
 	modelCount  int
 }
 
@@ -787,12 +821,19 @@ func (m *modelRegistry) snapshot() []providerSnapshot {
 	out := make([]providerSnapshot, 0, len(m.providerNames))
 	for _, name := range m.providerNames {
 		adapter := m.adapters[name]
-		modelCount, lastRefresh, lastErr := m.states[name].snapshot()
+		// Three-value multi-assign straight from the call, no intermediate
+		// named variables reused across a loop iteration boundary — Yaegi
+		// has had multi-assign edge cases around reused/shadowed loop
+		// variables in other parts of this codebase's history; this shape
+		// (fresh locals every iteration, assigned once, read once) avoids
+		// that class of trap entirely.
+		models, lastRefresh, lastErr := m.states[name].snapshot()
 		out = append(out, providerSnapshot{
 			name:        adapter.name(),
 			typeName:    adapter.typeName(),
 			baseURL:     adapter.base(),
-			modelCount:  modelCount,
+			models:      models,
+			modelCount:  len(models),
 			lastRefresh: lastRefresh,
 			lastErr:     lastErr,
 		})
