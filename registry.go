@@ -68,11 +68,14 @@ func (st *providerState) hasModel(id string) bool {
 	return st.explicit[id] || st.discovered[id]
 }
 
-// knownIDs returns the sorted union of this provider's explicit and
-// discovered model ids.
-func (st *providerState) knownIDs() []string {
-	st.mu.Lock()
-	defer st.mu.Unlock()
+// knownIDsLocked returns the sorted union of st.explicit and
+// st.discovered. It takes no lock itself — the caller must already hold
+// st.mu — so both knownIDs (below) and snapshot (which needs the
+// identical merge inside its own, already-held, critical section
+// alongside lastRefresh/lastErr) can share this one implementation
+// without knownIDs' own st.mu.Lock() double-locking (sync.Mutex is not
+// reentrant) when called from inside snapshot.
+func (st *providerState) knownIDsLocked() []string {
 	set := make(map[string]bool, len(st.explicit)+len(st.discovered))
 	for id := range st.explicit {
 		set[id] = true
@@ -86,6 +89,14 @@ func (st *providerState) knownIDs() []string {
 	}
 	sort.Strings(ids)
 	return ids
+}
+
+// knownIDs returns the sorted union of this provider's explicit and
+// discovered model ids.
+func (st *providerState) knownIDs() []string {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return st.knownIDsLocked()
 }
 
 // tryBeginRefresh reports whether now is far enough past lastRefresh (or
@@ -131,21 +142,15 @@ func (st *providerState) finishRefresh(now time.Time, ids []string, err error) {
 // provider-model-accordion task; a caller wanting just the count uses
 // len(models)), last refresh time, and last refresh error message.
 //
-// models is computed in the SAME critical section as lastRefresh/lastErr
-// below, not via a separate call to knownIDs() (which does the identical
-// explicit∪discovered merge-and-sort): st.mu is a plain sync.Mutex, not
-// reentrant, so calling knownIDs() — which takes the same lock — from
-// inside this already-locked method would deadlock. The duplication
-// mirrors this method's own pre-existing pattern (it already rebuilt the
-// same union set as knownIDs() independently, before this change, purely
-// for the count) rather than introducing a new one. Keeping the merge
-// inside one lock/unlock, rather than one call for the count and a
-// second, later call to knownIDs() for the list, also matters
-// functionally, not just stylistically: a concurrent finishRefresh
-// landing between two separate locked sections could otherwise hand the
-// admin dashboard a models list whose length disagrees with a
-// separately-read modelCount — reading both from one locked pass makes
-// that impossible.
+// models comes from knownIDsLocked (this method already holds st.mu, so
+// it uses the lock-free variant directly rather than the locking
+// knownIDs, which would deadlock reentering the same non-reentrant
+// sync.Mutex), read in the SAME critical section as lastRefresh/lastErr
+// below — not two separate locked calls. That matters functionally, not
+// just stylistically: a concurrent finishRefresh landing between two
+// separate locked sections could otherwise hand the admin dashboard a
+// models list whose length disagrees with a separately-read modelCount;
+// reading all three from one locked pass makes that impossible.
 //
 // A provider whose discovery is mid-refresh (or has never refreshed
 // since a config reload) returns exactly this stale-while-error set —
@@ -156,19 +161,7 @@ func (st *providerState) finishRefresh(now time.Time, ids []string, err error) {
 func (st *providerState) snapshot() (models []string, lastRefresh time.Time, lastErr string) {
 	st.mu.Lock()
 	defer st.mu.Unlock()
-	set := make(map[string]bool, len(st.explicit)+len(st.discovered))
-	for id := range st.explicit {
-		set[id] = true
-	}
-	for id := range st.discovered {
-		set[id] = true
-	}
-	ids := make([]string, 0, len(set))
-	for id := range set {
-		ids = append(ids, id)
-	}
-	sort.Strings(ids)
-	return ids, st.lastRefresh, st.lastErr
+	return st.knownIDsLocked(), st.lastRefresh, st.lastErr
 }
 
 // modelRegistry aggregates every configured provider's explicit and

@@ -7,7 +7,7 @@ import {
   faTriangleExclamation,
   faXmark,
 } from '@fortawesome/free-solid-svg-icons'
-import { computed, reactive, ref } from 'vue'
+import { computed, reactive, ref, watch } from 'vue'
 
 import ModelChip from '@/components/ModelChip.vue'
 import {
@@ -28,6 +28,7 @@ import {
   TableRow,
 } from '@/components/ui/table'
 import { formatAgo, formatTimestamp, routableModelId } from '@/lib/format'
+import { type ExpandState, clearExpandOverrides, computeExpandedProviders, toggleProviderExpand } from '@/lib/provider-expand'
 import { useDashboardStore } from '@/stores/dashboard'
 import type { AdminAliasView, AdminProviderView } from '@/types/api'
 
@@ -39,36 +40,59 @@ const overview = computed(() => dashboard.overview)
 // Providers table rows expand to a model list (operator feature). This is
 // NOT shadcn-vue's Accordion or Collapsible component: both wrap
 // trigger+content in one <div>, which cannot legally sit between two
-// <tr> elements inside a <table>/<tbody> — a browser's HTML table parser
-// reparents (hoists) a <div> found there out of the table, breaking the
-// layout. (reka-ui's Collapsible primitives DO support an `as` prop that
-// could in principle render Root as a <tbody> and Trigger/Content as
-// <tr> — installed and inspected via the CLI to check, then not used:
+// <tr> elements inside a <table>/<tbody>. This app renders entirely via
+// Vue's DOM APIs (createElement/appendChild), never by parsing an HTML
+// string, so the HTML5 parser's "foster parenting" algorithm — which
+// only runs while building a DOM tree FROM a token stream — never fires
+// here at all; a <div> placed as a <tbody> child by direct DOM
+// manipulation stays exactly where it was put. What actually breaks is
+// layout: CSS table rendering (CSS2.1 §17.2.1's anonymous-table-object
+// generation) does not know what to do with a block-level box sitting
+// directly inside a table-row-group box, so the table's visual layout
+// misbehaves around it. Either way, a <div> does not belong there.
+// (reka-ui's Collapsible primitives DO support an `as` prop that could in
+// principle render Root as a <tbody> and Trigger/Content as <tr> —
+// installed and inspected via the CLI to check, then not used:
 // CollapsibleContent's animation-measurement code calls
 // getBoundingClientRect() and sets inline transition/animation styles on
 // whatever element `as` names, an interaction with a <tr> this component
-// was never designed around and was not worth taking on for an
-// instant show/hide with no transition.) A second, plain <TableRow>
-// toggled by v-if is the correct table-native shape for an expandable
-// row; it reuses Accordion's own visual language (a rotating chevron,
-// the trigger row as a button) so it reads as the same interaction
-// pattern without misusing components built for block content.
-const manuallyExpanded = reactive(new Set<string>())
-function toggleProvider(name: string): void {
-  if (manuallyExpanded.has(name)) manuallyExpanded.delete(name)
-  else manuallyExpanded.add(name)
-}
+// was never designed around and was not worth taking on for an instant
+// show/hide with no transition.) A second, plain <TableRow> toggled by
+// v-if is the correct table-native shape for an expandable row; it
+// reuses Accordion's own visual language (a rotating chevron, a
+// keyboard-accessible trigger) without misusing a component built for
+// block content.
+//
+// Expand state itself (computeExpandedProviders/toggleProviderExpand/
+// clearExpandOverrides) is a plain, Vue-free module — lib/provider-expand.ts
+// — specifically so the exact toggle-during-search sequence a review
+// flagged is checkable by a throwaway assertion script outside Vue,
+// without standing up a component-test framework this project does not
+// otherwise have.
+const expandState: ExpandState = reactive({
+  manuallyExpanded: new Set<string>(),
+  manuallyCollapsed: new Set<string>(),
+})
 
 // --- model/alias search filter (operator feature) ---
 const modelQuery = ref('')
 const normalizedQuery = computed(() => modelQuery.value.trim().toLowerCase())
 const hasQuery = computed(() => normalizedQuery.value.length > 0)
 
-function modelMatches(modelId: string): boolean {
-  return modelId.toLowerCase().includes(normalizedQuery.value)
+/**
+ * Matching is against each model's full ROUTABLE id
+ * (routableModelId(p.name, m) — the same string ModelChip both displays
+ * and copies), not the bare model id: copying a chip's text and pasting
+ * it back into search must find it, and the routable form is strictly
+ * more permissive (it contains the bare id as a substring, plus the
+ * provider prefix), so this never hides a match the bare-id form would
+ * have found.
+ */
+function modelMatches(providerName: string, modelId: string): boolean {
+  return routableModelId(providerName, modelId).toLowerCase().includes(normalizedQuery.value)
 }
 function providerMatches(p: AdminProviderView): boolean {
-  return p.models.some(modelMatches)
+  return p.models.some((m) => modelMatches(p.name, m))
 }
 function aliasMatches(a: AdminAliasView): boolean {
   return a.alias.toLowerCase().includes(normalizedQuery.value) || a.target.toLowerCase().includes(normalizedQuery.value)
@@ -83,28 +107,45 @@ const filteredAliases = computed<AdminAliasView[]>(() => {
   return hasQuery.value ? all.filter(aliasMatches) : all
 })
 
-/**
- * expandedProviders is what the template reads to decide which rows show
- * their model list: the user's own manual toggles (manuallyExpanded),
- * plus — only while a search query is active — every provider
- * filteredProviders kept (they were kept because they have a matching
- * model, so auto-expanding them surfaces the match without an extra
- * click). Clearing the query drops this back to exactly
- * manuallyExpanded, which manualExpanded's own toggle is the only thing
- * that ever writes to — the "restore collapsed state when cleared"
- * requirement falls out for free, because the auto-expand set was never
- * a manual toggle to begin with.
- */
-const expandedProviders = computed<Set<string>>(() => {
-  if (!hasQuery.value) return manuallyExpanded
-  const expanded = new Set(manuallyExpanded)
-  for (const p of filteredProviders.value) expanded.add(p.name)
-  return expanded
+/** expandedProviders is what the template reads to decide which rows show their model list — see lib/provider-expand.ts's own doc comments for the manual/auto-expand/override semantics. */
+const expandedProviders = computed<Set<string>>(() =>
+  computeExpandedProviders(
+    expandState,
+    hasQuery.value,
+    filteredProviders.value.map((p) => p.name),
+  ),
+)
+
+/** toggleProvider reads the CURRENT effective (visible) state for name before flipping it — see toggleProviderExpand's own doc comment for exactly which bug this avoids. */
+function toggleProvider(name: string): void {
+  toggleProviderExpand(expandState, name, expandedProviders.value.has(name))
+}
+
+// A stale manuallyCollapsed suppression from one search must never
+// silently carry into a later, unrelated one — see ExpandState's own doc
+// comment. Watching modelQuery (not just the explicit clear button)
+// covers backspacing to empty too.
+watch(modelQuery, (value) => {
+  if (value.trim() === '') clearExpandOverrides(expandState)
 })
 
 /** visibleModels is p's own model list, filtered to matches while a query is active — p only appears in filteredProviders at all because it has one, so this is never empty in that case; it exists so the accordion shows WHICH models matched instead of re-showing all 70+ with no distinction. */
 function visibleModels(p: AdminProviderView): string[] {
-  return hasQuery.value ? p.models.filter(modelMatches) : p.models
+  return hasQuery.value ? p.models.filter((m) => modelMatches(p.name, m)) : p.models
+}
+
+/**
+ * providerModelsId is the id shared by a provider's chevron button
+ * (aria-controls, only set while expanded — see the template) and its
+ * expanded content row (id). Provider names are not escaped before this
+ * template-literal interpolation: buildAdapters (providers.go) rejects
+ * any name that does not match configNamePattern
+ * (`^[a-zA-Z0-9._-]+$`, providers.go) before this app ever sees it, so
+ * no provider name this endpoint can return contains a character an
+ * HTML id/attribute value needs escaped.
+ */
+function providerModelsId(name: string): string {
+  return `provider-models-${name}`
 }
 
 function clearQuery(): void {
@@ -227,18 +268,34 @@ function clearQuery(): void {
               no providers match &quot;{{ modelQuery }}&quot;
             </TableEmpty>
             <template v-for="p in filteredProviders" :key="p.name">
-              <TableRow
-                role="button"
-                tabindex="0"
-                class="cursor-pointer select-none hover:bg-accent/50"
-                :aria-expanded="expandedProviders.has(p.name)"
-                :aria-controls="`provider-models-${p.name}`"
-                @click="toggleProvider(p.name)"
-                @keydown.enter.prevent="toggleProvider(p.name)"
-                @keydown.space.prevent="toggleProvider(p.name)"
-              >
+              <TableRow class="cursor-pointer select-none hover:bg-accent/50" @click="toggleProvider(p.name)">
                 <TableCell class="font-medium">
-                  <span class="flex items-center gap-2">
+                  <!--
+                    A real <button>, not role="button" on the <tr>: a <tr>
+                    carries table-row AT semantics (a screen reader
+                    announces it as part of the table's row/column
+                    structure), and overriding that to "button" strips
+                    those semantics from the whole row — exactly the kind
+                    of ARIA-over-native mistake the "semantics first"
+                    rule warns against. The button lives in the natural
+                    host, the chevron+name span, and needs no click
+                    handler of its own: its native click (mouse, or Enter/
+                    Space while focused — free, standard <button>
+                    behavior, no keydown handling to write) bubbles up to
+                    the row's own @click above, so exactly one place
+                    (the row) ever runs the actual toggle. aria-controls
+                    is set ONLY while expanded (not unconditionally): the
+                    content row is v-if, not v-show (Lazy rendering — see
+                    the models div below), so an id it would point to
+                    while collapsed does not exist in the DOM yet, and
+                    ARIA requires aria-controls name an id that exists.
+                  -->
+                  <button
+                    type="button"
+                    class="flex items-center gap-2 rounded focus-visible:ring-3 focus-visible:ring-ring/50 focus-visible:outline-1 focus-visible:outline-ring"
+                    :aria-expanded="expandedProviders.has(p.name)"
+                    :aria-controls="expandedProviders.has(p.name) ? providerModelsId(p.name) : undefined"
+                  >
                     <FontAwesomeIcon
                       :icon="faChevronRight"
                       class="size-3 shrink-0 text-muted-foreground transition-transform duration-150"
@@ -246,7 +303,7 @@ function clearQuery(): void {
                       aria-hidden="true"
                     />
                     {{ p.name }}
-                  </span>
+                  </button>
                 </TableCell>
                 <TableCell class="text-muted-foreground">{{ p.type }}</TableCell>
                 <TableCell class="text-muted-foreground">{{ p.baseUrl }}</TableCell>
@@ -254,7 +311,7 @@ function clearQuery(): void {
                 <TableCell class="text-muted-foreground">{{ formatTimestamp(p.lastRefresh) }}</TableCell>
                 <TableCell class="text-destructive">{{ p.lastErr ?? '' }}</TableCell>
               </TableRow>
-              <TableRow v-if="expandedProviders.has(p.name)" :id="`provider-models-${p.name}`">
+              <TableRow v-if="expandedProviders.has(p.name)" :id="providerModelsId(p.name)">
                 <TableCell colspan="6" class="whitespace-normal bg-muted/30">
                   <div v-if="visibleModels(p).length" class="flex flex-wrap gap-1.5 py-1">
                     <ModelChip v-for="m in visibleModels(p)" :key="m" :id="routableModelId(p.name, m)" />
