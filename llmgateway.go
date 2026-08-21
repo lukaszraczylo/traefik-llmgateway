@@ -449,6 +449,23 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Federated /mcp (Feature C, v0.21) is matched ahead of the per-server
+	// "/mcp/{name}/..." target proxy below: targetRoute's own splitting
+	// already rejects a bare "/mcp" (no name segment to route to), so
+	// there is no ambiguity between the two, but this ordering keeps every
+	// exact-path route grouped together (mirroring "/v1/mcp/servers" and
+	// "/v1/agents" immediately above) ahead of the prefix-matched one.
+	if r.Method == http.MethodPost && r.URL.Path == federatedMCPPath {
+		u, grp, ok := g.auth.identify(r)
+		g.logAuthEvent(ok, authEventUserName(u), r)
+		if !ok {
+			writeOAIError(sw, http.StatusUnauthorized, "authentication_error", "invalid or missing API key")
+			return
+		}
+		g.handleMCPFederated(sw, r, u, grp)
+		return
+	}
+
 	if name, rest, ok := targetRoute(r.URL.EscapedPath(), targetKindMCP); ok {
 		u, grp, authOK := g.auth.identify(r)
 		g.logAuthEvent(authOK, authEventUserName(u), r)

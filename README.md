@@ -42,7 +42,7 @@ Catalog — see [Development](#development) for what that needs.
 ```mermaid
 flowchart LR
     Req["incoming request"] --> Route{"route<br/>ServeHTTP: path+method dispatch"}
-    Route -->|"a recognized route:<br/>/v1/models, /v1/chat/completions,<br/>/v1/embeddings, /v1/mcp/servers,<br/>/v1/agents, /mcp/name/...,<br/>/a2a/name/..., or /providerName/...<br/>for a known provider"| Auth["auth (per branch)<br/>identify(): key digest lookup"]
+    Route -->|"a recognized route:<br/>/v1/models, /v1/chat/completions,<br/>/v1/embeddings, /v1/mcp/servers,<br/>/v1/agents, /mcp (federated),<br/>/mcp/name/...,<br/>/a2a/name/..., or /providerName/...<br/>for a known provider"| Auth["auth (per branch)<br/>identify(): key digest lookup"]
     Route -->|"no route matches"| Fallback["passthroughUnknown ? next : 404<br/>never calls identify()"]
     Auth -->|"no match"| E401["401 authentication_error"]
     Auth -->|"user, group"| Branch{"branch"}
@@ -50,21 +50,26 @@ flowchart LR
     Branch --> Unified["POST /v1/chat/completions<br/>POST /v1/embeddings"]
     Branch --> Registry["GET /v1/mcp/servers, /v1/agents"]
     Branch --> MCP["MCP/A2A proxy"]
+    Branch --> Federated["POST /mcp (federated JSON-RPC)"]
     Branch --> Passthrough["native passthrough"]
     Unified --> Resolve["resolve model<br/>registry.resolve"]
     Resolve -->|"unknown/denied"| E404["404 / 403"]
     Resolve --> Limit1["limiter.checkAndCount"]
     MCP --> Limit2["limiter.checkAndCount"]
+    Federated --> Limit4["limiter.checkAndCount"]
     Passthrough --> Limit3["limiter.checkAndCount"]
     Limit1 -->|"over budget"| E429["429 / 503"]
     Limit2 -->|"over budget"| E429
     Limit3 -->|"over budget"| E429
+    Limit4 -->|"over budget"| E429
     Limit1 --> Exec["execute: translate + call adapter"]
     Limit2 --> ExecProxy["execute: reverse proxy"]
     Limit3 --> ExecProxy
+    Limit4 --> ExecFed["execute: answer locally, or<br/>JSON-RPC call(s) to backend server(s)"]
     Exec --> Account["account: usage, cost"]
     Account --> Resp["respond to client"]
     ExecProxy --> Resp
+    ExecFed --> Resp
     Models --> Resp
     Registry --> Resp
 ```
@@ -500,8 +505,9 @@ http:
   pushed the scope over.
 - **A synthetic total scope** (`kind: "total"`, `id: "all"`) is counted
   alongside every request's own user/group scopes on every metered route
-  (unified chat/embeddings, the media endpoints, native passthrough, and
-  the MCP/A2A proxy) — the sum of all LLM traffic combined. It carries no
+  (unified chat/embeddings, the media endpoints, native passthrough, the
+  per-server MCP/A2A proxy, and the federated `/mcp` endpoint) — the sum
+  of all LLM traffic combined. It carries no
   limit and is never evaluated: no configuration can throttle it. The
   admin usage API's `total` row and every `scope=total` usage-history
   query read this scope.
@@ -824,13 +830,27 @@ or in CI.
   `{"scope","metric","window","points":[{"bucket":"2026082114","value":123},...]}`.
   The Charts view fetches this once per selection change, plus a 30s
   auto-refresh of the current selection.
+- **`GET /admin/api/targets`** returns every configured MCP server and
+  agent for the dashboard's "MCP & Agents" tab:
+  `{"mcpServers":[...],"agents":[...]}`, each entry
+  `{"name","url","access","counters"}`. `url` has any userinfo/query
+  string stripped, same as a provider's `baseUrl` in `overview`. `access`
+  is the list of group names actually allowed to reach that target,
+  computed via the identical glob match `mcpServers`/`agents`
+  authorization itself uses (`GroupConfig.mcpServers`/`agents`), so this
+  view can never disagree with what the proxy enforces; omitted when
+  every configured group can reach it. `counters` is
+  `requestsPerMinute`/`requestsPerDay`/`requestsPerMonth` — requests
+  only, no tokens or cost (see [MCP and A2A](#mcp-and-a2a) for why). Polled
+  every 5 seconds, in the same batch as `overview` and `usage`.
 - **What's exposed**: provider names, types, base URLs (with any
   userinfo/query string stripped before it's ever echoed), model counts,
-  discovery status, group/user names, membership, limits, and live usage
-  counters. **Never exposed**: API keys (not even digests), provider
-  keys, the Redis password, or users-file path contents — every
-  secret-bearing field is redacted from every response.
-- **Admin traffic is never counted**: none of the three `/admin/api/*`
+  discovery status, group/user names, membership, limits, MCP/agent
+  target names/URLs/access, and live usage counters. **Never exposed**:
+  API keys (not even digests), provider keys, the Redis password, or
+  users-file path contents — every secret-bearing field is redacted from
+  every response.
+- **Admin traffic is never counted**: none of the four `/admin/api/*`
   JSON routes call `checkAndCount` — admin polling never moves any
   user's or group's `requestsPerMinute`/`requestsPerDay` counters, and
   usage statistics reflect real LLM traffic only (operator directive: an
@@ -838,18 +858,18 @@ or in CI.
   never itself distort the numbers it displays). The direct consequence:
   an admin's own `requestsPerMinute`/`requestsPerDay` limit, if
   configured, is never enforced against admin-route traffic either — an
-  admin key holder can poll any of the three routes as fast as they like.
+  admin key holder can poll any of the four routes as fast as they like.
   This is an accepted trade-off, not an oversight: these are admin-gated,
   cheap reads, and an admin holder polling aggressively is a
   self-inflicted, not a shared, resource cost. `GET /admin` and
   `GET /admin/assets/*` count nothing either, for the simpler reason that
   they are unauthenticated — there is no identified user to count a
   request against.
-- **Response headers**: all three JSON routes set
+- **Response headers**: all four JSON routes set
   `X-Content-Type-Options: nosniff` and `Cache-Control: no-store`; every
   hashed asset sets `X-Content-Type-Options: nosniff` and its own
-  immutable `Cache-Control` (above). Every one of the four routes — `GET
-  /admin`, every hashed asset, and the three JSON routes — shares one
+  immutable `Cache-Control` (above). Every one of these routes — `GET
+  /admin`, every hashed asset, and the four JSON routes — shares one
   `Content-Security-Policy` header (`default-src 'none'; script-src
   'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:;
   frame-ancestors 'none'; base-uri 'none'; form-action 'none'`) — no
@@ -880,10 +900,50 @@ or in CI.
 - Request-rate limits (`requestsPerMinute`/`requestsPerDay`) apply to
   target-proxy calls the same as everywhere else; token/cost metrics do
   not, since there is no usage to parse from an arbitrary MCP/A2A
-  response.
+  response. Every proxied call (per-server proxy or federated `/mcp`) is
+  additionally counted against its own target's request-rate counters —
+  requests only, no configurable limit of its own this round — visible via
+  `GET /admin/api/targets` above.
 - Group visibility (`mcpServers`/`agents` glob lists) gates both the
   registry listing and the proxy path itself — a denied name is a 403 at
   the proxy, not just hidden from the listing.
+- **Federated `POST /mcp`**: a single JSON-RPC 2.0 endpoint aggregating
+  every MCP server the caller's group can reach — for clients built
+  against a single aggregated endpoint (the earlier, pre-plugin gateway
+  this replaces) rather than the per-server `/mcp/{name}/...` proxy above.
+  Unlike that proxy, this is not a byte-level reverse proxy: the gateway
+  decodes the request itself, answers `initialize`/`ping` locally, and for
+  `tools/list`/`tools/call` issues its own outbound JSON-RPC call(s) to
+  the relevant server(s) as part of handling that one request — no
+  session state is cached across separate calls (per-request upstream
+  sessions, matching the per-server proxy's own complete absence of
+  gateway-side session tracking).
+  - `tools/list` fans out to every allowed server concurrently and merges
+    the results, prefixing each tool's name `"<serverName>_<toolName>"` —
+    the same underscore-separator convention the earlier agentgateway used
+    and that existing MCP clients (pugbot's `mcpclient`, agentkit) already
+    persist in their own tool-id records (e.g.
+    `brave-search_brave_web_search`). A server that errors or is
+    unreachable is skipped, not surfaced as a whole-call failure — the
+    aggregate degrades to every other server's tools.
+  - `tools/call` resolves the target server by the LONGEST matching
+    `"<serverName>_"` prefix against the caller's allowed servers (so two
+    configured servers where one name prefixes the other, e.g. `foo` and
+    `foo_bar`, resolve unambiguously), strips the prefix, forwards the
+    call, and relays the result under the caller's own JSON-RPC `id`. An
+    unresolvable prefix — including one that names a real but
+    group-restricted server — is a JSON-RPC `invalid params` error
+    (`-32602`), not an HTTP `404`: the request reached a real route and
+    method, it just named a tool nothing could route.
+  - `notifications/*` gets a `202 Accepted` with no body (no response is
+    ever due for a JSON-RPC notification); any other method is a JSON-RPC
+    `method not found` (`-32601`). Malformed JSON is a JSON-RPC `parse
+    error` (`-32700`) with `id: null`, per spec.
+  - `checkAndCount` runs once per request (the caller's own user/group/
+    total scopes); each backend server actually contacted is additionally
+    attributed its own per-target counters — see `GET /admin/api/targets`
+    above and the request-rate note below. Applies to MCP servers only,
+    not agents: there is no equivalent aggregated `/a2a` endpoint.
 
 ## Security notes
 
@@ -940,7 +1000,13 @@ or in CI.
   though, a translate-time 400 (an unsupported parameter combination) or
   Anthropic's embeddings 501 still count toward the caller's request-rate
   limit — the limiter already ran by then — though neither ever bills a
-  token or cost, since usage stays at zero either way.
+  token or cost, since usage stays at zero either way. The federated
+  `/mcp` endpoint follows the same shape: an unreadable body, an
+  unsupported `Upgrade`, or a malformed JSON-RPC envelope are all rejected
+  before the limiter runs, but a JSON-RPC-level error discovered AFTER
+  dispatch — `method not found`, an unresolvable `tools/call` prefix —
+  still counts, since `checkAndCount` already ran by the time the method
+  is even looked at.
 - **Gateway-to-client responses on passthrough and MCP/A2A routes are
   identity-encoded.** The gateway strips a client's own `Accept-Encoding`
   header before forwarding to the upstream, so Go's `http.Transport` adds
