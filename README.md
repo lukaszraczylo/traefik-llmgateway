@@ -1110,9 +1110,8 @@ All are 0-issues on this repository as of this commit.
 The plugin ships stdlib-only (no third-party dependencies at all, see
 `go.mod`) — a hard constraint of Yaegi interpretation, not a style
 preference. [`resp.go`](resp.go) is the clearest example: a hand-rolled,
-~400-line RESP2 client instead of `go-redis`, which the design doc records
-as unsuitable for Yaegi interpretation
-(`docs/superpowers/specs/2026-08-19-traefik-llmgateway-design.md`, §7).
+~400-line RESP2 client instead of `go-redis`, which proved unsuitable for
+Yaegi interpretation.
 
 ### Catalog submission
 
