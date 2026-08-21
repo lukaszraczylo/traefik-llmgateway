@@ -3,9 +3,11 @@ import type { SortingState } from '@tanstack/vue-table'
 import { getCoreRowModel, getSortedRowModel, useVueTable } from '@tanstack/vue-table'
 import { computed, reactive, ref, watch } from 'vue'
 
+import ModelChip from '@/components/ModelChip.vue'
 import SearchInput from '@/components/SearchInput.vue'
 import SortHeaderButton from '@/components/SortHeaderButton.vue'
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/components/ui/accordion'
+import { Badge } from '@/components/ui/badge'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { valueUpdater } from '@/components/ui/table'
 import UsageTable from '@/components/UsageTable.vue'
@@ -284,6 +286,37 @@ watch(userQuery, (value) => {
               </span>
             </AccordionTrigger>
             <AccordionContent>
+              <!--
+                Access block (group-access-display task): the group's
+                configured provider/model access, display-only — not part
+                of the user/group search filter above (row.original.providers/
+                models are plain display data, never touched by
+                groupMatches/userMatches in lib/usage-search.ts).
+              -->
+              <div class="mb-3 grid gap-3 sm:grid-cols-2">
+                <div>
+                  <p class="mb-1.5 text-xs font-medium text-muted-foreground">Providers</p>
+                  <div v-if="row.original.providers?.length" class="flex flex-wrap gap-1.5">
+                    <Badge
+                      v-for="providerName in row.original.providers"
+                      :key="providerName"
+                      as="span"
+                      variant="secondary"
+                      class="font-normal"
+                    >
+                      {{ providerName }}
+                    </Badge>
+                  </div>
+                  <p v-else class="text-sm text-muted-foreground">All providers</p>
+                </div>
+                <div>
+                  <p class="mb-1.5 text-xs font-medium text-muted-foreground">Models</p>
+                  <div v-if="row.original.models?.length" class="flex flex-wrap gap-1.5">
+                    <ModelChip v-for="modelId in row.original.models" :key="modelId" :id="modelId" />
+                  </div>
+                  <p v-else class="text-sm text-muted-foreground">All models</p>
+                </div>
+              </div>
               <dl class="mb-3 grid grid-cols-2 gap-x-6 gap-y-1.5 text-sm sm:grid-cols-4">
                 <div>
                   <dt class="text-xs text-muted-foreground">Limits</dt>

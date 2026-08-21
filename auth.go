@@ -334,10 +334,19 @@ type userSummary struct {
 
 // groupSummary mirrors userSummary for one configured group, plus its
 // current member count (how many active users, inline or file-sourced,
-// currently reference it).
+// currently reference it) and its configured access lists — providers,
+// models, mcpServers, agents — carried through exactly as group.allowsX
+// itself reads them (group-access-display task): nil/empty means every
+// provider/model/MCP server/agent is allowed (matchesGlob's own contract,
+// auth.go), never expanded to the full catalog here — the admin dashboard
+// echoes the configured glob list, not a resolved membership set.
 type groupSummary struct {
 	limits      *LimitsConfig
 	name        string
+	providers   []string
+	models      []string
+	mcpServers  []string
+	agents      []string
 	memberCount int
 }
 
@@ -359,7 +368,15 @@ func (a *authStore) snapshot() ([]userSummary, []groupSummary) {
 
 	groups := make([]groupSummary, 0, len(a.groups))
 	for name, grp := range a.groups {
-		groups = append(groups, groupSummary{limits: grp.limits, name: name, memberCount: memberCounts[name]})
+		groups = append(groups, groupSummary{
+			limits:      grp.limits,
+			name:        name,
+			providers:   grp.providers,
+			models:      grp.models,
+			mcpServers:  grp.mcpServers,
+			agents:      grp.agents,
+			memberCount: memberCounts[name],
+		})
 	}
 	sort.Slice(groups, func(i, j int) bool { return groups[i].name < groups[j].name })
 

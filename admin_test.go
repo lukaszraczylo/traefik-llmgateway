@@ -496,6 +496,97 @@ func findUsageEntry(t *testing.T, entries []adminUsageEntryView, id string) admi
 	return adminUsageEntryView{}
 }
 
+// TestAdminUsage_GroupAccessLists proves GET /admin/api/usage's per-group
+// rows (group-access-display task) echo GroupConfig's Providers/Models/
+// MCPServers/Agents exactly as configured — no server-side expansion to the
+// full provider/model catalog — and that a group with none of those set
+// carries empty/omitted lists rather than a resolved "everything" set,
+// matching group.allowsX's own empty-means-all contract (auth.go). A user
+// row and the synthetic total row must never carry these fields at all —
+// they are group-only, same convention as GroupName's own user-only field.
+func TestAdminUsage_GroupAccessLists(t *testing.T) {
+	t.Parallel()
+	cfg := CreateConfig()
+	cfg.Admin = &AdminConfig{Enabled: true}
+	cfg.Providers = map[string]*ProviderConfig{
+		"alpha": {Type: "openai", BaseURL: "http://alpha.invalid", APIKey: "sk-alpha", Models: []string{"a-model-1"}},
+	}
+	cfg.MCPServers = map[string]*TargetConfig{"srv1": {URL: "http://srv1.invalid"}}
+	cfg.Agents = map[string]*AgentConfig{"agent1": {URL: "http://agent1.invalid"}}
+	cfg.Groups = map[string]*GroupConfig{
+		"restricted": {
+			Providers:  []string{"alpha"},
+			Models:     []string{"alpha/a-model-1", "z-model"},
+			MCPServers: []string{"srv1"},
+			Agents:     []string{"agent1"},
+		},
+		"open": {}, // no Providers/Models/MCPServers/Agents set: unrestricted
+	}
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{
+		{Name: "admin1", Group: "open", APIKey: "sk-admin1", Admin: true},
+	}}
+	h, _ := newAdminGatewayHandle(t, cfg)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, adminRequest(http.MethodGet, adminUsagePath, "sk-admin1"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	var got adminUsageResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	tests := []struct {
+		name           string
+		group          string
+		wantProviders  []string
+		wantModels     []string
+		wantMCPServers []string
+		wantAgents     []string
+	}{
+		{
+			name:           "restricted group carries its exact configured lists",
+			group:          "restricted",
+			wantProviders:  []string{"alpha"},
+			wantModels:     []string{"alpha/a-model-1", "z-model"},
+			wantMCPServers: []string{"srv1"},
+			wantAgents:     []string{"agent1"},
+		},
+		{
+			name:  "unrestricted group carries empty/omitted lists",
+			group: "open",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			entry := findUsageEntry(t, got.Groups, tc.group)
+			if !slices.Equal(entry.Providers, tc.wantProviders) {
+				t.Errorf("providers = %v, want %v", entry.Providers, tc.wantProviders)
+			}
+			if !slices.Equal(entry.Models, tc.wantModels) {
+				t.Errorf("models = %v, want %v", entry.Models, tc.wantModels)
+			}
+			if !slices.Equal(entry.MCPServers, tc.wantMCPServers) {
+				t.Errorf("mcpServers = %v, want %v", entry.MCPServers, tc.wantMCPServers)
+			}
+			if !slices.Equal(entry.Agents, tc.wantAgents) {
+				t.Errorf("agents = %v, want %v", entry.Agents, tc.wantAgents)
+			}
+		})
+	}
+
+	admin1 := findUsageEntry(t, got.Users, "admin1")
+	if admin1.Providers != nil || admin1.Models != nil || admin1.MCPServers != nil || admin1.Agents != nil {
+		t.Errorf("user entry must never carry group access lists, got providers=%v models=%v mcpServers=%v agents=%v",
+			admin1.Providers, admin1.Models, admin1.MCPServers, admin1.Agents)
+	}
+	if got.Total.Providers != nil || got.Total.Models != nil || got.Total.MCPServers != nil || got.Total.Agents != nil {
+		t.Errorf("total entry must never carry group access lists, got providers=%v models=%v mcpServers=%v agents=%v",
+			got.Total.Providers, got.Total.Models, got.Total.MCPServers, got.Total.Agents)
+	}
+}
+
 // TestLimiterCurrentUsage_StoreDown drives limiter.currentUsage's
 // fail-closed path directly: a configured store whose every operation
 // errors, with failOpen false, must report storeDown and zero values

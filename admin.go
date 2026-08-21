@@ -415,11 +415,25 @@ func (g *Gateway) serveAdminOverview(w http.ResponseWriter) {
 // tokensPerDay/tokensPerMonth pair (v0.2 data-layer task, tokens-in/
 // tokens-out split) — a client wanting the combined total sums the two
 // itself.
+//
+// Providers/Models/MCPServers/Agents (group-access-display task) are set
+// only for a group entry — a user or the total entry never populates them,
+// same convention as GroupName's own "user-only" field above, mirrored.
+// Each carries the group's GroupConfig list exactly as configured: omitted
+// (nil) means every provider/model/MCP server/agent is allowed
+// (group.allowsX's own empty-list-matches-anything contract, auth.go) —
+// this is never resolved/expanded to the full catalog here, so the
+// dashboard can tell "explicitly restricted to these N" apart from
+// "unrestricted" without the payload growing with catalog size.
 type adminUsageEntryView struct {
 	Limits               *LimitsConfig `json:"limits,omitempty"`
 	Kind                 string        `json:"kind"`
 	ID                   string        `json:"id"`
 	GroupName            string        `json:"groupName,omitempty"`
+	Providers            []string      `json:"providers,omitempty"`
+	Models               []string      `json:"models,omitempty"`
+	MCPServers           []string      `json:"mcpServers,omitempty"`
+	Agents               []string      `json:"agents,omitempty"`
 	RequestsPerMinute    int64         `json:"requestsPerMinute"`
 	RequestsPerDay       int64         `json:"requestsPerDay"`
 	TokensInPerDay       int64         `json:"tokensInPerDay"`
@@ -500,6 +514,10 @@ func (g *Gateway) buildAdminUsage() adminUsageResponse {
 	groups := make([]adminUsageEntryView, len(groupUsage))
 	for i, su := range groupUsage {
 		groups[i] = usageEntryView(su, groupSummaries[i].limits)
+		groups[i].Providers = groupSummaries[i].providers
+		groups[i].Models = groupSummaries[i].models
+		groups[i].MCPServers = groupSummaries[i].mcpServers
+		groups[i].Agents = groupSummaries[i].agents
 	}
 	total := usageEntryView(totalUsage, nil)
 

@@ -67,6 +67,19 @@ export interface AdminUsageEntryView {
   kind: string
   id: string
   groupName?: string
+  /**
+   * The group's configured access lists (admin.go: adminUsageEntryView's
+   * Providers/Models/MCPServers/Agents) — set only on a group entry (kind
+   * === 'group'), never on a user or the total entry, mirroring groupName's
+   * own user-only convention above. Undefined/empty means unrestricted
+   * (GroupConfig's own empty-means-all semantics, llmgateway.go) — this is
+   * the group's configured glob list exactly as written, never expanded to
+   * the full provider/model catalog.
+   */
+  providers?: string[]
+  models?: string[]
+  mcpServers?: string[]
+  agents?: string[]
   requestsPerMinute: number
   requestsPerDay: number
   tokensInPerDay: number
