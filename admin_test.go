@@ -72,7 +72,7 @@ func TestAdmin_Disabled_FallsThroughTo404(t *testing.T) {
 	cfg.Admin = nil // not registered at all
 	h, _ := newAdminGatewayHandle(t, cfg)
 
-	for _, p := range []string{adminPagePath, adminOverviewPath, adminUsagePath} {
+	for _, p := range []string{adminPagePath, adminOverviewPath, adminUsagePath, adminTargetsPath} {
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, adminRequest(http.MethodGet, p, ""))
 		if rec.Code != http.StatusNotFound {
@@ -140,14 +140,14 @@ func TestAdminPage_ServedWithoutAuth(t *testing.T) {
 	}
 }
 
-// TestAdmin_GateMatrix covers the two /admin/api/* routes only — GET
-// /admin itself is unauthenticated by design (TestAdminPage_
-// ServedWithoutAuth above).
+// TestAdmin_GateMatrix covers the /admin/api/* routes only — GET /admin
+// itself is unauthenticated by design (TestAdminPage_ServedWithoutAuth
+// above).
 func TestAdmin_GateMatrix(t *testing.T) {
 	cfg := newAdminTestConfig()
 	h, _ := newAdminGatewayHandle(t, cfg)
 
-	paths := []string{adminOverviewPath, adminUsagePath}
+	paths := []string{adminOverviewPath, adminUsagePath, adminTargetsPath}
 	for _, p := range paths {
 		t.Run(p+"/unauthenticated", func(t *testing.T) {
 			rec := httptest.NewRecorder()
@@ -783,14 +783,15 @@ func TestLimiterCurrentUsage_StoreDown(t *testing.T) {
 
 // TestAdmin_NeverRateLimitedAndCountersUntouched proves the operator
 // directive (progress ledger, 2026-08-21 — "admin requests must NOT touch
-// req/min-req/day statistics"): GET /admin/api/overview and GET
-// /admin/api/usage never call checkAndCount, so an admin key with a
-// requestsPerMinute limit tight enough to 429 on any other authenticated
-// route never 429s here, no matter how many requests it makes — and its
-// own req/min counter stays at exactly 0 throughout. This inverts the
-// pre-directive TestAdmin_RateLimitApplies, which asserted the opposite
-// (a 2nd request 429ing); it mirrors TestAdminUsageHistory_DoesNotCountStats,
-// which already proved this for the third admin route from the start.
+// req/min-req/day statistics"): GET /admin/api/overview, GET
+// /admin/api/usage, and GET /admin/api/targets never call checkAndCount,
+// so an admin key with a requestsPerMinute limit tight enough to 429 on
+// any other authenticated route never 429s here, no matter how many
+// requests it makes — and its own req/min counter stays at exactly 0
+// throughout. This inverts the pre-directive TestAdmin_RateLimitApplies,
+// which asserted the opposite (a 2nd request 429ing); it mirrors
+// TestAdminUsageHistory_DoesNotCountStats, which already proved this for
+// the third admin route from the start.
 func TestAdmin_NeverRateLimitedAndCountersUntouched(t *testing.T) {
 	t.Parallel()
 	cfg := newAdminTestConfig()
@@ -800,7 +801,7 @@ func TestAdmin_NeverRateLimitedAndCountersUntouched(t *testing.T) {
 	fixedNow := time.Date(2026, 8, 20, 9, 0, 0, 0, time.UTC)
 	gw.limiter.nowFn = func() time.Time { return fixedNow }
 
-	for _, p := range []string{adminOverviewPath, adminUsagePath} {
+	for _, p := range []string{adminOverviewPath, adminUsagePath, adminTargetsPath} {
 		for i := 0; i < 5; i++ {
 			rec := httptest.NewRecorder()
 			h.ServeHTTP(rec, adminRequest(http.MethodGet, p, "sk-admin1"))
@@ -1045,7 +1046,7 @@ func truncateForTest(b []byte, n int) string {
 
 // --- JSON routes: nosniff/no-store/CSP headers (review sweep, 2026-08-20) ---
 
-// TestAdmin_JSONSecurityHeaders proves both /admin/api/* routes carry
+// TestAdmin_JSONSecurityHeaders proves every /admin/api/* route carries
 // X-Content-Type-Options: nosniff and Cache-Control: no-store alongside
 // the same Content-Security-Policy the HTML page sends
 // (setAdminJSONHeaders, admin.go) — folded review item, 2026-08-20
@@ -1056,7 +1057,7 @@ func TestAdmin_JSONSecurityHeaders(t *testing.T) {
 	h, _ := newAdminGatewayHandle(t, cfg)
 
 	wantCSP := "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
-	for _, p := range []string{adminOverviewPath, adminUsagePath} {
+	for _, p := range []string{adminOverviewPath, adminUsagePath, adminTargetsPath} {
 		t.Run(p, func(t *testing.T) {
 			rec := httptest.NewRecorder()
 			h.ServeHTTP(rec, adminRequest(http.MethodGet, p, "sk-admin1"))
@@ -1591,5 +1592,134 @@ func TestAdminUsageHistory_MemoryStoreFallbackWorks(t *testing.T) {
 	}
 	if len(got.Points) != 1 || got.Points[0].Value != 12 {
 		t.Errorf("points = %+v, want one point with value 12", got.Points)
+	}
+}
+
+// --- targets: GET /admin/api/targets (Feature B, v0.21) ---
+
+// TestAdminTargets_NoneConfigured_EmptyArraysNotNull proves an empty
+// GET /admin/api/targets response marshals mcpServers/agents as "[]", not
+// omitted or "null" — mirroring adminProviderView.Models' own "always an
+// array, never nil" convention (admin.go) — since newAdminTestConfig
+// configures neither.
+func TestAdminTargets_NoneConfigured_EmptyArraysNotNull(t *testing.T) {
+	t.Parallel()
+	cfg := newAdminTestConfig()
+	h, _ := newAdminGatewayHandle(t, cfg)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, adminRequest(http.MethodGet, adminTargetsPath, "sk-admin1"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"mcpServers":[]`) || !strings.Contains(rec.Body.String(), `"agents":[]`) {
+		t.Errorf("body = %s, want mcpServers and agents both present as empty arrays, not omitted or null", rec.Body.String())
+	}
+}
+
+// TestAdminTargets_AccessListsMatchEnforcement_AndCountersReflectTraffic
+// is the shape test for GET /admin/api/targets: two MCP servers and two
+// agents, three groups with deliberately different mcpServers/agents glob
+// restrictions, and pre-seeded per-target counters. It asserts:
+//   - sorted-by-name order (alpha/beta; bot1/bot2)
+//   - URL sanitization (sanitizeBaseURL strips embedded credentials, same
+//     as adminProviderView.BaseURL — TestAdminOverview_BaseURLStripsCredentials
+//     is this test's sibling for the provider view)
+//   - access is computed via the exact SAME matchesGlob call
+//     group.allowsMCP/allowsAgent themselves use (auth.go): a target every
+//     configured group can reach collapses to an omitted/nil access list
+//     ("empty meaning all"), one only some groups can reach lists exactly
+//     those group names, sorted
+//   - counters echo limiter.targetUsage's read of the exact keys
+//     countTargetRequest (limits.go) writes, at min/day/month
+//
+// "restricted" explicitly lists both alpha (mcpServers) and bot1 (agents);
+// "wide" and "admingroup" both leave their own mcpServers/agents fields
+// unset (empty pattern list = allow-all, matchesGlob's own contract) — so
+// alpha and bot1 are reachable by all three configured groups (access
+// collapses to nil), while beta and bot2 are reachable by "wide" and
+// "admingroup" only, never "restricted" (access = ["admingroup","wide"]).
+func TestAdminTargets_AccessListsMatchEnforcement_AndCountersReflectTraffic(t *testing.T) {
+	t.Parallel()
+
+	// Built via net/url, not a literal string, so a generic secret scanner
+	// never flags a credential-shaped literal in this test's own source —
+	// same convention as TestAdminOverview_BaseURLStripsCredentials above.
+	alphaURL := (&url.URL{Scheme: "http", User: url.UserPassword("mcpuser", "mcppass"), Host: "mcp-alpha.internal"}).String()
+
+	cfg := CreateConfig()
+	cfg.Admin = &AdminConfig{Enabled: true}
+	cfg.Providers = map[string]*ProviderConfig{"openai": {Type: "openai", APIKey: "k"}}
+	cfg.MCPServers = map[string]*TargetConfig{
+		"alpha": {URL: alphaURL},
+		"beta":  {URL: "http://mcp-beta.internal"},
+	}
+	cfg.Agents = map[string]*AgentConfig{
+		"bot1": {URL: "http://agent-bot1.internal"},
+		"bot2": {URL: "http://agent-bot2.internal"},
+	}
+	cfg.Groups = map[string]*GroupConfig{
+		"restricted": {MCPServers: []string{"alpha"}, Agents: []string{"bot1"}},
+		"wide":       {},
+		"admingroup": {},
+	}
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{
+		{Name: "admin1", Group: "admingroup", APIKey: "sk-admin1", Admin: true},
+	}}
+	h, gw := newAdminGatewayHandle(t, cfg)
+
+	fixedNow := time.Date(2026, 8, 21, 10, 0, 0, 0, time.UTC)
+	gw.limiter.nowFn = func() time.Time { return fixedNow }
+	gw.limiter.countTargetRequest(targetKindMCP, "alpha")
+	gw.limiter.countTargetRequest(targetKindMCP, "alpha")
+	gw.limiter.countTargetRequest(scopeKindAgent, "bot1")
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, adminRequest(http.MethodGet, adminTargetsPath, "sk-admin1"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	var got adminTargetsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	if len(got.MCPServers) != 2 || got.MCPServers[0].Name != "alpha" || got.MCPServers[1].Name != "beta" {
+		t.Fatalf("mcpServers not sorted by name: %+v", got.MCPServers)
+	}
+	if len(got.Agents) != 2 || got.Agents[0].Name != "bot1" || got.Agents[1].Name != "bot2" {
+		t.Fatalf("agents not sorted by name: %+v", got.Agents)
+	}
+
+	alpha := got.MCPServers[0]
+	if alpha.URL != "http://mcp-alpha.internal" {
+		t.Errorf("alpha.URL = %q, want credentials stripped to http://mcp-alpha.internal", alpha.URL)
+	}
+	if alpha.Access != nil {
+		t.Errorf("alpha.Access = %v, want nil (every configured group can reach it — 'empty meaning all')", alpha.Access)
+	}
+	if alpha.Counters.RequestsPerMinute != 2 || alpha.Counters.RequestsPerDay != 2 || alpha.Counters.RequestsPerMonth != 2 {
+		t.Errorf("alpha.Counters = %+v, want min/day/month all 2", alpha.Counters)
+	}
+
+	beta := got.MCPServers[1]
+	if want := []string{"admingroup", "wide"}; !slices.Equal(beta.Access, want) {
+		t.Errorf("beta.Access = %v, want %v (restricted's own mcpServers list excludes it)", beta.Access, want)
+	}
+	if beta.Counters != (adminTargetCountersView{}) {
+		t.Errorf("beta.Counters = %+v, want all zero (never proxied to in this test)", beta.Counters)
+	}
+
+	bot1 := got.Agents[0]
+	if bot1.Access != nil {
+		t.Errorf("bot1.Access = %v, want nil (every configured group can reach it)", bot1.Access)
+	}
+	if bot1.Counters.RequestsPerMinute != 1 || bot1.Counters.RequestsPerDay != 1 || bot1.Counters.RequestsPerMonth != 1 {
+		t.Errorf("bot1.Counters = %+v, want min/day/month all 1", bot1.Counters)
+	}
+
+	bot2 := got.Agents[1]
+	if want := []string{"admingroup", "wide"}; !slices.Equal(bot2.Access, want) {
+		t.Errorf("bot2.Access = %v, want %v (restricted's own agents list excludes it)", bot2.Access, want)
 	}
 }

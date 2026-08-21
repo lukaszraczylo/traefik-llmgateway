@@ -20,6 +20,29 @@ const (
 // listed agent whose AgentConfig.Card is empty.
 const defaultAgentCardPath = "/.well-known/agent-card.json"
 
+// scopeKindAgent is the limitScope.kind (and admin-API scope-kind) string
+// an A2A agent target's per-target request counters use (Feature B,
+// v0.21) — deliberately NOT targetKindAgent ("a2a", this file's own
+// URL-routing convention): "agent" is the vocabulary GET /admin/api/targets
+// (admin.go) and the webui's MCP & Agents panel use. The split matters for
+// collision-safety too: windowKey (limits.go) embeds kind as the counter
+// key's own leading segment, so an MCP server and an A2A agent configured
+// with the identical name — or either one sharing a name with a user or
+// group — can never share a counter regardless of what any of them are
+// called; kind, not id alone, is what makes a scope unique.
+const scopeKindAgent = "agent"
+
+// targetScopeKind maps handleTargetProxy's routing kind (targetKindMCP or
+// targetKindAgent) to the accounting scope kind its per-target request
+// counters use: identical for MCP (targetKindMCP is already "mcp"), but
+// remapped to scopeKindAgent ("agent") for an A2A target.
+func targetScopeKind(kind string) string {
+	if kind == targetKindAgent {
+		return scopeKindAgent
+	}
+	return kind
+}
+
 // mcpServerListing is one entry of GET /v1/mcp/servers: the configured
 // name and the gateway-relative URL a client proxies requests to it
 // through.
@@ -135,8 +158,11 @@ func (g *Gateway) resolveTarget(kind, name string, grp *group) (targetURL string
 // MCP servers and A2A agents are in-cluster targets that trust the
 // gateway's network position, not a per-provider API key the gateway
 // holds on the caller's behalf. Accounting is likewise passthrough-only —
-// a target request is counted by checkAndCount below, but its response
-// is never teed off for token/cost usage extraction.
+// a target request is counted by checkAndCount below (the caller's own
+// user/group/total scopes) and, additionally, attributed to name's own
+// per-target scope (limiter.countTargetRequest, Feature B v0.21) — but its
+// response is never teed off for token/cost usage extraction, for any of
+// those scopes.
 //
 // Checks run: unknown name (404) before group authorization (403) before
 // capability/path checks (Upgrade→501, traversal→400) before rate limits
@@ -146,6 +172,15 @@ func (g *Gateway) resolveTarget(kind, name string, grp *group) (targetURL string
 // request rejected on any check before checkAndCount must never burn the
 // caller's or their group's rate-limit quota for a call that was never
 // going to reach the upstream.
+//
+// Once admitted, limiter.countTargetRequest (limits.go) additionally
+// attributes the request to name's own per-target scope (Feature B,
+// v0.21) — requests only, same as the caller's own user/group counters:
+// GET /admin/api/targets (admin.go) reads these back for the webui's MCP &
+// Agents panel. This scope carries no limit of its own (no config surface
+// added this round) and so can never itself cause a 429/503; it is purely
+// additive visibility on top of the user/group/total admission decision
+// checkAndCount already made above.
 func (g *Gateway) handleTargetProxy(w http.ResponseWriter, r *http.Request, u *user, grp *group, kind, name, rest string) {
 	targetURL, allowed, known := g.resolveTarget(kind, name, grp)
 	if !known {
@@ -171,6 +206,7 @@ func (g *Gateway) handleTargetProxy(w http.ResponseWriter, r *http.Request, u *u
 		writeLimitViolation(w, violation)
 		return
 	}
+	g.limiter.countTargetRequest(targetScopeKind(kind), name)
 
 	upstreamURL := targetURL
 	if rest != "" {

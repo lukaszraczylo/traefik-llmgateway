@@ -779,3 +779,99 @@ func TestNewGateway_TargetURLValidation(t *testing.T) {
 		})
 	}
 }
+
+// --- Feature B (v0.21): per-target request accounting ---
+
+func TestTargetScopeKind(t *testing.T) {
+	cases := []struct {
+		routingKind string
+		want        string
+	}{
+		{targetKindMCP, "mcp"},
+		{targetKindAgent, scopeKindAgent},
+	}
+	for _, tc := range cases {
+		t.Run(tc.routingKind, func(t *testing.T) {
+			if got := targetScopeKind(tc.routingKind); got != tc.want {
+				t.Errorf("targetScopeKind(%q) = %q, want %q", tc.routingKind, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestHandleTargetProxy_PerTargetCounters_AttributedAndCollisionSafe proves
+// handleTargetProxy attributes a proxied request to name's own per-target
+// scope (Feature B, v0.21) at every window countTargetRequest tracks
+// (min/hour/day/month), for both an MCP server and an A2A agent target,
+// AND that this never collides with a same-named user counter: both cases
+// deliberately name the target "alice" — identical to the calling user's
+// own name — so a bug that dropped kind from the counter key (windowKey,
+// limits.go) would show up as the user's own counters silently absorbing
+// the target's, or vice versa.
+func TestHandleTargetProxy_PerTargetCounters_AttributedAndCollisionSafe(t *testing.T) {
+	cases := []struct {
+		wantScopeKind string
+		routingKind   string
+		targetName    string
+		path          string
+	}{
+		{wantScopeKind: targetKindMCP, routingKind: targetKindMCP, targetName: "alice", path: "/mcp/alice/tools/list"},
+		{wantScopeKind: scopeKindAgent, routingKind: targetKindAgent, targetName: "alice", path: "/a2a/alice/tasks/send"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.routingKind, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer srv.Close()
+
+			cfg := CreateConfig()
+			cfg.Providers = map[string]*ProviderConfig{"openai": {Type: "openai", APIKey: "k"}}
+			if tc.routingKind == targetKindMCP {
+				cfg.MCPServers = map[string]*TargetConfig{tc.targetName: {URL: srv.URL}}
+			} else {
+				cfg.Agents = map[string]*AgentConfig{tc.targetName: {URL: srv.URL}}
+			}
+			cfg.Groups = map[string]*GroupConfig{"default": {}}
+			cfg.Users = &UsersConfig{Inline: []*UserConfig{{Name: "alice", Group: "default", APIKey: "sk-alice"}}}
+			next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+			h, err := New(context.Background(), next, cfg, "llmgw")
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			gw, ok := h.(*Gateway)
+			if !ok {
+				t.Fatal("handler is not *Gateway")
+			}
+
+			req := httptest.NewRequest(http.MethodGet, tc.path, nil)
+			req.Header.Set("Authorization", "Bearer sk-alice")
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+			}
+
+			now := time.Now()
+			for _, window := range []string{windowMin, windowHour, windowDay, windowMonth} {
+				got, gotOK := gw.limiter.getCounter(tc.wantScopeKind, tc.targetName, metricReq, window, now)
+				if !gotOK || got != 1 {
+					t.Errorf("%s/%s req:%s counter = %d (ok=%v), want 1", tc.wantScopeKind, tc.targetName, window, got, gotOK)
+				}
+			}
+
+			// Collision guard: the caller's own USER scope (kind="user")
+			// must stay independent of the TARGET scope above despite
+			// sharing the identical id string "alice" — proving kind, not
+			// id alone, is what makes a counter key unique.
+			userReqMin, minOK := gw.limiter.getCounter("user", "alice", metricReq, windowMin, now)
+			if !minOK || userReqMin != 1 {
+				t.Errorf("user/alice req:min counter = %d (ok=%v), want 1 (its own scope, unaffected by the target scope of the same id)", userReqMin, minOK)
+			}
+			userReqMonth, monthOK := gw.limiter.getCounter("user", "alice", metricReq, windowMonth, now)
+			if !monthOK || userReqMonth != 0 {
+				t.Errorf("user/alice req:month counter = %d (ok=%v), want 0 (checkAndCount never writes a month window for user/group scopes; nonzero here would mean the target scope's month write leaked into it)", userReqMonth, monthOK)
+			}
+		})
+	}
+}

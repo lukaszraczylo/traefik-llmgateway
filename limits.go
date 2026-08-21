@@ -1011,6 +1011,109 @@ func (l *limiter) account(scopes []limitScope, u usage, costMicros int64) {
 	l.storeIncrMulti(entries) // no error return by contract (doc comment above); ok is intentionally discarded
 }
 
+// countTargetRequest increments one MCP-server's or A2A agent's per-target
+// request counters (Feature B, v0.21) at min, hour, day, AND month — the
+// only scope kind this package tracks a month window of REQUESTS for.
+// kind is targetScopeKind's own output ("mcp" or scopeKindAgent —
+// mcp_a2a.go), id is the configured target name; both come embedded in
+// windowKey's own key string, so a target scope can never collide with a
+// user/group/total scope of the same id even by coincidence — kind is
+// part of the key, not just a struct field.
+//
+// This is deliberately NOT folded into checkAndCount: a target scope
+// carries no limits by design (this round adds no config surface for
+// MCP/agent limits), so there is nothing for evaluateScope to check and no
+// violation this call could ever produce — it is pure accounting, exactly
+// like account() itself, hence the identical "no error return, ok
+// discarded" contract. Month exists here, uniquely, because the admin
+// dashboard's targets endpoint (admin.go's adminTargetCountersView)
+// surfaces a requestsPerMonth figure no user/group admin view does;
+// growing checkAndCount's own req:min/day/hour batch to a month window for
+// EVERY scope kind, just to serve this one endpoint's response shape, was
+// rejected as scope creep touching user/group accounting nothing else in
+// this round asked to change.
+//
+// Callers: handleTargetProxy (mcp_a2a.go, once per proxied request, after
+// its own user/group/total admission check passes) and the federated /mcp
+// endpoint (mcp_federation.go, once per actual backend server contacted —
+// tools/list may contact several in one incoming client request, tools/call
+// exactly one), so a call attributed to a specific target is counted the
+// same way regardless of which route reached it.
+func (l *limiter) countTargetRequest(kind, id string) {
+	now := l.now()
+	l.storeIncrMulti([]counterIncr{
+		newCounterIncr(kind, id, metricReq, windowMin, now, 1, minWindowTTL),
+		newCounterIncr(kind, id, metricReq, windowHour, now, 1, hourWindowTTL),
+		newCounterIncr(kind, id, metricReq, windowDay, now, 1, dayWindowTTL),
+		newCounterIncr(kind, id, metricReq, windowMonth, now, 1, monthWindowTTL),
+	})
+}
+
+// targetCounterKeysPerScope is the number of windowKey strings
+// targetUsageKeys builds per target scope, and the stride targetUsage's
+// flat storeGetMulti result is sliced back into per-target chunks by.
+const targetCounterKeysPerScope = 3
+
+// targetUsageKeys returns the targetCounterKeysPerScope windowKey strings
+// targetUsage reads for one (kind, id) target scope at time now — req at
+// min, day, and month granularity, matching adminTargetCountersView's own
+// field order (admin.go) exactly, so targetUsage can map storeGetMulti's
+// result slice back by plain index. Hour is deliberately not read here:
+// it is stats-only everywhere else in this package (windowHour's own doc
+// comment) and no admin view — targets included — ever surfaces it.
+func targetUsageKeys(kind, id string, now time.Time) []string {
+	return []string{
+		windowKey(kind, id, metricReq, windowMin, now),
+		windowKey(kind, id, metricReq, windowDay, now),
+		windowKey(kind, id, metricReq, windowMonth, now),
+	}
+}
+
+// targetCounters is one MCP-server's or agent's current-window request
+// counters (Feature B, v0.21) — requests only, mirroring handleTargetProxy's
+// own passthrough-only accounting (mcp_a2a.go): a target scope never
+// accumulates tokens or cost, so there is nothing else to report.
+type targetCounters struct {
+	requestsPerMinute int64
+	requestsPerDay    int64
+	requestsPerMonth  int64
+}
+
+// targetUsage reads every scope's current req:min/day/month counters in
+// ONE storeGetMulti round trip, mirroring currentUsage's own single-batch
+// discipline for the same reason: GET /admin/api/targets (admin.go) must
+// not pay one round trip per configured MCP server and agent. Order is
+// preserved: targetUsage(scopes)[i] corresponds to scopes[i]. Unlike
+// scopeUsage, there is no per-entry storeDown flag — a fail-closed read
+// (storeGetMulti's own contract) reports every target's counters as zero
+// rather than partial/stale values, which is acceptable here specifically
+// because a target scope carries no limit: nothing downstream ever treats
+// this zero as "confirmed no traffic" the way scopeUsage.storeDown guards
+// against for a limited scope.
+func (l *limiter) targetUsage(scopes []limitScope) []targetCounters {
+	out := make([]targetCounters, len(scopes))
+	if len(scopes) == 0 {
+		return out
+	}
+
+	now := l.now()
+	allKeys := make([]string, 0, len(scopes)*targetCounterKeysPerScope)
+	for _, sc := range scopes {
+		allKeys = append(allKeys, targetUsageKeys(sc.kind, sc.id, now)...)
+	}
+
+	vals, ok := l.storeGetMulti(allKeys)
+	if !ok || len(vals) != len(allKeys) {
+		return out // zero-value counters; see doc comment above
+	}
+
+	for i := range scopes {
+		v := vals[i*targetCounterKeysPerScope : i*targetCounterKeysPerScope+targetCounterKeysPerScope]
+		out[i] = targetCounters{requestsPerMinute: v[0], requestsPerDay: v[1], requestsPerMonth: v[2]}
+	}
+	return out
+}
+
 // usageKeysPerScope is the number of windowKey strings usageWindowKeys
 // builds per scope, and the stride currentUsage's flat storeGetMulti
 // result is sliced back into per-scope chunks by. Named here, closing a

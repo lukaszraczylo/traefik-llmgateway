@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -12,21 +13,22 @@ import (
 
 // The admin dashboard's routes (spec §4, v0.2; adminUsageHistoryPath added
 // by the v0.2 data-layer task; adminAssetsPathPrefix added by the Vue
-// admin-panel task), matched only when adminEnabled(g.cfg) — see
-// llmgateway.go's ServeHTTP dispatch. adminAssetsPathPrefix is a prefix,
-// not one fixed path: every hashed filename the Vite build emits
-// (admin_assets_gen.go) is served under it.
+// admin-panel task; adminTargetsPath added by Feature B, v0.21), matched
+// only when adminEnabled(g.cfg) — see llmgateway.go's ServeHTTP dispatch.
+// adminAssetsPathPrefix is a prefix, not one fixed path: every hashed
+// filename the Vite build emits (admin_assets_gen.go) is served under it.
 const (
 	adminPagePath         = "/admin"
 	adminAssetsPathPrefix = "/admin/assets/"
 	adminOverviewPath     = "/admin/api/overview"
 	adminUsagePath        = "/admin/api/usage"
 	adminUsageHistoryPath = "/admin/api/usage/history"
+	adminTargetsPath      = "/admin/api/targets"
 )
 
 // adminCSP is the Content-Security-Policy header served with GET /admin,
 // every GET /admin/assets/{hashedname} response (serveAdminAsset), and
-// the three /admin/api/* JSON routes — every /admin* response this
+// every /admin/api/* JSON route — every /admin* response this
 // gateway ever sends (spec §4, v0.2; extended to the JSON routes by a
 // folded review item, 2026-08-20 review; extended to the asset route by
 // a later review sweep — see serveAdminAsset's own doc comment for why).
@@ -64,9 +66,10 @@ func adminEnabled(cfg *Config) bool {
 
 // isAdminPath reports whether path is one of the admin dashboard's
 // routes: the page, any hashed asset under adminAssetsPathPrefix, or one
-// of the three /admin/api/* JSON routes.
+// of the /admin/api/* JSON routes.
 func isAdminPath(path string) bool {
-	if path == adminPagePath || path == adminOverviewPath || path == adminUsagePath || path == adminUsageHistoryPath {
+	if path == adminPagePath || path == adminOverviewPath || path == adminUsagePath ||
+		path == adminUsageHistoryPath || path == adminTargetsPath {
 		return true
 	}
 	return strings.HasPrefix(path, adminAssetsPathPrefix)
@@ -102,23 +105,24 @@ func (g *Gateway) handleAdmin(sw *statusTrackingWriter, r *http.Request) {
 	}
 }
 
-// handleAdminAPI is the gate for the three /admin/api/* JSON routes,
-// applying spec §4's gate order: unauthenticated → 401, authenticated
-// non-admin → 403, admin → serve.
+// handleAdminAPI is the gate for the /admin/api/* JSON routes, applying
+// spec §4's gate order: unauthenticated → 401, authenticated non-admin →
+// 403, admin → serve.
 //
-// None of the three routes call checkAndCount (operator directive:
-// progress ledger, 2026-08-20 — "admin requests must NOT touch req/min,
-// req/day statistics"): admin traffic must never appear in usage
-// statistics, which exist to measure real LLM traffic only. GET
-// /admin/api/usage/history was built this way from the start (v0.2
-// data-layer task); this change extends the same treatment to GET
-// /admin/api/overview and GET /admin/api/usage, which previously counted
-// like any other authenticated route (spec §4 amended accordingly). An
-// admin's own req/min or req/day limit, if configured, is therefore never
-// enforced against admin-route traffic either — the accepted trade-off
-// the operator directive names: these are admin-gated, cheap reads, and
-// an admin holder polling the dashboard aggressively is a self-inflicted,
-// not a shared, resource cost.
+// None of these routes call checkAndCount (operator directive: progress
+// ledger, 2026-08-20 — "admin requests must NOT touch req/min, req/day
+// statistics"): admin traffic must never appear in usage statistics,
+// which exist to measure real LLM traffic only. GET /admin/api/usage/
+// history was built this way from the start (v0.2 data-layer task); this
+// change extends the same treatment to GET /admin/api/overview and GET
+// /admin/api/usage, which previously counted like any other authenticated
+// route (spec §4 amended accordingly); GET /admin/api/targets (Feature B,
+// v0.21) is built the same way from the start too. An admin's own req/min
+// or req/day limit, if configured, is therefore never enforced against
+// admin-route traffic either — the accepted trade-off the operator
+// directive names: these are admin-gated, cheap reads, and an admin
+// holder polling the dashboard aggressively is a self-inflicted, not a
+// shared, resource cost.
 func (g *Gateway) handleAdminAPI(sw *statusTrackingWriter, r *http.Request) {
 	u, _, ok := g.auth.identify(r)
 	g.logAuthEvent(ok, authEventUserName(u), r)
@@ -138,6 +142,8 @@ func (g *Gateway) handleAdminAPI(sw *statusTrackingWriter, r *http.Request) {
 		g.serveAdminUsage(sw)
 	case adminUsageHistoryPath:
 		g.serveAdminUsageHistory(sw, r)
+	case adminTargetsPath:
+		g.serveAdminTargets(sw)
 	}
 }
 
@@ -713,4 +719,156 @@ func (g *Gateway) serveAdminUsageHistory(sw *statusTrackingWriter, r *http.Reque
 
 	setAdminJSONHeaders(sw)
 	_ = json.NewEncoder(sw).Encode(usageHistoryResponse{Scope: rawScope, Metric: metric, Window: window, Points: view})
+}
+
+// adminTargetCountersView is one target's current-window request counters
+// in GET /admin/api/targets (Feature B, v0.21) — requests only, mirroring
+// limiter.targetCounters (limits.go) field for field; a target never
+// accumulates tokens or cost (handleTargetProxy's own doc comment,
+// mcp_a2a.go), so there is nothing else to report here.
+type adminTargetCountersView struct {
+	RequestsPerMinute int64 `json:"requestsPerMinute"`
+	RequestsPerDay    int64 `json:"requestsPerDay"`
+	RequestsPerMonth  int64 `json:"requestsPerMonth"`
+}
+
+// adminTargetView is one configured MCP server's or A2A agent's row in GET
+// /admin/api/targets. Access lists the group names actually allowed to
+// reach this target — computed by running the SAME matchesGlob call
+// group.allowsMCP/allowsAgent themselves delegate to (auth.go) against
+// each group's own cloned mcpServers/agents pattern list (groupSummary,
+// authStore.snapshot), so this view can never disagree with what
+// handleTargetProxy actually enforces. Access is omitted (nil) when every
+// configured group can reach this target — "empty meaning all", mirroring
+// groupSummary's own providers/models/mcpServers/agents omitempty
+// convention (adminUsageEntryView) — rather than always listing every
+// group name, which would grow with the group catalog for no reason once
+// nothing is actually restricted.
+type adminTargetView struct {
+	Name     string                  `json:"name"`
+	URL      string                  `json:"url"`
+	Access   []string                `json:"access,omitempty"`
+	Counters adminTargetCountersView `json:"counters"`
+}
+
+// adminTargetsResponse is the full body of GET /admin/api/targets (Feature
+// B, v0.21): every configured MCP server and every configured agent, each
+// with its own access list and current-window request counters. Both
+// slices are sorted by name and built fresh per request, matching every
+// other admin response's "no caching of the response itself" convention.
+type adminTargetsResponse struct {
+	MCPServers []adminTargetView `json:"mcpServers"`
+	Agents     []adminTargetView `json:"agents"`
+}
+
+// adminTargetAccess computes one target's access list (adminTargetView.Access's
+// own doc comment): the sorted names of every group in groupSummaries whose
+// own glob pattern list — read via patternsOf, so one function serves both
+// MCPServers and Agents without duplicating this loop — matches name
+// (matchesGlob, auth.go: the exact function group.allowsMCP/allowsAgent
+// themselves call). groupSummaries is already sorted by name
+// (authStore.snapshot's own contract), so the result stays sorted too. A
+// match set covering every configured group collapses to nil ("empty
+// meaning all") rather than echoing the full group list back.
+func adminTargetAccess(groupSummaries []groupSummary, patternsOf func(groupSummary) []string, name string) []string {
+	matched := make([]string, 0, len(groupSummaries))
+	for _, gs := range groupSummaries {
+		if matchesGlob(patternsOf(gs), name) {
+			matched = append(matched, gs.name)
+		}
+	}
+	if len(matched) == len(groupSummaries) {
+		return nil
+	}
+	return matched
+}
+
+// sortedMCPServerNames and sortedAgentNames return the sorted key list of
+// Config.MCPServers/Config.Agents — the deterministic response order every
+// admin listing in this file already promises (authStore.snapshot's own
+// sorted contract), and the identical pattern handleMCPServers/
+// handleAgents (mcp_a2a.go) already use for their own group-filtered
+// listings. Two near-identical functions, not one generic helper, over a
+// map[string]*T: this plugin runs interpreted under Yaegi, whose stdlib/
+// type-parameter support does not extend to generic code the plugin
+// itself defines (tools/yaegi-check; see auth.go's cloneStringSlice for
+// the same constraint applied to a generic slices.Clone call instead).
+func sortedMCPServerNames(m map[string]*TargetConfig) []string {
+	names := make([]string, 0, len(m))
+	for name := range m {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+func sortedAgentNames(m map[string]*AgentConfig) []string {
+	names := make([]string, 0, len(m))
+	for name := range m {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// targetCountersView converts one limiter.targetCounters (limits.go) into
+// its JSON view. Not a plain type conversion (unlike adminAliasView's own
+// aliasSnapshotEntry conversion above): targetCounters' fields are
+// unexported (limiter-internal), so its field names do not match
+// adminTargetCountersView's exported ones and Go's identical-underlying-
+// type conversion rule does not apply here.
+func targetCountersView(c targetCounters) adminTargetCountersView {
+	return adminTargetCountersView{
+		RequestsPerMinute: c.requestsPerMinute,
+		RequestsPerDay:    c.requestsPerDay,
+		RequestsPerMonth:  c.requestsPerMonth,
+	}
+}
+
+// buildAdminTargets assembles adminTargetsResponse: every configured MCP
+// server and agent, their access lists (adminTargetAccess), and their
+// current-window request counters — ONE limiter.targetUsage round trip
+// for every target combined (mirroring buildAdminUsage's own
+// single-batch discipline), not one per target.
+func (g *Gateway) buildAdminTargets() adminTargetsResponse {
+	_, groupSummaries := g.auth.snapshot()
+
+	mcpNames := sortedMCPServerNames(g.cfg.MCPServers)
+	agentNames := sortedAgentNames(g.cfg.Agents)
+
+	scopes := make([]limitScope, 0, len(mcpNames)+len(agentNames))
+	for _, name := range mcpNames {
+		scopes = append(scopes, limitScope{kind: targetKindMCP, id: name})
+	}
+	for _, name := range agentNames {
+		scopes = append(scopes, limitScope{kind: scopeKindAgent, id: name})
+	}
+	counters := g.limiter.targetUsage(scopes)
+
+	mcpServers := make([]adminTargetView, len(mcpNames))
+	for i, name := range mcpNames {
+		mcpServers[i] = adminTargetView{
+			Name:     name,
+			URL:      sanitizeBaseURL(g.cfg.MCPServers[name].URL),
+			Access:   adminTargetAccess(groupSummaries, func(gs groupSummary) []string { return gs.mcpServers }, name),
+			Counters: targetCountersView(counters[i]),
+		}
+	}
+	agents := make([]adminTargetView, len(agentNames))
+	for i, name := range agentNames {
+		agents[i] = adminTargetView{
+			Name:     name,
+			URL:      sanitizeBaseURL(g.cfg.Agents[name].URL),
+			Access:   adminTargetAccess(groupSummaries, func(gs groupSummary) []string { return gs.agents }, name),
+			Counters: targetCountersView(counters[len(mcpNames)+i]),
+		}
+	}
+
+	return adminTargetsResponse{MCPServers: mcpServers, Agents: agents}
+}
+
+// serveAdminTargets writes buildAdminTargets's result as JSON.
+func (g *Gateway) serveAdminTargets(w http.ResponseWriter) {
+	setAdminJSONHeaders(w)
+	_ = json.NewEncoder(w).Encode(g.buildAdminTargets())
 }
