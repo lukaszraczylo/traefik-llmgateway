@@ -2,7 +2,11 @@ import { fileURLToPath, URL } from 'node:url'
 
 import tailwindcss from '@tailwindcss/vite'
 import vue from '@vitejs/plugin-vue'
-import { defineConfig } from 'vite'
+// vitest/config's defineConfig is vite's own, augmented with the `test`
+// field's types — importing from here (not 'vite') is what lets the
+// `test` block below type-check under vue-tsc -b without a separate
+// vitest.config.ts or a triple-slash type reference.
+import { defineConfig } from 'vitest/config'
 
 // https://vite.dev/config/
 export default defineConfig({
@@ -27,5 +31,14 @@ export default defineConfig({
     // targets current evergreen browsers (native ES module support), so the
     // polyfill has nothing to do here anyway.
     modulePreload: { polyfill: false },
+  },
+  test: {
+    // Deliberately narrow: only lib/provider-expand.ts's pure state module
+    // is under vitest right now (webui's test infra starts here, on
+    // purpose — no snapshot/DOM/component testing this round). 'node' is
+    // enough since the module touches no browser globals; jsdom is not
+    // pulled in as a dependency for a module that doesn't need it.
+    environment: 'node',
+    include: ['src/**/*.spec.ts'],
   },
 })

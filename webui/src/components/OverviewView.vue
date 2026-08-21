@@ -39,9 +39,10 @@ const overview = computed(() => dashboard.overview)
 //
 // Expand STATE itself is unchanged: lib/provider-expand.ts's plain,
 // Vue-free two-set module (manuallyExpanded/manuallyCollapsed) — the
-// exact search-interaction bug fix a prior review flagged, checkable by
-// its own throwaway assertion script without mounting Vue. Only the
-// template-facing adapter changed: expandedProviderValues below is a
+// exact search-interaction bug fix a prior review flagged, covered by a
+// real vitest spec (lib/provider-expand.spec.ts) that exercises the
+// module directly, without mounting Vue. Only the template-facing
+// adapter changed: expandedProviderValues below is a
 // writable computed translating that Set-based state into the string[]
 // shape Accordion's `type="multiple"` v-model expects, and back —
 // clicking a trigger fires the setter with the new array; diffing it
@@ -262,9 +263,9 @@ const aliasEmptyMessage = computed(() =>
         <Accordion v-else v-model="expandedProviderValues" type="multiple" class="rounded-md border px-3">
           <AccordionItem v-for="p in filteredProviders" :key="p.name" :value="p.name">
             <AccordionTrigger>
-              <div class="flex flex-1 flex-wrap items-center gap-x-3 gap-y-1 pr-2 text-left">
+              <span class="flex flex-1 flex-wrap items-center gap-x-3 gap-y-1 pr-2 text-left">
                 <span class="font-medium">{{ p.name }}</span>
-                <Badge variant="secondary" class="font-normal">{{ p.type }}</Badge>
+                <Badge as="span" variant="secondary" class="font-normal">{{ p.type }}</Badge>
                 <span class="text-xs text-muted-foreground tabular-nums">{{ p.modelCount }} models</span>
                 <FontAwesomeIcon
                   v-if="p.lastErr"
@@ -273,7 +274,7 @@ const aliasEmptyMessage = computed(() =>
                   aria-hidden="true"
                 />
                 <span class="text-xs text-muted-foreground">refreshed {{ formatAgo(p.lastRefresh) || 'never' }}</span>
-              </div>
+              </span>
             </AccordionTrigger>
             <AccordionContent>
               <dl class="mb-3 grid grid-cols-2 gap-x-6 gap-y-1.5 text-sm sm:grid-cols-3">

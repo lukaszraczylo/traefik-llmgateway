@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import type { SortingState } from '@tanstack/vue-table'
-import { faSort, faSortDown, faSortUp } from '@fortawesome/free-solid-svg-icons'
-import { FlexRender, getCoreRowModel, getSortedRowModel, useVueTable } from '@tanstack/vue-table'
+import { getCoreRowModel, getSortedRowModel, useVueTable } from '@tanstack/vue-table'
 import { computed, ref } from 'vue'
 
+import SortHeaderButton from '@/components/SortHeaderButton.vue'
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/components/ui/accordion'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { valueUpdater } from '@/components/ui/table'
@@ -59,10 +59,10 @@ function membersOf(group: AdminUsageEntryView): AdminUsageEntryView[] {
 // UsageTable (Users, and each group's own nested member list) drive a
 // second, unrendered useVueTable instance here purely for its
 // getSortedRowModel() — sortedGroupRows below. The small button toolbar
-// under the Groups heading toggles that sort exactly like DataTable.vue's
-// own sortable header buttons (same icons, same toggleSorting call,
-// same aria-sort), just laid out as a toolbar instead of <th>s, because
-// there is no <table> here to put a <th> in.
+// under the Groups heading toggles that sort using the identical
+// SortHeaderButton DataTable.vue's real <th>s use (same icons, same
+// toggleSorting call, same accessible name), just laid out as a toolbar
+// instead of <th>s, because there is no <table> here to put a <th> in.
 const groupColumns = usageColumns('Name', 'Members', memberCountOf)
 const groupSorting = ref<SortingState>([])
 const groupsTable = useVueTable({
@@ -83,10 +83,19 @@ const groupsTable = useVueTable({
 })
 const sortedGroupRows = computed(() => groupsTable.getRowModel().rows)
 
-/** ariaSort mirrors DataTable.vue's own helper — kept local since this toolbar isn't a <table> (aria-sort still applies to the toolbar buttons' own semantics, not a <th>, so it's set as a data attribute for styling/testing rather than the real ARIA property here). */
-function isSorted(id: string): false | 'asc' | 'desc' {
-  return groupsTable.getColumn(id)?.getIsSorted() ?? false
-}
+/**
+ * TOOLBAR_COLUMN_IDS restricts the toolbar to exactly the fields each
+ * trigger row displays (Name, Members, req/day, cost/day) — review fix:
+ * exposing all 11 usageColumns() fields as sortable when only 4 are
+ * visible per row let the accordion's order silently diverge from what
+ * the toolbar visibly claims to control. The full stat set stays
+ * available inside each expanded item's own detail grid, just not as a
+ * sort key here.
+ */
+const TOOLBAR_COLUMN_IDS = new Set(['id', 'secondary', 'reqDay', 'costDay'])
+const toolbarHeaders = computed(() =>
+  groupsTable.getHeaderGroups()[0].headers.filter((header) => TOOLBAR_COLUMN_IDS.has(header.column.id)),
+)
 
 /** Which groups are open — plain array state (no search-driven auto-expand exists for this view, unlike Providers, so the two-set provider-expand.ts module is not needed here). */
 const expandedGroups = ref<string[]>([])
@@ -129,28 +138,13 @@ const expandedGroups = ref<string[]>([])
           v-if="sortedGroupRows.length"
           class="mb-3 flex flex-wrap gap-x-4 gap-y-1 text-xs font-medium text-muted-foreground"
         >
-          <button
-            v-for="header in groupsTable.getHeaderGroups()[0].headers"
-            :key="header.id"
-            type="button"
-            class="inline-flex items-center gap-1 rounded px-1 py-0.5 hover:text-foreground focus-visible:ring-3 focus-visible:ring-ring/50 focus-visible:outline-1 focus-visible:outline-ring"
-            :data-sort="isSorted(header.column.id) || 'none'"
-            @click="header.column.toggleSorting(isSorted(header.column.id) === 'asc')"
-          >
-            <FlexRender :render="header.column.columnDef.header" :props="header.getContext()" />
-            <FontAwesomeIcon
-              :icon="isSorted(header.column.id) === 'asc' ? faSortUp : isSorted(header.column.id) === 'desc' ? faSortDown : faSort"
-              class="size-3 shrink-0"
-              :class="isSorted(header.column.id) ? 'text-foreground' : 'text-muted-foreground/50'"
-              aria-hidden="true"
-            />
-          </button>
+          <SortHeaderButton v-for="header in toolbarHeaders" :key="header.id" :header="header" />
         </div>
 
         <Accordion v-if="sortedGroupRows.length" v-model="expandedGroups" type="multiple" class="rounded-md border px-3">
           <AccordionItem v-for="row in sortedGroupRows" :key="row.original.id" :value="row.original.id">
             <AccordionTrigger>
-              <div class="flex flex-1 flex-wrap items-center gap-x-4 gap-y-1 pr-2 text-left">
+              <span class="flex flex-1 flex-wrap items-center gap-x-4 gap-y-1 pr-2 text-left">
                 <span class="font-medium">{{ row.original.id }}</span>
                 <span class="text-xs text-muted-foreground tabular-nums">{{ memberCountOf(row.original) || '0' }} members</span>
                 <span class="text-xs text-muted-foreground tabular-nums">
@@ -159,7 +153,7 @@ const expandedGroups = ref<string[]>([])
                 <span class="text-xs text-muted-foreground tabular-nums">
                   {{ row.original.storeDown ? '?' : formatCost(row.original.costPerDayMicroUsd) }}/day
                 </span>
-              </div>
+              </span>
             </AccordionTrigger>
             <AccordionContent>
               <dl class="mb-3 grid grid-cols-2 gap-x-6 gap-y-1.5 text-sm sm:grid-cols-4">

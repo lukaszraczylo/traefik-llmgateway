@@ -1,8 +1,10 @@
 /**
  * Pure expand/collapse state for OverviewView.vue's provider-model
  * accordion, extracted out of the component so the exact toggle sequence
- * a review flagged (see toggleProviderExpand's own comment) is checkable
- * in isolation, without mounting Vue.
+ * a review flagged (see toggleProviderExpand's own comment) is tested in
+ * isolation, without mounting Vue — see provider-expand.spec.ts (vitest),
+ * which exercises this module directly, including the full flagged
+ * sequence.
  *
  * Two sets track state:
  * - manuallyExpanded: providers the user explicitly opened, independent

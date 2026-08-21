@@ -1,9 +1,9 @@
 <script setup lang="ts" generic="TData">
 import type { ColumnDef, SortingState } from '@tanstack/vue-table'
-import { faSort, faSortDown, faSortUp } from '@fortawesome/free-solid-svg-icons'
 import { FlexRender, getCoreRowModel, getSortedRowModel, useVueTable } from '@tanstack/vue-table'
 import { ref } from 'vue'
 
+import SortHeaderButton from '@/components/SortHeaderButton.vue'
 import {
   Table,
   TableBody,
@@ -78,20 +78,7 @@ function ariaSort(dir: false | 'asc' | 'desc'): 'ascending' | 'descending' | und
           :class="header.column.columnDef.meta?.align === 'right' ? 'text-right' : undefined"
           :aria-sort="header.column.getCanSort() ? (ariaSort(header.column.getIsSorted()) ?? 'none') : undefined"
         >
-          <button
-            v-if="header.column.getCanSort()"
-            type="button"
-            class="-mx-1.5 inline-flex items-center gap-1 rounded px-1.5 py-0.5 hover:text-foreground focus-visible:ring-3 focus-visible:ring-ring/50 focus-visible:outline-1 focus-visible:outline-ring"
-            @click="header.column.toggleSorting(header.column.getIsSorted() === 'asc')"
-          >
-            <FlexRender v-if="!header.isPlaceholder" :render="header.column.columnDef.header" :props="header.getContext()" />
-            <FontAwesomeIcon
-              :icon="header.column.getIsSorted() === 'asc' ? faSortUp : header.column.getIsSorted() === 'desc' ? faSortDown : faSort"
-              class="size-3 shrink-0"
-              :class="header.column.getIsSorted() ? 'text-foreground' : 'text-muted-foreground/60'"
-              aria-hidden="true"
-            />
-          </button>
+          <SortHeaderButton v-if="header.column.getCanSort()" :header="header" class="-mx-1.5" />
           <FlexRender v-else-if="!header.isPlaceholder" :render="header.column.columnDef.header" :props="header.getContext()" />
         </TableHead>
       </TableRow>
