@@ -1,4 +1,8 @@
 .superpowers/
+# Working specs/plans for the agentic workflow — kept local alongside
+# .superpowers/ above (operator decision, 2026-08-21; the directory was also
+# removed from git history at the same time).
+docs/superpowers/
 *.wasm
 tools/yaegi-check/llmgw-yaegi-check
 dist/
