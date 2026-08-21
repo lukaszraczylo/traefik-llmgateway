@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { faGithub } from '@fortawesome/free-brands-svg-icons'
 import { faCircleExclamation } from '@fortawesome/free-solid-svg-icons'
-import { computed, defineAsyncComponent, onMounted, ref } from 'vue'
+import { computed, defineAsyncComponent, onMounted } from 'vue'
 
 import AuthGate from '@/components/AuthGate.vue'
 import ProvidersView from '@/components/ProvidersView.vue'
@@ -9,6 +9,7 @@ import TargetsView from '@/components/TargetsView.vue'
 import { Button } from '@/components/ui/button'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import UsageView from '@/components/UsageView.vue'
+import { useTabHash } from '@/composables/useTabHash'
 import { useAuthStore } from '@/stores/auth'
 import { useDashboardStore } from '@/stores/dashboard'
 
@@ -29,7 +30,16 @@ const dashboard = useDashboardStore()
 // fetches from, GET /admin/api/overview, and the store's own `overview`
 // field (AdminOverviewResponse) keep their original names unchanged — the
 // rename is UI-only, not an API surface change.
-const activeView = ref<'providers' | 'usage' | 'charts' | 'targets'>('providers')
+const TAB_VALUES = ['providers', 'usage', 'charts', 'targets'] as const
+type TabValue = (typeof TAB_VALUES)[number]
+
+// Feature C (v0.22): activeView is now hash-backed (composables/
+// useTabHash.ts) instead of a bare ref — same v-model contract Tabs
+// already expects, so nothing else about this template changes. AuthGate's
+// own flow is untouched: it never reads or writes the hash, so whatever
+// tab the URL named survives straight through the unauthenticated ->
+// authenticated transition with no extra wiring here.
+const activeView = useTabHash<TabValue>({ validTabs: TAB_VALUES, defaultTab: 'providers' })
 
 const statusText = computed<string>(() => {
   if (dashboard.error) return `refresh failed: ${dashboard.error}`

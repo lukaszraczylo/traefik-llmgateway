@@ -9,6 +9,7 @@ import { computed, h, reactive, watch } from 'vue'
 
 import DataTable from '@/components/DataTable.vue'
 import ModelChip from '@/components/ModelChip.vue'
+import ProviderRateBadge from '@/components/ProviderRateBadge.vue'
 import SearchInput from '@/components/SearchInput.vue'
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/components/ui/accordion'
 import { Badge } from '@/components/ui/badge'
@@ -20,10 +21,11 @@ import {
   CardTitle,
 } from '@/components/ui/card'
 import { useSearchQuery } from '@/composables/useSearchQuery'
-import { formatAgo, formatTimestamp, routableModelId } from '@/lib/format'
+import { formatAgo, formatTimestamp, refreshLabel, routableModelId } from '@/lib/format'
+import { isModelDegraded } from '@/lib/provider-rate'
 import { type ExpandState, clearExpandOverrides, computeExpandedItems, toggleItemExpand } from '@/lib/search-expand'
 import { useDashboardStore } from '@/stores/dashboard'
-import type { AdminAliasView, AdminProviderView } from '@/types/api'
+import type { AdminAliasView, AdminModelRateView, AdminProviderView } from '@/types/api'
 
 // This component backs the "Providers" tab (App.vue) — a UI-label rename
 // only. The data it renders still comes from GET /admin/api/overview
@@ -136,6 +138,20 @@ function visibleModels(p: AdminProviderView): string[] {
   return hasQuery.value ? p.models.filter((m) => modelMatches(p.name, m)) : p.models
 }
 
+/** ZERO_MODEL_RATE is the fallback ProviderRateBadge reads for a model p.modelRates has no entry for — should not happen (admin.go's buildAdminOverview populates one entry per Models id, unconditionally), but a defensive fallback keeps a stale/mismatched client build from throwing rather than just under-reporting. */
+const ZERO_MODEL_RATE: AdminModelRateView = { attemptsDay: 0, failuresDay: 0, attemptsMinute: 0, failuresMinute: 0 }
+
+/** modelRateFor looks up one model's counters within p.modelRates (Feature A, v0.22), falling back to ZERO_MODEL_RATE. */
+function modelRateFor(p: AdminProviderView, model: string): AdminModelRateView {
+  return p.modelRates[model] ?? ZERO_MODEL_RATE
+}
+
+/** modelIsDegraded gates the per-model rate badge (spec: "ONLY when that model is degraded") so a healthy or no-traffic model's ModelChip renders with no badge beside it at all. */
+function modelIsDegraded(p: AdminProviderView, model: string): boolean {
+  const r = modelRateFor(p, model)
+  return isModelDegraded(r.attemptsDay, r.failuresDay)
+}
+
 // --- model aliases (sortable DataTable, operator directive) ---
 //
 // The alias id gets the ModelChip copy treatment (an alias name IS the
@@ -244,13 +260,19 @@ const aliasEmptyMessage = computed(() =>
                 <span class="font-medium">{{ p.name }}</span>
                 <Badge as="span" variant="secondary" class="font-normal">{{ p.type }}</Badge>
                 <span class="text-xs text-muted-foreground tabular-nums">{{ p.modelCount }} models</span>
+                <ProviderRateBadge
+                  :attempts-day="p.attemptsDay"
+                  :failures-day="p.failuresDay"
+                  :attempts-minute="p.attemptsMinute"
+                  :failures-minute="p.failuresMinute"
+                />
                 <FontAwesomeIcon
                   v-if="p.lastErr"
                   :icon="faTriangleExclamation"
                   class="size-3.5 shrink-0 text-destructive"
                   aria-hidden="true"
                 />
-                <span class="text-xs text-muted-foreground">refreshed {{ formatAgo(p.lastRefresh) || 'never' }}</span>
+                <span class="text-xs text-muted-foreground">{{ refreshLabel(p.discoveryEnabled, p.lastRefresh) }}</span>
               </span>
             </AccordionTrigger>
             <AccordionContent>
@@ -269,7 +291,16 @@ const aliasEmptyMessage = computed(() =>
                 </div>
               </dl>
               <div v-if="visibleModels(p).length" class="flex flex-wrap gap-1.5">
-                <ModelChip v-for="m in visibleModels(p)" :key="m" :id="routableModelId(p.name, m)" />
+                <span v-for="m in visibleModels(p)" :key="m" class="inline-flex items-center gap-1">
+                  <ModelChip :id="routableModelId(p.name, m)" />
+                  <ProviderRateBadge
+                    v-if="modelIsDegraded(p, m)"
+                    :attempts-day="modelRateFor(p, m).attemptsDay"
+                    :failures-day="modelRateFor(p, m).failuresDay"
+                    :attempts-minute="modelRateFor(p, m).attemptsMinute"
+                    :failures-minute="modelRateFor(p, m).failuresMinute"
+                  />
+                </span>
               </div>
               <p v-else class="text-sm text-muted-foreground">no models known yet</p>
             </AccordionContent>

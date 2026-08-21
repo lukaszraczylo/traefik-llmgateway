@@ -39,6 +39,25 @@ export function formatTimestamp(iso: string | undefined): string {
   return d.toLocaleString()
 }
 
+/**
+ * refreshLabel renders a provider's discovery/refresh status as the
+ * Providers tab's own three-state label (Feature B, v0.22 — last-refresh
+ * label honesty): discovery disabled reads "discovery off" regardless of
+ * lastRefresh (a disabled provider's lastRefresh is always the unset
+ * sentinel, registry.go's own maybeRefresh/warmFill never call
+ * finishRefresh for it — but this checks discoveryEnabled first anyway,
+ * not lastRefresh's value, so it stays correct even if that invariant
+ * ever changes); discovery enabled but never yet refreshed reads
+ * "pending"; otherwise it is the existing "refreshed (Ns ago)" relative-
+ * time text, unchanged.
+ */
+export function refreshLabel(discoveryEnabled: boolean, lastRefresh: string | undefined): string {
+  if (!discoveryEnabled) return 'discovery off'
+  const ago = formatAgo(lastRefresh)
+  if (!ago) return 'pending'
+  return `refreshed${ago}`
+}
+
 /** formatLimits renders a LimitsConfig as a short comma-joined summary, or "none" when unset. */
 export function formatLimits(limits: LimitsConfig | undefined): string {
   if (!limits) return 'none'

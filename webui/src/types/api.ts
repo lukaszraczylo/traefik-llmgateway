@@ -12,6 +12,19 @@ export interface LimitsConfig {
   costPerMonthUSD?: number
 }
 
+/**
+ * One upstream model's current-window attempt/failure counters within its
+ * provider (admin.go: adminModelRateView) — Feature A, v0.22 per-model
+ * success-rate breakdown. Field shape matches AdminProviderView's own
+ * attempts/failures counters below, just scoped to one model.
+ */
+export interface AdminModelRateView {
+  attemptsDay: number
+  failuresDay: number
+  attemptsMinute: number
+  failuresMinute: number
+}
+
 export interface AdminProviderView {
   name: string
   type: string
@@ -21,6 +34,27 @@ export interface AdminProviderView {
   /** Sorted explicit∪discovered model ids (admin.go: adminProviderView.Models) — always an array, never omitted, even when empty. */
   models: string[]
   modelCount: number
+  /**
+   * discoveryEnabled mirrors the provider's own configured Discovery flag
+   * (admin.go: adminProviderView.DiscoveryEnabled — Feature B, v0.22): the
+   * Providers tab uses it to tell "discovery is off" apart from "discovery
+   * is on but has not refreshed yet", both of which otherwise show the same
+   * zero lastRefresh.
+   */
+  discoveryEnabled: boolean
+  /**
+   * attemptsDay/failuresDay/attemptsMinute/failuresMinute are this
+   * provider's current-window upstream-attempt counters (admin.go:
+   * adminProviderView's identically-named fields — Feature A, v0.22). See
+   * lib/provider-rate.ts for the success-rate math and badge-tier
+   * thresholds built on top of these.
+   */
+  attemptsDay: number
+  failuresDay: number
+  attemptsMinute: number
+  failuresMinute: number
+  /** Per-model breakdown of the counters above, keyed by upstream model id — always present (possibly empty), never omitted. */
+  modelRates: Record<string, AdminModelRateView>
 }
 
 export interface AdminRedisView {
