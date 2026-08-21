@@ -56,6 +56,15 @@ const (
 // needs, and copying its "go.yaml.in"-style nested module dirs into a
 // module-less GOPATH tree would otherwise confuse Yaegi's own import
 // resolution) have nothing to do with the plugin package Yaegi imports.
+// webui/ (Vue admin-panel task) is excluded for the same reason vendor/
+// is: its own go.mod already walls it off from the repo root's `go
+// build`/`vet`/`test ./...`, and its node_modules tree — hundreds of MB,
+// including a stray bundled .go file
+// (node_modules/flatted/golang/pkg/flatted.go) — would otherwise both
+// balloon copyRepoSource's wall time and risk Yaegi tripping over code
+// this repo neither wrote nor can build. The plugin only ever imports the
+// generated admin_assets_gen.go at the repo root, never anything under
+// webui/ itself.
 var excludedTopLevelDirs = map[string]bool{
 	"tools":        true,
 	"integration":  true,
@@ -63,6 +72,7 @@ var excludedTopLevelDirs = map[string]bool{
 	"docs":         true,
 	".git":         true,
 	"vendor":       true,
+	"webui":        true,
 }
 
 func main() {

@@ -24,3 +24,9 @@ testdata/ export-ignore
 .github/ export-ignore
 *_test.go export-ignore
 .gitattributes export-ignore
+# webui/ is the Vue admin panel's SOURCE (Vite/npm project) — CI and a
+# release build never need node: admin_assets_gen.go (repo root, `make
+# admin-ui`'s committed output) is the only artifact the plugin build
+# actually depends on, exactly like vendor/ above is safe to drop because
+# nothing at the repo root imports it directly.
+webui/ export-ignore

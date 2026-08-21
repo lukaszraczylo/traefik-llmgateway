@@ -1,0 +1,131 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn-vue/tailwind.css";
+
+/*
+ * Theme tokens (design note, not slop-by-default): shadcn-vue's `init`
+ * scaffolds an achromatic "stone" palette (chroma 0 everywhere), a Google
+ * Fonts Inter import, and a Geist Variable heading font. All three are
+ * rewritten below:
+ *
+ * - No Google Fonts import, no Geist. The admin CSP (admin.go) ships
+ *   style-src 'self' with no external host allowed, and the panel must load
+ *   zero external assets per the operator brief — a network font would
+ *   silently fail under that CSP anyway. Headings and body both use the
+ *   platform's own UI font stack; numeric/tabular data (usage tables, chart
+ *   axes) uses the platform monospace stack for column alignment.
+ * - A deliberate signature color (deep teal, hue ~200) replaces the
+ *   grayscale-everything default and the reflexive indigo/purple accent.
+ * - Chart series use the Okabe & Ito (2008) colorblind-safe qualitative
+ *   palette rather than picking hues by eye — distinguishable under
+ *   protanopia, deuteranopia, and tritanopia alike.
+ * - Dark mode is driven by `prefers-color-scheme`, not a `.dark` class
+ *   toggle: this panel has no theme switcher, so the OS setting is the only
+ *   signal there is. Tailwind v4's default `dark:` variant already means
+ *   "@media (prefers-color-scheme: dark)" — shadcn-vue's init overrides it
+ *   to a `.dark`-class variant for apps with a manual theme toggle; that
+ *   override is dropped here so any `dark:` utility (ours or a generated
+ *   ui/ primitive's) follows the OS setting, same as the CSS variables below.
+ */
+
+@theme inline {
+    --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    --font-mono: ui-monospace, "SF Mono", "Cascadia Code", "Roboto Mono", Consolas, monospace;
+    --color-ring: var(--ring);
+    --color-input: var(--input);
+    --color-border: var(--border);
+    --color-destructive: var(--destructive);
+    --color-accent-foreground: var(--accent-foreground);
+    --color-accent: var(--accent);
+    --color-muted-foreground: var(--muted-foreground);
+    --color-muted: var(--muted);
+    --color-secondary-foreground: var(--secondary-foreground);
+    --color-secondary: var(--secondary);
+    --color-primary-foreground: var(--primary-foreground);
+    --color-primary: var(--primary);
+    --color-popover-foreground: var(--popover-foreground);
+    --color-popover: var(--popover);
+    --color-card-foreground: var(--card-foreground);
+    --color-card: var(--card);
+    --color-foreground: var(--foreground);
+    --color-background: var(--background);
+    --color-chart-requests: var(--chart-requests);
+    --color-chart-tokens-in: var(--chart-tokens-in);
+    --color-chart-tokens-out: var(--chart-tokens-out);
+    --color-chart-cost: var(--chart-cost);
+    --radius-sm: calc(var(--radius) - 4px);
+    --radius-md: calc(var(--radius) - 2px);
+    --radius-lg: var(--radius);
+    --radius-xl: calc(var(--radius) + 4px);
+    --font-heading: var(--font-sans);
+}
+
+:root {
+    --background: oklch(0.99 0.004 75);
+    --foreground: oklch(0.19 0.012 75);
+    --card: oklch(0.995 0.003 75);
+    --card-foreground: oklch(0.19 0.012 75);
+    --popover: oklch(0.995 0.003 75);
+    --popover-foreground: oklch(0.19 0.012 75);
+    --primary: oklch(0.46 0.09 200);
+    --primary-foreground: oklch(0.98 0.006 200);
+    --secondary: oklch(0.95 0.006 75);
+    --secondary-foreground: oklch(0.22 0.01 75);
+    --muted: oklch(0.95 0.006 75);
+    --muted-foreground: oklch(0.48 0.012 75);
+    --accent: oklch(0.93 0.02 200);
+    --accent-foreground: oklch(0.28 0.05 200);
+    --destructive: oklch(0.55 0.2 25);
+    --border: oklch(0.9 0.007 75);
+    --input: oklch(0.9 0.007 75);
+    --ring: oklch(0.55 0.09 200);
+    --radius: 0.375rem;
+
+    /* Chart series — Okabe & Ito (2008) colorblind-safe qualitative set. */
+    --chart-requests: #009e73;
+    --chart-tokens-in: #0072b2;
+    --chart-tokens-out: #e69f00;
+    --chart-cost: #d55e00;
+}
+
+@media (prefers-color-scheme: dark) {
+    :root {
+        --background: oklch(0.17 0.007 75);
+        --foreground: oklch(0.95 0.005 75);
+        --card: oklch(0.21 0.009 75);
+        --card-foreground: oklch(0.95 0.005 75);
+        --popover: oklch(0.21 0.009 75);
+        --popover-foreground: oklch(0.95 0.005 75);
+        --primary: oklch(0.74 0.11 200);
+        --primary-foreground: oklch(0.16 0.012 200);
+        --secondary: oklch(0.27 0.011 75);
+        --secondary-foreground: oklch(0.93 0.005 75);
+        --muted: oklch(0.27 0.011 75);
+        --muted-foreground: oklch(0.68 0.012 75);
+        --accent: oklch(0.32 0.035 200);
+        --accent-foreground: oklch(0.91 0.03 200);
+        --destructive: oklch(0.68 0.19 25);
+        --border: oklch(1 0 0 / 12%);
+        --input: oklch(1 0 0 / 16%);
+        --ring: oklch(0.62 0.1 200);
+
+        /* Same hues, most already legible on a dark ground at this
+           saturation — Okabe-Ito was designed for slide/print use on light
+           and dark backgrounds alike. */
+        --chart-requests: #16b891;
+        --chart-tokens-in: #4098d7;
+        --chart-tokens-out: #f0ac1f;
+        --chart-cost: #e8763a;
+    }
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+    }
+  body {
+    @apply bg-background text-foreground;
+    @apply font-sans;
+    font-variant-numeric: tabular-nums;
+    }
+}
