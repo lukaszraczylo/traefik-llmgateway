@@ -5,6 +5,7 @@ import { computed, defineAsyncComponent, onMounted, ref } from 'vue'
 
 import AuthGate from '@/components/AuthGate.vue'
 import ProvidersView from '@/components/ProvidersView.vue'
+import TargetsView from '@/components/TargetsView.vue'
 import { Button } from '@/components/ui/button'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import UsageView from '@/components/UsageView.vue'
@@ -28,7 +29,7 @@ const dashboard = useDashboardStore()
 // fetches from, GET /admin/api/overview, and the store's own `overview`
 // field (AdminOverviewResponse) keep their original names unchanged — the
 // rename is UI-only, not an API surface change.
-const activeView = ref<'providers' | 'usage' | 'charts'>('providers')
+const activeView = ref<'providers' | 'usage' | 'charts' | 'targets'>('providers')
 
 const statusText = computed<string>(() => {
   if (dashboard.error) return `refresh failed: ${dashboard.error}`
@@ -72,6 +73,7 @@ onMounted(() => {
         <TabsTrigger value="providers">Providers</TabsTrigger>
         <TabsTrigger value="usage">Usage</TabsTrigger>
         <TabsTrigger value="charts">Charts</TabsTrigger>
+        <TabsTrigger value="targets">MCP & Agents</TabsTrigger>
       </TabsList>
       <TabsContent value="providers">
         <ProvidersView />
@@ -81,6 +83,9 @@ onMounted(() => {
       </TabsContent>
       <TabsContent value="charts">
         <ChartsView />
+      </TabsContent>
+      <TabsContent value="targets">
+        <TargetsView />
       </TabsContent>
     </Tabs>
   </div>

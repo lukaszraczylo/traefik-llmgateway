@@ -116,3 +116,31 @@ export interface UsageHistoryResponse {
   window: string
   points: UsageHistoryPoint[]
 }
+
+/** One MCP-server or agent target's current-window request counters (admin.go: adminTargetCountersView) — requests only, no tokens or cost. */
+export interface AdminTargetCountersView {
+  requestsPerMinute: number
+  requestsPerDay: number
+  requestsPerMonth: number
+}
+
+/**
+ * One configured MCP server's or A2A agent's row in GET /admin/api/targets
+ * (admin.go: adminTargetView). Access is the group names actually allowed
+ * to reach this target, computed server-side via the same matching authz
+ * enforcement uses — undefined/empty means every configured group can
+ * reach it ("empty meaning all", mirroring AdminUsageEntryView's own
+ * providers/models/mcpServers/agents convention above).
+ */
+export interface AdminTargetView {
+  name: string
+  url: string
+  access?: string[]
+  counters: AdminTargetCountersView
+}
+
+/** GET /admin/api/targets (admin.go: adminTargetsResponse). */
+export interface AdminTargetsResponse {
+  mcpServers: AdminTargetView[]
+  agents: AdminTargetView[]
+}
