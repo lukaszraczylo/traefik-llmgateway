@@ -179,6 +179,24 @@ func TestHandleImagesGenerations_OpenAI_HappyPath_NativeForward(t *testing.T) {
 	if !ok || totalReq != 1 {
 		t.Errorf("total request/min counter = %d (ok=%v), want 1", totalReq, ok)
 	}
+
+	// Feature A (v0.22): handleImagesGenerations wraps the request context
+	// with an attemptRecorder before calling adapter.imagesGeneration
+	// (routes_media.go) — a successful 200 upstream attempt must land as
+	// one attempt, zero failures, at both provider and (provider, model)
+	// scope.
+	attempts, ok := gw.limiter.getCounter(kindProvider, "openai", metricProvAttempt, windowDay, time.Now())
+	if !ok || attempts != 1 {
+		t.Errorf("provider attempts/day = %d (ok=%v), want 1", attempts, ok)
+	}
+	fails, _ := gw.limiter.getCounter(kindProvider, "openai", metricProvFail, windowDay, time.Now())
+	if fails != 0 {
+		t.Errorf("provider fails/day = %d, want 0", fails)
+	}
+	modelAttempts, ok := gw.limiter.getCounter(kindProviderModel, "openai/img-test", metricProvAttempt, windowDay, time.Now())
+	if !ok || modelAttempts != 1 {
+		t.Errorf("model attempts/day = %d (ok=%v), want 1", modelAttempts, ok)
+	}
 }
 
 // TestHandleImagesGenerations_ModelAlias_ResolvesToTargetUpstreamModel

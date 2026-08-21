@@ -281,6 +281,15 @@ func (g *Gateway) handlePassthrough(w http.ResponseWriter, r *http.Request, u *u
 		upstreamURL += "?" + r.URL.RawQuery
 	}
 
+	// Feature A (v0.22): provider-level only — unlike runUnified/the media
+	// routes, the upstream model here lives in the response body
+	// (extractPassthroughUsage, below), read only after this attempt
+	// already resolved, so there is no model to attribute it to yet. See
+	// recordProviderAttempt's own doc comment (limits.go).
+	r = r.WithContext(withAttemptRecorder(r.Context(), func(resp *http.Response, attemptErr error) {
+		g.limiter.recordProviderAttempt(providerName, "", resp, attemptErr)
+	}))
+
 	result, ok := g.proxyUpstream(w, r, upstreamURL, adapter.httpClient(), adapter.injectAuth, true, "passthrough (provider "+providerName+")")
 	if !ok || !result.isJSON {
 		// A build/connection/copy failure already wrote its own response
@@ -384,6 +393,16 @@ func (g *Gateway) proxyUpstream(w http.ResponseWriter, r *http.Request, upstream
 	}
 
 	resp, err := client.Do(upstreamReq) //nolint:gosec // same upstreamReq built above; operator-fixed host, traversal-checked, see its construction comment
+	// Feature A (v0.22): proxyUpstream makes exactly one attempt (no
+	// retry.go policy wraps this path), so this fires once per call,
+	// whichever way it resolves. Only handlePassthrough's own context ever
+	// carries a recorder (attemptRecorderFromContext, providers.go) —
+	// handleTargetProxy (mcp_a2a.go), this function's other caller, never
+	// wraps r's context this way, so an MCP/A2A target proxy attempt is
+	// correctly never accounted as provider traffic.
+	if rec := attemptRecorderFromContext(r.Context()); rec != nil {
+		rec(resp, err)
+	}
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
 			g.logf("%s: client canceled request: %v", logPrefix, err)

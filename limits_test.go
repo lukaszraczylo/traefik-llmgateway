@@ -1,9 +1,11 @@
 package traefikllmgateway
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"math"
+	"net/http"
 	"testing"
 	"time"
 
@@ -1372,5 +1374,175 @@ func TestMemoryStore_IncrMulti_DayCounterStillClampsAt48h(t *testing.T) {
 	}
 	if got != 0 {
 		t.Errorf("day counter at 49h past write = %d, want 0 (expired at the 48h ceiling; day's own 25h floor never raises it)", got)
+	}
+}
+
+// --- Feature A (v0.22): per-provider/per-(provider,model) success-rate accounting ---
+
+// TestRecordProviderAttempt_ClassifiesUsingIsTransient proves
+// recordProviderAttempt's failure classification is exactly isTransient's
+// own — reused, not forked (spec ruling) — across the full outcome table:
+// success, a non-429 4xx (still a "success" for provider-health purposes:
+// the provider answered correctly to a request it did not like), 429, a
+// 5xx, a plain network error, and a context-canceled error (not a
+// provider fault, per isTransient's own carve-out).
+func TestRecordProviderAttempt_ClassifiesUsingIsTransient(t *testing.T) {
+	tests := []struct {
+		err      error
+		resp     *http.Response
+		name     string
+		wantFail bool
+	}{
+		{name: "200 OK", resp: &http.Response{StatusCode: http.StatusOK}, wantFail: false},
+		{name: "404 not found (provider answered)", resp: &http.Response{StatusCode: http.StatusNotFound}, wantFail: false},
+		{name: "429 too many requests", resp: &http.Response{StatusCode: http.StatusTooManyRequests}, wantFail: true},
+		{name: "500 internal server error", resp: &http.Response{StatusCode: http.StatusInternalServerError}, wantFail: true},
+		{name: "503 service unavailable", resp: &http.Response{StatusCode: http.StatusServiceUnavailable}, wantFail: true},
+		{name: "network error", err: errors.New("dial tcp: connection refused"), wantFail: true},
+		{name: "context canceled (not a provider fault)", err: context.Canceled, wantFail: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			l := newLimiter(nil, true)
+			now := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
+			l.nowFn = func() time.Time { return now }
+
+			l.recordProviderAttempt("openai", "gpt-4o", tt.resp, tt.err)
+
+			attempts, _ := l.getCounter(kindProvider, "openai", metricProvAttempt, windowDay, now)
+			if attempts != 1 {
+				t.Errorf("provider attempts/day = %d, want 1", attempts)
+			}
+			fails, _ := l.getCounter(kindProvider, "openai", metricProvFail, windowDay, now)
+			wantFails := int64(0)
+			if tt.wantFail {
+				wantFails = 1
+			}
+			if fails != wantFails {
+				t.Errorf("provider fails/day = %d, want %d", fails, wantFails)
+			}
+
+			// Minute window and the (provider, model) scope both mirror the
+			// provider/day counters exactly.
+			attemptsMin, _ := l.getCounter(kindProvider, "openai", metricProvAttempt, windowMin, now)
+			if attemptsMin != 1 {
+				t.Errorf("provider attempts/min = %d, want 1", attemptsMin)
+			}
+			modelAttempts, _ := l.getCounter(kindProviderModel, "openai/gpt-4o", metricProvAttempt, windowDay, now)
+			if modelAttempts != 1 {
+				t.Errorf("model attempts/day = %d, want 1", modelAttempts)
+			}
+			modelFails, _ := l.getCounter(kindProviderModel, "openai/gpt-4o", metricProvFail, windowDay, now)
+			if modelFails != wantFails {
+				t.Errorf("model fails/day = %d, want %d", modelFails, wantFails)
+			}
+		})
+	}
+}
+
+// TestRecordProviderAttempt_EmptyModel_ProviderScopeOnly proves a caller
+// that cannot cheaply know the upstream model before the attempt resolves
+// (native passthrough, routes_passthrough.go's handlePassthrough: the
+// model lives in the response body, read only afterward) gets
+// provider-level accounting only when it passes model="".
+func TestRecordProviderAttempt_EmptyModel_ProviderScopeOnly(t *testing.T) {
+	l := newLimiter(nil, true)
+	now := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
+	l.nowFn = func() time.Time { return now }
+
+	l.recordProviderAttempt("openai", "", &http.Response{StatusCode: http.StatusInternalServerError}, nil)
+
+	attempts, _ := l.getCounter(kindProvider, "openai", metricProvAttempt, windowDay, now)
+	if attempts != 1 {
+		t.Errorf("provider attempts/day = %d, want 1", attempts)
+	}
+	fails, _ := l.getCounter(kindProvider, "openai", metricProvFail, windowDay, now)
+	if fails != 1 {
+		t.Errorf("provider fails/day = %d, want 1", fails)
+	}
+}
+
+// TestRecordProviderAttempt_EmptyProvider_NoOp proves a caller with no
+// resolved provider name (should never happen in production traffic, but
+// must never panic) is a silent no-op.
+func TestRecordProviderAttempt_EmptyProvider_NoOp(t *testing.T) {
+	l := newLimiter(nil, true)
+	l.recordProviderAttempt("", "some-model", &http.Response{StatusCode: http.StatusOK}, nil) // must not panic
+}
+
+// TestProviderModelScopeID proves the "provider/model" id convention
+// providerUsage/recordProviderAttempt share with pricing.go's own
+// unifiedCostMicros and the admin API.
+func TestProviderModelScopeID(t *testing.T) {
+	if got := providerModelScopeID("openai", "gpt-4o"); got != "openai/gpt-4o" {
+		t.Errorf("providerModelScopeID = %q, want %q", got, "openai/gpt-4o")
+	}
+}
+
+// TestProviderUsage_BatchedSingleRoundTrip drives limiter.providerUsage
+// against a counting stub store (historyCountingStore, shared with
+// TestLimiterHistory_OneBatchCallOldestFirst above): it must issue
+// exactly ONE getMulti call for both a provider-level and a
+// (provider, model) scope together, and slice the flat result back to the
+// right scope in order.
+func TestProviderUsage_BatchedSingleRoundTrip(t *testing.T) {
+	now := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
+	countStore := &historyCountingStore{values: map[string]int64{
+		windowKey(kindProvider, "openai", metricProvAttempt, windowMin, now):             3,
+		windowKey(kindProvider, "openai", metricProvFail, windowMin, now):                1,
+		windowKey(kindProvider, "openai", metricProvAttempt, windowDay, now):             30,
+		windowKey(kindProvider, "openai", metricProvFail, windowDay, now):                2,
+		windowKey(kindProviderModel, "openai/gpt-4o", metricProvAttempt, windowDay, now): 10,
+	}}
+	l := newLimiter(countStore, true)
+	l.nowFn = func() time.Time { return now }
+
+	scopes := []limitScope{
+		{kind: kindProvider, id: "openai"},
+		{kind: kindProviderModel, id: "openai/gpt-4o"},
+	}
+	got := l.providerUsage(scopes)
+
+	if countStore.getMultiCalls != 1 {
+		t.Errorf("getMultiCalls = %d, want 1 (both scopes' keys flattened into one call)", countStore.getMultiCalls)
+	}
+	if len(got) != 2 {
+		t.Fatalf("len(got) = %d, want 2", len(got))
+	}
+	if got[0].attemptsMinute != 3 || got[0].failuresMinute != 1 || got[0].attemptsDay != 30 || got[0].failuresDay != 2 {
+		t.Errorf("provider counters = %+v, want {3 1 30 2}", got[0])
+	}
+	if got[1].attemptsDay != 10 || got[1].failuresDay != 0 {
+		t.Errorf("model counters = %+v, want attemptsDay 10, failuresDay 0", got[1])
+	}
+}
+
+// TestProviderUsage_EmptyScopes_ReturnsEmptyWithoutTouchingStore mirrors
+// targetUsage's own empty-input short circuit.
+func TestProviderUsage_EmptyScopes_ReturnsEmptyWithoutTouchingStore(t *testing.T) {
+	countStore := &historyCountingStore{}
+	l := newLimiter(countStore, true)
+
+	got := l.providerUsage(nil)
+	if len(got) != 0 {
+		t.Errorf("len(got) = %d, want 0", len(got))
+	}
+	if countStore.getMultiCalls != 0 {
+		t.Errorf("getMultiCalls = %d, want 0 (empty scopes must not touch the store)", countStore.getMultiCalls)
+	}
+}
+
+// TestProviderUsage_StoreDown_ReturnsZeroCounters mirrors targetUsage's
+// own fail-closed contract: a store error with failOpen=false must report
+// every scope's counters as zero, not partial or stale values.
+func TestProviderUsage_StoreDown_ReturnsZeroCounters(t *testing.T) {
+	l := newLimiter(alwaysErrStore{}, false)
+	got := l.providerUsage([]limitScope{{kind: kindProvider, id: "openai"}})
+	if len(got) != 1 {
+		t.Fatalf("len(got) = %d, want 1", len(got))
+	}
+	if got[0] != (providerCounters{}) {
+		t.Errorf("counters = %+v, want the zero value on a storeDown read", got[0])
 	}
 }

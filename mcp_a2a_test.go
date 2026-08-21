@@ -684,6 +684,16 @@ func TestHandleTargetProxy_JSONResponse_OnlyRequestCounterMoves(t *testing.T) {
 	if !ok || totalReq != 1 {
 		t.Errorf("total request/min counter = %d (ok=%v), want 1", totalReq, ok)
 	}
+
+	// Feature A (v0.22): handleTargetProxy/proxyUpstream never wrap the
+	// request context with an attemptRecorder — an MCP/A2A target proxy
+	// attempt against the "openai" MCP server's own upstream must never be
+	// mistaken for provider traffic, even though a provider of the same
+	// name happens to be configured too.
+	provAttempts, _ := gw.limiter.getCounter(kindProvider, "openai", metricProvAttempt, windowDay, time.Now())
+	if provAttempts != 0 {
+		t.Errorf("provider attempts/day = %d, want 0 — the MCP target proxy must never record provider accounting", provAttempts)
+	}
 }
 
 // --- config validation at construction ---

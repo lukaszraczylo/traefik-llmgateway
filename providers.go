@@ -184,6 +184,50 @@ func newAdapterHTTPClient() *http.Client {
 	return &http.Client{Transport: tr}
 }
 
+// attemptRecorder is invoked once per upstream HTTP attempt a shared
+// chokepoint makes — retryPolicy.do's own retry loop (retry.go), for every
+// adapter method that goes through upstreamJSON/upstreamRawBytes, and
+// proxyUpstream's single client.Do call (routes_passthrough.go) — with
+// that attempt's raw resp/err, for Feature A's (v0.22) per-provider
+// success-rate accounting (limiter.recordProviderAttempt, limits.go). A
+// recorder must never touch resp.Body (still owned by its caller, read or
+// forwarded afterward) and must never retain resp or err past the call.
+type attemptRecorder func(resp *http.Response, err error)
+
+// attemptRecorderCtxKey is the unexported context.Value key
+// withAttemptRecorder/attemptRecorderFromContext share. An unexported
+// struct type, not a string, so no other package's context.WithValue call
+// can ever collide with it by accident.
+type attemptRecorderCtxKey struct{}
+
+// withAttemptRecorder returns a context carrying rec, so a chokepoint
+// shared across call sites that must NOT all record provider accounting —
+// retryPolicy.do and proxyUpstream are both also reached by traffic
+// Feature A is deliberately out of scope for: registry.go's discovery
+// listModels calls (no recorder ever set on their ctx) and the MCP/A2A
+// target proxy (handleTargetProxy, mcp_a2a.go, which never wraps its
+// request's context this way) — can look the recorder up without either
+// function needing a dedicated parameter every call site would otherwise
+// have to pass. A nil rec returns ctx unchanged, so a caller may call this
+// unconditionally.
+func withAttemptRecorder(ctx context.Context, rec attemptRecorder) context.Context {
+	if rec == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, attemptRecorderCtxKey{}, rec)
+}
+
+// attemptRecorderFromContext returns the attemptRecorder ctx carries via
+// withAttemptRecorder, or nil when none was set — the common case for any
+// call path Feature A does not account (see withAttemptRecorder's doc
+// comment). A bare comma-ok type assertion, not errors.As or any reflect-
+// based check: see providerHTTPError's own doc comment for why a
+// yaegi-interpreted plugin must avoid errors.As here.
+func attemptRecorderFromContext(ctx context.Context) attemptRecorder {
+	rec, _ := ctx.Value(attemptRecorderCtxKey{}).(attemptRecorder)
+	return rec
+}
+
 // upstreamJSON issues an HTTP request to url: body, when non-nil, is
 // marshaled as the JSON request body; hdr's values are added to the
 // request (a caller builds this from its adapter's auth and content-type

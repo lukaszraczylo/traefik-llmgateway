@@ -172,7 +172,14 @@ func (g *Gateway) runUnified(w http.ResponseWriter, r *http.Request, u *user, gr
 		respWriter = capture
 	}
 
-	result, callErr := call(adapter, r.Context(), respWriter, req)
+	// Feature A (v0.22): every upstream attempt call() makes — via
+	// upstreamJSON's retryPolicy.do, providers.go — reports through to
+	// this recorder, closing over the adapter/model this request already
+	// resolved to. See attemptRecorder's own doc comment (providers.go).
+	ctx := withAttemptRecorder(r.Context(), func(resp *http.Response, attemptErr error) {
+		g.limiter.recordProviderAttempt(adapter.name(), upstreamModel, resp, attemptErr)
+	})
+	result, callErr := call(adapter, ctx, respWriter, req)
 
 	// Usage is accounted before the error branch below runs, not after:
 	// every adapter that can fail mid-stream (forwardStream in each of the

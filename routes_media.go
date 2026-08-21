@@ -96,7 +96,12 @@ func (g *Gateway) handleImagesGenerations(w http.ResponseWriter, r *http.Request
 	}
 	req["model"] = upstreamModel
 
-	if _, err := adapter.imagesGeneration(r.Context(), sw, req); err != nil {
+	// Feature A (v0.22): see routes_unified.go's runUnified for the
+	// identical pattern this mirrors.
+	ctx := withAttemptRecorder(r.Context(), func(resp *http.Response, attemptErr error) {
+		g.limiter.recordProviderAttempt(adapter.name(), upstreamModel, resp, attemptErr)
+	})
+	if _, err := adapter.imagesGeneration(ctx, sw, req); err != nil {
 		g.handleAdapterError(sw, err, adapter.name())
 	}
 }
@@ -145,7 +150,12 @@ func (g *Gateway) handleAudioSpeech(w http.ResponseWriter, r *http.Request, u *u
 		return
 	}
 
-	if _, err := adapter.audioSpeech(r.Context(), sw, body, "application/json"); err != nil {
+	// Feature A (v0.22): see routes_unified.go's runUnified for the
+	// identical pattern this mirrors.
+	ctx := withAttemptRecorder(r.Context(), func(resp *http.Response, attemptErr error) {
+		g.limiter.recordProviderAttempt(adapter.name(), upstreamModel, resp, attemptErr)
+	})
+	if _, err := adapter.audioSpeech(ctx, sw, body, "application/json"); err != nil {
 		g.handleAdapterError(sw, err, adapter.name())
 	}
 }
@@ -230,7 +240,12 @@ func (g *Gateway) handleAudioTranscriptions(w http.ResponseWriter, r *http.Reque
 		uploadContentType = rebuiltContentType
 	}
 
-	if _, err := adapter.audioTranscription(r.Context(), sw, uploadBody, uploadContentType); err != nil {
+	// Feature A (v0.22): see routes_unified.go's runUnified for the
+	// identical pattern this mirrors.
+	ctx := withAttemptRecorder(r.Context(), func(resp *http.Response, attemptErr error) {
+		g.limiter.recordProviderAttempt(adapter.name(), upstreamModel, resp, attemptErr)
+	})
+	if _, err := adapter.audioTranscription(ctx, sw, uploadBody, uploadContentType); err != nil {
 		g.handleAdapterError(sw, err, adapter.name())
 	}
 }

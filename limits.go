@@ -3,6 +3,7 @@ package traefikllmgateway
 import (
 	"fmt"
 	"math"
+	"net/http"
 	"sync"
 	"time"
 )
@@ -1136,6 +1137,172 @@ func (l *limiter) targetUsage(scopes []limitScope) []targetCounters {
 	for i := range scopes {
 		v := vals[i*targetCounterKeysPerScope : i*targetCounterKeysPerScope+targetCounterKeysPerScope]
 		out[i] = targetCounters{requestsPerMinute: v[0], requestsPerDay: v[1], requestsPerMonth: v[2]}
+	}
+	return out
+}
+
+// kindProvider and kindProviderModel are the limitScope.kind (and
+// admin-API scope-kind) strings a provider's and a (provider, upstream
+// model) pair's outcome counters use (Feature A, v0.22 — provider/model
+// success-rate accounting) — collision-safety via kind embedding, mirroring
+// scopeKindAgent's own rationale (mcp_a2a.go): windowKey embeds kind as the
+// counter key's own leading segment, so a provider named identically to a
+// user, group, or MCP/A2A target can never share a counter with it, and a
+// provider-level scope can never collide with one of its own
+// (provider, model) scopes either, even when a model happens to be named
+// after its provider.
+const (
+	kindProvider      = "prov"
+	kindProviderModel = "provmodel"
+)
+
+// metricProvAttempt and metricProvFail are the counter metric names
+// recordProviderAttempt writes (Feature A, v0.22): every upstream attempt
+// increments metricProvAttempt; only a provider-fault outcome
+// (isTransient's own classification, retry.go — reused, not forked, per
+// spec ruling) additionally increments metricProvFail.
+const (
+	metricProvAttempt = "attempt"
+	metricProvFail    = "fail"
+)
+
+// providerModelScopeID joins provider and model into kindProviderModel's
+// id convention: "provider/model" — the same canonical id shape
+// pricing.go's unifiedCostMicros and the admin API already use elsewhere
+// for a (provider, model) pair, so a reader who already knows that
+// convention needs no new one here.
+func providerModelScopeID(provider, model string) string {
+	return provider + "/" + model
+}
+
+// recordProviderAttempt accounts ONE upstream HTTP attempt against
+// provider (Feature A, v0.22), and against the (provider, model) pair too
+// when model is non-empty — a caller that cannot cheaply know the upstream
+// model before the attempt resolves (native passthrough, routes_
+// passthrough.go's handlePassthrough: the model lives in the response
+// body, read only after the attempt already happened) passes "" and gets
+// provider-level accounting only.
+//
+// Every attempt increments an "attempts" counter; only a provider-fault
+// outcome — exactly isTransient(resp, err)'s own classification
+// (retry.go: a transport/connection error, HTTP 429, or a 5xx status) —
+// additionally increments a "failures" counter. Deliberately reused rather
+// than forked: a 4xx-but-not-429 response means the provider answered
+// correctly to a request it did not like, which is not a provider-health
+// signal, exactly the line isTransient already draws for "worth retrying".
+//
+// attempt-accounting: this is invoked once per upstream attempt, not once
+// per logical request — attemptRecorderFromContext (providers.go) is
+// looked up fresh inside retryPolicy.do's own retry loop and proxyUpstream's
+// single client.Do call, so a chat completion retried twice before
+// succeeding counts as two attempts here (one failure, one success), the
+// same "count what was actually attempted" discipline
+// countTargetRequests/-Request already apply to target scopes (mcp_a2a.go
+// callers), consistent with those counters' own attempt/request semantics.
+//
+// Both counters are written at minute AND day granularity only — no month
+// window: provider health is a now-and-today question (the Providers tab's
+// success-rate badge, webui), not a billing one, so there is nothing here
+// for a month-long retention window to serve.
+func (l *limiter) recordProviderAttempt(provider, model string, resp *http.Response, err error) {
+	if provider == "" {
+		return
+	}
+	now := l.now()
+	fail := isTransient(resp, err)
+
+	entries := make([]counterIncr, 0, 8)
+	entries = append(entries,
+		newCounterIncr(kindProvider, provider, metricProvAttempt, windowMin, now, 1, minWindowTTL),
+		newCounterIncr(kindProvider, provider, metricProvAttempt, windowDay, now, 1, dayWindowTTL),
+	)
+	if fail {
+		entries = append(entries,
+			newCounterIncr(kindProvider, provider, metricProvFail, windowMin, now, 1, minWindowTTL),
+			newCounterIncr(kindProvider, provider, metricProvFail, windowDay, now, 1, dayWindowTTL),
+		)
+	}
+	if model != "" {
+		id := providerModelScopeID(provider, model)
+		entries = append(entries,
+			newCounterIncr(kindProviderModel, id, metricProvAttempt, windowMin, now, 1, minWindowTTL),
+			newCounterIncr(kindProviderModel, id, metricProvAttempt, windowDay, now, 1, dayWindowTTL),
+		)
+		if fail {
+			entries = append(entries,
+				newCounterIncr(kindProviderModel, id, metricProvFail, windowMin, now, 1, minWindowTTL),
+				newCounterIncr(kindProviderModel, id, metricProvFail, windowDay, now, 1, dayWindowTTL),
+			)
+		}
+	}
+	l.storeIncrMulti(entries) // no error return by contract (doc comment above, mirroring account()); ok is intentionally discarded
+}
+
+// providerCounterKeysPerScope is the number of windowKey strings
+// providerCounterKeys builds per scope, and the stride providerUsage's
+// flat storeGetMulti result is sliced back into per-scope chunks by —
+// mirrors targetCounterKeysPerScope's own convention for the identical
+// reason.
+const providerCounterKeysPerScope = 4
+
+// providerCounterKeys returns the providerCounterKeysPerScope windowKey
+// strings providerUsage reads for one (kind, id) scope at time now —
+// attempt/fail at minute, then attempt/fail at day, matching
+// providerCounters' own field order exactly so providerUsage can map
+// storeGetMulti's result slice back by plain index.
+func providerCounterKeys(kind, id string, now time.Time) []string {
+	return []string{
+		windowKey(kind, id, metricProvAttempt, windowMin, now),
+		windowKey(kind, id, metricProvFail, windowMin, now),
+		windowKey(kind, id, metricProvAttempt, windowDay, now),
+		windowKey(kind, id, metricProvFail, windowDay, now),
+	}
+}
+
+// providerCounters is one provider's or (provider, model) pair's current-
+// window attempt/failure counters (Feature A, v0.22) — mirrors
+// targetCounters' own shape and read-only, admin-view-only role.
+type providerCounters struct {
+	attemptsMinute int64
+	failuresMinute int64
+	attemptsDay    int64
+	failuresDay    int64
+}
+
+// providerUsage reads every scope's current attempt/failure counters in
+// ONE storeGetMulti round trip — mirrors targetUsage's own single-batch
+// discipline (limits.go) for the identical reason: GET
+// /admin/api/overview must not pay one round trip per configured provider
+// and model. scopes is built by the caller (buildAdminOverview, admin.go)
+// as kindProvider entries for the provider-level rows followed by
+// kindProviderModel entries for the per-model breakdown, all in one
+// slice, so both share this single round trip. Order is preserved:
+// providerUsage(scopes)[i] corresponds to scopes[i]. A failed read
+// (store down + fail-closed) returns every zero-value counters, exactly
+// like targetUsage — see its own doc comment for why that is acceptable
+// here: nothing downstream treats a provider's zero counters as
+// "confirmed no traffic" the way scopeUsage.storeDown guards against for
+// a limited scope.
+func (l *limiter) providerUsage(scopes []limitScope) []providerCounters {
+	out := make([]providerCounters, len(scopes))
+	if len(scopes) == 0 {
+		return out
+	}
+
+	now := l.now()
+	allKeys := make([]string, 0, len(scopes)*providerCounterKeysPerScope)
+	for _, sc := range scopes {
+		allKeys = append(allKeys, providerCounterKeys(sc.kind, sc.id, now)...)
+	}
+
+	vals, ok := l.storeGetMulti(allKeys)
+	if !ok || len(vals) != len(allKeys) {
+		return out // zero-value counters; see doc comment above
+	}
+
+	for i := range scopes {
+		v := vals[i*providerCounterKeysPerScope : i*providerCounterKeysPerScope+providerCounterKeysPerScope]
+		out[i] = providerCounters{attemptsMinute: v[0], failuresMinute: v[1], attemptsDay: v[2], failuresDay: v[3]}
 	}
 	return out
 }

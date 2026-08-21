@@ -215,13 +215,26 @@ func drainAndClose(resp *http.Response) {
 // last attempt's (resp, err) as-is either way: on success, on a
 // still-transient failure once tries are exhausted, on a non-transient
 // failure at any attempt, or on a wait ctx aborted early.
+//
+// Feature A (v0.22) attempt-accounting: every call() invocation — not just
+// the final one — is reported to ctx's attemptRecorder, if it carries one
+// (attemptRecorderFromContext, providers.go), before the transient check
+// above decides whether to retry. A request retried twice before
+// succeeding therefore reports THREE attempts, not one — the caller
+// (limiter.recordProviderAttempt, limits.go) classifies each with the
+// identical isTransient(resp, err) this loop already uses, so "attempt"
+// and "failure" here always agree with what actually got retried.
 func (p *retryPolicy) do(ctx context.Context, call func() (*http.Response, error)) (*http.Response, error) {
 	tries := p.totalTries()
+	rec := attemptRecorderFromContext(ctx)
 
 	var resp *http.Response
 	var err error
 	for attempt := 1; attempt <= tries; attempt++ {
 		resp, err = call()
+		if rec != nil {
+			rec(resp, err)
+		}
 		if !isTransient(resp, err) || attempt == tries {
 			return resp, err
 		}

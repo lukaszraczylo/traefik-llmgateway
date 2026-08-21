@@ -871,3 +871,61 @@ func TestOpenAIAdapter_ChatCompletion_Stream_MidDeathNotRetried(t *testing.T) {
 		t.Errorf("rec.Body = %q, want it to contain the chunk already forwarded before the drop", rec.Body.String())
 	}
 }
+
+// TestRetryPolicy_Do_AttemptRecorder_FiresOncePerAttempt proves
+// attempt-accounting (Feature A, v0.22 — see do's own doc comment and
+// limits.go's recordProviderAttempt): a request retried twice before
+// succeeding reports THREE attempts to ctx's attemptRecorder, not one —
+// each with that specific attempt's own resp, in call order.
+func TestRetryPolicy_Do_AttemptRecorder_FiresOncePerAttempt(t *testing.T) {
+	var calls int32
+	p := &retryPolicy{enabled: true, attempts: 2, backoff: time.Millisecond, waitFn: spyWait(&[]time.Duration{})}
+	call := callSequence(&calls,
+		func() (*http.Response, error) { return fakeResp(http.StatusInternalServerError, nil), nil },
+		func() (*http.Response, error) { return fakeResp(http.StatusServiceUnavailable, nil), nil },
+		func() (*http.Response, error) { return fakeResp(http.StatusOK, nil), nil },
+	)
+
+	var recorded []int
+	ctx := withAttemptRecorder(context.Background(), func(resp *http.Response, err error) {
+		if err != nil {
+			t.Fatalf("recorder got unexpected err: %v", err)
+		}
+		recorded = append(recorded, resp.StatusCode)
+	})
+
+	resp, err := p.do(ctx, call)
+	if err != nil {
+		t.Fatalf("do: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("resp.StatusCode = %d, want 200", resp.StatusCode)
+	}
+
+	want := []int{http.StatusInternalServerError, http.StatusServiceUnavailable, http.StatusOK}
+	if len(recorded) != len(want) {
+		t.Fatalf("recorded = %v, want %v", recorded, want)
+	}
+	for i, w := range want {
+		if recorded[i] != w {
+			t.Errorf("recorded[%d] = %d, want %d", i, recorded[i], w)
+		}
+	}
+}
+
+// TestRetryPolicy_Do_NoAttemptRecorderInContext_NoPanic proves the common
+// case — a ctx that never called withAttemptRecorder, e.g. registry.go's
+// discovery listModels calls or the MCP/A2A target proxy — is a silent
+// no-op, not a nil-func-call panic.
+func TestRetryPolicy_Do_NoAttemptRecorderInContext_NoPanic(t *testing.T) {
+	p := &retryPolicy{enabled: true, attempts: 1, backoff: time.Millisecond, waitFn: spyWait(&[]time.Duration{})}
+	call := func() (*http.Response, error) { return fakeResp(http.StatusOK, nil), nil }
+
+	resp, err := p.do(context.Background(), call) // must not panic
+	if err != nil {
+		t.Fatalf("do: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("resp.StatusCode = %d, want 200", resp.StatusCode)
+	}
+}

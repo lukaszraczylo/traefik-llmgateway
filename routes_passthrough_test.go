@@ -480,6 +480,68 @@ func TestHandlePassthrough_NonStreamJSON_AccountsUsage(t *testing.T) {
 	if !ok || totalTokOut != 3 {
 		t.Errorf("total tokout/day counter = %d (ok=%v), want 3", totalTokOut, ok)
 	}
+
+	// Feature A (v0.22): handlePassthrough wraps r's context with an
+	// attemptRecorder before calling g.proxyUpstream — provider-level
+	// only (model="": the upstream model here lives in the response body,
+	// read only after this attempt already resolved, per
+	// recordProviderAttempt's own doc comment, limits.go).
+	attempts, ok := gw.limiter.getCounter(kindProvider, "openai", metricProvAttempt, windowDay, time.Now())
+	if !ok || attempts != 1 {
+		t.Errorf("provider attempts/day = %d (ok=%v), want 1", attempts, ok)
+	}
+	fails, _ := gw.limiter.getCounter(kindProvider, "openai", metricProvFail, windowDay, time.Now())
+	if fails != 0 {
+		t.Errorf("provider fails/day = %d, want 0", fails)
+	}
+}
+
+// TestHandlePassthrough_DeadUpstream_RecordsProviderFailure proves a
+// connection-level failure (proxyUpstream's client.Do returning a network
+// error) still reports one provider-level attempt AND one failure —
+// Feature A (v0.22): passthrough makes no retry.go attempt at all, so
+// this exercises proxyUpstream's own attemptRecorderFromContext call
+// directly, not retryPolicy.do's.
+func TestHandlePassthrough_DeadUpstream_RecordsProviderFailure(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	deadURL := srv.URL
+	srv.Close() // closed before any request: every dial fails
+
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{
+		"openai": {Type: "openai", BaseURL: deadURL, APIKey: "sk-up"},
+	}
+	cfg.Groups = map[string]*GroupConfig{"default": {}}
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{
+		{Name: "alice", Group: "default", APIKey: "sk-alice", Limits: &LimitsConfig{}},
+	}}
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	gw, ok := h.(*Gateway)
+	if !ok {
+		t.Fatal("handler is not *Gateway")
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/openai/v1/native-endpoint", strings.NewReader(`{}`))
+	req.Header.Set("Authorization", "Bearer sk-alice")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502, body=%s", rec.Code, rec.Body.String())
+	}
+
+	attempts, ok := gw.limiter.getCounter(kindProvider, "openai", metricProvAttempt, windowDay, time.Now())
+	if !ok || attempts != 1 {
+		t.Errorf("provider attempts/day = %d (ok=%v), want 1", attempts, ok)
+	}
+	fails, ok := gw.limiter.getCounter(kindProvider, "openai", metricProvFail, windowDay, time.Now())
+	if !ok || fails != 1 {
+		t.Errorf("provider fails/day = %d (ok=%v), want 1", fails, ok)
+	}
 }
 
 // TestHandlePassthrough_GroupDeniesProvider_Returns403 covers a provider
