@@ -3,7 +3,7 @@
 # two of them concurrently would corrupt each other's containers.
 .NOTPARALLEL:
 
-.PHONY: test lint yaegi-check integration integration-keep integration-up integration-wait integration-down
+.PHONY: test lint yaegi-check admin-ui integration integration-keep integration-up integration-wait integration-down
 
 test:
 	go test ./... -count=1
@@ -16,6 +16,18 @@ lint:
 		exit 1; \
 	fi
 	go vet ./...
+
+# admin-ui rebuilds the Vue admin panel (webui/) and regenerates
+# admin_assets_gen.go — the repo-root Go file admin.go's serveAdminPage/
+# serveAdminAsset actually serve. Only ever needed after a webui/ source
+# change; CI never runs this (admin_assets_gen.go is committed, and
+# .gitattributes export-ignores webui/ from release source tarballs — see
+# its own comment), so CI never needs node. `npm ci` requires
+# webui/package-lock.json, which is committed for exactly this.
+admin-ui:
+	cd webui && npm ci && npm run build
+	node webui/generate.mjs
+	gofmt -w admin_assets_gen.go
 
 yaegi-check:
 	cd tools/yaegi-check && GOWORK=off go run . $(CURDIR)

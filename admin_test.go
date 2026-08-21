@@ -1,6 +1,7 @@
 package traefikllmgateway
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -530,8 +531,18 @@ func TestAdmin_RateLimitApplies(t *testing.T) {
 	}
 }
 
-// --- HTML page: CSP header + fetch URLs, no external assets ---
+// --- HTML shell: CSP header, references the built Vue app, no external assets ---
 
+// TestAdminPage_CSPHeaderAndFetchURLs proves GET /admin serves the built
+// Vue app's generated index.html (admin_assets_gen.go) with the tightened
+// CSP (script-src/style-src 'self', no 'unsafe-inline' — the vanilla-JS
+// page's inline script/style are gone, replaced by an external
+// /admin/assets/*.js and *.css the browser loads itself) and that the
+// shell references those assets rather than embedding any logic inline.
+// This replaces the pre-Vue version of this test, which asserted the
+// opposite (inline script content like "setInterval"/"sessionStorage")
+// and the old CSP string — see also TestAdminAssets_GeneratedFilePresent
+// below for the generated-file sanity checks this test doesn't cover.
 func TestAdminPage_CSPHeaderAndFetchURLs(t *testing.T) {
 	t.Parallel()
 	cfg := newAdminTestConfig()
@@ -547,20 +558,135 @@ func TestAdminPage_CSPHeaderAndFetchURLs(t *testing.T) {
 	if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "text/html") {
 		t.Errorf("content-type = %q, want text/html", ct)
 	}
-	wantCSP := "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
+	wantCSP := "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
 	if got := rec.Header().Get("Content-Security-Policy"); got != wantCSP {
 		t.Errorf("CSP = %q, want %q", got, wantCSP)
 	}
 
 	body := rec.Body.String()
-	for _, want := range []string{adminOverviewPath, adminUsagePath, "setInterval", "sessionStorage", "x-api-key"} {
-		if !strings.Contains(body, want) {
-			t.Errorf("admin page body missing %q", want)
+	if !strings.Contains(body, "LLM Gateway") {
+		t.Error("admin page body does not look like the dashboard shell (missing \"LLM Gateway\")")
+	}
+	if !strings.Contains(body, adminAssetsPathPrefix) {
+		t.Errorf("admin page body does not reference any %q asset", adminAssetsPathPrefix)
+	}
+	// script-src/style-src 'self' means every actual asset reference must be
+	// a same-origin path, never an absolute http(s):// URL to another host.
+	// The inlined favicon is the one place "http" legitimately appears at
+	// all: a data: URI SVG whose xmlns attribute names the (never
+	// dereferenced) XML namespace URL http://www.w3.org/2000/svg — not a
+	// resource the browser fetches — so this checks specifically for a
+	// src=/href= attribute pointing off-host, not a blanket substring ban.
+	for _, attr := range []string{`src="http`, `src='http`, `href="http`, `href='http`} {
+		if strings.Contains(body, attr) {
+			t.Errorf("admin page loads an external asset via %s...", attr)
 		}
 	}
-	if strings.Contains(body, "http://") || strings.Contains(body, "https://") {
-		t.Error("admin page must load zero external assets (no http(s):// reference of any kind)")
+}
+
+// --- static assets: content type, immutable cache header, 404 on an unknown name ---
+
+// TestAdminAsset_Serving drives GET /admin/assets/{hashedname} against
+// one real entry from admin_assets_gen.go's adminAssets map — proving the
+// route serves the exact declared Content-Type, a long-lived `immutable`
+// Cache-Control, and the exact bytes generate.mjs baked in, byte for
+// byte.
+func TestAdminAsset_Serving(t *testing.T) {
+	t.Parallel()
+	if len(adminAssets) == 0 {
+		t.Fatal("adminAssets is empty — run `make admin-ui` before running this test")
 	}
+	var name string
+	var asset adminAsset
+	for name, asset = range adminAssets {
+		break
+	}
+
+	cfg := newAdminTestConfig()
+	h, _ := newAdminGatewayHandle(t, cfg)
+
+	// Unauthenticated, like GET /admin itself (handleAdmin's doc comment):
+	// the browser must be able to load the page's own script/style before
+	// it can ever attach an x-api-key header.
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, adminRequest(http.MethodGet, adminAssetsPathPrefix+name, ""))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Content-Type"); got != asset.contentType {
+		t.Errorf("Content-Type = %q, want %q", got, asset.contentType)
+	}
+	if got := rec.Header().Get("X-Content-Type-Options"); got != "nosniff" {
+		t.Errorf("X-Content-Type-Options = %q, want %q", got, "nosniff")
+	}
+	cc := rec.Header().Get("Cache-Control")
+	if !strings.Contains(cc, "immutable") || !strings.Contains(cc, "max-age=31536000") {
+		t.Errorf("Cache-Control = %q, want a long-lived immutable directive", cc)
+	}
+	if got := rec.Body.Bytes(); !bytes.Equal(got, asset.body) {
+		t.Errorf("body length = %d, want %d (byte-for-byte match against adminAssets[%q])", len(got), len(asset.body), name)
+	}
+}
+
+// TestAdminAsset_UnknownReturns404 proves an unrecognized asset name — a
+// stale bookmark, a probe — is a 404 in the same OAI-shaped error
+// envelope every other unknown route on this gateway returns, not a bare
+// empty body.
+func TestAdminAsset_UnknownReturns404(t *testing.T) {
+	t.Parallel()
+	cfg := newAdminTestConfig()
+	h, _ := newAdminGatewayHandle(t, cfg)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, adminRequest(http.MethodGet, adminAssetsPathPrefix+"does-not-exist.js", ""))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404, body=%s", rec.Code, rec.Body.String())
+	}
+	assertOAIErrorEnvelope(t, rec)
+}
+
+// --- generated-file sanity: present, non-empty, no leftover template markers ---
+
+// TestAdminAssets_GeneratedFilePresent proves admin_assets_gen.go
+// (webui/generate.mjs's output, committed to the repo) actually decoded
+// into real content: a non-empty index.html shell and at least one
+// non-empty static asset, with no stray Go-template placeholder
+// ("{{", "}}") or generator-marker text ("Code generated") leaking into
+// the decoded bytes — the strongest signal the base64 round-trip
+// (generate.mjs's encode, decodeAdminAsset's decode) actually worked,
+// rather than the map merely being non-empty by accident.
+func TestAdminAssets_GeneratedFilePresent(t *testing.T) {
+	t.Parallel()
+	if len(adminIndexHTML) == 0 {
+		t.Fatal("adminIndexHTML is empty — run `make admin-ui`")
+	}
+	if !strings.Contains(string(adminIndexHTML), "<!doctype html") {
+		t.Errorf("adminIndexHTML does not look like an HTML document: %q", truncateForTest(adminIndexHTML, 120))
+	}
+	for _, marker := range []string{"{{", "}}", "Code generated"} {
+		if strings.Contains(string(adminIndexHTML), marker) {
+			t.Errorf("adminIndexHTML contains leftover template marker %q", marker)
+		}
+	}
+
+	if len(adminAssets) == 0 {
+		t.Fatal("adminAssets is empty — run `make admin-ui`")
+	}
+	for name, asset := range adminAssets {
+		if len(asset.body) == 0 {
+			t.Errorf("adminAssets[%q].body is empty", name)
+		}
+		if asset.contentType == "" {
+			t.Errorf("adminAssets[%q].contentType is empty", name)
+		}
+	}
+}
+
+func truncateForTest(b []byte, n int) string {
+	if len(b) <= n {
+		return string(b)
+	}
+	return string(b[:n]) + "..."
 }
 
 // --- JSON routes: nosniff/no-store/CSP headers (review sweep, 2026-08-20) ---
@@ -575,7 +701,7 @@ func TestAdmin_JSONSecurityHeaders(t *testing.T) {
 	cfg := newAdminTestConfig()
 	h, _ := newAdminGatewayHandle(t, cfg)
 
-	wantCSP := "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
+	wantCSP := "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
 	for _, p := range []string{adminOverviewPath, adminUsagePath} {
 		t.Run(p, func(t *testing.T) {
 			rec := httptest.NewRecorder()

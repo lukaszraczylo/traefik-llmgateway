@@ -3,7 +3,6 @@ package traefikllmgateway
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -11,31 +10,44 @@ import (
 	"time"
 )
 
-// The four routes the read-only admin dashboard registers (spec §4, v0.2;
-// adminUsageHistoryPath added by the v0.2 data-layer task), matched only
-// when adminEnabled(g.cfg) — see llmgateway.go's ServeHTTP dispatch.
+// The admin dashboard's routes (spec §4, v0.2; adminUsageHistoryPath added
+// by the v0.2 data-layer task; adminAssetsPathPrefix added by the Vue
+// admin-panel task), matched only when adminEnabled(g.cfg) — see
+// llmgateway.go's ServeHTTP dispatch. adminAssetsPathPrefix is a prefix,
+// not one fixed path: every hashed filename the Vite build emits
+// (admin_assets_gen.go) is served under it.
 const (
 	adminPagePath         = "/admin"
+	adminAssetsPathPrefix = "/admin/assets/"
 	adminOverviewPath     = "/admin/api/overview"
 	adminUsagePath        = "/admin/api/usage"
 	adminUsageHistoryPath = "/admin/api/usage/history"
 )
 
-// adminCSP is the Content-Security-Policy header served with all three
-// admin routes (spec §4, v0.2; extended to the two JSON routes by a
-// folded review item, 2026-08-20 review): no external assets of any
-// kind, only this page's own inline script/style, and fetch calls
-// restricted to same-origin — the dashboard works air-gapped and cannot
-// be coerced into loading anything off-host. frame-ancestors/base-uri/
-// form-action are all 'none' (v0.2 final review wave, 2026-08-20): the
-// page carries a password-type key-entry input, so it must never be
-// embeddable in another site's frame (clickjacking), never have its
-// <base> href hijacked to retarget a relative script/fetch URL, and never
-// have its auth-form submitted anywhere but nowhere at all — the form's
-// own submit handler already intercepts and cancels the real submit
-// (adminPageHTML's "submit" listener calls preventDefault()), so
-// form-action has nothing legitimate to allow.
-const adminCSP = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
+// adminCSP is the Content-Security-Policy header served with GET /admin
+// and the three /admin/api/* JSON routes (spec §4, v0.2; extended to the
+// JSON routes by a folded review item, 2026-08-20 review). It was
+// widened with `script-src 'unsafe-inline'`/`style-src 'unsafe-inline'`
+// for the original vanilla-JS single-file page; the baked Vue build (Vue
+// admin-panel task) needs neither: `vite build` emits index.html with
+// only an external `<script type="module" src="/admin/assets/...">` and
+// an external `<link rel="stylesheet">` — no inline script or style tag
+// of any kind (vite.config.ts's `build.modulePreload.polyfill: false`
+// specifically removes the one inline bootstrap Vite would otherwise add
+// for legacy-browser module-preload support). `script-src`/`style-src`
+// therefore tighten to 'self', matching every hashed asset's own origin.
+// `img-src` adds `data:` for index.html's inlined favicon (a `data:` URI,
+// not a separate asset route — see webui/index.html's own comment) —
+// the only image this page ever loads. connect-src stays 'self': the
+// panel's own fetch calls to /admin/api/* are the only network activity
+// it ever performs. frame-ancestors/base-uri/form-action stay 'none'
+// (v0.2 final review wave, 2026-08-20): the page carries a password-type
+// key-entry input, so it must never be embeddable in another site's frame
+// (clickjacking), never have its <base> href hijacked to retarget a
+// relative script/fetch URL, and its auth form's own submit handler
+// already intercepts and cancels the real submit, so form-action has
+// nothing legitimate to allow.
+const adminCSP = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
 
 // adminEnabled reports whether cfg's Admin block is present and enabled —
 // the single gate ServeHTTP checks before matching any /admin* route at
@@ -46,14 +58,19 @@ func adminEnabled(cfg *Config) bool {
 	return cfg.Admin != nil && cfg.Admin.Enabled
 }
 
-// isAdminPath reports whether path is one of the four admin routes.
+// isAdminPath reports whether path is one of the admin dashboard's
+// routes: the page, any hashed asset under adminAssetsPathPrefix, or one
+// of the three /admin/api/* JSON routes.
 func isAdminPath(path string) bool {
-	return path == adminPagePath || path == adminOverviewPath || path == adminUsagePath || path == adminUsageHistoryPath
+	if path == adminPagePath || path == adminOverviewPath || path == adminUsagePath || path == adminUsageHistoryPath {
+		return true
+	}
+	return strings.HasPrefix(path, adminAssetsPathPrefix)
 }
 
-// handleAdmin is ServeHTTP's single entry point for all three /admin*
-// routes (spec §4, v0.2), called only when adminEnabled — ServeHTTP's
-// dispatch already checked that.
+// handleAdmin is ServeHTTP's single entry point for every /admin* route
+// (spec §4, v0.2), called only when adminEnabled — ServeHTTP's dispatch
+// already checked that.
 //
 // GET /admin itself serves the HTML shell with no authentication at all
 // (controller-approved amendment to spec §4, 2026-08-20 review): a
@@ -62,15 +79,23 @@ func isAdminPath(path string) bool {
 // unauthenticated" gate made the dashboard unreachable from a browser in
 // the first place. The shell carries zero data — every value is fetched
 // client-side from /admin/api/*, which stay fully gated below — so there
-// is nothing to protect by gating the page itself. adminEnabled(g.cfg)
-// still governs whether GET /admin is reachable at all (disabled falls
-// through to 404, unchanged).
+// is nothing to protect by gating the page itself. Every hashed asset
+// under adminAssetsPathPrefix is unauthenticated for the same reason: the
+// browser must load the page's own script/style before it can ever send
+// an x-api-key header, and the built JS/CSS is not sensitive (it is
+// exactly what `vite build` emits from webui/, publicly inspectable by
+// any admin dashboard user already). adminEnabled(g.cfg) still governs
+// whether any /admin* path is reachable at all (disabled falls through to
+// 404, unchanged).
 func (g *Gateway) handleAdmin(sw *statusTrackingWriter, r *http.Request) {
-	if r.URL.Path == adminPagePath {
+	switch {
+	case r.URL.Path == adminPagePath:
 		g.serveAdminPage(sw)
-		return
+	case strings.HasPrefix(r.URL.Path, adminAssetsPathPrefix):
+		g.serveAdminAsset(sw, strings.TrimPrefix(r.URL.Path, adminAssetsPathPrefix))
+	default:
+		g.handleAdminAPI(sw, r)
 	}
-	g.handleAdminAPI(sw, r)
 }
 
 // handleAdminAPI is the gate for the three /admin/api/* JSON routes,
@@ -118,13 +143,40 @@ func (g *Gateway) handleAdminAPI(sw *statusTrackingWriter, r *http.Request) {
 	}
 }
 
-// serveAdminPage writes the single-page dashboard (adminPageHTML, below)
+// serveAdminPage writes the built Vue app's index.html
+// (admin_assets_gen.go's adminIndexHTML, generated by webui/generate.mjs)
 // with its Content-Security-Policy header. Unauthenticated by design —
 // see handleAdmin's doc comment.
 func (g *Gateway) serveAdminPage(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Content-Security-Policy", adminCSP)
-	_, _ = io.WriteString(w, adminPageHTML)
+	_, _ = w.Write(adminIndexHTML)
+}
+
+// serveAdminAsset writes one hashed static asset from adminAssets
+// (admin_assets_gen.go, generated by webui/generate.mjs) — name is the
+// path with adminAssetsPathPrefix already stripped (handleAdmin). An
+// unrecognized name (a stale bookmark, a probe) is a 404 in the same
+// OpenAI-shaped error envelope every other unknown route on this gateway
+// returns, not a bare empty body.
+//
+// Cache-Control is long-lived and `immutable`: every filename is content-
+// hashed by the Vite build, so a given name's bytes never change — a
+// config change or plugin upgrade that alters the built output always
+// produces new filenames, never mutates one this browser may have cached.
+// X-Content-Type-Options: nosniff matches the JSON routes' own header
+// (setAdminJSONHeaders) — the declared Content-Type must never be
+// second-guessed by the browser's MIME sniffer.
+func (g *Gateway) serveAdminAsset(w http.ResponseWriter, name string) {
+	asset, ok := adminAssets[name]
+	if !ok {
+		writeOAIError(w, http.StatusNotFound, "invalid_request_error", "unknown admin asset")
+		return
+	}
+	w.Header().Set("Content-Type", asset.contentType)
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	_, _ = w.Write(asset.body)
 }
 
 // setAdminJSONHeaders applies the response headers shared by both admin
@@ -630,362 +682,3 @@ func (g *Gateway) serveAdminUsageHistory(sw *statusTrackingWriter, r *http.Reque
 	setAdminJSONHeaders(sw)
 	_ = json.NewEncoder(sw).Encode(usageHistoryResponse{Scope: rawScope, Metric: metric, Window: window, Points: view})
 }
-
-// adminPageHTML is the entire /admin single-page dashboard: markup, CSS,
-// and vanilla JS in one Go raw-string const. Yaegi interpretation forbids
-// the embed directive (no filesystem access from an interpreted plugin),
-// so the page ships as source, exactly like every other Yaegi-compatible
-// plugin's static assets. It polls adminOverviewPath and adminUsagePath
-// every 5s via fetch, loads no external asset of any kind (matching
-// adminCSP's default-src 'none'), and never uses innerHTML with
-// server-provided strings — every dynamic value is written via
-// textContent, so nothing the API returns is ever interpreted as markup.
-//
-// Browser key entry (controller-approved amendment, 2026-08-20 review):
-// the page itself carries no auth (see handleAdmin), so its script reads
-// an admin API key from this tab's sessionStorage and sends it as
-// "x-api-key" on every /admin/api/* fetch. Absent a stored key, or on any
-// 401/403 response, it shows an inline key-entry form instead of the
-// dashboard; a submitted key is kept only in sessionStorage — never in a
-// cookie, localStorage, or any persistent store — so it disappears when
-// the tab closes and is never sent anywhere but this page's own fetches.
-const adminPageHTML = `<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>LLM Gateway - Admin</title>
-<style>
-  :root {
-    color-scheme: light dark;
-    --bg: #ffffff;
-    --fg: #1a1a1a;
-    --muted: #666666;
-    --border: #d0d0d0;
-    --head-bg: #f2f2f2;
-    --err: #b91c1c;
-  }
-  @media (prefers-color-scheme: dark) {
-    :root {
-      --bg: #111214;
-      --fg: #e6e6e6;
-      --muted: #9a9a9a;
-      --border: #33363a;
-      --head-bg: #1c1e21;
-      --err: #f87171;
-    }
-  }
-  * { box-sizing: border-box; }
-  body {
-    margin: 0;
-    padding: 1.5rem;
-    background: var(--bg);
-    color: var(--fg);
-    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  }
-  h1 { font-size: 1.25rem; margin: 0 0 .25rem; }
-  h2 { font-size: 1rem; margin: 1.5rem 0 .5rem; }
-  #status-line { color: var(--muted); margin-bottom: 1rem; font-size: .85rem; }
-  table { border-collapse: collapse; width: 100%; margin-bottom: .5rem; }
-  th, td {
-    border: 1px solid var(--border);
-    padding: .4rem .6rem;
-    text-align: left;
-    font-size: .85rem;
-    vertical-align: top;
-  }
-  th { background: var(--head-bg); font-weight: 600; }
-  .muted { color: var(--muted); }
-  .err { color: var(--err); }
-  .hidden { display: none; }
-  .infra-line { margin: .25rem 0; font-size: .85rem; }
-  section { margin-bottom: 1.5rem; }
-  input, button {
-    font: inherit;
-    padding: .4rem .6rem;
-    border: 1px solid var(--border);
-    border-radius: .25rem;
-    background: var(--bg);
-    color: var(--fg);
-  }
-  button { cursor: pointer; }
-</style>
-</head>
-<body>
-<h1>LLM Gateway - Admin</h1>
-<div id="status-line">loading...</div>
-
-<section id="auth-gate">
-  <h2>Admin key required</h2>
-  <p class="muted">Enter an admin API key. The browser keeps it only in this tab's sessionStorage: it is never written to disk and is sent only to this page's own /admin/api/* requests.</p>
-  <form id="auth-form">
-    <input type="password" id="auth-key-input" autocomplete="off" placeholder="API key">
-    <button type="submit">Continue</button>
-  </form>
-  <div id="auth-error" class="err"></div>
-</section>
-
-<div id="dashboard" class="hidden">
-
-<section>
-  <h2>Providers</h2>
-  <table id="providers"><thead><tr>
-    <th>Name</th><th>Type</th><th>Base URL</th><th>Models</th><th>Last refresh</th><th>Last error</th>
-  </tr></thead><tbody></tbody></table>
-</section>
-
-<section>
-  <h2>Model aliases</h2>
-  <table id="aliases"><thead><tr>
-    <th>Alias</th><th>Target</th>
-  </tr></thead><tbody></tbody></table>
-</section>
-
-<section>
-  <h2>Infrastructure</h2>
-  <div id="infra"></div>
-</section>
-
-<section>
-  <h2>Groups</h2>
-  <table id="groups"><thead><tr>
-    <th>Name</th><th>Members</th><th>Limits</th><th>req/min</th><th>req/day</th><th>tokIn/day</th><th>tokOut/day</th><th>tokIn/month</th><th>tokOut/month</th><th>cost/day</th><th>cost/month</th>
-  </tr></thead><tbody></tbody></table>
-</section>
-
-<section>
-  <h2>Users</h2>
-  <table id="users"><thead><tr>
-    <th>Name</th><th>Group</th><th>Limits</th><th>req/min</th><th>req/day</th><th>tokIn/day</th><th>tokOut/day</th><th>tokIn/month</th><th>tokOut/month</th><th>cost/day</th><th>cost/month</th>
-  </tr></thead><tbody></tbody></table>
-</section>
-
-</div>
-
-<script>
-(function () {
-  "use strict";
-
-  var POLL_MS = 5000;
-  var OVERVIEW_URL = "/admin/api/overview";
-  var USAGE_URL = "/admin/api/usage";
-  var ZERO_TIME = "0001-01-01T00:00:00Z";
-  var KEY_STORAGE = "llmgwAdminKey";
-  var groupMeta = {};
-
-  function getStoredKey() {
-    try { return sessionStorage.getItem(KEY_STORAGE) || ""; } catch (e) { return ""; }
-  }
-  function setStoredKey(k) {
-    try { sessionStorage.setItem(KEY_STORAGE, k); } catch (e) { /* storage unavailable */ }
-  }
-  function clearStoredKey() {
-    try { sessionStorage.removeItem(KEY_STORAGE); } catch (e) { /* storage unavailable */ }
-  }
-
-  function el(tag, text, cls) {
-    var e = document.createElement(tag);
-    if (text !== undefined && text !== null) e.textContent = text;
-    if (cls) e.className = cls;
-    return e;
-  }
-
-  function fmtCost(micros) {
-    return "$" + (micros / 1000000).toFixed(4);
-  }
-
-  function fmtAgo(iso) {
-    if (!iso || iso === ZERO_TIME) return "";
-    var then = new Date(iso).getTime();
-    if (isNaN(then)) return "";
-    var secs = Math.max(0, Math.round((Date.now() - then) / 1000));
-    return " (" + secs + "s ago)";
-  }
-
-  function fmtLimits(l) {
-    if (!l) return "none";
-    var parts = [];
-    if (l.requestsPerMinute) parts.push("req/min " + l.requestsPerMinute);
-    if (l.requestsPerDay) parts.push("req/day " + l.requestsPerDay);
-    if (l.tokensPerDay) parts.push("tok/day " + l.tokensPerDay);
-    if (l.tokensPerMonth) parts.push("tok/month " + l.tokensPerMonth);
-    if (l.costPerDayUSD) parts.push("cost/day $" + l.costPerDayUSD);
-    if (l.costPerMonthUSD) parts.push("cost/month $" + l.costPerMonthUSD);
-    return parts.length ? parts.join(", ") : "none";
-  }
-
-  function setRows(tableId, rows, buildRow) {
-    var tbody = document.querySelector("#" + tableId + " tbody");
-    while (tbody.firstChild) tbody.removeChild(tbody.firstChild);
-    if (!rows || rows.length === 0) {
-      var tr = document.createElement("tr");
-      tr.appendChild(el("td", "none", "muted"));
-      tbody.appendChild(tr);
-      return;
-    }
-    for (var i = 0; i < rows.length; i++) {
-      tbody.appendChild(buildRow(rows[i]));
-    }
-  }
-
-  function renderOverview(data) {
-    setRows("providers", data.providers, function (p) {
-      var tr = document.createElement("tr");
-      tr.appendChild(el("td", p.name));
-      tr.appendChild(el("td", p.type));
-      tr.appendChild(el("td", p.baseUrl));
-      tr.appendChild(el("td", String(p.modelCount)));
-      tr.appendChild(el("td", p.lastRefresh && p.lastRefresh !== ZERO_TIME ? p.lastRefresh : "never"));
-      tr.appendChild(el("td", p.lastErr || "", p.lastErr ? "err" : "muted"));
-      return tr;
-    });
-
-    setRows("aliases", data.aliases, function (a) {
-      var tr = document.createElement("tr");
-      tr.appendChild(el("td", a.alias));
-      tr.appendChild(el("td", a.target));
-      return tr;
-    });
-
-    var infra = document.getElementById("infra");
-    while (infra.firstChild) infra.removeChild(infra.firstChild);
-    var redisText = "Redis: " + (data.redis.configured ? "configured" : "not configured");
-    if (data.redis.lastErr) redisText += " - last error" + fmtAgo(data.redis.lastErrAt) + ": " + data.redis.lastErr;
-    infra.appendChild(el("div", redisText, "infra-line"));
-    var cacheText = "Cache: " + (data.cache.enabled ? "enabled (ttl " + data.cache.ttl + ")" : "disabled");
-    infra.appendChild(el("div", cacheText, "infra-line"));
-    var retryText = "Retry: " + (data.retry.enabled ? "enabled (attempts " + data.retry.attempts + ", backoff " + data.retry.backoff + ")" : "disabled");
-    infra.appendChild(el("div", retryText, "infra-line"));
-    infra.appendChild(el("div", "Version: " + data.version, "infra-line muted"));
-
-    groupMeta = {};
-    (data.groups || []).forEach(function (g) {
-      groupMeta[g.name] = g;
-    });
-  }
-
-  function renderUsageTable(tableId, entries, withGroupColumn) {
-    setRows(tableId, entries, function (entry) {
-      var tr = document.createElement("tr");
-      if (withGroupColumn) {
-        tr.appendChild(el("td", entry.id));
-        tr.appendChild(el("td", entry.groupName || ""));
-      } else {
-        var meta = groupMeta[entry.id] || {};
-        tr.appendChild(el("td", entry.id));
-        tr.appendChild(el("td", meta.memberCount !== undefined ? String(meta.memberCount) : ""));
-      }
-      tr.appendChild(el("td", fmtLimits(entry.limits)));
-      tr.appendChild(el("td", entry.storeDown ? "?" : String(entry.requestsPerMinute)));
-      tr.appendChild(el("td", entry.storeDown ? "?" : String(entry.requestsPerDay)));
-      tr.appendChild(el("td", entry.storeDown ? "?" : String(entry.tokensInPerDay)));
-      tr.appendChild(el("td", entry.storeDown ? "?" : String(entry.tokensOutPerDay)));
-      tr.appendChild(el("td", entry.storeDown ? "?" : String(entry.tokensInPerMonth)));
-      tr.appendChild(el("td", entry.storeDown ? "?" : String(entry.tokensOutPerMonth)));
-      tr.appendChild(el("td", entry.storeDown ? "?" : fmtCost(entry.costPerDayMicroUsd)));
-      tr.appendChild(el("td", entry.storeDown ? "?" : fmtCost(entry.costPerMonthMicroUsd)));
-      if (entry.storeDown) tr.className = "err";
-      return tr;
-    });
-  }
-
-  function renderUsage(data) {
-    renderUsageTable("groups", data.groups || [], false);
-    renderUsageTable("users", data.users || [], true);
-  }
-
-  function setStatus(text, isErr) {
-    var s = document.getElementById("status-line");
-    s.textContent = text;
-    s.className = isErr ? "err" : "";
-  }
-
-  // showAuthGate switches to the key-entry view. message is OPTIONAL
-  // (review sweep, 2026-08-20): passed with a string, it replaces the
-  // auth-error text; passed as undefined (refresh's own no-stored-key
-  // branch), it leaves whatever error text is already there untouched —
-  // otherwise a 5s poll running while no key is stored (the state right
-  // after a 401 already showed "invalid key, or not an admin") would call
-  // showAuthGate() on every tick and silently wipe that message back to
-  // empty before the user ever reads it.
-  function showAuthGate(message) {
-    document.getElementById("dashboard").classList.add("hidden");
-    document.getElementById("auth-gate").classList.remove("hidden");
-    if (message !== undefined) {
-      document.getElementById("auth-error").textContent = message;
-    }
-  }
-
-  function showDashboard() {
-    document.getElementById("auth-gate").classList.add("hidden");
-    document.getElementById("dashboard").classList.remove("hidden");
-    document.getElementById("auth-error").textContent = "";
-  }
-
-  // fetchJSON captures the key it was actually sent with (key) onto a
-  // thrown auth error, rather than reading getStoredKey() again at the
-  // catch site: refresh's own Promise.all can still have this request's
-  // 401 in flight after the user has already submitted a newer key
-  // (setStoredKey then a fresh refresh() call) — capturing at throw time
-  // lets the catch handler tell that late, stale-key failure apart from a
-  // genuine rejection of the key currently stored.
-  function fetchJSON(url) {
-    var key = getStoredKey();
-    var headers = key ? { "x-api-key": key } : {};
-    return fetch(url, { credentials: "same-origin", headers: headers }).then(function (resp) {
-      if (resp.status === 401 || resp.status === 403) {
-        var err = new Error("admin key rejected: HTTP " + resp.status);
-        err.authFailed = true;
-        err.key = key;
-        throw err;
-      }
-      if (!resp.ok) throw new Error(url + ": HTTP " + resp.status);
-      return resp.json();
-    });
-  }
-
-  function refresh() {
-    if (!getStoredKey()) {
-      showAuthGate();
-      return;
-    }
-    Promise.all([fetchJSON(OVERVIEW_URL), fetchJSON(USAGE_URL)]).then(function (results) {
-      showDashboard();
-      renderOverview(results[0]);
-      renderUsage(results[1]);
-      setStatus("last updated " + new Date().toLocaleTimeString(), false);
-    }).catch(function (err) {
-      if (err.authFailed) {
-        // Guard against the late-401 race (review sweep, 2026-08-20): only
-        // clear the stored key and show the rejection when the FAILING
-        // request's own key still matches what is currently stored. A
-        // stale in-flight request for a key the user has since replaced
-        // must not clobber the newer key that may well be valid.
-        if (err.key === getStoredKey()) {
-          clearStoredKey();
-          showAuthGate("invalid key, or not an admin");
-        }
-        return;
-      }
-      setStatus("refresh failed: " + err.message, true);
-    });
-  }
-
-  document.getElementById("auth-form").addEventListener("submit", function (ev) {
-    ev.preventDefault();
-    var input = document.getElementById("auth-key-input");
-    var val = input.value;
-    input.value = "";
-    if (!val) return;
-    document.getElementById("auth-error").textContent = "";
-    setStoredKey(val);
-    refresh();
-  });
-
-  refresh();
-  setInterval(refresh, POLL_MS);
-})();
-</script>
-</body>
-</html>
-`
