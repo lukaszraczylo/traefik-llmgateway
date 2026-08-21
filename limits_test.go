@@ -1379,13 +1379,33 @@ func TestMemoryStore_IncrMulti_DayCounterStillClampsAt48h(t *testing.T) {
 
 // --- Feature A (v0.22): per-provider/per-(provider,model) success-rate accounting ---
 
+// newSyncLimiter builds a limiter exactly like newLimiter, but with spawn
+// overridden to run synchronously instead of in its own goroutine — every
+// recordProviderAttempt test in this file needs its store write to have
+// already landed by the time it reads the counter back. Production
+// spawns a real goroutine there (SHOULD-5 ruling, v0.22 review round: off
+// a streaming response's TTFB path); this is the deterministic-test half
+// of that same dependency-injection field, matching nowFn/waitFn's
+// existing pattern elsewhere in this package.
+func newSyncLimiter(store counterStore, failOpen bool) *limiter {
+	l := newLimiter(store, failOpen)
+	l.spawn = func(f func()) { f() }
+	return l
+}
+
 // TestRecordProviderAttempt_ClassifiesUsingIsTransient proves
 // recordProviderAttempt's failure classification is exactly isTransient's
 // own — reused, not forked (spec ruling) — across the full outcome table:
 // success, a non-429 4xx (still a "success" for provider-health purposes:
 // the provider answered correctly to a request it did not like), 429, a
 // 5xx, a plain network error, and a context-canceled error (not a
-// provider fault, per isTransient's own carve-out).
+// provider fault, per isTransient's own carve-out) — PLUS the SHOULD-1
+// addition (v0.22 review round): a context.DeadlineExceeded error (a
+// hung upstream the gateway's own deadline finally cut off) counts as a
+// failure even though isTransient itself excludes it, both bare and
+// wrapped (proving isDeadlineExceeded's manual Unwrap walk actually
+// walks) — while context.Canceled, wrapped the identical way, still does
+// not.
 func TestRecordProviderAttempt_ClassifiesUsingIsTransient(t *testing.T) {
 	tests := []struct {
 		err      error
@@ -1400,11 +1420,14 @@ func TestRecordProviderAttempt_ClassifiesUsingIsTransient(t *testing.T) {
 		{name: "503 service unavailable", resp: &http.Response{StatusCode: http.StatusServiceUnavailable}, wantFail: true},
 		{name: "network error", err: errors.New("dial tcp: connection refused"), wantFail: true},
 		{name: "context canceled (not a provider fault)", err: context.Canceled, wantFail: false},
+		{name: "context deadline exceeded (hung upstream timed out — SHOULD-1)", err: context.DeadlineExceeded, wantFail: true},
+		{name: "wrapped context deadline exceeded (proves the manual Unwrap walk)", err: fmt.Errorf("%w: dial timeout", context.DeadlineExceeded), wantFail: true},
+		{name: "wrapped context canceled stays non-failure too", err: fmt.Errorf("%w: client hung up", context.Canceled), wantFail: false},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			l := newLimiter(nil, true)
+			l := newSyncLimiter(nil, true)
 			now := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
 			l.nowFn = func() time.Time { return now }
 
@@ -1447,7 +1470,7 @@ func TestRecordProviderAttempt_ClassifiesUsingIsTransient(t *testing.T) {
 // model lives in the response body, read only afterward) gets
 // provider-level accounting only when it passes model="".
 func TestRecordProviderAttempt_EmptyModel_ProviderScopeOnly(t *testing.T) {
-	l := newLimiter(nil, true)
+	l := newSyncLimiter(nil, true)
 	now := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
 	l.nowFn = func() time.Time { return now }
 
@@ -1467,8 +1490,38 @@ func TestRecordProviderAttempt_EmptyModel_ProviderScopeOnly(t *testing.T) {
 // resolved provider name (should never happen in production traffic, but
 // must never panic) is a silent no-op.
 func TestRecordProviderAttempt_EmptyProvider_NoOp(t *testing.T) {
-	l := newLimiter(nil, true)
+	l := newSyncLimiter(nil, true)
 	l.recordProviderAttempt("", "some-model", &http.Response{StatusCode: http.StatusOK}, nil) // must not panic
+}
+
+// TestIsDeadlineExceeded_YaegiSafeUnwrap exercises matchesSentinel's
+// hand-rolled Unwrap walk directly (SHOULD-1, v0.22 review round): a bare
+// context.DeadlineExceeded, one wrapped once, one wrapped twice (proving
+// the loop actually loops, not just unwraps one level), a non-matching
+// error that implements Unwrap (must walk to its end and report false,
+// not stop after one failed comparison), and a plain error with no
+// Unwrap method at all (the comma-ok assertion's negative case).
+func TestIsDeadlineExceeded_YaegiSafeUnwrap(t *testing.T) {
+	tests := []struct {
+		err  error
+		name string
+		want bool
+	}{
+		{name: "nil error", err: nil, want: false},
+		{name: "bare sentinel", err: context.DeadlineExceeded, want: true},
+		{name: "wrapped once", err: fmt.Errorf("upstream: %w", context.DeadlineExceeded), want: true},
+		{name: "wrapped twice", err: fmt.Errorf("outer: %w", fmt.Errorf("upstream: %w", context.DeadlineExceeded)), want: true},
+		{name: "unrelated sentinel (context.Canceled)", err: context.Canceled, want: false},
+		{name: "unrelated wrapped error", err: fmt.Errorf("dial: %w", errors.New("connection refused")), want: false},
+		{name: "plain error, no Unwrap method", err: errors.New("boom"), want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isDeadlineExceeded(tt.err); got != tt.want {
+				t.Errorf("isDeadlineExceeded(%v) = %v, want %v", tt.err, got, tt.want)
+			}
+		})
+	}
 }
 
 // TestProviderModelScopeID proves the "provider/model" id convention
@@ -1485,7 +1538,11 @@ func TestProviderModelScopeID(t *testing.T) {
 // TestLimiterHistory_OneBatchCallOldestFirst above): it must issue
 // exactly ONE getMulti call for both a provider-level and a
 // (provider, model) scope together, and slice the flat result back to the
-// right scope in order.
+// right scope in order — including SHOULD-2's variable stride (v0.22
+// review round): the provider scope reads its minute window too, the
+// model scope does not, so a stray seeded minute-window key under the
+// model scope's own id must never leak into its result — providerUsage
+// never even asks the store for it.
 func TestProviderUsage_BatchedSingleRoundTrip(t *testing.T) {
 	now := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
 	countStore := &historyCountingStore{values: map[string]int64{
@@ -1494,6 +1551,13 @@ func TestProviderUsage_BatchedSingleRoundTrip(t *testing.T) {
 		windowKey(kindProvider, "openai", metricProvAttempt, windowDay, now):             30,
 		windowKey(kindProvider, "openai", metricProvFail, windowDay, now):                2,
 		windowKey(kindProviderModel, "openai/gpt-4o", metricProvAttempt, windowDay, now): 10,
+		// Seeded but must never be read: providerCounterKeys omits a
+		// kindProviderModel scope's minute-window keys entirely (SHOULD-2).
+		// A bug that started reading them again would make this key's
+		// value leak into got[1].attemptsMinute below, catching the
+		// regression even though allKeys's own length is never asserted
+		// directly.
+		windowKey(kindProviderModel, "openai/gpt-4o", metricProvAttempt, windowMin, now): 999,
 	}}
 	l := newLimiter(countStore, true)
 	l.nowFn = func() time.Time { return now }
@@ -1515,6 +1579,60 @@ func TestProviderUsage_BatchedSingleRoundTrip(t *testing.T) {
 	}
 	if got[1].attemptsDay != 10 || got[1].failuresDay != 0 {
 		t.Errorf("model counters = %+v, want attemptsDay 10, failuresDay 0", got[1])
+	}
+	if got[1].attemptsMinute != 0 || got[1].failuresMinute != 0 {
+		t.Errorf("model minute counters = %+v, want the zero value (never read for a model scope — SHOULD-2)", got[1])
+	}
+}
+
+// TestProviderUsage_OffsetSlicing_ScopeOrderIndependent proves the
+// running-offset slicing SHOULD-2 introduced (providerUsage no longer
+// assumes a single fixed stride) is correct regardless of scope order —
+// a model scope (2 keys) followed by TWO provider scopes (4 keys each)
+// followed by another model scope, deliberately not the "providers then
+// models" order buildAdminOverview itself always builds, to prove the
+// slicing logic itself does not silently depend on that convention.
+func TestProviderUsage_OffsetSlicing_ScopeOrderIndependent(t *testing.T) {
+	now := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
+	countStore := &historyCountingStore{values: map[string]int64{
+		windowKey(kindProviderModel, "a/m1", metricProvAttempt, windowDay, now): 1,
+		windowKey(kindProviderModel, "a/m1", metricProvFail, windowDay, now):    0,
+		windowKey(kindProvider, "a", metricProvAttempt, windowMin, now):         2,
+		windowKey(kindProvider, "a", metricProvFail, windowMin, now):            0,
+		windowKey(kindProvider, "a", metricProvAttempt, windowDay, now):         20,
+		windowKey(kindProvider, "a", metricProvFail, windowDay, now):            1,
+		windowKey(kindProvider, "b", metricProvAttempt, windowMin, now):         3,
+		windowKey(kindProvider, "b", metricProvFail, windowMin, now):            1,
+		windowKey(kindProvider, "b", metricProvAttempt, windowDay, now):         30,
+		windowKey(kindProvider, "b", metricProvFail, windowDay, now):            2,
+		windowKey(kindProviderModel, "b/m2", metricProvAttempt, windowDay, now): 4,
+		windowKey(kindProviderModel, "b/m2", metricProvFail, windowDay, now):    4,
+	}}
+	l := newLimiter(countStore, true)
+	l.nowFn = func() time.Time { return now }
+
+	scopes := []limitScope{
+		{kind: kindProviderModel, id: "a/m1"},
+		{kind: kindProvider, id: "a"},
+		{kind: kindProvider, id: "b"},
+		{kind: kindProviderModel, id: "b/m2"},
+	}
+	got := l.providerUsage(scopes)
+
+	if len(got) != 4 {
+		t.Fatalf("len(got) = %d, want 4", len(got))
+	}
+	if got[0].attemptsDay != 1 || got[0].failuresDay != 0 {
+		t.Errorf("scope[0] (model a/m1) = %+v, want attemptsDay 1, failuresDay 0", got[0])
+	}
+	if got[1].attemptsMinute != 2 || got[1].attemptsDay != 20 || got[1].failuresDay != 1 {
+		t.Errorf("scope[1] (provider a) = %+v, want attemptsMinute 2, attemptsDay 20, failuresDay 1", got[1])
+	}
+	if got[2].attemptsMinute != 3 || got[2].failuresMinute != 1 || got[2].attemptsDay != 30 || got[2].failuresDay != 2 {
+		t.Errorf("scope[2] (provider b) = %+v, want {3 1 30 2}", got[2])
+	}
+	if got[3].attemptsDay != 4 || got[3].failuresDay != 4 {
+		t.Errorf("scope[3] (model b/m2) = %+v, want attemptsDay 4, failuresDay 4", got[3])
 	}
 }
 

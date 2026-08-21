@@ -308,14 +308,18 @@ type adminProviderView struct {
 
 // adminModelRateView is one upstream model's current-window attempt/
 // failure counters within its provider — adminProviderView.ModelRates'
-// value type (Feature A, v0.22). Field shape and meaning are identical to
-// adminProviderView's own Attempts*/Failures* fields, just scoped to one
-// (provider, model) pair instead of the whole provider.
+// value type (Feature A, v0.22). Day window only, no AttemptsMinute/
+// FailuresMinute (SHOULD-2, v0.22 review round — removed, not merely
+// left unpopulated): a dashboard with N configured models was paying N
+// wasted minute-window store reads on every 5s poll for a figure that
+// only ever fed a badge's title text, never its own displayed tier — see
+// limits.go's providerCounterKeys/providerScopeKeyCount for the read-side
+// half of this same ruling. The Providers tab's per-model badge falls
+// back to a day-window-only title when these are absent; see webui's
+// lib/provider-rate.ts (dayRateTitle) and ProviderRateBadge.vue.
 type adminModelRateView struct {
-	AttemptsDay    int64 `json:"attemptsDay"`
-	FailuresDay    int64 `json:"failuresDay"`
-	AttemptsMinute int64 `json:"attemptsMinute"`
-	FailuresMinute int64 `json:"failuresMinute"`
+	AttemptsDay int64 `json:"attemptsDay"`
+	FailuresDay int64 `json:"failuresDay"`
 }
 
 // adminRedisView is the redis status line in GET /admin/api/overview.
@@ -423,10 +427,8 @@ func (g *Gateway) buildAdminOverview() adminOverviewResponse {
 			mc := modelCounters[mi]
 			mi++
 			modelRates[model] = adminModelRateView{
-				AttemptsDay:    mc.attemptsDay,
-				FailuresDay:    mc.failuresDay,
-				AttemptsMinute: mc.attemptsMinute,
-				FailuresMinute: mc.failuresMinute,
+				AttemptsDay: mc.attemptsDay,
+				FailuresDay: mc.failuresDay,
 			}
 		}
 		providers[i] = adminProviderView{

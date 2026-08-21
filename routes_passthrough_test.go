@@ -448,6 +448,13 @@ func TestHandlePassthrough_NonStreamJSON_AccountsUsage(t *testing.T) {
 	if !ok {
 		t.Fatal("handler is not *Gateway")
 	}
+	// SHOULD-5 (v0.22 review round): production spawns recordProviderAttempt's
+	// store write in its own goroutine, off this route's TTFB path — this
+	// test asserts on the resulting counter immediately after ServeHTTP
+	// returns, so it overrides spawn to run synchronously instead (the
+	// deterministic-test half of that dependency-injection field; see
+	// limiter.spawn's own doc comment, limits.go).
+	gw.limiter.spawn = func(f func()) { f() }
 
 	req := httptest.NewRequest(http.MethodPost, "/openai/v1/native-endpoint", strings.NewReader(`{}`))
 	req.Header.Set("Authorization", "Bearer sk-alice")
@@ -524,6 +531,9 @@ func TestHandlePassthrough_DeadUpstream_RecordsProviderFailure(t *testing.T) {
 	if !ok {
 		t.Fatal("handler is not *Gateway")
 	}
+	// SHOULD-5 (v0.22 review round): see the identical override in
+	// TestHandlePassthrough_NonStreamJSON_AccountsUsage above.
+	gw.limiter.spawn = func(f func()) { f() }
 
 	req := httptest.NewRequest(http.MethodPost, "/openai/v1/native-endpoint", strings.NewReader(`{}`))
 	req.Header.Set("Authorization", "Bearer sk-alice")

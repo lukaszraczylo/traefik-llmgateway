@@ -1,6 +1,7 @@
 package traefikllmgateway
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"net/http"
@@ -483,9 +484,11 @@ type limitViolation struct {
 // limiter enforces per-minute/day/month request, token, and cost limits
 // using fixed windows keyed by windowKey.
 type limiter struct {
-	store    counterStore     // configured backend; nil means always use fallback (see newLimiter)
-	fallback *memoryStore     // in-process counter store, always available
-	nowFn    func() time.Time // injected for tests; defaults to time.Now
+	lastLogAt        time.Time        // guarded by logMu; last time a store error was logged
+	lastStoreFailure time.Time        // guarded by logMu; zero means the store-down latch is not open (see storeLatched)
+	store            counterStore     // configured backend; nil means always use fallback (see newLimiter)
+	fallback         *memoryStore     // in-process counter store, always available
+	nowFn            func() time.Time // injected for tests; defaults to time.Now
 	// logf is a bound method value (g.errorf), injectable for tests; defaults
 	// to a no-op. Its own call site (logStoreError) passes exactly one
 	// variadic argument — never extend that to two or more without first
@@ -493,9 +496,24 @@ type limiter struct {
 	// field of variadic func type crashes Yaegi v0.16.1's CFG builder past
 	// one variadic argument, even though the identical call through a
 	// method or interface method does not.
-	logf             func(format string, args ...any)
-	lastLogAt        time.Time // guarded by logMu; last time a store error was logged
-	lastStoreFailure time.Time // guarded by logMu; zero means the store-down latch is not open (see storeLatched)
+	logf func(format string, args ...any)
+	// spawn runs f, by default in its own goroutine — the SHOULD-5 ruling
+	// (v0.22 review round): recordProviderAttempt's store write is
+	// telemetry-only, and must never sit on a streaming response's
+	// time-to-first-byte path (a synchronous storeIncrMulti round trip
+	// there would delay every first chunk by however long that write
+	// takes). newLimiter always wires a production limiter's spawn to a
+	// real `go f()`; a test that needs recordProviderAttempt's write to
+	// have already landed by the time it reads a counter back overrides
+	// spawn to run f synchronously instead — the same dependency-
+	// injection idiom nowFn already uses on this struct, and waitFn uses
+	// on retryPolicy (retry.go). A goroutine spawned this way outlives
+	// the request that triggered it by design: a write still in flight at
+	// process shutdown is lost. Accepted — this is telemetry, nothing in
+	// the request path gates on it, and the fixed-window counters it
+	// writes to are inherently approximate already (a counter reset at a
+	// bucket boundary loses whatever was in the previous bucket too).
+	spawn func(func())
 	// lastErrMsg is the message of the most recent store operation
 	// failure, guarded by logMu alongside lastStoreFailure. It is never
 	// cleared on a later success — "last store error" for the admin
@@ -521,6 +539,7 @@ func newLimiter(store counterStore, failOpen bool) *limiter {
 		nowFn:    time.Now,
 		logf:     func(string, ...any) {},
 		failOpen: failOpen,
+		spawn:    func(f func()) { go f() },
 	}
 }
 
@@ -1171,8 +1190,73 @@ const (
 // pricing.go's unifiedCostMicros and the admin API already use elsewhere
 // for a (provider, model) pair, so a reader who already knows that
 // convention needs no new one here.
+//
+// The "/" join is unambiguous even though model itself may legitimately
+// contain "/" (a discovered id like "uni/deepseek-v4-flash-0731" —
+// routableModelId's own doc comment, webui/src/lib/format.ts, documents
+// the identical case for the webui's copy of this convention): provider
+// is always validated against configNamePattern (providers.go) before it
+// can reach here, and that pattern's character class excludes "/"
+// entirely. Two distinct (provider, model) pairs can therefore never
+// produce the identical joined string — a provider name can never itself
+// contain the separator a model id might.
 func providerModelScopeID(provider, model string) string {
 	return provider + "/" + model
+}
+
+// sentinelUnwrapper is the errors.Unwrap interface, matched bare (a comma-ok
+// type assertion, never errors.Is/errors.As) — see matchesSentinel's own
+// doc comment for why.
+type sentinelUnwrapper interface {
+	Unwrap() error
+}
+
+// matchesSentinel reports whether err IS, or wraps, sentinel — the exact
+// semantics errors.Is applies for a plain sentinel comparison (neither
+// context.DeadlineExceeded nor context.Canceled defines an Is(error)
+// method, so there is no behavioral difference to preserve), implemented
+// by hand-walking err's Unwrap chain instead of calling errors.Is itself.
+//
+// This is deliberate, not a style preference: providerHTTPError's own doc
+// comment (providers.go) already documents that errors.As panics under
+// Yaegi when checking whether an interpreted pointer type implements
+// error, which is why handleAdapterError uses a bare type assertion
+// instead. errors.Is walks the identical reflect-based machinery
+// internally (both live in package errors and share its Is/As helper
+// code) and carries the same risk — recordProviderAttempt is exercised
+// under Yaegi too (tools/yaegi-check's harness drives a real chat
+// completion through it), so this sidesteps the trap entirely: a bare
+// `err.(sentinelUnwrapper)` comma-ok assertion is plain interface
+// satisfaction, never reflection over a possibly-interpreted concrete
+// type.
+func matchesSentinel(err, sentinel error) bool {
+	for err != nil {
+		if err == sentinel { //nolint:errorlint // deliberate identity comparison; see doc comment above
+			return true
+		}
+		u, ok := err.(sentinelUnwrapper)
+		if !ok {
+			return false
+		}
+		err = u.Unwrap()
+	}
+	return false
+}
+
+// isDeadlineExceeded reports whether err IS, or wraps, context.
+// DeadlineExceeded — SHOULD-1 ruling (v0.22 review round): retry.go's
+// isTransient deliberately excludes context.DeadlineExceeded from what it
+// retries (retrying after the gateway's own deadline already lapsed is
+// pointless), and recordProviderAttempt's fail determination below reuses
+// isTransient unforked for every other classification — but a deadline
+// the GATEWAY set and the upstream never answered inside is very much a
+// provider-health signal, arguably the clearest one isTransient's
+// retry-specific exclusion was never meant to hide from accounting. A
+// context.Canceled error (the client walked away) is deliberately NOT
+// matched here — that is not the provider's fault, and stays an
+// attempt-only outcome, exactly like isTransient already treats it.
+func isDeadlineExceeded(err error) bool {
+	return matchesSentinel(err, context.DeadlineExceeded)
 }
 
 // recordProviderAttempt accounts ONE upstream HTTP attempt against
@@ -1183,13 +1267,19 @@ func providerModelScopeID(provider, model string) string {
 // body, read only after the attempt already happened) passes "" and gets
 // provider-level accounting only.
 //
-// Every attempt increments an "attempts" counter; only a provider-fault
-// outcome — exactly isTransient(resp, err)'s own classification
-// (retry.go: a transport/connection error, HTTP 429, or a 5xx status) —
-// additionally increments a "failures" counter. Deliberately reused rather
-// than forked: a 4xx-but-not-429 response means the provider answered
-// correctly to a request it did not like, which is not a provider-health
-// signal, exactly the line isTransient already draws for "worth retrying".
+// Every attempt increments an "attempts" counter; a provider-fault
+// outcome additionally increments a "failures" counter. That outcome is
+// exactly isTransient(resp, err)'s own classification (retry.go: a
+// transport/connection error, HTTP 429, or a 5xx status) — reused, not
+// forked, per spec ruling — WITH ONE NARROW ADDITION (SHOULD-1, v0.22
+// review round): isDeadlineExceeded(err) also counts as a failure, even
+// though isTransient itself returns false for it (see isDeadlineExceeded's
+// own doc comment for why the two functions correctly disagree here). A
+// context.Canceled error still counts as an attempt only, from both
+// functions alike — the client walked away, not the provider's fault. A
+// 4xx-but-not-429 response means the provider answered correctly to a
+// request it did not like, which is not a provider-health signal, exactly
+// the line isTransient already draws for "worth retrying".
 //
 // attempt-accounting: this is invoked once per upstream attempt, not once
 // per logical request — attemptRecorderFromContext (providers.go) is
@@ -1200,16 +1290,28 @@ func providerModelScopeID(provider, model string) string {
 // countTargetRequests/-Request already apply to target scopes (mcp_a2a.go
 // callers), consistent with those counters' own attempt/request semantics.
 //
-// Both counters are written at minute AND day granularity only — no month
-// window: provider health is a now-and-today question (the Providers tab's
-// success-rate badge, webui), not a billing one, so there is nothing here
-// for a month-long retention window to serve.
+// Both counters are written at minute AND day granularity, for both the
+// provider scope and the (provider, model) scope — the write side is
+// unaffected by SHOULD-2's read-side change to providerUsage/
+// providerCounterKeys below: writing both windows costs nothing extra
+// (already one batched storeIncrMulti call either way), and it leaves
+// the model-level minute counters available in the store for a future
+// caller even though GET /admin/api/overview no longer reads them today.
+// No month window: provider health is a now-and-today question (the
+// Providers tab's success-rate badge, webui), not a billing one, so there
+// is nothing here for a month-long retention window to serve.
+//
+// The store write itself is fire-and-forget (l.spawn — SHOULD-5, v0.22
+// review round): entries is finished being built before spawn is called,
+// and never touched again afterward, so capturing it in the closure below
+// is race-free even though the write itself now runs on a goroutine this
+// function does not wait for.
 func (l *limiter) recordProviderAttempt(provider, model string, resp *http.Response, err error) {
 	if provider == "" {
 		return
 	}
 	now := l.now()
-	fail := isTransient(resp, err)
+	fail := isTransient(resp, err) || isDeadlineExceeded(err)
 
 	entries := make([]counterIncr, 0, 8)
 	entries = append(entries,
@@ -1235,22 +1337,46 @@ func (l *limiter) recordProviderAttempt(provider, model string, resp *http.Respo
 			)
 		}
 	}
-	l.storeIncrMulti(entries) // no error return by contract (doc comment above, mirroring account()); ok is intentionally discarded
+	l.spawn(func() {
+		l.storeIncrMulti(entries) // no error return by contract (doc comment above, mirroring account()); ok is intentionally discarded
+	})
 }
 
 // providerCounterKeysPerScope is the number of windowKey strings
-// providerCounterKeys builds per scope, and the stride providerUsage's
-// flat storeGetMulti result is sliced back into per-scope chunks by —
-// mirrors targetCounterKeysPerScope's own convention for the identical
-// reason.
-const providerCounterKeysPerScope = 4
+// providerCounterKeys builds for a PROVIDER-level (kindProvider, or any
+// kind other than kindProviderModel) scope — attempt/fail at minute, then
+// attempt/fail at day: 4. A kindProviderModel scope reads half as many
+// (providerModelCounterKeysPerScope, below) — SHOULD-2 ruling (v0.22
+// review round): GET /admin/api/overview's own per-model minute counters
+// fed nothing but a badge title, so a dashboard with N models paid N
+// wasted minute-window reads on every 5s poll for data nobody displayed.
+// providerCounterKeys and providerUsage's own slicing loop each branch on
+// sc.kind == kindProviderModel directly rather than through a shared
+// "key count for this kind" helper — with exactly two kinds and two
+// branches, a third layer of indirection bought nothing a direct
+// comparison did not already say more plainly, mirroring
+// targetCounterKeysPerScope's fixed-stride convention exactly where the
+// stride really IS fixed (every target scope there reads the same three
+// keys) and diverging from it only where it now is not.
+const (
+	providerCounterKeysPerScope      = 4
+	providerModelCounterKeysPerScope = 2
+)
 
-// providerCounterKeys returns the providerCounterKeysPerScope windowKey
-// strings providerUsage reads for one (kind, id) scope at time now —
-// attempt/fail at minute, then attempt/fail at day, matching
-// providerCounters' own field order exactly so providerUsage can map
-// storeGetMulti's result slice back by plain index.
+// providerCounterKeys returns providerCounterKeysPerScope (or, for a
+// kindProviderModel scope, providerModelCounterKeysPerScope) windowKey
+// strings providerUsage reads for one (kind, id) scope at time now: a
+// kindProviderModel scope gets attempt/fail at day only; every other kind
+// (kindProvider) gets attempt/fail at minute, then attempt/fail at day —
+// matching providerCounters' own field order exactly so providerUsage can
+// map storeGetMulti's result slice back by plain index.
 func providerCounterKeys(kind, id string, now time.Time) []string {
+	if kind == kindProviderModel {
+		return []string{
+			windowKey(kind, id, metricProvAttempt, windowDay, now),
+			windowKey(kind, id, metricProvFail, windowDay, now),
+		}
+	}
 	return []string{
 		windowKey(kind, id, metricProvAttempt, windowMin, now),
 		windowKey(kind, id, metricProvFail, windowMin, now),
@@ -1262,6 +1388,11 @@ func providerCounterKeys(kind, id string, now time.Time) []string {
 // providerCounters is one provider's or (provider, model) pair's current-
 // window attempt/failure counters (Feature A, v0.22) — mirrors
 // targetCounters' own shape and read-only, admin-view-only role.
+// attemptsMinute/failuresMinute stay at their zero value for a
+// kindProviderModel scope (SHOULD-2, providerCounterKeys' own doc
+// comment): providerUsage never reads a model scope's minute keys at
+// all, so this is not a real "zero traffic this minute" reading for a
+// model the way it is for a provider — a caller must not treat it as one.
 type providerCounters struct {
 	attemptsMinute int64
 	failuresMinute int64
@@ -1283,6 +1414,12 @@ type providerCounters struct {
 // here: nothing downstream treats a provider's zero counters as
 // "confirmed no traffic" the way scopeUsage.storeDown guards against for
 // a limited scope.
+//
+// Slicing is by running offset, not a fixed i*stride multiply (SHOULD-2,
+// providerCounterKeysPerScope's own doc comment): a kindProvider and a
+// kindProviderModel scope contribute a different number of keys to
+// allKeys, so the flat result cannot be sliced back by a single constant
+// stride the way targetUsage's fixed-shape scopes can.
 func (l *limiter) providerUsage(scopes []limitScope) []providerCounters {
 	out := make([]providerCounters, len(scopes))
 	if len(scopes) == 0 {
@@ -1291,7 +1428,9 @@ func (l *limiter) providerUsage(scopes []limitScope) []providerCounters {
 
 	now := l.now()
 	allKeys := make([]string, 0, len(scopes)*providerCounterKeysPerScope)
-	for _, sc := range scopes {
+	offsets := make([]int, len(scopes))
+	for i, sc := range scopes {
+		offsets[i] = len(allKeys)
 		allKeys = append(allKeys, providerCounterKeys(sc.kind, sc.id, now)...)
 	}
 
@@ -1300,9 +1439,18 @@ func (l *limiter) providerUsage(scopes []limitScope) []providerCounters {
 		return out // zero-value counters; see doc comment above
 	}
 
-	for i := range scopes {
-		v := vals[i*providerCounterKeysPerScope : i*providerCounterKeysPerScope+providerCounterKeysPerScope]
-		out[i] = providerCounters{attemptsMinute: v[0], failuresMinute: v[1], attemptsDay: v[2], failuresDay: v[3]}
+	for i, sc := range scopes {
+		start := offsets[i]
+		if sc.kind == kindProviderModel {
+			out[i] = providerCounters{attemptsDay: vals[start], failuresDay: vals[start+1]}
+			continue
+		}
+		out[i] = providerCounters{
+			attemptsMinute: vals[start],
+			failuresMinute: vals[start+1],
+			attemptsDay:    vals[start+2],
+			failuresDay:    vals[start+3],
+		}
 	}
 	return out
 }

@@ -54,6 +54,14 @@ func newAdminGatewayHandle(t *testing.T, cfg *Config) (http.Handler, *Gateway) {
 	if !ok {
 		t.Fatal("handler is not *Gateway")
 	}
+	// SHOULD-5 (v0.22 review round): production spawns recordProviderAttempt's
+	// store write in its own goroutine, off a request's TTFB path — every
+	// admin_test.go test that asserts on a resulting provider counter (GET
+	// /admin/api/overview's Attempts*/Failures* fields) needs it to have
+	// already landed, so spawn runs synchronously here rather than per-test
+	// (the deterministic-test half of that dependency-injection field; see
+	// limiter.spawn's own doc comment, limits.go).
+	gw.limiter.spawn = func(f func()) { f() }
 	return h, gw
 }
 

@@ -100,6 +100,14 @@ func newMediaTestGateway(t *testing.T, cfg *Config) *Gateway {
 	if !ok {
 		t.Fatal("handler is not *Gateway")
 	}
+	// SHOULD-5 (v0.22 review round): production spawns recordProviderAttempt's
+	// store write in its own goroutine, off a media route's TTFB path — every
+	// caller of this shared helper that asserts on a resulting provider
+	// counter needs it to have already landed, so spawn runs synchronously
+	// here rather than per-test (the deterministic-test half of that
+	// dependency-injection field; see limiter.spawn's own doc comment,
+	// limits.go).
+	gw.limiter.spawn = func(f func()) { f() }
 	return gw
 }
 
