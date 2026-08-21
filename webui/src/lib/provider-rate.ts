@@ -99,11 +99,14 @@ function countWord(n: number, singular: string, plural: string): string {
  * minuteRateTitle builds the provider-level badge's title/aria-label —
  * the "right now" minute-window detail the spec asks for beside the
  * day-window badge text itself, e.g. "12 attempts, 1 failure in the last
- * minute (92%)". Singular/plural wording follows the actual count, and a
- * zero-attempt minute reads as its own sentence rather than a "0%" that
- * would misread as a total outage. Provider-level only — a per-model
- * badge no longer has minute-window counters to build this from at all
- * (SHOULD-2, v0.22 review round: see dayRateTitle, its own fallback).
+ * minute (91%)" (formatRatePercent floors, not rounds — SHOULD-B, v0.22
+ * review round, round 2: this example previously said "(92%)", stale
+ * against the floor fix below it in this same file). Singular/plural
+ * wording follows the actual count, and a zero-attempt minute reads as
+ * its own sentence rather than a "0%" that would misread as a total
+ * outage. Provider-level only — a per-model badge no longer has minute-
+ * window counters to build this from at all (SHOULD-2, v0.22 review
+ * round: see dayRateTitle, its own fallback).
  */
 export function minuteRateTitle(attemptsMinute: number, failuresMinute: number): string {
   if (attemptsMinute <= 0) return 'no traffic in the last minute'
