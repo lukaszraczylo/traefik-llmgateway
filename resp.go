@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"runtime"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -20,9 +20,7 @@ import (
 // conn.SetDeadline, not reset before each individual read or write — a
 // server that accepts the connection and then never answers must cost
 // this one call ~respCallTimeout, not respCallTimeout multiplied by every
-// handshake and command step it happens to perform (which, with the
-// mutex serializing every caller behind one connection, previously turned
-// one hung server into a many-times-respCallTimeout stall per request).
+// handshake and command step it happens to perform.
 const (
 	respDialTimeout = 2 * time.Second
 	respCallTimeout = 2 * time.Second
@@ -48,6 +46,63 @@ const respMaxArrayLen = 1024
 // bytes before erroring.
 const respMaxLineLen = 64 << 10
 
+// respPoolMin/respPoolMax bound the self-tuned connection pool size
+// (house engineering rule: self-tuning over operator knobs, explicit
+// override always wins — see RedisConfig.PoolSize, llmgateway.go's
+// buildRedisClient). A single mutex-guarded connection was measured to be
+// THE throughput ceiling under Yaegi interpretation (perf audit,
+// 2026-08-2x): 1,458 req/s Redis-backed vs 7,811 req/s on memoryStore for
+// the identical workload, latency scaling ~linearly with concurrency
+// (869us@conc=1 -> 10.81ms@conc=16) — near-perfect serialization, since
+// pipeline held c.mu for the whole round trip. A pool of independent
+// connections, each handed to exactly one caller at a time, lets N
+// callers run N round trips concurrently instead of queueing behind one.
+// respPoolMax=8 is the exact size the audit's variants/resp_pool8.go
+// prototype validated: at a realistic 200us Redis RTT, conc=16, p50
+// 24.06ms -> 3.24ms (-86%), throughput 663 -> 4,670 req/s (+599%, ±1%
+// over 3 reps); a pool=1 control matched HEAD exactly, proving the win is
+// parallelism, not refactor noise. respPoolMin=4 keeps a low-core-count
+// replica (GOMAXPROCS clamps low under a small CPU request/limit) from
+// opening fewer connections than there are usable goroutine-scheduling
+// slots to fill them.
+const (
+	respPoolMin = 4
+	respPoolMax = 8
+)
+
+// respPoolConfigMax bounds RedisConfig.PoolSize (llmgateway.go's
+// buildRedisClient rejects anything above it outright, mirroring the
+// existing negative-DB/negative-poolSize checks): an unbounded override
+// would let PoolSize: 1<<20 eagerly allocate over a million *respConn
+// structs at construction (verified in review, 2026-08-2x) before a
+// single request ever arrives. 256 is far beyond any real single-instance
+// Redis/Dragonfly connection budget while staying well above
+// respPoolMax, leaving room for a legitimately high explicit override.
+const respPoolConfigMax = 256
+
+// defaultRespPoolSize returns the self-tuned connection pool size: the
+// host's GOMAXPROCS, clamped to [respPoolMin, respPoolMax]. Used whenever
+// RedisConfig.PoolSize is left at its zero value; an operator who sets it
+// explicitly always overrides this (newRESPClientPool, below).
+func defaultRespPoolSize() int {
+	return clampPoolSize(runtime.GOMAXPROCS(0))
+}
+
+// clampPoolSize clamps n to [respPoolMin, respPoolMax]. Split out of
+// defaultRespPoolSize so the clamp itself is testable against every
+// branch directly, independent of the test process's own real
+// GOMAXPROCS.
+func clampPoolSize(n int) int {
+	switch {
+	case n < respPoolMin:
+		return respPoolMin
+	case n > respPoolMax:
+		return respPoolMax
+	default:
+		return n
+	}
+}
+
 // respErr is a RESP2 error reply ("-message\r\n"). It implements error so a
 // caller inspecting a decoded reply can type-assert for it the same way as
 // any other error.
@@ -56,7 +111,7 @@ const respMaxLineLen = 64 << 10
 // string"): yaegi v0.16.1 conflates a defined string type with plain
 // string in a type assertion — v.(respErr) on an any holding a genuine
 // plain string (e.g. decodeReply's "+OK" success reply, itself a string)
-// incorrectly reports ok=true, so every successful handshakeLocked call
+// incorrectly reports ok=true, so every successful handshakeOn call
 // (AUTH/SELECT) was misread as a failed one under real Traefik. A struct
 // has no such ambiguity: verified empirically under real Traefik (Task
 // 15's integration suite, cross-replica rate limiting via Redis).
@@ -65,33 +120,98 @@ type respErr struct{ msg string }
 // Error implements the error interface.
 func (e respErr) Error() string { return e.msg }
 
+// respConn is one connection in respClient's pool: a lazily dialled TCP
+// connection plus its buffered reader, or the zero value for a slot that
+// has never dialled yet (or whose previous connection was discarded after
+// an error — see closeConn). Owned by exactly one caller at a time,
+// between an acquire and its matching release back onto respClient.free.
+type respConn struct {
+	conn net.Conn
+	r    *bufio.Reader
+}
+
 // respClient is a minimal stdlib-only RESP2 client for a single Redis-
-// compatible server: one mutex-guarded TCP connection, lazily dialled on
-// first use and reconnected at most once when a command round trip fails
-// for a reason other than a timeout (see pipeline). It exists because the
-// plugin runs interpreted under Yaegi with only the Go standard library
-// available, so a full Redis client library is not an option.
+// compatible server: a pool of independently usable TCP connections, each
+// lazily dialled on first use and reconnected at most once when a command
+// round trip fails for a reason other than a timeout (see pipeline). It
+// exists because the plugin runs interpreted under Yaegi with only the Go
+// standard library available, so a full Redis client library is not an
+// option.
 //
-// mu serializes every operation — do and pipeline hold it for their whole
-// round trip, including any reconnect — since RESP is not multiplexed:
-// interleaving two callers' writes on one connection would corrupt both
-// replies.
+// free holds every currently-idle connection slot; a caller acquires one
+// (blocking, bounded by its call deadline, if the pool is momentarily
+// exhausted) for its whole round trip and returns it via a deferred send
+// back onto free — RESP is not multiplexed, so two callers interleaving
+// writes on the SAME connection would corrupt both replies, but distinct
+// connections have no such restriction and can run fully concurrently.
 type respClient struct {
-	conn     net.Conn
-	r        *bufio.Reader
+	free     chan *respConn
 	addr     string
 	password string
-	mu       sync.Mutex
 	db       int
 }
 
-// newRESPClient returns a respClient for addr. It does not connect until
-// the first do or pipeline call. password, if non-empty, is sent via AUTH
-// on every new connection; db is always sent via SELECT on every new
-// connection (including db 0), since a Redis-compatible proxy is not
-// guaranteed to default a fresh connection to database 0.
+// newRESPClient returns a respClient for addr, sized by defaultRespPoolSize
+// — the self-tuned pool size used everywhere an explicit override
+// (RedisConfig.PoolSize) is absent. It does not connect until the first
+// do or pipeline call. password, if non-empty, is sent via AUTH on every
+// new connection; db is always sent via SELECT on every new connection
+// (including db 0), since a Redis-compatible proxy is not guaranteed to
+// default a fresh connection to database 0.
 func newRESPClient(addr, password string, db int) *respClient {
-	return &respClient{addr: addr, password: password, db: db}
+	return newRESPClientPool(addr, password, db, defaultRespPoolSize())
+}
+
+// newRESPClientPool is newRESPClient with an explicit poolSize, used by
+// llmgateway.go's buildRedisClient when RedisConfig.PoolSize is set
+// (house rule: an explicit override always wins over the self-tuned
+// default). poolSize below 1 is clamped to 1 — a zero or negative value
+// would leave free empty, making every acquire block forever.
+func newRESPClientPool(addr, password string, db, poolSize int) *respClient {
+	if poolSize < 1 {
+		poolSize = 1
+	}
+	c := &respClient{
+		addr:     addr,
+		password: password,
+		db:       db,
+		free:     make(chan *respConn, poolSize),
+	}
+	for i := 0; i < poolSize; i++ {
+		c.free <- &respConn{}
+	}
+	return c
+}
+
+// Close closes every currently idle pooled connection (a non-blocking
+// receive per slot, so it never waits on one still checked out by an
+// in-flight caller — the same "don't call Close concurrently with
+// in-flight use" contract any io.Closer implicitly carries) and always
+// returns nil — closeConn already discards each connection's own Close
+// error, matching every other close in this client.
+//
+// Review fix (Should-Fix 4, 2026-08-2x): the pool (perf finding 1) turned
+// a discarded-instance leak of one idle connection into up to
+// respPoolMax (8). Nothing in this codebase calls Close automatically —
+// Traefik's plugin contract for a locally-loaded middleware is exactly
+// `func New(...) (http.Handler, error)` (llmgateway.go); the returned
+// value satisfies only http.Handler, with no Shutdown/Close interface
+// Traefik itself checks for or invokes on a discarded instance (see
+// Gateway.Close's own doc comment for the full picture, including why
+// this repository has no evidence such a hook could even be wired to).
+// Close exists so a respClient built and discarded outside that contract
+// — tests, or a future framework/harness that does hold a lifecycle hook
+// — has a correct, deterministic way to release pooled connections
+// rather than depend solely on GC finalizing the underlying net.Conns.
+func (c *respClient) Close() error {
+	for {
+		select {
+		case pc := <-c.free:
+			closeConn(pc)
+		default:
+			return nil
+		}
+	}
 }
 
 // do sends one command and returns its decoded reply. It is equivalent to
@@ -104,40 +224,75 @@ func (c *respClient) do(args ...string) (any, error) {
 	return replies[0], nil
 }
 
-// pipeline sends every command in cmds on one round trip and returns their
+// pipeline sends every command in cmds on one round trip, over one pooled
+// connection acquired for the duration of the call, and returns their
 // decoded replies in the same order.
 //
 // One absolute deadline is computed here, at call entry, and shared by
-// both the first attempt and (if it happens) the one retry — not a fresh
-// respCallTimeout for each. On a non-timeout I/O error (connection reset,
-// EOF from a peer that closed mid-command) it closes the connection and
-// retries the whole pipeline once against the same deadline. On a timeout
-// specifically, it does not retry: a server that accepted the connection
-// and then went silent would just be given the same non-answer a second
-// time, doubling the caller's wait for nothing. Either way, a failure
-// leaves the connection closed so the next call lazily reconnects fresh
-// rather than retrying against a connection already known bad.
+// acquiring a connection, the first attempt, and (if it happens) the one
+// retry — not a fresh respCallTimeout for each. On a non-timeout I/O error
+// (connection reset, EOF from a peer that closed mid-command) it closes
+// the connection and retries the whole pipeline once against the same
+// deadline, on the SAME pooled slot (a fresh dial reusing that slot, not a
+// second slot acquired from the pool). On a timeout specifically, it does
+// not retry: a server that accepted the connection and then went silent
+// would just be given the same non-answer a second time, doubling the
+// caller's wait for nothing. Either way, a failure leaves that connection
+// closed (closeConn) so the next call to acquire this slot lazily
+// reconnects fresh rather than reusing a connection already known bad —
+// the slot itself always returns to the pool via the deferred send below,
+// whether or not its connection survived the call.
 func (c *respClient) pipeline(cmds [][]string) ([]any, error) {
 	deadline := time.Now().Add(respCallTimeout)
 
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	pc, err := c.acquire(deadline)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { c.free <- pc }()
 
-	replies, err := c.attemptPipelineLocked(cmds, deadline)
+	replies, err := c.attemptPipelineOn(pc, cmds, deadline)
 	if err == nil {
 		return replies, nil
 	}
-	c.closeLocked()
+	closeConn(pc)
 	if isTimeout(err) {
 		return nil, err
 	}
 
-	replies, err = c.attemptPipelineLocked(cmds, deadline)
+	replies, err = c.attemptPipelineOn(pc, cmds, deadline)
 	if err != nil {
-		c.closeLocked()
+		closeConn(pc)
 		return nil, err
 	}
 	return replies, nil
+}
+
+// acquire takes one idle connection slot from c.free, waiting no longer
+// than deadline. The non-blocking check first is an optimization, not a
+// correctness requirement of the blocking select below — with a buffered
+// channel a receive that CAN succeed immediately always does, so this
+// merely skips allocating a timer on the (overwhelmingly common) case
+// where a slot is already free.
+func (c *respClient) acquire(deadline time.Time) (*respConn, error) {
+	select {
+	case pc := <-c.free:
+		return pc, nil
+	default:
+	}
+
+	wait := time.Until(deadline)
+	if wait <= 0 {
+		return nil, respDeadlineExceededErr{}
+	}
+	t := time.NewTimer(wait)
+	defer t.Stop()
+	select {
+	case pc := <-c.free:
+		return pc, nil
+	case <-t.C:
+		return nil, respDeadlineExceededErr{}
+	}
 }
 
 // isTimeout reports whether err is (or wraps) a net.Error that timed out.
@@ -161,22 +316,24 @@ func dialTimeoutFor(deadline time.Time) time.Duration {
 }
 
 // respDeadlineExceededErr signals that a call's deadline had already
-// elapsed before an attempt could even dial — e.g. this call queued
-// behind respClient's mutex for the whole budget while an earlier call
-// was stuck. It implements net.Error so pipeline's isTimeout check treats
-// it the same as any other timed-out I/O: no retry, since retrying an
-// already-elapsed deadline can only fail the same way again.
+// elapsed before an attempt could even acquire a pool slot or dial — e.g.
+// this call queued behind every one of respClient's pool slots being busy
+// for the whole budget while earlier calls were stuck. It implements
+// net.Error so pipeline's isTimeout check treats it the same as any other
+// timed-out I/O: no retry, since retrying an already-elapsed deadline can
+// only fail the same way again.
 type respDeadlineExceededErr struct{}
 
 func (respDeadlineExceededErr) Error() string   { return "resp: call deadline already elapsed" }
 func (respDeadlineExceededErr) Timeout() bool   { return true }
 func (respDeadlineExceededErr) Temporary() bool { return true }
 
-// attemptPipelineLocked runs one full attempt of cmds over c's connection,
-// connecting first if needed, with every read and write bound by
-// deadline. Callers must hold c.mu.
-func (c *respClient) attemptPipelineLocked(cmds [][]string, deadline time.Time) ([]any, error) {
-	if err := c.ensureConnLocked(deadline); err != nil {
+// attemptPipelineOn runs one full attempt of cmds over pc, connecting
+// first if needed, with every read and write bound by deadline. Callers
+// own pc exclusively for the duration of this call (acquired from
+// c.free).
+func (c *respClient) attemptPipelineOn(pc *respConn, cmds [][]string, deadline time.Time) ([]any, error) {
+	if err := c.ensureConnOn(pc, deadline); err != nil {
 		return nil, err
 	}
 
@@ -184,13 +341,13 @@ func (c *respClient) attemptPipelineLocked(cmds [][]string, deadline time.Time) 
 	for _, args := range cmds {
 		buf.WriteString(encodeCommand(args))
 	}
-	if _, err := io.WriteString(c.conn, buf.String()); err != nil {
+	if _, err := io.WriteString(pc.conn, buf.String()); err != nil {
 		return nil, fmt.Errorf("resp: write: %w", err)
 	}
 
 	replies := make([]any, len(cmds))
 	for i := range cmds {
-		v, err := decodeReply(c.r, 0)
+		v, err := decodeReply(pc.r, 0)
 		if err != nil {
 			return nil, fmt.Errorf("resp: read reply %d/%d: %w", i+1, len(cmds), err)
 		}
@@ -199,14 +356,14 @@ func (c *respClient) attemptPipelineLocked(cmds [][]string, deadline time.Time) 
 	return replies, nil
 }
 
-// ensureConnLocked dials, authenticates, and selects the database if c has
-// no live connection, then (whether freshly dialled or reused) sets
-// deadline as the connection's single read/write deadline for the
-// remainder of this call — including the handshake, when one runs.
-// Callers must hold c.mu.
-func (c *respClient) ensureConnLocked(deadline time.Time) error {
-	if c.conn != nil {
-		if err := c.conn.SetDeadline(deadline); err != nil {
+// ensureConnOn dials, authenticates, and selects the database if pc has no
+// live connection, then (whether freshly dialled or reused) sets deadline
+// as the connection's single read/write deadline for the remainder of
+// this call — including the handshake, when one runs. Callers own pc
+// exclusively for the duration of this call.
+func (c *respClient) ensureConnOn(pc *respConn, deadline time.Time) error {
+	if pc.conn != nil {
+		if err := pc.conn.SetDeadline(deadline); err != nil {
 			return fmt.Errorf("resp: set deadline: %w", err)
 		}
 		return nil
@@ -220,35 +377,35 @@ func (c *respClient) ensureConnLocked(deadline time.Time) error {
 	if err != nil {
 		return fmt.Errorf("resp: dial %q: %w", c.addr, err)
 	}
-	c.conn = conn
-	c.r = bufio.NewReader(conn)
+	pc.conn = conn
+	pc.r = bufio.NewReader(conn)
 
-	if err := c.conn.SetDeadline(deadline); err != nil {
-		c.closeLocked()
+	if err := pc.conn.SetDeadline(deadline); err != nil {
+		closeConn(pc)
 		return fmt.Errorf("resp: set deadline: %w", err)
 	}
 
 	if c.password != "" {
-		if err := c.handshakeLocked("AUTH", c.password); err != nil {
-			c.closeLocked()
+		if err := c.handshakeOn(pc, "AUTH", c.password); err != nil {
+			closeConn(pc)
 			return err
 		}
 	}
-	if err := c.handshakeLocked("SELECT", strconv.Itoa(c.db)); err != nil {
-		c.closeLocked()
+	if err := c.handshakeOn(pc, "SELECT", strconv.Itoa(c.db)); err != nil {
+		closeConn(pc)
 		return err
 	}
 	return nil
 }
 
-// handshakeLocked sends one connection-setup command (AUTH or SELECT) and
-// requires a non-error reply. Callers must hold c.mu, have a live c.conn,
-// and have already set its deadline.
-func (c *respClient) handshakeLocked(cmd, arg string) error {
-	if _, err := io.WriteString(c.conn, encodeCommand([]string{cmd, arg})); err != nil {
+// handshakeOn sends one connection-setup command (AUTH or SELECT) and
+// requires a non-error reply. Callers own pc exclusively, with a live
+// pc.conn whose deadline is already set.
+func (c *respClient) handshakeOn(pc *respConn, cmd, arg string) error {
+	if _, err := io.WriteString(pc.conn, encodeCommand([]string{cmd, arg})); err != nil {
 		return fmt.Errorf("resp: %s: write: %w", cmd, err)
 	}
-	v, err := decodeReply(c.r, 0)
+	v, err := decodeReply(pc.r, 0)
 	if err != nil {
 		return fmt.Errorf("resp: %s: read reply: %w", cmd, err)
 	}
@@ -258,15 +415,16 @@ func (c *respClient) handshakeLocked(cmd, arg string) error {
 	return nil
 }
 
-// closeLocked closes and clears c's connection, if any. Callers must hold
-// c.mu.
-func (c *respClient) closeLocked() {
-	if c.conn == nil {
+// closeConn closes and clears pc's connection, if any, discarding it —
+// the connection itself is never reused after an error, only the slot pc
+// occupies, which pipeline always returns to c.free regardless.
+func closeConn(pc *respConn) {
+	if pc.conn == nil {
 		return
 	}
-	_ = c.conn.Close()
-	c.conn = nil
-	c.r = nil
+	_ = pc.conn.Close()
+	pc.conn = nil
+	pc.r = nil
 }
 
 // encodeCommand renders args as a RESP2 command array:

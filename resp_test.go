@@ -9,6 +9,7 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -42,7 +43,7 @@ func TestEncodeCommand(t *testing.T) {
 // string, error, integer, bulk string (including the null bulk "$-1"), and
 // a single top-level array (including the null array "*-1"). Every call
 // passes depth 0 — a top-level reply, matching every real call site in
-// resp.go (attemptPipelineLocked, handshakeLocked, and decodeArray's own
+// resp.go (attemptPipelineOn, handshakeOn, and decodeArray's own
 // element loop, which passes depth+1).
 func TestDecodeReply(t *testing.T) {
 	t.Run("simple string", func(t *testing.T) {
@@ -340,7 +341,7 @@ func newFakeListener(t *testing.T) net.Listener {
 // refusing or resetting. Used by review item 1's tests to prove a call's
 // latency is bounded by respCallTimeout rather than left to block
 // indefinitely. Each accepted connection's reader goroutine exits once
-// the connection is closed — by the client's own closeLocked after its
+// the connection is closed — by the client's own closeConn after its
 // deadline fires, or by the listener's t.Cleanup at test end.
 func newHungListener(t *testing.T) net.Listener {
 	t.Helper()
@@ -613,7 +614,7 @@ func (fakeAddr) String() string  { return "fake" }
 // fakeConn implements net.Conn, returning writeErr from Write and
 // setDeadlineErr from SetDeadline when set, so a test can drive respClient
 // methods directly against a connection already known bad — bypassing
-// ensureConnLocked's real net.DialTimeout, which always succeeds against a
+// ensureConnOn's real net.DialTimeout, which always succeeds against a
 // live listener and so cannot itself be made to fail this way.
 type fakeConn struct {
 	writeErr       error
@@ -642,6 +643,19 @@ func (c fakeConn) SetDeadline(time.Time) error {
 
 func (fakeConn) SetReadDeadline(time.Time) error  { return nil }
 func (fakeConn) SetWriteDeadline(time.Time) error { return nil }
+
+// closeCountingConn wraps fakeConn, incrementing *count on every Close
+// call — used to prove a method actually closed a connection, not just
+// forgot about (or merely drained a channel referencing) it.
+type closeCountingConn struct {
+	fakeConn
+	count *int
+}
+
+func (c *closeCountingConn) Close() error {
+	*c.count++
+	return c.fakeConn.Close()
+}
 
 // --- dialTimeoutFor / respDeadlineExceededErr ---
 
@@ -688,45 +702,44 @@ func TestRespDeadlineExceededErr(t *testing.T) {
 	assert.True(t, err.Temporary())
 }
 
-// --- ensureConnLocked / attemptPipelineLocked / handshakeLocked error
-// branches only reachable via a pre-set connection, not a real dial ---
+// --- ensureConnOn / attemptPipelineOn / handshakeOn error branches only
+// reachable via a pre-set connection, not a real dial ---
 
-// TestRESPClient_EnsureConnLocked_Errors covers ensureConnLocked's two
-// error returns that never touch the network: a reused connection whose
+// TestRESPClient_EnsureConnOn_Errors covers ensureConnOn's two error
+// returns that never touch the network: a reused connection whose
 // SetDeadline itself fails, and a deadline that has already elapsed before
-// a fresh dial would even start.
-func TestRESPClient_EnsureConnLocked_Errors(t *testing.T) {
+// a fresh dial would even start. Each case builds its own *respConn slot
+// directly — under the pool, ensureConnOn takes the slot as a parameter
+// rather than reading shared client state, so there is no c.mu precondition
+// to honor here any more.
+func TestRESPClient_EnsureConnOn_Errors(t *testing.T) {
 	cases := []struct {
-		name            string
-		client          func() *respClient
 		deadline        time.Time
+		pc              func() *respConn
+		name            string
+		addr            string
 		wantErrContains string
 	}{
 		{
 			name: "reused connection: SetDeadline failure surfaces",
-			client: func() *respClient {
-				return &respClient{conn: fakeConn{setDeadlineErr: errors.New("stub: set deadline failed")}}
+			pc: func() *respConn {
+				return &respConn{conn: fakeConn{setDeadlineErr: errors.New("stub: set deadline failed")}}
 			},
 			deadline:        time.Now().Add(time.Second),
 			wantErrContains: "set deadline",
 		},
 		{
-			name: "no connection yet: an already-elapsed deadline never dials",
-			client: func() *respClient {
-				return &respClient{addr: "127.0.0.1:1"}
-			},
+			name:            "no connection yet: an already-elapsed deadline never dials",
+			pc:              func() *respConn { return &respConn{} },
+			addr:            "127.0.0.1:1",
 			deadline:        time.Now().Add(-time.Second),
 			wantErrContains: "call deadline already elapsed",
 		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			client := c.client()
-			// ensureConnLocked documents "callers must hold c.mu" — honor
-			// that precondition even though this test is single-goroutine.
-			client.mu.Lock()
-			err := client.ensureConnLocked(c.deadline)
-			client.mu.Unlock()
+			client := &respClient{addr: c.addr}
+			err := client.ensureConnOn(c.pc(), c.deadline)
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), c.wantErrContains)
 		})
@@ -734,44 +747,40 @@ func TestRESPClient_EnsureConnLocked_Errors(t *testing.T) {
 }
 
 // TestRESPClient_WriteError_BrokenPipe covers the identical broken-pipe
-// shape shared by attemptPipelineLocked's command write and
-// handshakeLocked's own write: both fail deterministically on an
-// already-connected socket that refuses a write — distinct from a dial
-// failure, which never reaches either code path.
+// shape shared by attemptPipelineOn's command write and handshakeOn's own
+// write: both fail deterministically on an already-connected socket that
+// refuses a write — distinct from a dial failure, which never reaches
+// either code path.
 func TestRESPClient_WriteError_BrokenPipe(t *testing.T) {
 	cases := []struct {
-		run             func(c *respClient) error
+		run             func(c *respClient, pc *respConn) error
 		name            string
 		wantErrContains string
 	}{
 		{
-			name: "attemptPipelineLocked: command write fails",
-			run: func(c *respClient) error {
-				_, err := c.attemptPipelineLocked([][]string{{"GET", "k"}}, time.Now().Add(time.Second))
+			name: "attemptPipelineOn: command write fails",
+			run: func(c *respClient, pc *respConn) error {
+				_, err := c.attemptPipelineOn(pc, [][]string{{"GET", "k"}}, time.Now().Add(time.Second))
 				return err
 			},
 			wantErrContains: "write",
 		},
 		{
-			name: "handshakeLocked: AUTH write fails",
-			run: func(c *respClient) error {
-				return c.handshakeLocked("AUTH", "pw")
+			name: "handshakeOn: AUTH write fails",
+			run: func(c *respClient, pc *respConn) error {
+				return c.handshakeOn(pc, "AUTH", "pw")
 			},
 			wantErrContains: "AUTH",
 		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			client := &respClient{
+			client := &respClient{}
+			pc := &respConn{
 				conn: fakeConn{writeErr: errors.New("stub: broken pipe")},
 				r:    bufio.NewReader(strings.NewReader("")),
 			}
-			// attemptPipelineLocked/handshakeLocked document "callers must
-			// hold c.mu" — honor that precondition even though this test
-			// is single-goroutine.
-			client.mu.Lock()
-			err := c.run(client)
-			client.mu.Unlock()
+			err := c.run(client, pc)
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), c.wantErrContains)
 		})
@@ -779,13 +788,14 @@ func TestRESPClient_WriteError_BrokenPipe(t *testing.T) {
 }
 
 // TestRESPClient_AuthHandshakeFailure_ErrorReplySurfaces covers
-// ensureConnLocked's AUTH-failure branch and handshakeLocked's respErr
-// branch together: a RESP error reply to AUTH must fail the call, not be
-// silently treated as success. It calls attemptPipelineLocked directly
-// (one attempt, one scripted connection) rather than the public do/
-// pipeline, which would retry once more against a second connection the
-// fakeRESPServer fixture — built for a server-initiated closeConn, not a
-// client-initiated close on handshake failure — cannot script cleanly.
+// ensureConnOn's AUTH-failure branch and handshakeOn's respErr branch
+// together: a RESP error reply to AUTH must fail the call, not be
+// silently treated as success. It acquires one pooled slot and calls
+// attemptPipelineOn directly (one attempt, one scripted connection)
+// rather than the public do/pipeline, which would retry once more against
+// a second connection the fakeRESPServer fixture — built for a
+// server-initiated closeConn, not a client-initiated close on handshake
+// failure — cannot script cleanly.
 func TestRESPClient_AuthHandshakeFailure_ErrorReplySurfaces(t *testing.T) {
 	ln := newFakeListener(t)
 	runFakeRESPServer(t, ln, []respStep{
@@ -793,11 +803,10 @@ func TestRESPClient_AuthHandshakeFailure_ErrorReplySurfaces(t *testing.T) {
 	})
 
 	c := newRESPClient(ln.Addr().String(), "wrong-pw", 0)
-	// attemptPipelineLocked documents "callers must hold c.mu" — honor that
-	// precondition even though this test is single-goroutine.
-	c.mu.Lock()
-	_, err := c.attemptPipelineLocked([][]string{{"GET", "k"}}, time.Now().Add(2*time.Second))
-	c.mu.Unlock()
+	deadline := time.Now().Add(2 * time.Second)
+	pc, err := c.acquire(deadline)
+	require.NoError(t, err)
+	_, err = c.attemptPipelineOn(pc, [][]string{{"GET", "k"}}, deadline)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "AUTH failed")
 }
@@ -873,5 +882,277 @@ func TestRESPClient_GetBatch(t *testing.T) {
 			require.NoError(t, err)
 			assert.Equal(t, c.want, got)
 		})
+	}
+}
+
+// --- connection pool (finding 1, perf audit 2026-08-2x): a single
+// mutex-guarded connection was THE throughput ceiling under Yaegi
+// interpretation; respClient now pools respPoolMin..respPoolMax
+// connections (GOMAXPROCS-clamped by default, or an explicit
+// RedisConfig.PoolSize override — llmgateway.go's buildRedisClient) ---
+
+// TestDefaultRespPoolSize_ClampsToRange asserts defaultRespPoolSize never
+// returns a value outside [respPoolMin, respPoolMax], regardless of the
+// test host's actual GOMAXPROCS — the exact value is environment-
+// dependent, but the clamp is not.
+func TestDefaultRespPoolSize_ClampsToRange(t *testing.T) {
+	got := defaultRespPoolSize()
+	if got < respPoolMin || got > respPoolMax {
+		t.Errorf("defaultRespPoolSize() = %d, want in [%d, %d]", got, respPoolMin, respPoolMax)
+	}
+}
+
+// TestClampPoolSize covers every branch of the clamp defaultRespPoolSize
+// applies to the host's real GOMAXPROCS: below respPoolMin, above
+// respPoolMax, and already inside the range (passed through unchanged).
+func TestClampPoolSize(t *testing.T) {
+	cases := []struct {
+		name string
+		n    int
+		want int
+	}{
+		{name: "below min clamps up", n: 1, want: respPoolMin},
+		{name: "zero clamps up", n: 0, want: respPoolMin},
+		{name: "negative clamps up", n: -3, want: respPoolMin},
+		{name: "above max clamps down", n: 64, want: respPoolMax},
+		{name: "exactly min passes through", n: respPoolMin, want: respPoolMin},
+		{name: "exactly max passes through", n: respPoolMax, want: respPoolMax},
+		{name: "inside range passes through unchanged", n: 6, want: 6},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := clampPoolSize(c.n); got != c.want {
+				t.Errorf("clampPoolSize(%d) = %d, want %d", c.n, got, c.want)
+			}
+		})
+	}
+}
+
+// TestRESPClient_Acquire_WaitsForASlotThenSucceeds exercises acquire's
+// blocking-wait path (the pool is momentarily exhausted, not the
+// non-blocking fast path a free slot satisfies immediately): with a
+// pool of 1, a second acquire call blocks until the first caller's slot
+// is released, then succeeds well within its deadline.
+func TestRESPClient_Acquire_WaitsForASlotThenSucceeds(t *testing.T) {
+	c := newRESPClientPool("127.0.0.1:0", "", 0, 1)
+	held, err := c.acquire(time.Now().Add(time.Second))
+	if err != nil {
+		t.Fatalf("acquire (1st): %v", err)
+	}
+
+	released := make(chan struct{})
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		c.free <- held
+		close(released)
+	}()
+
+	start := time.Now()
+	pc, err := c.acquire(time.Now().Add(2 * time.Second))
+	elapsed := time.Since(start)
+	<-released
+	if err != nil {
+		t.Fatalf("acquire (2nd, blocking): %v", err)
+	}
+	if pc != held {
+		t.Errorf("acquire (2nd) returned a different slot than the one released, want the same *respConn")
+	}
+	if elapsed < 15*time.Millisecond {
+		t.Errorf("elapsed = %v, want it to have actually waited for the release (~20ms)", elapsed)
+	}
+	if elapsed >= 2*time.Second {
+		t.Errorf("elapsed = %v, want well under the 2s deadline", elapsed)
+	}
+}
+
+// TestRESPClient_Acquire_TimesOutWhenPoolExhausted covers acquire's other
+// blocking-wait outcome: no slot is ever released before the deadline, so
+// acquire returns respDeadlineExceededErr rather than blocking forever.
+func TestRESPClient_Acquire_TimesOutWhenPoolExhausted(t *testing.T) {
+	c := newRESPClientPool("127.0.0.1:0", "", 0, 1)
+	if _, err := c.acquire(time.Now().Add(time.Second)); err != nil {
+		t.Fatalf("acquire (1st, drains the only slot): %v", err)
+	}
+
+	start := time.Now()
+	_, err := c.acquire(time.Now().Add(50 * time.Millisecond))
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("want an error: the pool's only slot is held and never released")
+	}
+	var wantErr respDeadlineExceededErr
+	if !errors.As(err, &wantErr) {
+		t.Errorf("err = %v (%T), want respDeadlineExceededErr", err, err)
+	}
+	if elapsed < 40*time.Millisecond || elapsed >= time.Second {
+		t.Errorf("elapsed = %v, want roughly the 50ms deadline, not immediate and not unbounded", elapsed)
+	}
+}
+
+// TestNewRESPClientPool_SizesPoolExactly asserts newRESPClientPool builds
+// exactly poolSize free slots (each an empty, not-yet-dialled *respConn),
+// and that a poolSize of 0 or below is clamped up to 1 rather than
+// producing a pool no acquire could ever succeed against.
+func TestNewRESPClientPool_SizesPoolExactly(t *testing.T) {
+	cases := []struct {
+		name         string
+		poolSize     int
+		wantPoolSize int
+	}{
+		{name: "explicit size", poolSize: 3, wantPoolSize: 3},
+		{name: "zero clamps to 1", poolSize: 0, wantPoolSize: 1},
+		{name: "negative clamps to 1", poolSize: -5, wantPoolSize: 1},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			client := newRESPClientPool("127.0.0.1:0", "", 0, c.poolSize)
+			if got := len(client.free); got != c.wantPoolSize {
+				t.Errorf("len(free) = %d, want %d", got, c.wantPoolSize)
+			}
+			if got := cap(client.free); got != c.wantPoolSize {
+				t.Errorf("cap(free) = %d, want %d", got, c.wantPoolSize)
+			}
+			pc := <-client.free
+			if pc == nil || pc.conn != nil {
+				t.Errorf("pool slot = %+v, want a non-nil *respConn with a nil conn (not yet dialled)", pc)
+			}
+		})
+	}
+}
+
+// TestRESPClient_PoolSlotReturnedAfterError proves a slot always comes
+// back onto c.free after a failed call — the physical connection is
+// discarded (closeConn), never the SLOT itself — so a pool never shrinks
+// after an error the way it would if a broken slot were dropped instead
+// of returned.
+func TestRESPClient_PoolSlotReturnedAfterError(t *testing.T) {
+	ln := newFakeListener(t)
+	deadAddr := ln.Addr().String()
+	require.NoError(t, ln.Close()) // nothing listens at deadAddr from here on
+
+	c := newRESPClientPool(deadAddr, "", 0, 1)
+	if _, err := c.do("GET", "k"); err == nil {
+		t.Fatal("want an error dialing a dead address")
+	}
+	if got := len(c.free); got != 1 {
+		t.Fatalf("len(free) after a failed call = %d, want 1 (the slot must return to the pool)", got)
+	}
+}
+
+// TestRESPClient_PoolServesConcurrentCallersWithoutSerializing is the
+// core regression for finding 1: a pool-of-2 client issues two concurrent
+// GETs against a listener that withholds connection 1's reply until
+// connection 2 has been fully accepted and served. A single shared
+// connection (the pre-fix design) would deadlock here — the second
+// caller could never even dial while do() held the only connection open
+// — so both calls succeeding proves they ran on two separate connections
+// at once, not serialized behind one mutex.
+func TestRESPClient_PoolServesConcurrentCallersWithoutSerializing(t *testing.T) {
+	ln := newFakeListener(t)
+	conn1Read := make(chan struct{})
+
+	// Any read/write error below is deliberately swallowed rather than
+	// failing the test directly from this goroutine (t.Fatal/t.Errorf
+	// from a non-test goroutine after the test could return is unsafe): a
+	// script mismatch here instead surfaces as a do() error the two
+	// client goroutines below report via t.Errorf, or as the test timing
+	// out waiting on conn1Read/wg — either way, a real protocol failure
+	// still fails the test, just one step later.
+	go func() {
+		c1, acceptErr := ln.Accept()
+		if acceptErr != nil {
+			return
+		}
+		r1 := bufio.NewReader(c1)
+		_, _ = readRESPCommand(r1) // SELECT
+		_, _ = c1.Write([]byte("+OK\r\n"))
+		_, _ = readRESPCommand(r1) // GET
+		close(conn1Read)           // conn 1's GET has been read; its reply is withheld
+
+		c2, acceptErr2 := ln.Accept()
+		if acceptErr2 != nil {
+			return
+		}
+		r2 := bufio.NewReader(c2)
+		_, _ = readRESPCommand(r2) // SELECT
+		_, _ = c2.Write([]byte("+OK\r\n"))
+		_, _ = readRESPCommand(r2) // GET
+		_, _ = c2.Write([]byte("$1\r\n2\r\n"))
+
+		_, _ = c1.Write([]byte("$1\r\n1\r\n")) // release conn 1's reply last
+	}()
+
+	c := newRESPClientPool(ln.Addr().String(), "", 0, 2)
+	var wg sync.WaitGroup
+	results := make([]string, 2)
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		v, err := c.do("GET", "a")
+		if err != nil {
+			t.Errorf("do(a): %v", err)
+			return
+		}
+		results[0] = string(v.([]byte)) //nolint:forcetypeassert // test-controlled reply, always a bulk string
+	}()
+	go func() {
+		defer wg.Done()
+		<-conn1Read // wait until conn 1's GET has been read server-side
+		v, err := c.do("GET", "b")
+		if err != nil {
+			t.Errorf("do(b): %v", err)
+			return
+		}
+		results[1] = string(v.([]byte)) //nolint:forcetypeassert // test-controlled reply, always a bulk string
+	}()
+	wg.Wait()
+	// assert.Equal, not ElementsMatch: results[0]/[1] are written by
+	// INDEX (which goroutine, not completion order), so the expected
+	// values are positionally deterministic — "a" always reads conn 1's
+	// scripted reply ("1"), "b" always reads conn 2's ("2"). An
+	// order-insensitive match would still pass under the exact cross-talk
+	// bug this test targets (e.g. two callers corrupting/swapping each
+	// other's reply via a shared connection), since {"1","2"} and
+	// {"2","1"} compare equal under ElementsMatch but not under Equal.
+	assert.Equal(t, []string{"1", "2"}, results)
+}
+
+// TestRESPClient_Close_DrainsAndClosesIdleConnections is the review fix
+// (Should-Fix 4, 2026-08-2x): Close must actually close every idle
+// pooled connection (not merely forget about it) and leave the pool
+// empty.
+func TestRESPClient_Close_DrainsAndClosesIdleConnections(t *testing.T) {
+	closed := 0
+	c := newRESPClientPool("127.0.0.1:0", "", 0, 3)
+	// Replace each of the 3 idle slots' connection with one that records
+	// whether Close was called on it.
+	for i := 0; i < 3; i++ {
+		pc := <-c.free
+		pc.conn = &closeCountingConn{count: &closed}
+		c.free <- pc
+	}
+
+	if err := c.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if got := len(c.free); got != 0 {
+		t.Errorf("len(free) after Close = %d, want 0 (every slot drained)", got)
+	}
+	if closed != 3 {
+		t.Errorf("closed connections = %d, want 3 (every idle slot's connection actually closed)", closed)
+	}
+}
+
+// TestRESPClient_Close_EmptyPool_ReturnsNilImmediately asserts Close on a
+// pool with nothing yet dialled (every slot's conn is nil) is a no-op
+// that returns promptly, not a hang — closeConn already tolerates a nil
+// conn.
+func TestRESPClient_Close_EmptyPool_ReturnsNilImmediately(t *testing.T) {
+	c := newRESPClientPool("127.0.0.1:0", "", 0, 2)
+	if err := c.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if got := len(c.free); got != 0 {
+		t.Errorf("len(free) after Close = %d, want 0", got)
 	}
 }

@@ -196,6 +196,19 @@ type RedisConfig struct {
 	Address  string `json:"address"`
 	Password string `json:"password,omitempty"`
 	DB       int    `json:"db,omitempty"`
+	// PoolSize overrides respClient's self-tuned connection pool size
+	// (defaultRespPoolSize, resp.go: GOMAXPROCS clamped to [4, 8]) — perf
+	// finding 1, 2026-08-2x audit. Left at 0 (the default), the pool
+	// self-tunes; an operator who sets this explicitly always wins over
+	// that auto-tuning (house engineering rule), e.g. to open more
+	// connections than a low-GOMAXPROCS container would otherwise pick
+	// for a Redis known to have plenty of headroom, or fewer against a
+	// connection-constrained managed Redis tier. A negative value, or one
+	// above respPoolConfigMax (resp.go), is a construction error
+	// (buildRedisClient, below) — negative can never mean "no pool", and
+	// an unbounded value would eagerly allocate that many *respConn
+	// structs at construction before a single request arrives.
+	PoolSize int `json:"poolSize,omitempty"`
 }
 
 // RetryConfig configures same-provider retry on transient upstream
@@ -309,7 +322,14 @@ type Gateway struct {
 	// before using it, rather than responseCache having its own
 	// always-disabled zero value.
 	cache *responseCache
-	name  string
+	// redisClient is the same instance newGateway hands to both the
+	// limiter's redisStore and the response cache (its own doc comment,
+	// below, explains why it's built once and shared) — kept here too,
+	// on Gateway itself, purely so Close (below) has something to release
+	// pooled connections through. nil when config.Redis is absent, same
+	// as buildRedisClient's own nil-for-unconfigured contract.
+	redisClient *respClient
+	name        string
 }
 
 // New creates the middleware. NOTE: no tail call — Yaegi zeroes
@@ -320,6 +340,35 @@ func New(ctx context.Context, next http.Handler, config *Config, name string) (h
 		return nil, err
 	}
 	return g, nil
+}
+
+// Close releases resources this Gateway instance holds open: currently,
+// the pooled Redis connections behind redisClient (perf finding 1),
+// shared between the limiter's redisStore and the response cache — a
+// nil-safe no-op when Redis is not configured.
+//
+// Review fix (Should-Fix 4, 2026-08-2x): nothing in this codebase calls
+// Close automatically. Traefik's plugin contract for a locally-loaded
+// middleware is exactly `func New(...) (http.Handler, error)`, above —
+// the returned value satisfies only http.Handler, with no Shutdown/Close
+// interface Traefik itself checks for or invokes on a discarded
+// instance. README.md's "Config hot-reload" section already documents
+// this repository has no evidence of Traefik's teardown mechanism for an
+// old instance at config-reload swap time; a plugin-side Close, however
+// correct, has nowhere in Traefik's own contract to be wired to. Close
+// exists for direct Go callers — tests, or a future framework/harness
+// that DOES hold such a hook — to release pooled connections
+// deterministically instead of depending solely on GC finalizing the
+// underlying net.Conns. A discarded, never-Closed Gateway still leaks at
+// most respPoolMax (8) idle connections rather than the pre-pool single
+// connection — a real but bounded regression the pool accepts (perf
+// finding 1), because nothing in Traefik's own contract gives this
+// plugin a way to do better.
+func (g *Gateway) Close() error {
+	if g.redisClient == nil {
+		return nil
+	}
+	return g.redisClient.Close()
 }
 
 func newGateway(ctx context.Context, next http.Handler, config *Config, name string) (*Gateway, error) {
@@ -351,6 +400,7 @@ func newGateway(ctx context.Context, next http.Handler, config *Config, name str
 	if err != nil {
 		return nil, err
 	}
+	g.redisClient = redisClient
 	lim := newConfiguredLimiter(config, redisClient)
 	lim.logf = g.errorf
 	g.limiter = lim
@@ -410,12 +460,24 @@ func buildRedisClient(rc *RedisConfig) (*respClient, error) {
 	if rc.DB < 0 {
 		return nil, fmt.Errorf("llmgateway: redis: db must not be negative, got %d", rc.DB)
 	}
+	if rc.PoolSize < 0 {
+		return nil, fmt.Errorf("llmgateway: redis: poolSize must not be negative, got %d", rc.PoolSize)
+	}
+	if rc.PoolSize > respPoolConfigMax {
+		return nil, fmt.Errorf("llmgateway: redis: poolSize must not exceed %d, got %d", respPoolConfigMax, rc.PoolSize)
+	}
 
 	password, err := resolveSecret(rc.Password)
 	if err != nil {
 		return nil, fmt.Errorf("llmgateway: redis: %w", err)
 	}
 
+	// PoolSize left at 0 keeps newRESPClient's own self-tuned default
+	// (defaultRespPoolSize, resp.go); an explicit positive value always
+	// overrides it (RedisConfig.PoolSize's own doc comment).
+	if rc.PoolSize > 0 {
+		return newRESPClientPool(rc.Address, password, rc.DB, rc.PoolSize), nil
+	}
 	return newRESPClient(rc.Address, password, rc.DB), nil
 }
 

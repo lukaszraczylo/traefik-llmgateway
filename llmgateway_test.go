@@ -604,6 +604,57 @@ func TestNewGateway_RedisConfigured_WiresRedisStoreAndFailOpen(t *testing.T) {
 	}
 }
 
+// TestGateway_Close_NoRedis_NilSafeNoOp is the review fix (Should-Fix 4,
+// 2026-08-2x): a Gateway built with no Redis configured has a nil
+// redisClient, and Close must be a nil-safe no-op, not a panic.
+func TestGateway_Close_NoRedis_NilSafeNoOp(t *testing.T) {
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{"openai": {Type: "openai", APIKey: "k"}}
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	gw := h.(*Gateway)
+	if gw.redisClient != nil {
+		t.Fatal("gw.redisClient != nil, want nil (no Redis configured)")
+	}
+	if err := gw.Close(); err != nil {
+		t.Errorf("Close: %v, want nil", err)
+	}
+}
+
+// TestGateway_Close_WithRedis_DrainsPooledConnections is the review fix
+// (Should-Fix 4, 2026-08-2x) end-to-end proof: a Gateway built with Redis
+// configured wires redisClient, and Close drains its connection pool
+// (every slot, dialled or not — construction never eagerly dials, so
+// this exercises Close's drain path rather than a real socket close, but
+// proves the wiring: gw.Close() actually reaches gw.redisClient.Close(),
+// not a stub that does nothing).
+func TestGateway_Close_WithRedis_DrainsPooledConnections(t *testing.T) {
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{"openai": {Type: "openai", APIKey: "k"}}
+	cfg.Redis = &RedisConfig{Address: "127.0.0.1:0", PoolSize: 3}
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	gw := h.(*Gateway)
+	if gw.redisClient == nil {
+		t.Fatal("gw.redisClient = nil, want a non-nil client (Redis configured)")
+	}
+	if got := len(gw.redisClient.free); got != 3 {
+		t.Fatalf("len(redisClient.free) before Close = %d, want 3", got)
+	}
+	if err := gw.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if got := len(gw.redisClient.free); got != 0 {
+		t.Errorf("len(redisClient.free) after Close = %d, want 0 (drained)", got)
+	}
+}
+
 // TestNewGateway_RedisFailOpenNilDefaultsTrue asserts a configured Redis
 // block with FailOpen left nil defaults to true, matching the no-Redis
 // default.
@@ -646,6 +697,71 @@ func TestNewGateway_RedisConfigured_NegativeDB_ReturnsConstructorError(t *testin
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
 	if _, err := New(context.Background(), next, cfg, "llmgw"); err == nil {
 		t.Fatal("want constructor error for a negative Redis db")
+	}
+}
+
+// TestBuildRedisClient_NegativePoolSize_ReturnsConstructorError mirrors
+// the negative-DB case above: RedisConfig.PoolSize must fail construction
+// immediately, same as an empty address or a negative db, rather than
+// reaching newRESPClientPool with a value it would otherwise silently
+// clamp up to 1.
+func TestBuildRedisClient_NegativePoolSize_ReturnsConstructorError(t *testing.T) {
+	_, err := buildRedisClient(&RedisConfig{Address: "127.0.0.1:0", PoolSize: -1})
+	if err == nil {
+		t.Fatal("want constructor error for a negative Redis poolSize")
+	}
+}
+
+// TestBuildRedisClient_PoolSizeAboveCeiling_ReturnsConstructorError is the
+// review fix (Should-Fix 1, 2026-08-2x): PoolSize had no upper bound —
+// PoolSize: 1<<20 was accepted and eagerly allocated over a million
+// *respConn structs at construction. A value above respPoolConfigMax must
+// fail construction immediately, mirroring the negative-poolSize check
+// above.
+func TestBuildRedisClient_PoolSizeAboveCeiling_ReturnsConstructorError(t *testing.T) {
+	_, err := buildRedisClient(&RedisConfig{Address: "127.0.0.1:0", PoolSize: respPoolConfigMax + 1})
+	if err == nil {
+		t.Fatal("want constructor error for a Redis poolSize above respPoolConfigMax")
+	}
+}
+
+// TestBuildRedisClient_PoolSizeAtCeiling_Allowed asserts the ceiling
+// itself is inclusive — respPoolConfigMax is a valid, accepted value, not
+// an off-by-one rejection.
+func TestBuildRedisClient_PoolSizeAtCeiling_Allowed(t *testing.T) {
+	client, err := buildRedisClient(&RedisConfig{Address: "127.0.0.1:0", PoolSize: respPoolConfigMax})
+	if err != nil {
+		t.Fatalf("buildRedisClient: %v, want no error at exactly respPoolConfigMax", err)
+	}
+	if got := cap(client.free); got != respPoolConfigMax {
+		t.Errorf("cap(client.free) = %d, want %d", got, respPoolConfigMax)
+	}
+}
+
+// TestBuildRedisClient_PoolSize_ZeroUsesSelfTunedDefault_ExplicitOverrides
+// is perf finding 1's config-wiring proof: RedisConfig.PoolSize left at 0
+// gets defaultRespPoolSize's own self-tuned pool, but any explicit
+// positive value always overrides it — the house engineering rule
+// (self-tuning over operator knobs, explicit override always wins).
+func TestBuildRedisClient_PoolSize_ZeroUsesSelfTunedDefault_ExplicitOverrides(t *testing.T) {
+	cases := []struct {
+		name         string
+		poolSize     int
+		wantPoolSize int
+	}{
+		{name: "zero uses the self-tuned default", poolSize: 0, wantPoolSize: defaultRespPoolSize()},
+		{name: "explicit override wins", poolSize: 3, wantPoolSize: 3},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			client, err := buildRedisClient(&RedisConfig{Address: "127.0.0.1:0", PoolSize: c.poolSize})
+			if err != nil {
+				t.Fatalf("buildRedisClient: %v", err)
+			}
+			if got := cap(client.free); got != c.wantPoolSize {
+				t.Errorf("cap(client.free) = %d, want %d", got, c.wantPoolSize)
+			}
+		})
 	}
 }
 

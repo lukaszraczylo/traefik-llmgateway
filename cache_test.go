@@ -301,9 +301,19 @@ func TestBuildResponseCache_EnabledWithRedis_ReturnsWorkingCache(t *testing.T) {
 // newTestResponseCache builds a responseCache over ln's fake server, with
 // nowFn pinned to a fixed instant so logCacheError's rate-limit window is
 // deterministic. logged collects every logf call's formatted message.
+//
+// Pool size 1 (newRESPClientPool, not newRESPClient's self-tuned
+// default): a caller issuing more than one lookup/store against the
+// returned cache expects every command on the SAME connection, matching
+// runFakeRESPServer's strict one-connection-at-a-time script — with the
+// default pool (size >1, finding 1), a second call could acquire a
+// different, not-yet-dialled slot instead of reusing the first
+// connection, sending a second SELECT the fixed script never expects.
+// Production callers (llmgateway.go's buildRedisClient) are unaffected —
+// they always go through newRESPClient's own default.
 func newTestResponseCache(t *testing.T, ln net.Listener) (c *responseCache, logged *[]string) {
 	t.Helper()
-	client := newRESPClient(ln.Addr().String(), "", 0)
+	client := newRESPClientPool(ln.Addr().String(), "", 0, 1)
 	msgs := []string{}
 	spy := func(format string, args ...any) { msgs = append(msgs, fmt.Sprintf(format, args...)) }
 	c = newResponseCache(client, time.Minute, defaultCacheMaxBodyBytes, spy, spy)
@@ -678,7 +688,10 @@ func TestResponseCache_Store_EffectiveTTLDiffersPerGroup_SETCarriesGroupTTL(t *t
 		{wantArgs: []string{"SET", "k-override", string(val1), "EX", "30"}, reply: []byte("+OK\r\n")},
 		{wantArgs: []string{"SET", "k-inherit", string(val2), "EX", "60"}, reply: []byte("+OK\r\n")},
 	})
-	client := newRESPClient(ln.Addr().String(), "", 0)
+	// Pool size 1 — see newTestResponseCache's own doc comment: two
+	// sequential store() calls below must land on runFakeRESPServer's one
+	// scripted connection, not cycle across separate pool slots.
+	client := newRESPClientPool(ln.Addr().String(), "", 0, 1)
 	noop := func(string, ...any) {}
 	c := newResponseCache(client, time.Minute, defaultCacheMaxBodyBytes, noop, noop) // global ttl = 60s
 	c.nowFn = time.Now
