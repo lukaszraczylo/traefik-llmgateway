@@ -183,6 +183,7 @@ config accepts them as YAML, which decodes to the same JSON shape.
 | `cache` | `CacheConfig` | `{}` (disabled) | Opt-in Redis-backed response cache for unified non-streaming chat/embeddings — see [Caching](#caching). Omitted or `enabled: false` means no caching, byte-identical to a gateway built before this field existed. |
 | `admin` | `*AdminConfig` | `nil` (disabled) | Read-only admin dashboard — see [Admin](#admin). `nil` or `enabled: false` means the `/admin*` routes are not registered at all. |
 | `modelAliases` | `map[string]string` | `{}` | Operator-defined alias id → target model id — see [Model aliases](#model-aliases). Omitted or empty means no aliases, byte-identical to a gateway built before this field existed. |
+| `modelMeta` | `map[string]*ModelMetaConfig` | `{}` | Per-model context-window and cost overrides, keyed by exact `provider/model` or a bare model id — see [Model metadata](#model-metadata). Omitted or empty means no overrides; every model's metadata still resolves through discovery and the built-in table. |
 | `passthroughUnknown` | `bool` | `false` | `false`: a request matching none of the plugin's routes gets a 404 JSON envelope. `true`: it falls through to the router's own backing service. **Does not cover the three media routes** — see the upgrade note below. |
 
 > **Upgrading from v0.1**: `POST /v1/images/generations`, `POST
@@ -214,6 +215,7 @@ also a construction error, never a panic (`providers.go`, `mcp_a2a.go`,
 | `discoveryInterval` | `string` (Go duration) | `1h` | Only meaningful when `discovery: true`. Invalid duration string is a construction error. |
 | `models` | `[]string` | `[]` | Explicit model ids this provider serves. Combined with any discovered ids. |
 | `discovery` | `bool` | `false` | Pull the provider's own model-listing endpoint at startup and on `discoveryInterval`. A discovery failure is logged and non-fatal; construction still succeeds on `models` alone. |
+| `metadataPath` | `string` | `""` (no metadata capture) | Only read by `openai`-type providers. A second endpoint, fetched alongside `discovery`, that reports per-model context length — for example `/api/v0/models` on an LM Studio server. Must start with `/` when set (checked at construction). See [Model metadata](#model-metadata). |
 
 ### `GroupConfig`
 
@@ -306,6 +308,20 @@ own is governed purely by their group's — see
 |---|---|---|
 | `inputPerM` | `float64` | USD per 1,000,000 input/prompt tokens. |
 | `outputPerM` | `float64` | USD per 1,000,000 output/completion tokens. |
+
+### `ModelMetaConfig` (a `modelMeta` entry)
+
+Overrides one model's **context window and per-token cost for display**
+— see [Model metadata](#model-metadata). Distinct from `ModelPricing`
+above, which drives request-cost **accounting**: `modelMeta` never
+changes what a request is billed.
+
+| Field | Type | Default | Semantics |
+|---|---|---|---|
+| `contextTokens` | `int` | `0` (not overridden) | A value of `0` falls through to the next layer (discovery, then the built-in table) instead of overriding with an unknown value. Must not be negative. |
+| `inputCostPerMTokMicroUsd` | `int64` | `0` (not overridden) | Input cost per 1,000,000 tokens, in micro-USD (1 USD = 1,000,000). `0` falls through to the next layer unless `free` is set. Must not be negative. |
+| `outputCostPerMTokMicroUsd` | `int64` | `0` (not overridden) | Output cost per 1,000,000 tokens, in micro-USD. Same fallthrough rule as `inputCostPerMTokMicroUsd`. |
+| `free` | `bool` | `false` | `true` sets both cost fields to an explicit, known zero — distinct from leaving them at `0`, which means "not overridden here, keep looking." Rejected at construction when combined with a non-zero cost field (contradictory). |
 
 ### `TargetConfig` (an `mcpServers` entry)
 
@@ -471,6 +487,130 @@ http:
 - **Admin overview**: `GET /admin/api/overview` includes an `aliases`
   array (`{alias, target}`, sorted by alias) — see [Admin](#admin). No
   secrets involved.
+
+## Model metadata
+
+Per-model context window and per-token cost, resolved for display —
+`GET /v1/models` and the admin dashboard show what an operator or client
+actually knows about a model, without inventing a number nobody
+configured or reported. `modelMeta` (config overrides) is a **separate**
+config surface from `pricing` (request-cost accounting, see
+[`ModelPricing`](#modelpricing)) — the two never affect each other.
+
+Context and cost each resolve through their own layer stack
+(`modelmeta.go`'s `resolveModelMeta`), most specific first:
+
+1. **Context**: a `modelMeta` config override → a provider's own
+   discovery-captured context (`metadataPath`, below) → the built-in
+   table → unknown.
+2. **Cost**: a `modelMeta` config override (or its `free: true`) → a
+   `":free"`-suffixed model id (see the free-tier note below) → the
+   built-in table → unknown.
+
+A field genuinely unknown at every layer stays unknown — never invented
+— and is omitted from `GET /v1/models`, not sent as a misleading zero.
+
+```yaml
+http:
+  middlewares:
+    llmgateway:
+      plugin:
+        llmgateway:
+          # ... providers, groups, users unchanged ...
+          modelMeta:
+            # Exact "provider/model" key.
+            "uni/deepseek-v4-flash-0731":
+              contextTokens: 524288
+              free: true
+            # Bare model id — applies wherever that bare id resolves.
+            "ornith-397b/qwen3.6-27b/btl-4":
+              contextTokens: 262144
+              free: true
+```
+
+- **Alias inheritance**: a [model alias](#model-aliases) inherits its
+  target's fully resolved metadata, unless the alias id itself has its
+  own `modelMeta` entry — that entry's fields win, independently per
+  field (setting only `contextTokens` on the alias still inherits the
+  target's cost).
+- **Free-tier naming convention**: a model id ending in `:free` (a real
+  provider naming convention some upstreams use for their own free-tier
+  models) resolves to a known, zero cost even with no `modelMeta` entry
+  and no built-in table row for that exact id — ranked above the
+  built-in table, below an explicit `modelMeta` override. Context is
+  unaffected by this rule; it still resolves through the normal layers
+  above.
+
+### Discovery-captured context (`metadataPath`)
+
+Set `metadataPath` on an `openai`-type provider to fetch a second
+endpoint alongside `discovery`, one that reports per-model context
+length — LM Studio's own, non-OpenAI-compatible endpoint is the
+supported shape:
+
+```yaml
+providers:
+  macstudio:
+    type: openai
+    baseUrl: "http://macstudio.local:1234"
+    discovery: true
+    metadataPath: "/api/v0/models"
+```
+
+The response's `loaded_context_length` field is preferred over
+`max_context_length` when both are present — it reflects the context
+actually usable right now, which an operator can configure smaller than
+the model's own maximum under VRAM-constrained runtime settings. This
+means the reported context window can **change** across a discovery
+refresh (a model reloaded with a different context setting reports a
+different value) — it is not a fixed, one-time fact the way the built-in
+table's numbers are. A failed or absent metadata fetch is always
+non-fatal: no metadata is captured for that refresh, and `discovery`
+itself is unaffected.
+
+### Built-in table
+
+`pricing_data_gen.go` is a generated, checked-in table synced from
+[LiteLLM's own pricing
+data](https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json),
+pruned to the provider types this gateway can meaningfully match
+(`openai`, `anthropic`, `deepseek`, `xai`, `minimax`, `cerebras`,
+`dashscope`, `moonshot`) and to chat/embedding models only — the full
+upstream table is over 3,000 entries, most of them for providers this
+gateway has no adapter for.
+
+Run `make pricing-sync` to regenerate it against the current upstream
+data. This fetches over the network and writes `pricing_data_gen.go` at
+build time only — the running plugin never fetches anything itself. The
+generated file's header records a content digest of the fetched bytes,
+not a date, so a re-run against unchanged upstream data reproduces an
+identical file with nothing to review.
+
+### `GET /v1/models` extension fields
+
+Two OpenAI-compat-safe extra fields on each model object, present only
+when known:
+
+```json
+{
+  "id": "openai/gpt-5",
+  "object": "model",
+  "owned_by": "openai",
+  "context_window": 400000,
+  "pricing": {"input_per_mtok_usd": 1.25, "output_per_mtok_usd": 10}
+}
+```
+
+- `context_window` — an integer token count, omitted when unknown.
+- `pricing` — `{input_per_mtok_usd, output_per_mtok_usd}`, both floats
+  in USD per 1,000,000 tokens. Omitted when unknown; present with `0`
+  values for an explicitly free model — a known zero, not an absent
+  field.
+
+The admin dashboard's `GET /admin/api/overview` exposes the identical
+resolved values per provider (`providers[].modelMeta`, keyed by upstream
+model id) and per alias (`aliases[].modelMeta`) — see
+[Admin](#admin).
 
 ## Limits and accounting
 
@@ -842,10 +982,13 @@ or in CI.
   otherwise show the identical zero `lastRefresh`), `attemptsDay`/
   `failuresDay`/`attemptsMinute`/`failuresMinute` (the provider's own
   current-window success-rate counters — see [Limits and
-  accounting](#limits-and-accounting)), and `modelRates` (the identical
+  accounting](#limits-and-accounting)), `modelRates` (the identical
   `attemptsDay`/`failuresDay` pair per known model, keyed by model id — no
   per-model minute figures, since nothing displays them; the dashboard's
-  per-model badge falls back to a day-window-only detail instead). `usage`
+  per-model badge falls back to a day-window-only detail instead), and
+  `modelMeta` (the resolved context window and cost per known model —
+  see [Model metadata](#model-metadata)); each alias entry carries its
+  own `modelMeta` too. `usage`
   returns every user's and every group's
   current-window counter values — `requestsPerMinute`, `requestsPerDay`,
   `tokensInPerDay`/`tokensOutPerDay`, `tokensInPerMonth`/
