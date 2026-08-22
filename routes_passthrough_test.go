@@ -206,6 +206,30 @@ func TestHasTraversalSegment(t *testing.T) {
 		{"..%2f..%2fsecret", true},
 		{"..%2F..%2Fsecret", true},
 		{"%zz", true}, // invalid percent-encoding
+
+		// Round 3 (security review, 2026-08-22): path-parameter form
+		// ("..;/x", Tomcat/Spring's RFC 3986 §3.3 convention) — the
+		// segment's identity is everything before its first ";".
+		{"..;/x", true},
+		{"v1/foo;bar/x", false}, // a genuine path parameter on a non-".." segment is not itself traversal
+		{"a;../x", false},       // ";../" strips to "a", not "..", on the FIRST segment — the traversal is in a later, untouched segment here, so this specific rest has no ".." segment at all
+
+		// Round 3: backslash normalization ("..%5c..%5cx" decodes to
+		// "..\..\x" — a Windows/.NET-style separator).
+		{"..%5c..%5cx", true},
+		{"..%5C..%5Cx", true},
+		{"v1%5cfiles", false}, // a single encoded backslash segment with no ".." component
+
+		// Round 3: double-encoding ("%252e%252e/x" decodes ONCE to
+		// "%2e%2e/x" — still containing "%", refused rather than decoded
+		// a second time).
+		{"%252e%252e/x", true},
+		{"%252E%252E/x", true},
+		{"a%25b", true}, // a literal, intentionally double-encoded "%25" (a percent sign) is refused too — accepted trade-off, no legitimate use in this package
+
+		// Existing correct behavior must be unchanged: a legitimate
+		// single-encoded "/" within one segment, and literal "..".
+		{"a%2Fb%2Fc", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.rest, func(t *testing.T) {
@@ -835,6 +859,13 @@ func TestHandlePassthrough_TraversalPath_Returns400(t *testing.T) {
 	for _, path := range []string{
 		"/openai/../secret",
 		"/openai/..%2f..%2fsecret",
+		// Round 3 (security review, 2026-08-22): path-parameter form,
+		// backslash normalization, and double-encoding, driven through
+		// the full ServeHTTP dispatch rather than hasTraversalSegment
+		// directly.
+		"/openai/..;/secret",
+		"/openai/..%5c..%5csecret",
+		"/openai/%252e%252e/secret",
 	} {
 		t.Run(path, func(t *testing.T) {
 			req := httptest.NewRequest(http.MethodGet, path, nil)

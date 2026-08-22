@@ -245,26 +245,64 @@ func passthroughRoute(path string) (providerName, rest string, ok bool) {
 	return providerName, rest, true
 }
 
-// hasTraversalSegment reports whether rest, once percent-decoded, contains
-// a path segment exactly equal to "..". rest is still in its escaped form
-// here (see passthroughRoute) — decoding it is a validation-only step,
-// never used to build the outgoing upstream URL, so a legitimate
-// percent-encoded segment (e.g. "a%2Fb" naming a literal "a/b" resource)
-// still reaches the upstream exactly as the client sent it. Checking the
-// decoded form, not the escaped one, is what catches an encoded traversal
-// attempt like "..%2f..%2fsecret": as a single escaped segment it has no
-// literal "/" for a naive split to catch, but a permissive upstream
-// server decoding that same "%2f" itself would read it as "../../secret"
-// — this check rejects it here instead. A rest that fails to
-// url.PathUnescape at all is rejected too: a malformed percent-encoding
-// is not a path this gateway can reason about safely.
+// hasTraversalSegment reports whether rest, once percent-decoded and
+// normalized, contains a path segment that resolves to ".." or ".". rest
+// is still in its escaped form here (see passthroughRoute) — decoding it
+// is a validation-only step, never used to build the outgoing upstream
+// URL, so a legitimate percent-encoded segment (e.g. "a%2Fb" naming a
+// literal "a/b" resource) still reaches the upstream exactly as the
+// client sent it. Checking the decoded form, not the escaped one, is what
+// catches an encoded traversal attempt like "..%2f..%2fsecret": as a
+// single escaped segment it has no literal "/" for a naive split to
+// catch, but a permissive upstream server decoding that same "%2f"
+// itself would read it as "../../secret" — this check rejects it here
+// instead. A rest that fails to url.PathUnescape at all is rejected too:
+// a malformed percent-encoding is not a path this gateway can reason
+// about safely.
+//
+// Round 3 (security review, 2026-08-22) closes three further bypasses the
+// single-pass decode-and-split above missed, each measured against a
+// real upstream convention:
+//
+//   - Path parameters ("..;/x", the Tomcat/Spring RFC 3986 §3.3
+//     convention): a segment's own identity is everything BEFORE its
+//     first ";" — an upstream honoring that convention resolves
+//     "..;foo=bar" identically to "..". Every segment has its
+//     ";"-suffix stripped before the ".."/"." comparison below.
+//   - Backslash normalization ("..%5c..%5cx", decoding to "..\..\x"):
+//     Windows/.NET and other backslash-normalizing upstreams treat "\"
+//     as an equivalent path separator. The fully decoded string has
+//     every "\" replaced with "/" before splitting, so a segment
+//     hidden behind a backslash is caught the same as one behind "/".
+//   - Double-encoding ("%252e%252e/x"): one url.PathUnescape pass
+//     decodes this to "%2e%2e/x" — still containing "%", meaning a
+//     SECOND decode pass (which this function deliberately never
+//     performs — attempting one only invites indefinite re-encoding)
+//     would reveal a hidden "..". Rather than decode again, a rest that
+//     still contains "%" after the one legitimate unescape pass is
+//     rejected outright — fail closed on ambiguity, matching this
+//     function's existing rule for a rest that fails to unescape at
+//     all. This does reject an operator's literal, intentionally
+//     double-encoded "%25" in a resource name; accepted, since this
+//     package has no legitimate use for one and the alternative is an
+//     unbounded decode loop.
+//
+// Literal ".." and single-encoded "..%2f" keep their existing, already
+// correct behavior — both still resolve to a segment of exactly "..".
 func hasTraversalSegment(rest string) bool {
 	decoded, err := url.PathUnescape(rest)
 	if err != nil {
 		return true
 	}
-	for _, seg := range strings.Split(decoded, "/") {
-		if seg == ".." {
+	if strings.Contains(decoded, "%") {
+		return true
+	}
+	normalized := strings.ReplaceAll(decoded, `\`, "/")
+	for _, seg := range strings.Split(normalized, "/") {
+		if i := strings.IndexByte(seg, ';'); i >= 0 {
+			seg = seg[:i]
+		}
+		if seg == ".." || seg == "." {
 			return true
 		}
 	}
