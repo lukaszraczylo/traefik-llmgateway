@@ -4,10 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -1029,7 +1032,7 @@ func TestMcpBackendCall_HandshakeFallbackTrigger(t *testing.T) {
 				t.Fatal("handler is not *Gateway")
 			}
 
-			_, _ = gw.mcpBackendCall(context.Background(), srv.URL, "tools/list", struct{}{})
+			_, _ = gw.mcpBackendCall(context.Background(), srv.URL, "tools/list", struct{}{}, mcpBackendResponseMaxBytes)
 
 			gotCalls := callCount.Load()
 			if tc.wantHandshake && gotCalls < 2 {
@@ -1058,9 +1061,131 @@ func TestMcpBackendCall_NetworkFailure_NeverAttemptsHandshake(t *testing.T) {
 		t.Fatal("handler is not *Gateway")
 	}
 
-	_, err = gw.mcpBackendCall(context.Background(), "http://127.0.0.1:1", "tools/list", struct{}{})
+	_, err = gw.mcpBackendCall(context.Background(), "http://127.0.0.1:1", "tools/list", struct{}{}, mcpBackendResponseMaxBytes)
 	if err == nil {
 		t.Fatal("want an error (nothing listening on 127.0.0.1:1)")
+	}
+}
+
+// --- security review round 2, important finding 4: dual response caps ---
+
+// TestMcpBackendCall_ResponseExceedsCap_ReturnsDistinctTooLargeError is a
+// fast, small-scale unit test of doBackendJSONRPC's own maxBytes
+// mechanism, using an artificially tiny cap so the test needs no
+// multi-megabyte payload: a backend response over the cap must be
+// reported by wrapping errMCPResponseTooLarge — distinguishable via
+// errors.Is from an ordinary network/parse failure — never silently
+// truncated into a confusing parse error.
+func TestMcpBackendCall_ResponseExceedsCap_ReturnsDistinctTooLargeError(t *testing.T) {
+	const tinyCap = 64
+	big := strings.Repeat("x", tinyCap*4) // well past tinyCap once JSON-encoded
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req jsonrpcRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		result, _ := json.Marshal(map[string]string{"data": big})
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(jsonrpcResponse{ID: req.ID, Result: result})
+	}))
+	defer srv.Close()
+
+	cfg := newFederationTestConfig(srv.URL, "http://beta.invalid", false)
+	h, err := New(context.Background(), http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	gw, ok := h.(*Gateway)
+	if !ok {
+		t.Fatal("handler is not *Gateway")
+	}
+
+	_, err = gw.mcpBackendCall(context.Background(), srv.URL, "tools/list", struct{}{}, tinyCap)
+	if err == nil {
+		t.Fatal("want an error for a response exceeding the cap")
+	}
+	if !errors.Is(err, errMCPResponseTooLarge) {
+		t.Errorf("err = %v, want it to wrap %v", err, errMCPResponseTooLarge)
+	}
+}
+
+// TestMcpBackendCall_ResponseAtOrUnderCap_Succeeds proves the cap+1 read
+// technique does not false-positive: a response exactly AT the cap must
+// still succeed, not be mistaken for oversized.
+func TestMcpBackendCall_ResponseAtOrUnderCap_Succeeds(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req jsonrpcRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		result, _ := json.Marshal(map[string]bool{"ok": true})
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(jsonrpcResponse{ID: req.ID, Result: result})
+	}))
+	defer srv.Close()
+
+	cfg := newFederationTestConfig(srv.URL, "http://beta.invalid", false)
+	h, err := New(context.Background(), http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	gw, ok := h.(*Gateway)
+	if !ok {
+		t.Fatal("handler is not *Gateway")
+	}
+
+	// A generous cap comfortably above this tiny response — must succeed
+	// cleanly, not be flagged as too-large.
+	resp, err := gw.mcpBackendCall(context.Background(), srv.URL, "tools/list", struct{}{}, 4096)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.Error != nil {
+		t.Fatalf("resp.Error = %+v, want nil", resp.Error)
+	}
+}
+
+// TestHandleMCPFederated_ToolsCall_ResponseBetween4And10MiB_Succeeds is
+// the end-to-end regression for important finding 4: a real tool result
+// between mcpBackendResponseMaxBytes (4MiB, the fan-out-only cap) and
+// mcpBackendCallResponseMaxBytes (10MiB, tools/call's own cap) — legal
+// under the pre-finding-1c budget, and a realistic size for an image or
+// extracted-document tool result — must succeed on the tools/call path,
+// proving that path was never shrunk to the fan-out's smaller cap.
+func TestHandleMCPFederated_ToolsCall_ResponseBetween4And10MiB_Succeeds(t *testing.T) {
+	const payloadBytes = 6 << 20 // 6MiB: over the 4MiB fan-out cap, under the 10MiB tools/call cap
+	big := strings.Repeat("y", payloadBytes)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req jsonrpcRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if req.Method == "tools/call" {
+			result, _ := json.Marshal(map[string]string{"data": big})
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(jsonrpcResponse{ID: req.ID, Result: result})
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(jsonrpcResponse{ID: req.ID, Result: json.RawMessage(`{}`)})
+	}))
+	defer srv.Close()
+
+	cfg := newFederationTestConfig(srv.URL, "http://beta.invalid", false)
+	h, err := New(context.Background(), http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, newFederatedRequest(t, "sk-alice", jsonrpcRequest{
+		JSONRPC: jsonrpcVersion, Method: "tools/call", ID: json.RawMessage("1"),
+		Params: json.RawMessage(`{"name":"alpha_lookup"}`),
+	}))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	var got jsonrpcResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Error != nil {
+		t.Fatalf("error = %+v, want nil (a 6MiB result must succeed on the tools/call path)", got.Error)
 	}
 }
 
@@ -1211,6 +1336,274 @@ func TestHandleMCPFederated_ToolsList_AllServersFail_ReturnsInternalError(t *tes
 	}
 	if got.Error == nil || got.Error.Code != jsonrpcInternalError || got.Error.Message != "no MCP server reachable" {
 		t.Errorf("error = %+v, want internal error %q", got.Error, "no MCP server reachable")
+	}
+}
+
+// --- security audit finding 1a: fan-out concurrency bound ---
+
+// TestHandleMCPFederated_ToolsList_FanoutBoundedConcurrency proves
+// mcpFederatedFanoutConcurrency actually caps how many backend servers a
+// single tools/list call contacts AT ONCE — not just that it eventually
+// contacts all of them. numServers is comfortably above the cap so the
+// first wave of goroutines through the semaphore must stall on it: the
+// test blocks every mock server's handler until every one of them
+// observes exactly mcpFederatedFanoutConcurrency requests in flight
+// simultaneously, then releases them all. If the fan-out were unbounded
+// (the pre-fix behavior), every server's handler would receive its
+// request immediately and this test would deadlock waiting for
+// concurrency to reach a ceiling nothing ever enforces — a real
+// regression here hangs the test until it times out, it does not
+// silently pass.
+func TestHandleMCPFederated_ToolsList_FanoutBoundedConcurrency(t *testing.T) {
+	const numServers = mcpFederatedFanoutConcurrency + 4
+
+	var (
+		current int32
+		peak    int32
+		release = make(chan struct{})
+	)
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{"openai": {Type: "openai", APIKey: "k"}}
+	cfg.MCPServers = make(map[string]*TargetConfig, numServers)
+	for i := 0; i < numServers; i++ {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			n := atomic.AddInt32(&current, 1)
+			for {
+				old := atomic.LoadInt32(&peak)
+				if n <= old || atomic.CompareAndSwapInt32(&peak, old, n) {
+					break
+				}
+			}
+			<-release
+			atomic.AddInt32(&current, -1)
+
+			var req jsonrpcRequest
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			result, _ := json.Marshal(mcpToolsListResult{})
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(jsonrpcResponse{ID: req.ID, Result: result})
+		}))
+		t.Cleanup(srv.Close)
+		cfg.MCPServers[fmt.Sprintf("srv%d", i)] = &TargetConfig{URL: srv.URL}
+	}
+	cfg.Groups = map[string]*GroupConfig{"default": {}}
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{{Name: "alice", Group: "default", APIKey: "sk-alice"}}}
+
+	h, err := New(context.Background(), http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	done := make(chan struct{})
+	rec := httptest.NewRecorder()
+	go func() {
+		h.ServeHTTP(rec, newFederatedRequest(t, "sk-alice", jsonrpcRequest{JSONRPC: jsonrpcVersion, Method: "tools/list", ID: json.RawMessage("1")}))
+		close(done)
+	}()
+
+	deadline := time.After(5 * time.Second)
+	for atomic.LoadInt32(&current) < mcpFederatedFanoutConcurrency {
+		select {
+		case <-deadline:
+			t.Fatal("concurrency never reached mcpFederatedFanoutConcurrency — fan-out may be serialized instead of bounded")
+		case <-time.After(time.Millisecond):
+		}
+	}
+	// Give any wrongly-unbounded extra goroutines a chance to also reach
+	// the handler before we sample — if the bound were missing, ALL
+	// numServers requests would already be in flight by now.
+	time.Sleep(20 * time.Millisecond)
+	if got := atomic.LoadInt32(&current); got > mcpFederatedFanoutConcurrency {
+		t.Fatalf("current in-flight backends = %d, want <= %d (fan-out is not bounded)", got, mcpFederatedFanoutConcurrency)
+	}
+	close(release)
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("request never completed after releasing all backends")
+	}
+
+	if peak != mcpFederatedFanoutConcurrency {
+		t.Errorf("peak concurrent backends = %d, want exactly %d", peak, mcpFederatedFanoutConcurrency)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// --- security audit finding 2: unrecovered panic in the fan-out ---
+
+// panicOnHostRoundTripper panics for any request to panicHost — simulating
+// an unrecovered interpreter-level panic reached deep inside one backend's
+// own call path (mcpBackendCall -> doBackendJSONRPC -> g.targetClient.Do)
+// — and delegates every other request to next unchanged. This exercises
+// the REAL code path a genuine Yaegi interpreter panic would take,
+// through the actual HTTP client the gateway uses, rather than adding any
+// test-only hook to production code.
+type panicOnHostRoundTripper struct {
+	next      http.RoundTripper
+	panicHost string
+}
+
+func (rt panicOnHostRoundTripper) RoundTrip(r *http.Request) (*http.Response, error) {
+	if r.URL.Host == rt.panicHost {
+		panic("simulated interpreter-level panic mid-flight")
+	}
+	return rt.next.RoundTrip(r)
+}
+
+// TestHandleMCPFederated_ToolsList_PanickingBackendDegradesNotCrashes is
+// the regression for the missing recover() in mcpFederatedToolsList's own
+// fan-out goroutine (security audit finding 2, 2026-08-22): that goroutine
+// runs off the request's own goroutine, so an unrecovered panic there has
+// no ServeHTTP caller to unwind into and would crash the whole shared
+// Traefik process, not just fail one backend. Reaching the end of this
+// test at all is part of the proof: if the recover() were missing, beta's
+// panicking RoundTrip call below would already have crashed the test
+// binary — exactly the registry.go precedent this fix follows
+// (TestModelRegistry_RefreshProvider_AdapterPanics_RecoversAndReleasesInFlight).
+func TestHandleMCPFederated_ToolsList_PanickingBackendDegradesNotCrashes(t *testing.T) {
+	alpha := newMockJSONRPCServer(t, []mcpTool{{Name: "lookup"}})
+	beta := newMockJSONRPCServer(t, []mcpTool{{Name: "search"}}) // never actually reached; RoundTrip panics first
+	cfg := newFederationTestConfig(alpha.srv.URL, beta.srv.URL, false)
+	h, err := New(context.Background(), http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	gw, ok := h.(*Gateway)
+	if !ok {
+		t.Fatal("handler is not *Gateway")
+	}
+	betaURL, err := betaHost(beta.srv.URL)
+	if err != nil {
+		t.Fatalf("parse beta URL: %v", err)
+	}
+	gw.targetClient.Transport = panicOnHostRoundTripper{panicHost: betaURL, next: http.DefaultTransport}
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, newFederatedRequest(t, "sk-alice", jsonrpcRequest{JSONRPC: jsonrpcVersion, Method: "tools/list", ID: json.RawMessage("1")}))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+
+	var got jsonrpcResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Error != nil {
+		t.Fatalf("error = %+v, want nil (a panicking server degrades the aggregate, it does not fail the call)", got.Error)
+	}
+	var result mcpToolsListResult
+	if err := json.Unmarshal(got.Result, &result); err != nil {
+		t.Fatalf("decode result: %v", err)
+	}
+	if len(result.Tools) != 1 || result.Tools[0].Name != "alpha_lookup" {
+		t.Errorf("tools = %+v, want exactly alpha_lookup (beta panicked, skipped)", result.Tools)
+	}
+}
+
+// betaHost extracts the host:port a RoundTripper sees on r.URL.Host for
+// requests aimed at rawURL — httptest.Server URLs are already in that
+// exact "http://host:port" form, so this just strips the scheme.
+func betaHost(rawURL string) (string, error) {
+	const prefix = "http://"
+	if !strings.HasPrefix(rawURL, prefix) {
+		return "", fmt.Errorf("unexpected test server URL shape: %q", rawURL)
+	}
+	return strings.TrimPrefix(rawURL, prefix), nil
+}
+
+// --- security review round 2, critical finding 3: tools/list is NOT weighted ---
+
+// TestHandleMCPFederated_ToolsList_NotWeightedByBackendCount_BudgetBuysNCalls
+// is the regression for security review round 2's critical finding 3:
+// weighting checkAndCount by the number of allowed MCP servers (security
+// audit finding 1b's original fix) was not default-preserving — on a
+// config where the MCP allow-list is unrestricted (every group on the
+// live fleet), it silently turned a configured requests-per-minute budget
+// into budget/serverCount successful tools/list calls, with NO config
+// change on the operator's part (11 servers, requests-per-minute: 60 ->
+// only 5 calls/minute actually succeeded; examples/kubernetes.yaml's
+// shipped requests-per-minute: 10 would 429 the very FIRST call ever
+// made). With numServers (11, matching the live fleet) configured and a
+// requests-per-minute budget of exactly rpmBudget, all rpmBudget calls
+// must succeed and the next one must be rejected — proving the charge is
+// exactly 1 per call, regardless of how many backends that call fans out
+// to.
+func TestHandleMCPFederated_ToolsList_NotWeightedByBackendCount_BudgetBuysNCalls(t *testing.T) {
+	const numServers = 11 // matches the live fleet's own MCP server count
+	const rpmBudget = 5
+
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{"openai": {Type: "openai", APIKey: "k"}}
+	cfg.MCPServers = make(map[string]*TargetConfig, numServers)
+	for i := 0; i < numServers; i++ {
+		srv := newMockJSONRPCServer(t, []mcpTool{{Name: "lookup"}})
+		cfg.MCPServers[fmt.Sprintf("srv%d", i)] = &TargetConfig{URL: srv.srv.URL}
+	}
+	cfg.Groups = map[string]*GroupConfig{"default": {Limits: &LimitsConfig{RequestsPerMinute: rpmBudget}}}
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{{Name: "alice", Group: "default", APIKey: "sk-alice"}}}
+
+	h, err := New(context.Background(), http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	for i := 1; i <= rpmBudget; i++ {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, newFederatedRequest(t, "sk-alice", jsonrpcRequest{JSONRPC: jsonrpcVersion, Method: "tools/list", ID: json.RawMessage(fmt.Sprintf("%d", i))}))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("call %d/%d status = %d, want 200 (budget must buy exactly rpmBudget calls, not rpmBudget/numServers), body=%s", i, rpmBudget, rec.Code, rec.Body.String())
+		}
+	}
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, newFederatedRequest(t, "sk-alice", jsonrpcRequest{JSONRPC: jsonrpcVersion, Method: "tools/list", ID: json.RawMessage(`"over"`)}))
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("call %d status = %d, want 429 (budget exhausted), body=%s", rpmBudget+1, rec.Code, rec.Body.String())
+	}
+}
+
+// TestHandleMCPFederated_ToolsList_AmplificationVisibleAtTargetScopeOnly
+// proves the fan-out's real per-server cost is still fully visible to an
+// operator without silently consuming tenant quota (security review round
+// 2, 2026-08-22, critical finding 3's own ruling): after ONE tools/list
+// call against 2 servers, the user's own requests-per-minute counter
+// reads exactly 1 (never weighted), while EACH server's own "mcp"
+// target-scope counter (countTargetRequests, limits.go) reads exactly 1
+// — the real amplification, attributed where an operator can see it.
+func TestHandleMCPFederated_ToolsList_AmplificationVisibleAtTargetScopeOnly(t *testing.T) {
+	alpha := newMockJSONRPCServer(t, []mcpTool{{Name: "lookup"}})
+	beta := newMockJSONRPCServer(t, []mcpTool{{Name: "search"}})
+	cfg := newFederationTestConfig(alpha.srv.URL, beta.srv.URL, false)
+	h, err := New(context.Background(), http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	gw, ok := h.(*Gateway)
+	if !ok {
+		t.Fatal("handler is not *Gateway")
+	}
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, newFederatedRequest(t, "sk-alice", jsonrpcRequest{JSONRPC: jsonrpcVersion, Method: "tools/list", ID: json.RawMessage("1")}))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+
+	now := time.Now()
+	userReq, ok := gw.limiter.getCounter("user", "alice", metricReq, windowDay, now)
+	if !ok || userReq != 1 {
+		t.Errorf("user req:day counter = %d (ok=%v), want exactly 1 (never weighted by backend count)", userReq, ok)
+	}
+	alphaReq, ok := gw.limiter.getCounter(targetKindMCP, "alpha", metricReq, windowDay, now)
+	if !ok || alphaReq != 1 {
+		t.Errorf("mcp/alpha req:day counter = %d (ok=%v), want 1", alphaReq, ok)
+	}
+	betaReq, ok := gw.limiter.getCounter(targetKindMCP, "beta", metricReq, windowDay, now)
+	if !ok || betaReq != 1 {
+		t.Errorf("mcp/beta req:day counter = %d (ok=%v), want 1", betaReq, ok)
 	}
 }
 

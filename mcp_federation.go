@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -65,6 +66,65 @@ const (
 	// starved by, the real call it is cleaning up after.
 	mcpSessionCloseTimeout = 5 * time.Second
 )
+
+// mcpBackendResponseMaxBytes caps a single backend MCP server's HTTP
+// response body for the tools/list FAN-OUT path only (mcpFederatedToolsList)
+// — previously maxRequestBytes (10MiB, routes_unified.go), a budget sized
+// for a CLIENT's own chat/embeddings request body, not a backend's
+// JSON-RPC reply (security audit finding 1c, 2026-08-22). 4MiB matches
+// this codebase's other "generous but bounded" read caps for a non-
+// primary-request-body read (cache.go's maxAccountingTeeBytes is also
+// 4MiB) — measured at 547KiB for a real tools/list response describing
+// 20 fat tools (security review round 2, 2026-08-22), comfortably below
+// this cap — while bounding mcpFederatedFanoutConcurrency backends'
+// worst-case concurrent memory to a small multiple of 4MiB, against the
+// unbounded ~110MiB (11 production servers × up to 10MiB each, all fired
+// at once) the security audit measured before this fix. This cap is
+// deliberately NOT used for tools/call — see mcpBackendCallResponseMaxBytes,
+// whose own doc comment covers why the fan-out memory argument does not
+// apply there.
+const mcpBackendResponseMaxBytes = 4 << 20
+
+// mcpBackendCallResponseMaxBytes caps a single backend's response for the
+// tools/call path (mcpFederatedToolsCall) — kept at maxRequestBytes
+// (10MiB), the SAME budget this file used everywhere before finding 1c,
+// deliberately NOT shrunk to mcpBackendResponseMaxBytes (security review
+// round 2, 2026-08-22, important finding 4): tools/call always resolves
+// to exactly ONE backend (resolveFederatedTool), so the fan-out memory-
+// amplification argument that justifies the fan-out path's smaller cap
+// does not hold here at all — a single tool result can legitimately be
+// much larger than a tools/list schema listing (an extracted document, an
+// image or other blob a tool returns), and silently truncating one into
+// a generic parse failure would be a real, avoidable regression for any
+// tool whose legitimate results sit between 4MiB and 10MiB.
+const mcpBackendCallResponseMaxBytes = maxRequestBytes
+
+// errMCPResponseTooLarge is the sentinel doBackendJSONRPC wraps when a
+// backend response hits its call's maxBytes cap (security review round 2,
+// 2026-08-22, important finding 4), letting the tools/call handler report
+// "response too large" instead of a generic "upstream error".
+//
+// errors.Is is the correct match here, and it is Yaegi-safe. An earlier
+// revision used a string marker plus strings.Contains out of caution; a
+// harness on yaegi v0.16.1 (the version tools/yaegi-check pins, same
+// stdlib.Symbols set) interpreting this shape found errors.Is correct
+// through shallow, deep, and multi-%w wrapping, and correctly false for
+// an unrelated error. The reason is that declaring the VARIABLE in
+// interpreted code does not make its VALUE interpreted: errors.New
+// returns a compiled *errors.errorString and fmt.Errorf a compiled
+// *fmt.wrapError, so the whole chain errors.Is walks is compiled. This
+// is the same shape retry.go:isTransient has run in production since
+// v0.2.0, and errRequestBuildFailed (providers.go) is already matched
+// this way through a multi-%w wrap.
+//
+// Neither documented Yaegi trap applies: matchesSentinel's TRIP-WIRE
+// (limits.go) is about a plugin-declared error TYPE, which errors.New
+// does not create, and the comma-ok trap needs a plugin-declared
+// interface. A string check was also strictly worse than it looked —
+// err.Error() is itself an interpreted-to-compiled method dispatch, so
+// it verified nothing extra, and matching on text that partly comes
+// from the backend admits false positives a sentinel cannot have.
+var errMCPResponseTooLarge = errors.New("mcp backend response too large")
 
 // jsonrpcRequest is one JSON-RPC 2.0 request/notification, decoded from
 // the client's POST body and re-encoded (with a synthetic id) for this
@@ -234,9 +294,32 @@ func allowedMCPServerNames(cfg *Config, grp *group) []string {
 //
 // checkAndCount runs once per incoming request, before method dispatch —
 // covering the caller's own user/group/total scopes exactly like every
-// other metered route — with per-target attribution added separately
+// other metered route, charging the plain weight of one request
+// regardless of method — with per-target attribution added separately
 // inside mcpFederatedToolsList/mcpFederatedToolsCall (their own doc
 // comments cover exactly what "attributed" means for each).
+//
+// tools/list's fan-out is deliberately NOT charged against the caller's
+// own requests-per-minute/requests-per-day budget (security review round
+// 2, 2026-08-22, critical finding 3 — reverting security audit finding
+// 1b's weighted-charge attempt): weighting checkAndCount by the number of
+// allowed MCP servers is not default-preserving — on this operator's own
+// live fleet, both configured groups have an empty MCP allow-list (every
+// server allowed), so EVERY tools/list call would have weighed 11,
+// silently turning a configured requests-per-minute: 60 into an effective
+// budget of 5 successful tools/list calls per minute, and
+// examples/kubernetes.yaml's shipped requests-per-minute: 10 would have
+// 429'd the very FIRST tools/list call ever made — with no config change
+// on the operator's part. The fan-out's real amplification is still
+// fully visible to an operator without silently consuming tenant quota:
+// mcpFederatedToolsList's own countTargetRequests call attributes one
+// request to EVERY server actually attempted, at the "mcp"/target-id
+// scope (limits.go) — a SEPARATE scope kind from the user/group/total
+// scopes checkAndCount evaluates here — so the dashboard's targets view
+// already shows the true per-server cost. The fan-out's outbound HTTP/
+// memory cost is bounded instead by mcpFederatedFanoutConcurrency's
+// semaphore (mcpFederatedToolsList's own doc comment), which is the
+// actual protection against the amplification finding 1 described.
 func (g *Gateway) handleMCPFederated(w http.ResponseWriter, r *http.Request, u *user, grp *group) {
 	if r.Header.Get("Upgrade") != "" {
 		writeOAIError(w, http.StatusNotImplemented, "invalid_request_error", "websocket/upgrade passthrough not supported")
@@ -270,7 +353,7 @@ func (g *Gateway) handleMCPFederated(w http.ResponseWriter, r *http.Request, u *
 	case req.Method == "ping":
 		writeJSONRPCResult(w, req.ID, map[string]any{})
 	case req.Method == "tools/list":
-		g.mcpFederatedToolsList(w, r, req, grp)
+		g.mcpFederatedToolsList(w, r, req, allowedMCPServerNames(g.cfg, grp))
 	case req.Method == "tools/call":
 		g.mcpFederatedToolsCall(w, r, req, grp)
 	case strings.HasPrefix(req.Method, "notifications/"):
@@ -370,8 +453,16 @@ type mcpToolsListResult struct {
 // doBackendJSONRPC issues one JSON-RPC 2.0 POST to targetURL — an MCP
 // server's own configured base URL, the same single endpoint
 // handleTargetProxy reverse-proxies every method to — carrying sessionID
-// as the Mcp-Session-Id request header when non-empty. It is the one place
-// that actually builds and sends an HTTP request for this file; every
+// as the Mcp-Session-Id request header when non-empty, and reading at
+// most maxBytes of the response body (mcpBackendResponseMaxBytes for the
+// tools/list fan-out, mcpBackendCallResponseMaxBytes for tools/call —
+// their own doc comments cover why the two differ; security review round
+// 2, 2026-08-22, important finding 4). A response body that hits maxBytes
+// is reported by wrapping errMCPResponseTooLarge, not silently truncated
+// into whatever partial (and likely invalid) JSON happened to fit.
+//
+// It is the one place that actually builds and sends an HTTP request for
+// this file; every
 // other function in the handshake-fallback machinery (mcpBackendCall,
 // mcpBackendHandshake, mcpBackendCloseSession's own DELETE aside) goes
 // through this.
@@ -396,7 +487,7 @@ type mcpToolsListResult struct {
 // that WAS valid JSON but not a real JSON-RPC response (see
 // parseBackendJSONRPC's own validity check) would have silently produced
 // an all-zero-fields response otherwise.
-func (g *Gateway) doBackendJSONRPC(ctx context.Context, targetURL, method string, params any, sessionID string) (resp *jsonrpcResponse, status int, respSessionID string, err error) {
+func (g *Gateway) doBackendJSONRPC(ctx context.Context, targetURL, method string, params any, sessionID string, maxBytes int64) (resp *jsonrpcResponse, status int, respSessionID string, err error) {
 	paramsRaw, err := json.Marshal(params)
 	if err != nil {
 		return nil, 0, "", err
@@ -433,12 +524,25 @@ func (g *Gateway) doBackendJSONRPC(ctx context.Context, targetURL, method string
 	status = httpResp.StatusCode
 	respSessionID = httpResp.Header.Get(mcpSessionHeader)
 
-	respBody, err := io.ReadAll(io.LimitReader(httpResp.Body, maxRequestBytes))
+	// Reads one byte past maxBytes so a response that hits the cap is
+	// DETECTABLE (len(respBody) > maxBytes) rather than silently truncated
+	// and handed to parseBackendJSONRPC to fail confusingly (security
+	// review round 2, 2026-08-22, important finding 4).
+	respBody, err := io.ReadAll(io.LimitReader(httpResp.Body, maxBytes+1))
 	if err != nil {
 		return nil, status, respSessionID, err
 	}
+	// Status is checked BEFORE the size cap: a backend that fails with a
+	// large HTML error page is diagnosed as "upstream returned HTTP 500",
+	// which is actionable, rather than as "too large", which sends the
+	// operator hunting a payload-size problem that does not exist. An
+	// oversized SUCCESS response still reports the cap, which is the case
+	// the cap exists for.
 	if status < 200 || status >= 300 {
 		return nil, status, respSessionID, fmt.Errorf("upstream returned HTTP %d", status)
+	}
+	if int64(len(respBody)) > maxBytes {
+		return nil, status, respSessionID, fmt.Errorf("%w: exceeds %d bytes", errMCPResponseTooLarge, maxBytes)
 	}
 
 	parsed, err := parseBackendJSONRPC(httpResp.Header.Get("Content-Type"), respBody)
@@ -457,13 +561,13 @@ func (g *Gateway) doBackendJSONRPC(ctx context.Context, targetURL, method string
 // the initialize call itself failed outright (network error, non-2xx, a
 // JSON-RPC error response to initialize itself) — there is no retry of a
 // failed handshake.
-func (g *Gateway) mcpBackendHandshake(ctx context.Context, targetURL string) (sessionID string, err error) {
+func (g *Gateway) mcpBackendHandshake(ctx context.Context, targetURL string, maxBytes int64) (sessionID string, err error) {
 	initParams := map[string]any{
 		"protocolVersion": defaultMCPProtocolVersion,
 		"capabilities":    map[string]any{},
 		"clientInfo":      map[string]any{"name": "traefik-llmgateway", "version": pluginVersion},
 	}
-	resp, _, respSessionID, err := g.doBackendJSONRPC(ctx, targetURL, "initialize", initParams, "")
+	resp, _, respSessionID, err := g.doBackendJSONRPC(ctx, targetURL, "initialize", initParams, "", maxBytes)
 	if err != nil {
 		return "", err
 	}
@@ -524,9 +628,14 @@ func (g *Gateway) mcpBackendCloseSession(ctx context.Context, targetURL, session
 // except the close itself — see mcpSessionCloseTimeout's own doc
 // comment); callers derive it from context.WithTimeout(r.Context(), ...)
 // with toolsListBackendTimeout or toolsCallBackendTimeout (MF1, review
-// round 2, 2026-08-21).
-func (g *Gateway) mcpBackendCall(ctx context.Context, targetURL, method string, params any) (*jsonrpcResponse, error) {
-	resp, status, _, err := g.doBackendJSONRPC(ctx, targetURL, method, params, "")
+// round 2, 2026-08-21). maxBytes is doBackendJSONRPC's own response-size
+// cap, passed straight through to every doBackendJSONRPC call this
+// function makes (bare attempt, handshake, retry) — callers pass
+// mcpBackendResponseMaxBytes or mcpBackendCallResponseMaxBytes depending
+// on which path they are (security review round 2, 2026-08-22, important
+// finding 4).
+func (g *Gateway) mcpBackendCall(ctx context.Context, targetURL, method string, params any, maxBytes int64) (*jsonrpcResponse, error) {
+	resp, status, _, err := g.doBackendJSONRPC(ctx, targetURL, method, params, "", maxBytes)
 	if err == nil && resp.Error == nil {
 		return resp, nil
 	}
@@ -536,7 +645,7 @@ func (g *Gateway) mcpBackendCall(ctx context.Context, targetURL, method string, 
 		return nil, err
 	}
 
-	sessionID, initErr := g.mcpBackendHandshake(ctx, targetURL)
+	sessionID, initErr := g.mcpBackendHandshake(ctx, targetURL, maxBytes)
 	if initErr != nil {
 		// The handshake itself failed: surface the bare attempt's own
 		// outcome when it has one (a JSON-RPC error response is more
@@ -557,7 +666,7 @@ func (g *Gateway) mcpBackendCall(ctx context.Context, targetURL, method string, 
 		}()
 	}
 
-	retryResp, _, _, retryErr := g.doBackendJSONRPC(ctx, targetURL, method, params, sessionID)
+	retryResp, _, _, retryErr := g.doBackendJSONRPC(ctx, targetURL, method, params, sessionID, maxBytes)
 	if retryErr != nil {
 		return nil, retryErr
 	}
@@ -632,47 +741,126 @@ func lastSSEDataLine(body []byte) []byte {
 	return last
 }
 
+// mcpFederatedFanoutConcurrency bounds how many of names' backend servers
+// mcpFederatedToolsList's own fan-out below contacts at once — a
+// buffered-channel semaphore gating each goroutine's actual outbound HTTP
+// work rather than its launch. It resembles limiter.spawnTokens
+// (limits.go) only in using a buffered channel: spawnTokens is a
+// non-blocking select with a `default:` that DROPS the work, whereas this
+// one blocks until a slot frees and must never skip a server. Do not
+// treat the two as interchangeable. Before this bound (security audit finding
+// 1a, 2026-08-22), one incoming tools/list request spawned one goroutine
+// per allowed server with NO cap at all: with the 11 production servers,
+// one client call could hold up to 11 concurrent connections and up to
+// 11× mcpBackendResponseMaxBytes of backend response bodies in memory at
+// once, entirely outside this gateway's own admission control. Every
+// server is eventually contacted regardless of this bound — a goroutine
+// blocks on the semaphore, it is never dropped or skipped. 8 (raised from
+// an initial 4, security review round 2, 2026-08-22, important finding
+// 3): 4 measurably tripled worst-case wall-clock latency for an
+// unrestricted group against all 11 servers (907ms measured at 300ms/
+// server, versus ~300ms pre-bound) and, against hung backends, pushed the
+// worst case to ceil(11/4)×toolsListBackendTimeout = 60s — well past the
+// ~30s timeout many real MCP clients use, holding the ServeHTTP goroutine
+// the whole time. 8 nearly halves both: ceil(11/8)=2 batches. The fanoutCtx
+// deadline below (not this constant alone) is what actually re-bounds the
+// worst case back down near toolsListBackendTimeout regardless of
+// concurrency or backend count — see its own doc comment.
+const mcpFederatedFanoutConcurrency = 8
+
 // mcpFederatedToolsList implements the federated "tools/list": it fans
-// out one mcpBackendCall per server allowedMCPServerNames(grp) permits,
-// concurrently — each under its own toolsListBackendTimeout budget
-// (context.WithTimeout off r.Context(), MF1) — then merges every
-// reachable server's own tools into one result, each tool's name prefixed
-// "<serverName>_<toolName>", the exact underscore-separator convention the
-// old agentgateway this plugin replaces used, and the one pugbot's
-// mcpclient and agentkit have already persisted into their own tool-id
-// databases (e.g. "brave-search_brave_web_search" — verified live). A
-// server that errors, times out, or returns an unparsable/invalid result
-// is logged and skipped, not surfaced as a whole-call failure — UNLESS
-// every single attempted server failed, in which case an empty tools list
-// would misleadingly look like "this caller's group has no MCP access" —
-// see the loud-failure branch below.
+// out one mcpBackendCall per server in names (handleMCPFederated's own
+// allowedMCPServerNames(grp) call, made once there so the exact set
+// contacted is always the one the client actually asked to reach), at
+// most mcpFederatedFanoutConcurrency at a time — every backend sharing
+// ONE overall toolsListBackendTimeout deadline (fanoutCtx, below) — then
+// merges every reachable server's own tools into one result,
+// each tool's name prefixed "<serverName>_<toolName>", the exact
+// underscore-separator convention the old agentgateway this plugin
+// replaces used, and the one pugbot's mcpclient and agentkit have already
+// persisted into their own tool-id databases (e.g.
+// "brave-search_brave_web_search" — verified live). A server that errors,
+// times out, panics, or returns an unparsable/invalid result is logged
+// and skipped, not surfaced as a whole-call failure — UNLESS every single
+// attempted server failed, in which case an empty tools list would
+// misleadingly look like "this caller's group has no MCP access" — see
+// the loud-failure branch below.
 //
 // countTargetRequests (limits.go) attributes one request to EVERY server
 // ATTEMPTED here, in ONE batched call after wg.Wait() — "attempted", not
 // "reached" or "succeeded": a server this gateway dialed and got a
-// response (or a timeout, or a connection refusal) from still had a real
-// request sent to it and a real slot of this gateway's outbound capacity
-// spent on it, which is what these counters exist to track. A single
-// federated tools/list call can move several targets' own counters, not
-// just one — unlike handleTargetProxy's always-exactly-one-target shape
-// (mcp_a2a.go).
-func (g *Gateway) mcpFederatedToolsList(w http.ResponseWriter, r *http.Request, req jsonrpcRequest, grp *group) {
-	names := allowedMCPServerNames(g.cfg, grp)
-
+// response (or a timeout, a connection refusal, or a panic) from still had
+// a real request sent to it and a real slot of this gateway's outbound
+// capacity spent on it, which is what these counters exist to track. A
+// single federated tools/list call can move several targets' own
+// counters, not just one — unlike handleTargetProxy's always-exactly-
+// one-target shape (mcp_a2a.go).
+func (g *Gateway) mcpFederatedToolsList(w http.ResponseWriter, r *http.Request, req jsonrpcRequest, names []string) {
 	var (
 		mu     sync.Mutex
 		wg     sync.WaitGroup
 		merged = make([]mcpTool, 0, len(names))
 		failed []string
 	)
+	// fanoutCtx bounds the WHOLE fan-out to toolsListBackendTimeout from
+	// when THIS call started — not each individual backend's own start
+	// (security review round 2, 2026-08-22, important finding 3). With
+	// mcpFederatedFanoutConcurrency backends running at once, a later
+	// batch's goroutines only begin once an earlier one's semaphore slot
+	// frees; giving each one its own FRESH toolsListBackendTimeout budget
+	// (this function's pre-bound design, and its own initial post-
+	// semaphore revision) let total wall-clock grow with
+	// ceil(len(names)/mcpFederatedFanoutConcurrency) batches. Every
+	// backend below shares this ONE already-ticking context instead —
+	// context.WithTimeout always resolves to the earlier of a parent's
+	// existing deadline and its own duration (proven by
+	// TestHandleMCPFederated_ToolsList_SlowBackend_BoundedByRequestContext),
+	// so deriving fanoutCtx from r.Context() here preserves that same
+	// property for the request's own deadline, on top of this one.
+	//
+	// The accepted trade: a later batch inherits the REMAINING budget, not
+	// a fresh one, so if every backend is slow enough to consume most of
+	// toolsListBackendTimeout on its own, servers in later batches are cut
+	// off and their tools are missing from the merged list. Measured: 11
+	// servers at 11s each returns 8 of 11 tools after 20s, where a per-
+	// backend budget returned 11 of 11 after 11s. This is deliberate —
+	// the alternative is a worst case of ceil(11/8) x 20s = 60s for a
+	// single tools/list — and it degrades to a partial list plus a logged
+	// failure line per starved server, never a hung request. Real
+	// tools/list calls answer in well under a second (at 300ms/server all
+	// 11 return), so this path needs a pathological backend to trigger.
+	fanoutCtx, fanoutCancel := context.WithTimeout(r.Context(), toolsListBackendTimeout)
+	defer fanoutCancel()
+
+	sem := make(chan struct{}, mcpFederatedFanoutConcurrency)
 	for _, name := range names {
 		wg.Add(1)
 		go func(name string) {
 			defer wg.Done()
-			ctx, cancel := context.WithTimeout(r.Context(), toolsListBackendTimeout)
-			defer cancel()
+			// Unrecovered-panic guard (security audit finding 2,
+			// 2026-08-22): this goroutine runs off the request's own
+			// goroutine, so a panic here has no ServeHTTP caller to
+			// unwind into and would crash the whole shared Traefik
+			// process — the same reasoning limiter.spawn (limits.go) and
+			// modelRegistry.refreshProvider/captureModelMetadata
+			// (registry.go) already apply to their own off-request
+			// goroutines. A panicking backend must degrade to "that
+			// server failed", exactly like an HTTP error from it, never
+			// a process-wide crash.
+			defer func() {
+				if rec := recover(); rec != nil {
+					g.logf("federated tools/list: server %q panicked: %v", name, rec)
+					mu.Lock()
+					failed = append(failed, name)
+					mu.Unlock()
+				}
+			}()
+
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
 			targetURL := g.cfg.MCPServers[name].URL
-			resp, err := g.mcpBackendCall(ctx, targetURL, "tools/list", struct{}{})
+			resp, err := g.mcpBackendCall(fanoutCtx, targetURL, "tools/list", struct{}{}, mcpBackendResponseMaxBytes)
 
 			mu.Lock()
 			defer mu.Unlock()
@@ -784,11 +972,24 @@ func (g *Gateway) mcpFederatedToolsCall(w http.ResponseWriter, r *http.Request, 
 	ctx, cancel := context.WithTimeout(r.Context(), toolsCallBackendTimeout)
 	defer cancel()
 	targetURL := g.cfg.MCPServers[serverName].URL
-	resp, err := g.mcpBackendCall(ctx, targetURL, "tools/call", mcpToolCallParams{Name: toolName, Arguments: params.Arguments})
+	// mcpBackendCallResponseMaxBytes (10MiB), not the fan-out's smaller
+	// mcpBackendResponseMaxBytes (security review round 2, 2026-08-22,
+	// important finding 4): tools/call always resolves to exactly ONE
+	// backend, so the fan-out memory-amplification argument does not
+	// apply here — see mcpBackendCallResponseMaxBytes' own doc comment.
+	resp, err := g.mcpBackendCall(ctx, targetURL, "tools/call", mcpToolCallParams{Name: toolName, Arguments: params.Arguments}, mcpBackendCallResponseMaxBytes)
 	g.limiter.countTargetRequest(targetKindMCP, serverName)
 	if err != nil {
 		g.logf("federated tools/call: server %q: %v", serverName, err)
-		writeJSONRPCErrorResponse(w, req.ID, jsonrpcInternalError, "upstream error")
+		// A response that hit mcpBackendCallResponseMaxBytes gets its own
+		// specific message, not the generic "upstream error" a truncated-
+		// then-unparsable body would otherwise produce (security review
+		// round 2, 2026-08-22, important finding 4).
+		if errors.Is(err, errMCPResponseTooLarge) {
+			writeJSONRPCErrorResponse(w, req.ID, jsonrpcInternalError, "response too large")
+		} else {
+			writeJSONRPCErrorResponse(w, req.ID, jsonrpcInternalError, "upstream error")
+		}
 		return
 	}
 

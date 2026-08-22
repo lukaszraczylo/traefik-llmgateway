@@ -24,6 +24,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -226,6 +227,30 @@ func run() error {
 	}))
 	defer slowUpstream.Close()
 
+	// mcpProbeUpstream answers federation's outbound tools/call with a
+	// body deliberately larger than mcpBackendCallResponseMaxBytes, so
+	// exerciseHandler's POST /mcp probe below drives doBackendJSONRPC's
+	// oversize branch — and therefore its errors.Is(err,
+	// errMCPResponseTooLarge) match — under the REAL interpreter.
+	//
+	// This exists because a security review round objected that no gate
+	// exercised federation's tools/call path interpreted, which left
+	// errors.Is there justified by reasoning rather than by evidence.
+	// Reasoning is exactly what the Yaegi traps in this codebase have
+	// repeatedly defeated, so the path is now covered instead of argued.
+	mcpProbeUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"`))
+		chunk := bytes.Repeat([]byte("x"), 1<<20)
+		for written := 0; written <= mcpProbeOversizeBytes; written += len(chunk) {
+			if _, writeErr := w.Write(chunk); writeErr != nil {
+				return
+			}
+		}
+		_, _ = w.Write([]byte(`"}]}}`))
+	}))
+	defer mcpProbeUpstream.Close()
+
 	// builtinLookupContextTokens (review fix, SHOULD-6): read directly
 	// out of the generated pricing_data_gen.go rather than hardcoding a
 	// number, so this assertion self-updates across a `make
@@ -252,6 +277,7 @@ func run() error {
 		// runs correctly under Yaegi too, not just the config-override
 		// one testDataWantModel already exercises.
 		`"modelMeta":{"` + testDataWantModel + `":{"contextTokens":` + yaegiMetaContextTokens + `,"inputCostPerMTokMicroUsd":1250000,"outputCostPerMTokMicroUsd":10000000}},` +
+		`"mcpServers":{"` + mcpProbeServerName + `":{"url":"` + mcpProbeUpstream.URL + `"}},` +
 		`"admin":{"enabled":true},"users":{"inline":[{"name":"tester","group":"default","apiKey":"` + testDataUserAPIKey + `"},{"name":"admin1","group":"default","apiKey":"` + attemptAccountingAdminAPIKey + `","admin":true}]}}`
 	if err = json.Unmarshal([]byte(attemptAccountingOverride), cfgVal.Interface()); err != nil {
 		return fmt.Errorf("decode attempt-accounting harness override into the interpreted Config: %w", err)
@@ -297,6 +323,32 @@ func run() error {
 // ever come from an interpreted lookup into the real map literal, not
 // the config-override path testDataWantModel already exercises.
 const builtinLookupModelID = "gpt-4o"
+
+// mcpProbeServerName is the federated MCP server run() configures against
+// mcpProbeUpstream, and mcpProbeToolName is a tool id carrying its
+// "<server>_" prefix so resolveFederatedTool routes POST /mcp's
+// tools/call there. The tool needs no tools/list entry — resolution is
+// pure prefix matching on the configured, group-allowed server names.
+const (
+	mcpProbeServerName = "probe"
+	mcpProbeToolName   = mcpProbeServerName + "_big"
+)
+
+// mcpProbeOversizeBytes is how much filler mcpProbeUpstream writes: over
+// mcpBackendCallResponseMaxBytes (maxRequestBytes, 10MiB) so the response
+// trips doBackendJSONRPC's cap. Kept as its own named value rather than
+// importing the plugin's const, because this harness deliberately builds
+// nothing from the plugin package at compile time — everything it asserts
+// about the plugin must come from the interpreter.
+const mcpProbeOversizeBytes = 11 << 20
+
+// mcpTooLargeWantMessage is the exact JSON-RPC error message
+// mcpFederatedToolsCall writes when errors.Is matches
+// errMCPResponseTooLarge. "upstream error" here instead means errors.Is
+// returned false under the interpreter for a chain that is true when
+// compiled — which is precisely the class of Yaegi divergence this
+// harness exists to catch, and which no compiled test can see.
+const mcpTooLargeWantMessage = "response too large"
 
 // readBuiltinContextTokens reads repoRoot/pricing_data_gen.go and
 // extracts modelID's own ContextTokens value directly out of the
@@ -401,6 +453,10 @@ func exerciseHandler(handler http.Handler, builtinContextTokens int) error {
 		return err
 	}
 
+	if err := exerciseFederatedTooLarge(handler); err != nil {
+		return err
+	}
+
 	unauthedReq := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
 	unauthedRec := httptest.NewRecorder()
 	handler.ServeHTTP(unauthedRec, unauthedReq)
@@ -439,6 +495,56 @@ func exerciseHandler(handler http.Handler, builtinContextTokens int) error {
 // a compiled concrete value's method set in Yaegi. matchesSentinel now
 // uses real errors.Is instead (its own doc comment in limits.go has the
 // full account); this harness is what caught the difference.
+// exerciseFederatedTooLarge drives POST /mcp (federation's tools/call
+// path) against mcpProbeUpstream, whose response deliberately exceeds
+// mcpBackendCallResponseMaxBytes, and asserts the interpreted plugin
+// answers with mcpTooLargeWantMessage rather than the generic "upstream
+// error".
+//
+// What this actually pins is errors.Is under the interpreter. A security
+// review round replaced that errors.Is with a strings.Contains marker on
+// the grounds that no gate exercised this path interpreted — true at the
+// time, and the honest objection. The reasoning for errors.Is is sound
+// (errors.New and fmt.Errorf both return COMPILED values, so declaring
+// the sentinel variable in interpreted code leaves the whole chain
+// errors.Is walks compiled, which is why retry.go's isTransient has
+// worked in production since v0.2.0), and a standalone yaegi v0.16.1
+// harness confirmed it. But this codebase's own history — matchesSentinel
+// (limits.go) — is a case where sound reasoning about the reflect
+// boundary was wrong and only an interpreted probe caught it. So the
+// path is covered here rather than argued in a comment.
+//
+// A failure surfaces as "upstream error": errors.Is returning false
+// interpreted for a chain that is true compiled. No `go test` row can
+// see that difference.
+func exerciseFederatedTooLarge(handler http.Handler) error {
+	body := `{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"` + mcpProbeToolName + `","arguments":{}}}`
+	req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+testDataUserAPIKey)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		return fmt.Errorf("POST /mcp tools/call: status = %d, want 200 (JSON-RPC reports the failure in the body, not the status), body=%s", rec.Code, rec.Body.String())
+	}
+
+	var resp struct {
+		Error *struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		return fmt.Errorf("decode POST /mcp tools/call body: %w (body=%s)", err, rec.Body.String())
+	}
+	if resp.Error == nil {
+		return fmt.Errorf("POST /mcp tools/call returned no JSON-RPC error, want %q — the probe upstream's oversized response should have tripped the cap: %s", mcpTooLargeWantMessage, rec.Body.String())
+	}
+	if resp.Error.Message != mcpTooLargeWantMessage {
+		return fmt.Errorf("POST /mcp tools/call error message = %q, want %q — errors.Is(err, errMCPResponseTooLarge) did not match under the interpreter (mcp_federation.go)", resp.Error.Message, mcpTooLargeWantMessage)
+	}
+	return nil
+}
+
 func exerciseAttemptAccounting(handler http.Handler) error {
 	chatReq := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(
 		`{"model":"`+testDataWantModel+`","messages":[{"role":"user","content":"hi"}]}`,

@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -1456,6 +1457,100 @@ func TestLimiterCurrentUsage_BatchesOneGetMultiCallForAllScopes(t *testing.T) {
 	}
 }
 
+// --- security audit finding 4: admin usage batch chunking ---
+
+// TestChunkedCurrentUsage_SplitsIntoMultipleRoundTrips is the regression
+// for finding 4: buildAdminUsage previously handed limiter.currentUsage
+// the WHOLE scopes slice in one call, so one round trip's own pipeline
+// size (and how long it holds the shared, mutex-guarded store connection)
+// scaled with catalog size with no ceiling at all. With more scopes than
+// adminUsageChunkScopes, chunkedCurrentUsage must issue more than one
+// getMulti call — proving chunking actually happens, not merely that the
+// constant exists.
+func TestChunkedCurrentUsage_SplitsIntoMultipleRoundTrips(t *testing.T) {
+	t.Parallel()
+	fixedNow := time.Date(2026, 8, 22, 10, 0, 0, 0, time.UTC)
+	const n = adminUsageChunkScopes + 50 // over one chunk, under two
+
+	store := &countingMultiStore{values: make(map[string]int64, n)}
+	scopes := make([]limitScope, n)
+	for i := 0; i < n; i++ {
+		id := fmt.Sprintf("user%d", i)
+		scopes[i] = limitScope{kind: "user", id: id, limits: &LimitsConfig{}}
+		store.values[windowKey("user", id, metricReq, windowMin, fixedNow)] = int64(i)
+	}
+
+	l := newLimiter(store, true)
+	l.nowFn = func() time.Time { return fixedNow }
+	gw := &Gateway{limiter: l}
+
+	got := gw.chunkedCurrentUsage(scopes)
+
+	if store.getMultiCalls != 2 {
+		t.Errorf("getMultiCalls = %d, want 2 (%d scopes over one %d-scope chunk)", store.getMultiCalls, n, adminUsageChunkScopes)
+	}
+	if len(got) != n {
+		t.Fatalf("len(got) = %d, want %d", len(got), n)
+	}
+	// Order must be preserved across the chunk boundary — spot-check the
+	// first scope of the SECOND chunk, whose value only exists if the
+	// concatenation kept scopes[adminUsageChunkScopes] aligned with
+	// got[adminUsageChunkScopes].
+	boundary := got[adminUsageChunkScopes]
+	if boundary.id != fmt.Sprintf("user%d", adminUsageChunkScopes) || boundary.requestsPerMinute != int64(adminUsageChunkScopes) {
+		t.Errorf("scope at the chunk boundary = %+v, want id=%q requestsPerMinute=%d (order preserved across chunks)",
+			boundary, fmt.Sprintf("user%d", adminUsageChunkScopes), adminUsageChunkScopes)
+	}
+}
+
+// TestChunkedCurrentUsage_AtOrBelowChunkSize_MakesExactlyOneCall proves
+// chunking is a no-op difference for any deployment at or under
+// adminUsageChunkScopes — including the live cluster's 5 friends + 4 home
+// users (project brief) — matching currentUsage's own pre-existing
+// single-round-trip behavior exactly.
+func TestChunkedCurrentUsage_AtOrBelowChunkSize_MakesExactlyOneCall(t *testing.T) {
+	t.Parallel()
+	fixedNow := time.Date(2026, 8, 22, 10, 0, 0, 0, time.UTC)
+	store := &countingMultiStore{values: map[string]int64{}}
+	scopes := []limitScope{
+		{kind: "user", id: "alice", limits: &LimitsConfig{}},
+		{kind: "user", id: "bob", limits: &LimitsConfig{}},
+		{kind: "group", id: "eng", limits: &LimitsConfig{}},
+	}
+	l := newLimiter(store, true)
+	l.nowFn = func() time.Time { return fixedNow }
+	gw := &Gateway{limiter: l}
+
+	got := gw.chunkedCurrentUsage(scopes)
+
+	if store.getMultiCalls != 1 {
+		t.Errorf("getMultiCalls = %d, want 1 (scope count under adminUsageChunkScopes)", store.getMultiCalls)
+	}
+	if len(got) != len(scopes) {
+		t.Fatalf("len(got) = %d, want %d", len(got), len(scopes))
+	}
+}
+
+// TestChunkedCurrentUsage_EmptyScopes proves the edge case a real caller
+// never hits directly (buildAdminUsage always appends the synthetic total
+// scope) still behaves like currentUsage's own empty-input contract:
+// no call, no panic, empty result.
+func TestChunkedCurrentUsage_EmptyScopes(t *testing.T) {
+	t.Parallel()
+	store := &countingMultiStore{values: map[string]int64{}}
+	l := newLimiter(store, true)
+	gw := &Gateway{limiter: l}
+
+	got := gw.chunkedCurrentUsage(nil)
+
+	if store.getMultiCalls != 0 {
+		t.Errorf("getMultiCalls = %d, want 0 for an empty scopes slice", store.getMultiCalls)
+	}
+	if len(got) != 0 {
+		t.Errorf("len(got) = %d, want 0", len(got))
+	}
+}
+
 // --- overview: redis lastErr carries a timestamp (folded item 4, 2026-08-20 review) ---
 
 func TestAdminOverview_RedisLastErrAt(t *testing.T) {
@@ -1897,5 +1992,96 @@ func TestAdminTargets_AccessListsMatchEnforcement_AndCountersReflectTraffic(t *t
 	bot2 := got.Agents[1]
 	if want := []string{"admingroup", "wide"}; !slices.Equal(bot2.Access, want) {
 		t.Errorf("bot2.Access = %v, want %v (restricted's own agents list excludes it)", bot2.Access, want)
+	}
+}
+
+// --- default-preserving: the live cluster's real shape (security audit, 2026-08-22) ---
+
+// TestDefaultPreserving_LiveClusterShape_LoadsAndServesIdentically models
+// the live production shape this round's fixes must not break (project
+// brief): 5 "friend" users plus 4 "home" users (steve-cw and kevinsandom
+// are named live users; the rest are representative — real names this
+// test has no visibility into, which is exactly why finding 5's fix stops
+// short of restricting the name charset, see buildEntry's own doc
+// comment, auth.go) and 11 MCP servers. A2A agents are out of scope here:
+// none of this round's fixes touch mcp_a2a.go or any A2A-specific code
+// path, so there is no mechanism by which they could regress agent
+// handling.
+//
+// It proves construction succeeds unchanged (finding 5's new empty/
+// duplicate-name checks accept every one of these real names), a
+// friends-group user's configured requests-per-minute budget still buys
+// EXACTLY that many tools/list calls against all 11 servers — not
+// budget/11 — regressing security review round 2's critical finding 3
+// (weighting tools/list by backend count was reverted specifically
+// because it was not default-preserving at this exact shape: both live
+// groups have an empty MCP allow-list, i.e. all 11 servers, so a naive
+// per-backend weight would have silently cut every configured
+// requests-per-minute budget by ~11x here), and the admin dashboard's
+// usage poll still returns exactly one row per user and per group in a
+// single store round trip (finding 4's chunking is a no-op at 10 users,
+// well under adminUsageChunkScopes).
+func TestDefaultPreserving_LiveClusterShape_LoadsAndServesIdentically(t *testing.T) {
+	friendNames := []string{"steve-cw", "kevinsandom", "friend3", "friend4", "friend5"}
+	homeNames := []string{"home1", "home2", "home3", "home4"}
+	const friendsRPM = 60
+
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{"openai": {Type: "openai", APIKey: "k"}}
+	cfg.Admin = &AdminConfig{Enabled: true}
+	cfg.Groups = map[string]*GroupConfig{
+		"friends": {Limits: &LimitsConfig{RequestsPerMinute: friendsRPM}},
+		"home":    {Limits: &LimitsConfig{RequestsPerMinute: 120}},
+	}
+
+	cfg.MCPServers = make(map[string]*TargetConfig, 11)
+	for i := 0; i < 11; i++ {
+		srv := newMockJSONRPCServer(t, []mcpTool{{Name: "lookup"}})
+		cfg.MCPServers[fmt.Sprintf("mcp%d", i)] = &TargetConfig{URL: srv.srv.URL}
+	}
+
+	inline := []*UserConfig{{Name: "admin1", Group: "home", Admin: true, APIKey: "sk-admin1"}}
+	for _, name := range friendNames {
+		inline = append(inline, &UserConfig{Name: name, Group: "friends", APIKey: "sk-" + name})
+	}
+	for _, name := range homeNames {
+		inline = append(inline, &UserConfig{Name: name, Group: "home", APIKey: "sk-" + name})
+	}
+	cfg.Users = &UsersConfig{Inline: inline}
+
+	h, err := New(context.Background(), http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: want the realistic live-cluster config to load unchanged, got error: %v", err)
+	}
+
+	// Drives friendsRPM calls, not just one (security review round 2:
+	// a single-call assertion cannot distinguish "budget buys N calls"
+	// from "budget buys N/11 calls" — exactly the blind spot that let the
+	// weighted-charge regression ship undetected).
+	for i := 1; i <= friendsRPM; i++ {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, newFederatedRequest(t, "sk-steve-cw", jsonrpcRequest{JSONRPC: jsonrpcVersion, Method: "tools/list", ID: json.RawMessage(fmt.Sprintf("%d", i))}))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("tools/list call %d/%d status = %d, want 200 (budget must buy all %d calls against 11 servers), body=%s", i, friendsRPM, rec.Code, friendsRPM, rec.Body.String())
+		}
+	}
+
+	usageReq := httptest.NewRequest("GET", adminUsagePath, nil)
+	usageReq.Header.Set("Authorization", "Bearer sk-admin1")
+	usageRec := httptest.NewRecorder()
+	h.ServeHTTP(usageRec, usageReq)
+	if usageRec.Code != http.StatusOK {
+		t.Fatalf("admin usage status = %d, want 200, body=%s", usageRec.Code, usageRec.Body.String())
+	}
+	var usage adminUsageResponse
+	if err := json.Unmarshal(usageRec.Body.Bytes(), &usage); err != nil {
+		t.Fatalf("decode admin usage: %v", err)
+	}
+	wantUsers := len(friendNames) + len(homeNames) + 1 // + admin1
+	if len(usage.Users) != wantUsers {
+		t.Errorf("admin usage users = %d, want %d", len(usage.Users), wantUsers)
+	}
+	if len(usage.Groups) != 2 {
+		t.Errorf("admin usage groups = %d, want 2", len(usage.Groups))
 	}
 }

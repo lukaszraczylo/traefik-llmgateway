@@ -3,6 +3,7 @@ package traefikllmgateway
 import (
 	"fmt"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -575,5 +576,316 @@ func TestAuthStore_Identify_NotBlockedByBuildMu(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("identify blocked while buildMu is held — reader lock must not depend on the writer-serialization lock")
+	}
+}
+
+// --- security audit finding 3: per-source-IP auth-failure throttling ---
+
+func TestClientIP_StripsPort(t *testing.T) {
+	r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	r.RemoteAddr = "203.0.113.9:54321"
+	if got := clientIP(r); got != "203.0.113.9" {
+		t.Errorf("clientIP = %q, want %q", got, "203.0.113.9")
+	}
+}
+
+func TestClientIP_MalformedRemoteAddr_UsedAsIs(t *testing.T) {
+	r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	r.RemoteAddr = "not-a-host-port"
+	if got := clientIP(r); got != "not-a-host-port" {
+		t.Errorf("clientIP = %q, want the raw RemoteAddr back unchanged", got)
+	}
+}
+
+// TestAuthStore_Identify_ValidKeyAlwaysSucceeds_EvenWhenIPThrottled is the
+// core regression for security review round 2's critical finding 1: this
+// plugin runs as a Traefik middleware behind a Kubernetes Service — with
+// externalTrafficPolicy: Cluster, r.RemoteAddr is the NODE's own SNAT
+// address, shared by every external caller reaching that node, not a
+// per-tenant one. The prior revision of identify checked the per-IP
+// throttle BEFORE verifying the key, so 20 failed requests from anywhere
+// sharing that node locked out every legitimate tenant too. After well
+// past authFailureLimit failed attempts from one source IP, a SUBSEQUENT
+// VALID key from that EXACT same IP must still succeed immediately.
+func TestAuthStore_Identify_ValidKeyAlwaysSucceeds_EvenWhenIPThrottled(t *testing.T) {
+	a, err := newAuthStore(testAuthCfg()) // inline user "a" / sk-secret, group eng
+	if err != nil {
+		t.Fatal(err)
+	}
+	const sharedIP = "203.0.113.9:54321"
+
+	for i := 0; i < authFailureLimit*2; i++ { // well past the threshold
+		r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+		r.RemoteAddr = sharedIP
+		r.Header.Set("x-api-key", "wrong-key")
+		a.identify(r)
+	}
+	// Sanity: the tracker really did cross the threshold — otherwise this
+	// test would not actually exercise the throttled-IP path at all.
+	if !a.authThrottled("203.0.113.9") {
+		t.Fatal("test setup: expected the tracker to be over authFailureLimit for the shared IP")
+	}
+
+	valid := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	valid.RemoteAddr = sharedIP
+	valid.Header.Set("Authorization", "Bearer sk-secret")
+	u, grp, ok := a.identify(valid)
+	if !ok || u.name != "a" || grp.name != "eng" {
+		t.Fatalf("want a valid key to succeed even from a throttled source IP, got user=%v group=%v ok=%v", u, grp, ok)
+	}
+}
+
+// TestAuthStore_AuthThrottled_TracksPerIPIndependently proves
+// authFailureTracker's own counting (used only by logAuthEvent's distinct
+// throttle-engaged line now, logger.go — never by identify's return
+// value, see identify's own doc comment) is still scoped per source IP:
+// one IP crossing the threshold must never affect a different IP's own
+// count.
+func TestAuthStore_AuthThrottled_TracksPerIPIndependently(t *testing.T) {
+	a, err := newAuthStore(testAuthCfg())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < authFailureLimit; i++ {
+		r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+		r.RemoteAddr = "203.0.113.9:1"
+		r.Header.Set("x-api-key", "wrong-key")
+		a.identify(r)
+	}
+	if !a.authThrottled("203.0.113.9") {
+		t.Error("want 203.0.113.9 throttled after authFailureLimit failures")
+	}
+	if a.authThrottled("198.51.100.5") {
+		t.Error("want a different, never-failing IP to remain unthrottled")
+	}
+}
+
+// TestAuthStore_AuthThrottled_ResetsAfterWindowExpires proves
+// authFailureTracker is a fixed-window counter, not a permanent record:
+// once authFailureWindow has elapsed, a source IP's earlier failures no
+// longer count toward authThrottled.
+func TestAuthStore_AuthThrottled_ResetsAfterWindowExpires(t *testing.T) {
+	a, err := newAuthStore(testAuthCfg())
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock := &fakeClock{now: time.Unix(1_700_000_000, 0)}
+	a.nowFn = clock.Now
+	for i := 0; i < authFailureLimit; i++ {
+		r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+		r.RemoteAddr = "203.0.113.9:1"
+		r.Header.Set("x-api-key", "wrong-key")
+		a.identify(r)
+	}
+	if !a.authThrottled("203.0.113.9") {
+		t.Fatal("want throttled before the window elapses")
+	}
+
+	clock.Advance(authFailureWindow + time.Second)
+
+	if a.authThrottled("203.0.113.9") {
+		t.Error("want the throttle cleared once authFailureWindow has elapsed")
+	}
+}
+
+// --- authFailureTracker: direct unit tests ---
+
+func TestAuthFailureTracker_IncrementAndGet(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	tr := newAuthFailureTracker(func() time.Time { return now })
+
+	if got := tr.get("1.2.3.4"); got != 0 {
+		t.Errorf("get on untracked ip = %d, want 0", got)
+	}
+	for i := int64(1); i <= 5; i++ {
+		if got := tr.increment("1.2.3.4"); got != i {
+			t.Errorf("increment #%d = %d, want %d", i, got, i)
+		}
+	}
+	if got := tr.get("1.2.3.4"); got != 5 {
+		t.Errorf("get after 5 increments = %d, want 5", got)
+	}
+}
+
+func TestAuthFailureTracker_WindowExpiry(t *testing.T) {
+	clock := &fakeClock{now: time.Unix(1_700_000_000, 0)}
+	tr := newAuthFailureTracker(clock.Now)
+
+	tr.increment("1.2.3.4")
+	tr.increment("1.2.3.4")
+	if got := tr.get("1.2.3.4"); got != 2 {
+		t.Fatalf("get = %d, want 2", got)
+	}
+
+	clock.Advance(authFailureWindow + time.Second)
+	if got := tr.get("1.2.3.4"); got != 0 {
+		t.Errorf("get after window expiry = %d, want 0", got)
+	}
+	if got := tr.increment("1.2.3.4"); got != 1 {
+		t.Errorf("increment after window expiry = %d, want 1 (fresh window)", got)
+	}
+}
+
+// TestAuthFailureTracker_BoundsMemoryViaRotation is the regression for
+// security review round 2's important finding 1: the tracker must never
+// grow past 2×authFailureMapCap total entries — filling it past
+// authFailureMapCap distinct IPs must trigger an O(1) generation
+// rotation, not unbounded growth.
+func TestAuthFailureTracker_BoundsMemoryViaRotation(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	tr := newAuthFailureTracker(func() time.Time { return now })
+
+	for i := 0; i < authFailureMapCap+10; i++ {
+		tr.increment(fmt.Sprintf("10.%d.%d.%d", i/65536, (i/256)%256, i%256))
+	}
+
+	tr.mu.Lock()
+	total := len(tr.current) + len(tr.previous)
+	currentLen := len(tr.current)
+	tr.mu.Unlock()
+	if total > 2*authFailureMapCap {
+		t.Errorf("tracked entries = %d, want <= %d (2x cap)", total, 2*authFailureMapCap)
+	}
+	if currentLen > authFailureMapCap {
+		t.Errorf("current generation = %d entries, want <= %d", currentLen, authFailureMapCap)
+	}
+}
+
+// TestAuthStore_Identify_FewFailedAttempts_NeverThrottled is the good-path
+// counterpart: a handful of failed attempts (well under authFailureLimit
+// — a human retrying a mistyped key a couple of times) must never trip
+// the throttle.
+func TestAuthStore_Identify_FewFailedAttempts_NeverThrottled(t *testing.T) {
+	a, err := newAuthStore(testAuthCfg())
+	if err != nil {
+		t.Fatal(err)
+	}
+	const ip = "203.0.113.9:54321"
+	for i := 0; i < 3; i++ {
+		r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+		r.RemoteAddr = ip
+		r.Header.Set("x-api-key", "wrong-key")
+		a.identify(r)
+	}
+	r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	r.RemoteAddr = ip
+	r.Header.Set("Authorization", "Bearer sk-secret")
+	if _, _, ok := a.identify(r); !ok {
+		t.Fatal("want a valid key to succeed after only 3 prior failures (well under authFailureLimit)")
+	}
+}
+
+// TestAuthStore_Identify_SuccessfulAuthDoesNotRecordFailure proves a
+// successful identify never itself counts toward the failure budget —
+// otherwise a legitimate, high-traffic user could eventually throttle
+// themselves.
+func TestAuthStore_Identify_SuccessfulAuthDoesNotRecordFailure(t *testing.T) {
+	a, err := newAuthStore(testAuthCfg())
+	if err != nil {
+		t.Fatal(err)
+	}
+	const ip = "203.0.113.9:54321"
+	r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	r.RemoteAddr = ip
+	r.Header.Set("Authorization", "Bearer sk-secret")
+	for i := 0; i < authFailureLimit+5; i++ {
+		if _, _, ok := a.identify(r); !ok {
+			t.Fatalf("attempt %d: want success (valid key), got failure", i)
+		}
+	}
+}
+
+// --- security audit finding 5: duplicate/empty user names ---
+
+func TestNewAuthStore_EmptyUserName_ReturnsError(t *testing.T) {
+	cfg := &Config{
+		Providers: map[string]*ProviderConfig{"openai": {Type: "openai", APIKey: "k"}},
+		Groups:    map[string]*GroupConfig{"eng": {}},
+		Users:     &UsersConfig{Inline: []*UserConfig{{Name: "", Group: "eng", APIKey: "sk-secret"}}},
+	}
+	if _, err := newAuthStore(cfg); err == nil {
+		t.Fatal("want error for an empty user name")
+	}
+}
+
+func TestNewAuthStore_DuplicateUserName_ReturnsError(t *testing.T) {
+	cfg := &Config{
+		Providers: map[string]*ProviderConfig{"openai": {Type: "openai", APIKey: "k"}},
+		Groups:    map[string]*GroupConfig{"eng": {}},
+		Users: &UsersConfig{Inline: []*UserConfig{
+			{Name: "dup", Group: "eng", APIKey: "sk-one"},
+			{Name: "dup", Group: "eng", APIKey: "sk-two"},
+		}},
+	}
+	_, err := newAuthStore(cfg)
+	if err == nil {
+		t.Fatal("want error for two inline users sharing the same name")
+	}
+	if !strings.Contains(err.Error(), "duplicate user name") {
+		t.Errorf("error = %q, want it to mention the duplicate-name check specifically (not the API-key one)", err.Error())
+	}
+}
+
+func TestAuthStore_ReplaceFileUsers_EmptyUserName_ReturnsError(t *testing.T) {
+	a, err := newAuthStore(testAuthCfg())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.replaceFileUsers([]*UserConfig{{Name: "", Group: "eng", APIKey: "sk-file1"}}); err == nil {
+		t.Fatal("want error for a file user with an empty name")
+	}
+}
+
+func TestAuthStore_ReplaceFileUsers_DuplicateUserNameWithinFile_ReturnsError(t *testing.T) {
+	a, err := newAuthStore(testAuthCfg())
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = a.replaceFileUsers([]*UserConfig{
+		{Name: "dup", Group: "eng", APIKey: "sk-file1"},
+		{Name: "dup", Group: "eng", APIKey: "sk-file2"},
+	})
+	if err == nil {
+		t.Fatal("want error for two file users sharing the same name")
+	}
+	if !strings.Contains(err.Error(), "duplicate user name") {
+		t.Errorf("error = %q, want it to mention the duplicate-name check specifically (not the API-key one)", err.Error())
+	}
+
+	// The store must still be usable — the rejected replace must not have
+	// partially mutated it.
+	r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	r.Header.Set("Authorization", "Bearer sk-secret")
+	if _, _, ok := a.identify(r); !ok {
+		t.Fatal("want the original inline user still resolvable after a rejected duplicate-name replace")
+	}
+}
+
+// TestAuthStore_ReplaceFileUsers_SameNameAsInline_DifferentKey_OverrideAllowed
+// proves the new duplicate-name check does NOT reject the intentional
+// cross-source override replaceFileUsers' own doc comment describes: a
+// file user of the same name as an inline user, even with a different API
+// key, must still win — this is a feature (rotating/promoting a
+// statically-configured user through the hot-reloadable file), not a
+// duplicate.
+func TestAuthStore_ReplaceFileUsers_SameNameAsInline_DifferentKey_OverrideAllowed(t *testing.T) {
+	a, err := newAuthStore(testAuthCfg()) // inline user "a" / sk-secret, group eng
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.replaceFileUsers([]*UserConfig{{Name: "a", Group: "eng", APIKey: "sk-file-a"}}); err != nil {
+		t.Fatalf("replaceFileUsers: want the same-name override allowed, got error: %v", err)
+	}
+
+	inlineReq := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	inlineReq.Header.Set("Authorization", "Bearer sk-secret")
+	if _, _, ok := a.identify(inlineReq); ok {
+		t.Fatal("want the inline key overridden once the file defines a same-named user")
+	}
+	fileReq := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	fileReq.Header.Set("Authorization", "Bearer sk-file-a")
+	u, _, ok := a.identify(fileReq)
+	if !ok || u.name != "a" {
+		t.Fatalf("want the file-sourced user resolvable under the overridden name, got %v ok=%v", u, ok)
 	}
 }

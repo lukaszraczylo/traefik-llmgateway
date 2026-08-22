@@ -631,16 +631,63 @@ func usageEntryView(su scopeUsage, limits *LimitsConfig) adminUsageEntryView {
 // buildAdminUsage assembles adminUsageResponse: authStore.snapshot lists
 // every currently active user and every configured group (names, group
 // membership, and limits only — never a key or its digest), and
-// limiter.currentUsage reads every one's current-window counters — plus
-// the synthetic total scope's own (v0.2 data-layer task) — in ONE
-// storeGetMulti round trip total (v0.2 final review wave, 2026-08-20; see
-// limiter.currentUsage's own doc comment for the tradeoff this
-// supersedes) — users, groups, and the total scope are concatenated into
-// a single scopes slice before that one call, then the flat result is
-// sliced back into the three response sections at the same split points,
-// order preserved. Unlike buildLimitScopes (routes_unified.go), this
-// never omits an entity for having nil limits — the dashboard shows usage
-// for every user and group, limited or not.
+// chunkedCurrentUsage (above) reads every one's current-window counters —
+// plus the synthetic total scope's own (v0.2 data-layer task) — in
+// batches of at most adminUsageChunkScopes scopes per storeGetMulti round
+// trip (security audit finding 4, 2026-08-22, capping the v0.2 final
+// review wave's own "fold everything into ONE round trip" design — see
+// adminUsageChunkScopes' own doc comment for why) — users, groups, and the
+// total scope are concatenated into a single scopes slice before
+// chunking, then the flat result is sliced back into the three response
+// sections at the same split points, order preserved. Unlike
+// buildLimitScopes (routes_unified.go), this never omits an entity for
+// having nil limits — the dashboard shows usage for every user and group,
+// limited or not.
+// adminUsageChunkScopes bounds how many scopes buildAdminUsage sends to
+// limiter.currentUsage in a single storeGetMulti round trip (security
+// audit finding 4, 2026-08-22). currentUsage's own doc comment (limits.go)
+// already explains why every scope was folded into ONE round trip rather
+// than one per scope — but "one round trip" for the WHOLE catalog means
+// that round trip's own pipeline size, and how long it holds the shared,
+// mutex-guarded Redis connection (respClient, resp.go), now scales with
+// how many users and groups are configured. With 1,000 users that is
+// ~8,000 GETs (usageKeysPerScope=8) in one pipelined call, during which
+// every concurrent checkAndCount from live LLM traffic queues behind the
+// same connection mutex — and the admin dashboard polls this endpoint
+// every 5s. chunkedCurrentUsage (below) keeps each individual round trip's
+// key count bounded, letting live traffic interleave between chunks,
+// while a chunk still batches every scope inside it exactly as before,
+// keeping most of currentUsage's own round-trip-collapsing win. 200
+// scopes (1,600 keys per chunk) comfortably covers the live cluster's 5
+// friends + 4 home users in a single chunk, so today's real deployment
+// sees no behavior change at all — chunking only engages once a
+// deployment's user+group count actually grows past it. One accepted,
+// disclosed side effect: currentUsage's own doc comment notes a transient
+// store error marks every scope in ONE call storeDown together; chunking
+// narrows that blast radius to one chunk's worth of scopes instead of the
+// whole response, which is a strict improvement, not a new risk.
+const adminUsageChunkScopes = 200
+
+// chunkedCurrentUsage calls limiter.currentUsage in batches of at most
+// adminUsageChunkScopes scopes at a time, concatenating the results in
+// the SAME order scopes was given — buildAdminUsage's own slicing of the
+// flat result back into users/groups/total (below) is unaffected by, and
+// unaware of, the chunking underneath. A scopes slice at or under the
+// chunk size makes exactly one call, byte-for-byte what calling
+// currentUsage directly would have done.
+func (g *Gateway) chunkedCurrentUsage(scopes []limitScope) []scopeUsage {
+	out := make([]scopeUsage, 0, len(scopes))
+	for len(scopes) > 0 {
+		n := adminUsageChunkScopes
+		if n > len(scopes) {
+			n = len(scopes)
+		}
+		out = append(out, g.limiter.currentUsage(scopes[:n])...)
+		scopes = scopes[n:]
+	}
+	return out
+}
+
 func (g *Gateway) buildAdminUsage() adminUsageResponse {
 	userSummaries, groupSummaries := g.auth.snapshot()
 
@@ -653,7 +700,7 @@ func (g *Gateway) buildAdminUsage() adminUsageResponse {
 	}
 	scopes = append(scopes, limitScope{kind: totalScopeKind, id: totalScopeID, limits: nil})
 
-	allUsage := g.limiter.currentUsage(scopes)
+	allUsage := g.chunkedCurrentUsage(scopes)
 	userUsage := allUsage[:len(userSummaries)]
 	groupUsage := allUsage[len(userSummaries) : len(userSummaries)+len(groupSummaries)]
 	totalUsage := allUsage[len(userSummaries)+len(groupSummaries)]
