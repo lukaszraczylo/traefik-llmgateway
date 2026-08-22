@@ -221,6 +221,7 @@ also a construction error, never a panic (`providers.go`, `mcp_a2a.go`,
 | `models` | `[]string` | `[]` | Explicit model ids this provider serves. Combined with any discovered ids. |
 | `discovery` | `bool` | `false` | Pull the provider's own model-listing endpoint at startup and on `discoveryInterval`. A discovery failure is logged and non-fatal; construction still succeeds on `models` alone. |
 | `metadataPath` | `string` | `""` (no metadata capture) | Only read by `openai`-type providers. A second endpoint, fetched alongside `discovery`, that reports per-model context length — for example `/api/v0/models` on an LM Studio server. Must start with `/` when set (checked at construction). See [Model metadata](#model-metadata). |
+| `passthrough` | `*bool` | `nil` (enabled) | `nil` or `true`: this provider's native passthrough route (`/{name}/...`) stays reachable, unchanged from before this field existed. `false`: the route is disabled — `ServeHTTP` treats it exactly like an unconfigured provider name, falling through to the ordinary unknown-route 404 without even reaching authentication. Does not affect the MCP/A2A target proxy, which has its own routing prefix. |
 
 ### `GroupConfig`
 
@@ -233,6 +234,7 @@ also a construction error, never a panic (`providers.go`, `mcp_a2a.go`,
 | `cacheTTL` | `string` | `""` (inherit) | Sets the TTL written when this group's own request populates a cache entry — see [Caching](#caching). It does not scope entries to a group: cache entries are shared across every group that can reach the model (see the Caching section's "User identity is not part of the key" note, which applies to group identity too), so this controls a write's TTL only, not which group can read the entry. Empty inherits the global TTL. A set value must be a valid, positive Go duration (`"30s"`, `"5m"`), and requires the top-level `cache` block to be configured — a construction error otherwise, the same "nothing to inherit from" reasoning as `cache: true` above. |
 | `mcpServers` | `[]string` | `[]` (all) | Glob-matched against a configured MCP server name. |
 | `agents` | `[]string` | `[]` (all) | Glob-matched against a configured agent name. |
+| `passthroughPaths` | `[]string` | `[]` (all) | Restricts which REST path this group's **native passthrough** requests may address — glob-matched (`path.Match`) against the path segment after the provider name (e.g. `v1/files` for a request to `/openai/v1/files`). Empty is allow-all, matching every other field on this table — **not** `["*"]`: `path.Match`'s `*` does not cross `/`, so a literal `["*"]` pattern denies every multi-segment `rest` (almost all real passthrough traffic). Leave this unset to actually allow everything. See [Unified vs. passthrough](#unified-vs-passthrough) for the related model-authorization rule. |
 
 ### `LimitsConfig`
 
@@ -403,8 +405,11 @@ kept — a bad edit to the file never breaks already-authenticated traffic.
   `group.allowsProvider` for the resolved provider — a model that exists
   but the caller's group cannot reach returns 403, distinct from a model no
   configured provider knows at all (404). Native passthrough
-  (`/{provider}/...`) resolves no model at all and checks
-  `group.allowsProvider` only — see the authorization row in [Unified vs.
+  (`/{provider}/...`) always checks `group.allowsProvider`, and additionally
+  checks `group.allowsModel` — against a `model` field peeked from the
+  request body — whenever the group's `models` list is non-empty; see
+  [Native passthrough model authorization](#native-passthrough-model-authorization)
+  and the authorization row in [Unified vs.
   passthrough](#unified-vs-passthrough).
 - **Discovery**: `GET {baseUrl}/v1/models` for an `openai`-type provider,
   `GET {baseUrl}/v1/models` for `anthropic`, `GET {baseUrl}/v1beta/models`
@@ -859,12 +864,32 @@ cached bodies for the same request.
 | | Unified (`/v1/...`) | Native passthrough (`/{provider}/...`) |
 |---|---|---|
 | Wire format | Always OpenAI-shaped in, OpenAI-shaped out. | The provider's own native format, untouched. |
-| Authorization | `group.allowsModel` AND `group.allowsProvider`, both checked against the resolved provider (`modelRegistry.resolve` — see [Model routing](#model-routing)). | `group.allowsProvider` only. Passthrough resolves no model at all, so there is nothing for `allowsModel` to gate. |
+| Authorization | `group.allowsModel` AND `group.allowsProvider`, both checked against the resolved provider (`modelRegistry.resolve` — see [Model routing](#model-routing)). | `group.allowsProvider`, always. `group.allowsModel` too, but ONLY when the group's `models` list is non-empty — see the model-enforcement note below the table. `passthroughPaths`, when set, also gates the REST path. |
 | Translation | `openai`-type: body forwarded verbatim (model id rewritten). `anthropic`/`gemini`: full bidirectional translation, including streaming, chunk by chunk. | None — a raw reverse proxy. |
 | Model alias in the response | Translated providers (`anthropic`, `gemini`) echo back the client's exact requested model string in the response's `model` field, even though the upstream call used the resolved provider model id. An `openai`-type response is a verbatim passthrough of the upstream body, so it carries whatever model id the upstream itself returned — this asymmetry is intentional, not a bug. | The upstream's own `model` field, verbatim — there is no alias to echo. |
-| Embeddings | `openai`-type: passthrough. `gemini`: mapped to `:embedContent`/`:batchEmbedContents`. `anthropic`: **501** — Anthropic's API has no embeddings endpoint. | Whatever the provider itself supports at that path; the gateway does not gate it. |
+| Embeddings | `openai`-type: passthrough. `gemini`: mapped to `:embedContent`/`:batchEmbedContents`. `anthropic`: **501** — Anthropic's API has no embeddings endpoint. | Whatever the provider itself supports at that path, subject to the same `models`/`passthroughPaths` authorization as every other native passthrough request. |
 | Unsupported parameters | A semantically meaningful field the target provider cannot express (e.g. `n > 1`, `logit_bias`, `logprobs` on Anthropic) is a **400**, never silently dropped. | Not applicable — the request reaches the provider exactly as sent. |
 | Non-2xx upstream response | Wrapped in the gateway's own error envelope, with the provider's own body embedded under `error.upstream`. | Forwarded to the client exactly as the upstream sent it — status, headers, and body. |
+
+### Native passthrough model authorization
+
+A group's `models` glob authorizes native passthrough traffic too, but
+only once it has something to authorize:
+
+- **`models` empty (the default)** — nothing for `allowsModel` to reject,
+  so the request body is never even read for this purpose. Every request
+  reaches the provider exactly as it did before this feature existed.
+- **`models` non-empty** — the gateway reads up to 64KiB of a JSON request
+  body looking for a top-level `model` field (a genuinely binary body —
+  multipart, `audio/*`, `image/*`, `video/*`, `application/octet-stream`
+  — is never read at all, since it cannot carry one). The field, when
+  found, is checked against `models` in both its bare and
+  `provider/model` forms. **A `model` field not found within that 64KiB
+  window is DENIED (403)** — fail closed, not fail open. This includes a
+  **Gemini** passthrough request: Gemini's model id lives in the URL
+  path, never the JSON body, so a group with a restricted `models` list
+  will see every Gemini passthrough request denied. Route Gemini traffic
+  for a model-restricted group through the unified `/v1/*` API instead.
 
 ## Image and audio endpoints
 

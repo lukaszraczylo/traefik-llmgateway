@@ -25,15 +25,31 @@ type user struct {
 // group describes a group's access rules and default limits. Empty
 // providers, models, mcpServers, or agents means all are allowed.
 type group struct {
-	limits           *LimitsConfig
-	cache            *bool
-	name             string
-	providers        []string
-	models           []string
-	mcpServers       []string
-	agents           []string
+	limits *LimitsConfig
+	// cache is GroupConfig.Cache carried through unchanged: nil inherits
+	// the global cache.enabled setting, non-nil overrides it for this
+	// group's requests. Resolved by groupCacheEnabled (cache.go).
+	cache      *bool
+	name       string
+	providers  []string
+	models     []string
+	mcpServers []string
+	agents     []string
+	// passthroughPaths is GroupConfig.PassthroughPaths carried through
+	// unchanged (security+performance audit, 2026-08-22) — see
+	// allowsPassthroughPath below.
 	passthroughPaths []string
-	cacheTTL         time.Duration
+	// cacheTTL is GroupConfig.CacheTTL parsed and validated at construction
+	// (newAuthStore below): 0 inherits the global responseCache's TTL
+	// (effectiveTTL, cache.go); a positive value sets the TTL written
+	// when THIS group's own request populates a cache entry. It is not a
+	// per-group scope — cache entries are shared across every group that
+	// can reach the model (groupCacheEnabled, cache.go), so a positive
+	// cacheTTL only ever controls a write's TTL, never which group can
+	// later read the entry. GroupConfig.CacheTTL == "" is the only input
+	// that produces 0 here — every other value either becomes a positive
+	// duration or fails newAuthStore as a constructor error.
+	cacheTTL time.Duration
 }
 
 // allowsProvider reports whether name matches one of the group's provider
@@ -58,6 +74,20 @@ func (grp *group) allowsModel(id string) bool {
 	return matchesGlob(grp.models, id)
 }
 
+// hasModelRestriction reports whether grp's Models glob is non-empty —
+// whether there is anything for allowsModel to actually reject (security
+// review fix, 2026-08-22, round 2). handlePassthrough (routes_
+// passthrough.go) checks this BEFORE peeking a passthrough request's body
+// at all: a group with an empty Models list (matchesGlob's own
+// empty-means-all contract — the live cluster's "home" group and every
+// other group that has not opted into model restrictions) has nothing
+// allowsModel could ever deny, so there is no reason to read, buffer, or
+// even look at the request body for model enforcement — zero risk, and
+// exactly today's behavior for the overwhelming majority of traffic.
+func (grp *group) hasModelRestriction() bool {
+	return len(grp.models) > 0
+}
+
 // allowsMCP reports whether name matches one of the group's MCP-server glob
 // patterns. An empty pattern list allows every server.
 func (grp *group) allowsMCP(name string) bool {
@@ -73,10 +103,13 @@ func (grp *group) allowsAgent(name string) bool {
 // allowsPassthroughPath reports whether rest — the path segment after the
 // provider name in a native passthrough request (passthroughRoute's own
 // "rest", routes_passthrough.go) — matches one of the group's
-// PassthroughPaths glob patterns (security+performance audit,
-// 2026-08-22). An empty pattern list allows every path, the same
-// fail-open default every other allowsX method on group already applies
-// (matchesGlob's own empty-means-all contract) — do not invert it.
+// PassthroughPaths glob patterns (security review, 2026-08-22). An empty
+// pattern list allows every path, the same fail-open default every other
+// allowsX method on group already applies (matchesGlob's own
+// empty-means-all contract) — do not invert it. See GroupConfig.
+// PassthroughPaths' own doc comment (llmgateway.go) for a path.Match
+// footgun a non-empty list inherits: "*" does not cross "/", so ["*"]
+// is NOT "allow everything".
 func (grp *group) allowsPassthroughPath(rest string) bool {
 	return matchesGlob(grp.passthroughPaths, rest)
 }

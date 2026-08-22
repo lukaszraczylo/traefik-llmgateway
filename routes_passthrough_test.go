@@ -103,6 +103,94 @@ func TestExtractPassthroughUsage(t *testing.T) {
 	}
 }
 
+// --- unit tests: scanTopLevelModel (review fix, 2026-08-22, round 2) ---
+
+func TestScanTopLevelModel(t *testing.T) {
+	tests := []struct {
+		name      string
+		head      string
+		wantModel string
+		wantFound bool
+	}{
+		{
+			name:      "model is the first key",
+			head:      `{"model":"gpt-4","temperature":0.7}`,
+			wantModel: "gpt-4",
+			wantFound: true,
+		},
+		{
+			name:      "model after a nested object",
+			head:      `{"metadata":{"a":1,"b":[1,2,3]},"model":"gpt-4"}`,
+			wantModel: "gpt-4",
+			wantFound: true,
+		},
+		{
+			name:      "model after a nested array of objects",
+			head:      `{"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"there"}],"model":"gpt-4"}`,
+			wantModel: "gpt-4",
+			wantFound: true,
+		},
+		{
+			name:      "model found even though the document is truncated AFTER it",
+			head:      `{"model":"gpt-4","messages":[{"role":"user","content":"this array is never closed`,
+			wantModel: "gpt-4",
+			wantFound: true,
+		},
+		{
+			name:      "truncated BEFORE model appears: not found",
+			head:      `{"messages":[{"role":"user","content":"a long message that eats the whole peek window and mo`,
+			wantFound: false,
+		},
+		{
+			name:      "empty object: not found",
+			head:      `{}`,
+			wantFound: false,
+		},
+		{
+			name:      "not a JSON object at the top level: not found",
+			head:      `["model","gpt-4"]`,
+			wantFound: false,
+		},
+		{
+			name:      "model value is not a string: not found",
+			head:      `{"model":4}`,
+			wantFound: false,
+		},
+		{
+			name:      "model value is an empty string: not found",
+			head:      `{"model":""}`,
+			wantFound: false,
+		},
+		{
+			name:      "empty head: not found",
+			head:      ``,
+			wantFound: false,
+		},
+		{
+			name:      "malformed JSON: not found",
+			head:      `not json at all`,
+			wantFound: false,
+		},
+		{
+			name:      "deeply nested value ahead of model, correctly skipped",
+			head:      `{"a":{"b":{"c":[1,[2,3],{"d":4}]}},"model":"gpt-4"}`,
+			wantModel: "gpt-4",
+			wantFound: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotModel, gotFound := scanTopLevelModel([]byte(tt.head))
+			if gotFound != tt.wantFound {
+				t.Errorf("found = %v, want %v", gotFound, tt.wantFound)
+			}
+			if gotFound && gotModel != tt.wantModel {
+				t.Errorf("model = %q, want %q", gotModel, tt.wantModel)
+			}
+		})
+	}
+}
+
 // --- unit tests: hasTraversalSegment ---
 
 func TestHasTraversalSegment(t *testing.T) {
@@ -1107,14 +1195,56 @@ func TestHandlePassthrough_ModelAllowed_ProviderPrefixedForm(t *testing.T) {
 	}
 }
 
-// TestHandlePassthrough_NoInspectableModel_FallsBackToProviderOnly covers
-// every "no inspectable model" shape handlePassthrough's own doc comment
-// documents: a non-JSON Content-Type (a multipart upload — parakeet-mlx's
-// transcription passthrough shape). Even though the group's Models glob
-// would deny the literal string used here if it were checked, the request
-// must still succeed — falling back to provider-only authorization,
-// unchanged from before model enforcement existed.
-func TestHandlePassthrough_NoInspectableModel_FallsBackToProviderOnly(t *testing.T) {
+// TestHandlePassthrough_UnrestrictedGroup_SkipsModelPeekEntirely proves
+// ruling item 1 (review fix, 2026-08-22, round 2): a group with an EMPTY
+// Models list — the live cluster's "home" group and every group that has
+// not opted into model restriction — never even reads the request body
+// for model enforcement, regardless of Content-Type or body shape. This
+// is the correct "no inspectable model, and nothing to enforce anyway"
+// case; TestHandlePassthrough_RestrictedGroup_BinaryContentType_Returns403
+// below covers the opposite: the SAME binary body against a group that
+// DOES restrict models.
+func TestHandlePassthrough_UnrestrictedGroup_SkipsModelPeekEntirely(t *testing.T) {
+	var upstreamCalled bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalled = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{"openai": {Type: "openai", BaseURL: srv.URL, APIKey: "sk-up"}}
+	cfg.Groups = map[string]*GroupConfig{"default": {}} // no Models restriction
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{{Name: "alice", Group: "default", APIKey: "sk-alice"}}}
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/openai/v1/audio/transcriptions", strings.NewReader("--boundary\r\nfake multipart body\r\n--boundary--"))
+	req.Header.Set("Authorization", "Bearer sk-alice")
+	req.Header.Set("Content-Type", "multipart/form-data; boundary=boundary")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (no model restriction, no peek at all), body=%s", rec.Code, rec.Body.String())
+	}
+	if !upstreamCalled {
+		t.Error("upstream must be called: an unrestricted group's request body is never read for model enforcement")
+	}
+}
+
+// TestHandlePassthrough_RestrictedGroup_BinaryContentType_Returns403 is
+// ruling item 4's fail-closed case for a genuinely binary body: a
+// RESTRICTED group's multipart/audio/image/video upload carries no
+// inspectable "model" field by nature, and peekPassthroughModel does not
+// even read it (isPassthroughBinaryContentType's skip-list) — but because
+// the group opted into model restriction, "not found" still denies,
+// rather than silently falling back to provider-only the way an
+// unrestricted group would.
+func TestHandlePassthrough_RestrictedGroup_BinaryContentType_Returns403(t *testing.T) {
 	var upstreamCalled bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		upstreamCalled = true
@@ -1138,18 +1268,105 @@ func TestHandlePassthrough_NoInspectableModel_FallsBackToProviderOnly(t *testing
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 (restricted group, no model determinable), body=%s", rec.Code, rec.Body.String())
+	}
+	if upstreamCalled {
+		t.Error("upstream must never be called: a restricted group with no determinable model must fail closed")
+	}
+}
+
+// TestHandlePassthrough_ContentTypeBypass_Returns403 is the MUST-FIX
+// regression test: the round-1 gate skipped the body read (and so the
+// whole model check) for ANY Content-Type not containing
+// "application/json" — entirely client-controlled. The reviewer measured
+// {"model":"EXPENSIVE"} reaching the upstream with a 200 via
+// "Content-Type: text/plain". This table drives the identical body
+// through text/plain, an ABSENT Content-Type, and
+// application/x-www-form-urlencoded — none of them binary, so all three
+// must now be inspected and denied.
+func TestHandlePassthrough_ContentTypeBypass_Returns403(t *testing.T) {
+	contentTypes := []string{"text/plain", "", "application/x-www-form-urlencoded"}
+	for _, ct := range contentTypes {
+		t.Run("Content-Type="+ct, func(t *testing.T) {
+			var upstreamCalled bool
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				upstreamCalled = true
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer srv.Close()
+
+			cfg := CreateConfig()
+			cfg.Providers = map[string]*ProviderConfig{"openai": {Type: "openai", BaseURL: srv.URL, APIKey: "sk-up"}}
+			cfg.Groups = map[string]*GroupConfig{"default": {Models: []string{"gpt-cheap"}}}
+			cfg.Users = &UsersConfig{Inline: []*UserConfig{{Name: "alice", Group: "default", APIKey: "sk-alice"}}}
+			next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+			h, err := New(context.Background(), next, cfg, "llmgw")
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+
+			req := httptest.NewRequest(http.MethodPost, "/openai/v1/fine-tuning/jobs", strings.NewReader(`{"model":"EXPENSIVE"}`))
+			req.Header.Set("Authorization", "Bearer sk-alice")
+			if ct != "" {
+				req.Header.Set("Content-Type", ct)
+			}
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusForbidden {
+				t.Fatalf("status = %d, want 403 — the model check must not be skippable via Content-Type, body=%s", rec.Code, rec.Body.String())
+			}
+			if upstreamCalled {
+				t.Error("upstream must never be called: EXPENSIVE is not in the group's Models glob")
+			}
+		})
+	}
+}
+
+// TestHandlePassthrough_MatcherParity_AlreadyPrefixedBody_Allowed is the
+// matcher-parity regression test (review fix, 2026-08-22, round 2): a
+// body whose "model" field already carries the "provider/model" form
+// (some client tooling always sends canonical ids) must be authorized
+// against a BARE group glob, not false-403'd by a naive
+// providerName+"/"+model concatenation producing "openai/openai/x".
+func TestHandlePassthrough_MatcherParity_AlreadyPrefixedBody_Allowed(t *testing.T) {
+	var upstreamCalled bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalled = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{"openai": {Type: "openai", BaseURL: srv.URL, APIKey: "sk-up"}}
+	cfg.Groups = map[string]*GroupConfig{"default": {Models: []string{"x"}}} // bare glob
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{{Name: "alice", Group: "default", APIKey: "sk-alice"}}}
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/openai/v1/native-endpoint", strings.NewReader(`{"model":"openai/x"}`))
+	req.Header.Set("Authorization", "Bearer sk-alice")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
 	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200 (falls back to provider-only auth), body=%s", rec.Code, rec.Body.String())
+		t.Fatalf("status = %d, want 200 — the already-prefixed body must resolve against the bare glob, body=%s", rec.Code, rec.Body.String())
 	}
 	if !upstreamCalled {
-		t.Error("upstream must be called: a non-JSON body has no inspectable model, so model enforcement must not block it")
+		t.Error("upstream must be called: splitConfiguredProvider must strip the client's own \"openai/\" prefix before matching, not double it")
 	}
 }
 
 // TestHandlePassthrough_ModelBodyReadFailure_Returns400 covers
 // peekPassthroughModel's own body-read-failure path, distinct from a body
-// that merely fails to decode as JSON (which falls back to provider-only,
-// not an error).
+// with no determinable model (which fails closed with 403, not 400). The
+// group must have a Models restriction — otherwise the peek never runs
+// at all (ruling item 1) and this failure is never reached.
 func TestHandlePassthrough_ModelBodyReadFailure_Returns400(t *testing.T) {
 	var upstreamCalled bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1160,7 +1377,7 @@ func TestHandlePassthrough_ModelBodyReadFailure_Returns400(t *testing.T) {
 
 	cfg := CreateConfig()
 	cfg.Providers = map[string]*ProviderConfig{"openai": {Type: "openai", BaseURL: srv.URL, APIKey: "sk-up"}}
-	cfg.Groups = map[string]*GroupConfig{"default": {}}
+	cfg.Groups = map[string]*GroupConfig{"default": {Models: []string{"gpt-allowed"}}}
 	cfg.Users = &UsersConfig{Inline: []*UserConfig{{Name: "alice", Group: "default", APIKey: "sk-alice"}}}
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
 	h, err := New(context.Background(), next, cfg, "llmgw")
@@ -1181,6 +1398,92 @@ func TestHandlePassthrough_ModelBodyReadFailure_Returns400(t *testing.T) {
 	if upstreamCalled {
 		t.Error("upstream must never be called when the request body cannot be read")
 	}
+}
+
+// TestHandlePassthrough_BodyIntegrity_ByteIdentical_LargeBody proves
+// peekPassthroughModel's io.MultiReader restoration (review fix,
+// 2026-08-22, round 2) forwards the EXACT original body to the upstream,
+// even when the body is larger than maxModelPeekBytes (64KiB) — so the
+// remainder streams from the real, unread r.Body rather than a second
+// buffered copy. Exercises the "read exactly the cap, more remains" path
+// io.ReadFull's nil-error branch takes.
+func TestHandlePassthrough_BodyIntegrity_ByteIdentical_LargeBody(t *testing.T) {
+	padding := strings.Repeat("x", maxModelPeekBytes*2) // forces the body well past the 64KiB peek cap
+	body := `{"model":"gpt-allowed","padding":"` + padding + `"}`
+
+	var gotBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{"openai": {Type: "openai", BaseURL: srv.URL, APIKey: "sk-up"}}
+	cfg.Groups = map[string]*GroupConfig{"default": {Models: []string{"gpt-allowed"}}}
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{{Name: "alice", Group: "default", APIKey: "sk-alice"}}}
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/openai/v1/native-endpoint", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer sk-alice")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	if string(gotBody) != body {
+		t.Errorf("upstream body length = %d, want %d bytes byte-identical to the original", len(gotBody), len(body))
+	}
+}
+
+// TestHandlePassthrough_BodyIntegrity_ChunkedContentLength proves the
+// same byte-identical forwarding when the request arrives with
+// ContentLength < 0 (chunked transfer / unknown length — httptest's own
+// stand-in for what a real chunked client connection produces), the
+// variant the reviewer specifically asked for alongside the large-body
+// case above.
+func TestHandlePassthrough_BodyIntegrity_ChunkedContentLength(t *testing.T) {
+	body := `{"model":"gpt-allowed","messages":[{"role":"user","content":"hi"}]}`
+
+	var gotBody []byte
+	var gotContentLength int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotContentLength = r.ContentLength
+		gotBody, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{"openai": {Type: "openai", BaseURL: srv.URL, APIKey: "sk-up"}}
+	cfg.Groups = map[string]*GroupConfig{"default": {Models: []string{"gpt-allowed"}}}
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{{Name: "alice", Group: "default", APIKey: "sk-alice"}}}
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/openai/v1/native-endpoint", strings.NewReader(body))
+	req.ContentLength = -1 // simulate chunked transfer / unknown length
+	req.Header.Set("Authorization", "Bearer sk-alice")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	if string(gotBody) != body {
+		t.Errorf("upstream body = %q, want %q (byte-identical)", gotBody, body)
+	}
+	_ = gotContentLength // upstream's own negotiated length; not asserted, proxyUpstream already re-derives it from the reader
 }
 
 // TestHandlePassthrough_ProviderPassthroughDisabled_Returns404 is the

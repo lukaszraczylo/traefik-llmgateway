@@ -25,6 +25,70 @@ const maxPassthroughBytes = 32 << 20
 // of any size — without ever waiting for the full body to buffer first.
 const maxAccountingTeeBytes = 4 << 20
 
+// maxModelPeekBytes caps how much of a passthrough request body
+// peekPassthroughModel reads to find a top-level "model" field: 64KiB
+// (security review fix, 2026-08-22, round 2). This is deliberately far
+// smaller than maxPassthroughBytes: a legitimate LLM request always
+// carries "model" in its first bytes, so 64KiB is generous headroom
+// ahead of it while bounding memory to a small constant regardless of how
+// large the rest of the body (a long messages/documents array) is. The
+// body is never fully buffered to find this — see peekPassthroughModel's
+// own doc comment for the io.MultiReader restoration that lets the
+// remainder stream straight to the upstream, unread by this gateway.
+//
+// OPERATOR CONTRACT: a group with a non-empty Models list (GroupConfig,
+// llmgateway.go) enforces model authorization on every native passthrough
+// request whose body is inspected (see peekPassthroughModel's own gating)
+// — and a request whose "model" field does not appear within this 64KiB
+// window is DENIED (403), fail-closed, even if it would otherwise have
+// been allowed. This includes a Gemini passthrough request: Gemini's
+// model id lives in the URL path, never the JSON body, so a group with a
+// restricted Models list and Gemini passthrough traffic will see every
+// such request denied under this rule — route Gemini traffic for a
+// model-restricted group through the unified /v1/* API instead, where
+// modelRegistry.resolve enforces the same authorization against the
+// URL-independent "model" field those routes already require.
+const maxModelPeekBytes = 64 << 10
+
+// passthroughBinaryContentTypePrefixes lists Content-Type prefixes
+// peekPassthroughModel treats as genuinely binary and never reads at all
+// (security review fix, 2026-08-22, round 2): multipart uploads
+// (parakeet-mlx's transcription passthrough shape) and raw audio/image/
+// video/octet-stream payloads carry no JSON "model" field to find, and
+// reading them would only cost memory for nothing.
+//
+// This is a SKIP-list, not an ALLOW-list — the deliberate inversion of
+// this gate's first version, which skipped the read unless Content-Type
+// contained "application/json". That allow-list shape let a client bypass
+// model enforcement outright merely by omitting Content-Type or sending
+// an unexpected value (e.g. "text/plain"): the reviewer measured a
+// {"model":"EXPENSIVE"} body reaching the upstream with a 200, because
+// the Content-Type check alone decided whether the check ran, and
+// Content-Type is entirely client-controlled. With a skip-list, every
+// Content-Type NOT matching one of these prefixes — including "text/plain"
+// and an ABSENT header — is inspected; the attacker no longer controls
+// whether the check runs, only (still) what non-binary Content-Type they
+// send.
+var passthroughBinaryContentTypePrefixes = []string{
+	"multipart/",
+	"audio/",
+	"image/",
+	"video/",
+	"application/octet-stream",
+}
+
+// isPassthroughBinaryContentType reports whether contentType matches one
+// of passthroughBinaryContentTypePrefixes, case-insensitively.
+func isPassthroughBinaryContentType(contentType string) bool {
+	ct := strings.ToLower(contentType)
+	for _, prefix := range passthroughBinaryContentTypePrefixes {
+		if strings.HasPrefix(ct, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 // hopByHopHeaders lists the RFC 7230 §6.1 hop-by-hop headers, stripped
 // from both the outgoing upstream request and the response copied back
 // to the client — they describe this one TCP hop, not the end-to-end
@@ -299,38 +363,166 @@ func extractPassthroughUsage(typeName, providerName string, body []byte) (usage,
 	}
 }
 
-// peekPassthroughModel best-effort reads a passthrough request's JSON body
-// far enough to extract its top-level "model" field, restoring r.Body
-// afterward — a fresh reader over the exact bytes read — so proxyUpstream
-// can still forward the request to the upstream unchanged (security+
-// performance audit, 2026-08-22). hasModel is false, with no error, for
-// every shape handlePassthrough's own doc comment documents as "no
-// inspectable model, fall back to provider-only auth": a non-JSON
-// Content-Type (Gemini's URL-embedded model; a multipart audio/image
-// upload — parakeet-mlx's transcription passthrough is exactly this
-// shape, and this check skips reading its body entirely, at no cost), a
-// body that fails to decode as JSON, or JSON with no non-empty top-level
-// "model" string. err is non-nil only for an actual body-read failure
-// (client disconnect, deadline) — the caller maps that to the same 400
-// runUnified's own body-read failure uses (routes_unified.go), rather
-// than silently treating an unreadable body as "provider-only, proceed".
+// peekPassthroughModel reads at most maxModelPeekBytes of a passthrough
+// request body to find its top-level "model" field, then restores r.Body
+// to stream the ORIGINAL, complete body to the upstream unchanged — the
+// bytes already read prepended (io.MultiReader) to whatever remains
+// unread on the real r.Body, never fully buffered in memory (security
+// review fix, 2026-08-22, round 2: the first version buffered the whole
+// body, up to 32MiB, into memory before forwarding it).
+//
+// Callers only invoke this once they have already decided enforcement is
+// required (handlePassthrough checks group.hasModelRestriction() first) —
+// this function itself has no fail-open/fail-closed opinion; hasModel
+// simply reports whether a non-empty top-level "model" STRING was found
+// within the peek window. It is skipped, at no cost — no read at all —
+// for a Content-Type isPassthroughBinaryContentType recognizes as
+// genuinely binary (multipart uploads, audio/image/video, octet-stream):
+// none of those carry a JSON "model" field to find. Every OTHER
+// Content-Type, including "text/plain" or an absent header, IS read: the
+// caller decides what a "not found" result means, not this gate — see
+// maxModelPeekBytes' own doc comment for why the caller's answer is
+// fail-closed.
+//
+// The scan (scanTopLevelModel) is a bounded JSON TOKEN walk, not a full
+// json.Unmarshal: the peek window is very often a PREFIX of a larger body
+// (a long messages/documents array trailing the model field), and
+// Unmarshal requires a complete, valid document — it would reject a
+// legitimately-truncated-but-found "model" as if it were malformed JSON.
+//
+// err is non-nil only for a genuine body-read failure (client disconnect,
+// deadline) distinct from merely reaching the end of a body shorter than
+// the peek window — the caller maps err to the same 400 runUnified's own
+// body-read failure uses (routes_unified.go).
 func peekPassthroughModel(r *http.Request) (model string, hasModel bool, err error) {
-	if r.Body == nil || !strings.Contains(strings.ToLower(r.Header.Get("Content-Type")), "application/json") {
+	if r.Body == nil || isPassthroughBinaryContentType(r.Header.Get("Content-Type")) {
 		return "", false, nil
 	}
-	body, readErr := io.ReadAll(io.LimitReader(r.Body, maxPassthroughBytes))
-	if readErr != nil {
+
+	head := make([]byte, maxModelPeekBytes)
+	n, readErr := io.ReadFull(r.Body, head)
+	switch readErr { //nolint:errorlint // io.ReadFull returns these sentinels bare, never wrapped — see its own doc comment
+	case nil:
+		// Read exactly maxModelPeekBytes: the body has at least that much
+		// left unread on r.Body, restored below via io.MultiReader.
+	case io.EOF, io.ErrUnexpectedEOF:
+		// Body was shorter than the peek window (io.EOF: empty; io.
+		// ErrUnexpectedEOF: 0 < n < len(head)) — head[:n] IS the whole
+		// body; r.Body is now exhausted, so appending it below is a
+		// harmless immediate EOF.
+	default:
 		return "", false, readErr
 	}
-	r.Body = io.NopCloser(bytes.NewReader(body))
+	head = head[:n]
+	r.Body = io.NopCloser(io.MultiReader(bytes.NewReader(head), r.Body))
 
-	var payload struct {
-		Model string `json:"model"`
+	model, hasModel = scanTopLevelModel(head)
+	return model, hasModel, nil
+}
+
+// scanTopLevelModel walks head — a bounded, possibly-truncated PREFIX of
+// a JSON request body (peekPassthroughModel's own maxModelPeekBytes cap)
+// — as a stream of JSON tokens (encoding/json's Decoder.Token, the
+// documented mechanism for parsing a document incrementally) and returns
+// the string value of its top-level "model" key, without ever requiring
+// head to be a complete, valid JSON document on its own: a legitimate
+// request's "model" field sits well within the cap even when a trailing
+// field (a long messages/documents array) does not, and this walk finds
+// it regardless of what truncation or garbage follows. found is false —
+// not an error — for anything else: head is not a JSON object at all,
+// "model" never appears among its top-level keys before head runs out,
+// or "model" is present but its value is not a string.
+func scanTopLevelModel(head []byte) (model string, found bool) {
+	dec := json.NewDecoder(bytes.NewReader(head))
+	tok, err := dec.Token()
+	if err != nil {
+		return "", false
 	}
-	if json.Unmarshal(body, &payload) != nil || payload.Model == "" {
-		return "", false, nil
+	if d, ok := tok.(json.Delim); !ok || d != '{' {
+		return "", false
 	}
-	return payload.Model, true, nil
+	for dec.More() {
+		keyTok, err := dec.Token()
+		if err != nil {
+			return "", false
+		}
+		key, ok := keyTok.(string)
+		if !ok {
+			return "", false // malformed: expected an object key
+		}
+		valTok, err := dec.Token()
+		if err != nil {
+			return "", false
+		}
+		if key == "model" {
+			s, ok := valTok.(string)
+			return s, ok && s != ""
+		}
+		if d, ok := valTok.(json.Delim); ok && (d == '{' || d == '[') {
+			if err := skipJSONValue(dec); err != nil {
+				return "", false
+			}
+		}
+		// Otherwise valTok was a scalar (string/float64/bool/nil) other
+		// than "model" — nothing further to do; loop to the next key.
+	}
+	return "", false
+}
+
+// skipJSONValue consumes the remainder of a nested JSON array/object
+// value whose opening delimiter dec has already emitted, so
+// scanTopLevelModel's own dec.More() call — which reports position in
+// whatever object/array dec is CURRENTLY inside — correctly reports the
+// outer top-level object's state again once this returns, rather than
+// still appearing "inside" the value just skipped.
+func skipJSONValue(dec *json.Decoder) error {
+	depth := 1
+	for depth > 0 {
+		tok, err := dec.Token()
+		if err != nil {
+			return err
+		}
+		if d, ok := tok.(json.Delim); ok {
+			switch d {
+			case '{', '[':
+				depth++
+			case '}', ']':
+				depth--
+			}
+		}
+	}
+	return nil
+}
+
+// allowsPassthroughModel reports whether grp's Models glob authorizes
+// model for a native passthrough request already pinned to providerName
+// by the URL (security review, 2026-08-22, round 2 — fixes a matcher-
+// parity bug: gluing providerName+"/" onto model UNCONDITIONALLY, the
+// round-1 version's approach, produces "openai/openai/x" and false-403s a
+// legitimate client whose body already carries the prefixed form).
+//
+// This reuses modelRegistry.splitConfiguredProvider — the SAME rule
+// resolve/resolveAgainst apply to a client-given model id (registry.go):
+// a leading segment is stripped as a provider prefix ONLY when it names
+// an ACTUALLY CONFIGURED provider, never blindly assumed. Three
+// candidates are checked, covering this package's two established
+// conventions for turning one model reference into every glob form an
+// operator might reasonably write:
+//   - model, exactly as the client's body sent it (resolveAgainst's own
+//     "requestedID" candidate)
+//   - bareModel, model's own suffix once any genuinely-configured
+//     provider prefix is stripped — equal to model when it carried none
+//     (resolveAgainst's own "upstreamModel" candidate)
+//   - providerName+"/"+bareModel, the canonical id for the provider THIS
+//     route is actually pinned to (listFor's own p+"/"+id synthesis) —
+//     lets an operator write their glob against the addressed provider
+//     even when the client sends a bare model id
+func (g *Gateway) allowsPassthroughModel(grp *group, providerName, model string) bool {
+	bareModel := model
+	if _, rest, ok := g.registry.splitConfiguredProvider(model); ok {
+		bareModel = rest
+	}
+	return grp.allowsModel(model) || grp.allowsModel(bareModel) || grp.allowsModel(providerName+"/"+bareModel)
 }
 
 // handlePassthrough implements the native provider passthrough route:
@@ -343,59 +535,72 @@ func peekPassthroughModel(r *http.Request) (model string, hasModel bool, err err
 // providerHTTPError.
 //
 // Checks run in this order: group authorization — provider (403), model
-// when the body carries one (403), path allowlist (403) — before
-// capability checks (Upgrade→501, path validity→400) before rate limits
-// (429/503) — a caller who cannot use providerName/model/path at all
-// learns that first, rather than learning something about how they tried
-// to use it. The provider-level Passthrough toggle (ProviderConfig,
+// when the group restricts models at all (403), path allowlist (403) —
+// before capability checks (Upgrade→501, path validity→400) before rate
+// limits (429/503) — a caller who cannot use providerName/model/path at
+// all learns that first, rather than learning something about how they
+// tried to use it. The provider-level Passthrough toggle (ProviderConfig,
 // llmgateway.go) is checked earlier still, by ServeHTTP's own route gate
 // — a disabled provider never reaches this function at all, reported as
 // the ordinary unknown-route 404 instead.
 //
-// MODEL ENFORCEMENT (security+performance audit, 2026-08-22): when the
-// request body is JSON and carries a non-empty top-level "model" field
-// (peekPassthroughModel), it is checked against grp.allowsModel — both
-// the bare form and the "providerName/model" form, the identical
-// dual-candidate matcher the unified route's own resolveAgainst applies
-// (registry.go) — before proxying, closing the bypass where a tenant
-// scoped to one cheap model could otherwise reach the SAME provider's
-// entire native API (fine-tuning, files, batches, ...) on the operator's
-// key merely by asking natively instead of through /v1/chat/completions.
-// A body with no inspectable model (Gemini's URL-embedded model id, a
-// multipart upload, a non-JSON body) falls back to provider-only
-// authorization, unchanged from before this round — this is a strict
-// narrowing of what a passthrough request may address, never a new way
-// to allow one a plain grp.allowsProvider check would have refused.
+// MODEL ENFORCEMENT (security review, 2026-08-22, round 2 — closes a
+// round-1 bypass): enforcement runs ONLY for a group with a non-empty
+// Models list (grp.hasModelRestriction) — a group that has not opted into
+// model restriction has nothing allowsModel could reject, so the request
+// body is never even read, exactly as before this feature existed at all.
+// For a restricted group, peekPassthroughModel reads (bounded,
+// maxModelPeekBytes) for a top-level "model" field and this function
+// checks it via allowsPassthroughModel — the round-1 version instead
+// gated the READ ITSELF on Content-Type containing "application/json",
+// which a client fully controls: sending "text/plain", an unexpected
+// value, or no Content-Type at all skipped the check outright and let
+// {"model":"EXPENSIVE"} straight through. There is no such escape now: a
+// restricted group's every non-genuinely-binary request body is
+// inspected (isPassthroughBinaryContentType's skip-list, not an
+// allow-list), and one where "model" cannot be found within the peek
+// window is DENIED (403) — fail CLOSED, not open, the opposite direction
+// from a body with no inspectable model under round 1. This is
+// deliberate: it only affects a group that already opted into model
+// restriction, and a legitimate LLM request always carries "model" well
+// within maxModelPeekBytes. See maxModelPeekBytes' own doc comment for
+// the Gemini-passthrough interaction this creates (its model id lives in
+// the URL, never the body) and the operator-facing contract.
 //
-// PATH ALLOWLIST (same audit): GroupConfig.PassthroughPaths, when
+// PATH ALLOWLIST (same review): GroupConfig.PassthroughPaths, when
 // non-empty, additionally restricts which rest path this group's
 // passthrough requests may address (grp.allowsPassthroughPath). Empty
 // (the default, matchesGlob's own empty-means-all contract) allows every
-// path, exactly as before this field existed.
+// path, exactly as before this field existed — see its own doc comment
+// for a path.Match footgun this allow-list inherits (a literal "*"
+// pattern does NOT mean "allow everything").
 //
 // For a Gemini provider, rest is appended to base() exactly as the client
 // sent it: there is no model extraction or URL rewriting here, so a
 // Gemini passthrough client must address it with Gemini's own native URL
 // structure, including its "/v1beta/models/{model}:generateContent"
 // paths — injectAuth still sets the same x-goog-api-key header it sets
-// for every other Gemini request. Gemini's model id lives in that URL
-// path, not the JSON body, so peekPassthroughModel never finds one for a
-// Gemini request — a Gemini passthrough client is always authorized
-// provider-only, exactly as it was before model enforcement existed.
+// for every other Gemini request.
 func (g *Gateway) handlePassthrough(w http.ResponseWriter, r *http.Request, u *user, grp *group, providerName, rest string) {
 	if !grp.allowsProvider(providerName) {
 		writeOAIError(w, http.StatusForbidden, "invalid_request_error", "provider access denied")
 		return
 	}
 
-	model, hasModel, err := peekPassthroughModel(r)
-	if err != nil {
-		writeOAIError(w, http.StatusBadRequest, "invalid_request_error", "cannot read request body")
-		return
-	}
-	if hasModel && !grp.allowsModel(model) && !grp.allowsModel(providerName+"/"+model) {
-		writeOAIError(w, http.StatusForbidden, "invalid_request_error", "model access denied")
-		return
+	if grp.hasModelRestriction() {
+		model, hasModel, err := peekPassthroughModel(r)
+		if err != nil {
+			writeOAIError(w, http.StatusBadRequest, "invalid_request_error", "cannot read request body")
+			return
+		}
+		if !hasModel {
+			writeOAIError(w, http.StatusForbidden, "invalid_request_error", "model could not be determined")
+			return
+		}
+		if !g.allowsPassthroughModel(grp, providerName, model) {
+			writeOAIError(w, http.StatusForbidden, "invalid_request_error", "model access denied")
+			return
+		}
 	}
 
 	if !grp.allowsPassthroughPath(rest) {
@@ -450,11 +655,16 @@ func (g *Gateway) handlePassthrough(w http.ResponseWriter, r *http.Request, u *u
 		return
 	}
 
-	respUsage, model, unmarshalErr := extractPassthroughUsage(adapter.typeName(), providerName, result.tee.buf.Bytes())
+	// respModel: the RESPONSE body's own reported model id (extractPassthroughUsage
+	// reads it, when present, from the upstream's reply) — never named
+	// "model" here, so it can never be confused with (or shadow) the
+	// REQUEST body's "model" field the enforcement block above already
+	// consumed via peekPassthroughModel (review fix, 2026-08-22, round 2).
+	respUsage, respModel, unmarshalErr := extractPassthroughUsage(adapter.typeName(), providerName, result.tee.buf.Bytes())
 	if unmarshalErr != nil {
 		g.logf("passthrough: response body did not decode as JSON for usage accounting (provider %q): %v", providerName, unmarshalErr)
 	}
-	cost := unifiedCostMicros(providerName+"/"+model, model, respUsage, g.cfg.Pricing)
+	cost := unifiedCostMicros(providerName+"/"+respModel, respModel, respUsage, g.cfg.Pricing)
 	g.limiter.account(scopes, respUsage, cost)
 }
 

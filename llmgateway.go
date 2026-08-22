@@ -65,14 +65,44 @@ type Config struct {
 
 // ProviderConfig describes one upstream LLM provider.
 type ProviderConfig struct {
-	Passthrough       *bool    `json:"passthrough,omitempty"`
-	Type              string   `json:"type"`
-	BaseURL           string   `json:"baseUrl,omitempty"`
-	APIKey            string   `json:"apiKey"`
-	DiscoveryInterval string   `json:"discoveryInterval,omitempty"`
-	MetadataPath      string   `json:"metadataPath,omitempty"`
-	Models            []string `json:"models,omitempty"`
-	Discovery         bool     `json:"discovery,omitempty"`
+	// Passthrough gates whether this provider's native passthrough route
+	// ("/{providerName}/{rest...}", routes_passthrough.go's
+	// handlePassthrough) is reachable at all. nil or true (the default)
+	// preserves prior behavior exactly: every configured provider stays
+	// reachable through native passthrough unless an operator explicitly
+	// opts it out — FAIL-OPEN BY DESIGN, the same default direction as
+	// every allow-list field in this package (GroupConfig's Providers/
+	// Models/MCPServers/Agents/PassthroughPaths: empty/unset permits, an
+	// explicit restriction narrows). Set false to disable a provider's
+	// native passthrough entirely — e.g. an operator who wants clients
+	// reaching a provider only through the unified /v1/* routes, never
+	// its raw native API. A disabled provider's passthrough prefix is
+	// treated exactly like an unconfigured one: ServeHTTP falls through
+	// to the ordinary unknown-route 404, without even reaching auth
+	// (security+performance audit, 2026-08-22). This does not affect the
+	// MCP/A2A target proxy (mcp_a2a.go), which has its own routing
+	// prefix and its own allow-list (GroupConfig.MCPServers/Agents) —
+	// operators who route native tools like macstudio-rerank/parakeet-
+	// mlx/piper-tts through THIS field's route must leave it unset or
+	// true to keep that traffic flowing.
+	Passthrough       *bool  `json:"passthrough,omitempty"`
+	Type              string `json:"type"`
+	BaseURL           string `json:"baseUrl,omitempty"`
+	APIKey            string `json:"apiKey"`
+	DiscoveryInterval string `json:"discoveryInterval,omitempty"`
+	// MetadataPath is an optional second discovery endpoint (feature
+	// v0.23), fetched alongside the provider's normal listModels call
+	// when set: a path such as "/api/v0/models" (LM Studio's own,
+	// non-OpenAI-compatible models endpoint) that reports per-model
+	// context length. Only openai-type adapters read this field
+	// (provider_openai.go's openaiAdapter.fetchModelMetadata) — an
+	// anthropic/gemini provider configuring it has no effect. Empty (the
+	// default) captures no metadata, preserving prior behavior exactly.
+	// A failed or absent fetch is always non-fatal to discovery itself:
+	// no metadata is captured, nothing else changes.
+	MetadataPath string   `json:"metadataPath,omitempty"`
+	Models       []string `json:"models,omitempty"`
+	Discovery    bool     `json:"discovery,omitempty"`
 }
 
 // GroupConfig describes a group's access and limits. Empty/omitted
@@ -103,17 +133,29 @@ type GroupConfig struct {
 	Agents     []string `json:"agents,omitempty"`
 	// PassthroughPaths restricts which REST path this group's native
 	// passthrough requests may address, glob-matched (matchesGlob,
-	// auth.go) against passthroughRoute's own "rest" — the path segment
-	// AFTER the provider name (e.g. "v1/files" for a request to
-	// "/openai/v1/files"). Empty/omitted (the default) means every path
-	// is allowed, preserving prior behavior exactly and matching every
-	// other allow-list field's own empty-means-all semantics in this
-	// struct — DO NOT invert that convention here. Set a non-empty list
-	// to restrict a group to specific native endpoints (e.g.
-	// ["v1/chat/completions"]), without narrowing any group that leaves
-	// it unset (security+performance audit, 2026-08-22). The "home"
-	// group's own providers/models/mcpServers/agents lists are already
-	// empty (unrestricted); leaving this unset too keeps it that way.
+	// auth.go, via Go's path.Match) against passthroughRoute's own
+	// "rest" — the ESCAPED path segment (r.URL.EscapedPath()-derived,
+	// never percent-decoded) AFTER the provider name (e.g. "v1/files" for
+	// a request to "/openai/v1/files"). Empty/omitted (the default) means
+	// every path is allowed, preserving prior behavior exactly and
+	// matching every other allow-list field's own empty-means-all
+	// semantics in this struct — DO NOT invert that convention here. Set
+	// a non-empty list to restrict a group to specific native endpoints
+	// (e.g. ["v1/chat/completions"]), without narrowing any group that
+	// leaves it unset (security review, 2026-08-22). The "home" group's
+	// own providers/models/mcpServers/agents lists are already empty
+	// (unrestricted); leaving this unset too keeps it that way.
+	//
+	// FOOTGUN (path.Match's documented behavior, verified in review): "*"
+	// matches within ONE path segment only — it does NOT cross "/". A
+	// pattern of exactly ["*"] therefore does NOT mean "allow every
+	// path": it denies every "rest" with more than one segment, which is
+	// most real passthrough traffic (e.g. "v1/chat/completions", three
+	// segments, never matches "*"). Leave PassthroughPaths unset/empty to
+	// actually allow everything; if you need a genuine multi-segment
+	// wildcard, list every segment explicitly (e.g. "v1/*") or repeat a
+	// "*/*/*"-shaped pattern per depth — there is no "**" (path.Match has
+	// no such construct).
 	PassthroughPaths []string `json:"passthroughPaths,omitempty"`
 }
 
