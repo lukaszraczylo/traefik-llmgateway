@@ -45,6 +45,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/traefik/yaegi/interp"
@@ -293,7 +294,36 @@ func run() error {
 		return fmt.Errorf("read builtin context tokens for %q from pricing_data_gen.go: %w", builtinLookupModelID, err)
 	}
 
-	attemptAccountingOverride := `{"providers":{"openai":{"type":"openai","baseUrl":"` + upstream.URL + `","apiKey":"sk-up","models":["` + testDataWantModel + `","` + builtinLookupModelID + `"]},"` +
+	// --- breaker probe (feat/provider-health): a provider whose
+	// /v1/models 401s, exactly the xiaomi production case, driven under
+	// the REAL interpreter. brkHealthy flips the upstream from always-401
+	// to serving real data once the probe wants to observe recovery;
+	// brkModelsHits counts every /v1/models hit so exerciseBreaker can
+	// prove the open window actually suppresses discovery traffic (a
+	// count staying flat), not merely that healthState reads "open".
+	brkModelsHits := new(int64)
+	brkHealthy := new(int64)
+	brkUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/v1/models") {
+			atomic.AddInt64(brkModelsHits, 1)
+			if atomic.LoadInt64(brkHealthy) == 0 {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusUnauthorized)
+				_, _ = w.Write([]byte(`{"error":{"message":"invalid api key","type":"invalid_request_error"}}`))
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"brk-model"}]}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"c3","object":"chat.completion","model":"brk-model","choices":[],"usage":{}}`))
+	}))
+	defer brkUpstream.Close()
+
+	attemptAccountingOverride := `{"breaker":{"failureThreshold":2,"openDuration":"3s","maxOpenDuration":"6s"},` +
+		`"providers":{"openai":{"type":"openai","baseUrl":"` + upstream.URL + `","apiKey":"sk-up","models":["` + testDataWantModel + `","` + builtinLookupModelID + `"]},` +
+		`"brk":{"type":"openai","baseUrl":"` + brkUpstream.URL + `","apiKey":"sk-up","discovery":true,"discoveryInterval":"1ms"},"` +
 		slowProviderName + `":{"type":"openai","baseUrl":"` + slowUpstream.URL + `","apiKey":"sk-up","models":["` + slowProviderModel + `"]}},` +
 		// modelMeta (feature v0.23): a config-override entry for
 		// testDataWantModel, so exerciseHandler's GET /v1/models
@@ -345,7 +375,20 @@ func run() error {
 		return fmt.Errorf("%s.New's returned value does not implement http.Handler", pkgName)
 	}
 
-	return exerciseHandler(handler, builtinLookupContextTokens)
+	if err := exerciseHandler(handler, builtinLookupContextTokens); err != nil {
+		return err
+	}
+	// exerciseBreaker (feat/provider-health, adversarial-review round 2):
+	// runs after exerciseHandler, against the SAME interpreted handler —
+	// proves the discovery circuit breaker's open/half-open/closed state
+	// machine, its new interpreted breakerState (a named int32 with a
+	// String() method), and recordHealthLocked's classification call all
+	// run correctly under Yaegi, not merely compiled. limits.go's own
+	// matchesSentinel doc comment (Trap-4/reverse-direction history) is
+	// exactly why this class of divergence needs its own interpreted
+	// probe: a compiled `go test` pass here would prove nothing about the
+	// interpreter.
+	return exerciseBreaker(handler, brkModelsHits, brkHealthy)
 }
 
 // builtinLookupModelID is a real, stable entry in the generated
@@ -445,6 +488,111 @@ func readBuiltinContextTokens(repoRoot, modelID string) (int, error) {
 		return 0, fmt.Errorf("builtinModelMetaTable entry for %q has ContextTokens=%d, want > 0", modelID, n)
 	}
 	return n, nil
+}
+
+// readHealth returns provider name's healthState string from the admin
+// overview, decoded generically like readProviderAttemptCounters does
+// (feat/provider-health).
+func readHealth(handler http.Handler, name string) (string, error) {
+	req := httptest.NewRequest(http.MethodGet, "/admin/api/overview", nil)
+	req.Header.Set("Authorization", "Bearer "+attemptAccountingAdminAPIKey)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		return "", fmt.Errorf("GET /admin/api/overview: status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		return "", err
+	}
+	providers, _ := body["providers"].([]any)
+	for _, raw := range providers {
+		p, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		if p["name"] == name {
+			s, _ := p["healthState"].(string)
+			return s, nil
+		}
+	}
+	return "", fmt.Errorf("provider %q not in overview: %s", name, rec.Body.String())
+}
+
+// drive fires n authenticated GET /v1/models requests, each of which runs
+// maybeRefresh at ServeHTTP entry, with a small gap so the 1ms discovery
+// interval always permits a fresh attempt when the breaker is closed
+// (feat/provider-health).
+func drive(handler http.Handler, n int) {
+	for i := 0; i < n; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+		req.Header.Set("Authorization", "Bearer "+testDataUserAPIKey)
+		handler.ServeHTTP(httptest.NewRecorder(), req)
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// exerciseBreaker drives the "brk" provider (attemptAccountingOverride,
+// run()) through the discovery circuit breaker's full state cycle —
+// closed -> open -> half-open -> closed again — against the REAL
+// interpreter, proving under Yaegi what registry_health_test.go already
+// proves compiled: tryBeginRefresh/finishRefresh/recordHealthLocked, the
+// interpreted breakerState named-int32 type and its String() method, and
+// the classification call recordHealthLocked makes all behave correctly
+// interpreted, not merely compiled (feat/provider-health, adversarial-
+// review round 2 — limits.go's matchesSentinel doc comment is exactly why
+// this class of divergence needs its own interpreted probe).
+func exerciseBreaker(handler http.Handler, hits, healthy *int64) error {
+	// Phase 1: hammer with the upstream 401ing. The breaker must open.
+	deadline := time.Now().Add(10 * time.Second)
+	state := ""
+	for time.Now().Before(deadline) {
+		drive(handler, 5)
+		s, err := readHealth(handler, "brk")
+		if err != nil {
+			return err
+		}
+		state = s
+		if s == "open" {
+			break
+		}
+	}
+	if state != "open" {
+		return fmt.Errorf("BREAKER-1: healthState = %q after sustained 401s, want %q (upstream /v1/models hits=%d)", state, "open", atomic.LoadInt64(hits))
+	}
+	openedAtHits := atomic.LoadInt64(hits)
+	fmt.Printf("yaegi-check: breaker opened after %d upstream /v1/models hits\n", openedAtHits)
+
+	// Phase 2: while open, further traffic must NOT reach the upstream.
+	// openDuration is 3s; hammer for ~1s and require zero new hits.
+	drive(handler, 30)
+	duringOpen := atomic.LoadInt64(hits) - openedAtHits
+	if duringOpen != 0 {
+		return fmt.Errorf("BREAKER-2: %d upstream /v1/models hits during the open window, want 0 — backoff did not suppress discovery", duringOpen)
+	}
+	fmt.Println("yaegi-check: breaker open window suppressed all discovery hits")
+
+	// Phase 3: provider recovers. After the backoff window elapses the
+	// half-open probe must run and CLOSE the breaker again.
+	atomic.StoreInt64(healthy, 1)
+	recovered := false
+	recoverDeadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(recoverDeadline) {
+		drive(handler, 5)
+		s, err := readHealth(handler, "brk")
+		if err != nil {
+			return err
+		}
+		if s == "closed" {
+			recovered = true
+			break
+		}
+	}
+	if !recovered {
+		return fmt.Errorf("BREAKER-3: breaker never returned to closed after the provider recovered (hits=%d)", atomic.LoadInt64(hits))
+	}
+	fmt.Println("yaegi-check: recovered provider closed the breaker again")
+	return nil
 }
 
 // exerciseHandler runs two real requests against the interpreted
