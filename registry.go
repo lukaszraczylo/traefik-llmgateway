@@ -401,12 +401,20 @@ func (m *modelRegistry) warmFill(ctx context.Context) {
 		}
 		fctx, cancel := context.WithTimeout(ctx, warmFillTimeout)
 		ids, err := m.adapters[name].listModels(fctx)
+		cancel()
 		st.finishRefresh(m.now(), ids, err)
 		if err != nil {
 			m.log("%s", fmt.Sprintf("model registry: initial discovery for provider %q failed: %v", name, err))
 		}
-		m.captureModelMetadata(fctx, name, m.adapters[name], st)
-		cancel()
+		// Own timeout budget, review fix (SHOULD-4): fctx above is
+		// spent by listModels — reusing it here would hand the metadata
+		// fetch an already-near-expired (or fully expired, on a slow/
+		// timed-out listModels) context every warm fill, guaranteeing a
+		// spurious deadline error and log line even for a healthy
+		// provider whose model-list call merely took a while.
+		mctx, mcancel := context.WithTimeout(ctx, warmFillTimeout)
+		m.captureModelMetadata(mctx, name, m.adapters[name], st)
+		mcancel()
 	}
 }
 
@@ -448,7 +456,24 @@ type modelMetadataFetcher interface {
 // captured" ruling, it must never fail discovery itself, which
 // listModels (warmFill/refreshProvider's own caller) already accounts
 // for independently.
+//
+// The deferred recover (review fix, SHOULD-5) is this function's OWN,
+// separate from refreshProvider's outer recover: without it, a panic
+// inside fetchModelMetadata would unwind into refreshProvider's deferred
+// recover instead, which sets its OWN err variable and would then report
+// listModels' own, already-successful discovery fetch as failed —
+// discarding a good, freshly-fetched model list over an unrelated bug in
+// the metadata path. Catching it here, before it can ever reach that
+// outer recover, is what actually enforces "metadata must never fail
+// discovery" on the panic path, not just the plain-error-return one
+// already handled below.
 func (m *modelRegistry) captureModelMetadata(ctx context.Context, name string, adapter providerAdapter, st *providerState) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			m.log("%s", fmt.Sprintf("model registry: metadata capture for provider %q panicked: %v", name, rec))
+		}
+	}()
+
 	mf, ok := adapter.(modelMetadataFetcher)
 	if !ok {
 		return
@@ -523,9 +548,16 @@ func (m *modelRegistry) refreshProvider(name string, st *providerState, adapter 
 	}()
 
 	fctx, cancel := context.WithTimeout(context.Background(), backgroundRefreshTimeout)
-	defer cancel()
 	ids, err = adapter.listModels(fctx)
-	m.captureModelMetadata(fctx, name, adapter, st)
+	cancel()
+
+	// Own timeout budget, review fix (SHOULD-4) — see warmFill's
+	// identical comment: reusing fctx here would hand the metadata fetch
+	// an already-spent context on every refresh whose listModels call
+	// ran long, not just a slow or timed-out one.
+	mctx, mcancel := context.WithTimeout(context.Background(), backgroundRefreshTimeout)
+	m.captureModelMetadata(mctx, name, adapter, st)
+	mcancel()
 }
 
 // splitConfiguredProvider reports whether id has "prefix/rest" form where

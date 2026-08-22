@@ -288,3 +288,90 @@ func TestModelRegistry_ResolveMetaForAliasName(t *testing.T) {
 		}
 	})
 }
+
+// TestModelRegistry_WarmFill_MetadataGetsFreshTimeoutBudget is the
+// review fix (SHOULD-4) regression: the metadata fetch must get its OWN
+// context.WithTimeout budget, computed AFTER listModels finishes — not a
+// reuse of listModels' own, already-partially-spent context. A
+// listModels call that takes real, non-trivial time must not leave the
+// metadata fetch with a shrunken remaining budget.
+func TestModelRegistry_WarmFill_MetadataGetsFreshTimeoutBudget(t *testing.T) {
+	t.Parallel()
+	const simulatedListModelsDelay = 800 * time.Millisecond
+	const slack = 400 * time.Millisecond // generous vs. the 800ms delay — see the assertion's own comment
+
+	var metadataCtxDeadline time.Time
+	var sawDeadline bool
+
+	fa := newFakeMetaAdapter("lmstudio")
+	fa.listModelsFn = func(context.Context) ([]string, error) {
+		time.Sleep(simulatedListModelsDelay)
+		return []string{"m1"}, nil
+	}
+	fa.fetchModelMetadataFn = func(ctx context.Context) (map[string]int, error) {
+		metadataCtxDeadline, sawDeadline = ctx.Deadline()
+		return map[string]int{"m1": 4096}, nil
+	}
+	adapters := map[string]providerAdapter{"lmstudio": fa}
+	cfg := &Config{Providers: map[string]*ProviderConfig{"lmstudio": {Discovery: true, MetadataPath: "/api/v0/models"}}}
+	reg, err := newModelRegistry(adapters, cfg, func(string, ...any) {})
+	if err != nil {
+		t.Fatalf("newModelRegistry: %v", err)
+	}
+
+	before := time.Now()
+	reg.warmFill(context.Background())
+	if !sawDeadline {
+		t.Fatal("fetchModelMetadataFn never ran, or its context carried no deadline")
+	}
+
+	// Old (buggy) behavior would reuse listModels' own context, whose
+	// warmFillTimeout budget started BEFORE the simulated delay — its
+	// deadline would land ~800ms EARLIER than a freshly computed one.
+	// The fixed behavior computes a new deadline AFTER listModels
+	// returns, so it lands close to (start-of-warmFill + delay +
+	// warmFillTimeout), not (start-of-warmFill + warmFillTimeout).
+	wantEarliest := before.Add(warmFillTimeout - slack)
+	if metadataCtxDeadline.Before(wantEarliest) {
+		t.Errorf("metadata fetch context deadline = %v, want at or after %v — it must get a fresh warmFillTimeout budget, not listModels' spent one", metadataCtxDeadline, wantEarliest)
+	}
+}
+
+// TestModelRegistry_RefreshProvider_MetadataPanicDoesNotFailDiscovery is
+// the review fix (SHOULD-5) regression: a panic inside fetchModelMetadata
+// must never discard a listModels call that already succeeded.
+// captureModelMetadata's own recover (registry.go) must catch it before
+// it ever reaches refreshProvider's outer recover, which would otherwise
+// overwrite the (already-nil, already-correct) err variable and cause
+// finishRefresh to treat a genuinely successful discovery as failed.
+func TestModelRegistry_RefreshProvider_MetadataPanicDoesNotFailDiscovery(t *testing.T) {
+	t.Parallel()
+	fa := newFakeMetaAdapter("lmstudio")
+	fa.listModelsFn = func(context.Context) ([]string, error) {
+		return []string{"m1", "m2"}, nil
+	}
+	fa.fetchModelMetadataFn = func(context.Context) (map[string]int, error) {
+		panic("simulated bug in fetchModelMetadata")
+	}
+	adapters := map[string]providerAdapter{"lmstudio": fa}
+	cfg := &Config{Providers: map[string]*ProviderConfig{"lmstudio": {Discovery: true, DiscoveryInterval: "1h", MetadataPath: "/api/v0/models"}}}
+	log := &recordingLog{}
+	reg, err := newModelRegistry(adapters, cfg, log.fn)
+	if err != nil {
+		t.Fatalf("newModelRegistry: %v", err)
+	}
+
+	reg.maybeRefresh(context.Background())
+	waitUntil(t, time.Second, func() bool { return reg.states["lmstudio"].hasModel("m1") })
+
+	if !reg.states["lmstudio"].hasModel("m2") {
+		t.Error("a panic in metadata capture must not discard the successful discovery result")
+	}
+	_, _, lastErr := reg.states["lmstudio"].snapshot()
+	if lastErr != "" {
+		t.Errorf("lastErr = %q, want empty — discovery itself succeeded; only metadata capture panicked", lastErr)
+	}
+	if log.count() == 0 {
+		t.Error("want at least one log line recording the metadata-capture panic")
+	}
+}
