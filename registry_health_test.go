@@ -201,6 +201,28 @@ func TestProviderState_Breaker_ErrRequestBuildFailed_CountsAsFailure(t *testing.
 	}
 }
 
+// TestProviderState_Breaker_ContextDeadlineExceeded_CountsAsFailure proves
+// context.DeadlineExceeded is a plain failure, NOT given Canceled's
+// neutral treatment — deliberate, matching recordProviderAttempt's own
+// SHOULD-1 ruling (limits.go): a deadline the GATEWAY set and the upstream
+// never answered inside is a genuine provider-health signal, unlike a
+// caller-canceled context. Three consecutive backgroundRefreshTimeout
+// (30s) overruns against a merely slow provider trip the breaker exactly
+// like three plain errors would.
+func TestProviderState_Breaker_ContextDeadlineExceeded_CountsAsFailure(t *testing.T) {
+	t.Parallel()
+	st := newHealthTestState(time.Hour, 3, time.Minute, 10*time.Minute)
+	now := time.Now()
+
+	for i := 0; i < 3; i++ {
+		st.finishRefresh(now, nil, context.DeadlineExceeded)
+	}
+
+	if st.discoveryHealthy() {
+		t.Fatal("discoveryHealthy() = true after 3 consecutive context.DeadlineExceeded outcomes, want false — a deadline the gateway set and the upstream never answered inside is a provider fault, not a neutral cancellation")
+	}
+}
+
 // --- breaker: the zero value never trips (adversarial-review finding,
 // round 2 — providerState's own doc comment claims "zero value behaves
 // exactly as before this feature existed"; without this guard that claim
@@ -234,29 +256,39 @@ func TestProviderState_Breaker_ZeroThreshold_NeverOpens(t *testing.T) {
 	}
 }
 
-// --- breaker: discovery backoff must never retry MORE often than plain
-// interval throttling (BLOCKING adversarial-review finding, round 2) ---
+// --- breaker: discovery backoff must actually suppress re-probing under
+// DEFAULT config, strictly, not merely stay no-worse-than plain interval
+// throttling (BLOCKING adversarial-review findings, rounds 2 and 3) ---
 
-// TestProviderState_Breaker_DefaultCadence_NoWorseThanPreFeatureBaseline
-// simulates 24 hours of a permanently-failing provider under every
-// DEFAULT setting (the shipped configuration, the xiaomi case this
-// feature exists for) and counts actual ADMITTED refresh attempts.
+// TestProviderState_Breaker_DefaultCadence_StrictlyFewerThanPreFeatureBaseline
+// simulates 24 hours of a permanently-failing provider under every DEFAULT
+// setting (the shipped configuration, the xiaomi case this feature exists
+// for) and counts actual ADMITTED refresh attempts.
 //
-// An earlier version of tryBeginRefresh let an open breaker's own backoff
-// window (openUntil) REPLACE the plain interval gate instead of adding to
-// it. Since defaultBreakerMaxOpenDuration (30m) is shorter than
-// defaultDiscoveryInterval (1h), that measured 50 admitted attempts here —
-// MORE than the 24 a plain, breaker-less interval gate would ever produce
-// for the same 24h window. For a permanently broken provider that means
-// MORE upstream 401s and MORE ERROR lines than today, the exact inverse of
-// this feature's stated purpose. tryBeginRefresh now applies the interval
-// gate unconditionally (closed or open alike), so backoff can only ever
-// make retries LESS frequent, never more — and because
-// defaultBreakerMaxOpenDuration is itself shorter than
-// defaultDiscoveryInterval, the interval remains the sole binding
-// constraint under pure defaults, so this asserts EQUALITY with the
-// baseline, not just "no worse".
-func TestProviderState_Breaker_DefaultCadence_NoWorseThanPreFeatureBaseline(t *testing.T) {
+// Round 2's earlier version of tryBeginRefresh let an open breaker's own
+// backoff window (openUntil) REPLACE the plain interval gate instead of
+// adding to it. Since that round's defaultBreakerMaxOpenDuration (30m) was
+// shorter than defaultDiscoveryInterval (1h), that measured 50 admitted
+// attempts here — MORE than the 24 a plain, breaker-less interval gate
+// would ever produce for the same 24h window: the exact inverse of this
+// feature's purpose. The round-2 fix (interval gate applies
+// unconditionally) closed that regression, but left the feature CADENCE-
+// NEUTRAL: with defaultBreakerMaxOpenDuration still shorter than
+// defaultDiscoveryInterval, the interval alone remained the sole binding
+// constraint and this test measured EXACTLY 24 — no worse than baseline,
+// but no better either, doing nothing a plain interval gate would not
+// already do.
+//
+// Round 3's design ruling raised defaultBreakerMaxOpenDuration to 6h
+// (longer than the 1h interval) specifically so the breaker's backoff can
+// eventually become the binding constraint instead of the interval — see
+// that constant's own doc comment for the resulting cadence (roughly 5
+// attempts a day). This test now asserts the STRONGER, actually-intended
+// property: strictly fewer admits than the pre-feature baseline. Reverting
+// EITHER the round-2 interval-gate fix OR the round-3 default bump makes
+// this fail — the first by exceeding the baseline, the second by merely
+// equaling it.
+func TestProviderState_Breaker_DefaultCadence_StrictlyFewerThanPreFeatureBaseline(t *testing.T) {
 	t.Parallel()
 	st := newHealthTestState(defaultDiscoveryInterval, defaultBreakerFailureThreshold, defaultBreakerOpenDuration, defaultBreakerMaxOpenDuration)
 	base := time.Now()
@@ -275,8 +307,64 @@ func TestProviderState_Breaker_DefaultCadence_NoWorseThanPreFeatureBaseline(t *t
 	// all) admits exactly one attempt per defaultDiscoveryInterval (1h)
 	// over a 24h window for a provider that never succeeds.
 	const preFeatureBaseline = 24
-	if admits > preFeatureBaseline {
-		t.Errorf("admitted %d discovery attempts over 24h with default config and a permanently failing provider, want <= %d (the pre-feature, interval-only baseline) — the breaker must never retry MORE often than plain interval throttling", admits, preFeatureBaseline)
+	if admits >= preFeatureBaseline {
+		t.Errorf("admitted %d discovery attempts over 24h with default config and a permanently failing provider, want STRICTLY FEWER than %d (the pre-feature, interval-only baseline) — the breaker must actually suppress re-probing under stock config, not merely match plain interval throttling", admits, preFeatureBaseline)
+	}
+}
+
+// --- breaker: the admin-facing openUntil accounts for the interval floor
+// (MEDIUM adversarial-review finding, round 3) ---
+
+// TestProviderState_Snapshot_OpenUntil_ReflectsIntervalFloor proves
+// snapshot()'s emitted openUntil is the REAL next probe time —
+// max(raw openUntil, lastRefresh+interval) — not the raw backoff-only
+// value. Since tryBeginRefresh's interval gate applies unconditionally,
+// a fresh trip's raw openUntil (lastRefresh + breakerOpenBase) can be far
+// EARLIER than the actual next admitted attempt whenever breakerOpenBase
+// is shorter than interval — measured on pure defaults, a 59-minute skew
+// (raw +1m versus the real +1h). An operator watching the dashboard would
+// otherwise see "open (in 60s)", nothing happen, and then the countdown
+// silently vanish once formatUntil (webui) reads the now-past raw value.
+func TestProviderState_Snapshot_OpenUntil_ReflectsIntervalFloor(t *testing.T) {
+	t.Parallel()
+	// interval (1h) far longer than the backoff base (1m) — the exact
+	// shape of the shipped defaults on a fresh trip.
+	st := newHealthTestState(time.Hour, 1, time.Minute, 10*time.Minute)
+	base := time.Now()
+	st.tryBeginRefresh(base)
+	st.finishRefresh(base, nil, errors.New("boom")) // opens: raw openUntil = base+1m
+
+	_, lastRefresh, _, health, openUntil := st.snapshot()
+	if health != breakerOpen {
+		t.Fatalf("health = %v, want breakerOpen", health)
+	}
+	want := lastRefresh.Add(time.Hour)
+	if !openUntil.Equal(want) {
+		t.Errorf("snapshot openUntil = %v, want %v (lastRefresh + interval, not the raw +1m backoff — tryBeginRefresh will not actually admit a probe before then)", openUntil, want)
+	}
+}
+
+// TestProviderState_Snapshot_OpenUntil_UnchangedWhenBackoffExceedsInterval
+// is the complementary case: once backoff is the LONGER of the two (the
+// steady state this feature is designed to reach — see
+// defaultBreakerMaxOpenDuration's own doc comment), snapshot's openUntil
+// is exactly the raw value, with no floor adjustment needed.
+func TestProviderState_Snapshot_OpenUntil_UnchangedWhenBackoffExceedsInterval(t *testing.T) {
+	t.Parallel()
+	// interval (1m) far shorter than the backoff base (1h) — backoff is
+	// already the binding constraint from the very first trip.
+	st := newHealthTestState(time.Minute, 1, time.Hour, 10*time.Hour)
+	base := time.Now()
+	st.tryBeginRefresh(base)
+	st.finishRefresh(base, nil, errors.New("boom")) // opens: raw openUntil = base+1h
+
+	_, _, _, health, openUntil := st.snapshot()
+	if health != breakerOpen {
+		t.Fatalf("health = %v, want breakerOpen", health)
+	}
+	want := base.Add(time.Hour)
+	if !openUntil.Equal(want) {
+		t.Errorf("snapshot openUntil = %v, want %v (the raw backoff value, unchanged — it already exceeds the interval floor)", openUntil, want)
 	}
 }
 
@@ -422,13 +510,37 @@ func TestProviderState_Breaker_ContextCanceled_IsNeutral_NotSuccess(t *testing.T
 	}
 }
 
+// TestProviderState_Breaker_ContextCanceled_IsNeutral_NotFailure is the
+// other direction of the bidirectional check (round 3 finding): its
+// _NotSuccess sibling above proves Canceled does not reset the streak,
+// but says nothing about whether Canceled ITSELF is wrongly counted as a
+// failure — a mutant that classified Canceled as a failure would still
+// pass that test unchanged, since either way the threshold is reached by
+// the trailing plain failure. A LONE Canceled call on a threshold-1
+// breaker settles it directly: if Canceled counted as a failure, one call
+// would be enough to trip a threshold of 1.
+func TestProviderState_Breaker_ContextCanceled_IsNeutral_NotFailure(t *testing.T) {
+	t.Parallel()
+	st := newHealthTestState(time.Hour, 1, time.Minute, 10*time.Minute)
+	now := time.Now()
+
+	st.finishRefresh(now, nil, context.Canceled)
+
+	if !st.discoveryHealthy() {
+		t.Fatal("discoveryHealthy() = false after a single context.Canceled outcome on a threshold-1 breaker, want true — Canceled must not be counted as a failure")
+	}
+}
+
 // TestProviderState_Breaker_ContextCanceled_DuringHalfOpen_PreservesBackoff
 // is the sharper half of the same finding: an earlier version treated a
 // Canceled half-open probe as a SUCCESS, which CLOSED an already-open
 // breaker and wiped its backoff — reporting a still-401ing provider
 // healthy purely because a probe was interrupted at shutdown. This proves
-// the backoff survives: the NEXT real failure must escalate from the
-// ORIGINAL backoff, not restart fresh at the base.
+// two things: discoveryHealthy reports the provider unhealthy immediately
+// (round 3 finding: a canceled probe reverts to OPEN rather than being
+// left stuck at halfOpen, which would report healthy), and the backoff
+// survives — the NEXT real failure must escalate from the ORIGINAL
+// backoff, not restart fresh at the base.
 func TestProviderState_Breaker_ContextCanceled_DuringHalfOpen_PreservesBackoff(t *testing.T) {
 	t.Parallel()
 	st := newHealthTestState(time.Second, 1, time.Minute, 10*time.Minute)
@@ -441,6 +553,10 @@ func TestProviderState_Breaker_ContextCanceled_DuringHalfOpen_PreservesBackoff(t
 		t.Fatal("tryBeginRefresh after the backoff window = false, want true")
 	}
 	st.finishRefresh(probeAt, nil, context.Canceled) // probe interrupted at shutdown: must be neutral
+
+	if st.discoveryHealthy() {
+		t.Fatal("discoveryHealthy() = true immediately after a canceled half-open probe, want false — a still-broken provider must not read healthy just because its re-probe was interrupted")
+	}
 
 	// The next real attempt must see the ORIGINAL backoff still in
 	// force, not a wiped/reset one: if Canceled had (incorrectly) closed
@@ -499,6 +615,17 @@ func TestProviderState_Breaker_HealthyProviderNeverAffected(t *testing.T) {
 // nothing to catch a locking bug with; the locking was correct, but
 // unproven) ---
 
+// TestProviderState_Breaker_ConcurrentRefreshes_RaceFree is primarily a
+// -race and panic net (round 2), but round 3 found it carried ZERO
+// assertions and so survived every one of the seven fix-reversion
+// mutations tried against this file — useful for what it catches, but not
+// a behavioral test of its own. It now asserts two invariants on every
+// iteration, under the SAME lock discoveryHealthy/tryBeginRefresh already
+// take, so the read is race-free too: backoff never exceeds breakerOpenMax
+// (the overflow-ceiling property, round 2 finding 7, checked here under
+// real concurrent mutation rather than only sequentially), and health is
+// always one of the three declared states — breakerState is a bare int32
+// under the hood, so nothing enforces that at compile time.
 func TestProviderState_Breaker_ConcurrentRefreshes_RaceFree(t *testing.T) {
 	t.Parallel()
 	st := newHealthTestState(time.Millisecond, 3, 2*time.Millisecond, 20*time.Millisecond)
@@ -521,6 +648,18 @@ func TestProviderState_Breaker_ConcurrentRefreshes_RaceFree(t *testing.T) {
 					st.finishRefresh(now, []string{"m1"}, err)
 				}
 				_ = st.discoveryHealthy()
+
+				st.mu.Lock()
+				gotBackoff, gotMax, gotHealth := st.backoff, st.breakerOpenMax, st.health
+				st.mu.Unlock()
+				if gotBackoff > gotMax {
+					t.Errorf("worker %d iteration %d: backoff = %v, want <= breakerOpenMax %v", worker, i, gotBackoff, gotMax)
+				}
+				switch gotHealth {
+				case breakerClosed, breakerOpen, breakerHalfOpen:
+				default:
+					t.Errorf("worker %d iteration %d: health = %v, want one of closed/open/half-open", worker, i, gotHealth)
+				}
 			}
 		}(w)
 	}

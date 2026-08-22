@@ -47,8 +47,18 @@ const defaultBreakerOpenDuration = time.Minute
 
 // defaultBreakerMaxOpenDuration caps the exponential backoff the breaker
 // doubles into on every further failed probe, applied when BreakerConfig.
-// MaxOpenDuration is left empty.
-const defaultBreakerMaxOpenDuration = 30 * time.Minute
+// MaxOpenDuration is left empty. Deliberately LONGER than
+// defaultDiscoveryInterval (1h) — design ruling, adversarial review round
+// 3: a breaker whose backoff can never exceed the plain interval cannot
+// suppress anything, since tryBeginRefresh's interval gate (see its own
+// doc comment) already applies unconditionally and only the LONGER of the
+// two ever binds. An earlier value here (30m, shorter than the 1h
+// interval) made the breaker cadence-neutral under stock config — exactly
+// as strict an interval-only gate would already produce, with none of the
+// suppression this feature exists to provide. At 6h, a permanently broken
+// provider under every default backs off 1h, 2h, 4h, 6h, 6h, ... — roughly
+// 5 attempts a day instead of 24.
+const defaultBreakerMaxOpenDuration = 6 * time.Hour
 
 // maxBreakerOpenDuration bounds BreakerConfig.MaxOpenDuration — the same
 // ceiling-on-a-config-value precedent maxBreakerFailureThreshold already
@@ -240,23 +250,32 @@ func (st *providerState) setDiscoveredContext(m map[string]int) {
 // call.
 //
 // The interval gate (now far enough past lastRefresh, or this is the first
-// refresh) applies UNCONDITIONALLY, closed or open alike — this is the
-// fix for the adversarial-review blocker (round 2): an EARLIER version of
-// this method let an open breaker's own backoff window (openUntil) REPLACE
-// the interval gate rather than add to it, and since
-// defaultBreakerMaxOpenDuration (30m) is shorter than defaultDiscoveryInterval
-// (1h), that let a permanently broken provider get probed roughly TWICE as
-// often as before this feature existed — the exact opposite of "back off".
-// Backoff can only ever make retries LESS frequent than the plain interval,
-// never more: a closed breaker is gated by interval alone (exactly as
-// before this feature existed — a provider that never fails never touches
-// the breaker branch below at all); an open breaker is additionally gated
-// by openUntil, so whichever of the two — interval or backoff — is
-// currently longer wins. Reaching both starts exactly one half-open probe
-// (state moves to halfOpen here, before the caller's fetch even runs)
-// rather than resuming normal per-interval refreshing outright —
+// refresh) applies UNCONDITIONALLY, closed or open alike — fix for the
+// adversarial-review blocker (round 2): an EARLIER version of this method
+// let an open breaker's own backoff window (openUntil) REPLACE the
+// interval gate rather than add to it. Since that round's default
+// maxOpenDuration was shorter than the default interval, a permanently
+// broken provider got probed roughly TWICE as often as before this
+// feature existed — the exact opposite of "back off". Backoff can only
+// ever make retries LESS frequent than the plain interval, never more: a
+// closed breaker is gated by interval alone (exactly as before this
+// feature existed — a provider that never fails never touches the
+// breaker branch below at all); an open breaker is additionally gated by
+// openUntil, so whichever of the two — interval or backoff — is currently
+// longer wins. Reaching both starts exactly one half-open probe (state
+// moves to halfOpen here, before the caller's fetch even runs) rather
+// than resuming normal per-interval refreshing outright —
 // recordHealthLocked decides whether that probe closes the breaker or
 // reopens it with a longer backoff.
+//
+// PRACTICAL CONSEQUENCE, design ruling (round 3): whichever of interval
+// and maxOpenDuration is larger is the one that actually governs a
+// persistently broken provider's re-probe cadence — the smaller of the
+// two is masked entirely, never merely "adds a little more delay". A
+// deployment whose maxOpenDuration does not exceed its discoveryInterval
+// gets NO suppression benefit from this feature at all; see
+// defaultBreakerMaxOpenDuration's own doc comment for why the shipped
+// defaults are chosen to avoid exactly that trap.
 func (st *providerState) tryBeginRefresh(now time.Time) bool {
 	st.mu.Lock()
 	defer st.mu.Unlock()
@@ -317,14 +336,29 @@ func (st *providerState) finishRefresh(now time.Time, ids []string, err error) {
 // method had — must not count as a SUCCESS either: treating it as success
 // would CLOSE an already-open breaker and wipe its backoff/counters purely
 // because a half-open probe got interrupted before it could complete,
-// reporting a still-broken provider as healthy again. Every field this
-// method could touch is left exactly as it was; only lastRefresh/lastErr
-// (finishRefresh, above, unconditionally) and inFlight change. If health
-// is still halfOpen afterward, the NEXT real attempt (admitted immediately
-// — see tryBeginRefresh's own doc comment: a halfOpen provider is not
-// gated by openUntil at all, only by the plain interval) re-decides the
-// breaker through this same function, so a canceled probe simply delays
-// the decision by one cycle rather than making a wrong one now.
+// reporting a still-broken provider as healthy again. Every OTHER field
+// this method could touch is left exactly as it was; only lastRefresh/
+// lastErr (finishRefresh, above, unconditionally) and inFlight change.
+//
+// A canceled probe while halfOpen is the one exception (round 3, MEDIUM
+// finding): health reverts to OPEN with its backoff/openUntil left
+// completely untouched, rather than staying at halfOpen. discoveryHealthy
+// reports true for halfOpen (by design — a provider actively being
+// re-probed must stay routable), so leaving a canceled probe's state at
+// halfOpen indefinitely would report a still-broken provider healthy
+// until the next attempt happens to land, which the plain interval gate
+// alone does not bound tightly. Reverting to open costs nothing extra —
+// tryBeginRefresh's own interval gate already runs before this is ever
+// reached, so the NEXT attempt is admitted at the identical instant
+// either way; only what discoveryHealthy reports in the meantime differs.
+//
+// context.DeadlineExceeded is NOT given the same neutral treatment as
+// Canceled — deliberately: it counts as a plain failure, below, matching
+// recordProviderAttempt's own SHOULD-1 ruling (limits.go) that a deadline
+// the GATEWAY set and the upstream never answered inside is a genuine
+// provider-health signal, not a caller-walked-away one. Three consecutive
+// backgroundRefreshTimeout (30s) overruns trip the breaker exactly like
+// three plain errors would.
 //
 // failed classifies every OTHER error explicitly for provider health,
 // deliberately NOT reusing isTransient's retry-shaped semantics (retry.go)
@@ -352,12 +386,20 @@ func (st *providerState) finishRefresh(now time.Time, ids []string, err error) {
 // While halfOpen (the only other state finishRefresh can observe —
 // tryBeginRefresh never starts a refresh from open without first moving to
 // halfOpen), a successful probe closes the breaker outright; a failed one
-// reopens it with a DOUBLED backoff, capped at breakerOpenMax — the
-// exponential escalation that keeps a persistently broken provider (like
-// xiaomi's ongoing 401s) from being re-probed every single interval
-// forever.
+// reopens it with a DOUBLED backoff, capped at breakerOpenMax. This ONLY
+// suppresses re-probing when the resulting backoff exceeds discoveryInterval
+// — design ruling, round 3: tryBeginRefresh's interval gate (its own doc
+// comment) applies regardless of breaker state, so a maxOpenDuration
+// shorter than discoveryInterval is masked entirely and this escalation
+// changes nothing observable. defaultBreakerMaxOpenDuration is deliberately
+// set longer than defaultDiscoveryInterval so this DOES suppress re-probing
+// under stock config — see that constant's own doc comment for the
+// resulting cadence.
 func (st *providerState) recordHealthLocked(now time.Time, err error) {
 	if errors.Is(err, context.Canceled) {
+		if st.health == breakerHalfOpen {
+			st.health = breakerOpen
+		}
 		return
 	}
 	failed := err != nil
@@ -451,10 +493,30 @@ func (st *providerState) discoveryHealthy() bool {
 // lastRefresh/lastErr: a concurrent finishRefresh must never be able to
 // hand the admin dashboard a breaker state that disagrees with the
 // lastErr/models it is shown alongside.
+//
+// openUntil is NOT returned raw (round 3 MEDIUM finding): since
+// tryBeginRefresh's interval gate applies unconditionally (its own doc
+// comment), the REAL next probe time is max(st.openUntil,
+// lastRefresh+interval), which can differ sharply from st.openUntil alone
+// — under stock defaults, a fresh trip sets st.openUntil to +1m while the
+// first admitted probe is actually at +1h, a 59-minute skew an operator
+// watching the dashboard would otherwise see as a broken countdown
+// (formatUntil renders "in 60s", nothing happens, then the timestamp goes
+// stale and the countdown vanishes for the remaining 59 minutes). This
+// correction only ever applies while OPEN — st.openUntil is always the
+// zero time while closed (closeBreakerLocked) or a past instant while
+// half-open (a probe only ever starts once now has already reached it),
+// neither of which this dashboard-facing value should be adjusted for.
 func (st *providerState) snapshot() (models []string, lastRefresh time.Time, lastErr string, health breakerState, openUntil time.Time) {
 	st.mu.Lock()
 	defer st.mu.Unlock()
-	return st.knownIDsLocked(), st.lastRefresh, st.lastErr, st.health, st.openUntil
+	effectiveOpenUntil := st.openUntil
+	if st.health == breakerOpen {
+		if floor := st.lastRefresh.Add(st.interval); floor.After(effectiveOpenUntil) {
+			effectiveOpenUntil = floor
+		}
+	}
+	return st.knownIDsLocked(), st.lastRefresh, st.lastErr, st.health, effectiveOpenUntil
 }
 
 // modelRegistry aggregates every configured provider's explicit and
