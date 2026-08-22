@@ -34,6 +34,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -225,7 +226,17 @@ func run() error {
 	}))
 	defer slowUpstream.Close()
 
-	attemptAccountingOverride := `{"providers":{"openai":{"type":"openai","baseUrl":"` + upstream.URL + `","apiKey":"sk-up","models":["` + testDataWantModel + `"]},"` +
+	// builtinLookupContextTokens (review fix, SHOULD-6): read directly
+	// out of the generated pricing_data_gen.go rather than hardcoding a
+	// number, so this assertion self-updates across a `make
+	// pricing-sync` regeneration instead of pinning a value that could
+	// legitimately drift when LiteLLM's own upstream data changes.
+	builtinLookupContextTokens, err := readBuiltinContextTokens(repoRoot, builtinLookupModelID)
+	if err != nil {
+		return fmt.Errorf("read builtin context tokens for %q from pricing_data_gen.go: %w", builtinLookupModelID, err)
+	}
+
+	attemptAccountingOverride := `{"providers":{"openai":{"type":"openai","baseUrl":"` + upstream.URL + `","apiKey":"sk-up","models":["` + testDataWantModel + `","` + builtinLookupModelID + `"]},"` +
 		slowProviderName + `":{"type":"openai","baseUrl":"` + slowUpstream.URL + `","apiKey":"sk-up","models":["` + slowProviderModel + `"]}},` +
 		// modelMeta (feature v0.23): a config-override entry for
 		// testDataWantModel, so exerciseHandler's GET /v1/models
@@ -234,7 +245,12 @@ func run() error {
 		// and the whole registry.go/modelmeta.go resolution path all
 		// run correctly INTERPRETED, not merely compiled — cheap to add
 		// to this existing harness request, per this feature's own gate
-		// requirement.
+		// requirement. builtinLookupModelID carries NO config override
+		// at all (SHOULD-6, review round) — its context_window can only
+		// come from an interpreted LOOKUP into the real, 200+-entry
+		// builtinModelMetaTable map literal, proving that specific path
+		// runs correctly under Yaegi too, not just the config-override
+		// one testDataWantModel already exercises.
 		`"modelMeta":{"` + testDataWantModel + `":{"contextTokens":` + yaegiMetaContextTokens + `,"inputCostPerMTokMicroUsd":1250000,"outputCostPerMTokMicroUsd":10000000}},` +
 		`"admin":{"enabled":true},"users":{"inline":[{"name":"tester","group":"default","apiKey":"` + testDataUserAPIKey + `"},{"name":"admin1","group":"default","apiKey":"` + attemptAccountingAdminAPIKey + `","admin":true}]}}`
 	if err = json.Unmarshal([]byte(attemptAccountingOverride), cfgVal.Interface()); err != nil {
@@ -271,7 +287,41 @@ func run() error {
 		return fmt.Errorf("%s.New's returned value does not implement http.Handler", pkgName)
 	}
 
-	return exerciseHandler(handler)
+	return exerciseHandler(handler, builtinLookupContextTokens)
+}
+
+// builtinLookupModelID is a real, stable entry in the generated
+// builtinModelMetaTable (pricing_data_gen.go) — review fix, SHOULD-6 —
+// added to the harness's openai provider with NO modelMeta config
+// override of its own, so its GET /v1/models context_window can only
+// ever come from an interpreted lookup into the real map literal, not
+// the config-override path testDataWantModel already exercises.
+const builtinLookupModelID = "gpt-4o"
+
+// readBuiltinContextTokens reads repoRoot/pricing_data_gen.go and
+// extracts modelID's own ContextTokens value directly out of the
+// generated source (review fix, SHOULD-6) — rather than hardcoding a
+// number in this harness, which would need hand-updating (and could
+// silently drift out of sync) every time `make pricing-sync`
+// regenerates the table against updated upstream data.
+func readBuiltinContextTokens(repoRoot, modelID string) (int, error) {
+	data, err := os.ReadFile(filepath.Join(repoRoot, "pricing_data_gen.go"))
+	if err != nil {
+		return 0, fmt.Errorf("read pricing_data_gen.go: %w", err)
+	}
+	pattern := regexp.MustCompile(regexp.QuoteMeta(`"`+modelID+`":`) + `\s*\{ContextTokens:\s*(\d+)`)
+	m := pattern.FindSubmatch(data)
+	if m == nil {
+		return 0, fmt.Errorf("no builtinModelMetaTable entry found for %q — pick a different, currently-present stable id", modelID)
+	}
+	n, err := strconv.Atoi(string(m[1]))
+	if err != nil {
+		return 0, fmt.Errorf("parse ContextTokens for %q: %w", modelID, err)
+	}
+	if n <= 0 {
+		return 0, fmt.Errorf("builtinModelMetaTable entry for %q has ContextTokens=%d, want > 0", modelID, n)
+	}
+	return n, nil
 }
 
 // exerciseHandler runs two real requests against the interpreted
@@ -281,7 +331,10 @@ func run() error {
 // be refused with 401 — proving ServeHTTP, auth.identify, the model
 // registry, statusTrackingWriter, and the gateway's logger all execute
 // for real under Yaegi, not merely that the package's imports resolve.
-func exerciseHandler(handler http.Handler) error {
+// builtinContextTokens is builtinLookupModelID's own real, extracted
+// builtinModelMetaTable value (SHOULD-6) — see that constant's own doc
+// comment.
+func exerciseHandler(handler http.Handler, builtinContextTokens int) error {
 	authedReq := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
 	authedReq.Header.Set("Authorization", "Bearer "+testDataUserAPIKey)
 	authedRec := httptest.NewRecorder()
@@ -292,18 +345,56 @@ func exerciseHandler(handler http.Handler) error {
 	if !strings.Contains(authedRec.Body.String(), testDataWantModel) {
 		return fmt.Errorf("GET /v1/models body does not contain %q: %s", testDataWantModel, authedRec.Body.String())
 	}
-	// modelMeta (feature v0.23), interpreted: run() layers a modelMeta
-	// config override for testDataWantModel onto cfgVal before New() is
-	// ever called (attemptAccountingOverride above) — proving under the
-	// real Yaegi interpreter, not just `go test`, that resolveModelMeta's
-	// config-override layer and modelObject's context_window/pricing
-	// extension fields both run correctly through registry.go's
-	// listFor/resolveMetaFor.
-	if !strings.Contains(authedRec.Body.String(), `"context_window":128000`) {
-		return fmt.Errorf("GET /v1/models body does not contain the modelMeta-resolved context_window (feature v0.23 metadata harness): %s", authedRec.Body.String())
+
+	// modelMeta (feature v0.23), interpreted, decoded structurally (not
+	// a raw substring match — SHOULD-6, review round: a bare Contains
+	// check cannot tell WHICH model entry a given context_window value
+	// belongs to, which matters once two entries can legitimately share
+	// the same number) so each assertion below is pinned to its own
+	// named model id.
+	var modelsBody struct {
+		Data []map[string]any `json:"data"`
 	}
-	if !strings.Contains(authedRec.Body.String(), `"input_per_mtok_usd":1.25`) || !strings.Contains(authedRec.Body.String(), `"output_per_mtok_usd":10`) {
-		return fmt.Errorf("GET /v1/models body does not contain the modelMeta-resolved pricing (feature v0.23 metadata harness): %s", authedRec.Body.String())
+	if err := json.Unmarshal(authedRec.Body.Bytes(), &modelsBody); err != nil {
+		return fmt.Errorf("decode GET /v1/models body: %w (body=%s)", err, authedRec.Body.String())
+	}
+	byID := make(map[string]map[string]any, len(modelsBody.Data))
+	for _, entry := range modelsBody.Data {
+		if id, ok := entry["id"].(string); ok {
+			byID[id] = entry
+		}
+	}
+
+	// run() layers a modelMeta config override for testDataWantModel
+	// onto cfgVal before New() is ever called (attemptAccountingOverride
+	// above) — proving resolveModelMeta's config-override layer and
+	// modelObject's context_window/pricing extension fields both run
+	// correctly, interpreted, through registry.go's listFor/
+	// resolveMetaFor.
+	overridden, ok := byID[testDataWantModel]
+	if !ok {
+		return fmt.Errorf("GET /v1/models body has no entry for %q: %s", testDataWantModel, authedRec.Body.String())
+	}
+	if cw, _ := overridden["context_window"].(float64); cw != 128000 {
+		return fmt.Errorf("GET /v1/models %q context_window = %v, want 128000 (feature v0.23 config-override metadata harness): %s", testDataWantModel, overridden["context_window"], authedRec.Body.String())
+	}
+	pricing, _ := overridden["pricing"].(map[string]any)
+	if pricing == nil || pricing["input_per_mtok_usd"] != 1.25 || pricing["output_per_mtok_usd"] != 10.0 {
+		return fmt.Errorf("GET /v1/models %q pricing = %v, want {input_per_mtok_usd:1.25 output_per_mtok_usd:10} (feature v0.23 config-override metadata harness): %s", testDataWantModel, overridden["pricing"], authedRec.Body.String())
+	}
+
+	// builtinLookupModelID (SHOULD-6, review round) carries NO modelMeta
+	// config override — its context_window can only come from an
+	// interpreted LOOKUP into the real, 200+-entry builtinModelMetaTable
+	// map literal (modelmeta.go's resolveModelMeta, builtin branch),
+	// proving that specific path — not just the config-override one
+	// above — runs correctly under Yaegi.
+	builtinLookedUp, ok := byID[builtinLookupModelID]
+	if !ok {
+		return fmt.Errorf("GET /v1/models body has no entry for %q: %s", builtinLookupModelID, authedRec.Body.String())
+	}
+	if cw, _ := builtinLookedUp["context_window"].(float64); int(cw) != builtinContextTokens {
+		return fmt.Errorf("GET /v1/models %q context_window = %v, want %d (feature v0.23 builtin-table-lookup metadata harness, SHOULD-6): %s", builtinLookupModelID, builtinLookedUp["context_window"], builtinContextTokens, authedRec.Body.String())
 	}
 
 	if err := exerciseAttemptAccounting(handler); err != nil {
