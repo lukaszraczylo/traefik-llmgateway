@@ -70,6 +70,22 @@ func TestExtractPassthroughUsage(t *testing.T) {
 			wantModel:    "claude-native",
 		},
 		{
+			// F2 fix (BLOCKING, 2026-08-23 review): reverting
+			// extractPassthroughUsage's providerTypeAnthropic case back
+			// to input_tokens alone (dropping the cache_creation_input_
+			// tokens/cache_read_input_tokens terms) must fail this case —
+			// this is the production /{provider}/... native passthrough
+			// route, and the previous version silently under-billed a
+			// cache-heavy tenant by orders of magnitude with zero test
+			// coverage catching it.
+			name:         "anthropic shape with prompt-cache tokens billed (F2)",
+			typeName:     providerTypeAnthropic,
+			providerName: "anthropic",
+			body:         `{"model":"claude-native","usage":{"input_tokens":4,"cache_creation_input_tokens":180000,"cache_read_input_tokens":20000,"output_tokens":9}}`,
+			wantUsage:    usage{prompt: 200004, completion: 9},
+			wantModel:    "claude-native",
+		},
+		{
 			name:         "gemini shape, no model field",
 			typeName:     providerTypeGemini,
 			providerName: "gemini",

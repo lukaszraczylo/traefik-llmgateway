@@ -42,7 +42,7 @@ const maxMultipartModelFieldBytes = 4096
 // multipart body. A read failure or invalid/missing JSON is a 400,
 // already written to sw; ok reports whether the caller may proceed.
 func (g *Gateway) decodeMediaJSONRequest(sw *statusTrackingWriter, r *http.Request) (req map[string]any, model string, ok bool) {
-	release, admitted := g.acquireBodyAdmission(sw)
+	release, admitted := g.acquireBodyAdmission(sw, writeOAIError)
 	defer release()
 	if !admitted {
 		return nil, "", false
@@ -100,7 +100,7 @@ func (g *Gateway) resolveMediaModel(sw *statusTrackingWriter, grp *group, reques
 func (g *Gateway) handleImagesGenerations(w http.ResponseWriter, r *http.Request, u *user, grp *group) {
 	sw := &statusTrackingWriter{ResponseWriter: w}
 
-	if _, ok := g.admitRequest(sw, u, grp); !ok {
+	if _, ok := g.admitRequest(sw, u, grp, writeOAIError); !ok {
 		return
 	}
 
@@ -137,7 +137,7 @@ func (g *Gateway) handleImagesGenerations(w http.ResponseWriter, r *http.Request
 func (g *Gateway) handleAudioSpeech(w http.ResponseWriter, r *http.Request, u *user, grp *group) {
 	sw := &statusTrackingWriter{ResponseWriter: w}
 
-	if _, ok := g.admitRequest(sw, u, grp); !ok {
+	if _, ok := g.admitRequest(sw, u, grp, writeOAIError); !ok {
 		return
 	}
 
@@ -197,7 +197,7 @@ func (g *Gateway) handleAudioSpeech(w http.ResponseWriter, r *http.Request, u *u
 func (g *Gateway) handleAudioTranscriptions(w http.ResponseWriter, r *http.Request, u *user, grp *group) {
 	sw := &statusTrackingWriter{ResponseWriter: w}
 
-	if _, ok := g.admitRequest(sw, u, grp); !ok {
+	if _, ok := g.admitRequest(sw, u, grp, writeOAIError); !ok {
 		return
 	}
 
@@ -293,7 +293,7 @@ func (g *Gateway) handleAudioTranscriptions(w http.ResponseWriter, r *http.Reque
 // acquireBodyAdmission already wrote its own 503 to sw); body/oversize/
 // err are readCapped's own results, valid only when admitted is true.
 func (g *Gateway) readAdmittedCapped(sw *statusTrackingWriter, r io.Reader, limit int64) (body []byte, oversize, admitted bool, err error) {
-	release, admitted := g.acquireBodyAdmission(sw)
+	release, admitted := g.acquireBodyAdmission(sw, writeOAIError)
 	defer release()
 	if !admitted {
 		return nil, false, false, nil

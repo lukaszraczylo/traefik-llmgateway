@@ -116,7 +116,28 @@ func (g *Gateway) handleModels(w http.ResponseWriter, r *http.Request) {
 // handleChat and handleEmbeddings share every other step of the pipeline
 // below (decode, resolve, enforce limits, account usage, translate
 // errors) and differ only in which of these two methods they invoke.
+// routes_messages.go's handleMessages reuses the identical contract for
+// its own anthropic-passthrough/translate branching (see its own doc
+// comment) — the shape is exactly what runMeteredCall, below, needs
+// regardless of which wire shape a route answers in.
 type adapterCall func(a providerAdapter, ctx context.Context, w http.ResponseWriter, req map[string]any) (usage, error)
+
+// envelopeWriter abstracts the client-facing error envelope shape so the
+// shared metered-request pipeline (runMeteredCall, below) can serve both
+// the OpenAI-shaped unified/media routes and the Anthropic-shaped
+// /v1/messages route through one implementation (item 7, 2026-08-22
+// review — fixing 58 of handleMessages' 73 lines being verbatim
+// duplicated from runUnified) rather than duplicating it. writeOAIError
+// (errors.go) and writeAnthropicError (routes_messages.go) both already
+// match this exact signature.
+type envelopeWriter func(w http.ResponseWriter, status int, errType, msg string)
+
+// providerUpstreamErrorWriter abstracts which envelope shape a
+// *providerHTTPError gets embedded into (writeProviderUpstreamError,
+// below, or routes_messages.go's writeAnthropicProviderUpstreamError) —
+// threaded through runMeteredCall/handleAdapterErrorEnvelope alongside
+// envelopeWriter for the same reason.
+type providerUpstreamErrorWriter func(w http.ResponseWriter, providerName string, perr *providerHTTPError)
 
 // handleChat implements POST /v1/chat/completions.
 func (g *Gateway) handleChat(w http.ResponseWriter, r *http.Request, u *user, grp *group) {
@@ -134,15 +155,14 @@ func (g *Gateway) handleEmbeddings(w http.ResponseWriter, r *http.Request, u *us
 
 // runUnified is the shared chat/embeddings pipeline: enforce per-user/
 // per-group/total REQUEST-RATE limits, claim a body-admission slot to
-// decode the request, resolve its model, invoke the adapter via call,
-// then account the resulting usage — even when call itself returned an
-// error, so usage captured before a mid-stream failure still gets billed
-// — before translating that error into a response. w is wrapped in its
-// own statusTrackingWriter so a mid-stream adapter error (headers
-// already sent) can be told apart from one that failed before any
-// write. endpoint is cacheEndpointChat or cacheEndpointEmbeddings — one
-// of cacheKey's key-material components (cache.go), so the two routes
-// never collide into one cache entry.
+// decode the request, then hand off to runMeteredCall (below) for
+// everything from model resolution through response caching, usage
+// accounting, and adapter-error handling. w is wrapped in its own
+// statusTrackingWriter so a mid-stream adapter error (headers already
+// sent) can be told apart from one that failed before any write.
+// endpoint is cacheEndpointChat or cacheEndpointEmbeddings — one of
+// cacheKey's key-material components (cache.go), so the two routes never
+// collide into one cache entry.
 //
 // ORDERING (security review finding 1a, 2026-08-22): the rate-limit
 // check runs BEFORE the body is ever read, not after — the previous
@@ -182,15 +202,26 @@ func (g *Gateway) handleEmbeddings(w http.ResponseWriter, r *http.Request, u *us
 // cannot even form a valid request is now itself rate-limited rather
 // than getting unlimited free retries — but are called out explicitly
 // here since neither is visible from the diff alone.
+//
+// SHARED CORE (item 7 fix, 2026-08-22 review): routes_messages.go's
+// handleMessages needs admitRequest and the body decode in a DIFFERENT
+// relative order than this route does (its own doc comment explains
+// why — a streaming request must never touch the rate-limit counters at
+// all, which means it has to know "is this streaming" from the decoded
+// body before admitRequest ever runs). That is the one genuine ordering
+// difference between the two routes, and it is why THIS function still
+// owns admitRequest/readAndDecodeUnifiedBody directly rather than folding
+// them into runMeteredCall too — everything after both are done is
+// identical regardless of wire shape, and lives in runMeteredCall alone.
 func (g *Gateway) runUnified(w http.ResponseWriter, r *http.Request, u *user, grp *group, endpoint string, call adapterCall) {
 	sw := &statusTrackingWriter{ResponseWriter: w}
 
-	scopes, ok := g.admitRequest(sw, u, grp)
+	scopes, ok := g.admitRequest(sw, u, grp, writeOAIError)
 	if !ok {
 		return
 	}
 
-	body, req, ok := g.readAndDecodeUnifiedBody(sw, r)
+	body, req, ok := g.readAndDecodeUnifiedBody(sw, r, writeOAIError)
 	if !ok {
 		return
 	}
@@ -200,11 +231,35 @@ func (g *Gateway) runUnified(w http.ResponseWriter, r *http.Request, u *user, gr
 		writeOAIError(sw, http.StatusBadRequest, "invalid_request_error", "model is required")
 		return
 	}
-	streaming, _ := req["stream"].(bool)
 
+	g.runMeteredCall(sw, r, scopes, body, req, requestedModel, grp, endpoint, "unified route", writeOAIError, writeProviderUpstreamError, call)
+}
+
+// runMeteredCall is the shared implementation from model resolution
+// through response caching, usage accounting, and adapter-error handling
+// — the part of every metered LLM route (this file's runUnified, above;
+// routes_messages.go's handleMessages) that is genuinely identical
+// regardless of wire shape (item 7 fix, 2026-08-22 review: this body used
+// to be duplicated almost verbatim in routes_messages.go). Callers have
+// already run admitRequest (rate limiting) and decoded the request body
+// into req, in whichever relative order their own route needs (see
+// runUnified's own doc comment for why that order differs for
+// /v1/messages) — this function starts only once both are done.
+//
+// endpoint is cacheKey's endpoint argument (cacheEndpointChat/
+// cacheEndpointEmbeddings/routes_messages.go's cacheEndpointMessages).
+// envelope and writeUpstream pick the client-facing error shape. call is
+// adapterCall — how the wire-shape-specific request/response translation,
+// if any, actually happens; the routes differ ONLY here (call's own
+// closure already has whatever it needs — routes_messages.go's own
+// requestedModel for its alias echo, in particular) and in which error
+// envelope shape they answer in. logPrefix names the route in every log
+// line this function writes, so a log reader can always tell which route
+// produced a given line without the classification logic existing twice.
+func (g *Gateway) runMeteredCall(sw *statusTrackingWriter, r *http.Request, scopes []limitScope, body []byte, req map[string]any, requestedModel string, grp *group, endpoint, logPrefix string, envelope envelopeWriter, writeUpstream providerUpstreamErrorWriter, call adapterCall) {
 	adapter, upstreamModel, canonical, err := g.registry.resolve(requestedModel, grp)
 	if err != nil {
-		writeModelResolveError(sw, err)
+		writeModelResolveErrorEnvelope(sw, err, envelope)
 		return
 	}
 
@@ -224,6 +279,7 @@ func (g *Gateway) runUnified(w http.ResponseWriter, r *http.Request, u *user, gr
 	// clients requesting the same upstream model under different alias
 	// forms (e.g. "claude-x" vs "anthropic/claude-x") must never collide
 	// into one cache entry (cacheKey's own doc comment, cache.go).
+	streaming, _ := req["stream"].(bool)
 	cacheable := !streaming && g.cache != nil && groupCacheEnabled(grp)
 	var cacheKeyStr string
 	if cacheable {
@@ -252,8 +308,8 @@ func (g *Gateway) runUnified(w http.ResponseWriter, r *http.Request, u *user, gr
 	// respWriter is sw, wrapped in a capture tee only when this request
 	// is cacheable — cacheCaptureWriter buffers everything written so a
 	// 200 non-stream response can be stored after call() returns, without
-	// any adapter knowing caching exists (routes_unified.go's adapterCall
-	// contract is unchanged either way).
+	// any adapter knowing caching exists (adapterCall's contract is
+	// unchanged either way).
 	var respWriter http.ResponseWriter = sw
 	var capture *cacheCaptureWriter
 	if cacheable {
@@ -280,9 +336,14 @@ func (g *Gateway) runUnified(w http.ResponseWriter, r *http.Request, u *user, gr
 	// translateError, or a connection failure before any write) always
 	// carries zero usage by contract, so accounting it here is a no-op —
 	// account skips every write once both total tokens and cost are zero.
+	// routes_messages.go's callTranslatedMessages/
+	// callAnthropicMessagesPassthrough follow the identical contract for
+	// their own error paths (item 1 fix, 2026-08-22 review: a translation
+	// failure AFTER a successful, billed upstream call must still return
+	// that call's real usage, not usage{}).
 	if callErr == nil && result.total() == 0 {
 		if streaming {
-			g.logf("unified route: zero usage reported for a streaming response from model %q; accounting the request only", canonical)
+			g.logf("%s: zero usage reported for a streaming response from model %q; accounting the request only", logPrefix, canonical)
 		} else {
 			result.prompt = int64(math.Ceil(float64(len(body)) / 4))
 			result.estimated = true
@@ -290,7 +351,7 @@ func (g *Gateway) runUnified(w http.ResponseWriter, r *http.Request, u *user, gr
 	}
 	g.limiter.account(scopes, result, unifiedCostMicros(canonical, upstreamModel, result, g.cfg.Pricing))
 	if result.estimated {
-		g.logf("unified route: usage for model %q logged as estimated (%d prompt tokens derived from request body size, not the provider's reported usage)", canonical, result.prompt)
+		g.logf("%s: usage for model %q logged as estimated (%d prompt tokens derived from request body size, not the provider's reported usage)", logPrefix, canonical, result.prompt)
 	}
 
 	// A miss stores the response after everything above has already run —
@@ -310,7 +371,7 @@ func (g *Gateway) runUnified(w http.ResponseWriter, r *http.Request, u *user, gr
 	}
 
 	if callErr != nil {
-		g.handleAdapterError(sw, callErr, adapter.name())
+		g.handleAdapterErrorEnvelope(sw, callErr, adapter.name(), logPrefix, envelope, writeUpstream)
 		return
 	}
 }
@@ -385,19 +446,23 @@ func withTotalScope(scopes []limitScope) []limitScope {
 // caller can reuse the identical scope slice for its own later account
 // call, rather than rebuilding (and risking scope-list drift from) a
 // second buildLimitScopes/withTotalScope pair. A violation writes its
-// response to sw itself (writeLimitViolation, unchanged body/headers from
-// before this fix) and returns ok=false.
+// response to sw itself, via envelope (writeLimitViolationEnvelope,
+// below), and returns ok=false.
 //
-// Shared verbatim by every unified/media route (runUnified above;
-// handleImagesGenerations/handleAudioSpeech/handleAudioTranscriptions,
-// routes_media.go) — see runUnified's own "BEHAVIOR CHANGE" doc-comment
+// Shared verbatim by every unified/media/messages route (runUnified
+// above; handleImagesGenerations/handleAudioSpeech/
+// handleAudioTranscriptions, routes_media.go; handleMessages,
+// routes_messages.go) — see runUnified's own "BEHAVIOR CHANGE" doc-comment
 // section for the two previously-silent side effects this reordering has
 // for a caller who is both over budget and sending a malformed/
-// unroutable request; they apply identically here.
-func (g *Gateway) admitRequest(sw *statusTrackingWriter, u *user, grp *group) (scopes []limitScope, ok bool) {
+// unroutable request; they apply identically here. envelope (item 7 fix,
+// 2026-08-22 review) lets routes_messages.go answer a violation in
+// Anthropic's own error shape instead of OpenAI's, without a second copy
+// of this function's own logic.
+func (g *Gateway) admitRequest(sw *statusTrackingWriter, u *user, grp *group, envelope envelopeWriter) (scopes []limitScope, ok bool) {
 	scopes = withTotalScope(buildLimitScopes(u, grp))
 	if violation := g.limiter.checkAndCount(scopes); violation != nil {
-		writeLimitViolation(sw, violation)
+		writeLimitViolationEnvelope(sw, violation, envelope)
 		return scopes, false
 	}
 	return scopes, true
@@ -457,7 +522,8 @@ const bodyAdmissionRetryAfterSeconds = 2
 // of goroutines blocked on a channel receive) — it fails immediately
 // instead, writing a 503 with a Retry-After header to sw and returning a
 // no-op release so the caller's own `defer release()` stays valid
-// either way.
+// either way. envelope (item 7 fix, 2026-08-22 review) picks the JSON
+// shape that 503 gets written in.
 //
 // release must be deferred by the caller IMMEDIATELY after this
 // returns, BEFORE checking ok, and that defer must be scoped narrowly
@@ -477,13 +543,13 @@ const bodyAdmissionRetryAfterSeconds = 2
 // this semaphore to bound — the only body-inspection it ever does is
 // peekPassthroughModel's own bounded 64KiB read, an intentional
 // omission, not an oversight.
-func (g *Gateway) acquireBodyAdmission(sw *statusTrackingWriter) (release func(), ok bool) {
+func (g *Gateway) acquireBodyAdmission(sw *statusTrackingWriter, envelope envelopeWriter) (release func(), ok bool) {
 	select {
 	case g.bodyAdmission <- struct{}{}:
 		return func() { <-g.bodyAdmission }, true
 	default:
 		sw.Header().Set("Retry-After", strconv.Itoa(bodyAdmissionRetryAfterSeconds))
-		writeOAIError(sw, http.StatusServiceUnavailable, "server_error", "server is at capacity; try again shortly")
+		envelope(sw, http.StatusServiceUnavailable, "server_error", "server is at capacity; try again shortly")
 		return func() {}, false
 	}
 }
@@ -494,14 +560,16 @@ func (g *Gateway) acquireBodyAdmission(sw *statusTrackingWriter) (release func()
 // successful decode, a read failure, a decode failure, or admission
 // exhaustion itself (security review finding 1b, round 3, 2026-08-22).
 // This is deliberately the ENTIRE scope of what the semaphore guards for
-// the unified routes: by the time this returns, req is fully decoded and
-// nothing further in runUnified re-amplifies memory the way the decode
+// the unified/messages routes: by the time this returns, req is fully
+// decoded and nothing further re-amplifies memory the way the decode
 // itself does, so model resolution, the cache lookup, and the upstream
 // round trip all run after the slot is already released. A read or
-// decode failure has already written its 400 to sw; ok reports whether
-// the caller may proceed.
-func (g *Gateway) readAndDecodeUnifiedBody(sw *statusTrackingWriter, r *http.Request) (body []byte, req map[string]any, ok bool) {
-	release, admitted := g.acquireBodyAdmission(sw)
+// decode failure has already written its 400 to sw, through envelope
+// (item 7 fix, 2026-08-22 review — routes_messages.go passes
+// writeAnthropicError here so this shared step answers in this route's
+// own error shape); ok reports whether the caller may proceed.
+func (g *Gateway) readAndDecodeUnifiedBody(sw *statusTrackingWriter, r *http.Request, envelope envelopeWriter) (body []byte, req map[string]any, ok bool) {
+	release, admitted := g.acquireBodyAdmission(sw, envelope)
 	defer release()
 	if !admitted {
 		return nil, nil, false
@@ -509,12 +577,12 @@ func (g *Gateway) readAndDecodeUnifiedBody(sw *statusTrackingWriter, r *http.Req
 
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxUnifiedRequestBytes))
 	if err != nil {
-		writeOAIError(sw, http.StatusBadRequest, "invalid_request_error", "cannot read request body")
+		envelope(sw, http.StatusBadRequest, "invalid_request_error", "cannot read request body")
 		return nil, nil, false
 	}
 
 	if err = json.Unmarshal(body, &req); err != nil {
-		writeOAIError(sw, http.StatusBadRequest, "invalid_request_error", "invalid JSON body")
+		envelope(sw, http.StatusBadRequest, "invalid_request_error", "invalid JSON body")
 		return nil, nil, false
 	}
 	return body, req, true
@@ -536,58 +604,79 @@ func unifiedCostMicros(canonical, bare string, u usage, overrides map[string]*Mo
 	return costMicros(bare, u, overrides)
 }
 
-// writeModelResolveError maps a modelRegistry.resolve error to its HTTP
-// envelope: errModelUnknown is a 404 (no configured provider knows this
-// model), errModelDenied is a 403 (a real model the caller's group cannot
-// use). A *aliasTargetError (spec §5, v0.2) is also a 404, but with its
-// own message naming both the alias and its unresolved target, checked
-// first via a plain type assertion — not errors.As, matching this
-// package's established yaegi-safe convention for a pointer error type
-// (registry.go's aliasTargetError doc comment). Any other error is a
-// defensive 500 — resolve's own contract promises only these sentinels/
-// types, so reaching this branch would be a programming error, not a
-// client mistake.
-func writeModelResolveError(w http.ResponseWriter, err error) {
+// writeModelResolveErrorEnvelope maps a modelRegistry.resolve error to
+// its HTTP status/message, written through whichever envelope the caller
+// supplies (item 7 fix, 2026-08-22 review): errModelUnknown is a 404 (no
+// configured provider knows this model), errModelDenied is a 403 (a real
+// model the caller's group cannot use). A *aliasTargetError (spec §5,
+// v0.2) is also a 404, but with its own message naming both the alias and
+// its unresolved target, checked first via a plain type assertion — not
+// errors.As, matching this package's established yaegi-safe convention
+// for a pointer error type (registry.go's aliasTargetError doc comment).
+// Any other error is a defensive 500 — resolve's own contract promises
+// only these sentinels/types, so reaching this branch would be a
+// programming error, not a client mistake.
+func writeModelResolveErrorEnvelope(w http.ResponseWriter, err error, envelope envelopeWriter) {
 	if aerr, ok := err.(*aliasTargetError); ok {
-		writeOAIError(w, http.StatusNotFound, "invalid_request_error", aerr.Error())
+		envelope(w, http.StatusNotFound, "invalid_request_error", aerr.Error())
 		return
 	}
 	switch {
 	case errors.Is(err, errModelUnknown):
-		writeOAIError(w, http.StatusNotFound, "invalid_request_error", "unknown model")
+		envelope(w, http.StatusNotFound, "invalid_request_error", "unknown model")
 	case errors.Is(err, errModelDenied):
-		writeOAIError(w, http.StatusForbidden, "invalid_request_error", "model access denied")
+		envelope(w, http.StatusForbidden, "invalid_request_error", "model access denied")
 	default:
-		writeOAIError(w, http.StatusInternalServerError, "server_error", "internal error")
+		envelope(w, http.StatusInternalServerError, "server_error", "internal error")
 	}
 }
 
-// writeLimitViolation maps a limiter violation to its HTTP envelope
-// (ruling b): a storeDown violation — the configured limit store was
-// unreachable and failOpen is false — is a 503 server_error, since it is
-// not an actual limit breach; any other violation is a 429 rate_limit_error
-// carrying v's own message, plus a Retry-After header when the violation
-// names a meaningful retry window.
-func writeLimitViolation(w http.ResponseWriter, v *limitViolation) {
+// writeModelResolveError is writeModelResolveErrorEnvelope pinned to the
+// OpenAI envelope shape — the thin wrapper every existing OpenAI-shaped
+// call site (this file's runMeteredCall, via writeOAIError;
+// routes_media.go's resolveMediaModel) keeps calling unchanged.
+func writeModelResolveError(w http.ResponseWriter, err error) {
+	writeModelResolveErrorEnvelope(w, err, writeOAIError)
+}
+
+// writeLimitViolationEnvelope maps a limiter violation to its HTTP
+// status/message, written through whichever envelope the caller supplies
+// (item 7 fix, 2026-08-22 review): a storeDown violation — the configured
+// limit store was unreachable and failOpen is false — is a 503
+// server_error, since it is not an actual limit breach; any other
+// violation is a 429 rate_limit_error carrying v's own message, plus a
+// Retry-After header when the violation names a meaningful retry window.
+func writeLimitViolationEnvelope(w http.ResponseWriter, v *limitViolation, envelope envelopeWriter) {
 	if v.storeDown {
-		writeOAIError(w, http.StatusServiceUnavailable, "server_error", v.message)
+		envelope(w, http.StatusServiceUnavailable, "server_error", v.message)
 		return
 	}
 	if v.retryAfter > 0 {
 		w.Header().Set("Retry-After", strconv.Itoa(v.retryAfter))
 	}
-	writeOAIError(w, http.StatusTooManyRequests, "rate_limit_error", v.message)
+	envelope(w, http.StatusTooManyRequests, "rate_limit_error", v.message)
 }
 
-// handleAdapterError translates an adapter's returned error into a
-// response, or into nothing at all, per ruling c. sw.wroteHeader is
-// checked first, ahead of every other case: an error surfacing after the
-// adapter already started writing a response (a mid-stream connection
-// drop) must never get a second, conflicting envelope appended, whatever
-// kind of error it is.
-func (g *Gateway) handleAdapterError(sw *statusTrackingWriter, err error, providerName string) {
+// writeLimitViolation is writeLimitViolationEnvelope pinned to the
+// OpenAI envelope shape — the thin wrapper every existing direct call
+// site (mcp_a2a.go, mcp_federation.go, routes_passthrough.go, all of
+// which call checkAndCount themselves rather than through admitRequest)
+// keeps calling unchanged.
+func writeLimitViolation(w http.ResponseWriter, v *limitViolation) {
+	writeLimitViolationEnvelope(w, v, writeOAIError)
+}
+
+// handleAdapterErrorEnvelope is the shared adapter-error classification
+// every metered route goes through (item 7 fix, 2026-08-22 review):
+// sw.wroteHeader is checked first, ahead of every other case, since an
+// error surfacing after the adapter already started writing a response
+// (a mid-stream connection drop) must never get a second, conflicting
+// envelope appended, whatever kind of error it is. envelope/writeUpstream
+// pick the client-facing shape; logPrefix names the route in every log
+// line.
+func (g *Gateway) handleAdapterErrorEnvelope(sw *statusTrackingWriter, err error, providerName, logPrefix string, envelope envelopeWriter, writeUpstream providerUpstreamErrorWriter) {
 	// A cacheable request's miss path pre-sets X-Llmgw-Cache: miss before
-	// call() runs (runUnified), so headers precede a successful body —
+	// call() runs (runMeteredCall), so headers precede a successful body —
 	// but an adapter error means nothing was actually served from, or
 	// stored to, the cache. Del is unconditional and harmless when the
 	// header was never set (a no-op on an absent key), so this needs no
@@ -597,7 +686,7 @@ func (g *Gateway) handleAdapterError(sw *statusTrackingWriter, err error, provid
 	sw.Header().Del("X-Llmgw-Cache")
 
 	if sw.wroteHeader {
-		g.errorf("unified route: adapter error after response started (provider %q): %v", providerName, err)
+		g.errorf("%s: adapter error after response started (provider %q): %v", logPrefix, providerName, err)
 		return
 	}
 
@@ -611,7 +700,7 @@ func (g *Gateway) handleAdapterError(sw *statusTrackingWriter, err error, provid
 	// Verified empirically under real Traefik (Task 15's integration
 	// suite); tools/yaegi-check never exercises this call path.
 	if perr, ok := err.(*providerHTTPError); ok {
-		writeProviderUpstreamError(sw, providerName, perr)
+		writeUpstream(sw, providerName, perr)
 		return
 	}
 
@@ -620,17 +709,58 @@ func (g *Gateway) handleAdapterError(sw *statusTrackingWriter, err error, provid
 		if terr.notSupported {
 			status = http.StatusNotImplemented
 		}
-		writeOAIError(sw, status, "invalid_request_error", terr.msg)
+		envelope(sw, status, "invalid_request_error", terr.msg)
+		return
+	}
+
+	// *responseTranslationError (routes_messages.go, item 1/12 fix,
+	// 2026-08-22 review) is the /v1/messages route's own: a translation
+	// failure AFTER a successful, already-billed upstream call (its usage
+	// already travels back through call's own return value regardless of
+	// this branch — see runMeteredCall's own comment on that). This
+	// branch only ever fires for routes_messages.go's own call closures;
+	// runUnified's adapterCall implementations never produce this type,
+	// so it is always a no-op miss for that route. Kept here, in the one
+	// shared classification, rather than a second copy of this whole
+	// cascade in routes_messages.go, so the classification logic itself
+	// never exists twice — see handleAdapterErrorEnvelope's own doc
+	// comment (item 7).
+	if terr, ok := err.(*responseTranslationError); ok {
+		g.errorf("%s: response translation failed after a billed upstream call (provider %q): %v", logPrefix, providerName, terr.err)
+		envelope(sw, http.StatusBadGateway, "server_error", "failed to translate provider response")
 		return
 	}
 
 	if errors.Is(err, context.Canceled) {
-		g.logf("unified route: client canceled request to provider %q: %v", providerName, err)
+		g.logf("%s: client canceled request to provider %q: %v", logPrefix, providerName, err)
 		return
 	}
 
-	g.errorf("unified route: upstream connection error (provider %q): %v", providerName, err)
-	writeOAIError(sw, http.StatusBadGateway, "server_error", "upstream connection error")
+	g.errorf("%s: upstream connection error (provider %q): %v", logPrefix, providerName, err)
+	envelope(sw, http.StatusBadGateway, "server_error", "upstream connection error")
+}
+
+// handleAdapterError is handleAdapterErrorEnvelope pinned to the OpenAI
+// envelope shape — the thin wrapper every existing OpenAI-shaped call
+// site (routes_media.go's three media handlers) keeps calling unchanged.
+// runMeteredCall (this file) calls handleAdapterErrorEnvelope directly,
+// with whichever envelope its own caller supplied.
+func (g *Gateway) handleAdapterError(sw *statusTrackingWriter, err error, providerName string) {
+	g.handleAdapterErrorEnvelope(sw, err, providerName, "unified route", writeOAIError, writeProviderUpstreamError)
+}
+
+// decodeUpstreamErrorBody decodes perr.body as JSON when it parses as
+// one, or returns it as a raw string otherwise — the shared read
+// writeProviderUpstreamError and routes_messages.go's
+// writeAnthropicProviderUpstreamError both embed under "upstream" in
+// their own envelope shape (item 7/8 fix, 2026-08-22 review).
+func decodeUpstreamErrorBody(perr *providerHTTPError) any {
+	var upstream any = string(perr.body)
+	var parsed any
+	if json.Unmarshal(perr.body, &parsed) == nil {
+		upstream = parsed
+	}
+	return upstream
 }
 
 // writeProviderUpstreamError passes perr's status through to the client,
@@ -638,16 +768,10 @@ func (g *Gateway) handleAdapterError(sw *statusTrackingWriter, err error, provid
 // verbatim (unified-route callers get this wrapped form; the openai-type
 // adapter's own passthrough forwards a non-2xx body unwrapped, since that
 // path never reaches this function). perr.body is embedded under
-// error.upstream, decoded to a JSON value when it parses as one and left
-// as a raw string otherwise, so a caller sees exactly what the provider
-// said either way.
+// error.upstream (decodeUpstreamErrorBody, above), decoded to a JSON
+// value when it parses as one and left as a raw string otherwise, so a
+// caller sees exactly what the provider said either way.
 func writeProviderUpstreamError(w http.ResponseWriter, providerName string, perr *providerHTTPError) {
-	var upstream any = string(perr.body)
-	var parsed any
-	if json.Unmarshal(perr.body, &parsed) == nil {
-		upstream = parsed
-	}
-
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(perr.status)
 	_ = json.NewEncoder(w).Encode(map[string]any{ // headers already committed; nothing useful to do on encode failure
@@ -655,7 +779,7 @@ func writeProviderUpstreamError(w http.ResponseWriter, providerName string, perr
 			"message":  providerName + " upstream error",
 			"type":     "upstream_error",
 			"code":     strconv.Itoa(perr.status),
-			"upstream": upstream,
+			"upstream": decodeUpstreamErrorBody(perr),
 		},
 	})
 }
@@ -663,9 +787,10 @@ func writeProviderUpstreamError(w http.ResponseWriter, providerName string, perr
 // cacheCaptureWriter tees a cacheable request's response into an
 // in-memory buffer, capped at maxBodyBytes regardless of how large the
 // real response turns out to be, while writing everything through to the
-// wrapped *statusTrackingWriter unchanged — the mechanism runUnified uses
-// to fill the response cache (cache.go) on a miss without any adapter, or
-// forwardJSON/forwardStream inside one, needing to know caching exists.
+// wrapped *statusTrackingWriter unchanged — the mechanism runMeteredCall
+// uses to fill the response cache (cache.go) on a miss without any
+// adapter, or forwardJSON/forwardStream inside one, needing to know
+// caching exists.
 //
 // The cap matters even though the adapter response it captures is itself
 // already bounded by maxResponseBytes (32MiB): cache.maxBodyBytes
@@ -681,9 +806,10 @@ func writeProviderUpstreamError(w http.ResponseWriter, providerName string, perr
 // overriding here. This is what "preserve statusTrackingWriter semantics"
 // means in practice: Flush passes through for free, and wroteHeader stays
 // the single shared bookkeeping field statusTrackingWriter already
-// maintains (handleAdapterError inspects it via the original sw pointer,
-// not through this wrapper, so a cacheCaptureWriter's WriteHeader/Write
-// must delegate to the embedded pointer, never shadow its state).
+// maintains (handleAdapterErrorEnvelope inspects it via the original sw
+// pointer, not through this wrapper, so a cacheCaptureWriter's
+// WriteHeader/Write must delegate to the embedded pointer, never shadow
+// its state).
 type cacheCaptureWriter struct {
 	*statusTrackingWriter
 	contentType  string
@@ -692,7 +818,7 @@ type cacheCaptureWriter struct {
 	status       int
 	// oversize is true once buf has reached maxBodyBytes: Write stops
 	// appending to buf from that point on (the real write to the client
-	// is never affected), and runUnified skips calling store() entirely
+	// is never affected), and runMeteredCall skips calling store() entirely
 	// rather than handing it a silently truncated body.
 	oversize bool
 }

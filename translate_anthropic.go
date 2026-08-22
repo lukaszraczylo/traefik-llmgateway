@@ -487,9 +487,34 @@ type anthropicContentBlock struct {
 
 // anthropicUsagePayload is the "usage" object on both a non-streaming
 // Anthropic response and a streaming message_start/message_delta event.
+// CacheCreationInputTokens/CacheReadInputTokens (item 6 fix, 2026-08-22
+// review) are Anthropic's prompt-cache counters: tokens written to the
+// cache and tokens read back from it, reported separately from
+// InputTokens (fresh, uncached input). Verified repro before this fix:
+// 180000 cache-creation + 20000 cache-read tokens billed as tokin=4 — the
+// two cache fields were decoded into nothing and silently dropped.
+// Caching is near-universal for Claude Code and any agentic client using
+// Anthropic's prompt cache, so ignoring them under-counted budgets by
+// orders of magnitude on the primary use case.
 type anthropicUsagePayload struct {
-	InputTokens  int64 `json:"input_tokens"`
-	OutputTokens int64 `json:"output_tokens"`
+	InputTokens              int64 `json:"input_tokens"`
+	OutputTokens             int64 `json:"output_tokens"`
+	CacheCreationInputTokens int64 `json:"cache_creation_input_tokens"`
+	CacheReadInputTokens     int64 `json:"cache_read_input_tokens"`
+}
+
+// totalInputTokens returns the full input-side token count Anthropic
+// actually billed for one request: fresh InputTokens plus both cache-tier
+// counters. This gateway's budgets/rate-limits (limits.go's usage.prompt)
+// track one combined "prompt" token count per request, not per-tier
+// pricing, so folding all three into one number here — rather than
+// pricing cache-write/cache-read tiers differently — fixes the under-
+// billing item 6 reported (2026-08-22 review) without a materially larger
+// change to pricing.go's cost model, which this fix deliberately leaves
+// alone: token-budget accuracy was the reported defect, not $ cost
+// accuracy for cache-tier pricing.
+func (p anthropicUsagePayload) totalInputTokens() int64 {
+	return p.InputTokens + p.CacheCreationInputTokens + p.CacheReadInputTokens
 }
 
 // anthropicResponseBody is the subset of a non-streaming Anthropic
@@ -559,7 +584,7 @@ func openAIResponseFromAnthropic(body []byte, model string, created int64) (map[
 		message["tool_calls"] = toolCalls
 	}
 
-	u := usage{prompt: resp.Usage.InputTokens, completion: resp.Usage.OutputTokens}
+	u := usage{prompt: resp.Usage.totalInputTokens(), completion: resp.Usage.OutputTokens}
 
 	out := map[string]any{
 		"id":      chatCompletionIDPrefix + resp.ID,
@@ -744,7 +769,7 @@ func (st *anthropicStreamState) translate(ev sseEvent) ([][]byte, error) {
 			return nil, fmt.Errorf("%w: decode anthropic message_start event: %w", errUpstream, err)
 		}
 		st.id = p.Message.ID
-		st.u.prompt = p.Message.Usage.InputTokens
+		st.u.prompt = p.Message.Usage.totalInputTokens()
 		return [][]byte{st.chunk(map[string]any{"role": "assistant"}, nil)}, nil
 
 	case "content_block_start":
@@ -823,4 +848,524 @@ func (st *anthropicStreamState) translate(ev sseEvent) ([][]byte, error) {
 		// message_stop, ping, content_block_stop, and anything unrecognized.
 		return nil, nil
 	}
+}
+
+// --- Anthropic -> OpenAI request translation (routes_messages.go) ---
+//
+// The functions below are the mirror of anthropicRequestFromOpenAI/
+// openAIResponseFromAnthropic above: routes_messages.go's /v1/messages
+// route receives an Anthropic-shaped request and, when it resolves to a
+// non-anthropic-type provider, must translate it to OpenAI's shape going
+// out and translate that provider's OpenAI-shaped response back to
+// Anthropic's shape coming back — the opposite direction from every
+// function above this comment, which exist to let an OpenAI-shaped
+// /v1/chat/completions request reach an anthropic-type provider. Neither
+// direction reuses the other's helpers beyond the truly shape-agnostic
+// ones (isTruthy, toFloat64/toInt64, systemTextFromContentParts): the two
+// wire formats are similar but not inverses of each other field-for-field
+// (Anthropic's tool_use.input is a decoded JSON value, OpenAI's
+// tool_calls[].function.arguments is that same value re-encoded as a
+// string, for instance), so each direction earns its own small mapping
+// functions rather than one trying to serve both.
+
+// anthropicSystemToText maps Anthropic's "system" request field — a plain
+// string, or (newer API versions) an array of {"type":"text","text":...}
+// content blocks — to plain text. Reuses systemTextFromContentParts
+// (above) for the array form, since Anthropic's system content-block
+// shape and OpenAI's system-message content-array shape are identical.
+// Any other type (absent, or already-invalid JSON) returns "", nil —
+// openAIRequestFromAnthropic only emits a system message when this
+// returns non-empty text.
+func anthropicSystemToText(sys any) (string, error) {
+	switch s := sys.(type) {
+	case string:
+		return s, nil
+	case []any:
+		return systemTextFromContentParts(s)
+	default:
+		return "", nil
+	}
+}
+
+// openAIContentPartFromAnthropicImage maps one Anthropic {"type":"image",
+// "source":{"type":"base64","media_type":...,"data":...}} content block to
+// OpenAI's {"type":"image_url","image_url":{"url":"data:...;base64,..."}},
+// the mirror of anthropicImageSourceFromDataURI above. Anthropic's image
+// source "type" is currently always "base64" (a URL-sourced image source
+// is a separate, newer Anthropic feature this translator does not yet
+// support) — any other value is a *translateError.
+func openAIContentPartFromAnthropicImage(bm map[string]any) (map[string]any, error) {
+	src, _ := bm["source"].(map[string]any)
+	srcType, _ := src["type"].(string)
+	if srcType != "base64" {
+		return nil, &translateError{msg: fmt.Sprintf("image source type %q is not supported for this provider", srcType)}
+	}
+	mediaType, _ := src["media_type"].(string)
+	data, _ := src["data"].(string)
+	url := "data:" + mediaType + ";base64," + data
+	return map[string]any{"type": "image_url", "image_url": map[string]any{"url": url}}, nil
+}
+
+// openAIToolCallFromAnthropic maps one Anthropic {"type":"tool_use","id",
+// "name","input"} content block to an OpenAI tool_calls[] entry
+// ({"id","type":"function","function":{"name","arguments"}}), the mirror
+// of anthropicToolUseBlockFromOpenAI above: input, already a decoded Go
+// value (this translator's caller decoded the whole request body into
+// map[string]any), is re-marshaled to a compact JSON string for OpenAI's
+// "arguments" field.
+func openAIToolCallFromAnthropic(bm map[string]any) (map[string]any, error) {
+	id, _ := bm["id"].(string)
+	name, _ := bm["name"].(string)
+	input := bm["input"]
+	if input == nil {
+		input = map[string]any{}
+	}
+	argsBytes, err := json.Marshal(input)
+	if err != nil {
+		return nil, fmt.Errorf("%w: marshal tool_use input: %w", errUpstream, err)
+	}
+	return map[string]any{
+		"id":   id,
+		"type": "function",
+		"function": map[string]any{
+			"name":      name,
+			"arguments": string(argsBytes),
+		},
+	}, nil
+}
+
+// openAIToolMessageFromAnthropic maps one Anthropic {"type":"tool_result",
+// "tool_use_id","content","is_error"} content block to an OpenAI
+// role:"tool" message ({"role":"tool","tool_call_id","content"}), the
+// mirror of anthropicToolResultBlock above. is_error (item 11/F4 fix,
+// 2026-08-22/23 review) has no native OpenAI equivalent — a tool message
+// carries no error flag — so it is preserved by prefixing "Error: " onto
+// content once openAIToolResultContentString (below) has normalized it
+// to a plain string, instead of being silently dropped: an earlier
+// version of this function read only tool_use_id/content and discarded
+// is_error entirely, and a second earlier version only prefixed a Go
+// string, still dropping the signal for Anthropic's array-content form.
+func openAIToolMessageFromAnthropic(bm map[string]any) map[string]any {
+	toolUseID, _ := bm["tool_use_id"].(string)
+	content := openAIToolResultContentString(bm["content"])
+	if isErr, _ := bm["is_error"].(bool); isErr {
+		content = "Error: " + content
+	}
+	return map[string]any{"role": "tool", "tool_call_id": toolUseID, "content": content}
+}
+
+// openAIToolResultContentString normalizes an Anthropic tool_result
+// block's "content" into the single string OpenAI's tool message
+// "content" field requires (item 11/F4 fix, 2026-08-22/23 review). Three
+// source shapes all collapse to a string: a plain string passes through
+// unchanged; a content-block array (Anthropic permits this, and Claude
+// Code sends it for a tool_result carrying more than plain text) has its
+// text blocks concatenated; an absent/nil content becomes "". Handling
+// all three uniformly, here, is what lets openAIToolMessageFromAnthropic's
+// is_error prefix apply regardless of the source shape — the PREVIOUS
+// version only prefixed a Go string and left the array form unmarked
+// entirely, silently dropping the failure signal for real Claude Code
+// traffic (item 11 only covered half of it). It also fixes a second,
+// separate bug the array-only gap masked: an absent content previously
+// passed through as a literal Go nil, which this function's caller wrote
+// out as the JSON literal null — OpenAI rejects a null tool-message
+// content outright, where "" is accepted.
+func openAIToolResultContentString(content any) string {
+	switch c := content.(type) {
+	case string:
+		return c
+	case []any:
+		var parts []string
+		for _, block := range c {
+			bm, ok := block.(map[string]any)
+			if !ok {
+				continue
+			}
+			if text, ok := bm["text"].(string); ok {
+				parts = append(parts, text)
+			}
+		}
+		return strings.Join(parts, "")
+	default:
+		return ""
+	}
+}
+
+// openAIMessagesFromAnthropic maps one Anthropic message ({"role",
+// "content"}, content either a plain string or a content-block array) to
+// one or more OpenAI messages, preserving the ORIGINAL block order (item
+// 3 fix, 2026-08-22 review): a plain string passes through unchanged. For
+// a block array, text/image/tool_use blocks accumulate into one pending
+// {role, content, tool_calls?} message; each tool_result block flushes
+// that pending message (if it has anything to flush) and then emits its
+// own role:"tool" message, in the SAME relative position the tool_result
+// held in the original array. Any trailing accumulated content flushes at
+// the end.
+//
+// This ordering matters beyond cosmetics: OpenAI requires a role:"tool"
+// message to directly follow the assistant message carrying the
+// tool_calls it answers, with nothing in between. The PREVIOUS version of
+// this function always emitted every tool_result AFTER the combined
+// content/tool_calls message regardless of where it actually appeared in
+// the original block array — correct for the common shape (a user turn
+// that is pure tool_results, following an assistant's pure tool_use
+// turn), but wrong for a legal Anthropic user turn shaped [tool_result,
+// text]: the old code emitted [user(text), tool(...)], inserting a
+// non-tool message between an assistant's tool_calls and its answer and
+// getting a 400 from OpenAI ("messages with role 'tool' must be a
+// response to a preceding message with 'tool_calls'"). Preserving
+// original order fixes both shapes without special-casing either.
+func openAIMessagesFromAnthropic(role string, content any) ([]any, error) {
+	if s, ok := content.(string); ok {
+		return []any{map[string]any{"role": role, "content": s}}, nil
+	}
+
+	blocksRaw, ok := content.([]any)
+	if !ok {
+		// Absent or unrecognized content shape: an empty message rather
+		// than an error — mirrors anthropicMessageFromOpenAI's own
+		// tolerance of a missing "content" field above.
+		return []any{map[string]any{"role": role, "content": ""}}, nil
+	}
+
+	var out []any
+	var pendingContent []any
+	var pendingToolCalls []any
+	flushPending := func() {
+		if len(pendingContent) == 0 && len(pendingToolCalls) == 0 {
+			return
+		}
+		m := map[string]any{"role": role}
+		if len(pendingContent) > 0 {
+			m["content"] = pendingContent
+		} else {
+			m["content"] = nil
+		}
+		if len(pendingToolCalls) > 0 {
+			m["tool_calls"] = pendingToolCalls
+		}
+		out = append(out, m)
+		pendingContent = nil
+		pendingToolCalls = nil
+	}
+
+	for _, b := range blocksRaw {
+		bm, ok := b.(map[string]any)
+		if !ok {
+			continue
+		}
+		switch bt, _ := bm["type"].(string); bt {
+		case "text":
+			text, _ := bm["text"].(string)
+			pendingContent = append(pendingContent, map[string]any{"type": "text", "text": text})
+		case "image":
+			part, err := openAIContentPartFromAnthropicImage(bm)
+			if err != nil {
+				return nil, err
+			}
+			pendingContent = append(pendingContent, part)
+		case "tool_use":
+			tc, err := openAIToolCallFromAnthropic(bm)
+			if err != nil {
+				return nil, err
+			}
+			pendingToolCalls = append(pendingToolCalls, tc)
+		case "tool_result":
+			flushPending()
+			out = append(out, openAIToolMessageFromAnthropic(bm))
+		}
+	}
+	flushPending()
+	return out, nil
+}
+
+// openAIToolsFromAnthropic maps Anthropic's tools[]{name, description,
+// input_schema} to OpenAI's tools[].function{name, description,
+// parameters}, the mirror of anthropicToolsFromOpenAI above.
+func openAIToolsFromAnthropic(toolsRaw []any) []any {
+	out := make([]any, 0, len(toolsRaw))
+	for _, t := range toolsRaw {
+		tm, ok := t.(map[string]any)
+		if !ok {
+			continue
+		}
+		fn := map[string]any{"name": tm["name"], "parameters": tm["input_schema"]}
+		if desc, ok := tm["description"]; ok {
+			fn["description"] = desc
+		}
+		out = append(out, map[string]any{"type": "function", "function": fn})
+	}
+	return out
+}
+
+// openAIToolChoiceFromAnthropic maps Anthropic's tool_choice
+// ({"type":"auto"|"any"|"tool","name":...}) to OpenAI's tool_choice, the
+// mirror of anthropicToolChoiceFromOpenAI above. Anthropic has no
+// equivalent of OpenAI's "none" (a tool_choice this translator's forward
+// direction can only produce by omitting the field, per that function's
+// own doc comment), so there is no case here that ever needs to signal
+// "drop tools" the way that direction's dropTools return does.
+func openAIToolChoiceFromAnthropic(tc any) any {
+	tm, ok := tc.(map[string]any)
+	if !ok {
+		return nil
+	}
+	switch t, _ := tm["type"].(string); t {
+	case "auto":
+		return "auto"
+	case "any":
+		return "required"
+	case "tool":
+		name, _ := tm["name"].(string)
+		return map[string]any{"type": "function", "function": map[string]any{"name": name}}
+	default:
+		return nil
+	}
+}
+
+// openAIReasoningModelPrefixes are OpenAI (and OpenAI-compatible) model
+// id prefixes that reject the "max_tokens" request field with a 400 and
+// require "max_completion_tokens" instead (item 10 fix, 2026-08-22
+// review): the o-series reasoning models and the gpt-5 family. Matched
+// against the resolved upstream model id, case-sensitively, the same
+// case OpenAI's own ids use.
+var openAIReasoningModelPrefixes = []string{"o1", "o3", "o4", "gpt-5"}
+
+// isOpenAIReasoningModel reports whether model is one of the model
+// families openAIRequestFromAnthropic (below) must emit
+// "max_completion_tokens" for instead of "max_tokens" — see
+// openAIReasoningModelPrefixes' own doc comment. model may carry a
+// "provider/" prefix; this only needs a prefix match on the bare id
+// portion after it.
+func isOpenAIReasoningModel(model string) bool {
+	if _, rest, ok := strings.Cut(model, "/"); ok {
+		model = rest
+	}
+	for _, prefix := range openAIReasoningModelPrefixes {
+		if strings.HasPrefix(model, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// openAIRequestFromAnthropic maps an Anthropic Messages API request body
+// (already decoded into map[string]any by the messages route's shared
+// admission/decode path) to an OpenAI chat-completion request body, the
+// mirror of anthropicRequestFromOpenAI above. It returns a
+// *translateError — never wrapped, matching this file's established
+// convention — for a content block this translator cannot map (an
+// unsupported image source type).
+//
+// The second return value lists request fields this translator
+// recognizes but has no OpenAI equivalent for and therefore dropped
+// (item 11 fix, 2026-08-22 review) — currently only "thinking"
+// (Anthropic's extended-thinking/reasoning-budget config). The caller
+// (routes_messages.go's callTranslatedMessages) logs a warning per
+// dropped field rather than this function logging directly: every other
+// function in this file is a pure, Gateway-free translator, callable and
+// testable without a *Gateway instance, and this keeps it that way.
+func openAIRequestFromAnthropic(req map[string]any) (map[string]any, []string, error) {
+	out := map[string]any{}
+	modelStr, _ := req["model"].(string)
+	if modelStr != "" {
+		out["model"] = modelStr
+	}
+
+	msgs := make([]any, 0, 1)
+	if sys, ok := req["system"]; ok {
+		text, err := anthropicSystemToText(sys)
+		if err != nil {
+			return nil, nil, err
+		}
+		if text != "" {
+			msgs = append(msgs, map[string]any{"role": "system", "content": text})
+		}
+	}
+
+	msgsRaw, _ := req["messages"].([]any)
+	for _, m := range msgsRaw {
+		msg, ok := m.(map[string]any)
+		if !ok {
+			continue
+		}
+		role, _ := msg["role"].(string)
+		converted, err := openAIMessagesFromAnthropic(role, msg["content"])
+		if err != nil {
+			return nil, nil, err
+		}
+		msgs = append(msgs, converted...)
+	}
+	out["messages"] = msgs
+
+	if v, ok := req["max_tokens"]; ok {
+		if n, ok2 := toInt64(v); ok2 {
+			// Reasoning models (o1/o3/o4/gpt-5 family) reject "max_tokens"
+			// with a 400 and require "max_completion_tokens" instead
+			// (item 10 fix, 2026-08-22 review) — isOpenAIReasoningModel's
+			// own doc comment has the model-family list.
+			if isOpenAIReasoningModel(modelStr) {
+				out["max_completion_tokens"] = n
+			} else {
+				out["max_tokens"] = n
+			}
+		}
+	}
+	if v, ok := req["temperature"]; ok {
+		out["temperature"] = v
+	}
+	if v, ok := req["top_p"]; ok {
+		out["top_p"] = v
+	}
+	if seqs, ok := req["stop_sequences"].([]any); ok && len(seqs) > 0 {
+		out["stop"] = seqs
+	}
+	if v, ok := req["stream"]; ok {
+		out["stream"] = v
+	}
+
+	if toolsRaw, ok := req["tools"].([]any); ok {
+		out["tools"] = openAIToolsFromAnthropic(toolsRaw)
+	}
+	if tc, ok := req["tool_choice"]; ok {
+		if choice := openAIToolChoiceFromAnthropic(tc); choice != nil {
+			out["tool_choice"] = choice
+		}
+	}
+
+	if meta, ok := req["metadata"].(map[string]any); ok {
+		if uid, ok := meta["user_id"]; ok {
+			out["user"] = uid
+		}
+	}
+
+	var dropped []string
+	if _, ok := req["thinking"]; ok {
+		dropped = append(dropped, "thinking")
+	}
+
+	return out, dropped, nil
+}
+
+// openAIChatResponseBody is the subset of a non-streaming OpenAI
+// chat.completion response this translator reads, the mirror of
+// anthropicResponseBody above. Message.Content is a pointer so a
+// tool-calls-only response (content: null) is told apart from one
+// carrying empty text — mirroring openAIResponseFromAnthropic's own
+// len(textParts) > 0 check in the other direction.
+type openAIChatResponseBody struct {
+	ID      string `json:"id"`
+	Choices []struct {
+		FinishReason string `json:"finish_reason"`
+		Message      struct {
+			Content   *string `json:"content"`
+			ToolCalls []struct {
+				ID       string `json:"id"`
+				Function struct {
+					Name      string `json:"name"`
+					Arguments string `json:"arguments"`
+				} `json:"function"`
+			} `json:"tool_calls"`
+		} `json:"message"`
+	} `json:"choices"`
+	Usage chatStreamUsage `json:"usage"`
+}
+
+// anthropicToolInputFromOpenAI decodes an OpenAI tool_calls[].function.
+// arguments JSON string into a generic Go value for Anthropic's
+// tool_use.input field, the mirror of reMarshalToolInput above (which
+// goes the other way: a decoded value re-marshaled to a string). An empty
+// arguments string decodes to an empty object, matching a tool call with
+// no arguments.
+func anthropicToolInputFromOpenAI(argsStr string) (any, error) {
+	input := any(map[string]any{})
+	if argsStr != "" {
+		if err := json.Unmarshal([]byte(argsStr), &input); err != nil {
+			return nil, fmt.Errorf("%w: decode tool_calls[].function.arguments: %w", errUpstream, err)
+		}
+	}
+	return input, nil
+}
+
+// anthropicStopReasonFromOpenAI maps an OpenAI finish_reason to an
+// Anthropic stop_reason, the mirror of anthropicFinishReason above:
+// length -> max_tokens, tool_calls -> tool_use, everything else
+// (including "stop") -> end_turn. OpenAI's finish_reason carries no
+// equivalent of Anthropic's "stop_sequence" (which stop string matched),
+// so this translator can never populate the response's stop_sequence
+// field — the same loss of fidelity anthropicFinishReason already
+// accepts by collapsing end_turn and stop_sequence into one OpenAI value.
+func anthropicStopReasonFromOpenAI(finishReason string) string {
+	switch finishReason {
+	case "length":
+		return "max_tokens"
+	case "tool_calls":
+		return "tool_use"
+	default:
+		return "end_turn"
+	}
+}
+
+// anthropicMessageIDFromOpenAI derives an Anthropic-shaped message id
+// from an OpenAI chat.completion response id, stripping
+// chatCompletionIDPrefix ("chatcmpl-") when present and prefixing
+// "msg_" — Anthropic's own id convention — the mirror of
+// openAIResponseFromAnthropic's chatCompletionIDPrefix+resp.ID above.
+func anthropicMessageIDFromOpenAI(id string) string {
+	return "msg_" + strings.TrimPrefix(id, chatCompletionIDPrefix)
+}
+
+// anthropicResponseFromOpenAI maps a non-streaming OpenAI chat.completion
+// response body to an Anthropic Messages API response body, the mirror of
+// openAIResponseFromAnthropic above. model is supplied by the caller
+// (routes_messages.go's callTranslatedMessages) — the client's original
+// requested alias, echoed back into the response's "model" field the same
+// way every translating adapter's gatewayAliasKey mechanism already does
+// for the outbound direction (routes_unified.go's gatewayAliasKey doc
+// comment).
+func anthropicResponseFromOpenAI(body []byte, model string) (map[string]any, error) {
+	var resp openAIChatResponseBody
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, fmt.Errorf("%w: decode openai response: %w", errUpstream, err)
+	}
+
+	var content []any
+	stopReason := "end_turn"
+	if len(resp.Choices) > 0 {
+		choice := resp.Choices[0]
+		if choice.Message.Content != nil && *choice.Message.Content != "" {
+			content = append(content, map[string]any{"type": "text", "text": *choice.Message.Content})
+		}
+		for _, tc := range choice.Message.ToolCalls {
+			input, err := anthropicToolInputFromOpenAI(tc.Function.Arguments)
+			if err != nil {
+				return nil, err
+			}
+			content = append(content, map[string]any{
+				"type":  "tool_use",
+				"id":    tc.ID,
+				"name":  tc.Function.Name,
+				"input": input,
+			})
+		}
+		stopReason = anthropicStopReasonFromOpenAI(choice.FinishReason)
+	}
+	if content == nil {
+		content = []any{}
+	}
+
+	out := map[string]any{
+		"id":            anthropicMessageIDFromOpenAI(resp.ID),
+		"type":          "message",
+		"role":          "assistant",
+		"model":         model,
+		"content":       content,
+		"stop_reason":   stopReason,
+		"stop_sequence": nil,
+		"usage": map[string]any{
+			"input_tokens":  resp.Usage.PromptTokens,
+			"output_tokens": resp.Usage.CompletionTokens,
+		},
+	}
+	return out, nil
 }

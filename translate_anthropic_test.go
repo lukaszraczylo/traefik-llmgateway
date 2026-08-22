@@ -507,3 +507,352 @@ func TestToFloat64(t *testing.T) {
 		})
 	}
 }
+
+// --- openAIRequestFromAnthropic / anthropicResponseFromOpenAI: the
+// reverse-direction translators routes_messages.go uses (/v1/messages
+// resolved to a non-anthropic-type provider) ---
+
+// TestOpenAIRequestFromAnthropic_ToolResultBecomesToolMessage proves an
+// assistant tool_use block becomes an OpenAI tool_calls[] entry (with its
+// decoded "input" re-marshaled to a JSON string, matching OpenAI's
+// arguments field) and a following user tool_result block becomes its
+// own separate role:"tool" message — the mirror of
+// anthropicRequestFromOpenAI's pendingToolResults collapse in the other
+// direction.
+func TestOpenAIRequestFromAnthropic_ToolResultBecomesToolMessage(t *testing.T) {
+	req := map[string]any{
+		"model": "claude-x",
+		"messages": []any{
+			map[string]any{"role": "assistant", "content": []any{
+				map[string]any{"type": "tool_use", "id": "call_1", "name": "get_weather", "input": map[string]any{"city": "London"}},
+			}},
+			map[string]any{"role": "user", "content": []any{
+				map[string]any{"type": "tool_result", "tool_use_id": "call_1", "content": "sunny"},
+			}},
+		},
+	}
+
+	out, _, err := openAIRequestFromAnthropic(req)
+	if err != nil {
+		t.Fatalf("openAIRequestFromAnthropic: %v", err)
+	}
+	msgs, _ := out["messages"].([]any)
+	if len(msgs) != 2 {
+		t.Fatalf("messages = %v, want 2 (assistant tool_calls + tool result)", msgs)
+	}
+	assistant, _ := msgs[0].(map[string]any)
+	toolCalls, _ := assistant["tool_calls"].([]any)
+	if len(toolCalls) != 1 {
+		t.Fatalf("assistant tool_calls = %v, want 1 entry", assistant["tool_calls"])
+	}
+	tc, _ := toolCalls[0].(map[string]any)
+	fn, _ := tc["function"].(map[string]any)
+	assert.Equal(t, "get_weather", fn["name"])
+	assert.JSONEq(t, `{"city":"London"}`, fn["arguments"].(string))
+
+	toolMsg, _ := msgs[1].(map[string]any)
+	assert.Equal(t, "tool", toolMsg["role"])
+	assert.Equal(t, "call_1", toolMsg["tool_call_id"])
+	assert.Equal(t, "sunny", toolMsg["content"])
+}
+
+// TestOpenAIRequestFromAnthropic_SystemStringFoldedIntoMessages proves a
+// plain-string Anthropic "system" field becomes a role:"system" message
+// prepended ahead of the rest, and the Anthropic-only top-level "system"
+// key never survives into the OpenAI-shaped output.
+func TestOpenAIRequestFromAnthropic_SystemStringFoldedIntoMessages(t *testing.T) {
+	req := map[string]any{
+		"model":    "claude-x",
+		"system":   "Be terse.",
+		"messages": []any{map[string]any{"role": "user", "content": "hi"}},
+	}
+
+	out, _, err := openAIRequestFromAnthropic(req)
+	if err != nil {
+		t.Fatalf("openAIRequestFromAnthropic: %v", err)
+	}
+	if _, ok := out["system"]; ok {
+		t.Error(`out carries a "system" key; Anthropic's system field has no OpenAI equivalent and must be folded into messages[]`)
+	}
+	msgs, _ := out["messages"].([]any)
+	if len(msgs) != 2 {
+		t.Fatalf("messages = %v, want 2 (system + user)", msgs)
+	}
+	sysMsg, _ := msgs[0].(map[string]any)
+	assert.Equal(t, "system", sysMsg["role"])
+	assert.Equal(t, "Be terse.", sysMsg["content"])
+}
+
+// TestAnthropicResponseFromOpenAI_ToolCallsBecomeToolUseBlocks proves an
+// OpenAI tool_calls[] entry becomes an Anthropic tool_use content block
+// with its arguments STRING decoded back to a structured "input" value,
+// stop_reason maps tool_calls -> tool_use, and the caller-supplied model
+// (the client's own requested alias) is echoed into the response.
+func TestAnthropicResponseFromOpenAI_ToolCallsBecomeToolUseBlocks(t *testing.T) {
+	const body = `{"id":"chatcmpl-77","choices":[{"index":0,"message":{"content":null,"tool_calls":[{"id":"call_9","function":{"name":"get_weather","arguments":"{\"city\":\"Paris\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":3,"completion_tokens":2}}`
+
+	out, err := anthropicResponseFromOpenAI([]byte(body), "aliased/model")
+	if err != nil {
+		t.Fatalf("anthropicResponseFromOpenAI: %v", err)
+	}
+	assert.Equal(t, "aliased/model", out["model"])
+	assert.Equal(t, "tool_use", out["stop_reason"])
+
+	content, _ := out["content"].([]any)
+	if len(content) != 1 {
+		t.Fatalf("content = %v, want one tool_use block", out["content"])
+	}
+	block, _ := content[0].(map[string]any)
+	assert.Equal(t, "tool_use", block["type"])
+	assert.Equal(t, "get_weather", block["name"])
+	assert.Equal(t, "call_9", block["id"])
+	input, _ := block["input"].(map[string]any)
+	assert.Equal(t, "Paris", input["city"])
+
+	usageMap, _ := out["usage"].(map[string]any)
+	assert.Equal(t, int64(3), usageMap["input_tokens"])
+	assert.Equal(t, int64(2), usageMap["output_tokens"])
+}
+
+// TestAnthropicResponseFromOpenAI_PlainTextResponse proves the common
+// case: a plain-text OpenAI response becomes a single Anthropic text
+// content block with stop_reason "stop" -> "end_turn".
+func TestAnthropicResponseFromOpenAI_PlainTextResponse(t *testing.T) {
+	const body = `{"id":"chatcmpl-1","choices":[{"index":0,"message":{"content":"hi there"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":2}}`
+
+	out, err := anthropicResponseFromOpenAI([]byte(body), "claude-x")
+	if err != nil {
+		t.Fatalf("anthropicResponseFromOpenAI: %v", err)
+	}
+	assert.Equal(t, "message", out["type"])
+	assert.Equal(t, "assistant", out["role"])
+	assert.Equal(t, "end_turn", out["stop_reason"])
+	content, _ := out["content"].([]any)
+	if len(content) != 1 {
+		t.Fatalf("content = %v, want one text block", out["content"])
+	}
+	block, _ := content[0].(map[string]any)
+	assert.Equal(t, "text", block["type"])
+	assert.Equal(t, "hi there", block["text"])
+}
+
+// TestOpenAIContentPartFromAnthropicImage_RejectsNonBase64Source proves an
+// Anthropic image block whose source is not base64-encoded (a URL-sourced
+// image, which this translator does not support) returns a
+// *translateError rather than silently dropping or mistranslating it.
+func TestOpenAIContentPartFromAnthropicImage_RejectsNonBase64Source(t *testing.T) {
+	_, err := openAIContentPartFromAnthropicImage(map[string]any{"source": map[string]any{"type": "url", "url": "https://example.com/x.png"}})
+	if err == nil {
+		t.Fatal("want an error for a non-base64 image source, got nil")
+	}
+	if _, ok := err.(*translateError); !ok {
+		t.Errorf("err = %T, want *translateError", err)
+	}
+}
+
+// TestOpenAIMessagesFromAnthropic_PreservesToolResultThenTextOrder is the
+// regression for item 3 (IMPORTANT, 2026-08-22 review): a legal Anthropic
+// user turn shaped [tool_result, text] must translate preserving that
+// order — tool message first, then the content message — since OpenAI
+// requires a role:"tool" message to directly follow the assistant
+// message carrying the tool_calls it answers, with nothing in between.
+// The previous version of this function always emitted every tool_result
+// AFTER the combined content/tool_calls message regardless of its
+// original position, which turned this exact shape into
+// [assistant(tool_calls), user(text), tool(...)] — an OpenAI 400, since
+// user(text) sits between the tool_calls and its answer.
+func TestOpenAIMessagesFromAnthropic_PreservesToolResultThenTextOrder(t *testing.T) {
+	content := []any{
+		map[string]any{"type": "tool_result", "tool_use_id": "call_1", "content": "sunny"},
+		map[string]any{"type": "text", "text": "thanks"},
+	}
+
+	out, err := openAIMessagesFromAnthropic("user", content)
+	if err != nil {
+		t.Fatalf("openAIMessagesFromAnthropic: %v", err)
+	}
+	if len(out) != 2 {
+		t.Fatalf("messages = %v, want 2 (tool result, then text)", out)
+	}
+
+	first, _ := out[0].(map[string]any)
+	if first["role"] != "tool" || first["tool_call_id"] != "call_1" {
+		t.Errorf("messages[0] = %v, want the tool_result message FIRST, matching its original position", first)
+	}
+
+	second, _ := out[1].(map[string]any)
+	if second["role"] != "user" {
+		t.Errorf("messages[1] = %v, want the text-content message SECOND", second)
+	}
+	parts, _ := second["content"].([]any)
+	if len(parts) != 1 {
+		t.Fatalf("messages[1].content = %v, want one text part", second["content"])
+	}
+}
+
+// TestOpenAIMessagesFromAnthropic_InterspersedToolResults proves the fix
+// generalizes beyond one tool_result: [tool_result A, text, tool_result
+// B] must translate to [tool(A), user(text), tool(B)] — each tool_result
+// flushing whatever content/tool_calls had accumulated before it, not
+// just the first one.
+func TestOpenAIMessagesFromAnthropic_InterspersedToolResults(t *testing.T) {
+	content := []any{
+		map[string]any{"type": "tool_result", "tool_use_id": "call_A", "content": "a"},
+		map[string]any{"type": "text", "text": "middle"},
+		map[string]any{"type": "tool_result", "tool_use_id": "call_B", "content": "b"},
+	}
+
+	out, err := openAIMessagesFromAnthropic("user", content)
+	if err != nil {
+		t.Fatalf("openAIMessagesFromAnthropic: %v", err)
+	}
+	if len(out) != 3 {
+		t.Fatalf("messages = %v, want 3 (tool A, text, tool B)", out)
+	}
+	m0, _ := out[0].(map[string]any)
+	m1, _ := out[1].(map[string]any)
+	m2, _ := out[2].(map[string]any)
+	if m0["tool_call_id"] != "call_A" {
+		t.Errorf("messages[0].tool_call_id = %v, want call_A", m0["tool_call_id"])
+	}
+	if m1["role"] != "user" {
+		t.Errorf("messages[1].role = %v, want user (the interspersed text)", m1["role"])
+	}
+	if m2["tool_call_id"] != "call_B" {
+		t.Errorf("messages[2].tool_call_id = %v, want call_B", m2["tool_call_id"])
+	}
+}
+
+// TestOpenAIToolMessageFromAnthropic_PreservesIsError is the regression
+// for item 11a and F4 (IMPORTANT/BLOCKING-adjacent, 2026-08-22/23
+// review): Anthropic's tool_result.is_error has no native OpenAI
+// tool-message field, so a prior version of this function silently
+// dropped it — and a second prior version prefixed only a Go string,
+// silently dropping the signal again for the array-content form Claude
+// Code actually sends. All content shapes now normalize to a string
+// (openAIToolResultContentString) before the "Error: " prefix applies,
+// and an absent content becomes "" rather than the JSON null OpenAI
+// rejects for a tool message.
+func TestOpenAIToolMessageFromAnthropic_PreservesIsError(t *testing.T) {
+	cases := []struct {
+		content     any
+		wantContent any
+		name        string
+		isError     bool
+	}{
+		{name: "string content with is_error prefixes Error:", content: "boom", isError: true, wantContent: "Error: boom"},
+		{name: "string content without is_error is unchanged", content: "ok", isError: false, wantContent: "ok"},
+		{name: "array-form content with is_error is normalized to a string and prefixed (F4)", content: []any{map[string]any{"type": "text", "text": "boom"}}, isError: true, wantContent: "Error: boom"},
+		{name: "array-form content without is_error joins its text blocks (F4)", content: []any{map[string]any{"type": "text", "text": "part1"}, map[string]any{"type": "text", "text": "part2"}}, isError: false, wantContent: "part1part2"},
+		{name: "absent content with is_error still prefixes onto an empty string, never null (F4)", content: nil, isError: true, wantContent: "Error: "},
+		{name: "absent content without is_error is an empty string, never null (F4)", content: nil, isError: false, wantContent: ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			bm := map[string]any{"tool_use_id": "call_1", "is_error": tc.isError}
+			if tc.content != nil {
+				bm["content"] = tc.content
+			}
+			got := openAIToolMessageFromAnthropic(bm)
+			assert.Equal(t, tc.wantContent, got["content"])
+			if _, ok := got["content"].(string); !ok {
+				t.Errorf("content = %#v (%T), want a string (OpenAI rejects a null/non-string tool message content)", got["content"], got["content"])
+			}
+		})
+	}
+}
+
+// TestOpenAIRequestFromAnthropic_ThinkingFieldReportedAsDropped is the
+// regression for item 11b (IMPORTANT, 2026-08-22 review): Anthropic's
+// "thinking" (extended-thinking config) has no OpenAI equivalent.
+// openAIRequestFromAnthropic must report it in its dropped-fields return
+// rather than silently discarding it, so the caller (routes_messages.go's
+// callTranslatedMessages) can log a warning instead of the drop being
+// invisible.
+func TestOpenAIRequestFromAnthropic_ThinkingFieldReportedAsDropped(t *testing.T) {
+	req := map[string]any{
+		"model":    "claude-x",
+		"thinking": map[string]any{"type": "enabled", "budget_tokens": float64(1024)},
+		"messages": []any{map[string]any{"role": "user", "content": "hi"}},
+	}
+
+	_, dropped, err := openAIRequestFromAnthropic(req)
+	if err != nil {
+		t.Fatalf("openAIRequestFromAnthropic: %v", err)
+	}
+	if len(dropped) != 1 || dropped[0] != "thinking" {
+		t.Errorf("dropped = %v, want [\"thinking\"]", dropped)
+	}
+}
+
+// TestOpenAIRequestFromAnthropic_ThinkingAbsent_NothingDropped proves the
+// dropped-fields list stays empty for a request that never set
+// "thinking" in the first place — the previous test's absence is not
+// itself evidence of a bug.
+func TestOpenAIRequestFromAnthropic_ThinkingAbsent_NothingDropped(t *testing.T) {
+	req := map[string]any{
+		"model":    "claude-x",
+		"messages": []any{map[string]any{"role": "user", "content": "hi"}},
+	}
+
+	_, dropped, err := openAIRequestFromAnthropic(req)
+	if err != nil {
+		t.Fatalf("openAIRequestFromAnthropic: %v", err)
+	}
+	if len(dropped) != 0 {
+		t.Errorf("dropped = %v, want none", dropped)
+	}
+}
+
+// TestOpenAIRequestFromAnthropic_ReasoningModel_UsesMaxCompletionTokens is
+// the regression for item 10 (IMPORTANT, 2026-08-22 review): OpenAI's
+// o-series and gpt-5-family reasoning models reject the "max_tokens"
+// request field with a 400 and require "max_completion_tokens" instead.
+// Every other model keeps using "max_tokens" as before.
+func TestOpenAIRequestFromAnthropic_ReasoningModel_UsesMaxCompletionTokens(t *testing.T) {
+	cases := []struct {
+		model      string
+		wantField  string
+		wantOthers []string
+	}{
+		{"o3-mini", "max_completion_tokens", []string{"max_tokens"}},
+		{"o1", "max_completion_tokens", []string{"max_tokens"}},
+		{"o4-mini-2025-04-16", "max_completion_tokens", []string{"max_tokens"}},
+		{"gpt-5", "max_completion_tokens", []string{"max_tokens"}},
+		{"gpt-5.1-chat-latest", "max_completion_tokens", []string{"max_tokens"}},
+		{"gpt-4o", "max_tokens", []string{"max_completion_tokens"}},
+		{"gpt-4o-mini", "max_tokens", []string{"max_completion_tokens"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.model, func(t *testing.T) {
+			req := map[string]any{
+				"model":      tc.model,
+				"max_tokens": float64(256),
+				"messages":   []any{map[string]any{"role": "user", "content": "hi"}},
+			}
+			out, _, err := openAIRequestFromAnthropic(req)
+			if err != nil {
+				t.Fatalf("openAIRequestFromAnthropic: %v", err)
+			}
+			if _, ok := out[tc.wantField]; !ok {
+				t.Errorf("out[%q] missing, want it set to 256", tc.wantField)
+			}
+			for _, other := range tc.wantOthers {
+				if _, ok := out[other]; ok {
+					t.Errorf("out[%q] present, want only %q set", other, tc.wantField)
+				}
+			}
+		})
+	}
+}
+
+// TestAnthropicUsagePayload_TotalInputTokens_FoldsCacheCounters is the
+// unit-level regression for item 6 (IMPORTANT, 2026-08-22 review):
+// cache_creation_input_tokens and cache_read_input_tokens must fold into
+// the billed prompt count alongside fresh input_tokens, not be dropped.
+func TestAnthropicUsagePayload_TotalInputTokens_FoldsCacheCounters(t *testing.T) {
+	p := anthropicUsagePayload{InputTokens: 4, CacheCreationInputTokens: 180000, CacheReadInputTokens: 20000}
+	if got, want := p.totalInputTokens(), int64(200004); got != want {
+		t.Errorf("totalInputTokens() = %d, want %d", got, want)
+	}
+}

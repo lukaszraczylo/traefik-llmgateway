@@ -831,6 +831,25 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if r.Method == http.MethodPost && r.URL.Path == messagesPath {
+		// Anthropic SDKs authenticate with x-api-key, not Authorization:
+		// Bearer — g.auth.identify (auth.go) already reads both headers,
+		// Bearer taking priority when a caller somehow sends both, so no
+		// route-specific auth handling is needed here beyond using the
+		// same identify/logAuthEvent call every other route already
+		// makes. A failed auth gets the Anthropic error shape
+		// (writeAnthropicError, routes_messages.go), not writeOAIError's
+		// — the one thing that differs from every route above.
+		u, grp, ok := g.auth.identify(r)
+		g.logAuthEvent(ok, authEventUserName(u), r)
+		if !ok {
+			writeAnthropicError(sw, http.StatusUnauthorized, "authentication_error", "invalid or missing API key")
+			return
+		}
+		g.handleMessages(sw, r, u, grp)
+		return
+	}
+
 	if r.Method == http.MethodPost && (r.URL.Path == imagesGenerationsPath || r.URL.Path == audioSpeechPath || r.URL.Path == audioTranscriptionsPath) {
 		u, grp, ok := g.auth.identify(r)
 		g.logAuthEvent(ok, authEventUserName(u), r)
