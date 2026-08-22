@@ -5,7 +5,7 @@ import { Bar } from 'vue-chartjs'
 
 import '@/lib/chart-setup'
 import { useThemeColors } from '@/composables/useThemeColors'
-import { formatBucketLabel } from '@/lib/format'
+import { formatBucketLabel, formatCompactCount, formatExactInt } from '@/lib/format'
 import type { ChartTab } from '@/stores/history'
 import type { HistoryMetric, HistoryWindow, UsageHistoryPoint } from '@/types/api'
 
@@ -107,7 +107,11 @@ const chartOptions = computed<ChartOptions<'bar'>>(() => ({
       grid: { color: border.value },
       ticks: {
         color: mutedForeground.value,
-        callback: (value) => (props.tab === 'cost' ? `$${value}` : String(value)),
+        // Axis ticks stay compact (feature v0.23 addendum) — no room for
+        // the exact figure on an axis label; the tooltip below carries
+        // it. Cost keeps its existing money format, unaffected: a
+        // dollar figure is not a "count" this formatter is meant for.
+        callback: (value) => (props.tab === 'cost' ? `$${value}` : formatCompactCount(Number(value))),
       },
     },
   },
@@ -118,9 +122,15 @@ const chartOptions = computed<ChartOptions<'bar'>>(() => ({
     },
     tooltip: {
       callbacks: {
+        // Tooltip shows the compact form WITH the precise raw value
+        // alongside (feature v0.23 addendum) — e.g. "Tokens in: 1.23M
+        // (1,234,567)" — since a tooltip, unlike an axis tick, has room
+        // for both and precision must never be lost. Cost stays its
+        // existing $-with-4-decimals format, unchanged.
         label: (ctx) => {
           const value = ctx.parsed.y ?? 0
-          return `${ctx.dataset.label}: ${props.tab === 'cost' ? `$${value.toFixed(4)}` : value}`
+          if (props.tab === 'cost') return `${ctx.dataset.label}: $${value.toFixed(4)}`
+          return `${ctx.dataset.label}: ${formatCompactCount(value)} (${formatExactInt(value)})`
         },
       },
     },

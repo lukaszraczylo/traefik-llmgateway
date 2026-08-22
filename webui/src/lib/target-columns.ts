@@ -1,16 +1,21 @@
 import type { ColumnDef } from '@tanstack/vue-table'
 import { h } from 'vue'
 
+import CompactNumber from '@/components/CompactNumber.vue'
 import { Badge } from '@/components/ui/badge'
 import type { AdminTargetView } from '@/types/api'
 
 /**
- * numericColumn builds one right-aligned, sortable request-counter column.
- * Mirrors usage-columns.ts's own helper of the same name and purpose, but
- * without that one's storeDown '?' masking: a target's counters carry no
- * storeDown flag (limiter.targetUsage, limits.go — a target scope has no
- * limit to protect from a misleadingly-confident zero, unlike a limited
- * user/group scope), so there is nothing to mask here.
+ * numericColumn builds one right-aligned, sortable request-counter
+ * column, rendered via CompactNumber (SI-style, exact value on title/
+ * aria-label — usage-columns.ts's own numericColumn applies the
+ * identical treatment). Mirrors usage-columns.ts's own helper of the
+ * same name and purpose, but without that one's storeDown '?' masking: a
+ * target's counters carry no storeDown flag (limiter.targetUsage,
+ * limits.go — a target scope has no limit to protect from a
+ * misleadingly-confident zero, unlike a limited user/group scope), so
+ * there is nothing to mask here. accessorFn (and therefore sorting)
+ * always reads the true raw number.
  */
 function numericColumn(id: string, header: string, read: (t: AdminTargetView) => number): ColumnDef<AdminTargetView, unknown> {
   return {
@@ -18,7 +23,7 @@ function numericColumn(id: string, header: string, read: (t: AdminTargetView) =>
     header,
     accessorFn: read,
     meta: { align: 'right' },
-    cell: ({ row }) => String(read(row.original)),
+    cell: ({ row }) => h(CompactNumber, { value: read(row.original) }),
   }
 }
 

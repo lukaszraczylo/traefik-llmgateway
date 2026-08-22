@@ -3,6 +3,7 @@ import type { SortingState } from '@tanstack/vue-table'
 import { getCoreRowModel, getSortedRowModel, useVueTable } from '@tanstack/vue-table'
 import { computed, reactive, ref, watch } from 'vue'
 
+import CompactNumber from '@/components/CompactNumber.vue'
 import ModelChip from '@/components/ModelChip.vue'
 import SearchInput from '@/components/SearchInput.vue'
 import SortHeaderButton from '@/components/SortHeaderButton.vue'
@@ -267,15 +268,15 @@ function isGlobPattern(entry: string): boolean {
       <CardContent class="grid grid-cols-2 gap-4 text-sm sm:grid-cols-4">
         <div>
           <p class="text-muted-foreground">Requests/day</p>
-          <p class="text-lg font-semibold tabular-nums">{{ usage.total.requestsPerDay }}</p>
+          <p class="text-lg font-semibold tabular-nums"><CompactNumber :value="usage.total.requestsPerDay" /></p>
         </div>
         <div>
           <p class="text-muted-foreground">Tokens in/day</p>
-          <p class="text-lg font-semibold tabular-nums">{{ usage.total.tokensInPerDay }}</p>
+          <p class="text-lg font-semibold tabular-nums"><CompactNumber :value="usage.total.tokensInPerDay" /></p>
         </div>
         <div>
           <p class="text-muted-foreground">Tokens out/day</p>
-          <p class="text-lg font-semibold tabular-nums">{{ usage.total.tokensOutPerDay }}</p>
+          <p class="text-lg font-semibold tabular-nums"><CompactNumber :value="usage.total.tokensOutPerDay" /></p>
         </div>
         <div>
           <p class="text-muted-foreground">Cost/day</p>
@@ -304,7 +305,8 @@ function isGlobPattern(entry: string): boolean {
                 <span class="font-medium">{{ row.original.id }}</span>
                 <span class="text-xs text-muted-foreground tabular-nums">{{ memberCountOf(row.original) || '0' }} members</span>
                 <span class="text-xs text-muted-foreground tabular-nums">
-                  {{ row.original.storeDown ? '?' : row.original.requestsPerDay }} req/day
+                  <template v-if="row.original.storeDown">?</template>
+                  <CompactNumber v-else :value="row.original.requestsPerDay" /> req/day
                 </span>
                 <span class="text-xs text-muted-foreground tabular-nums">
                   {{ row.original.storeDown ? '?' : formatCost(row.original.costPerDayMicroUsd) }}/day
@@ -394,23 +396,38 @@ function isGlobPattern(entry: string): boolean {
                 </div>
                 <div>
                   <dt class="text-xs text-muted-foreground">req/min</dt>
-                  <dd class="tabular-nums">{{ row.original.storeDown ? '?' : row.original.requestsPerMinute }}</dd>
+                  <dd class="tabular-nums">
+                    <template v-if="row.original.storeDown">?</template>
+                    <CompactNumber v-else :value="row.original.requestsPerMinute" />
+                  </dd>
                 </div>
                 <div>
                   <dt class="text-xs text-muted-foreground">tokIn/day</dt>
-                  <dd class="tabular-nums">{{ row.original.storeDown ? '?' : row.original.tokensInPerDay }}</dd>
+                  <dd class="tabular-nums">
+                    <template v-if="row.original.storeDown">?</template>
+                    <CompactNumber v-else :value="row.original.tokensInPerDay" />
+                  </dd>
                 </div>
                 <div>
                   <dt class="text-xs text-muted-foreground">tokOut/day</dt>
-                  <dd class="tabular-nums">{{ row.original.storeDown ? '?' : row.original.tokensOutPerDay }}</dd>
+                  <dd class="tabular-nums">
+                    <template v-if="row.original.storeDown">?</template>
+                    <CompactNumber v-else :value="row.original.tokensOutPerDay" />
+                  </dd>
                 </div>
                 <div>
                   <dt class="text-xs text-muted-foreground">tokIn/month</dt>
-                  <dd class="tabular-nums">{{ row.original.storeDown ? '?' : row.original.tokensInPerMonth }}</dd>
+                  <dd class="tabular-nums">
+                    <template v-if="row.original.storeDown">?</template>
+                    <CompactNumber v-else :value="row.original.tokensInPerMonth" />
+                  </dd>
                 </div>
                 <div>
                   <dt class="text-xs text-muted-foreground">tokOut/month</dt>
-                  <dd class="tabular-nums">{{ row.original.storeDown ? '?' : row.original.tokensOutPerMonth }}</dd>
+                  <dd class="tabular-nums">
+                    <template v-if="row.original.storeDown">?</template>
+                    <CompactNumber v-else :value="row.original.tokensOutPerMonth" />
+                  </dd>
                 </div>
                 <div>
                   <dt class="text-xs text-muted-foreground">cost/month</dt>

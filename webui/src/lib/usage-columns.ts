@@ -1,6 +1,7 @@
 import type { ColumnDef } from '@tanstack/vue-table'
 import { h } from 'vue'
 
+import CompactNumber from '@/components/CompactNumber.vue'
 import { formatCost, formatLimits } from '@/lib/format'
 import type { AdminUsageEntryView } from '@/types/api'
 
@@ -12,19 +13,33 @@ import type { AdminUsageEntryView } from '@/types/api'
  * (a storeDown row sorts by its last-known number, same as the rest of
  * the table; only the DISPLAYED text is masked). Mirrors the pre-DataTable
  * UsageTable.vue template's own `entry.storeDown ? '?' : ...` convention.
+ *
+ * compact (default true) renders the value through CompactNumber (SI-
+ * style, with the exact figure on title/aria-label) instead of the plain
+ * `format`/String path — used for every raw token/request COUNT column
+ * below; the two cost columns pass compact:false, since formatCost
+ * already shows full precision and compacting a dollar figure is not
+ * this feature's concern. The accessorFn (and therefore sorting) always
+ * reads the true raw number either way — only the cell's rendered text
+ * changes.
  */
 function numericColumn(
   id: string,
   header: string,
   read: (entry: AdminUsageEntryView) => number,
   format: (n: number) => string = String,
+  compact = true,
 ): ColumnDef<AdminUsageEntryView, unknown> {
   return {
     id,
     header,
     accessorFn: read,
     meta: { align: 'right' },
-    cell: ({ row }) => (row.original.storeDown ? '?' : format(read(row.original))),
+    cell: ({ row }) => {
+      if (row.original.storeDown) return '?'
+      const value = read(row.original)
+      return compact ? h(CompactNumber, { value }) : format(value)
+    },
   }
 }
 
@@ -69,7 +84,7 @@ export function usageColumns(
     numericColumn('tokOutDay', 'tokOut/day', (e) => e.tokensOutPerDay),
     numericColumn('tokInMonth', 'tokIn/month', (e) => e.tokensInPerMonth),
     numericColumn('tokOutMonth', 'tokOut/month', (e) => e.tokensOutPerMonth),
-    numericColumn('costDay', 'cost/day', (e) => e.costPerDayMicroUsd, formatCost),
-    numericColumn('costMonth', 'cost/month', (e) => e.costPerMonthMicroUsd, formatCost),
+    numericColumn('costDay', 'cost/day', (e) => e.costPerDayMicroUsd, formatCost, false),
+    numericColumn('costMonth', 'cost/month', (e) => e.costPerMonthMicroUsd, formatCost, false),
   ]
 }
