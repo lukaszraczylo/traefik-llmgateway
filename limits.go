@@ -583,8 +583,99 @@ type limiter struct {
 	// not "is the store currently failing" (storeLatched already answers
 	// that question for the enforcement path).
 	lastErrMsg string
+	// rejections tracks rate/budget-limit-violation counts per scope
+	// (metrics.go's llmgateway_rate_limit_rejections_total). It is a
+	// plain in-process, per-process-lifetime counter guarded by its own
+	// mutex, deliberately NOT a counterStore key: checkAndCount already
+	// pays a Redis round trip on every admission decision, and every
+	// number metrics.go otherwise exposes is read back OUT of that
+	// existing accounting rather than written fresh — but "how many
+	// requests were rejected" has no existing counter to read at all
+	// (req:min/req:day count every admission attempt, accepted or not,
+	// by design — see checkAndCount's own doc comment). Adding it here
+	// as a bare map increment costs one uncontended lock per rejection
+	// (already the rare, not-hot-path outcome of checkAndCount), never a
+	// second network round trip, and never re-derives a number the
+	// store already tracks.
+	rejections rejectionCounter
 	logMu      sync.Mutex
 	failOpen   bool // store-error policy: true falls back to fallback, false refuses the request
+}
+
+// rejectionScope is the (kind, id) key rejectionCounter accumulates
+// under — a scope's own kind/id pair, exactly as limitScope carries them,
+// but held separately so rejectionCounter's map key never aliases a
+// limitScope's own `limits` pointer (which plays no part in identity
+// here: two limitScope values for the same user with different `limits`
+// pointers must still land in the identical bucket).
+type rejectionScope struct {
+	kind string
+	id   string
+}
+
+// rejectionCounter accumulates rate/budget-limit-violation counts per
+// scope for the lifetime of the process — limiter.rejections' own
+// backing store; see its doc comment for why this exists as a bare
+// in-process map rather than a counterStore key. Unlike authFailureTracker
+// (auth.go), there is no TTL or generation rotation here: a Prometheus
+// counter must only ever grow for as long as the process runs, so there
+// is nothing to roll over, and cardinality is bounded by the configured
+// user/group count (checkAndCount only ever sees scopes for an already-
+// authenticated caller's own user/group, never attacker-controlled
+// strings), the same bound scopeUsage's own per-scope metrics already
+// carry.
+type rejectionCounter struct {
+	counts map[rejectionScope]int64
+	mu     sync.Mutex
+}
+
+// increment records one rejection for (kind, id), initializing the
+// backing map on first use — rejectionCounter's zero value (as embedded,
+// unexported, in limiter) is ready to use without a constructor.
+func (c *rejectionCounter) increment(kind, id string) {
+	c.mu.Lock()
+	if c.counts == nil {
+		c.counts = make(map[rejectionScope]int64)
+	}
+	c.counts[rejectionScope{kind: kind, id: id}]++
+	c.mu.Unlock()
+}
+
+// rejectionSnapshot is one (kind, id) scope's rate-limit-rejection count
+// — rejectionCounter.snapshot's own output, metrics.go's read of it.
+type rejectionSnapshot struct {
+	kind  string
+	id    string
+	count int64
+}
+
+// snapshot returns every scope with at least one recorded rejection, in
+// no particular order (metrics.go sorts its own copy before rendering).
+func (c *rejectionCounter) snapshot() []rejectionSnapshot {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([]rejectionSnapshot, 0, len(c.counts))
+	for scope, n := range c.counts {
+		out = append(out, rejectionSnapshot{kind: scope.kind, id: scope.id, count: n})
+	}
+	return out
+}
+
+// rejectionScopeStoreDown is the synthetic scope id checkAndCount
+// records a rejection under when it refuses a request because the
+// configured store is unreachable and failOpen is false
+// (storeDownViolation) — there is no real limitScope in play at that
+// point (the failure happens before any scope is evaluated), so this
+// names the event on its own rather than attributing it to whichever
+// scope happened to be first in the slice.
+const rejectionScopeStoreDown = "store_down"
+
+// rejectionSnapshot (method) reads l.rejections — metrics.go's own entry
+// point, named to match l's other read accessors (redisStatus,
+// currentUsage, providerUsage) rather than exposing the rejections field
+// itself.
+func (l *limiter) rejectionSnapshot() []rejectionSnapshot {
+	return l.rejections.snapshot()
 }
 
 // providerAttemptSpawnCap bounds how many concurrent recordProviderAttempt
@@ -1095,6 +1186,7 @@ func (l *limiter) checkAndCount(scopes []limitScope) *limitViolation {
 
 	incrVals, readVals, ok := l.storeIncrAndGetMulti(entries, reads)
 	if !ok || len(incrVals) != len(entries) || len(readVals) != len(reads) {
+		l.rejections.increment(rejectionScopeStoreDown, rejectionScopeStoreDown)
 		return storeDownViolation()
 	}
 
@@ -1107,9 +1199,11 @@ func (l *limiter) checkAndCount(scopes []limitScope) *limitViolation {
 		// incrVals[i*checkAndCountKeysPerScope+2] is the req:hour count —
 		// stats-only, deliberately never read here.
 		if v := requestLimitViolation(sc, "requests-per-minute", sc.limits.RequestsPerMinute, minCount, windowMin, now); v != nil {
+			l.rejections.increment(sc.kind, sc.id)
 			return v
 		}
 		if v := requestLimitViolation(sc, "requests-per-day", sc.limits.RequestsPerDay, dayCount, windowDay, now); v != nil {
+			l.rejections.increment(sc.kind, sc.id)
 			return v
 		}
 		for _, p := range probes {
@@ -1123,6 +1217,7 @@ func (l *limiter) checkAndCount(scopes []limitScope) *limitViolation {
 			if used < p.limit {
 				continue
 			}
+			l.rejections.increment(sc.kind, sc.id)
 			return &limitViolation{
 				message:    fmt.Sprintf("%s %q exceeded %s budget", sc.kind, sc.id, p.name),
 				retryAfter: retryAfterSeconds(now, p.window),
