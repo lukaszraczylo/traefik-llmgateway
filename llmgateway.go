@@ -367,9 +367,40 @@ func CreateConfig() *Config {
 // worst-case LIVE-heap arithmetic above still needs to stay defensible
 // on a modest node.
 const (
-	minBodyAdmissionCap = 32
-	maxBodyAdmissionCap = 256
+	minBodyAdmissionCap = 8
+	maxBodyAdmissionCap = 64
 )
+
+// NOTE on these bounds (round-4 correction, measured): review round 3
+// shipped [32, 256], reasoning from the isolated json.Unmarshal peak
+// (~51.5MB for an adversarial 4MiB body). The verifier then measured the
+// END-TO-END per-slot cost through the real handler — ~80-108MB, since
+// the raw body []byte stays live alongside the decoded map and GC lags —
+// and swept the cap against peak HeapInuse under 400 concurrent
+// adversarial requests:
+//
+//	cap  16 ->  1.5GB    cap  64 ->  6.1GB
+//	cap  32 ->  3.4GB    cap 256 -> 21.1GB
+//
+// A 256 ceiling therefore does not prevent the OOM this semaphore exists
+// to prevent: it is above any realistic pod budget. It is still strictly
+// better than the unbounded base (25GB on the same burst), but "better
+// than unbounded" was never the goal. The reference deployment runs
+// Traefik with resources.limits.memory: 512Mi, where even the 8-slot
+// floor is the binding constraint, not the ceiling.
+//
+// So the bounds are cut to [8, 64]: 64 keeps a large-memory host from
+// being throttled below what it can actually serve, 8 keeps a small pod
+// from admitting more concurrent decodes than its heap can hold. This
+// costs legitimate throughput almost nothing because the slot is now
+// held ONLY across read+decode (round-3 fix) — microseconds to low
+// milliseconds — not across the upstream call; an operator whose host
+// genuinely wants more sets Config.MaxInFlightBodyRequests explicitly,
+// which always wins. Deriving the ceiling from the process's real memory
+// budget (runtime/debug.SetMemoryLimit(-1), which the chart already sets
+// via goMemLimitPercentage) is the better long-term shape and is left as
+// a follow-up: it needs its own Yaegi-interpreted verification, since
+// runtime/debug's availability under the interpreter is unproven here.
 
 // bodyAdmissionCapPerCPU is defaultBodyAdmissionCap's GOMAXPROCS
 // multiplier (revised round 3 — see minBodyAdmissionCap's own doc
