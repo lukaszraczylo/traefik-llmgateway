@@ -111,16 +111,36 @@ function goStringLiteral(s) {
 
 /**
  * goBase64Expr renders base64Body (a base64 string) as a Go expression
- * calling decodeAdminAsset, split into LINE_WIDTH-character chunks joined
- * with `+` — a single 400KB-wide line is valid Go but painful for humans
- * and diff tools alike; chunking keeps every line reviewable.
+ * calling decodeAdminAsset, split into at most CHUNK_CHARS-character
+ * literals joined with `+`.
+ *
+ * This used to split at a human-readable LINE_WIDTH of 120 chars —
+ * ~7,550 literals / ~7,538 `+` operations for this panel's ~680KB of
+ * base64. That's fine for a compiled Go binary (constant string
+ * concatenation folds at compile time), but this plugin is loaded by
+ * Yaegi (github.com/traefik/yaegi — Traefik's plugin interpreter), which
+ * folds a chain of N literal `+` operations at *import* time, by
+ * repeatedly reallocating and copying the whole already-folded prefix:
+ * O(N^2). Measured: that alone cost ~186ms of a ~223-240ms package
+ * import — the dominant share of Traefik's plugin-boot latency for this
+ * repo, versus ~3-4ms for decoding the asset bytes themselves.
+ *
+ * CHUNK_CHARS is set well above this panel's current largest asset
+ * (~516,000 base64 chars for the main JS bundle), so every asset today
+ * emits exactly one literal — zero `+` folds, zero O(N^2) cost. It still
+ * caps chunk size (rather than emitting one unbounded literal) so a
+ * future, much larger bundle degrades to a handful of large chunks
+ * instead of one arbitrarily long source line; gofmt/go vet/go build
+ * were verified against single-line string literals in this size class
+ * (see the perf-fix commit that introduced this constant), so this cap
+ * sits well inside that verified range.
  */
-const LINE_WIDTH = 120
+const CHUNK_CHARS = 1_000_000
 function goBase64Expr(base64Body) {
   if (base64Body.length === 0) return 'decodeAdminAsset("")'
   const chunks = []
-  for (let i = 0; i < base64Body.length; i += LINE_WIDTH) {
-    chunks.push(goStringLiteral(base64Body.slice(i, i + LINE_WIDTH)))
+  for (let i = 0; i < base64Body.length; i += CHUNK_CHARS) {
+    chunks.push(goStringLiteral(base64Body.slice(i, i + CHUNK_CHARS)))
   }
   return `decodeAdminAsset(\n\t\t${chunks.join(' +\n\t\t')},\n\t)`
 }
