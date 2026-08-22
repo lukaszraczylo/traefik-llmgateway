@@ -47,15 +47,30 @@ export function formatCompactCount(n: number): string {
 
   const sign = n < 0 ? '-' : ''
   const [divisor, suffix] = abs < 1_000_000 ? [1_000, 'k'] : abs < 1_000_000_000 ? [1_000_000, 'M'] : [1_000_000_000, 'B']
-  const scaled = abs / divisor
 
   // Three significant figures total: the floored integer part's own
   // digit count (1, 2, or 3) decides how many decimal places are left.
-  const intDigits = Math.floor(scaled) >= 100 ? 3 : Math.floor(scaled) >= 10 ? 2 : 1
+  // Uses `abs / divisor` ONLY to pick the digit-count tier, never as the
+  // value that gets floored — see the review fix below for why.
+  const roughScaled = abs / divisor
+  const intDigits = Math.floor(roughScaled) >= 100 ? 3 : Math.floor(roughScaled) >= 10 ? 2 : 1
   const decimals = 3 - intDigits
-
   const factor = 10 ** decimals
-  const floored = Math.floor(scaled * factor) / factor
+
+  // Review fix (IEEE-754 precision bug): computing `scaled = abs /
+  // divisor` first, THEN `Math.floor(scaled * factor)`, under-reports by
+  // one unit whenever the intermediate `scaled` is not exactly
+  // representable in binary floating point — 8_700_000 / 1_000_000
+  // rounds to a double a hair BELOW 8.7 (≈8.699999999999999), so
+  // flooring `that * 100` lands on 869, not 870, and displays "8.69M"
+  // instead of "8.7M". Multiplying the ORIGINAL INTEGER abs by factor
+  // FIRST keeps every intermediate value exact for any realistic count
+  // (abs*factor stays within Number.MAX_SAFE_INTEGER, 2^53, for abs up
+  // to roughly 9×10^13 — far beyond any token/request count this
+  // function will ever see) — only the final division by divisor can
+  // still land a hair off after toFixed's own rounding, which
+  // toFixed(decimals) then resolves correctly.
+  const floored = Math.floor((abs * factor) / divisor) / factor
 
   let text = floored.toFixed(decimals)
   if (decimals > 0) {
@@ -65,17 +80,53 @@ export function formatCompactCount(n: number): string {
 }
 
 /**
- * formatContextWindow renders a token count as a compact "256k"-style
- * label (feature v0.23's context_window/AdminModelMetaView.contextTokens
- * unit — plain token count, not bytes) — binary-K (÷1024), matching the
- * task brief's own worked example (262144 tokens -> "256k"). Plain
- * digits, no suffix, for anything under 1024: a context window that
- * small is rare (LM Studio's smallest observed embedding models run
- * 512-8192) but must still render as a real number, not "0k".
+ * isPowerOfTwo reports whether n is an exact power of two (1, 2, 4, 8,
+ * ..., 262144, ...) — the classic bit trick: a power of two has exactly
+ * one set bit, so `n & (n - 1)` clears it and leaves zero. Requires n >
+ * 0 (0 and negative inputs are not powers of two here, by definition of
+ * a token count).
+ */
+function isPowerOfTwo(n: number): boolean {
+  return n > 0 && (n & (n - 1)) === 0
+}
+
+/**
+ * formatContextWindow renders a token count as a compact "128k"/"256k"-
+ * style label (feature v0.23's context_window/AdminModelMetaView.
+ * contextTokens unit — plain token count, not bytes).
+ *
+ * Review fix: the original version always divided by 1024 (binary-K),
+ * which is right for LM Studio's own genuinely binary context sizes
+ * (262144 -> "256k") but WRONG for a decimal, marketing-style count a
+ * model card advertises in round thousands (128000 -> "125k" under
+ * binary division, which reads as an odd, unexplained number — the
+ * model is advertised as "128K", not "125K"). A plain "tokens % 1024 ==
+ * 0" check cannot tell these apart either: 128000 is ALSO an exact
+ * multiple of 1024 (128000 = 125 × 1024), yet the two cases must render
+ * differently. The correct discriminator is POWER OF TWO, not "multiple
+ * of 1024": 262144 = 2^18 (a genuine binary size), 128000 factors as
+ * 2^10 × 5^3 (not a power of two, despite dividing evenly by 1024). So:
+ * binary-K/M (÷1024, ÷1024²) only when tokens is an exact power of two;
+ * decimal-K/M (÷1000, ÷1,000,000) otherwise. Verified against every
+ * worked example: 128000 -> "128k" (decimal), 1_000_000 -> "1M"
+ * (decimal), 2_000_000 -> "2M" (decimal), 262144 -> "256k" (binary,
+ * unchanged), 32768 -> "32k" (binary, unchanged).
+ *
+ * Plain digits, no suffix, for anything under 1024 either way: a
+ * context window that small is rare (LM Studio's smallest observed
+ * embedding models run 512-8192) but must still render as a real
+ * number, not "0k".
  */
 export function formatContextWindow(tokens: number): string {
   if (tokens < 1024) return `${tokens}`
-  return `${Math.round(tokens / 1024)}k`
+
+  if (isPowerOfTwo(tokens)) {
+    if (tokens < 1024 * 1024) return `${Math.round(tokens / 1024)}k`
+    return `${Math.round(tokens / (1024 * 1024))}M`
+  }
+
+  if (tokens < 1_000_000) return `${Math.round(tokens / 1_000)}k`
+  return `${Math.round(tokens / 1_000_000)}M`
 }
 
 /** formatUsdPerMTok renders a USD-per-million-tokens float as "$0.19" (2 decimals) — the shared building block for both the visible cost chip and ModelChip's hover detail. */

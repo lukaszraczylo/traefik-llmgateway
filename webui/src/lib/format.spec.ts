@@ -54,15 +54,31 @@ describe('refreshDetailLabel', () => {
 // cost). formatContextWindow is table-driven over good/edge cases;
 // formatModelCostHover covers the free/priced split ModelChip's
 // hover-detail relies on.
+//
+// Review fix: binary-K/M (÷1024) applies ONLY when tokens is an exact
+// power of two; a decimal, round-thousands count uses decimal-K/M
+// (÷1000) instead — see formatContextWindow's own doc comment for why a
+// plain "tokens % 1024 == 0" check cannot tell these two cases apart
+// (128000 divides evenly by 1024 too, yet must render as decimal "128k",
+// not binary "125k").
 describe('formatContextWindow', () => {
   it.each([
-    { tokens: 262144, want: '256k' },
-    { tokens: 32768, want: '32k' },
-    { tokens: 1_000_000, want: '977k' },
-    { tokens: 8192, want: '8k' },
-    { tokens: 512, want: '512' }, // under 1024: plain digits, no "k"
+    // Genuine binary sizes (exact powers of two) — binary-K/M.
+    { tokens: 262144, want: '256k' }, // 2^18 — LM Studio's own worked example
+    { tokens: 131072, want: '128k' }, // 2^17
+    { tokens: 32768, want: '32k' }, // 2^15
+    { tokens: 8192, want: '8k' }, // 2^13
+    { tokens: 1024, want: '1k' }, // 2^10 — boundary
+    { tokens: 1_048_576, want: '1M' }, // 2^20 — binary M-tier boundary
+    // Decimal, marketing-style round counts — NOT powers of two, even
+    // when they happen to be exact multiples of 1024 (128000 = 125 ×
+    // 1024) — decimal-K/M.
+    { tokens: 128_000, want: '128k' }, // review regression: was "125k"
+    { tokens: 1_000_000, want: '1M' }, // review regression: was "977k"
+    { tokens: 2_000_000, want: '2M' }, // review regression: was "1953k"
+    // Plain digits under 1024, either path.
+    { tokens: 512, want: '512' },
     { tokens: 0, want: '0' },
-    { tokens: 1024, want: '1k' }, // boundary
   ])('formatContextWindow($tokens) = $want', ({ tokens, want }) => {
     expect(formatContextWindow(tokens)).toBe(want)
   })
@@ -105,6 +121,13 @@ describe('formatCompactCount', () => {
     { n: 1_234_567, want: '1.23M' },
     { n: 45_600_000, want: '45.6M' },
     { n: 999_999_999, want: '999M' }, // just under the 1e9 boundary
+    // Review fix: IEEE-754 precision regressions. 8_700_000 / 1_000_000
+    // is not exactly representable in binary floating point (the double
+    // closest to 8.7 sits a hair BELOW it); the old
+    // `Math.floor(scaled*factor)/factor` implementation floored that
+    // slightly-under value to 869 instead of 870, rendering "8.69M".
+    { n: 8_700_000, want: '8.7M' },
+    { n: 1_130_000, want: '1.13M' },
     // B tier.
     { n: 1_000_000_000, want: '1B' }, // the 1e9 boundary itself
     { n: 1_230_000_000, want: '1.23B' },
