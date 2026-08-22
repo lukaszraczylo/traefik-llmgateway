@@ -708,6 +708,24 @@ func TestBuildAdapters(t *testing.T) {
 		}
 	})
 
+	t.Run("bad: metadataPath without a leading slash is a constructor error (review fix)", func(t *testing.T) {
+		cfg := &Config{Providers: map[string]*ProviderConfig{
+			"lmstudio": {Type: "openai", MetadataPath: "api/v0/models"},
+		}}
+		if _, err := buildAdapters(cfg); err == nil {
+			t.Error("want an error for a metadataPath missing its leading slash")
+		}
+	})
+
+	t.Run("good: empty metadataPath is valid (feature disabled)", func(t *testing.T) {
+		cfg := &Config{Providers: map[string]*ProviderConfig{
+			"p1": {Type: "openai", APIKey: "sk-test"},
+		}}
+		if _, err := buildAdapters(cfg); err != nil {
+			t.Errorf("buildAdapters: %v, want no error for an empty metadataPath", err)
+		}
+	})
+
 	t.Run("good: explicit base URL trailing slash trimmed", func(t *testing.T) {
 		cfg := &Config{Providers: map[string]*ProviderConfig{
 			"p1": {Type: "openai", BaseURL: "https://custom.example.com/", APIKey: "sk-test"},

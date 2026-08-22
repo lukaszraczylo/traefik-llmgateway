@@ -367,6 +367,25 @@ func validateConfigName(kind, name string) error {
 	return nil
 }
 
+// validateMetadataPath rejects a non-empty ProviderConfig.MetadataPath
+// (feature v0.23) that does not start with "/" (review fix, folded
+// minor) — fetchModelMetadata (provider_openai.go) builds its request
+// URL by plain string concatenation, a.baseURL+a.metadataPath; a value
+// missing the leading slash would silently glue onto baseURL's own path
+// with no separator (e.g. "http://host:1234api/v0/models"), a malformed
+// URL that only surfaces as a confusing runtime fetch failure instead of
+// a clear, named construction error. Empty (the default, metadata
+// capture disabled) is always valid.
+func validateMetadataPath(providerName, metadataPath string) error {
+	if metadataPath == "" {
+		return nil
+	}
+	if !strings.HasPrefix(metadataPath, "/") {
+		return fmt.Errorf("llmgateway: provider %q: metadataPath %q must start with \"/\"", providerName, metadataPath)
+	}
+	return nil
+}
+
 // buildAdapters resolves cfg.Providers into a map of providerAdapter keyed
 // by provider name. Every provider name is validated (validateConfigName)
 // and every ProviderConfig value must be non-nil before anything else runs,
@@ -411,6 +430,10 @@ func buildAdapters(cfg *Config) (map[string]providerAdapter, error) {
 		base := strings.TrimSuffix(pc.BaseURL, "/")
 		if base == "" {
 			base = defaultBaseURLByType[pc.Type]
+		}
+
+		if err := validateMetadataPath(name, pc.MetadataPath); err != nil {
+			return nil, err
 		}
 
 		switch pc.Type {
