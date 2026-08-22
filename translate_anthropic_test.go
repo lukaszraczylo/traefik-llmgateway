@@ -856,3 +856,175 @@ func TestAnthropicUsagePayload_TotalInputTokens_FoldsCacheCounters(t *testing.T)
 		t.Errorf("totalInputTokens() = %d, want %d", got, want)
 	}
 }
+
+// --- openAIToolsFromAnthropic / openAIToolChoiceFromAnthropic: the
+// Anthropic tools[]/tool_choice request translators, on the newest,
+// heaviest-traffic path (/v1/messages -> a non-anthropic provider). Claude
+// Code sends a tools[] array on nearly every call. Both functions were
+// previously ZERO-COVERED: every existing openAIRequestFromAnthropic test
+// above never set "tools" or "tool_choice" on its request map. ---
+
+// TestOpenAIToolsFromAnthropic_MapsFieldsAndSkipsMalformedEntries proves
+// each Anthropic tool{name, description, input_schema} maps IN ORDER to
+// an OpenAI {"type":"function","function":{"name","description",
+// "parameters"}} entry, that "description" is OMITTED (not set to a zero
+// value) when the source tool carries none, and that a non-map entry in
+// toolsRaw is skipped rather than panicking or producing a garbage entry.
+//
+// MUTATION PROVEN: changing `"parameters": tm["input_schema"]` to
+// `"parameters": tm["name"]` made this test fail (parameters carried the
+// tool's name string instead of its JSON schema) — confirmed via `go test
+// -run TestOpenAIToolsFromAnthropic`, then reverted with `git checkout --
+// translate_anthropic.go`.
+func TestOpenAIToolsFromAnthropic_MapsFieldsAndSkipsMalformedEntries(t *testing.T) {
+	schema := map[string]any{"type": "object", "properties": map[string]any{"city": map[string]any{"type": "string"}}}
+	toolsRaw := []any{
+		map[string]any{"name": "get_weather", "description": "Get the weather", "input_schema": schema},
+		map[string]any{"name": "no_desc_tool", "input_schema": map[string]any{"type": "object"}},
+		"not a map", // malformed entry: must be skipped, not panic
+		map[string]any{"name": "empty_schema_tool", "input_schema": map[string]any{}},
+	}
+
+	out := openAIToolsFromAnthropic(toolsRaw)
+	if len(out) != 3 {
+		t.Fatalf("len(out) = %d, want 3 (the malformed entry must be skipped)", len(out))
+	}
+
+	first, _ := out[0].(map[string]any)
+	if first["type"] != "function" {
+		t.Errorf(`out[0]["type"] = %v, want "function"`, first["type"])
+	}
+	fn, _ := first["function"].(map[string]any)
+	assert.Equal(t, "get_weather", fn["name"])
+	assert.Equal(t, "Get the weather", fn["description"])
+	assert.Equal(t, schema, fn["parameters"])
+
+	second, _ := out[1].(map[string]any)
+	fn2, _ := second["function"].(map[string]any)
+	if _, hasDesc := fn2["description"]; hasDesc {
+		t.Errorf(`function["description"] present (%v) for a tool with no description, want the key omitted`, fn2["description"])
+	}
+
+	third, _ := out[2].(map[string]any)
+	fn3, _ := third["function"].(map[string]any)
+	assert.Equal(t, "empty_schema_tool", fn3["name"])
+	assert.Equal(t, map[string]any{}, fn3["parameters"])
+}
+
+// TestOpenAIToolChoiceFromAnthropic_AllForms proves each of Anthropic's
+// tool_choice shapes maps to OpenAI's, per the function's own doc
+// comment: "auto"->"auto", "any"->"required" (OpenAI's force-some-tool
+// value), {"type":"tool","name":n}->{"type":"function","function":
+// {"name":n}}, and an unrecognized type, an absent type, a non-map value,
+// or nil all map to a Go nil — the signal openAIRequestFromAnthropic's own
+// caller-side `if choice := ...; choice != nil` uses to decide whether to
+// set "tool_choice" on the OpenAI request at all.
+//
+// MUTATION PROVEN: changing the "any" case to `return "auto"` (collapsing
+// it into the "auto" case, so a forced tool call silently became merely
+// advisory) made this test fail — confirmed, then reverted.
+func TestOpenAIToolChoiceFromAnthropic_AllForms(t *testing.T) {
+	cases := []struct {
+		tc   any
+		want any
+		name string
+	}{
+		{name: "auto", tc: map[string]any{"type": "auto"}, want: "auto"},
+		{name: "any becomes OpenAI's required", tc: map[string]any{"type": "any"}, want: "required"},
+		{name: "tool-by-name", tc: map[string]any{"type": "tool", "name": "get_weather"}, want: map[string]any{"type": "function", "function": map[string]any{"name": "get_weather"}}},
+		{name: "unrecognized type is nil", tc: map[string]any{"type": "bogus"}, want: nil},
+		{name: "absent type is nil", tc: map[string]any{}, want: nil},
+		{name: "non-map value is nil", tc: "auto", want: nil},
+		{name: "nil value is nil", tc: nil, want: nil},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := openAIToolChoiceFromAnthropic(c.tc)
+			assert.Equal(t, c.want, got)
+		})
+	}
+}
+
+// TestOpenAIRequestFromAnthropic_ToolsAndToolChoiceRoundTrip is the
+// end-to-end regression for openAIToolsFromAnthropic and
+// openAIToolChoiceFromAnthropic wired through their only real caller,
+// openAIRequestFromAnthropic: an Anthropic /v1/messages request carrying a
+// multi-tool tools[] array and a tool_choice forcing one specific tool
+// translates to a request shape a real OpenAI chat-completions endpoint
+// accepts, and the tool_calls[] such an endpoint would answer with
+// translates back to Anthropic's own tool_use content-block shape — the
+// full round trip Claude Code actually drives on this route.
+func TestOpenAIRequestFromAnthropic_ToolsAndToolChoiceRoundTrip(t *testing.T) {
+	req := map[string]any{
+		"model": "claude-x",
+		"tools": []any{
+			map[string]any{"name": "get_weather", "description": "Get the weather for a city", "input_schema": map[string]any{
+				"type": "object", "properties": map[string]any{"city": map[string]any{"type": "string"}}, "required": []any{"city"},
+			}},
+			map[string]any{"name": "get_time", "input_schema": map[string]any{"type": "object"}},
+		},
+		"tool_choice": map[string]any{"type": "tool", "name": "get_weather"},
+		"messages":    []any{map[string]any{"role": "user", "content": "What's the weather in London?"}},
+	}
+
+	out, _, err := openAIRequestFromAnthropic(req)
+	if err != nil {
+		t.Fatalf("openAIRequestFromAnthropic: %v", err)
+	}
+
+	tools, _ := out["tools"].([]any)
+	if len(tools) != 2 {
+		t.Fatalf(`out["tools"] = %v, want 2 entries`, out["tools"])
+	}
+	firstFn, _ := tools[0].(map[string]any)["function"].(map[string]any)
+	assert.Equal(t, "get_weather", firstFn["name"])
+	secondFn, _ := tools[1].(map[string]any)["function"].(map[string]any)
+	assert.Equal(t, "get_time", secondFn["name"])
+
+	wantChoice := map[string]any{"type": "function", "function": map[string]any{"name": "get_weather"}}
+	assert.Equal(t, wantChoice, out["tool_choice"])
+
+	// A real OpenAI-shaped response answering that forced tool call...
+	const body = `{"id":"chatcmpl-1","choices":[{"index":0,"message":{"content":null,"tool_calls":[{"id":"call_1","function":{"name":"get_weather","arguments":"{\"city\":\"London\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":10,"completion_tokens":5}}`
+	anthropicOut, err := anthropicResponseFromOpenAI([]byte(body), "claude-x")
+	if err != nil {
+		t.Fatalf("anthropicResponseFromOpenAI: %v", err)
+	}
+	// ...must translate back to Anthropic's tool_use shape.
+	assert.Equal(t, "tool_use", anthropicOut["stop_reason"])
+	content, _ := anthropicOut["content"].([]any)
+	if len(content) != 1 {
+		t.Fatalf("content = %v, want one tool_use block", anthropicOut["content"])
+	}
+	block, _ := content[0].(map[string]any)
+	assert.Equal(t, "get_weather", block["name"])
+	input, _ := block["input"].(map[string]any)
+	assert.Equal(t, "London", input["city"])
+}
+
+// TestOpenAIRequestFromAnthropic_NoTools_OmitsToolsAndToolChoiceFields
+// proves a request that never set Anthropic's "tools"/"tool_choice"
+// fields produces an OpenAI request with NEITHER key present at all — not
+// an empty "tools":[] array, which some OpenAI-compatible upstreams treat
+// differently from the field's outright absence.
+//
+// MUTATION PROVEN: changing `if toolsRaw, ok := req["tools"].([]any); ok`
+// to always assign `out["tools"] = openAIToolsFromAnthropic(toolsRaw)`
+// regardless of ok made this test fail (an empty "tools" key appeared) —
+// confirmed, then reverted.
+func TestOpenAIRequestFromAnthropic_NoTools_OmitsToolsAndToolChoiceFields(t *testing.T) {
+	req := map[string]any{
+		"model":    "claude-x",
+		"messages": []any{map[string]any{"role": "user", "content": "hi"}},
+	}
+	out, _, err := openAIRequestFromAnthropic(req)
+	if err != nil {
+		t.Fatalf("openAIRequestFromAnthropic: %v", err)
+	}
+	if _, ok := out["tools"]; ok {
+		t.Errorf(`out["tools"] = %v, want the key absent when no tools were requested`, out["tools"])
+	}
+	if _, ok := out["tool_choice"]; ok {
+		t.Errorf(`out["tool_choice"] = %v, want the key absent when no tool_choice was requested`, out["tool_choice"])
+	}
+}
