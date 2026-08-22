@@ -507,3 +507,145 @@ func TestToFloat64(t *testing.T) {
 		})
 	}
 }
+
+// --- openAIRequestFromAnthropic / anthropicResponseFromOpenAI: the
+// reverse-direction translators routes_messages.go uses (/v1/messages
+// resolved to a non-anthropic-type provider) ---
+
+// TestOpenAIRequestFromAnthropic_ToolResultBecomesToolMessage proves an
+// assistant tool_use block becomes an OpenAI tool_calls[] entry (with its
+// decoded "input" re-marshaled to a JSON string, matching OpenAI's
+// arguments field) and a following user tool_result block becomes its
+// own separate role:"tool" message — the mirror of
+// anthropicRequestFromOpenAI's pendingToolResults collapse in the other
+// direction.
+func TestOpenAIRequestFromAnthropic_ToolResultBecomesToolMessage(t *testing.T) {
+	req := map[string]any{
+		"model": "claude-x",
+		"messages": []any{
+			map[string]any{"role": "assistant", "content": []any{
+				map[string]any{"type": "tool_use", "id": "call_1", "name": "get_weather", "input": map[string]any{"city": "London"}},
+			}},
+			map[string]any{"role": "user", "content": []any{
+				map[string]any{"type": "tool_result", "tool_use_id": "call_1", "content": "sunny"},
+			}},
+		},
+	}
+
+	out, err := openAIRequestFromAnthropic(req)
+	if err != nil {
+		t.Fatalf("openAIRequestFromAnthropic: %v", err)
+	}
+	msgs, _ := out["messages"].([]any)
+	if len(msgs) != 2 {
+		t.Fatalf("messages = %v, want 2 (assistant tool_calls + tool result)", msgs)
+	}
+	assistant, _ := msgs[0].(map[string]any)
+	toolCalls, _ := assistant["tool_calls"].([]any)
+	if len(toolCalls) != 1 {
+		t.Fatalf("assistant tool_calls = %v, want 1 entry", assistant["tool_calls"])
+	}
+	tc, _ := toolCalls[0].(map[string]any)
+	fn, _ := tc["function"].(map[string]any)
+	assert.Equal(t, "get_weather", fn["name"])
+	assert.JSONEq(t, `{"city":"London"}`, fn["arguments"].(string))
+
+	toolMsg, _ := msgs[1].(map[string]any)
+	assert.Equal(t, "tool", toolMsg["role"])
+	assert.Equal(t, "call_1", toolMsg["tool_call_id"])
+	assert.Equal(t, "sunny", toolMsg["content"])
+}
+
+// TestOpenAIRequestFromAnthropic_SystemStringFoldedIntoMessages proves a
+// plain-string Anthropic "system" field becomes a role:"system" message
+// prepended ahead of the rest, and the Anthropic-only top-level "system"
+// key never survives into the OpenAI-shaped output.
+func TestOpenAIRequestFromAnthropic_SystemStringFoldedIntoMessages(t *testing.T) {
+	req := map[string]any{
+		"model":    "claude-x",
+		"system":   "Be terse.",
+		"messages": []any{map[string]any{"role": "user", "content": "hi"}},
+	}
+
+	out, err := openAIRequestFromAnthropic(req)
+	if err != nil {
+		t.Fatalf("openAIRequestFromAnthropic: %v", err)
+	}
+	if _, ok := out["system"]; ok {
+		t.Error(`out carries a "system" key; Anthropic's system field has no OpenAI equivalent and must be folded into messages[]`)
+	}
+	msgs, _ := out["messages"].([]any)
+	if len(msgs) != 2 {
+		t.Fatalf("messages = %v, want 2 (system + user)", msgs)
+	}
+	sysMsg, _ := msgs[0].(map[string]any)
+	assert.Equal(t, "system", sysMsg["role"])
+	assert.Equal(t, "Be terse.", sysMsg["content"])
+}
+
+// TestAnthropicResponseFromOpenAI_ToolCallsBecomeToolUseBlocks proves an
+// OpenAI tool_calls[] entry becomes an Anthropic tool_use content block
+// with its arguments STRING decoded back to a structured "input" value,
+// stop_reason maps tool_calls -> tool_use, and the caller-supplied model
+// (the client's own requested alias) is echoed into the response.
+func TestAnthropicResponseFromOpenAI_ToolCallsBecomeToolUseBlocks(t *testing.T) {
+	const body = `{"id":"chatcmpl-77","choices":[{"index":0,"message":{"content":null,"tool_calls":[{"id":"call_9","function":{"name":"get_weather","arguments":"{\"city\":\"Paris\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":3,"completion_tokens":2}}`
+
+	out, err := anthropicResponseFromOpenAI([]byte(body), "aliased/model")
+	if err != nil {
+		t.Fatalf("anthropicResponseFromOpenAI: %v", err)
+	}
+	assert.Equal(t, "aliased/model", out["model"])
+	assert.Equal(t, "tool_use", out["stop_reason"])
+
+	content, _ := out["content"].([]any)
+	if len(content) != 1 {
+		t.Fatalf("content = %v, want one tool_use block", out["content"])
+	}
+	block, _ := content[0].(map[string]any)
+	assert.Equal(t, "tool_use", block["type"])
+	assert.Equal(t, "get_weather", block["name"])
+	assert.Equal(t, "call_9", block["id"])
+	input, _ := block["input"].(map[string]any)
+	assert.Equal(t, "Paris", input["city"])
+
+	usageMap, _ := out["usage"].(map[string]any)
+	assert.Equal(t, int64(3), usageMap["input_tokens"])
+	assert.Equal(t, int64(2), usageMap["output_tokens"])
+}
+
+// TestAnthropicResponseFromOpenAI_PlainTextResponse proves the common
+// case: a plain-text OpenAI response becomes a single Anthropic text
+// content block with stop_reason "stop" -> "end_turn".
+func TestAnthropicResponseFromOpenAI_PlainTextResponse(t *testing.T) {
+	const body = `{"id":"chatcmpl-1","choices":[{"index":0,"message":{"content":"hi there"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":2}}`
+
+	out, err := anthropicResponseFromOpenAI([]byte(body), "claude-x")
+	if err != nil {
+		t.Fatalf("anthropicResponseFromOpenAI: %v", err)
+	}
+	assert.Equal(t, "message", out["type"])
+	assert.Equal(t, "assistant", out["role"])
+	assert.Equal(t, "end_turn", out["stop_reason"])
+	content, _ := out["content"].([]any)
+	if len(content) != 1 {
+		t.Fatalf("content = %v, want one text block", out["content"])
+	}
+	block, _ := content[0].(map[string]any)
+	assert.Equal(t, "text", block["type"])
+	assert.Equal(t, "hi there", block["text"])
+}
+
+// TestOpenAIContentPartFromAnthropicImage_RejectsNonBase64Source proves an
+// Anthropic image block whose source is not base64-encoded (a URL-sourced
+// image, which this translator does not support) returns a
+// *translateError rather than silently dropping or mistranslating it.
+func TestOpenAIContentPartFromAnthropicImage_RejectsNonBase64Source(t *testing.T) {
+	_, err := openAIContentPartFromAnthropicImage(map[string]any{"source": map[string]any{"type": "url", "url": "https://example.com/x.png"}})
+	if err == nil {
+		t.Fatal("want an error for a non-base64 image source, got nil")
+	}
+	if _, ok := err.(*translateError); !ok {
+		t.Errorf("err = %T, want *translateError", err)
+	}
+}
