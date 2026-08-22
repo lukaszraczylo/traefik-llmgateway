@@ -1319,6 +1319,63 @@ func TestHandleChat_CacheOversizeBody_SkipsStore_StillServesEveryRequest(t *test
 	}
 }
 
+// TestHandleChat_StreamingRequest_NeverCachedOrServedFromCache is the
+// direct regression for runMeteredCall's own `cacheable := !streaming &&
+// ...` guard (routes_unified.go): a streaming chat-completion request
+// must never get an X-Llmgw-Cache header at all (it is never looked up
+// nor stored — the whole cacheable block is skipped), and nothing the
+// streaming call did may have populated the cache under that body's own
+// key.
+//
+// MUTATION PROVEN: changing `cacheable := !streaming && g.cache != nil &&
+// groupCacheEnabled(grp)` to drop the `!streaming` term made this test
+// fail — the streaming response picked up an X-Llmgw-Cache: miss header
+// — confirmed via `go test -run
+// TestHandleChat_StreamingRequest_NeverCachedOrServedFromCache`, then
+// reverted with `git checkout -- routes_unified.go`.
+func TestHandleChat_StreamingRequest_NeverCachedOrServedFromCache(t *testing.T) {
+	var upstreamCalls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalls++
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		fl, ok := w.(http.Flusher)
+		if !ok {
+			t.Fatal("fake upstream ResponseWriter does not support Flush")
+		}
+		_, _ = w.Write([]byte("data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n"))
+		fl.Flush()
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+		fl.Flush()
+	}))
+	defer srv.Close()
+
+	gw := newCacheTestGateway(t, srv, nil, defaultCacheMaxBodyBytes)
+	body := map[string]any{"model": "gpt-test", "stream": true, "messages": []any{map[string]any{"role": "user", "content": "hi"}}}
+
+	req := newUnifiedRequest(t, http.MethodPost, "/v1/chat/completions", "sk-alice", body)
+	rw := newRecordingWriter()
+	gw.ServeHTTP(rw, req)
+
+	if rw.status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rw.status)
+	}
+	if got := rw.Header().Get("X-Llmgw-Cache"); got != "" {
+		t.Errorf(`X-Llmgw-Cache = %q for a streaming request, want no header at all (never cacheable)`, got)
+	}
+	if upstreamCalls != 1 {
+		t.Fatalf("upstreamCalls = %d, want 1", upstreamCalls)
+	}
+
+	// Nothing the streaming call did may have populated the cache under
+	// the key a non-streaming request with the same provider/model/body
+	// would have used.
+	key := cacheKey("openai", "gpt-test", "gpt-test", cacheEndpointChat, body)
+	if _, hit := gw.cache.lookup(key); hit {
+		t.Error("cache has an entry for the streaming request's key, want none stored")
+	}
+}
+
 // TestHandleChat_CacheRedisDown_MissesAndServesNormallyWithLog proves
 // spec §2's "redis errors during cache ops → treat as miss ... never fail
 // the request because the cache is down": cfg.Redis points at an address

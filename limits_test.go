@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -1096,6 +1097,241 @@ func TestLimiter_FailPolicyGet(t *testing.T) {
 				assert.Equal(t, int64(0), v)
 			}
 		})
+	}
+}
+
+// TestLimiter_FailPolicyIncrBy mirrors TestLimiter_FailPolicyGet for the
+// write side: failOpen=true counts n into the in-process fallback and
+// returns its real post-increment value; failOpen=false refuses outright
+// (0, false) WITHOUT touching the fallback at all — a caller must not
+// double-count once the store recovers by having silently counted
+// locally on the refused path too.
+//
+// MUTATION PROVEN: removing the `if !l.failOpen { return 0, false }`
+// guard (falling straight through to the fallback increment regardless of
+// failOpen) made the "failOpen false" case return ok=true and leave a
+// nonzero fallback counter instead of refusing untouched — confirmed via
+// `go test -run TestLimiter_FailPolicyIncrBy`, then reverted with `git
+// checkout -- limits.go`.
+func TestLimiter_FailPolicyIncrBy(t *testing.T) {
+	cases := []struct {
+		name     string
+		failOpen bool
+		wantOK   bool
+		wantV    int64
+	}{
+		{name: "failOpen true counts in the fallback", failOpen: true, wantOK: true, wantV: 3},
+		{name: "failOpen false refuses without touching the fallback", failOpen: false, wantOK: false, wantV: 0},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			l := newLimiter(nil, c.failOpen)
+			v, ok := l.failPolicyIncrBy("k", 3, time.Minute)
+			require.Equal(t, c.wantOK, ok)
+			assert.Equal(t, c.wantV, v)
+
+			got, err := l.fallback.get("k")
+			if err != nil {
+				t.Fatalf("fallback.get: %v", err)
+			}
+			wantFallback := int64(0)
+			if c.failOpen {
+				wantFallback = 3
+			}
+			if got != wantFallback {
+				t.Errorf("fallback[k] = %d, want %d", got, wantFallback)
+			}
+		})
+	}
+}
+
+// fixedStore is a counterStore stub whose incrBy/get always succeed with a
+// fixed value, independent of key/n/ttl — used to prove storeIncrBy/
+// storeGet return the STORE's own reported value on success, rather than
+// silently substituting the in-process fallback's.
+type fixedStore struct {
+	incrVal int64
+	getVal  int64
+}
+
+func (s *fixedStore) incrBy(string, int64, time.Duration) (int64, error) { return s.incrVal, nil }
+func (s *fixedStore) get(string) (int64, error)                          { return s.getVal, nil }
+func (s *fixedStore) getMulti([]string) ([]int64, error)                 { return nil, nil }
+func (s *fixedStore) incrMulti([]counterIncr) ([]int64, error)           { return nil, nil }
+func (s *fixedStore) incrAndGetMulti([]counterIncr, []string) ([]int64, []int64, error) {
+	return nil, nil, nil
+}
+
+// TestLimiter_StoreIncrBy_DirectPaths exercises storeIncrBy's four
+// branches directly. storeIncrBy has no production caller since
+// checkAndCount/account moved to the batched storeIncrMulti (its own doc
+// comment) — its only caller, incrCounter, is itself only called from
+// tests for direct counter seeding, which is why the existing suite only
+// ever drove it through the nil-store path (30% baseline coverage): a nil
+// store always uses the in-process fallback; a configured store's
+// successful call returns the STORE's own value; a store error records
+// the failure and falls through to the fail-open/fail-closed policy; and
+// once the store-down latch opens from a prior failure, the store is
+// never called again until the latch expires.
+//
+// MUTATION PROVEN: deleting the `if l.storeLatched() { return
+// l.failPolicyIncrBy(key, n, ttl) }` branch made the "latched skips the
+// network call" subtest fail (the erroring store's incrBy was invoked a
+// second time instead of being skipped) — confirmed via `go test -run
+// TestLimiter_StoreIncrBy_DirectPaths/latched`, then reverted.
+func TestLimiter_StoreIncrBy_DirectPaths(t *testing.T) {
+	t.Run("nil store uses the fallback", func(t *testing.T) {
+		l := newLimiter(nil, true)
+		v, ok := l.storeIncrBy("k", 5, time.Minute)
+		require.True(t, ok)
+		assert.Equal(t, int64(5), v)
+		got, err := l.fallback.get("k")
+		if err != nil {
+			t.Fatalf("fallback.get: %v", err)
+		}
+		if got != 5 {
+			t.Errorf("fallback[k] = %d, want 5", got)
+		}
+	})
+
+	t.Run("configured store success returns the store's own value", func(t *testing.T) {
+		store := &fixedStore{incrVal: 42}
+		l := newLimiter(store, true)
+		v, ok := l.storeIncrBy("k", 5, time.Minute)
+		require.True(t, ok)
+		assert.Equal(t, int64(42), v)
+	})
+
+	t.Run("store error falls through to the fail-open policy", func(t *testing.T) {
+		store := &erroringStore{err: errors.New("boom")}
+		l := newLimiter(store, true)
+		v, ok := l.storeIncrBy("k", 5, time.Minute)
+		require.True(t, ok)
+		assert.Equal(t, int64(5), v)
+		got, err := l.fallback.get("k")
+		if err != nil {
+			t.Fatalf("fallback.get: %v", err)
+		}
+		if got != 5 {
+			t.Errorf("fallback[k] = %d, want 5 (fail-open must count in the fallback)", got)
+		}
+	})
+
+	t.Run("store error with failOpen false refuses", func(t *testing.T) {
+		store := &erroringStore{err: errors.New("boom")}
+		l := newLimiter(store, false)
+		_, ok := l.storeIncrBy("k", 5, time.Minute)
+		require.False(t, ok)
+	})
+
+	t.Run("latched skips the network call entirely", func(t *testing.T) {
+		store := &countingErrorStore{err: errors.New("boom")}
+		l := newLimiter(store, true)
+		now := time.Date(2026, 8, 20, 10, 0, 0, 0, time.UTC)
+		l.nowFn = func() time.Time { return now }
+
+		l.storeIncrBy("k", 1, time.Minute) // first call: reaches the store, opens the latch
+		if store.incrCalls != 1 {
+			t.Fatalf("incrCalls after first call = %d, want 1", store.incrCalls)
+		}
+		l.storeIncrBy("k", 1, time.Minute) // second call: within the latch window
+		if store.incrCalls != 1 {
+			t.Errorf("incrCalls after second call = %d, want still 1 (the latch must skip the store)", store.incrCalls)
+		}
+	})
+}
+
+// TestLimiter_StoreGet_DirectPaths mirrors
+// TestLimiter_StoreIncrBy_DirectPaths for the read side. The round-3 perf
+// fusion moved checkAndCount's own reads onto storeGetMulti/
+// incrAndGetMulti, so a direct call is storeGet's only remaining exercise
+// of its store!=nil branches (70% baseline coverage, from other tests
+// that only drove it through account/currentUsage's own indirect paths).
+//
+// MUTATION PROVEN: deleting the `if l.storeLatched() { return
+// l.failPolicyGet(key) }` branch made the "latched skips the network
+// call" subtest fail (the erroring store's get was invoked a second time)
+// — confirmed, then reverted.
+func TestLimiter_StoreGet_DirectPaths(t *testing.T) {
+	t.Run("nil store uses the fallback", func(t *testing.T) {
+		l := newLimiter(nil, true)
+		if _, err := l.fallback.incrBy("k", 7, time.Minute); err != nil {
+			t.Fatalf("fallback.incrBy: %v", err)
+		}
+		v, ok := l.storeGet("k")
+		require.True(t, ok)
+		assert.Equal(t, int64(7), v)
+	})
+
+	t.Run("configured store success returns the store's own value", func(t *testing.T) {
+		store := &fixedStore{getVal: 99}
+		l := newLimiter(store, true)
+		v, ok := l.storeGet("k")
+		require.True(t, ok)
+		assert.Equal(t, int64(99), v)
+	})
+
+	t.Run("store error with failOpen false refuses", func(t *testing.T) {
+		store := &erroringStore{err: errors.New("boom")}
+		l := newLimiter(store, false)
+		_, ok := l.storeGet("k")
+		require.False(t, ok)
+	})
+
+	t.Run("latched skips the network call entirely", func(t *testing.T) {
+		store := &countingErrorStore{err: errors.New("boom")}
+		l := newLimiter(store, true)
+		now := time.Date(2026, 8, 20, 10, 0, 0, 0, time.UTC)
+		l.nowFn = func() time.Time { return now }
+
+		l.storeGet("k") // first call: reaches the store, opens the latch
+		if store.getCalls != 1 {
+			t.Fatalf("getCalls after first call = %d, want 1", store.getCalls)
+		}
+		l.storeGet("k") // second call: within the latch window
+		if store.getCalls != 1 {
+			t.Errorf("getCalls after second call = %d, want still 1 (the latch must skip the store)", store.getCalls)
+		}
+	})
+}
+
+// TestLimiter_LogSpawnDrop_RateLimited proves logSpawnDrop logs one line
+// describing the dropped telemetry write, rate-limited to once per
+// storeErrorLogEvery regardless of how many drops happen in between —
+// mirroring TestLimiter_LogsStoreErrorOncePerRateLimit, since logSpawnDrop
+// deliberately shares lastLogAt with logStoreError (logSpawnDrop's own
+// doc comment: "a stressed store... is the same 'the store is struggling'
+// story").
+//
+// MUTATION PROVEN: removing the `if shouldLog { ... }` guard around the
+// l.logf call (logging unconditionally on every drop) made the
+// "still inside the window" assertion fail (2 lines logged after the
+// second call instead of 1) — confirmed via `go test -run
+// TestLimiter_LogSpawnDrop_RateLimited`, then reverted.
+func TestLimiter_LogSpawnDrop_RateLimited(t *testing.T) {
+	l := newLimiter(nil, true)
+	now := time.Date(2026, 8, 20, 10, 0, 0, 0, time.UTC)
+	l.nowFn = func() time.Time { return now }
+	var logged []string
+	l.logf = func(format string, args ...any) { logged = append(logged, fmt.Sprintf(format, args...)) }
+
+	l.logSpawnDrop()
+	if len(logged) != 1 {
+		t.Fatalf("logged = %d lines after the first drop, want 1", len(logged))
+	}
+	if !strings.Contains(logged[0], "limit telemetry write dropped") {
+		t.Errorf("logged[0] = %q, want it to mention the telemetry write drop", logged[0])
+	}
+
+	l.logSpawnDrop() // still inside the rate-limit window
+	if len(logged) != 1 {
+		t.Fatalf("logged = %d lines after a second drop inside the window, want still 1", len(logged))
+	}
+
+	now = now.Add(storeErrorLogEvery)
+	l.logSpawnDrop()
+	if len(logged) != 2 {
+		t.Fatalf("logged = %d lines after the rate-limit window elapsed, want 2", len(logged))
 	}
 }
 

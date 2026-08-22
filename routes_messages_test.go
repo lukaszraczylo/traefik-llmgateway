@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -677,5 +678,70 @@ func TestHandleMessages_AnthropicProvider_Passthrough_HeaderAllowlist(t *testing
 	}
 	if apiKeyValues[0] != "sk-ant-up" { // #nosec G101 -- test fixture literal, not a real credential
 		t.Errorf("upstream x-api-key = %q, want the gateway's own configured key sk-ant-up, never the client's sk-alice", apiKeyValues[0])
+	}
+}
+
+// TestResponseTranslationError_ErrorPrefixesTranslateResponse proves
+// (*responseTranslationError).Error prefixes the wrapped error's own
+// message with "translate response: " — the text a log line built from
+// this error carries, distinguishing a translation failure (the upstream
+// already answered and was billed) from a connectivity failure in the
+// same log stream.
+//
+// MUTATION PROVEN: changing the method body to `return e.err.Error()`
+// (dropping the prefix) made this test fail — confirmed via `go test -run
+// TestResponseTranslationError_ErrorPrefixesTranslateResponse`, then
+// reverted with `git checkout -- routes_messages.go`.
+func TestResponseTranslationError_ErrorPrefixesTranslateResponse(t *testing.T) {
+	err := &responseTranslationError{err: errors.New("boom")}
+	if got, want := err.Error(), "translate response: boom"; got != want {
+		t.Errorf("Error() = %q, want %q", got, want)
+	}
+}
+
+// TestWriteAnthropicProviderUpstreamError_EmbedsStatusTypeAndDecodedBody
+// proves writeAnthropicProviderUpstreamError writes perr's own status
+// through as the HTTP status (not a fixed one), wraps it in the Anthropic
+// {"type":"error","error":{...}} envelope with error.type "upstream_error"
+// and error.code as perr's status stringified, and embeds perr.body —
+// decoded as JSON when it parses as one — under error.upstream
+// (decodeUpstreamErrorBody, routes_unified.go, shared with this
+// function's OpenAI-shaped counterpart writeProviderUpstreamError).
+//
+// MUTATION PROVEN: replacing `w.WriteHeader(perr.status)` with a
+// hardcoded `w.WriteHeader(http.StatusInternalServerError)` made the
+// status assertion fail — confirmed, then reverted. Separately proven:
+// removing `"upstream": decodeUpstreamErrorBody(perr)` from the envelope
+// made the upstream-body assertion fail — confirmed, then reverted.
+func TestWriteAnthropicProviderUpstreamError_EmbedsStatusTypeAndDecodedBody(t *testing.T) {
+	perr := &providerHTTPError{status: http.StatusServiceUnavailable, body: []byte(`{"error":{"message":"overloaded"}}`)}
+	rec := httptest.NewRecorder()
+
+	writeAnthropicProviderUpstreamError(rec, "anthropic", perr)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503 (perr's own status)", rec.Code)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("response is not valid JSON: %v, body=%s", err, rec.Body.String())
+	}
+	if got["type"] != "error" {
+		t.Errorf(`top-level "type" = %v, want "error"`, got["type"])
+	}
+	errObj, _ := got["error"].(map[string]any)
+	if errObj["type"] != "upstream_error" {
+		t.Errorf(`error.type = %v, want "upstream_error"`, errObj["type"])
+	}
+	if errObj["message"] != "anthropic upstream error" {
+		t.Errorf(`error.message = %v, want "anthropic upstream error"`, errObj["message"])
+	}
+	if errObj["code"] != "503" {
+		t.Errorf(`error.code = %v, want "503"`, errObj["code"])
+	}
+	upstream, _ := errObj["upstream"].(map[string]any)
+	inner, _ := upstream["error"].(map[string]any)
+	if inner["message"] != "overloaded" {
+		t.Errorf(`error.upstream decoded body = %v, want the parsed provider body {"error":{"message":"overloaded"}}`, errObj["upstream"])
 	}
 }
