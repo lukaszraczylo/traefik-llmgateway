@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -98,19 +99,32 @@ const mcpBackendResponseMaxBytes = 4 << 20
 // tool whose legitimate results sit between 4MiB and 10MiB.
 const mcpBackendCallResponseMaxBytes = maxRequestBytes
 
-// mcpResponseTooLargeMarker is a fixed, unique substring doBackendJSONRPC
-// embeds in its own error message when a backend response hits its
-// call's maxBytes cap (security review round 2, 2026-08-22, important
-// finding 4) — detected via strings.Contains, deliberately NOT an
-// errors.Is-checked sentinel. matchesSentinel's own doc comment
-// (limits.go) proves errors.Is safe under Yaegi only for chains reaching
-// a call site this package's own yaegi-check harness actually exercises
-// at runtime under the real interpreter — federation's tools/call path
-// is not one of those exercised paths today, so a plain string check
-// trades a little idiom for zero interpreter risk here, rather than
-// relying on reasoning about compiled-vs-interpreted-origin values that
-// nothing in the gate actually verifies for this specific path.
-const mcpResponseTooLargeMarker = "mcp backend response too large"
+// errMCPResponseTooLarge is the sentinel doBackendJSONRPC wraps when a
+// backend response hits its call's maxBytes cap (security review round 2,
+// 2026-08-22, important finding 4), letting the tools/call handler report
+// "response too large" instead of a generic "upstream error".
+//
+// errors.Is is the correct match here, and it is Yaegi-safe. An earlier
+// revision used a string marker plus strings.Contains out of caution; a
+// harness on yaegi v0.16.1 (the version tools/yaegi-check pins, same
+// stdlib.Symbols set) interpreting this shape found errors.Is correct
+// through shallow, deep, and multi-%w wrapping, and correctly false for
+// an unrelated error. The reason is that declaring the VARIABLE in
+// interpreted code does not make its VALUE interpreted: errors.New
+// returns a compiled *errors.errorString and fmt.Errorf a compiled
+// *fmt.wrapError, so the whole chain errors.Is walks is compiled. This
+// is the same shape retry.go:isTransient has run in production since
+// v0.2.0, and errRequestBuildFailed (providers.go) is already matched
+// this way through a multi-%w wrap.
+//
+// Neither documented Yaegi trap applies: matchesSentinel's TRIP-WIRE
+// (limits.go) is about a plugin-declared error TYPE, which errors.New
+// does not create, and the comma-ok trap needs a plugin-declared
+// interface. A string check was also strictly worse than it looked —
+// err.Error() is itself an interpreted-to-compiled method dispatch, so
+// it verified nothing extra, and matching on text that partly comes
+// from the backend admits false positives a sentinel cannot have.
+var errMCPResponseTooLarge = errors.New("mcp backend response too large")
 
 // jsonrpcRequest is one JSON-RPC 2.0 request/notification, decoded from
 // the client's POST body and re-encoded (with a synthetic id) for this
@@ -444,8 +458,8 @@ type mcpToolsListResult struct {
 // tools/list fan-out, mcpBackendCallResponseMaxBytes for tools/call —
 // their own doc comments cover why the two differ; security review round
 // 2, 2026-08-22, important finding 4). A response body that hits maxBytes
-// is reported with mcpResponseTooLargeMarker in its message, not silently truncated into
-// whatever partial (and likely invalid) JSON happened to fit.
+// is reported by wrapping errMCPResponseTooLarge, not silently truncated
+// into whatever partial (and likely invalid) JSON happened to fit.
 //
 // It is the one place that actually builds and sends an HTTP request for
 // this file; every
@@ -518,11 +532,17 @@ func (g *Gateway) doBackendJSONRPC(ctx context.Context, targetURL, method string
 	if err != nil {
 		return nil, status, respSessionID, err
 	}
-	if int64(len(respBody)) > maxBytes {
-		return nil, status, respSessionID, fmt.Errorf("%s: exceeds %d bytes", mcpResponseTooLargeMarker, maxBytes)
-	}
+	// Status is checked BEFORE the size cap: a backend that fails with a
+	// large HTML error page is diagnosed as "upstream returned HTTP 500",
+	// which is actionable, rather than as "too large", which sends the
+	// operator hunting a payload-size problem that does not exist. An
+	// oversized SUCCESS response still reports the cap, which is the case
+	// the cap exists for.
 	if status < 200 || status >= 300 {
 		return nil, status, respSessionID, fmt.Errorf("upstream returned HTTP %d", status)
+	}
+	if int64(len(respBody)) > maxBytes {
+		return nil, status, respSessionID, fmt.Errorf("%w: exceeds %d bytes", errMCPResponseTooLarge, maxBytes)
 	}
 
 	parsed, err := parseBackendJSONRPC(httpResp.Header.Get("Content-Type"), respBody)
@@ -723,10 +743,12 @@ func lastSSEDataLine(body []byte) []byte {
 
 // mcpFederatedFanoutConcurrency bounds how many of names' backend servers
 // mcpFederatedToolsList's own fan-out below contacts at once — a
-// buffered-channel semaphore, the same bounded-concurrency shape
-// limiter.spawnTokens already uses for its own goroutine fan-out
-// (limits.go), applied here to gate each goroutine's actual outbound HTTP
-// work rather than its launch. Before this bound (security audit finding
+// buffered-channel semaphore gating each goroutine's actual outbound HTTP
+// work rather than its launch. It resembles limiter.spawnTokens
+// (limits.go) only in using a buffered channel: spawnTokens is a
+// non-blocking select with a `default:` that DROPS the work, whereas this
+// one blocks until a slot frees and must never skip a server. Do not
+// treat the two as interchangeable. Before this bound (security audit finding
 // 1a, 2026-08-22), one incoming tools/list request spawned one goroutine
 // per allowed server with NO cap at all: with the 11 production servers,
 // one client call could hold up to 11 concurrent connections and up to
@@ -795,6 +817,18 @@ func (g *Gateway) mcpFederatedToolsList(w http.ResponseWriter, r *http.Request, 
 	// TestHandleMCPFederated_ToolsList_SlowBackend_BoundedByRequestContext),
 	// so deriving fanoutCtx from r.Context() here preserves that same
 	// property for the request's own deadline, on top of this one.
+	//
+	// The accepted trade: a later batch inherits the REMAINING budget, not
+	// a fresh one, so if every backend is slow enough to consume most of
+	// toolsListBackendTimeout on its own, servers in later batches are cut
+	// off and their tools are missing from the merged list. Measured: 11
+	// servers at 11s each returns 8 of 11 tools after 20s, where a per-
+	// backend budget returned 11 of 11 after 11s. This is deliberate —
+	// the alternative is a worst case of ceil(11/8) x 20s = 60s for a
+	// single tools/list — and it degrades to a partial list plus a logged
+	// failure line per starved server, never a hung request. Real
+	// tools/list calls answer in well under a second (at 300ms/server all
+	// 11 return), so this path needs a pathological backend to trigger.
 	fanoutCtx, fanoutCancel := context.WithTimeout(r.Context(), toolsListBackendTimeout)
 	defer fanoutCancel()
 
@@ -951,7 +985,7 @@ func (g *Gateway) mcpFederatedToolsCall(w http.ResponseWriter, r *http.Request, 
 		// specific message, not the generic "upstream error" a truncated-
 		// then-unparsable body would otherwise produce (security review
 		// round 2, 2026-08-22, important finding 4).
-		if strings.Contains(err.Error(), mcpResponseTooLargeMarker) {
+		if errors.Is(err, errMCPResponseTooLarge) {
 			writeJSONRPCErrorResponse(w, req.ID, jsonrpcInternalError, "response too large")
 		} else {
 			writeJSONRPCErrorResponse(w, req.ID, jsonrpcInternalError, "upstream error")

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -1072,9 +1073,9 @@ func TestMcpBackendCall_NetworkFailure_NeverAttemptsHandshake(t *testing.T) {
 // fast, small-scale unit test of doBackendJSONRPC's own maxBytes
 // mechanism, using an artificially tiny cap so the test needs no
 // multi-megabyte payload: a backend response over the cap must be
-// reported with mcpResponseTooLargeMarker in its message —
-// distinguishable via strings.Contains from an ordinary network/parse
-// failure — never silently truncated into a confusing parse error.
+// reported by wrapping errMCPResponseTooLarge — distinguishable via
+// errors.Is from an ordinary network/parse failure — never silently
+// truncated into a confusing parse error.
 func TestMcpBackendCall_ResponseExceedsCap_ReturnsDistinctTooLargeError(t *testing.T) {
 	const tinyCap = 64
 	big := strings.Repeat("x", tinyCap*4) // well past tinyCap once JSON-encoded
@@ -1101,8 +1102,8 @@ func TestMcpBackendCall_ResponseExceedsCap_ReturnsDistinctTooLargeError(t *testi
 	if err == nil {
 		t.Fatal("want an error for a response exceeding the cap")
 	}
-	if !strings.Contains(err.Error(), mcpResponseTooLargeMarker) {
-		t.Errorf("err = %v, want it to contain %q", err, mcpResponseTooLargeMarker)
+	if !errors.Is(err, errMCPResponseTooLarge) {
+		t.Errorf("err = %v, want it to wrap %v", err, errMCPResponseTooLarge)
 	}
 }
 
