@@ -11,8 +11,8 @@ It runs as a [Yaegi](https://github.com/traefik/yaegi)-interpreted Go
 module, the same way [`traefikoidc`](https://github.com/lukaszraczylo/traefikoidc)
 does, configured per-middleware in Traefik's dynamic configuration.
 
-> [!WARNING]
-> **Experimental — proof of concept.** Until version 1.0 this project is an
+> **⚠️ WARNING — experimental, proof of concept.**
+> Until version 1.0 this project is an
 > experiment in PoC development stage, not production ready. Configuration
 > keys, endpoints, and behaviour can change between pre-1.0 releases without
 > a deprecation period. Evaluate it, test it, break it — but do not put it
@@ -38,6 +38,9 @@ Catalog — see [Development](#development) for what that needs.
 - A registry and authenticated reverse proxy for MCP servers and A2A
   agents, so those can sit behind the same gateway, the same auth, and the
   same group-based visibility rules as the LLM traffic.
+
+<details>
+<summary><b>Request flow diagram</b> (mermaid — renders on GitHub)</summary>
 
 ```mermaid
 flowchart LR
@@ -73,6 +76,8 @@ flowchart LR
     Models --> Resp
     Registry --> Resp
 ```
+
+</details>
 
 Every route the plugin recognises is handled entirely inside the
 middleware — `next` (the router's configured backing service) is only
