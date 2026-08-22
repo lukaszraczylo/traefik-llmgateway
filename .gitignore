@@ -5,6 +5,7 @@
 docs/superpowers/
 *.wasm
 tools/yaegi-check/llmgw-yaegi-check
+tools/pricing-sync/llmgw-pricing-sync
 dist/
 
 # webui/'s build output (dist/, matched above) and npm dependency tree —

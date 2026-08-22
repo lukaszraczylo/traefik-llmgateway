@@ -3,7 +3,7 @@
 # two of them concurrently would corrupt each other's containers.
 .NOTPARALLEL:
 
-.PHONY: test lint yaegi-check admin-ui integration integration-keep integration-up integration-wait integration-down
+.PHONY: test lint yaegi-check admin-ui pricing-sync integration integration-keep integration-up integration-wait integration-down
 
 test:
 	go test ./... -count=1
@@ -31,6 +31,18 @@ admin-ui:
 
 yaegi-check:
 	cd tools/yaegi-check && GOWORK=off go run . $(CURDIR)
+
+# pricing-sync regenerates the repo-root pricing_data_gen.go: the
+# built-in, LiteLLM-synced per-model context/cost table feature v0.23's
+# metadata resolution falls back to (modelmeta.go's resolveModelMeta).
+# Fetches LiteLLM's model_prices_and_context_window.json at BUILD TIME
+# only — see tools/pricing-sync/main.go's own doc comment for the
+# pruning rule and naming-bridge mechanism. Not run by CI (network
+# fetch, and the generated table is committed); an operator re-runs this
+# by hand when LiteLLM's own pricing drifts.
+pricing-sync:
+	cd tools/pricing-sync && GOWORK=off go run . $(CURDIR)
+	gofmt -w pricing_data_gen.go
 
 INTEGRATION_COMPOSE := integration/docker-compose.yml
 INTEGRATION_HEALTH_URL := http://localhost:19081/v1/models
