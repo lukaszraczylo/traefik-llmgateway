@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -1211,6 +1212,196 @@ func TestHandleMCPFederated_ToolsList_AllServersFail_ReturnsInternalError(t *tes
 	}
 	if got.Error == nil || got.Error.Code != jsonrpcInternalError || got.Error.Message != "no MCP server reachable" {
 		t.Errorf("error = %+v, want internal error %q", got.Error, "no MCP server reachable")
+	}
+}
+
+// --- security audit finding 1a: fan-out concurrency bound ---
+
+// TestHandleMCPFederated_ToolsList_FanoutBoundedConcurrency proves
+// mcpFederatedFanoutConcurrency actually caps how many backend servers a
+// single tools/list call contacts AT ONCE — not just that it eventually
+// contacts all of them. numServers is comfortably above the cap so the
+// first wave of goroutines through the semaphore must stall on it: the
+// test blocks every mock server's handler until every one of them
+// observes exactly mcpFederatedFanoutConcurrency requests in flight
+// simultaneously, then releases them all. If the fan-out were unbounded
+// (the pre-fix behavior), every server's handler would receive its
+// request immediately and this test would deadlock waiting for
+// concurrency to reach a ceiling nothing ever enforces — a real
+// regression here hangs the test until it times out, it does not
+// silently pass.
+func TestHandleMCPFederated_ToolsList_FanoutBoundedConcurrency(t *testing.T) {
+	const numServers = mcpFederatedFanoutConcurrency + 4
+
+	var (
+		current int32
+		peak    int32
+		release = make(chan struct{})
+	)
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{"openai": {Type: "openai", APIKey: "k"}}
+	cfg.MCPServers = make(map[string]*TargetConfig, numServers)
+	for i := 0; i < numServers; i++ {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			n := atomic.AddInt32(&current, 1)
+			for {
+				old := atomic.LoadInt32(&peak)
+				if n <= old || atomic.CompareAndSwapInt32(&peak, old, n) {
+					break
+				}
+			}
+			<-release
+			atomic.AddInt32(&current, -1)
+
+			var req jsonrpcRequest
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			result, _ := json.Marshal(mcpToolsListResult{})
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(jsonrpcResponse{ID: req.ID, Result: result})
+		}))
+		t.Cleanup(srv.Close)
+		cfg.MCPServers[fmt.Sprintf("srv%d", i)] = &TargetConfig{URL: srv.URL}
+	}
+	cfg.Groups = map[string]*GroupConfig{"default": {}}
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{{Name: "alice", Group: "default", APIKey: "sk-alice"}}}
+
+	h, err := New(context.Background(), http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	done := make(chan struct{})
+	rec := httptest.NewRecorder()
+	go func() {
+		h.ServeHTTP(rec, newFederatedRequest(t, "sk-alice", jsonrpcRequest{JSONRPC: jsonrpcVersion, Method: "tools/list", ID: json.RawMessage("1")}))
+		close(done)
+	}()
+
+	deadline := time.After(5 * time.Second)
+	for atomic.LoadInt32(&current) < mcpFederatedFanoutConcurrency {
+		select {
+		case <-deadline:
+			t.Fatal("concurrency never reached mcpFederatedFanoutConcurrency — fan-out may be serialized instead of bounded")
+		case <-time.After(time.Millisecond):
+		}
+	}
+	// Give any wrongly-unbounded extra goroutines a chance to also reach
+	// the handler before we sample — if the bound were missing, ALL
+	// numServers requests would already be in flight by now.
+	time.Sleep(20 * time.Millisecond)
+	if got := atomic.LoadInt32(&current); got > mcpFederatedFanoutConcurrency {
+		t.Fatalf("current in-flight backends = %d, want <= %d (fan-out is not bounded)", got, mcpFederatedFanoutConcurrency)
+	}
+	close(release)
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("request never completed after releasing all backends")
+	}
+
+	if peak != mcpFederatedFanoutConcurrency {
+		t.Errorf("peak concurrent backends = %d, want exactly %d", peak, mcpFederatedFanoutConcurrency)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// --- security audit finding 1b: tools/list weighted by backend count ---
+
+// TestHandleMCPFederated_ToolsList_WeightedByBackendCount_RejectsWhenOverBudget
+// proves a tools/list call charges checkAndCount len(allowedMCPServerNames)
+// requests, not one: with 3 configured (and unrestricted) servers and a
+// requests-per-minute budget of 2, the very FIRST tools/list call must be
+// rejected outright — and, because checkAndCountWeighted runs and fails
+// BEFORE the fan-out ever starts, none of the three servers may be
+// contacted at all.
+func TestHandleMCPFederated_ToolsList_WeightedByBackendCount_RejectsWhenOverBudget(t *testing.T) {
+	alpha := newMockJSONRPCServer(t, nil)
+	beta := newMockJSONRPCServer(t, nil)
+	gamma := newMockJSONRPCServer(t, nil)
+	cfg := newFederationTestConfig(alpha.srv.URL, beta.srv.URL, false)
+	cfg.MCPServers["gamma"] = &TargetConfig{URL: gamma.srv.URL}
+	cfg.Groups["default"].Limits = &LimitsConfig{RequestsPerMinute: 2}
+
+	h, err := New(context.Background(), http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, newFederatedRequest(t, "sk-alice", jsonrpcRequest{JSONRPC: jsonrpcVersion, Method: "tools/list", ID: json.RawMessage("1")}))
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want 429 (weight=3 > limit=2), body=%s", rec.Code, rec.Body.String())
+	}
+	for name, srv := range map[string]*mockJSONRPCServer{"alpha": alpha, "beta": beta, "gamma": gamma} {
+		if srv.called.Load() != 0 {
+			t.Errorf("server %q was contacted %d times, want 0 (rejected before fan-out)", name, srv.called.Load())
+		}
+	}
+}
+
+// TestHandleMCPFederated_ToolsList_WeightedByBackendCount_AccumulatesAcrossCalls
+// proves the weighted charge actually accumulates against the same
+// requests-per-minute window: with 3 servers and a budget of 5, the first
+// tools/list call (weight 3) succeeds, and the second (weight 3 more,
+// total 6 > 5) is rejected.
+func TestHandleMCPFederated_ToolsList_WeightedByBackendCount_AccumulatesAcrossCalls(t *testing.T) {
+	alpha := newMockJSONRPCServer(t, []mcpTool{{Name: "lookup"}})
+	beta := newMockJSONRPCServer(t, []mcpTool{{Name: "search"}})
+	gamma := newMockJSONRPCServer(t, []mcpTool{{Name: "fetch"}})
+	cfg := newFederationTestConfig(alpha.srv.URL, beta.srv.URL, false)
+	cfg.MCPServers["gamma"] = &TargetConfig{URL: gamma.srv.URL}
+	cfg.Groups["default"].Limits = &LimitsConfig{RequestsPerMinute: 5}
+
+	h, err := New(context.Background(), http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	rec1 := httptest.NewRecorder()
+	h.ServeHTTP(rec1, newFederatedRequest(t, "sk-alice", jsonrpcRequest{JSONRPC: jsonrpcVersion, Method: "tools/list", ID: json.RawMessage("1")}))
+	if rec1.Code != http.StatusOK {
+		t.Fatalf("first call status = %d, want 200, body=%s", rec1.Code, rec1.Body.String())
+	}
+
+	rec2 := httptest.NewRecorder()
+	h.ServeHTTP(rec2, newFederatedRequest(t, "sk-alice", jsonrpcRequest{JSONRPC: jsonrpcVersion, Method: "tools/list", ID: json.RawMessage("2")}))
+	if rec2.Code != http.StatusTooManyRequests {
+		t.Fatalf("second call status = %d, want 429 (3+3=6 > limit=5), body=%s", rec2.Code, rec2.Body.String())
+	}
+}
+
+// TestHandleMCPFederated_ToolsCall_WeightStaysOne_EvenWithManyServersConfigured
+// proves tools/call — which only ever resolves to ONE backend — never
+// inherits tools/list's per-backend weighting: with 3 servers configured
+// and a requests-per-minute budget of 2, two sequential tools/call
+// requests must both succeed (weight 1 each, total 2, at the limit), where
+// the equivalent tools/list weighting (3 each) would already have
+// rejected the first one.
+func TestHandleMCPFederated_ToolsCall_WeightStaysOne_EvenWithManyServersConfigured(t *testing.T) {
+	alpha := newMockJSONRPCServer(t, nil)
+	beta := newMockJSONRPCServer(t, nil)
+	gamma := newMockJSONRPCServer(t, nil)
+	cfg := newFederationTestConfig(alpha.srv.URL, beta.srv.URL, false)
+	cfg.MCPServers["gamma"] = &TargetConfig{URL: gamma.srv.URL}
+	cfg.Groups["default"].Limits = &LimitsConfig{RequestsPerMinute: 2}
+
+	h, err := New(context.Background(), http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	for i := 1; i <= 2; i++ {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, newFederatedRequest(t, "sk-alice", jsonrpcRequest{
+			JSONRPC: jsonrpcVersion, Method: "tools/call", ID: json.RawMessage(fmt.Sprintf("%d", i)),
+			Params: json.RawMessage(`{"name":"alpha_lookup"}`),
+		}))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("call %d status = %d, want 200 (tools/call weight must stay 1), body=%s", i, rec.Code, rec.Body.String())
+		}
 	}
 }
 

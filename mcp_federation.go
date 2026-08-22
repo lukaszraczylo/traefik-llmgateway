@@ -66,6 +66,21 @@ const (
 	mcpSessionCloseTimeout = 5 * time.Second
 )
 
+// mcpBackendResponseMaxBytes caps a single backend MCP server's HTTP
+// response body doBackendJSONRPC will read into memory — previously
+// maxRequestBytes (10MiB, routes_unified.go), a budget sized for a
+// CLIENT's own chat/embeddings request body, not a backend's JSON-RPC
+// reply (security audit finding 1c, 2026-08-22). 4MiB matches this
+// codebase's other "generous but bounded" read caps for a non-primary-
+// request-body read (cache.go's maxAccountingTeeBytes is also 4MiB) —
+// comfortably above any tools/list schema listing or tools/call result
+// this gateway has actually seen live (typically low KB), while bounding
+// mcpFederatedFanoutConcurrency backends' worst-case concurrent memory to
+// 4 × 4MiB = 16MiB, against the unbounded ~110MiB (11 production servers
+// × up to 10MiB each, all fired at once) the security audit measured
+// before this fix.
+const mcpBackendResponseMaxBytes = 4 << 20
+
 // jsonrpcRequest is one JSON-RPC 2.0 request/notification, decoded from
 // the client's POST body and re-encoded (with a synthetic id) for this
 // gateway's own outbound calls to a backend MCP server (mcpBackendCall).
@@ -237,6 +252,24 @@ func allowedMCPServerNames(cfg *Config, grp *group) []string {
 // other metered route — with per-target attribution added separately
 // inside mcpFederatedToolsList/mcpFederatedToolsCall (their own doc
 // comments cover exactly what "attributed" means for each).
+//
+// The weight charged to checkAndCount is 1 for every method EXCEPT
+// tools/list (security audit finding 1b, 2026-08-22): a tools/list call
+// fans out to every server allowedMCPServerNames(grp) returns — up to the
+// whole MCP catalog, concurrently (mcpFederatedToolsList's own doc
+// comment) — so one incoming client request can cost this gateway many
+// real outbound backend calls. Charging it as a single request against
+// the caller's requests-per-minute/requests-per-day budget undercounts
+// that real cost; weighting it by len(names) instead makes the budget
+// reflect what the request actually does. This is computed and charged
+// exactly once, right here, before dispatch — never doubled by anything
+// mcpFederatedToolsList itself does (its own countTargetRequests call is a
+// SEPARATE scope kind, "mcp"/target-id, entirely disjoint from the
+// user/group/total scopes checkAndCountWeighted evaluates here; see
+// countTargetRequests' own doc comment, limits.go). tools/call, by
+// contrast, always resolves to exactly ONE backend (resolveFederatedTool),
+// so it keeps the plain weight of 1 — checkAndCountWeighted(scopes, 1) is
+// byte-for-byte checkAndCount's own existing behavior.
 func (g *Gateway) handleMCPFederated(w http.ResponseWriter, r *http.Request, u *user, grp *group) {
 	if r.Header.Get("Upgrade") != "" {
 		writeOAIError(w, http.StatusNotImplemented, "invalid_request_error", "websocket/upgrade passthrough not supported")
@@ -259,7 +292,17 @@ func (g *Gateway) handleMCPFederated(w http.ResponseWriter, r *http.Request, u *
 	}
 
 	scopes := withTotalScope(buildLimitScopes(u, grp))
-	if violation := g.limiter.checkAndCount(scopes); violation != nil {
+
+	var toolsListNames []string
+	weight := int64(1)
+	if req.Method == "tools/list" {
+		toolsListNames = allowedMCPServerNames(g.cfg, grp)
+		if n := int64(len(toolsListNames)); n > weight {
+			weight = n
+		}
+	}
+
+	if violation := g.limiter.checkAndCountWeighted(scopes, weight); violation != nil {
 		writeLimitViolation(w, violation)
 		return
 	}
@@ -270,7 +313,7 @@ func (g *Gateway) handleMCPFederated(w http.ResponseWriter, r *http.Request, u *
 	case req.Method == "ping":
 		writeJSONRPCResult(w, req.ID, map[string]any{})
 	case req.Method == "tools/list":
-		g.mcpFederatedToolsList(w, r, req, grp)
+		g.mcpFederatedToolsList(w, r, req, toolsListNames)
 	case req.Method == "tools/call":
 		g.mcpFederatedToolsCall(w, r, req, grp)
 	case strings.HasPrefix(req.Method, "notifications/"):
@@ -433,7 +476,7 @@ func (g *Gateway) doBackendJSONRPC(ctx context.Context, targetURL, method string
 	status = httpResp.StatusCode
 	respSessionID = httpResp.Header.Get(mcpSessionHeader)
 
-	respBody, err := io.ReadAll(io.LimitReader(httpResp.Body, maxRequestBytes))
+	respBody, err := io.ReadAll(io.LimitReader(httpResp.Body, mcpBackendResponseMaxBytes))
 	if err != nil {
 		return nil, status, respSessionID, err
 	}
@@ -632,43 +675,64 @@ func lastSSEDataLine(body []byte) []byte {
 	return last
 }
 
+// mcpFederatedFanoutConcurrency bounds how many of names' backend servers
+// mcpFederatedToolsList's own fan-out below contacts at once — a
+// buffered-channel semaphore, the same bounded-concurrency shape
+// limiter.spawnTokens already uses for its own goroutine fan-out
+// (limits.go), applied here to gate each goroutine's actual outbound HTTP
+// work rather than its launch. Before this bound (security audit finding
+// 1a, 2026-08-22), one incoming tools/list request spawned one goroutine
+// per allowed server with NO cap at all: with the 11 production servers,
+// one client call could hold up to 11 concurrent connections and up to
+// 11× mcpBackendResponseMaxBytes of backend response bodies in memory at
+// once, entirely outside this gateway's own admission control. 4 keeps
+// every server eventually contacted — a goroutine blocks on the
+// semaphore, it is never dropped or skipped — while capping the worst
+// case to 4 concurrent backends' cost, not the whole catalog's.
+const mcpFederatedFanoutConcurrency = 4
+
 // mcpFederatedToolsList implements the federated "tools/list": it fans
-// out one mcpBackendCall per server allowedMCPServerNames(grp) permits,
-// concurrently — each under its own toolsListBackendTimeout budget
-// (context.WithTimeout off r.Context(), MF1) — then merges every
-// reachable server's own tools into one result, each tool's name prefixed
-// "<serverName>_<toolName>", the exact underscore-separator convention the
-// old agentgateway this plugin replaces used, and the one pugbot's
-// mcpclient and agentkit have already persisted into their own tool-id
-// databases (e.g. "brave-search_brave_web_search" — verified live). A
-// server that errors, times out, or returns an unparsable/invalid result
-// is logged and skipped, not surfaced as a whole-call failure — UNLESS
-// every single attempted server failed, in which case an empty tools list
-// would misleadingly look like "this caller's group has no MCP access" —
-// see the loud-failure branch below.
+// out one mcpBackendCall per server in names (handleMCPFederated's own
+// allowedMCPServerNames(grp) call, made once there so the SAME set that
+// was weighed into checkAndCountWeighted is the set actually contacted),
+// at most mcpFederatedFanoutConcurrency at a time — each under its own
+// toolsListBackendTimeout budget (context.WithTimeout off r.Context(),
+// MF1) — then merges every reachable server's own tools into one result,
+// each tool's name prefixed "<serverName>_<toolName>", the exact
+// underscore-separator convention the old agentgateway this plugin
+// replaces used, and the one pugbot's mcpclient and agentkit have already
+// persisted into their own tool-id databases (e.g.
+// "brave-search_brave_web_search" — verified live). A server that errors,
+// times out, or returns an unparsable/invalid result is logged
+// and skipped, not surfaced as a whole-call failure — UNLESS every single
+// attempted server failed, in which case an empty tools list would
+// misleadingly look like "this caller's group has no MCP access" — see
+// the loud-failure branch below.
 //
 // countTargetRequests (limits.go) attributes one request to EVERY server
 // ATTEMPTED here, in ONE batched call after wg.Wait() — "attempted", not
 // "reached" or "succeeded": a server this gateway dialed and got a
-// response (or a timeout, or a connection refusal) from still had a real
-// request sent to it and a real slot of this gateway's outbound capacity
-// spent on it, which is what these counters exist to track. A single
-// federated tools/list call can move several targets' own counters, not
-// just one — unlike handleTargetProxy's always-exactly-one-target shape
-// (mcp_a2a.go).
-func (g *Gateway) mcpFederatedToolsList(w http.ResponseWriter, r *http.Request, req jsonrpcRequest, grp *group) {
-	names := allowedMCPServerNames(g.cfg, grp)
-
+// response (or a timeout, or a connection refusal) from still had
+// a real request sent to it and a real slot of this gateway's outbound
+// capacity spent on it, which is what these counters exist to track. A
+// single federated tools/list call can move several targets' own
+// counters, not just one — unlike handleTargetProxy's always-exactly-
+// one-target shape (mcp_a2a.go).
+func (g *Gateway) mcpFederatedToolsList(w http.ResponseWriter, r *http.Request, req jsonrpcRequest, names []string) {
 	var (
 		mu     sync.Mutex
 		wg     sync.WaitGroup
 		merged = make([]mcpTool, 0, len(names))
 		failed []string
 	)
+	sem := make(chan struct{}, mcpFederatedFanoutConcurrency)
 	for _, name := range names {
 		wg.Add(1)
 		go func(name string) {
 			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
 			ctx, cancel := context.WithTimeout(r.Context(), toolsListBackendTimeout)
 			defer cancel()
 			targetURL := g.cfg.MCPServers[name].URL
