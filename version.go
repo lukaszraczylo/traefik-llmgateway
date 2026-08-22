@@ -12,4 +12,4 @@ package traefikllmgateway
 // in GET /admin/api/overview (spec §4, v0.2). Local/dev/test builds carry
 // the "0.0.0-dev" sentinel below, since nothing has stamped them. Not read
 // from anywhere else in the package.
-const pluginVersion = "0.0.0-dev"
+const pluginVersion = "0.2.43"
