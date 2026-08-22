@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -1453,6 +1454,100 @@ func TestLimiterCurrentUsage_BatchesOneGetMultiCallForAllScopes(t *testing.T) {
 	g1 := got[1]
 	if g1.requestsPerMinute != 1 {
 		t.Errorf("g1 requestsPerMinute = %d, want 1", g1.requestsPerMinute)
+	}
+}
+
+// --- security audit finding 4: admin usage batch chunking ---
+
+// TestChunkedCurrentUsage_SplitsIntoMultipleRoundTrips is the regression
+// for finding 4: buildAdminUsage previously handed limiter.currentUsage
+// the WHOLE scopes slice in one call, so one round trip's own pipeline
+// size (and how long it holds the shared, mutex-guarded store connection)
+// scaled with catalog size with no ceiling at all. With more scopes than
+// adminUsageChunkScopes, chunkedCurrentUsage must issue more than one
+// getMulti call — proving chunking actually happens, not merely that the
+// constant exists.
+func TestChunkedCurrentUsage_SplitsIntoMultipleRoundTrips(t *testing.T) {
+	t.Parallel()
+	fixedNow := time.Date(2026, 8, 22, 10, 0, 0, 0, time.UTC)
+	const n = adminUsageChunkScopes + 50 // over one chunk, under two
+
+	store := &countingMultiStore{values: make(map[string]int64, n)}
+	scopes := make([]limitScope, n)
+	for i := 0; i < n; i++ {
+		id := fmt.Sprintf("user%d", i)
+		scopes[i] = limitScope{kind: "user", id: id, limits: &LimitsConfig{}}
+		store.values[windowKey("user", id, metricReq, windowMin, fixedNow)] = int64(i)
+	}
+
+	l := newLimiter(store, true)
+	l.nowFn = func() time.Time { return fixedNow }
+	gw := &Gateway{limiter: l}
+
+	got := gw.chunkedCurrentUsage(scopes)
+
+	if store.getMultiCalls != 2 {
+		t.Errorf("getMultiCalls = %d, want 2 (%d scopes over one %d-scope chunk)", store.getMultiCalls, n, adminUsageChunkScopes)
+	}
+	if len(got) != n {
+		t.Fatalf("len(got) = %d, want %d", len(got), n)
+	}
+	// Order must be preserved across the chunk boundary — spot-check the
+	// first scope of the SECOND chunk, whose value only exists if the
+	// concatenation kept scopes[adminUsageChunkScopes] aligned with
+	// got[adminUsageChunkScopes].
+	boundary := got[adminUsageChunkScopes]
+	if boundary.id != fmt.Sprintf("user%d", adminUsageChunkScopes) || boundary.requestsPerMinute != int64(adminUsageChunkScopes) {
+		t.Errorf("scope at the chunk boundary = %+v, want id=%q requestsPerMinute=%d (order preserved across chunks)",
+			boundary, fmt.Sprintf("user%d", adminUsageChunkScopes), adminUsageChunkScopes)
+	}
+}
+
+// TestChunkedCurrentUsage_AtOrBelowChunkSize_MakesExactlyOneCall proves
+// chunking is a no-op difference for any deployment at or under
+// adminUsageChunkScopes — including the live cluster's 5 friends + 4 home
+// users (project brief) — matching currentUsage's own pre-existing
+// single-round-trip behavior exactly.
+func TestChunkedCurrentUsage_AtOrBelowChunkSize_MakesExactlyOneCall(t *testing.T) {
+	t.Parallel()
+	fixedNow := time.Date(2026, 8, 22, 10, 0, 0, 0, time.UTC)
+	store := &countingMultiStore{values: map[string]int64{}}
+	scopes := []limitScope{
+		{kind: "user", id: "alice", limits: &LimitsConfig{}},
+		{kind: "user", id: "bob", limits: &LimitsConfig{}},
+		{kind: "group", id: "eng", limits: &LimitsConfig{}},
+	}
+	l := newLimiter(store, true)
+	l.nowFn = func() time.Time { return fixedNow }
+	gw := &Gateway{limiter: l}
+
+	got := gw.chunkedCurrentUsage(scopes)
+
+	if store.getMultiCalls != 1 {
+		t.Errorf("getMultiCalls = %d, want 1 (scope count under adminUsageChunkScopes)", store.getMultiCalls)
+	}
+	if len(got) != len(scopes) {
+		t.Fatalf("len(got) = %d, want %d", len(got), len(scopes))
+	}
+}
+
+// TestChunkedCurrentUsage_EmptyScopes proves the edge case a real caller
+// never hits directly (buildAdminUsage always appends the synthetic total
+// scope) still behaves like currentUsage's own empty-input contract:
+// no call, no panic, empty result.
+func TestChunkedCurrentUsage_EmptyScopes(t *testing.T) {
+	t.Parallel()
+	store := &countingMultiStore{values: map[string]int64{}}
+	l := newLimiter(store, true)
+	gw := &Gateway{limiter: l}
+
+	got := gw.chunkedCurrentUsage(nil)
+
+	if store.getMultiCalls != 0 {
+		t.Errorf("getMultiCalls = %d, want 0 for an empty scopes slice", store.getMultiCalls)
+	}
+	if len(got) != 0 {
+		t.Errorf("len(got) = %d, want 0", len(got))
 	}
 }
 
