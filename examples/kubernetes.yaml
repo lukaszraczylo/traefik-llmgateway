@@ -125,6 +125,23 @@ spec:
       # ../README.md#admin.
       admin:
         enabled: false
+      # Prometheus text-exposition endpoint — see ../README.md#metrics.
+      # allowedCIDRs is the cluster's OWN pod network (a placeholder here;
+      # replace 10.42.0.0/16 with your cluster CIDR, e.g. `kubectl get
+      # nodes -o jsonpath='{.items[0].spec.podCIDR}'`), letting an
+      # in-cluster scraper (VMServiceScrape/ServiceMonitor below) hit
+      # /metrics with no credential. NEVER widen this to a whole RFC1918
+      # range like 10.0.0.0/8 — see ../README.md#metrics for why that
+      # specific mistake is live-reproducible, not theoretical: a
+      # SNAT-ing router or load balancer makes EXTERNAL traffic arrive
+      # from an address inside that same private range too. The
+      # dashboard-admin key above (users.inline) works here regardless,
+      # for a scraper that lives outside allowedCIDRs.
+      metrics:
+        enabled: true
+        allowedCIDRs:
+          - 10.42.0.0/16
+        modelLabel: false
       pricing:
         gpt-5-mini: {inputPerM: 0.25, outputPerM: 2.0}
       mcpServers:
@@ -192,6 +209,42 @@ spec:
       services:
         - name: llmgateway-dummy-backend
           port: 80
+
+---
+# Scraping /metrics (../README.md#metrics): this cluster runs
+# VictoriaMetrics, not Prometheus, so the CRD is VMServiceScrape
+# (victoriametrics/operator), not a Prometheus-operator ServiceMonitor —
+# the exposition FORMAT this plugin emits is identical either way (a
+# ServiceMonitor with the same selector/port/path works unchanged if
+# your cluster runs Prometheus instead); only the CRD kind differs, and
+# that is entirely outside this plugin's own config.
+#
+# IMPORTANT: /metrics is served by TRAEFIK ITSELF, not by
+# llmgateway-dummy-backend above — this middleware intercepts the path
+# before any backend service is ever reached (same as every other route
+# this plugin owns). Point this scrape at YOUR Traefik installation's own
+# Service (commonly named "traefik" — verify against your own Helm
+# release), never at a backend service this file defines. Adjust
+# selector/namespaceSelector/port to match your Traefik Service's real
+# labels and named port.
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMServiceScrape
+metadata:
+  name: llmgateway-metrics
+  namespace: traefik
+spec:
+  namespaceSelector:
+    matchNames:
+      - traefik
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: traefik
+  endpoints:
+    - port: websecure # the Traefik Service's own named entryPoint port llmgateway is exposed on
+      path: /metrics # the default; matches metrics.path left unset above
+      scheme: https
+      tlsConfig:
+        insecureSkipVerify: true # adjust for your cluster's own CA/cert setup
 
 ---
 # Helm values snippet (traefik/traefik-helm-chart) — illustrative, verify

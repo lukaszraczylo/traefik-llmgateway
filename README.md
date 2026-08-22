@@ -196,6 +196,7 @@ config accepts them as YAML, which decodes to the same JSON shape.
 | `cache` | `CacheConfig` | `{}` (disabled) | Opt-in Redis-backed response cache for unified non-streaming chat/embeddings — see [Caching](#caching). Omitted or `enabled: false` means no caching, byte-identical to a gateway built before this field existed. |
 | `breaker` | `BreakerConfig` | `{}` (every default) | Per-provider discovery circuit breaker — see [Provider health (discovery circuit breaker)](#provider-health-discovery-circuit-breaker). Every field is individually zero-means-default; a provider whose discovery never fails is unaffected regardless of what this block contains. |
 | `admin` | `*AdminConfig` | `nil` (disabled) | Read-only admin dashboard — see [Admin](#admin). `nil` or `enabled: false` means the `/admin*` routes are not registered at all. |
+| `metrics` | `*MetricsConfig` | `nil` (disabled) | Prometheus text-exposition endpoint — see [Metrics](#metrics). `nil` or `enabled: false` means the metrics route is not registered at all. |
 | `modelAliases` | `map[string]string` | `{}` | Operator-defined alias id → target model id — see [Model aliases](#model-aliases). Omitted or empty means no aliases, byte-identical to a gateway built before this field existed. |
 | `modelMeta` | `map[string]*ModelMetaConfig` | `{}` | Per-model context-window and cost overrides, keyed by exact `provider/model` or a bare model id — see [Model metadata](#model-metadata). Omitted or empty means no overrides; every model's metadata still resolves through discovery and the built-in table. |
 | `passthroughUnknown` | `bool` | `false` | `false`: a request matching none of the plugin's routes gets a 404 JSON envelope. `true`: it falls through to the router's own backing service. **Does not cover the three media routes** — see the upgrade note below. |
@@ -326,6 +327,15 @@ own is governed purely by their group's — see
 | Field | Type | Default | Semantics |
 |---|---|---|---|
 | `enabled` | `bool` | `false` | `false`: the `/admin*` routes are not registered at all — a request to any of them falls through to the plugin's existing 404/`passthroughUnknown` handling like any other unrecognized path. `true`: the read-only dashboard per [Admin](#admin) below. |
+
+### `MetricsConfig`
+
+| Field | Type | Default | Semantics |
+|---|---|---|---|
+| `enabled` | `bool` | `false` | `false`: the metrics route is not registered at all. `true`: the Prometheus text-exposition endpoint per [Metrics](#metrics) below. |
+| `path` | `string` | `/metrics` | Overrides the served path. |
+| `allowedCIDRs` | `[]string` | `[]` (no bypass) | CIDR blocks whose source address may scrape without an admin key — e.g. `10.42.0.0/16` for a cluster's pod network. **Never use a whole RFC1918 range like `10.0.0.0/8`** — see [Metrics](#metrics)'s own warning for why that specific mistake is live-reproducible, not theoretical. |
+| `modelLabel` | `bool` | `false` | Adds a `model` label to the provider attempt/failure counters, breaking them out per `(provider, model)` pair. Off by default: a deployment with hundreds of discovered model ids is a series-count explosion waiting to happen. |
 
 ### `ModelPricing`
 
@@ -1311,6 +1321,140 @@ or in CI.
   admin route already sends the identical header, so there is no reason
   for asset responses to be the exception. The dashboard loads no
   external asset of any kind and works in an air-gapped cluster.
+
+## Metrics
+
+A hand-written Prometheus text-exposition endpoint — the plugin is
+stdlib-only under Yaegi, so it cannot use `client_golang` or any other
+metrics library. Off by default (`metrics.enabled: false`, or the
+`metrics` block omitted entirely): the route is not registered at all,
+the same nil-disables convention [Admin](#admin) uses. Served at
+`/metrics` by default, overridable via `metrics.path`. Works identically
+with any scraper that speaks the standard text exposition format —
+Prometheus with a `ServiceMonitor`/`PodMonitor`, or
+[VictoriaMetrics](https://victoriametrics.com) with a `VMServiceScrape`;
+the format is the same either way, only the CRD kind that points a
+scraper at this endpoint differs, and that is entirely outside this
+plugin's config.
+
+- **This endpoint exposes per-user and per-group cost and usage data**
+  (everything [Admin](#admin)'s `GET /admin/api/usage` exposes, in
+  Prometheus form), so it is never reachable unauthenticated by default.
+  Two ways in, either is sufficient on its own:
+  - **Admin bearer token** (the default, and always works): the identical
+    gate `GET /admin/api/*` uses — present a key belonging to a user
+    flagged `admin: true` as `Authorization: Bearer <key>` or
+    `x-api-key: <key>`. Unauthenticated → 401; authenticated non-admin →
+    403; admin → served. There is no second credential path — this reuses
+    `authStore.identify` exactly.
+  - **`metrics.allowedCIDRs`** (optional, off by default): CIDR blocks
+    whose **source address** may scrape with no key at all — for a
+    Prometheus/VictoriaMetrics server that should not need to carry a
+    credential. Checked against the request's source address exactly as
+    Traefik's own `net/http` server sees it (`RemoteAddr`, never a
+    client-supplied header like `X-Forwarded-For`) — **only meaningful for
+    a caller whose real source address actually survives to this
+    gateway**. Behind a Kubernetes `Service` or a second reverse proxy
+    that does not preserve the original address, every caller looks
+    identical to this check, and the allowlist becomes either "everyone"
+    or "no one" depending on what address arrives; confirm `RemoteAddr`
+    reflects the scraper's own address in your deployment before relying
+    on this instead of a key.
+
+  **On CIDR sizing — this is the mistake that actually breaks security,
+  live-reproduced, not a theoretical warning**: always scope
+  `allowedCIDRs` to the **narrowest block that covers only your actual
+  scrapers** — a cluster's Prometheus/VictoriaMetrics pod network, e.g.
+  `10.42.0.0/16`. **Never configure a whole RFC1918 range** such as
+  `10.0.0.0/8`, `172.16.0.0/12`, or `192.168.0.0/16`. The failure mode is
+  not "the allowlist does not work" — it is "the allowlist works exactly
+  as configured, and what survives to `RemoteAddr` is an address you never
+  intended to trust": a SNAT-ing router or load balancer makes
+  **external** traffic arrive from an address inside that same private
+  range. `allowedCIDRs: ["10.0.0.0/8"]` paired with a router's own SNAT
+  address has been reproduced returning full per-user cost data to an
+  external caller with no key at all.
+
+- **`metrics.modelLabel`** (`false` by default) adds a `model` label to
+  the provider attempt/failure counters
+  (`llmgateway_provider_model_attempts_total`/
+  `llmgateway_provider_model_failures_total`), breaking them out per
+  `(provider, model)` pair in addition to the always-on per-provider
+  totals. Left off by default because a deployment with hundreds of
+  discovered model ids across several providers is a series-count
+  explosion waiting to happen — enable it only when your scraper's
+  retention and cardinality budget can absorb one series per
+  `(provider, model)` pair actually seen.
+
+- **What's exposed** (families; see each one's own `# HELP` line in the
+  live output for the exact contract):
+  - `llmgateway_requests_total{scope_kind,scope_id}`,
+    `llmgateway_tokens_total{scope_kind,scope_id,direction}`,
+    `llmgateway_cost_micro_usd_total{scope_kind,scope_id}` — the
+    identical per-user/per-group/total accounting `GET /admin/api/usage`
+    already exposes as JSON, today's UTC-calendar-day window (resets at
+    UTC midnight).
+  - `llmgateway_budget_consumed_ratio{scope_kind,scope_id,budget}` —
+    fraction of a configured limit already consumed in its own window
+    (`0.0`–`1.0`+; above `1.0` means the limit has been breached), for
+    Prometheus's own alerting to threshold on. Emitted only for a scope
+    with that particular limit configured.
+  - `llmgateway_provider_attempts_total{provider}` /
+    `llmgateway_provider_failures_total{provider}` (+ opt-in
+    `_model_` variants, above) — the identical `attemptsDay`/`failuresDay`
+    counters `GET /admin/api/overview` already exposes.
+  - `llmgateway_provider_healthy{provider}` — `1`/`0` gauge from the
+    discovery circuit breaker (`healthState` in the admin API); see
+    [Provider health](#provider-health-discovery-circuit-breaker).
+  - `llmgateway_rate_limit_rejections_total{scope_kind,scope_id}` — how
+    many requests a rate or budget limit actually refused, by scope. This
+    one has no equivalent in the admin JSON API: nothing else tracks it.
+
+- **Aggregation across replicas — read this before wiring an alert**: with
+  `redis` configured, **every replica reads the SAME shared counters**
+  (the underlying key carries no per-instance component), so
+  `llmgateway_requests_total`, `llmgateway_tokens_total`,
+  `llmgateway_cost_micro_usd_total`, `llmgateway_budget_consumed_ratio`,
+  and both `llmgateway_provider_*_total` families are the
+  **gateway-wide total, identical on every replica's own `/metrics`
+  response**. Prometheus scrapes each replica as its own target, so
+  `sum(rate(llmgateway_requests_total[5m]))` (or any other `sum()`) across
+  a 3-replica deployment **triple-counts** — a cost alert built on `sum()`
+  fires at a third of its intended threshold. **Aggregate these with
+  `max()`, never `sum()`.** Without `redis` (the in-process fallback), the
+  identical families become genuinely **per-replica** instead — each
+  replica counts only the traffic it personally handled — and `sum()`
+  becomes the correct aggregation instead. This flips on that one config
+  bit; know which one you are running before wiring an alert. Two
+  families do **not** follow this rule:
+  - `llmgateway_rate_limit_rejections_total` lives only in each replica's
+    own process memory, **never** in Redis, regardless of the `redis`
+    config — `sum()` is always correct for it.
+  - `llmgateway_provider_healthy` reflects each replica's own,
+    independently-running discovery circuit breaker — never shared via
+    Redis either — so two replicas can legitimately disagree about one
+    provider's health at the same instant. Read it per-instance where
+    possible; if you must aggregate, `min()` surfaces "at least one
+    replica sees this provider as unhealthy" — `sum()` is meaningless for
+    a 0/1 gauge.
+
+- **Labels are escaped**: a label value that is user- or
+  upstream-controlled (a user/group name, a model id) is escaped for
+  backslash, double quote, and newline, byte-for-byte — the exact rule
+  the text-exposition format requires. This matters more than it looks:
+  Prometheus reports an unparseable scrape as the **whole target being
+  down**, not as one bad line, so a single unescaped quote in a model id
+  would otherwise take the entire endpoint offline from Prometheus's point
+  of view, not just that one series.
+
+- **A store outage never fabricates a zero**: if the configured Redis is
+  unreachable and `redis.failOpen` is `false`, an affected scope's
+  request/token/cost/provider counters are **skipped entirely** for that
+  scrape rather than reported as `0` — a temporary gap in the series is
+  the honest signal; a fabricated `0` would read to Prometheus as a
+  counter reset followed by a phantom spike the instant the store
+  recovers. `llmgateway_provider_healthy` is unaffected either way — it
+  never reads from the store.
 
 ## MCP and A2A
 
