@@ -3,6 +3,7 @@ package traefikllmgateway
 import (
 	"fmt"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -717,5 +718,100 @@ func TestAuthStore_Identify_SuccessfulAuthDoesNotRecordFailure(t *testing.T) {
 		if _, _, ok := a.identify(r); !ok {
 			t.Fatalf("attempt %d: want success (valid key), got failure", i)
 		}
+	}
+}
+
+// --- security audit finding 5: duplicate/empty user names ---
+
+func TestNewAuthStore_EmptyUserName_ReturnsError(t *testing.T) {
+	cfg := &Config{
+		Providers: map[string]*ProviderConfig{"openai": {Type: "openai", APIKey: "k"}},
+		Groups:    map[string]*GroupConfig{"eng": {}},
+		Users:     &UsersConfig{Inline: []*UserConfig{{Name: "", Group: "eng", APIKey: "sk-secret"}}},
+	}
+	if _, err := newAuthStore(cfg); err == nil {
+		t.Fatal("want error for an empty user name")
+	}
+}
+
+func TestNewAuthStore_DuplicateUserName_ReturnsError(t *testing.T) {
+	cfg := &Config{
+		Providers: map[string]*ProviderConfig{"openai": {Type: "openai", APIKey: "k"}},
+		Groups:    map[string]*GroupConfig{"eng": {}},
+		Users: &UsersConfig{Inline: []*UserConfig{
+			{Name: "dup", Group: "eng", APIKey: "sk-one"},
+			{Name: "dup", Group: "eng", APIKey: "sk-two"},
+		}},
+	}
+	_, err := newAuthStore(cfg)
+	if err == nil {
+		t.Fatal("want error for two inline users sharing the same name")
+	}
+	if !strings.Contains(err.Error(), "duplicate user name") {
+		t.Errorf("error = %q, want it to mention the duplicate-name check specifically (not the API-key one)", err.Error())
+	}
+}
+
+func TestAuthStore_ReplaceFileUsers_EmptyUserName_ReturnsError(t *testing.T) {
+	a, err := newAuthStore(testAuthCfg())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.replaceFileUsers([]*UserConfig{{Name: "", Group: "eng", APIKey: "sk-file1"}}); err == nil {
+		t.Fatal("want error for a file user with an empty name")
+	}
+}
+
+func TestAuthStore_ReplaceFileUsers_DuplicateUserNameWithinFile_ReturnsError(t *testing.T) {
+	a, err := newAuthStore(testAuthCfg())
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = a.replaceFileUsers([]*UserConfig{
+		{Name: "dup", Group: "eng", APIKey: "sk-file1"},
+		{Name: "dup", Group: "eng", APIKey: "sk-file2"},
+	})
+	if err == nil {
+		t.Fatal("want error for two file users sharing the same name")
+	}
+	if !strings.Contains(err.Error(), "duplicate user name") {
+		t.Errorf("error = %q, want it to mention the duplicate-name check specifically (not the API-key one)", err.Error())
+	}
+
+	// The store must still be usable — the rejected replace must not have
+	// partially mutated it.
+	r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	r.Header.Set("Authorization", "Bearer sk-secret")
+	if _, _, ok := a.identify(r); !ok {
+		t.Fatal("want the original inline user still resolvable after a rejected duplicate-name replace")
+	}
+}
+
+// TestAuthStore_ReplaceFileUsers_SameNameAsInline_DifferentKey_OverrideAllowed
+// proves the new duplicate-name check does NOT reject the intentional
+// cross-source override replaceFileUsers' own doc comment describes: a
+// file user of the same name as an inline user, even with a different API
+// key, must still win — this is a feature (rotating/promoting a
+// statically-configured user through the hot-reloadable file), not a
+// duplicate.
+func TestAuthStore_ReplaceFileUsers_SameNameAsInline_DifferentKey_OverrideAllowed(t *testing.T) {
+	a, err := newAuthStore(testAuthCfg()) // inline user "a" / sk-secret, group eng
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.replaceFileUsers([]*UserConfig{{Name: "a", Group: "eng", APIKey: "sk-file-a"}}); err != nil {
+		t.Fatalf("replaceFileUsers: want the same-name override allowed, got error: %v", err)
+	}
+
+	inlineReq := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	inlineReq.Header.Set("Authorization", "Bearer sk-secret")
+	if _, _, ok := a.identify(inlineReq); ok {
+		t.Fatal("want the inline key overridden once the file defines a same-named user")
+	}
+	fileReq := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	fileReq.Header.Set("Authorization", "Bearer sk-file-a")
+	u, _, ok := a.identify(fileReq)
+	if !ok || u.name != "a" {
+		t.Fatalf("want the file-sourced user resolvable under the overridden name, got %v ok=%v", u, ok)
 	}
 }

@@ -323,11 +323,22 @@ func newAuthStore(cfg *Config) (*authStore, error) {
 	}
 
 	if cfg.Users != nil {
+		// seenNames rejects two INLINE users sharing the same name
+		// (security audit finding 5, 2026-08-22) — scoped to inline only,
+		// not cross-checked against a later file-sourced set: replaceFileUsers
+		// intentionally allows a file user to override an inline user of the
+		// same name (its own doc comment), so "duplicate name" only ever
+		// means "duplicate within the same source".
+		seenNames := make(map[string]bool, len(cfg.Users.Inline))
 		for _, uc := range cfg.Users.Inline {
 			entry, err := a.buildEntry(uc)
 			if err != nil {
 				return nil, err
 			}
+			if seenNames[entry.user.name] {
+				return nil, fmt.Errorf("llmgateway: duplicate user name %q", entry.user.name)
+			}
+			seenNames[entry.user.name] = true
 			if _, exists := a.inline[entry.digest]; exists {
 				return nil, fmt.Errorf("llmgateway: duplicate API key for user %q", uc.Name)
 			}
@@ -341,9 +352,32 @@ func newAuthStore(cfg *Config) (*authStore, error) {
 // buildEntry resolves uc's group and API key into an authEntry. The API key
 // goes through resolveSecret before digesting, so env:/file: references
 // work the same as for provider keys.
+//
+// uc.Name must be non-empty (security audit finding 5, 2026-08-22):
+// counters are keyed on a user's name (windowKey's "kind:id:..." shape,
+// limits.go, called with id=u.name at routes_unified.go's own call site),
+// so an empty name would collapse every such user's requests-per-minute/
+// day, token, and cost counters onto the single shared key
+// "llmgw:user::...", each silently overwriting the others' admission
+// checks and usage — never a legitimate configuration, always a config
+// mistake worth failing construction over. This check is deliberately
+// NOT extended to configNamePattern's full character restriction
+// (providers.go): that pattern's own doc comment ties it specifically to
+// being embedded as a URL PATH SEGMENT (passthroughRoute's
+// "/{provider}/*", targetRoute's "/mcp/{name}/*" and "/a2a/{name}/*") — a
+// concern that does not apply to a user name, which is never used as a
+// route path segment anywhere in this package, only as a counter-key
+// component and a JSON field in admin views. Restricting the character
+// set beyond "non-empty" would risk rejecting a real, currently-working
+// operator-chosen name this round has no visibility into, for a route-
+// safety reason that has no bearing on users at all — see this finding's
+// own report for the full reasoning.
 func (a *authStore) buildEntry(uc *UserConfig) (*authEntry, error) {
 	if uc == nil {
 		return nil, fmt.Errorf("llmgateway: user config entry must not be nil")
+	}
+	if uc.Name == "" {
+		return nil, fmt.Errorf("llmgateway: user config entry must have a non-empty name")
 	}
 	grp, ok := a.groups[uc.Group]
 	if !ok {
@@ -403,11 +437,21 @@ func (a *authStore) replaceFileUsers(us []*UserConfig) error {
 		}
 		next[digest] = entry
 	}
+	// seenFileNames rejects two FILE users sharing the same name (security
+	// audit finding 5, 2026-08-22) — scoped to this call's own us slice
+	// only, never checked against a.inline: a file user overriding an
+	// inline user of the same name is this function's own documented,
+	// intentional behavior (doc comment above), not a duplicate.
+	seenFileNames := make(map[string]bool, len(us))
 	for _, uc := range us {
 		entry, err := a.buildEntry(uc)
 		if err != nil {
 			return err
 		}
+		if seenFileNames[entry.user.name] {
+			return fmt.Errorf("llmgateway: duplicate user name %q", entry.user.name)
+		}
+		seenFileNames[entry.user.name] = true
 		if _, exists := next[entry.digest]; exists {
 			return fmt.Errorf("llmgateway: duplicate API key for user %q", uc.Name)
 		}

@@ -1994,3 +1994,83 @@ func TestAdminTargets_AccessListsMatchEnforcement_AndCountersReflectTraffic(t *t
 		t.Errorf("bot2.Access = %v, want %v (restricted's own agents list excludes it)", bot2.Access, want)
 	}
 }
+
+// --- default-preserving: the live cluster's real shape (security audit, 2026-08-22) ---
+
+// TestDefaultPreserving_LiveClusterShape_LoadsAndServesIdentically models
+// the live production shape this round's five fixes must not break
+// (project brief): 5 "friend" users plus 4 "home" users (steve-cw and
+// kevinsandom are named live users; the rest are representative — real
+// names this test has no visibility into, which is exactly why finding
+// 5's fix stops short of restricting the name charset, see buildEntry's
+// own doc comment, auth.go) and 11 MCP servers. A2A agents are out of
+// scope here: none of this round's five findings touch mcp_a2a.go or any
+// A2A-specific code path, so there is no mechanism by which they could
+// regress agent handling.
+//
+// It proves construction succeeds unchanged (finding 5's new empty/
+// duplicate-name checks accept every one of these real names), a normal
+// federated tools/list call from an ordinary user still succeeds under a
+// realistic per-minute limit (finding 1b's per-backend weighting does not
+// spuriously throttle ordinary usage — 11 servers is comfortably under a
+// 60/min budget), and the admin dashboard's usage poll still returns
+// exactly one row per user and per group in a single store round trip
+// (finding 4's chunking is a no-op at 10 users, well under
+// adminUsageChunkScopes).
+func TestDefaultPreserving_LiveClusterShape_LoadsAndServesIdentically(t *testing.T) {
+	friendNames := []string{"steve-cw", "kevinsandom", "friend3", "friend4", "friend5"}
+	homeNames := []string{"home1", "home2", "home3", "home4"}
+
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{"openai": {Type: "openai", APIKey: "k"}}
+	cfg.Admin = &AdminConfig{Enabled: true}
+	cfg.Groups = map[string]*GroupConfig{
+		"friends": {Limits: &LimitsConfig{RequestsPerMinute: 60}},
+		"home":    {Limits: &LimitsConfig{RequestsPerMinute: 120}},
+	}
+
+	cfg.MCPServers = make(map[string]*TargetConfig, 11)
+	for i := 0; i < 11; i++ {
+		srv := newMockJSONRPCServer(t, []mcpTool{{Name: "lookup"}})
+		cfg.MCPServers[fmt.Sprintf("mcp%d", i)] = &TargetConfig{URL: srv.srv.URL}
+	}
+
+	inline := []*UserConfig{{Name: "admin1", Group: "home", Admin: true, APIKey: "sk-admin1"}}
+	for _, name := range friendNames {
+		inline = append(inline, &UserConfig{Name: name, Group: "friends", APIKey: "sk-" + name})
+	}
+	for _, name := range homeNames {
+		inline = append(inline, &UserConfig{Name: name, Group: "home", APIKey: "sk-" + name})
+	}
+	cfg.Users = &UsersConfig{Inline: inline}
+
+	h, err := New(context.Background(), http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: want the realistic live-cluster config to load unchanged, got error: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, newFederatedRequest(t, "sk-steve-cw", jsonrpcRequest{JSONRPC: jsonrpcVersion, Method: "tools/list", ID: json.RawMessage("1")}))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("tools/list status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+
+	usageReq := httptest.NewRequest("GET", adminUsagePath, nil)
+	usageReq.Header.Set("Authorization", "Bearer sk-admin1")
+	usageRec := httptest.NewRecorder()
+	h.ServeHTTP(usageRec, usageReq)
+	if usageRec.Code != http.StatusOK {
+		t.Fatalf("admin usage status = %d, want 200, body=%s", usageRec.Code, usageRec.Body.String())
+	}
+	var usage adminUsageResponse
+	if err := json.Unmarshal(usageRec.Body.Bytes(), &usage); err != nil {
+		t.Fatalf("decode admin usage: %v", err)
+	}
+	wantUsers := len(friendNames) + len(homeNames) + 1 // + admin1
+	if len(usage.Users) != wantUsers {
+		t.Errorf("admin usage users = %d, want %d", len(usage.Users), wantUsers)
+	}
+	if len(usage.Groups) != 2 {
+		t.Errorf("admin usage groups = %d, want 2", len(usage.Groups))
+	}
+}
