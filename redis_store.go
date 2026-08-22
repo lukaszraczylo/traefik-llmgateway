@@ -134,6 +134,10 @@ func (s *redisStore) incrMulti(entries []counterIncr) ([]int64, error) {
 // (see its own doc comment) apply to the INCRBY half of this call; the GET
 // half is read-only and carries no such caveat.
 func (s *redisStore) incrAndGetMulti(entries []counterIncr, reads []string) ([]int64, []int64, error) {
+	if len(entries) == 0 && len(reads) == 0 {
+		return nil, nil, nil
+	}
+
 	cmds := make([][]string, 0, len(entries)*2+len(reads))
 	for _, e := range entries {
 		cmds = append(cmds,

@@ -1320,9 +1320,15 @@ func TestTokenBudget_ExactBoundaryViolates(t *testing.T) {
 // within one scope, requests-per-minute, then requests-per-day, then
 // tokens-per-day, then tokens-per-month, then cost-per-day, then
 // cost-per-month; across scopes, the scope earlier in the given slice
-// (buildLimitScopes puts a user before their group) wins. Every subtest
-// engineers TWO simultaneously-true violation conditions and asserts only
-// the higher-precedence one is ever reported.
+// (buildLimitScopes puts a user before their group) wins. The first six
+// subtests each engineer TWO simultaneously-true violation conditions
+// (one per limit type in a precedence pair) and assert only the
+// higher-precedence one is ever reported; the seventh engineers only ONE
+// condition (the group violates, the user carries no limits at all) to
+// pin the separate claim that a later scope still gets evaluated at all
+// when an earlier one has nothing to check (review fix, 2026-08-22, round
+// 2: this doc comment previously claimed all seven subtests engineered
+// two conditions, which was not true of the seventh).
 func TestCheckAndCount_FusedViolationPrecedence(t *testing.T) {
 	t.Run("requests-per-minute beats requests-per-day in the same scope", func(t *testing.T) {
 		l := newLimiter(nil, true)

@@ -32,7 +32,7 @@ const storeDownLatchFor = 5 * time.Second
 // Window identifiers used throughout windowKey, counter metrics, and
 // retry-after calculation. windowHour is stats-only (v0.2 data-layer
 // task, see hourWindowTTL): checkAndCount/account both write it, but no
-// LimitsConfig field ever names it, so evaluateScope has nothing to
+// LimitsConfig field ever names it, so checkAndCount has nothing to
 // evaluate it against — GET /admin/api/usage/history (admin.go) is its
 // only reader.
 const (
@@ -48,7 +48,8 @@ const (
 // usage.prompt under metricTokIn and usage.completion under metricTokOut
 // separately, so the admin usage/history APIs can chart each direction on
 // its own. A TokensPerDay/TokensPerMonth limit still enforces a TOTAL
-// budget across both — see tokenBudgetViolation.
+// budget across both — see checkAndCount's own probe loop and
+// buildBudgetProbes' tokens field, below.
 const (
 	metricReq    = "req"
 	metricTokIn  = "tokin"
@@ -495,8 +496,8 @@ type limitScope struct {
 // totalScopeKind and totalScopeID name the synthetic "all LLM traffic"
 // scope withTotalScope (routes_unified.go) appends to every metered
 // route's scopes slice (v0.2 data-layer task): {kind: totalScopeKind, id:
-// totalScopeID}, limits always nil. evaluateScope's nil-limits check
-// (below) skips it during evaluation, so checkAndCount still counts it
+// totalScopeID}, limits always nil. checkAndCount's own nil-limits check
+// (below) skips it during evaluation, but still counts it
 // like any other scope — its req/tokin/tokout/cost counters accumulate
 // every LLM request across all users and groups combined, the admin
 // usage-history "total" series — but no configuration can ever throttle
@@ -885,8 +886,8 @@ func (l *limiter) failPolicyIncrAndGetMulti(entries []counterIncr, reads []strin
 	return incrVals, readVals, true
 }
 
-// storeDownViolation is the violation checkAndCount/budgetViolation return
-// when the configured store is unreachable and failOpen is false: the
+// storeDownViolation is the violation checkAndCount returns when the
+// configured store is unreachable and failOpen is false: the
 // request is refused instead of silently enforcing limits against a
 // non-shared fallback, so a backend outage cannot let every configured
 // limit go unenforced across a fleet of gateway instances.
@@ -974,8 +975,8 @@ func (l *limiter) getCounter(kind, id, metric, window string, t time.Time) (int6
 
 // checkAndCountKeysPerScope is the number of counterIncr entries
 // checkAndCount builds per scope (req:min, req:day, req:hour), and the
-// stride its flat storeIncrMulti result is sliced back into per-scope
-// counts by.
+// stride storeIncrAndGetMulti's flat incrVals result is sliced back into
+// per-scope counts by.
 const checkAndCountKeysPerScope = 3
 
 // budgetProbe names one token/cost budget checkAndCount's fused admission
@@ -1205,8 +1206,8 @@ func (l *limiter) account(scopes []limitScope, u usage, costMicros int64) {
 //
 // This is deliberately NOT folded into checkAndCount: a target scope
 // carries no limits by design (this round adds no config surface for
-// MCP/agent limits), so there is nothing for evaluateScope to check and no
-// violation this call could ever produce — it is pure accounting, exactly
+// MCP/agent limits), so there is nothing for checkAndCount to evaluate
+// and no violation this call could ever produce — it is pure accounting, exactly
 // like account() itself, hence the identical "no error return, ok
 // discarded" contract. Month exists here, uniquely, because the admin
 // dashboard's targets endpoint (admin.go's adminTargetCountersView)
@@ -1655,7 +1656,8 @@ const usageKeysPerScope = 8
 // tokensPerDay/tokensPerMonth pair (v0.2 data-layer task, tokens-in/
 // tokens-out split): a caller wanting the combined total a
 // LimitsConfig.TokensPerDay/TokensPerMonth limit is actually evaluated
-// against (tokenBudgetViolation) sums the two itself.
+// against (checkAndCount's own probe loop, via buildBudgetProbes) sums
+// the two itself.
 type scopeUsage struct {
 	kind               string // "user", "group", or "total", mirroring limitScope.kind
 	id                 string

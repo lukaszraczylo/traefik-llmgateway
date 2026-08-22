@@ -133,6 +133,73 @@ func TestRedisStore_IncrAndGetMulti_EmptyReads(t *testing.T) {
 	}
 }
 
+// TestRedisStore_IncrAndGetMulti_NoEntriesOrReads_SkipsThePipelineCall
+// asserts the empty-input guard (review fix, 2026-08-22, round 2 —
+// symmetry with incrMulti's own len(entries)==0 guard): no commands are
+// sent, and the call returns cleanly, when both entries and reads are
+// empty.
+func TestRedisStore_IncrAndGetMulti_NoEntriesOrReads_SkipsThePipelineCall(t *testing.T) {
+	ln := newFakeListener(t)
+	// No respStep script at all: any command reaching the fake server
+	// (including the connection-setup SELECT) would fail this test by
+	// timing out waiting for a script step that does not exist.
+	store := newRedisStore(newRESPClient(ln.Addr().String(), "", 0))
+	incrVals, readVals, err := store.incrAndGetMulti(nil, nil)
+	if err != nil {
+		t.Fatalf("incrAndGetMulti: %v", err)
+	}
+	if len(incrVals) != 0 || len(readVals) != 0 {
+		t.Errorf("incrVals=%v readVals=%v, want both empty", incrVals, readVals)
+	}
+}
+
+// TestRedisStore_IncrAndGetMulti_GetReplyErrors is the GET-reply-error
+// half of the perf-review round-3 pipelining test (review fix, 2026-08-22,
+// round 2 — parity with respClient.getBatch's own equivalent table,
+// TestRESPClient_GetBatch, resp_test.go): a RESP error reply or a
+// non-integer value on any read key fails the WHOLE call, matching
+// getBatch's own all-or-nothing contract, since incrAndGetMulti decodes
+// GET replies itself rather than delegating to getBatch.
+func TestRedisStore_IncrAndGetMulti_GetReplyErrors(t *testing.T) {
+	cases := []struct {
+		name          string
+		wantErrSubstr string
+		steps         []respStep
+	}{
+		{
+			name: "a RESP error reply on a read key fails the whole call",
+			steps: []respStep{
+				{wantArgs: []string{"INCRBY", "k", "1"}, reply: []byte(":1\r\n")},
+				{wantArgs: []string{"EXPIRE", "k", "60"}, reply: []byte(":1\r\n")},
+				{wantArgs: []string{"GET", "budget"}, reply: []byte("-ERR busy\r\n")},
+			},
+			wantErrSubstr: "ERR busy",
+		},
+		{
+			name: "a non-integer value on a read key fails the whole call",
+			steps: []respStep{
+				{wantArgs: []string{"INCRBY", "k", "1"}, reply: []byte(":1\r\n")},
+				{wantArgs: []string{"EXPIRE", "k", "60"}, reply: []byte(":1\r\n")},
+				{wantArgs: []string{"GET", "budget"}, reply: []byte("$3\r\nabc\r\n")},
+			},
+			wantErrSubstr: "non-integer value",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			ln := newFakeListener(t)
+			steps := append([]respStep{{wantArgs: []string{"SELECT", "0"}, reply: []byte("+OK\r\n")}}, c.steps...)
+			runFakeRESPServer(t, ln, steps)
+
+			store := newRedisStore(newRESPClient(ln.Addr().String(), "", 0))
+			entries := []counterIncr{{key: "k", delta: 1, ttl: time.Minute}}
+			_, _, err := store.incrAndGetMulti(entries, []string{"budget"})
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), c.wantErrSubstr)
+		})
+	}
+}
+
 // TestRedisStore_IncrBy_RoundsSubSecondTTLUp asserts a ttl under one
 // second is never sent to EXPIRE as 0 (which would delete the key
 // immediately) — it is rounded up to a 1s floor.
