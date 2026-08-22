@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { formatCompactCount, formatContextWindow, formatModelCostHover, refreshDetailLabel, refreshLabel } from './format'
+import { formatCompactCount, formatContextWindow, formatModelCostHover, formatUntil, refreshDetailLabel, refreshLabel } from './format'
 
 const ZERO_TIME = '0001-01-01T00:00:00Z'
 
@@ -95,6 +95,30 @@ describe('formatModelCostHover', () => {
 
   it('renders a sub-dollar price with two decimals', () => {
     expect(formatModelCostHover(0.19, 0.51)).toBe('in $0.19 / out $0.51 per MTok')
+  })
+})
+
+// Discovery circuit breaker (feat/provider-health, round 3): openUntil's
+// future-time counterpart to formatAgo's past-time "(Ns ago)". Only
+// caller today is ProvidersView.vue's healthBadgeLabel, rendering the
+// breaker's live "open (in Ns)" countdown.
+describe('formatUntil', () => {
+  it('renders "" for the unset zero-time sentinel', () => {
+    expect(formatUntil(ZERO_TIME)).toBe('')
+  })
+
+  it('renders "" for undefined', () => {
+    expect(formatUntil(undefined)).toBe('')
+  })
+
+  it('renders "in Ns" for a future timestamp', () => {
+    const inFortyTwoSeconds = new Date(Date.now() + 42_000).toISOString()
+    expect(formatUntil(inFortyTwoSeconds)).toMatch(/^in \d+s$/)
+  })
+
+  it('renders "" for a timestamp already in the past — a stale poll must not show a negative countdown', () => {
+    const oneMinuteAgo = new Date(Date.now() - 60_000).toISOString()
+    expect(formatUntil(oneMinuteAgo)).toBe('')
   })
 })
 

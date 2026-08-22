@@ -367,7 +367,7 @@ func TestModelRegistry_RefreshProvider_MetadataPanicDoesNotFailDiscovery(t *test
 	if !reg.states["lmstudio"].hasModel("m2") {
 		t.Error("a panic in metadata capture must not discard the successful discovery result")
 	}
-	_, _, lastErr := reg.states["lmstudio"].snapshot()
+	_, _, lastErr, _, _ := reg.states["lmstudio"].snapshot()
 	if lastErr != "" {
 		t.Errorf("lastErr = %q, want empty — discovery itself succeeded; only metadata capture panicked", lastErr)
 	}

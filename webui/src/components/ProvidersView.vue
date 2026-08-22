@@ -21,7 +21,7 @@ import {
   CardTitle,
 } from '@/components/ui/card'
 import { useSearchQuery } from '@/composables/useSearchQuery'
-import { formatAgo, formatContextWindow, refreshDetailLabel, refreshLabel, routableModelId } from '@/lib/format'
+import { formatAgo, formatContextWindow, formatUntil, refreshDetailLabel, refreshLabel, routableModelId } from '@/lib/format'
 import { isModelDegraded } from '@/lib/provider-rate'
 import { type ExpandState, clearExpandOverrides, computeExpandedItems, toggleItemExpand } from '@/lib/search-expand'
 import { useDashboardStore } from '@/stores/dashboard'
@@ -169,6 +169,36 @@ function modelMetaFor(p: AdminProviderView, model: string): AdminModelMetaView {
   return p.modelMeta?.[model] ?? ZERO_MODEL_META
 }
 
+// --- discovery circuit breaker (feat/provider-health) ---
+//
+// Badge shown ONLY for 'open'/'half-open' — mirroring modelIsDegraded's
+// own "no badge when healthy" convention above: a 'closed' provider (the
+// common case) renders no breaker badge at all, exactly like a
+// non-degraded model gets no ProviderRateBadge.
+
+/** healthBadgeVariant maps healthState to the shadcn-vue Badge variant: destructive (backing off) for 'open', secondary (in progress) for 'half-open', undefined (no badge) for 'closed'. */
+function healthBadgeVariant(state: AdminProviderView['healthState']): 'destructive' | 'secondary' | undefined {
+  switch (state) {
+    case 'open':
+      return 'destructive'
+    case 'half-open':
+      return 'secondary'
+    default:
+      return undefined
+  }
+}
+
+/** healthBadgeLabel renders the breaker badge's text: "open (in Ns)" while backing off (formatUntil omits the parenthetical once openUntil has passed or is unset), or "half-open" while probing. */
+function healthBadgeLabel(p: AdminProviderView): string {
+  const until = formatUntil(p.openUntil)
+  return until ? `${p.healthState} (${until})` : p.healthState
+}
+
+/** healthDetailClass matches the accordion-content detail row's text color to healthBadgeVariant's own trigger-row Badge color, rather than hardcoding text-destructive for every non-closed state: destructive (red) for 'open', muted (grey, the same neutral tone secondary conveys on the Badge) for 'half-open'. */
+function healthDetailClass(state: AdminProviderView['healthState']): string {
+  return state === 'open' ? 'text-destructive' : 'text-muted-foreground'
+}
+
 // --- model aliases (sortable DataTable, operator directive) ---
 //
 // The alias id gets the ModelChip copy treatment (an alias name IS the
@@ -295,6 +325,21 @@ const aliasEmptyMessage = computed(() =>
                   :attempts-minute="p.attemptsMinute"
                   :failures-minute="p.failuresMinute"
                 />
+                <!--
+                  Discovery circuit breaker (feat/provider-health): no
+                  badge at all while 'closed' (the healthy, common case),
+                  mirroring modelIsDegraded's own convention for the
+                  per-model rate badge above.
+                -->
+                <Badge
+                  v-if="p.healthState !== 'closed'"
+                  as="span"
+                  :variant="healthBadgeVariant(p.healthState)"
+                  class="font-normal"
+                  :title="p.healthState === 'open' ? 'discovery is backing off after repeated failures' : 'a discovery probe is deciding whether to recover'"
+                >
+                  {{ healthBadgeLabel(p) }}
+                </Badge>
                 <FontAwesomeIcon
                   v-if="p.lastErr"
                   :icon="faTriangleExclamation"
@@ -313,6 +358,10 @@ const aliasEmptyMessage = computed(() =>
                 <div>
                   <dt class="text-xs text-muted-foreground">Last refresh</dt>
                   <dd>{{ refreshDetailLabel(p.discoveryEnabled, p.lastRefresh) }}</dd>
+                </div>
+                <div v-if="p.healthState !== 'closed'">
+                  <dt class="text-xs text-muted-foreground">Discovery health</dt>
+                  <dd :class="healthDetailClass(p.healthState)">{{ healthBadgeLabel(p) }}</dd>
                 </div>
                 <div v-if="p.lastErr">
                   <dt class="text-xs text-muted-foreground">Last error</dt>

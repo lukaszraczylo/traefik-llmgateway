@@ -18,19 +18,23 @@ import (
 // Config is the plugin's dynamic configuration, populated by Traefik from
 // the middleware's YAML/testData. Every limit or list field follows the
 // convention: zero/empty/omitted means unlimited/all.
+// Field order below is fieldalignment-verified (golangci-lint's govet
+// enable-all, run with -fix against a scratch copy to derive the exact
+// zero-waste sequence, then hand-applied here so every field keeps its
+// original doc comment) — see providerState's own doc comment (registry.go)
+// for the general pointer-first/scalar-last convention this follows.
 type Config struct {
-	Providers  map[string]*ProviderConfig `json:"providers,omitempty"`
-	Groups     map[string]*GroupConfig    `json:"groups,omitempty"`
-	Pricing    map[string]*ModelPricing   `json:"pricing,omitempty"`
-	MCPServers map[string]*TargetConfig   `json:"mcpServers,omitempty"`
-	Agents     map[string]*AgentConfig    `json:"agents,omitempty"`
-	Users      *UsersConfig               `json:"users,omitempty"`
-	Redis      *RedisConfig               `json:"redis,omitempty"`
+	Redis *RedisConfig `json:"redis,omitempty"`
 	// Admin gates the read-only admin dashboard (spec §4, v0.2): nil or
 	// Admin.Enabled false means the /admin* routes are not registered at
 	// all — ServeHTTP falls through to its existing 404/passthroughUnknown
 	// handling for those paths, preserving v0.1 behavior exactly.
-	Admin *AdminConfig `json:"admin,omitempty"`
+	Admin      *AdminConfig             `json:"admin,omitempty"`
+	Pricing    map[string]*ModelPricing `json:"pricing,omitempty"`
+	MCPServers map[string]*TargetConfig `json:"mcpServers,omitempty"`
+	Agents     map[string]*AgentConfig  `json:"agents,omitempty"`
+	Users      *UsersConfig             `json:"users,omitempty"`
+	Groups     map[string]*GroupConfig  `json:"groups,omitempty"`
 	// ModelAliases maps an operator-defined alias id to a target model id
 	// (spec §5, v0.2) — e.g. {"aliased/coding": "anthropic/claude-sonnet-4-5"}.
 	// An exact alias match wins resolution before any other rule
@@ -39,7 +43,8 @@ type Config struct {
 	// exactly: resolve never consults an empty alias map, so no existing
 	// model id's resolution changes. Validated at construction
 	// (validateModelAliases, registry.go).
-	ModelAliases map[string]string `json:"modelAliases,omitempty"`
+	ModelAliases map[string]string          `json:"modelAliases,omitempty"`
+	Providers    map[string]*ProviderConfig `json:"providers,omitempty"`
 	// ModelMeta declares per-model metadata overrides (feature v0.23):
 	// context window size and per-token cost, keyed by an exact
 	// "provider/model" id or a bare model id (applying wherever that bare
@@ -54,6 +59,18 @@ type Config struct {
 	// discovery/builtin/absent, same as before this feature existed.
 	// Validated at construction (validateModelMeta, modelmeta.go).
 	ModelMeta map[string]*ModelMetaConfig `json:"modelMeta,omitempty"`
+	// Breaker configures the discovery circuit breaker (feat/provider-
+	// health): how many consecutive discovery-refresh failures open a
+	// provider's breaker, and how long it then backs off before probing
+	// again. A struct value, not a pointer, for the same reason as Retry/
+	// Cache below — its fields are individually zero-means-default
+	// (validateBreakerConfig, registry.go), not gated by one Enabled
+	// flag, so "omitempty" on this tag would be a no-op that misleadingly
+	// implies otherwise. The zero value (Config{} with no breaker block
+	// at all) resolves to every documented default and behaves exactly
+	// like a deployment with no circuit breaker at all for a provider
+	// that never fails — see validateBreakerConfig's own doc comment.
+	Breaker BreakerConfig `json:"breaker"`
 	// Retry is a struct value, not a pointer, because its own Enabled
 	// field is the on/off signal (unlike Redis/Users, where the block's
 	// mere presence is the signal) — so its tag omits "omitempty":
@@ -63,8 +80,7 @@ type Config struct {
 	Retry RetryConfig `json:"retry"`
 	// Cache is a struct value, not a pointer, for the same reason as Retry
 	// above: its own Enabled field is the on/off signal.
-	Cache              CacheConfig `json:"cache"`
-	PassthroughUnknown bool        `json:"passthroughUnknown,omitempty"`
+	Cache CacheConfig `json:"cache"`
 	// MaxInFlightBodyRequests caps how many unified and media JSON/
 	// multipart requests (routes_unified.go's runUnified via
 	// readAndDecodeUnifiedBody; routes_media.go's decodeMediaJSONRequest/
@@ -85,7 +101,8 @@ type Config struct {
 	// maxExplicitBodyAdmissionCap (llmgateway.go): "wins" means it
 	// overrides the self-tuned value, not that an operator can silently
 	// disable the bound entirely with an unbounded number.
-	MaxInFlightBodyRequests int `json:"maxInFlightBodyRequests,omitempty"`
+	MaxInFlightBodyRequests int  `json:"maxInFlightBodyRequests,omitempty"`
+	PassthroughUnknown      bool `json:"passthroughUnknown,omitempty"`
 }
 
 // ProviderConfig describes one upstream LLM provider.
@@ -276,6 +293,35 @@ type CacheConfig struct {
 	// value above maxCacheMaxBodyBytes is a construction error.
 	MaxBodyBytes int  `json:"maxBodyBytes,omitempty"`
 	Enabled      bool `json:"enabled,omitempty"`
+}
+
+// BreakerConfig configures the per-provider discovery circuit breaker
+// (feat/provider-health): closed -> open -> half-open, driven entirely by
+// discovery-refresh outcomes (registry.go's providerState.finishRefresh),
+// never by request-path traffic. Every field is individually zero-means-
+// default (validateBreakerConfig, registry.go) — there is no Enabled
+// flag, unlike Retry/Cache above, because the breaker is always live:
+// its defaults are chosen so a provider that never fails never notices
+// it exists, so there is nothing meaningful to "disable". Field order
+// (both strings before the int) is fieldalignment-sensitive, the same
+// convention providerState's own doc comment explains.
+type BreakerConfig struct {
+	// OpenDuration is the base backoff a newly opened breaker waits
+	// before its first half-open probe (a Go duration string, e.g.
+	// "1m"). Doubles on every further failed probe, capped at
+	// MaxOpenDuration. Empty (the default) uses
+	// defaultBreakerOpenDuration (registry.go).
+	OpenDuration string `json:"openDuration,omitempty"`
+	// MaxOpenDuration caps the exponential backoff OpenDuration above
+	// doubles into. Empty (the default) uses
+	// defaultBreakerMaxOpenDuration (registry.go). Must be >=
+	// OpenDuration when both are set.
+	MaxOpenDuration string `json:"maxOpenDuration,omitempty"`
+	// FailureThreshold is how many CONSECUTIVE failed discovery refreshes
+	// open the breaker. 0 (the default) uses defaultBreakerFailureThreshold
+	// (registry.go). A value outside 1..maxBreakerFailureThreshold is a
+	// construction error.
+	FailureThreshold int `json:"failureThreshold,omitempty"`
 }
 
 // AdminConfig configures the read-only admin dashboard (spec §4, v0.2).
