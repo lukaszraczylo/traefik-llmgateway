@@ -126,6 +126,69 @@ func TestResolveModelMeta_BuiltinTable(t *testing.T) {
 	}
 }
 
+// TestResolveModelMeta_FreeTierSuffix covers freeTierSuffix's layer
+// (review addendum): a ":free"-suffixed id is free by naming convention
+// alone, ranked above the built-in table but below an operator's own
+// config override, and never invents a context window.
+func TestResolveModelMeta_FreeTierSuffix(t *testing.T) {
+	t.Run("free-by-suffix wins over a builtin paid entry under the identical key", func(t *testing.T) {
+		const id = "review-fixture-model:free"
+		t.Cleanup(func() { delete(builtinModelMetaTable, id) })
+		builtinModelMetaTable[id] = builtinModelMeta{ContextTokens: 999, InputCostPerMTokMicroUSD: 5_000_000, OutputCostPerMTokMicroUSD: 5_000_000}
+
+		got := resolveModelMeta("openrouter", id, nil, 0, false)
+		if !got.CostKnown || got.InputCostPerMTokMicroUSD != 0 || got.OutputCostPerMTokMicroUSD != 0 {
+			t.Errorf("cost = (%d, %d, known=%v), want (0, 0, true) — free-by-suffix must beat a builtin paid entry", got.InputCostPerMTokMicroUSD, got.OutputCostPerMTokMicroUSD, got.CostKnown)
+		}
+		// Context still resolves independently — the builtin entry's own
+		// ContextTokens is a real, known value for this exact key, so it
+		// is NOT suppressed by the free-tier cost rule (freeTierSuffix
+		// affects cost only).
+		if !got.ContextKnown || got.ContextTokens != 999 {
+			t.Errorf("context = (%d, known=%v), want (999, true) — freeTierSuffix must not touch context resolution", got.ContextTokens, got.ContextKnown)
+		}
+	})
+
+	t.Run("free-by-suffix never invents context when nothing else knows it", func(t *testing.T) {
+		got := resolveModelMeta("openrouter", "some-model-nobody-prices:free", nil, 0, false)
+		if got.ContextKnown {
+			t.Errorf("context = %+v, want unknown — free-by-suffix must never invent a context window", got)
+		}
+		if !got.CostKnown || got.InputCostPerMTokMicroUSD != 0 || got.OutputCostPerMTokMicroUSD != 0 {
+			t.Errorf("cost = %+v, want known zero", got)
+		}
+	})
+
+	t.Run("an explicit operator override still beats free-by-suffix", func(t *testing.T) {
+		const id = "review-fixture-model-2:free"
+		cfg := map[string]*ModelMetaConfig{id: {InputCostPerMTokMicroUSD: 1, OutputCostPerMTokMicroUSD: 2}}
+		got := resolveModelMeta("openrouter", id, cfg, 0, false)
+		if !got.CostKnown || got.InputCostPerMTokMicroUSD != 1 || got.OutputCostPerMTokMicroUSD != 2 {
+			t.Errorf("cost = (%d, %d, known=%v), want (1, 2, true) — an explicit operator override must win over the free-by-suffix rule", got.InputCostPerMTokMicroUSD, got.OutputCostPerMTokMicroUSD, got.CostKnown)
+		}
+	})
+
+	t.Run("a non-free config override still beats free-by-suffix even at zero context", func(t *testing.T) {
+		const id = "review-fixture-model-3:free"
+		cfg := map[string]*ModelMetaConfig{id: {Free: false, InputCostPerMTokMicroUSD: 0, OutputCostPerMTokMicroUSD: 0}}
+		// A present-but-all-zero, non-Free override entry sets nothing at
+		// this layer (matches ModelMetaConfig's own "zero falls through"
+		// contract) — the free-tier suffix rule still applies underneath
+		// it, not the (absent) override.
+		got := resolveModelMeta("openrouter", id, cfg, 0, false)
+		if !got.CostKnown || got.InputCostPerMTokMicroUSD != 0 {
+			t.Errorf("cost = %+v, want known zero via the free-by-suffix fallback", got)
+		}
+	})
+
+	t.Run("an id without the suffix is unaffected", func(t *testing.T) {
+		got := resolveModelMeta("openrouter", "plain-model-id", nil, 0, false)
+		if got.CostKnown {
+			t.Errorf("cost = %+v, want unknown for a plain id with no :free suffix and no other layer", got)
+		}
+	})
+}
+
 // TestLookupModelMetaConfig covers lookupModelMetaConfig's own
 // precedence and nil-safety directly.
 func TestLookupModelMetaConfig(t *testing.T) {

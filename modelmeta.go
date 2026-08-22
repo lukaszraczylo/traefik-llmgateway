@@ -3,6 +3,7 @@ package traefikllmgateway
 import (
 	"fmt"
 	"sort"
+	"strings"
 )
 
 // microUSDPerUSD scales a micro-USD integer (ModelMetaConfig/
@@ -14,6 +15,17 @@ import (
 // quantities — one a token count, this one a currency scale — and must
 // not be conflated just because they share a value.
 const microUSDPerUSD = 1_000_000
+
+// freeTierSuffix marks a discovered model id as free by naming
+// convention alone (review addendum, feature v0.23): a real provider
+// (OpenRouter's own live API is the known case) reports free-tier model
+// ids with this exact suffix, independent of whatever LiteLLM's static
+// pricing file does or does not track for that provider. resolveModelMeta
+// checks this AFTER an operator's own config override and BEFORE the
+// built-in table, so a ":free"-suffixed id never falls through to a
+// builtin entry's paid price for that same key, and an operator can
+// still override it (e.g. to attach a context window) if they choose.
+const freeTierSuffix = ":free"
 
 // resolvedModelMeta is resolveModelMeta's result: a model's context
 // window and per-token cost, each resolved independently through its own
@@ -44,12 +56,19 @@ type resolvedModelMeta struct {
 //     names, so an exact "provider/model" form makes no sense for that
 //     table the way it does for cfg; otherwise unknown.
 //   - Cost: the config override wins when it sets Free (an explicit,
-//     known zero) or either cost field > 0; otherwise the built-in
-//     table. Discovery never reports cost, so there is no discovery
-//     layer for it.
+//     known zero) or either cost field > 0; otherwise a ":free"-suffixed
+//     model id (freeTierSuffix — review addendum) wins next, ahead of
+//     the built-in table, so a provider's own free-tier naming
+//     convention is never shadowed by a paid built-in price under the
+//     identical key; otherwise the built-in table. Discovery never
+//     reports cost, so there is no discovery layer for it.
 //
 // Absent at every applicable layer is a genuinely unknown value and is
 // never invented — ContextKnown/CostKnown both stay false in that case.
+// The freeTierSuffix rule affects ONLY cost: a ":free" id's context
+// still runs through the normal context layering above (config/
+// discovery/builtin/absent), never inherited from some other, unrelated
+// entry.
 func resolveModelMeta(provider, model string, cfg map[string]*ModelMetaConfig, discoveredContext int, discoveredKnown bool) resolvedModelMeta {
 	var out resolvedModelMeta
 	override := lookupModelMetaConfig(provider, model, cfg)
@@ -66,11 +85,13 @@ func resolveModelMeta(provider, model string, cfg map[string]*ModelMetaConfig, d
 
 	switch {
 	case override != nil && override.Free:
-		out.CostKnown = true // both cost fields stay 0 — explicit, known zero
+		out.InputCostPerMTokMicroUSD, out.OutputCostPerMTokMicroUSD, out.CostKnown = 0, 0, true
 	case override != nil && (override.InputCostPerMTokMicroUSD > 0 || override.OutputCostPerMTokMicroUSD > 0):
 		out.InputCostPerMTokMicroUSD = override.InputCostPerMTokMicroUSD
 		out.OutputCostPerMTokMicroUSD = override.OutputCostPerMTokMicroUSD
 		out.CostKnown = true
+	case strings.HasSuffix(model, freeTierSuffix):
+		out.InputCostPerMTokMicroUSD, out.OutputCostPerMTokMicroUSD, out.CostKnown = 0, 0, true
 	case builtinOK && (builtin.InputCostPerMTokMicroUSD > 0 || builtin.OutputCostPerMTokMicroUSD > 0):
 		out.InputCostPerMTokMicroUSD = builtin.InputCostPerMTokMicroUSD
 		out.OutputCostPerMTokMicroUSD = builtin.OutputCostPerMTokMicroUSD
