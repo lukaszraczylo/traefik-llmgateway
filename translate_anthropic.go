@@ -487,9 +487,34 @@ type anthropicContentBlock struct {
 
 // anthropicUsagePayload is the "usage" object on both a non-streaming
 // Anthropic response and a streaming message_start/message_delta event.
+// CacheCreationInputTokens/CacheReadInputTokens (item 6 fix, 2026-08-22
+// review) are Anthropic's prompt-cache counters: tokens written to the
+// cache and tokens read back from it, reported separately from
+// InputTokens (fresh, uncached input). Verified repro before this fix:
+// 180000 cache-creation + 20000 cache-read tokens billed as tokin=4 — the
+// two cache fields were decoded into nothing and silently dropped.
+// Caching is near-universal for Claude Code and any agentic client using
+// Anthropic's prompt cache, so ignoring them under-counted budgets by
+// orders of magnitude on the primary use case.
 type anthropicUsagePayload struct {
-	InputTokens  int64 `json:"input_tokens"`
-	OutputTokens int64 `json:"output_tokens"`
+	InputTokens              int64 `json:"input_tokens"`
+	OutputTokens             int64 `json:"output_tokens"`
+	CacheCreationInputTokens int64 `json:"cache_creation_input_tokens"`
+	CacheReadInputTokens     int64 `json:"cache_read_input_tokens"`
+}
+
+// totalInputTokens returns the full input-side token count Anthropic
+// actually billed for one request: fresh InputTokens plus both cache-tier
+// counters. This gateway's budgets/rate-limits (limits.go's usage.prompt)
+// track one combined "prompt" token count per request, not per-tier
+// pricing, so folding all three into one number here — rather than
+// pricing cache-write/cache-read tiers differently — fixes the under-
+// billing item 6 reported (2026-08-22 review) without a materially larger
+// change to pricing.go's cost model, which this fix deliberately leaves
+// alone: token-budget accuracy was the reported defect, not $ cost
+// accuracy for cache-tier pricing.
+func (p anthropicUsagePayload) totalInputTokens() int64 {
+	return p.InputTokens + p.CacheCreationInputTokens + p.CacheReadInputTokens
 }
 
 // anthropicResponseBody is the subset of a non-streaming Anthropic
@@ -559,7 +584,7 @@ func openAIResponseFromAnthropic(body []byte, model string, created int64) (map[
 		message["tool_calls"] = toolCalls
 	}
 
-	u := usage{prompt: resp.Usage.InputTokens, completion: resp.Usage.OutputTokens}
+	u := usage{prompt: resp.Usage.totalInputTokens(), completion: resp.Usage.OutputTokens}
 
 	out := map[string]any{
 		"id":      chatCompletionIDPrefix + resp.ID,
@@ -744,7 +769,7 @@ func (st *anthropicStreamState) translate(ev sseEvent) ([][]byte, error) {
 			return nil, fmt.Errorf("%w: decode anthropic message_start event: %w", errUpstream, err)
 		}
 		st.id = p.Message.ID
-		st.u.prompt = p.Message.Usage.InputTokens
+		st.u.prompt = p.Message.Usage.totalInputTokens()
 		return [][]byte{st.chunk(map[string]any{"role": "assistant"}, nil)}, nil
 
 	case "content_block_start":
@@ -910,25 +935,64 @@ func openAIToolCallFromAnthropic(bm map[string]any) (map[string]any, error) {
 }
 
 // openAIToolMessageFromAnthropic maps one Anthropic {"type":"tool_result",
-// "tool_use_id","content"} content block to an OpenAI role:"tool" message
-// ({"role":"tool","tool_call_id","content"}), the mirror of
-// anthropicToolResultBlock above.
+// "tool_use_id","content","is_error"} content block to an OpenAI
+// role:"tool" message ({"role":"tool","tool_call_id","content"}), the
+// mirror of anthropicToolResultBlock above. is_error (item 11 fix,
+// 2026-08-22 review) has no native OpenAI equivalent — a tool message
+// carries no error flag — so it is preserved via prefixErrorMarker
+// instead of being silently dropped: the previous version of this
+// function read only tool_use_id/content and discarded is_error
+// entirely, losing the failure signal for any OpenAI-backed agentic loop
+// that branches on whether a tool call succeeded.
 func openAIToolMessageFromAnthropic(bm map[string]any) map[string]any {
 	toolUseID, _ := bm["tool_use_id"].(string)
-	return map[string]any{"role": "tool", "tool_call_id": toolUseID, "content": bm["content"]}
+	content := bm["content"]
+	if isErr, _ := bm["is_error"].(bool); isErr {
+		content = prefixErrorMarker(content)
+	}
+	return map[string]any{"role": "tool", "tool_call_id": toolUseID, "content": content}
+}
+
+// prefixErrorMarker preserves Anthropic's tool_result.is_error signal
+// across the translation to OpenAI's tool message shape (item 11 fix,
+// 2026-08-22 review): a string content gets an "Error: " prefix so the
+// model still sees the failure signal in the one shape OpenAI's tool
+// message actually carries. Any other content shape (a block array, or
+// absent) is left as-is rather than guessing how to annotate it —
+// OpenAI-compatible upstreams generally infer failure from content
+// itself in that case, same as before this fix; only the common
+// string-content case previously lost the signal entirely.
+func prefixErrorMarker(content any) any {
+	if s, ok := content.(string); ok {
+		return "Error: " + s
+	}
+	return content
 }
 
 // openAIMessagesFromAnthropic maps one Anthropic message ({"role",
 // "content"}, content either a plain string or a content-block array) to
-// one or more OpenAI messages: a plain string passes through unchanged; a
-// block array splits into at most one {role, content, tool_calls?}
-// message carrying every text/image/tool_use block, followed by one
-// role:"tool" message per tool_result block (Anthropic allows a single
-// user turn to carry several tool_result blocks answering a prior
-// assistant turn's several tool_use calls — OpenAI's shape represents
-// each as its own separate message, the mirror of
-// anthropicRequestFromOpenAI's pendingToolResults accumulation above,
-// which does the same collapse in the opposite direction).
+// one or more OpenAI messages, preserving the ORIGINAL block order (item
+// 3 fix, 2026-08-22 review): a plain string passes through unchanged. For
+// a block array, text/image/tool_use blocks accumulate into one pending
+// {role, content, tool_calls?} message; each tool_result block flushes
+// that pending message (if it has anything to flush) and then emits its
+// own role:"tool" message, in the SAME relative position the tool_result
+// held in the original array. Any trailing accumulated content flushes at
+// the end.
+//
+// This ordering matters beyond cosmetics: OpenAI requires a role:"tool"
+// message to directly follow the assistant message carrying the
+// tool_calls it answers, with nothing in between. The PREVIOUS version of
+// this function always emitted every tool_result AFTER the combined
+// content/tool_calls message regardless of where it actually appeared in
+// the original block array — correct for the common shape (a user turn
+// that is pure tool_results, following an assistant's pure tool_use
+// turn), but wrong for a legal Anthropic user turn shaped [tool_result,
+// text]: the old code emitted [user(text), tool(...)], inserting a
+// non-tool message between an assistant's tool_calls and its answer and
+// getting a 400 from OpenAI ("messages with role 'tool' must be a
+// response to a preceding message with 'tool_calls'"). Preserving
+// original order fixes both shapes without special-casing either.
 func openAIMessagesFromAnthropic(role string, content any) ([]any, error) {
 	if s, ok := content.(string); ok {
 		return []any{map[string]any{"role": role, "content": s}}, nil
@@ -942,9 +1006,27 @@ func openAIMessagesFromAnthropic(role string, content any) ([]any, error) {
 		return []any{map[string]any{"role": role, "content": ""}}, nil
 	}
 
-	var contentParts []any
-	var toolCalls []any
-	var toolResults []any
+	var out []any
+	var pendingContent []any
+	var pendingToolCalls []any
+	flushPending := func() {
+		if len(pendingContent) == 0 && len(pendingToolCalls) == 0 {
+			return
+		}
+		m := map[string]any{"role": role}
+		if len(pendingContent) > 0 {
+			m["content"] = pendingContent
+		} else {
+			m["content"] = nil
+		}
+		if len(pendingToolCalls) > 0 {
+			m["tool_calls"] = pendingToolCalls
+		}
+		out = append(out, m)
+		pendingContent = nil
+		pendingToolCalls = nil
+	}
+
 	for _, b := range blocksRaw {
 		bm, ok := b.(map[string]any)
 		if !ok {
@@ -953,38 +1035,25 @@ func openAIMessagesFromAnthropic(role string, content any) ([]any, error) {
 		switch bt, _ := bm["type"].(string); bt {
 		case "text":
 			text, _ := bm["text"].(string)
-			contentParts = append(contentParts, map[string]any{"type": "text", "text": text})
+			pendingContent = append(pendingContent, map[string]any{"type": "text", "text": text})
 		case "image":
 			part, err := openAIContentPartFromAnthropicImage(bm)
 			if err != nil {
 				return nil, err
 			}
-			contentParts = append(contentParts, part)
+			pendingContent = append(pendingContent, part)
 		case "tool_use":
 			tc, err := openAIToolCallFromAnthropic(bm)
 			if err != nil {
 				return nil, err
 			}
-			toolCalls = append(toolCalls, tc)
+			pendingToolCalls = append(pendingToolCalls, tc)
 		case "tool_result":
-			toolResults = append(toolResults, openAIToolMessageFromAnthropic(bm))
+			flushPending()
+			out = append(out, openAIToolMessageFromAnthropic(bm))
 		}
 	}
-
-	var out []any
-	if len(contentParts) > 0 || len(toolCalls) > 0 {
-		m := map[string]any{"role": role}
-		if len(contentParts) > 0 {
-			m["content"] = contentParts
-		} else {
-			m["content"] = nil
-		}
-		if len(toolCalls) > 0 {
-			m["tool_calls"] = toolCalls
-		}
-		out = append(out, m)
-	}
-	out = append(out, toolResults...)
+	flushPending()
 	return out, nil
 }
 
@@ -1032,6 +1101,32 @@ func openAIToolChoiceFromAnthropic(tc any) any {
 	}
 }
 
+// openAIReasoningModelPrefixes are OpenAI (and OpenAI-compatible) model
+// id prefixes that reject the "max_tokens" request field with a 400 and
+// require "max_completion_tokens" instead (item 10 fix, 2026-08-22
+// review): the o-series reasoning models and the gpt-5 family. Matched
+// against the resolved upstream model id, case-sensitively, the same
+// case OpenAI's own ids use.
+var openAIReasoningModelPrefixes = []string{"o1", "o3", "o4", "gpt-5"}
+
+// isOpenAIReasoningModel reports whether model is one of the model
+// families openAIRequestFromAnthropic (below) must emit
+// "max_completion_tokens" for instead of "max_tokens" — see
+// openAIReasoningModelPrefixes' own doc comment. model may carry a
+// "provider/" prefix; this only needs a prefix match on the bare id
+// portion after it.
+func isOpenAIReasoningModel(model string) bool {
+	if _, rest, ok := strings.Cut(model, "/"); ok {
+		model = rest
+	}
+	for _, prefix := range openAIReasoningModelPrefixes {
+		if strings.HasPrefix(model, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 // openAIRequestFromAnthropic maps an Anthropic Messages API request body
 // (already decoded into map[string]any by the messages route's shared
 // admission/decode path) to an OpenAI chat-completion request body, the
@@ -1039,17 +1134,27 @@ func openAIToolChoiceFromAnthropic(tc any) any {
 // *translateError — never wrapped, matching this file's established
 // convention — for a content block this translator cannot map (an
 // unsupported image source type).
-func openAIRequestFromAnthropic(req map[string]any) (map[string]any, error) {
+//
+// The second return value lists request fields this translator
+// recognizes but has no OpenAI equivalent for and therefore dropped
+// (item 11 fix, 2026-08-22 review) — currently only "thinking"
+// (Anthropic's extended-thinking/reasoning-budget config). The caller
+// (routes_messages.go's callTranslatedMessages) logs a warning per
+// dropped field rather than this function logging directly: every other
+// function in this file is a pure, Gateway-free translator, callable and
+// testable without a *Gateway instance, and this keeps it that way.
+func openAIRequestFromAnthropic(req map[string]any) (map[string]any, []string, error) {
 	out := map[string]any{}
-	if model, ok := req["model"].(string); ok {
-		out["model"] = model
+	modelStr, _ := req["model"].(string)
+	if modelStr != "" {
+		out["model"] = modelStr
 	}
 
 	msgs := make([]any, 0, 1)
 	if sys, ok := req["system"]; ok {
 		text, err := anthropicSystemToText(sys)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		if text != "" {
 			msgs = append(msgs, map[string]any{"role": "system", "content": text})
@@ -1065,7 +1170,7 @@ func openAIRequestFromAnthropic(req map[string]any) (map[string]any, error) {
 		role, _ := msg["role"].(string)
 		converted, err := openAIMessagesFromAnthropic(role, msg["content"])
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		msgs = append(msgs, converted...)
 	}
@@ -1073,7 +1178,15 @@ func openAIRequestFromAnthropic(req map[string]any) (map[string]any, error) {
 
 	if v, ok := req["max_tokens"]; ok {
 		if n, ok2 := toInt64(v); ok2 {
-			out["max_tokens"] = n
+			// Reasoning models (o1/o3/o4/gpt-5 family) reject "max_tokens"
+			// with a 400 and require "max_completion_tokens" instead
+			// (item 10 fix, 2026-08-22 review) — isOpenAIReasoningModel's
+			// own doc comment has the model-family list.
+			if isOpenAIReasoningModel(modelStr) {
+				out["max_completion_tokens"] = n
+			} else {
+				out["max_tokens"] = n
+			}
 		}
 	}
 	if v, ok := req["temperature"]; ok {
@@ -1104,7 +1217,12 @@ func openAIRequestFromAnthropic(req map[string]any) (map[string]any, error) {
 		}
 	}
 
-	return out, nil
+	var dropped []string
+	if _, ok := req["thinking"]; ok {
+		dropped = append(dropped, "thinking")
+	}
+
+	return out, dropped, nil
 }
 
 // openAIChatResponseBody is the subset of a non-streaming OpenAI

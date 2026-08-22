@@ -28,6 +28,10 @@ combination.
   and from Anthropic's and Google Gemini's own wire formats, so any
   OpenAI-SDK-compatible client can talk to all three providers through one
   API shape.
+- An Anthropic-compatible surface (`POST /v1/messages`) for Anthropic SDK
+  clients — including Claude Code — to talk to any configured provider in
+  Anthropic's own Messages API shape; see [Anthropic Messages API
+  (`/v1/messages`)](#anthropic-messages-api-v1messages).
 - Native passthrough per provider (`/{provider}/...`) for callers that want
   a provider's own wire format untouched, with the gateway injecting that
   provider's own API key and still enforcing auth and limits.
@@ -929,6 +933,80 @@ only once it has something to authorize:
   will see every Gemini passthrough request denied. Route Gemini traffic
   for a model-restricted group through the unified `/v1/*` API instead.
 
+## Anthropic Messages API (`/v1/messages`)
+
+`POST /v1/messages` serves Anthropic SDK clients — including Claude
+Code — directly, in Anthropic's own Messages API request/response shape:
+the inbound counterpart to the outbound-only Anthropic support the
+unified routes already had. From model resolution through response
+caching, usage accounting, and adapter-error handling, this route shares
+one implementation with `/v1/chat/completions`
+(`runMeteredCall`, `routes_unified.go`) — the same group authorization
+(see [`GroupConfig`](#groupconfig)), [limits and
+accounting](#limits-and-accounting), and [caching](#caching) semantics
+apply. Only the wire shape and the client-facing error envelope are
+specific to this route.
+
+### Authentication
+
+Anthropic SDKs authenticate with the `x-api-key` header, not
+`Authorization: Bearer`. This route accepts **both** — the identical
+credential lookup (`authStore.identify`, `auth.go`) every other route
+uses already reads either header, `Authorization: Bearer` taking
+priority if a request somehow carries both — so no separate credential
+path exists for this route. A failed auth answers in Anthropic's own
+error shape (`{"type":"error","error":{"type":"authentication_error",
+"message":"..."}}`), never the OpenAI-shaped
+`{"error":{"type":...,"code":...}}` every other route uses.
+
+### Translation vs. passthrough
+
+Behavior depends entirely on the resolved provider's configured `type`:
+
+| Resolved provider `type` | Behavior |
+|---|---|
+| `anthropic` | **Passthrough.** The request reaches that provider's own `/v1/messages` endpoint untranslated — no message-body translation of any kind. The response reaches the client unchanged, field for field, with one exception: `"model"` is rewritten to the client's own requested alias, the same routing rewrite every route applies before any adapter call — not a translation of the response body. |
+| `openai` or `gemini` | **Full bidirectional translation**, through the same `providerAdapter.chatCompletion` a `/v1/chat/completions` request against that provider already uses — its contract is OpenAI-shape in, OpenAI-shape out regardless of provider type. The Anthropic-shaped request is translated to OpenAI's shape before the call; that provider's OpenAI-shaped response is translated back to Anthropic's shape before it reaches the client. |
+
+A few translation specifics worth knowing:
+
+- **`anthropic-beta` is forwarded** to an `anthropic`-type upstream (an
+  explicit allowlist — `Authorization`, `x-api-key`, `Cookie`, and every
+  hop-by-hop header are never forwarded, and the gateway's own credential
+  injection always overrides whatever the allowlist copied), so Claude
+  Code and the SDKs can still opt into 1M context, token-efficient
+  tools, computer use, and other beta features through this route.
+- **Prompt-cache tokens are billed.** Anthropic's
+  `cache_creation_input_tokens` and `cache_read_input_tokens` fold into
+  the same combined prompt-token count every other route's budgets
+  track, alongside `input_tokens` — not dropped, and not priced at a
+  separate cache-tier rate.
+- **`tool_result.is_error`** has no native OpenAI tool-message field; a
+  string `content` gets an `"Error: "` prefix so an OpenAI-backed
+  agentic loop still sees the failure signal.
+- **Reasoning models** (OpenAI's `o1`/`o3`/`o4`/`gpt-5` families) get
+  `max_completion_tokens` instead of `max_tokens` — the field those
+  models reject with a 400.
+- **`thinking`** (Anthropic's extended-thinking config) has no OpenAI
+  equivalent and is dropped when translating to an `openai`/`gemini`
+  target; the gateway logs a warning naming the dropped field rather
+  than discarding it silently.
+
+### Streaming is not yet supported
+
+`"stream"` set to anything other than the JSON literal `false` (or left
+unset) gets a clean **400** `invalid_request_error` — never silently
+ignored, never answered non-streamed. This is deliberately a 400, not a
+501: Anthropic's own SDKs retry any status ≥ 500, so a 501 here would
+turn every streaming call — the default for Claude Code — into a
+multi-request retry storm against the caller's own request-rate limit.
+The rejection happens *before* the rate limiter runs, so a
+streaming-rejected request never consumes budget either. A follow-up
+release adds the Anthropic SSE event translator
+(`message_start`/`content_block_delta`/`message_stop`) — a genuinely
+different event model from OpenAI's own stream shape this plugin already
+forwards on `/v1/chat/completions`.
+
 ## Image and audio endpoints
 
 `POST /v1/images/generations`, `POST /v1/audio/speech`, and
@@ -1346,10 +1424,18 @@ the plugin's only non-standard-library runtime dependency.
 - **A request rejected before it reaches a provider never consumes
   request-rate quota.** On the unified routes, a malformed body, a missing
   `model` field, or an unknown/denied model (404/403) is rejected before
-  `limiter.checkAndCount` runs. On native passthrough and the MCP/A2A
-  proxy, denied provider/target access (403), an unsupported `Upgrade`
-  request (501), and a path-traversal attempt (400) are all checked before
-  the limiter too. Once a request *does* reach a provider adapter,
+  `limiter.checkAndCount` runs. `/v1/messages` goes further for one
+  specific field: it decodes the body and rejects a streaming request
+  (400) *before* the rate limiter runs too, the opposite relative order
+  from the unified routes' own admission-before-decode default — a
+  deliberate, route-scoped exception (see [Anthropic Messages
+  API](#anthropic-messages-api-v1messages)), since Anthropic SDKs retry
+  any 5xx and would otherwise burn multiple requests of budget per
+  logical streaming call against a route that does not support streaming
+  yet. On native passthrough and the MCP/A2A proxy, denied provider/target
+  access (403), an unsupported `Upgrade` request (501), and a
+  path-traversal attempt (400) are all checked before the limiter too.
+  Once a request *does* reach a provider adapter,
   though, a translate-time 400 (an unsupported parameter combination) or
   Anthropic's embeddings 501 still count toward the caller's request-rate
   limit — the limiter already ran by then — though neither ever bills a

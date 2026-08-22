@@ -58,19 +58,25 @@ func newMessagesTestGateway(t *testing.T, anthropicURL, openaiURL string) *Gatew
 
 // TestHandleMessages_AnthropicProvider_Passthrough proves a /v1/messages
 // request resolved to an anthropic-type provider is forwarded to that
-// provider's own Messages endpoint and its response copied back to the
-// client byte-for-byte (brief: "pass through, no translation of the
-// message body"), while still authenticating upstream and accounting
-// usage exactly like every other route.
+// provider's own Messages endpoint UNTRANSLATED (brief: "pass through, no
+// translation of the message body") and its response copied back to the
+// client with every field preserved except "model", which is rewritten to
+// the client's own requested alias (item 4 fix, 2026-08-22 review: a
+// routing rewrite, not message-body translation — every OTHER field,
+// including ones this translator does not itself know about, survives
+// unchanged), while still authenticating upstream, forwarding the
+// anthropic-beta header (item 5), billing prompt-cache tokens (item 6),
+// and accounting usage exactly like every other route.
 func TestHandleMessages_AnthropicProvider_Passthrough(t *testing.T) {
-	const anthResp = `{"id":"msg_01ABC","type":"message","role":"assistant","content":[{"type":"text","text":"hi there"}],"model":"claude-real","stop_reason":"end_turn","usage":{"input_tokens":12,"output_tokens":6}}`
+	const anthResp = `{"id":"msg_01ABC","type":"message","role":"assistant","content":[{"type":"text","text":"hi there"}],"model":"claude-real","stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":12,"output_tokens":6,"cache_creation_input_tokens":100,"cache_read_input_tokens":50}}`
 
 	var gotBody map[string]any
-	var gotAPIKey, gotVersion, gotPath string
+	var gotAPIKey, gotVersion, gotPath, gotBeta string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
 		gotAPIKey = r.Header.Get("x-api-key")
 		gotVersion = r.Header.Get("anthropic-version")
+		gotBeta = r.Header.Get("anthropic-beta")
 		_ = json.NewDecoder(r.Body).Decode(&gotBody)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
@@ -86,15 +92,34 @@ func TestHandleMessages_AnthropicProvider_Passthrough(t *testing.T) {
 		"messages":   []any{map[string]any{"role": "user", "content": "hello"}},
 	}
 	req := newMessagesRequest(t, body, "x-api-key", "sk-alice")
+	req.Header.Set("anthropic-beta", "token-efficient-tools-2025-02-19")
 	rec := httptest.NewRecorder()
 	gw.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
 	}
-	if rec.Body.String() != anthResp {
-		t.Errorf("body = %q, want verbatim upstream body %q (no translation)", rec.Body.String(), anthResp)
+
+	var got map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode client response: %v", err)
 	}
+	if got["model"] != "claude-test" {
+		t.Errorf(`response["model"] = %v, want "claude-test" (the client's requested alias echoed back, item 4 fix — not the upstream's real model id)`, got["model"])
+	}
+	// Every other field must survive the passthrough unchanged, including
+	// ones this gateway does not itself interpret (stop_sequence).
+	if got["id"] != "msg_01ABC" || got["role"] != "assistant" || got["stop_reason"] != "end_turn" {
+		t.Errorf("response id/role/stop_reason = %v/%v/%v, want the upstream's own values preserved", got["id"], got["role"], got["stop_reason"])
+	}
+	if _, hasStopSeq := got["stop_sequence"]; !hasStopSeq {
+		t.Error(`response missing "stop_sequence" — a field this gateway never reads must still survive the passthrough`)
+	}
+	content, _ := got["content"].([]any)
+	if len(content) != 1 {
+		t.Fatalf("response content = %v, want the upstream's one text block preserved", got["content"])
+	}
+
 	if gotPath != anthropicMessagesPath {
 		t.Errorf("upstream path = %q, want %q", gotPath, anthropicMessagesPath)
 	}
@@ -104,6 +129,9 @@ func TestHandleMessages_AnthropicProvider_Passthrough(t *testing.T) {
 	if gotVersion != anthropicAPIVersion {
 		t.Errorf("upstream anthropic-version = %q, want %q", gotVersion, anthropicAPIVersion)
 	}
+	if gotBeta != "token-efficient-tools-2025-02-19" {
+		t.Errorf("upstream anthropic-beta = %q, want the client's header forwarded (item 5 fix)", gotBeta)
+	}
 	if gotBody["model"] != "claude-test" {
 		t.Errorf("upstream model = %v, want claude-test (resolved upstream id)", gotBody["model"])
 	}
@@ -111,9 +139,11 @@ func TestHandleMessages_AnthropicProvider_Passthrough(t *testing.T) {
 		t.Error("upstream request carries gatewayAliasKey; must never reach an upstream provider")
 	}
 
+	// 12 input + 100 cache-creation + 50 cache-read (item 6 fix): all
+	// three fold into the billed prompt count, not just fresh input.
 	tokIn, ok := gw.limiter.getCounter("user", "alice", metricTokIn, windowDay, time.Now())
-	if !ok || tokIn != 12 {
-		t.Errorf("user tokin/day counter = %d (ok=%v), want 12", tokIn, ok)
+	if !ok || tokIn != 162 {
+		t.Errorf("user tokin/day counter = %d (ok=%v), want 162 (12 input + 100 cache-creation + 50 cache-read)", tokIn, ok)
 	}
 	tokOut, ok := gw.limiter.getCounter("user", "alice", metricTokOut, windowDay, time.Now())
 	if !ok || tokOut != 6 {
@@ -266,41 +296,95 @@ func TestHandleMessages_Auth(t *testing.T) {
 	}
 }
 
-// TestHandleMessages_StreamingRejected proves "stream": true is rejected
-// cleanly with a typed, Anthropic-shaped error before any upstream call
-// is made — never silently ignored, never answered non-streamed.
+// TestHandleMessages_StreamingRejected table-drives every "stream" shape
+// this route must reject cleanly, with a typed, Anthropic-shaped error,
+// before any upstream call is made or any rate-limit budget is spent —
+// never silently ignored, never answered non-streamed. Covers a real
+// boolean true and, per item 9's fix (2026-08-22 review), a non-bool
+// truthy value ("stream":"true", a string, and "stream":1, a number) that
+// a bare req["stream"].(bool) assertion would previously have silently
+// treated as false and forwarded upstream.
 func TestHandleMessages_StreamingRejected(t *testing.T) {
-	called := false
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		called = true
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer srv.Close()
+	cases := []struct {
+		stream any
+		name   string
+	}{
+		{name: "boolean true", stream: true},
+		{name: "string \"true\" (non-bool, item 9)", stream: "true"},
+		{name: "number 1 (non-bool, item 9)", stream: float64(1)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			called := false
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				called = true
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer srv.Close()
 
-	gw := newMessagesTestGateway(t, srv.URL, "")
-	body := map[string]any{"model": "claude-test", "max_tokens": 10, "stream": true, "messages": []any{map[string]any{"role": "user", "content": "hi"}}}
-	req := newMessagesRequest(t, body, "x-api-key", "sk-alice")
-	rec := httptest.NewRecorder()
-	gw.ServeHTTP(rec, req)
+			// requestsPerMinute: 1 so a second wrongly-counted request
+			// would 429 — proving the rejection happens before
+			// admitRequest ever runs (item 2 fix): both requests below
+			// must succeed at the "not yet counted" stage.
+			cfg := CreateConfig()
+			cfg.Providers = map[string]*ProviderConfig{"anthropic": {Type: providerTypeAnthropic, BaseURL: srv.URL, APIKey: "sk-ant-up", Models: []string{"claude-test"}}} // #nosec G101 -- test fixture literal, not a real credential
+			cfg.Groups = map[string]*GroupConfig{"default": {}}
+			cfg.Users = &UsersConfig{Inline: []*UserConfig{{Name: "alice", Group: "default", APIKey: "sk-alice", Limits: &LimitsConfig{RequestsPerMinute: 1}}}} // #nosec G101 -- test fixture literal, not a real credential
+			next := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})
+			h, err := New(context.Background(), next, cfg, "llmgw")
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			gw, ok := h.(*Gateway)
+			if !ok {
+				t.Fatal("handler is not *Gateway")
+			}
 
-	if rec.Code != http.StatusNotImplemented {
-		t.Fatalf("status = %d, want 501, body=%s", rec.Code, rec.Body.String())
-	}
-	if called {
-		t.Error("upstream was called; streaming must be rejected before any upstream request")
-	}
+			body := map[string]any{"model": "claude-test", "max_tokens": 10, "stream": tc.stream, "messages": []any{map[string]any{"role": "user", "content": "hi"}}}
 
-	var got map[string]any
-	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
-		t.Fatalf("decode error body: %v", err)
-	}
-	if got["type"] != "error" {
-		t.Errorf(`response["type"] = %v, want "error"`, got["type"])
-	}
-	errObj, _ := got["error"].(map[string]any)
-	msg, _ := errObj["message"].(string)
-	if !strings.Contains(msg, "stream") {
-		t.Errorf("error message = %q, want it to mention streaming is not supported", msg)
+			for attempt := 1; attempt <= 2; attempt++ {
+				req := newMessagesRequest(t, body, "x-api-key", "sk-alice")
+				rec := httptest.NewRecorder()
+				gw.ServeHTTP(rec, req)
+
+				// 400, not 501 (item 2 fix): anthropic-sdk-python's retry
+				// classifies purely on status code and retries anything
+				// >= 500 — a 501 here turns every streaming call into a
+				// three-request SDK retry storm against this route's own
+				// rate limit.
+				if rec.Code != http.StatusBadRequest {
+					t.Fatalf("attempt %d: status = %d, want 400, body=%s", attempt, rec.Code, rec.Body.String())
+				}
+
+				var got map[string]any
+				if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+					t.Fatalf("decode error body: %v", err)
+				}
+				if got["type"] != "error" {
+					t.Errorf(`response["type"] = %v, want "error"`, got["type"])
+				}
+				errObj, _ := got["error"].(map[string]any)
+				if errObj["type"] != "invalid_request_error" {
+					t.Errorf("error.type = %v, want invalid_request_error", errObj["type"])
+				}
+				msg, _ := errObj["message"].(string)
+				if !strings.Contains(msg, "stream") {
+					t.Errorf("error message = %q, want it to mention streaming is not supported", msg)
+				}
+			}
+			if called {
+				t.Error("upstream was called; streaming must be rejected before any upstream request")
+			}
+
+			// item 2's actual fix: TWO streaming-rejected attempts against
+			// a requestsPerMinute:1 user must BOTH succeed (as 400s, not
+			// as a 429 on the second one) — proving admitRequest's
+			// checkAndCount never ran for either.
+			reqCount, ok := gw.limiter.getCounter("user", "alice", metricReq, windowMin, time.Now())
+			if !ok || reqCount != 0 {
+				t.Errorf("user req:min counter = %d (ok=%v), want 0 — a streaming-rejected request must never consume rate-limit budget", reqCount, ok)
+			}
+		})
 	}
 }
 
@@ -356,8 +440,105 @@ func TestHandleMessages_RateLimited_Returns429(t *testing.T) {
 		t.Errorf("upstream called %d times, want 1 (second request refused before any upstream call)", upstreamCalls)
 	}
 
+	// Envelope-shape assertion (item 8 fix, 2026-08-22 review): now that
+	// admitRequest threads an envelopeWriter through
+	// (routes_unified.go's writeLimitViolationEnvelope), a 429 on this
+	// route must answer in Anthropic's shape like every other error this
+	// route produces, not OpenAI's flat one.
+	var got map[string]any
+	if err := json.Unmarshal(rec2.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode 429 body: %v", err)
+	}
+	if got["type"] != "error" {
+		t.Errorf(`429 response["type"] = %v, want "error" (Anthropic's envelope shape, not OpenAI's flat one)`, got["type"])
+	}
+	errObj, _ := got["error"].(map[string]any)
+	if errObj["type"] != "rate_limit_error" {
+		t.Errorf("429 error.type = %v, want rate_limit_error", errObj["type"])
+	}
+	if _, hasTopLevelCode := got["code"]; hasTopLevelCode {
+		t.Error(`429 response carries a top-level "code" field — that is OpenAI's writeOAIError shape, not Anthropic's`)
+	}
+
 	tokIn, ok := gw.limiter.getCounter("user", "alice", metricTokIn, windowDay, time.Now())
 	if !ok || tokIn != 1 {
 		t.Errorf("user tokin/day counter = %d (ok=%v), want 1 (only the first, successful request accounted)", tokIn, ok)
+	}
+}
+
+// TestHandleMessages_TranslationFailureAfterBilledUsage_PreservesUsage is
+// the regression for item 1 (CRITICAL, 2026-08-22 review): an
+// openai-type provider's response can succeed (200, real usage the
+// provider already charged for) yet still fail THIS route's own
+// translation into Anthropic's shape — here, a tool-call arguments
+// string truncated mid-JSON by the provider's own max_tokens cutoff
+// (finish_reason "length"). The previous version of callTranslatedMessages
+// returned usage{} on that path, discarding tokens the provider had
+// already billed — a client who could reliably induce a truncated
+// tool-call response got unlimited free tokens against any budget. This
+// proves the client gets a clean 502 (translation genuinely failed, no
+// valid Anthropic response could be produced) while the usage still
+// lands in the limiter's counters, and (item 12) that the log line
+// names the real cause — "response translation failed", never "upstream
+// connection error", which would misdirect an operator toward a network
+// problem that never happened.
+func TestHandleMessages_TranslationFailureAfterBilledUsage_PreservesUsage(t *testing.T) {
+	// Exact verified repro from the review: usage prompt=5000/
+	// completion=900, finish_reason "length", and a tool_calls[].function.
+	// arguments string truncated mid-object.
+	const oaiResp = `{"id":"chatcmpl-trunc","object":"chat.completion","model":"gpt-real","choices":[{"index":0,"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"get_weather","arguments":"{\"city\": \"Lond"}}]},"finish_reason":"length"}],"usage":{"prompt_tokens":5000,"completion_tokens":900}}`
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(oaiResp))
+	}))
+	defer srv.Close()
+
+	gw := newMessagesTestGateway(t, "", srv.URL)
+
+	body := map[string]any{
+		"model":      "gpt-test",
+		"max_tokens": 100,
+		"messages":   []any{map[string]any{"role": "user", "content": "hello"}},
+	}
+	req := newMessagesRequest(t, body, "x-api-key", "sk-alice")
+	var rec *httptest.ResponseRecorder
+	logs := captureStderr(t, func() {
+		rec = httptest.NewRecorder()
+		gw.ServeHTTP(rec, req)
+	})
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502, body=%s", rec.Code, rec.Body.String())
+	}
+
+	var got map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode error body: %v", err)
+	}
+	if got["type"] != "error" {
+		t.Errorf(`response["type"] = %v, want "error" (Anthropic error shape)`, got["type"])
+	}
+
+	// item 1: usage the provider already billed must still land in the
+	// counters, even though the client got an error.
+	tokIn, ok := gw.limiter.getCounter("user", "alice", metricTokIn, windowDay, time.Now())
+	if !ok || tokIn != 5000 {
+		t.Errorf("user tokin/day counter = %d (ok=%v), want 5000 (the upstream's already-billed usage, not discarded on translation failure)", tokIn, ok)
+	}
+	tokOut, ok := gw.limiter.getCounter("user", "alice", metricTokOut, windowDay, time.Now())
+	if !ok || tokOut != 900 {
+		t.Errorf("user tokout/day counter = %d (ok=%v), want 900", tokOut, ok)
+	}
+
+	// item 12: the log must name this a translation failure, never an
+	// upstream connection error — the connection and the upstream call
+	// both succeeded fine.
+	if !strings.Contains(logs, "response translation failed") {
+		t.Errorf("log output = %q, want it to contain \"response translation failed\"", logs)
+	}
+	if strings.Contains(logs, "upstream connection error") {
+		t.Errorf("log output = %q, want it to NOT be classified as an upstream connection error", logs)
 	}
 }

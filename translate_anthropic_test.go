@@ -532,7 +532,7 @@ func TestOpenAIRequestFromAnthropic_ToolResultBecomesToolMessage(t *testing.T) {
 		},
 	}
 
-	out, err := openAIRequestFromAnthropic(req)
+	out, _, err := openAIRequestFromAnthropic(req)
 	if err != nil {
 		t.Fatalf("openAIRequestFromAnthropic: %v", err)
 	}
@@ -567,7 +567,7 @@ func TestOpenAIRequestFromAnthropic_SystemStringFoldedIntoMessages(t *testing.T)
 		"messages": []any{map[string]any{"role": "user", "content": "hi"}},
 	}
 
-	out, err := openAIRequestFromAnthropic(req)
+	out, _, err := openAIRequestFromAnthropic(req)
 	if err != nil {
 		t.Fatalf("openAIRequestFromAnthropic: %v", err)
 	}
@@ -647,5 +647,199 @@ func TestOpenAIContentPartFromAnthropicImage_RejectsNonBase64Source(t *testing.T
 	}
 	if _, ok := err.(*translateError); !ok {
 		t.Errorf("err = %T, want *translateError", err)
+	}
+}
+
+// TestOpenAIMessagesFromAnthropic_PreservesToolResultThenTextOrder is the
+// regression for item 3 (IMPORTANT, 2026-08-22 review): a legal Anthropic
+// user turn shaped [tool_result, text] must translate preserving that
+// order — tool message first, then the content message — since OpenAI
+// requires a role:"tool" message to directly follow the assistant
+// message carrying the tool_calls it answers, with nothing in between.
+// The previous version of this function always emitted every tool_result
+// AFTER the combined content/tool_calls message regardless of its
+// original position, which turned this exact shape into
+// [assistant(tool_calls), user(text), tool(...)] — an OpenAI 400, since
+// user(text) sits between the tool_calls and its answer.
+func TestOpenAIMessagesFromAnthropic_PreservesToolResultThenTextOrder(t *testing.T) {
+	content := []any{
+		map[string]any{"type": "tool_result", "tool_use_id": "call_1", "content": "sunny"},
+		map[string]any{"type": "text", "text": "thanks"},
+	}
+
+	out, err := openAIMessagesFromAnthropic("user", content)
+	if err != nil {
+		t.Fatalf("openAIMessagesFromAnthropic: %v", err)
+	}
+	if len(out) != 2 {
+		t.Fatalf("messages = %v, want 2 (tool result, then text)", out)
+	}
+
+	first, _ := out[0].(map[string]any)
+	if first["role"] != "tool" || first["tool_call_id"] != "call_1" {
+		t.Errorf("messages[0] = %v, want the tool_result message FIRST, matching its original position", first)
+	}
+
+	second, _ := out[1].(map[string]any)
+	if second["role"] != "user" {
+		t.Errorf("messages[1] = %v, want the text-content message SECOND", second)
+	}
+	parts, _ := second["content"].([]any)
+	if len(parts) != 1 {
+		t.Fatalf("messages[1].content = %v, want one text part", second["content"])
+	}
+}
+
+// TestOpenAIMessagesFromAnthropic_InterspersedToolResults proves the fix
+// generalizes beyond one tool_result: [tool_result A, text, tool_result
+// B] must translate to [tool(A), user(text), tool(B)] — each tool_result
+// flushing whatever content/tool_calls had accumulated before it, not
+// just the first one.
+func TestOpenAIMessagesFromAnthropic_InterspersedToolResults(t *testing.T) {
+	content := []any{
+		map[string]any{"type": "tool_result", "tool_use_id": "call_A", "content": "a"},
+		map[string]any{"type": "text", "text": "middle"},
+		map[string]any{"type": "tool_result", "tool_use_id": "call_B", "content": "b"},
+	}
+
+	out, err := openAIMessagesFromAnthropic("user", content)
+	if err != nil {
+		t.Fatalf("openAIMessagesFromAnthropic: %v", err)
+	}
+	if len(out) != 3 {
+		t.Fatalf("messages = %v, want 3 (tool A, text, tool B)", out)
+	}
+	m0, _ := out[0].(map[string]any)
+	m1, _ := out[1].(map[string]any)
+	m2, _ := out[2].(map[string]any)
+	if m0["tool_call_id"] != "call_A" {
+		t.Errorf("messages[0].tool_call_id = %v, want call_A", m0["tool_call_id"])
+	}
+	if m1["role"] != "user" {
+		t.Errorf("messages[1].role = %v, want user (the interspersed text)", m1["role"])
+	}
+	if m2["tool_call_id"] != "call_B" {
+		t.Errorf("messages[2].tool_call_id = %v, want call_B", m2["tool_call_id"])
+	}
+}
+
+// TestOpenAIToolMessageFromAnthropic_PreservesIsError is the regression
+// for item 11a (IMPORTANT, 2026-08-22 review): Anthropic's
+// tool_result.is_error has no native OpenAI tool-message field, so the
+// previous version of this function silently dropped it. A string
+// content now gets an "Error: " prefix so the failure signal survives
+// into the one shape OpenAI's tool message actually carries.
+func TestOpenAIToolMessageFromAnthropic_PreservesIsError(t *testing.T) {
+	cases := []struct {
+		content     any
+		wantContent any
+		name        string
+		isError     bool
+	}{
+		{name: "string content with is_error prefixes Error:", content: "boom", isError: true, wantContent: "Error: boom"},
+		{name: "string content without is_error is unchanged", content: "ok", isError: false, wantContent: "ok"},
+		{name: "non-string content is left as-is even with is_error", content: []any{"x"}, isError: true, wantContent: []any{"x"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			bm := map[string]any{"tool_use_id": "call_1", "content": tc.content, "is_error": tc.isError}
+			got := openAIToolMessageFromAnthropic(bm)
+			assert.Equal(t, tc.wantContent, got["content"])
+		})
+	}
+}
+
+// TestOpenAIRequestFromAnthropic_ThinkingFieldReportedAsDropped is the
+// regression for item 11b (IMPORTANT, 2026-08-22 review): Anthropic's
+// "thinking" (extended-thinking config) has no OpenAI equivalent.
+// openAIRequestFromAnthropic must report it in its dropped-fields return
+// rather than silently discarding it, so the caller (routes_messages.go's
+// callTranslatedMessages) can log a warning instead of the drop being
+// invisible.
+func TestOpenAIRequestFromAnthropic_ThinkingFieldReportedAsDropped(t *testing.T) {
+	req := map[string]any{
+		"model":    "claude-x",
+		"thinking": map[string]any{"type": "enabled", "budget_tokens": float64(1024)},
+		"messages": []any{map[string]any{"role": "user", "content": "hi"}},
+	}
+
+	_, dropped, err := openAIRequestFromAnthropic(req)
+	if err != nil {
+		t.Fatalf("openAIRequestFromAnthropic: %v", err)
+	}
+	if len(dropped) != 1 || dropped[0] != "thinking" {
+		t.Errorf("dropped = %v, want [\"thinking\"]", dropped)
+	}
+}
+
+// TestOpenAIRequestFromAnthropic_ThinkingAbsent_NothingDropped proves the
+// dropped-fields list stays empty for a request that never set
+// "thinking" in the first place — the previous test's absence is not
+// itself evidence of a bug.
+func TestOpenAIRequestFromAnthropic_ThinkingAbsent_NothingDropped(t *testing.T) {
+	req := map[string]any{
+		"model":    "claude-x",
+		"messages": []any{map[string]any{"role": "user", "content": "hi"}},
+	}
+
+	_, dropped, err := openAIRequestFromAnthropic(req)
+	if err != nil {
+		t.Fatalf("openAIRequestFromAnthropic: %v", err)
+	}
+	if len(dropped) != 0 {
+		t.Errorf("dropped = %v, want none", dropped)
+	}
+}
+
+// TestOpenAIRequestFromAnthropic_ReasoningModel_UsesMaxCompletionTokens is
+// the regression for item 10 (IMPORTANT, 2026-08-22 review): OpenAI's
+// o-series and gpt-5-family reasoning models reject the "max_tokens"
+// request field with a 400 and require "max_completion_tokens" instead.
+// Every other model keeps using "max_tokens" as before.
+func TestOpenAIRequestFromAnthropic_ReasoningModel_UsesMaxCompletionTokens(t *testing.T) {
+	cases := []struct {
+		model      string
+		wantField  string
+		wantOthers []string
+	}{
+		{"o3-mini", "max_completion_tokens", []string{"max_tokens"}},
+		{"o1", "max_completion_tokens", []string{"max_tokens"}},
+		{"o4-mini-2025-04-16", "max_completion_tokens", []string{"max_tokens"}},
+		{"gpt-5", "max_completion_tokens", []string{"max_tokens"}},
+		{"gpt-5.1-chat-latest", "max_completion_tokens", []string{"max_tokens"}},
+		{"gpt-4o", "max_tokens", []string{"max_completion_tokens"}},
+		{"gpt-4o-mini", "max_tokens", []string{"max_completion_tokens"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.model, func(t *testing.T) {
+			req := map[string]any{
+				"model":      tc.model,
+				"max_tokens": float64(256),
+				"messages":   []any{map[string]any{"role": "user", "content": "hi"}},
+			}
+			out, _, err := openAIRequestFromAnthropic(req)
+			if err != nil {
+				t.Fatalf("openAIRequestFromAnthropic: %v", err)
+			}
+			if _, ok := out[tc.wantField]; !ok {
+				t.Errorf("out[%q] missing, want it set to 256", tc.wantField)
+			}
+			for _, other := range tc.wantOthers {
+				if _, ok := out[other]; ok {
+					t.Errorf("out[%q] present, want only %q set", other, tc.wantField)
+				}
+			}
+		})
+	}
+}
+
+// TestAnthropicUsagePayload_TotalInputTokens_FoldsCacheCounters is the
+// unit-level regression for item 6 (IMPORTANT, 2026-08-22 review):
+// cache_creation_input_tokens and cache_read_input_tokens must fold into
+// the billed prompt count alongside fresh input_tokens, not be dropped.
+func TestAnthropicUsagePayload_TotalInputTokens_FoldsCacheCounters(t *testing.T) {
+	p := anthropicUsagePayload{InputTokens: 4, CacheCreationInputTokens: 180000, CacheReadInputTokens: 20000}
+	if got, want := p.totalInputTokens(), int64(200004); got != want {
+		t.Errorf("totalInputTokens() = %d, want %d", got, want)
 	}
 }

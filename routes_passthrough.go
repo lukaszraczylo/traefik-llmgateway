@@ -426,6 +426,17 @@ type passthroughUsagePayload struct {
 		CompletionTokens int64 `json:"completion_tokens"`
 		InputTokens      int64 `json:"input_tokens"`
 		OutputTokens     int64 `json:"output_tokens"`
+		// CacheCreationInputTokens/CacheReadInputTokens (item 6 fix,
+		// 2026-08-22 review — applied "for the anthropic provider
+		// generally", not only translate_anthropic.go's own
+		// anthropicUsagePayload): Anthropic's native passthrough
+		// response reports these two prompt-cache counters separately
+		// from InputTokens, and extractPassthroughUsage's own
+		// providerTypeAnthropic case folds them in below so a
+		// cache-heavy caller's usage is not silently under-billed on
+		// this route either.
+		CacheCreationInputTokens int64 `json:"cache_creation_input_tokens"`
+		CacheReadInputTokens     int64 `json:"cache_read_input_tokens"`
 	} `json:"usage"`
 	UsageMetadata struct {
 		PromptTokenCount     int64 `json:"promptTokenCount"`
@@ -459,7 +470,7 @@ func extractPassthroughUsage(typeName, providerName string, body []byte) (usage,
 	case providerTypeOpenAI:
 		return usage{prompt: payload.Usage.PromptTokens, completion: payload.Usage.CompletionTokens}, model, err
 	case providerTypeAnthropic:
-		return usage{prompt: payload.Usage.InputTokens, completion: payload.Usage.OutputTokens}, model, err
+		return usage{prompt: payload.Usage.InputTokens + payload.Usage.CacheCreationInputTokens + payload.Usage.CacheReadInputTokens, completion: payload.Usage.OutputTokens}, model, err
 	case providerTypeGemini:
 		return usage{prompt: payload.UsageMetadata.PromptTokenCount, completion: payload.UsageMetadata.CandidatesTokenCount}, model, err
 	default:

@@ -282,6 +282,31 @@ func run() error {
 		_, _ = w.Write([]byte(`"}]}}`))
 	}))
 	defer mcpProbeUpstream.Close()
+	// anthropicProbeUpstream answers an Anthropic Messages API call with a
+	// real Anthropic-shaped body, so the /v1/messages passthrough branch
+	// (callAnthropicMessagesPassthrough) runs interpreted. A body
+	// containing "make-it-fail" gets a 429, driving
+	// handleAdapterErrorEnvelope's *providerHTTPError branch interpreted
+	// too — the exact construct class that has broken under Yaegi before
+	// (see handleAdapterError's own doc comment, routes_unified.go).
+	anthropicProbeUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		if bytes.Contains(raw, []byte("make-it-fail")) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"type":"error","error":{"type":"rate_limit_error","message":"slow down"}}`))
+			return
+		}
+		if r.Header.Get("anthropic-version") == "" || r.Header.Get("x-api-key") == "" {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"type":"error","error":{"type":"invalid_request_error","message":"missing anthropic headers"}}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"id":"msg_probe","type":"message","role":"assistant","model":"claude-upstream-real","content":[{"type":"text","text":"pong"}],"stop_reason":"end_turn","usage":{"input_tokens":7,"output_tokens":3}}`))
+	}))
+	defer anthropicProbeUpstream.Close()
 
 	// builtinLookupContextTokens (review fix, SHOULD-6): read directly
 	// out of the generated pricing_data_gen.go rather than hardcoding a
@@ -294,7 +319,12 @@ func run() error {
 	}
 
 	attemptAccountingOverride := `{"providers":{"openai":{"type":"openai","baseUrl":"` + upstream.URL + `","apiKey":"sk-up","models":["` + testDataWantModel + `","` + builtinLookupModelID + `"]},"` +
-		slowProviderName + `":{"type":"openai","baseUrl":"` + slowUpstream.URL + `","apiKey":"sk-up","models":["` + slowProviderModel + `"]}},` +
+		slowProviderName + `":{"type":"openai","baseUrl":"` + slowUpstream.URL + `","apiKey":"sk-up","models":["` + slowProviderModel + `"]},` +
+		// "anthropic" backs the /v1/messages passthrough probes
+		// (exerciseMessagesRoute, below): a real anthropic-type provider,
+		// interpreted end to end through
+		// callAnthropicMessagesPassthrough.
+		`"anthropic":{"type":"anthropic","baseUrl":"` + anthropicProbeUpstream.URL + `","apiKey":"sk-anth","models":["claude-test"]}},` + // #nosec G101 -- test fixture literal, not a real credential
 		// modelMeta (feature v0.23): a config-override entry for
 		// testDataWantModel, so exerciseHandler's GET /v1/models
 		// assertion below proves resolveModelMeta's config-override
@@ -532,6 +562,10 @@ func exerciseHandler(handler http.Handler, builtinContextTokens int) error {
 		return err
 	}
 
+	if err := exerciseMessagesRoute(handler); err != nil {
+		return err
+	}
+
 	unauthedReq := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
 	unauthedRec := httptest.NewRecorder()
 	handler.ServeHTTP(unauthedRec, unauthedReq)
@@ -597,6 +631,178 @@ func exerciseStampedVersion(handler http.Handler) error {
 	}
 	if overview.Version != stampedCheckVersion {
 		return fmt.Errorf("interpreted plugin reports version %q, want %q — stampReleaseVersion did not take effect, so New's telemetry gate short-circuited on the dev sentinel and the vendored oss-telemetry call was never exercised under Yaegi", overview.Version, stampedCheckVersion)
+	}
+	return nil
+}
+
+// postMessages drives one POST /v1/messages through handler with the given
+// auth header name/value and JSON body, returning the recorder.
+func postMessages(handler http.Handler, hdrName, hdrValue, body string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(hdrName, hdrValue)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	return rec
+}
+
+// exerciseMessagesRoute drives the inbound Anthropic Messages API route
+// under the REAL interpreter: both auth header forms, the streaming
+// rejection, a bad key's error envelope, an unknown model's error
+// envelope, the openai-type TRANSLATED path (openAIRequestFromAnthropic
+// -> chatCompletion -> anthropicResponseFromOpenAI), the anthropic-type
+// PASSTHROUGH path including its own upstream-error branch, and a
+// tool_use round trip through the translated path. This exists because
+// go test never runs under Yaegi — a construct that compiles and passes
+// `go test` can still panic or silently misbehave interpreted (this
+// package's own doc comment has the general case; handleAdapterError's
+// doc comment, routes_unified.go, has this route's own specific history
+// with plain type assertions over errors.As).
+func exerciseMessagesRoute(handler http.Handler) error {
+	// 1. x-api-key auth + translated path (openai-type provider).
+	rec := postMessages(handler, "x-api-key", testDataUserAPIKey,
+		`{"model":"`+testDataWantModel+`","max_tokens":64,"system":"be terse","messages":[{"role":"user","content":[{"type":"text","text":"ping"}]}]}`)
+	if rec.Code != http.StatusOK {
+		return fmt.Errorf("POST /v1/messages (x-api-key, translated): status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	var msg map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &msg); err != nil {
+		return fmt.Errorf("POST /v1/messages: decode body: %w (body=%s)", err, rec.Body.String())
+	}
+	if msg["type"] != "message" || msg["role"] != "assistant" {
+		return fmt.Errorf("POST /v1/messages translated: type/role = %v/%v, want message/assistant: %s", msg["type"], msg["role"], rec.Body.String())
+	}
+	if msg["model"] != testDataWantModel {
+		return fmt.Errorf("POST /v1/messages translated: model = %v, want %q (the client's requested alias echoed back, item 4 fix): %s", msg["model"], testDataWantModel, rec.Body.String())
+	}
+	if msg["stop_reason"] != "end_turn" {
+		return fmt.Errorf("POST /v1/messages translated: stop_reason = %v, want end_turn: %s", msg["stop_reason"], rec.Body.String())
+	}
+	content, _ := msg["content"].([]any)
+	if len(content) != 1 {
+		return fmt.Errorf("POST /v1/messages translated: content len = %d, want 1: %s", len(content), rec.Body.String())
+	}
+	block, _ := content[0].(map[string]any)
+	if block["type"] != "text" || block["text"] != "hi" {
+		return fmt.Errorf("POST /v1/messages translated: content[0] = %v, want text/hi: %s", content[0], rec.Body.String())
+	}
+	usg, _ := msg["usage"].(map[string]any)
+	if usg == nil || usg["input_tokens"] != float64(1) || usg["output_tokens"] != float64(1) {
+		return fmt.Errorf("POST /v1/messages translated: usage = %v, want input=1 output=1: %s", msg["usage"], rec.Body.String())
+	}
+
+	// 2. Authorization: Bearer must authenticate the same route.
+	bearerRec := postMessages(handler, "Authorization", "Bearer "+testDataUserAPIKey,
+		`{"model":"`+testDataWantModel+`","max_tokens":64,"messages":[{"role":"user","content":"ping"}]}`)
+	if bearerRec.Code != http.StatusOK {
+		return fmt.Errorf("POST /v1/messages (Authorization: Bearer): status = %d, want 200, body=%s", bearerRec.Code, bearerRec.Body.String())
+	}
+
+	// 3. A bad key gets a 401 in the ANTHROPIC error shape.
+	badRec := postMessages(handler, "x-api-key", "not-a-real-key",
+		`{"model":"`+testDataWantModel+`","max_tokens":64,"messages":[{"role":"user","content":"ping"}]}`)
+	if badRec.Code != http.StatusUnauthorized {
+		return fmt.Errorf("POST /v1/messages with a bad key: status = %d, want 401, body=%s", badRec.Code, badRec.Body.String())
+	}
+	if err := assertAnthropicErrorShape("bad key 401", badRec.Body.Bytes()); err != nil {
+		return err
+	}
+
+	// 4. "stream": true is rejected explicitly, in the Anthropic shape,
+	// as a 400 (item 2 fix, 2026-08-22 review) — NOT 501: a 501 makes
+	// anthropic-sdk-python (which retries any status >= 500) turn every
+	// streaming call into a three-request retry storm against this
+	// route's own rate limit. 400 maps to the SDK's non-retryable
+	// BadRequestError.
+	streamRec := postMessages(handler, "x-api-key", testDataUserAPIKey,
+		`{"model":"`+testDataWantModel+`","max_tokens":64,"stream":true,"messages":[{"role":"user","content":"ping"}]}`)
+	if streamRec.Code != http.StatusBadRequest {
+		return fmt.Errorf("POST /v1/messages with stream=true: status = %d, want 400, body=%s", streamRec.Code, streamRec.Body.String())
+	}
+	if err := assertAnthropicErrorShape("stream rejection", streamRec.Body.Bytes()); err != nil {
+		return err
+	}
+
+	// 5. An unknown model's 404 must also be Anthropic-shaped.
+	unknownRec := postMessages(handler, "x-api-key", testDataUserAPIKey,
+		`{"model":"no-such-model-anywhere","max_tokens":64,"messages":[{"role":"user","content":"ping"}]}`)
+	if unknownRec.Code != http.StatusNotFound {
+		return fmt.Errorf("POST /v1/messages with an unknown model: status = %d, want 404, body=%s", unknownRec.Code, unknownRec.Body.String())
+	}
+	if err := assertAnthropicErrorShape("unknown model 404", unknownRec.Body.Bytes()); err != nil {
+		return err
+	}
+
+	// 6. The anthropic-type PASSTHROUGH branch, interpreted: every field
+	// survives except "model", rewritten to the client's own requested
+	// alias (item 4 fix) — a routing rewrite, not message-body
+	// translation.
+	passRec := postMessages(handler, "x-api-key", testDataUserAPIKey,
+		`{"model":"claude-test","max_tokens":64,"system":"be terse","messages":[{"role":"user","content":"ping"}]}`)
+	if passRec.Code != http.StatusOK {
+		return fmt.Errorf("POST /v1/messages (anthropic passthrough): status = %d, want 200, body=%s", passRec.Code, passRec.Body.String())
+	}
+	var pass map[string]any
+	if err := json.Unmarshal(passRec.Body.Bytes(), &pass); err != nil {
+		return fmt.Errorf("POST /v1/messages passthrough: decode body: %w (body=%s)", err, passRec.Body.String())
+	}
+	if pass["id"] != "msg_probe" {
+		return fmt.Errorf("POST /v1/messages passthrough: id = %v, want msg_probe (every field but \"model\" must survive the passthrough unchanged): %s", pass["id"], passRec.Body.String())
+	}
+	if pass["model"] != "claude-test" {
+		return fmt.Errorf("POST /v1/messages passthrough: model = %v, want \"claude-test\" (the client's requested alias echoed back, item 4 fix — not anthropicProbeUpstream's own \"claude-upstream-real\"): %s", pass["model"], passRec.Body.String())
+	}
+
+	// 6b. handleAdapterErrorEnvelope's *providerHTTPError type assertion,
+	// interpreted — the exact construct class that has broken under Yaegi
+	// before (see handleAdapterError's own doc comment, routes_unified.go).
+	upErrRec := postMessages(handler, "x-api-key", testDataUserAPIKey,
+		`{"model":"claude-test","max_tokens":64,"messages":[{"role":"user","content":"make-it-fail"}]}`)
+	if upErrRec.Code != http.StatusTooManyRequests {
+		return fmt.Errorf("POST /v1/messages (upstream 429): status = %d, want 429, body=%s", upErrRec.Code, upErrRec.Body.String())
+	}
+	if err := assertAnthropicErrorShape("upstream 429", upErrRec.Body.Bytes()); err != nil {
+		return err
+	}
+	if upErrRec.Header().Get("X-Llmgw-Cache") != "" {
+		return fmt.Errorf("POST /v1/messages (upstream 429) carries a stale X-Llmgw-Cache header: %q", upErrRec.Header().Get("X-Llmgw-Cache"))
+	}
+
+	// 7. A tool_use round trip through the TRANSLATED path, to drive
+	// openAIToolCallFromAnthropic/openAIToolMessageFromAnthropic and
+	// anthropicToolInputFromOpenAI interpreted.
+	toolRec := postMessages(handler, "x-api-key", testDataUserAPIKey,
+		`{"model":"`+testDataWantModel+`","max_tokens":64,`+
+			`"tools":[{"name":"get_weather","description":"w","input_schema":{"type":"object","properties":{"city":{"type":"string"}}}}],`+
+			`"tool_choice":{"type":"auto"},`+
+			`"messages":[{"role":"user","content":"weather?"},`+
+			`{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"get_weather","input":{"city":"London"}}]},`+
+			`{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"sunny"}]}]}`)
+	if toolRec.Code != http.StatusOK {
+		return fmt.Errorf("POST /v1/messages (tool_use round trip): status = %d, want 200, body=%s", toolRec.Code, toolRec.Body.String())
+	}
+	return nil
+}
+
+// assertAnthropicErrorShape checks b is {"type":"error","error":{"type":...,
+// "message":...}} — what an Anthropic SDK client parses.
+func assertAnthropicErrorShape(label string, b []byte) error {
+	var env map[string]any
+	if err := json.Unmarshal(b, &env); err != nil {
+		return fmt.Errorf("/v1/messages %s: body is not JSON: %w (body=%s)", label, err, string(b))
+	}
+	if env["type"] != "error" {
+		return fmt.Errorf("/v1/messages %s: top-level \"type\" = %v, want \"error\" (Anthropic envelope): %s", label, env["type"], string(b))
+	}
+	inner, _ := env["error"].(map[string]any)
+	if inner == nil {
+		return fmt.Errorf("/v1/messages %s: no \"error\" object: %s", label, string(b))
+	}
+	if _, ok := inner["type"].(string); !ok {
+		return fmt.Errorf("/v1/messages %s: error.type missing: %s", label, string(b))
+	}
+	if _, ok := inner["message"].(string); !ok {
+		return fmt.Errorf("/v1/messages %s: error.message missing: %s", label, string(b))
 	}
 	return nil
 }
