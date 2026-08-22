@@ -370,6 +370,15 @@ func run() error {
 		// one testDataWantModel already exercises.
 		`"modelMeta":{"` + testDataWantModel + `":{"contextTokens":` + yaegiMetaContextTokens + `,"inputCostPerMTokMicroUsd":1250000,"outputCostPerMTokMicroUsd":10000000}},` +
 		`"mcpServers":{"` + mcpProbeServerName + `":{"url":"` + mcpProbeUpstream.URL + `"}},` +
+		// metrics (Prometheus text-exposition endpoint): enabled with
+		// modelLabel on, so exerciseMetricsRoute below exercises the
+		// opt-in per-(provider,model) breakdown under the interpreter
+		// too, not just the always-on families. allowedCIDRs names the
+		// exact block httptest.NewRequest's own default RemoteAddr
+		// (192.0.2.1:1234, verified empirically) falls inside, so the
+		// CIDR-bypass path is reachable with a plain httptest.NewRequest
+		// carrying no explicit RemoteAddr override.
+		`"metrics":{"enabled":true,"allowedCIDRs":["` + metricsProbeAllowedCIDR + `"],"modelLabel":true},` +
 		`"admin":{"enabled":true},"users":{"inline":[{"name":"tester","group":"default","apiKey":"` + testDataUserAPIKey + `"},{"name":"admin1","group":"default","apiKey":"` + attemptAccountingAdminAPIKey + `","admin":true}]}}`
 	if err = json.Unmarshal([]byte(attemptAccountingOverride), cfgVal.Interface()); err != nil {
 		return fmt.Errorf("decode attempt-accounting harness override into the interpreted Config: %w", err)
@@ -418,7 +427,17 @@ func run() error {
 	// exactly why this class of divergence needs its own interpreted
 	// probe: a compiled `go test` pass here would prove nothing about the
 	// interpreter.
-	return exerciseBreaker(handler, brkModelsHits, brkHealthy)
+	if err := exerciseBreaker(handler, brkModelsHits, brkHealthy); err != nil {
+		return err
+	}
+	// exerciseMetricsRoute runs LAST, after exerciseBreaker has already
+	// settled: GET /metrics runs registry.maybeRefresh like every other
+	// route (ServeHTTP's own unconditional call at entry), and
+	// exerciseBreaker's own hit-counting is timing-sensitive against the
+	// "brk" provider specifically — probing metrics first could perturb
+	// the very discovery-attempt counts that test samples. Ordering the
+	// metrics probe after avoids any such interaction.
+	return exerciseMetricsRoute(handler)
 }
 
 // builtinLookupModelID is a real, stable entry in the generated
@@ -438,6 +457,16 @@ const (
 	mcpProbeServerName = "probe"
 	mcpProbeToolName   = mcpProbeServerName + "_big"
 )
+
+// metricsProbeAllowedCIDR is the CIDR block attemptAccountingOverride's
+// own metrics.allowedCIDRs names — see that literal's own comment for why
+// this must contain httptest.NewRequest's default RemoteAddr.
+const metricsProbeAllowedCIDR = "192.0.2.0/24"
+
+// metricsProbeOutsideAddr is a source address deliberately OUTSIDE
+// metricsProbeAllowedCIDR (TEST-NET-3, RFC 5737) — exerciseMetricsRoute's
+// own proof that the allowlist is not simply matching everything.
+const metricsProbeOutsideAddr = "203.0.113.9:5555"
 
 // mcpProbeOversizeBytes is how much filler mcpProbeUpstream writes: over
 // mcpBackendCallResponseMaxBytes (maxRequestBytes, 10MiB) so the response
@@ -622,6 +651,84 @@ func exerciseBreaker(handler http.Handler, hits, healthy *int64) error {
 		return fmt.Errorf("BREAKER-3: breaker never returned to closed after the provider recovered (hits=%d)", atomic.LoadInt64(hits))
 	}
 	fmt.Println("yaegi-check: recovered provider closed the breaker again")
+	return nil
+}
+
+// exerciseMetricsRoute drives GET /metrics against the interpreted
+// handler and proves both its auth gate and its rendering run correctly
+// under Yaegi — the metrics feature's own gate requirement: compiled
+// tests have repeatedly passed on this codebase while the interpreted
+// shape failed (matchesSentinel's own doc comment, limits.go, is the
+// canonical example), so a metrics-specific probe is not optional here.
+//
+// Four requests, mirroring TestMetrics_GateMatrix (metrics_test.go)
+// exactly so this harness and the compiled test suite assert the
+// identical contract from two different angles:
+//  1. unauthenticated, from an address outside metrics.allowedCIDRs -> 401
+//  2. authenticated as "tester" (not admin) -> 403
+//  3. authenticated as the admin user -> 200, body inspected
+//  4. unauthenticated, from an address INSIDE metrics.allowedCIDRs -> 200
+//
+// Request 3's body is inspected for real, live-data content — not just a
+// 200 status — because a Yaegi-specific bug in this codebase's history
+// (matchesSentinel, limits.go) was a case where the interpreted code ran
+// without panicking yet produced a WRONG answer; a bare status-code check
+// would not have caught that class of failure here either. Specifically:
+// the "openai" provider's name, and — since attemptAccountingOverride
+// enables metrics.modelLabel — testDataWantModel's own id inside the
+// opt-in provider-model breakdown, both of which can only appear via a
+// live registry.snapshot() walk and a live providerModelScopeID join
+// under the real interpreter, not a static string in this harness.
+func exerciseMetricsRoute(handler http.Handler) error {
+	unauthReq := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	unauthReq.RemoteAddr = metricsProbeOutsideAddr
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, unauthReq)
+	if rec.Code != http.StatusUnauthorized {
+		return fmt.Errorf("GET /metrics (no key, outside allowedCIDRs): status = %d, want 401, body=%s", rec.Code, rec.Body.String())
+	}
+
+	nonAdminReq := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	nonAdminReq.RemoteAddr = metricsProbeOutsideAddr
+	nonAdminReq.Header.Set("Authorization", "Bearer "+testDataUserAPIKey)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, nonAdminReq)
+	if rec.Code != http.StatusForbidden {
+		return fmt.Errorf("GET /metrics (non-admin key): status = %d, want 403, body=%s", rec.Code, rec.Body.String())
+	}
+
+	adminReq := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	adminReq.RemoteAddr = metricsProbeOutsideAddr
+	adminReq.Header.Set("Authorization", "Bearer "+attemptAccountingAdminAPIKey)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, adminReq)
+	if rec.Code != http.StatusOK {
+		return fmt.Errorf("GET /metrics (admin key): status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/plain") {
+		return fmt.Errorf("GET /metrics (admin key): Content-Type = %q, want a text/plain prefix", ct)
+	}
+	body := rec.Body.String()
+	for _, want := range []string{
+		"# TYPE llmgateway_requests_total counter",
+		"# TYPE llmgateway_provider_healthy gauge",
+		`llmgateway_provider_attempts_total{provider="openai"}`,
+		"# TYPE llmgateway_provider_model_attempts_total counter",
+		`llmgateway_provider_model_attempts_total{provider="openai",model="` + testDataWantModel + `"}`,
+	} {
+		if !strings.Contains(body, want) {
+			return fmt.Errorf("GET /metrics (admin key): body missing %q — interpreted rendering diverged from the compiled shape; body=%s", want, body)
+		}
+	}
+
+	allowlistedReq := httptest.NewRequest(http.MethodGet, "/metrics", nil) // default RemoteAddr, inside metricsProbeAllowedCIDR
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, allowlistedReq)
+	if rec.Code != http.StatusOK {
+		return fmt.Errorf("GET /metrics (no key, inside allowedCIDRs): status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+
+	fmt.Println("yaegi-check: GET /metrics auth gate and rendering both verified interpreted")
 	return nil
 }
 
