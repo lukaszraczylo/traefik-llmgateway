@@ -261,6 +261,16 @@ func sanitizeProviderErr(lastErr, rawBaseURL string) string {
 // sanitizeBaseURL before this view is ever built.
 type adminProviderView struct {
 	LastRefresh time.Time `json:"lastRefresh"`
+	// ModelMeta is this provider's resolved per-model metadata (feature
+	// v0.23: context window, per-token cost — resolveModelMeta,
+	// modelmeta.go), keyed by upstream model id. One entry per id in
+	// Models, unconditionally — never nil, mirroring ModelRates' own
+	// "never nil" convention below — so the dashboard's provider
+	// accordion can render a context/cost chip beside each model without
+	// a second round trip. An individual entry's own fields are omitted
+	// (not zeroed) when unknown; see adminModelMetaView's own doc
+	// comment.
+	ModelMeta map[string]adminModelMetaView `json:"modelMeta"`
 	// ModelRates is this provider's per-model breakdown of the Attempts*/
 	// Failures* counters below, keyed by upstream model id (Feature A,
 	// v0.22) — every entry in Models gets one, even a model with zero
@@ -280,8 +290,7 @@ type adminProviderView struct {
 	// Never nil for a real provider — even zero known models marshals as
 	// "[]", not omitted, so the dashboard can tell "no models yet" apart
 	// from a field a stale client build does not know how to read.
-	Models     []string `json:"models"`
-	ModelCount int      `json:"modelCount"`
+	Models []string `json:"models"`
 	// AttemptsDay/FailuresDay/AttemptsMinute/FailuresMinute are this
 	// provider's current-window upstream-attempt counters (Feature A,
 	// v0.22 — see limiter.recordProviderAttempt, limits.go): every
@@ -298,6 +307,7 @@ type adminProviderView struct {
 	FailuresDay    int64 `json:"failuresDay"`
 	AttemptsMinute int64 `json:"attemptsMinute"`
 	FailuresMinute int64 `json:"failuresMinute"`
+	ModelCount     int   `json:"modelCount"`
 	// DiscoveryEnabled mirrors providerSnapshot.discoveryEnabled (Feature
 	// B, v0.22): the Providers tab uses it to tell a provider whose
 	// discovery is off apart from one that is on but has not completed its
@@ -320,6 +330,40 @@ type adminProviderView struct {
 type adminModelRateView struct {
 	AttemptsDay int64 `json:"attemptsDay"`
 	FailuresDay int64 `json:"failuresDay"`
+}
+
+// adminModelMetaView is one upstream model's resolved metadata (feature
+// v0.23: context window, per-token cost) within its provider —
+// adminProviderView.ModelMeta's value type. Every field is a pointer,
+// not a plain int/float64: a plain field's "omitempty" cannot tell a
+// genuinely unknown value apart from an explicit zero (a free model's
+// cost IS 0, and known), so a nil pointer (omitted from the JSON
+// response) means "unknown" and a non-nil pointer — even one pointing at
+// 0 — means "known", mirroring resolvedModelMeta's own ContextKnown/
+// CostKnown bools (modelmeta.go) one for one.
+type adminModelMetaView struct {
+	ContextTokens    *int     `json:"contextTokens,omitempty"`
+	InputPerMTokUSD  *float64 `json:"inputPerMTokUsd,omitempty"`
+	OutputPerMTokUSD *float64 `json:"outputPerMTokUsd,omitempty"`
+}
+
+// buildAdminModelMetaView converts resolveModelMeta's result into the
+// admin API's pointer-based "known vs. unknown" JSON shape (see
+// adminModelMetaView's own doc comment for why plain zero values cannot
+// do this).
+func buildAdminModelMetaView(meta resolvedModelMeta) adminModelMetaView {
+	var v adminModelMetaView
+	if meta.ContextKnown {
+		ctx := meta.ContextTokens
+		v.ContextTokens = &ctx
+	}
+	if meta.CostKnown {
+		in := microUSDPerMTokToUSD(meta.InputCostPerMTokMicroUSD)
+		out := microUSDPerMTokToUSD(meta.OutputCostPerMTokMicroUSD)
+		v.InputPerMTokUSD = &in
+		v.OutputPerMTokUSD = &out
+	}
+	return v
 }
 
 // adminRedisView is the redis status line in GET /admin/api/overview.
@@ -372,8 +416,16 @@ type adminGroupView struct {
 // /admin/api/overview (spec §5, v0.2): the alias->target pair exactly as
 // an operator wrote it. No secrets involved.
 type adminAliasView struct {
-	Alias  string `json:"alias"`
-	Target string `json:"target"`
+	// ModelMeta is this alias's own resolved metadata (feature v0.23,
+	// hover-detail refinement): the alias's INHERITED metadata from its
+	// resolved target, unless the alias itself carries its own modelMeta
+	// override (resolveMetaForAliasName, registry.go — same
+	// alias-inheritance rule listFor's own alias entries use for GET
+	// /v1/models). All-unknown (every field omitted) when the alias's
+	// target does not resolve to any known model yet.
+	ModelMeta adminModelMetaView `json:"modelMeta"`
+	Alias     string             `json:"alias"`
+	Target    string             `json:"target"`
 }
 
 // adminOverviewResponse is the full body of GET /admin/api/overview (spec
@@ -423,6 +475,7 @@ func (g *Gateway) buildAdminOverview() adminOverviewResponse {
 	for i, s := range snaps {
 		pc := providerLevelCounters[i]
 		modelRates := make(map[string]adminModelRateView, len(s.models))
+		modelMeta := make(map[string]adminModelMetaView, len(s.models))
 		for _, model := range s.models {
 			mc := modelCounters[mi]
 			mi++
@@ -430,6 +483,7 @@ func (g *Gateway) buildAdminOverview() adminOverviewResponse {
 				AttemptsDay: mc.attemptsDay,
 				FailuresDay: mc.failuresDay,
 			}
+			modelMeta[model] = buildAdminModelMetaView(g.registry.resolveMetaFor(s.name, model))
 		}
 		providers[i] = adminProviderView{
 			Name:             s.name,
@@ -445,6 +499,7 @@ func (g *Gateway) buildAdminOverview() adminOverviewResponse {
 			AttemptsMinute:   pc.attemptsMinute,
 			FailuresMinute:   pc.failuresMinute,
 			ModelRates:       modelRates,
+			ModelMeta:        modelMeta,
 		}
 	}
 
@@ -478,7 +533,11 @@ func (g *Gateway) buildAdminOverview() adminOverviewResponse {
 	aliasSnaps := g.registry.aliasSnapshot()
 	aliases := make([]adminAliasView, len(aliasSnaps))
 	for i, a := range aliasSnaps {
-		aliases[i] = adminAliasView(a) // identical underlying field shape (alias, target string), differing only in json tags
+		aliases[i] = adminAliasView{
+			Alias:     a.Alias,
+			Target:    a.Target,
+			ModelMeta: buildAdminModelMetaView(g.registry.resolveMetaForAliasName(a.Alias)),
+		}
 	}
 
 	return adminOverviewResponse{

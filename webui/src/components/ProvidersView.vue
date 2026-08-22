@@ -21,11 +21,11 @@ import {
   CardTitle,
 } from '@/components/ui/card'
 import { useSearchQuery } from '@/composables/useSearchQuery'
-import { formatAgo, refreshDetailLabel, refreshLabel, routableModelId } from '@/lib/format'
+import { formatAgo, formatContextWindow, refreshDetailLabel, refreshLabel, routableModelId } from '@/lib/format'
 import { isModelDegraded } from '@/lib/provider-rate'
 import { type ExpandState, clearExpandOverrides, computeExpandedItems, toggleItemExpand } from '@/lib/search-expand'
 import { useDashboardStore } from '@/stores/dashboard'
-import type { AdminAliasView, AdminModelRateView, AdminProviderView } from '@/types/api'
+import type { AdminAliasView, AdminModelMetaView, AdminModelRateView, AdminProviderView } from '@/types/api'
 
 // This component backs the "Providers" tab (App.vue) — a UI-label rename
 // only. The data it renders still comes from GET /admin/api/overview
@@ -161,6 +161,14 @@ function modelIsDegraded(p: AdminProviderView, model: string): boolean {
   return isModelDegraded(r.attemptsDay, r.failuresDay)
 }
 
+/** ZERO_MODEL_META is modelMetaFor's fallback, mirroring ZERO_MODEL_RATE's own doc comment above — every sub-field undefined reads as "nothing known", not a thrown error, across a version-skewed client/server pair. */
+const ZERO_MODEL_META: AdminModelMetaView = {}
+
+/** modelMetaFor looks up one model's resolved metadata within p.modelMeta (feature v0.23), falling back to ZERO_MODEL_META. */
+function modelMetaFor(p: AdminProviderView, model: string): AdminModelMetaView {
+  return p.modelMeta?.[model] ?? ZERO_MODEL_META
+}
+
 // --- model aliases (sortable DataTable, operator directive) ---
 //
 // The alias id gets the ModelChip copy treatment (an alias name IS the
@@ -171,7 +179,13 @@ const aliasColumns: ColumnDef<AdminAliasView, unknown>[] = [
     id: 'alias',
     header: 'Alias',
     accessorFn: (a) => a.alias,
-    cell: ({ row }) => h(ModelChip, { id: row.original.alias }),
+    cell: ({ row }) =>
+      h(ModelChip, {
+        id: row.original.alias,
+        contextTokens: row.original.modelMeta.contextTokens,
+        inputPerMTokUsd: row.original.modelMeta.inputPerMTokUsd,
+        outputPerMTokUsd: row.original.modelMeta.outputPerMTokUsd,
+      }),
   },
   {
     id: 'target',
@@ -301,7 +315,26 @@ const aliasEmptyMessage = computed(() =>
               </dl>
               <div v-if="visibleModels(p).length" class="flex flex-wrap gap-1.5">
                 <span v-for="m in visibleModels(p)" :key="m" class="inline-flex items-center gap-1">
-                  <ModelChip :id="routableModelId(p.name, m)" />
+                  <ModelChip
+                    :id="routableModelId(p.name, m)"
+                    :context-tokens="modelMetaFor(p, m).contextTokens"
+                    :input-per-m-tok-usd="modelMetaFor(p, m).inputPerMTokUsd"
+                    :output-per-m-tok-usd="modelMetaFor(p, m).outputPerMTokUsd"
+                  />
+                  <!--
+                    Context chip, visible, muted (feature v0.23) — only
+                    when known. Cost stays hover-only on ModelChip itself
+                    (operator directive: chips + hover would otherwise
+                    show the identical price figures twice; context
+                    visible for scanning, price on hover for the exact
+                    numbers).
+                  -->
+                  <span
+                    v-if="modelMetaFor(p, m).contextTokens !== undefined"
+                    class="text-[10px] text-muted-foreground tabular-nums"
+                  >
+                    {{ formatContextWindow(modelMetaFor(p, m).contextTokens as number) }}
+                  </span>
                   <!--
                     attempts-minute/failures-minute deliberately omitted
                     (SHOULD-2, v0.22 review round): AdminModelRateView no

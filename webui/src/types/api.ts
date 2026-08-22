@@ -27,6 +27,19 @@ export interface AdminModelRateView {
   failuresDay: number
 }
 
+/**
+ * One upstream model's resolved metadata (admin.go: adminModelMetaView —
+ * feature v0.23: context window, per-token cost). Every field is
+ * optional/undefined, not a plain 0 — undefined means "unknown", any
+ * present value (including 0, a free model's real cost) means "known".
+ * Never infer "unknown" from a value being falsy; check for undefined.
+ */
+export interface AdminModelMetaView {
+  contextTokens?: number
+  inputPerMTokUsd?: number
+  outputPerMTokUsd?: number
+}
+
 export interface AdminProviderView {
   name: string
   type: string
@@ -36,6 +49,13 @@ export interface AdminProviderView {
   /** Sorted explicit∪discovered model ids (admin.go: adminProviderView.Models) — always an array, never omitted, even when empty. */
   models: string[]
   modelCount: number
+  /**
+   * Resolved metadata (context window, per-token cost — feature v0.23)
+   * for every id in `models`, keyed by upstream model id. Always
+   * present (possibly with every sub-field undefined), never omitted —
+   * mirroring modelRates' own "never nil" convention below.
+   */
+  modelMeta: Record<string, AdminModelMetaView>
   /**
    * discoveryEnabled mirrors the provider's own configured Discovery flag
    * (admin.go: adminProviderView.DiscoveryEnabled — Feature B, v0.22): the
@@ -85,6 +105,13 @@ export interface AdminGroupView {
 export interface AdminAliasView {
   alias: string
   target: string
+  /**
+   * The alias's own resolved metadata (admin.go: adminAliasView.
+   * ModelMeta — feature v0.23): INHERITED from its target unless the
+   * alias itself carries its own modelMeta override. Always present
+   * (possibly with every sub-field undefined).
+   */
+  modelMeta: AdminModelMetaView
 }
 
 /** GET /admin/api/overview (admin.go: adminOverviewResponse). */
