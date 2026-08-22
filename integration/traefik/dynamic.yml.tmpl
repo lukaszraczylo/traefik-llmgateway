@@ -80,6 +80,22 @@ http:
             hotreload:
               limits:
                 requestsPerMinute: 100000
+            # Dedicated to TestPassthroughModelAndPathRestriction
+            # (security review finding 2/3, round 3, 2026-08-22 report
+            # correction): every OTHER group in this file leaves models
+            # and passthroughPaths unset, so hasModelRestriction() is
+            # always false and allowsPassthroughPath's non-empty-list
+            # branch is never reached — meaning the native-passthrough
+            # model-peek (peekPassthroughModel/scanTopLevelModel) and
+            # path-allowlist (allowsPassthroughPath) code paths were
+            # NEVER exercised under real Yaegi interpretation by this
+            # suite, contrary to what an earlier report claimed. This
+            # group exists specifically to close that gap.
+            restricted:
+              limits:
+                requestsPerMinute: 1000
+              models: ["gpt-mock"]
+              passthroughPaths: ["v1/chat/completions"]
           users:
             inline:
               # limits.requestsPerDay is set (generously — every test in
@@ -114,6 +130,12 @@ http:
               - name: hotreload-probe
                 group: hotreload
                 apiKey: "sk-int-hotreload"
+              # TestPassthroughModelAndPathRestriction's dedicated
+              # identity — see the "restricted" group's own comment
+              # above.
+              - name: dave
+                group: restricted
+                apiKey: "sk-int-dave"
             file: "/users/users.json"
           redis:
             address: "redis:6379"

@@ -48,6 +48,15 @@ const (
 	// much lower per-minute bucket so that loop's volume can never
 	// masquerade as a reload-caused failure via a budget-exhaustion 429.
 	hotReloadProbeKey = "sk-int-hotreload"
+	// daveKey belongs to the dedicated "restricted" group (models:
+	// ["gpt-mock"], passthroughPaths: ["v1/chat/completions"],
+	// dynamic.yml.tmpl) — used only by
+	// TestPassthroughModelAndPathRestriction (security review finding
+	// 2/3, round 3, 2026-08-22 report correction) to exercise the
+	// native-passthrough model-peek and path-allowlist enforcement under
+	// real Yaegi interpretation; every other group/user in this suite
+	// leaves both fields unset.
+	daveKey = "sk-int-dave"
 )
 
 // composeFile returns the path to docker-compose.yml relative to this
@@ -654,6 +663,52 @@ func TestPassthroughAndMCPStream(t *testing.T) {
 	}
 	if !strings.Contains(string(raw), "mocktool") {
 		t.Errorf("mcp target proxy: streamed body did not carry mocktool's content:\n%s", raw)
+	}
+}
+
+// TestPassthroughModelAndPathRestriction (security review finding 2/3,
+// round 3, 2026-08-22 — closes a report-correction gap, not a code
+// defect: the reviewer verified peekPassthroughModel/scanTopLevelModel
+// and allowsPassthroughPath directly via the repo's own Yaegi harness,
+// but every group/user this suite drove native passthrough through left
+// models/passthroughPaths unset, so hasModelRestriction() was always
+// false and this suite itself never exercised either enforcement path
+// under a real Traefik+Yaegi process) drives dave (the "restricted"
+// group: models: ["gpt-mock"], passthroughPaths: ["v1/chat/completions"])
+// through native passthrough three ways: an allowed model on the
+// allowed path (200, proxied for real), a denied model on that SAME
+// allowed path (403 — proves the model peek runs and rejects), and an
+// ALLOWED model on a path outside the allowlist (403 — proves
+// allowsPassthroughPath's non-empty-list branch runs and rejects; the
+// model on this third request is deliberately the allowed one, so a
+// pass here can only be explained by the path check, not the model
+// check, having fired).
+func TestPassthroughModelAndPathRestriction(t *testing.T) {
+	allowedBody := map[string]any{
+		"model":    "gpt-mock",
+		"messages": []map[string]any{{"role": "user", "content": "hi"}},
+	}
+	resp, body := doJSON(t, http.MethodPost, traefik1URL+"/openai/v1/chat/completions", daveKey, allowedBody)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("allowed model+path: status = %d, body=%#v", resp.StatusCode, body)
+	}
+
+	deniedModelBody := map[string]any{
+		"model":    "not-in-the-allowlist",
+		"messages": []map[string]any{{"role": "user", "content": "hi"}},
+	}
+	resp, body = doJSON(t, http.MethodPost, traefik1URL+"/openai/v1/chat/completions", daveKey, deniedModelBody)
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("denied model, allowed path: status = %d, want 403, body=%#v", resp.StatusCode, body)
+	}
+
+	// "v1/embeddings" is not in passthroughPaths (["v1/chat/completions"]);
+	// the model ("gpt-mock") is the allowed one, so a 403 here can only
+	// come from the path check, not the model check.
+	deniedPathBody := map[string]any{"model": "gpt-mock", "input": "hi"}
+	resp, body = doJSON(t, http.MethodPost, traefik1URL+"/openai/v1/embeddings", daveKey, deniedPathBody)
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("allowed model, denied path: status = %d, want 403, body=%#v", resp.StatusCode, body)
 	}
 }
 
