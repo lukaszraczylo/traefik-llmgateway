@@ -593,10 +593,20 @@ type limiter struct {
 	// requests were rejected" has no existing counter to read at all
 	// (req:min/req:day count every admission attempt, accepted or not,
 	// by design — see checkAndCount's own doc comment). Adding it here
-	// as a bare map increment costs one uncontended lock per rejection
-	// (already the rare, not-hot-path outcome of checkAndCount), never a
-	// second network round trip, and never re-derives a number the
-	// store already tracks.
+	// as a bare map increment costs one uncontended lock per rejection,
+	// never a second network round trip, and never re-derives a number
+	// the store already tracks.
+	//
+	// CORRECTION (adversarial verification, 2026-08-23): an earlier
+	// version of this comment called the increment "the rare, not-hot-
+	// path outcome of checkAndCount" — true for an ordinary single-scope
+	// limit breach, but false for the storeDownViolation branch
+	// (checkAndCount's own body, below): with a configured store down
+	// and failOpen false, EVERY request takes that branch, so the
+	// increment runs on every request for as long as the outage lasts,
+	// not rarely. The honest claim is narrower: it is still cheaper than
+	// the network round trip that already failed to produce this
+	// violation in the first place, never an ADDITIONAL one.
 	rejections rejectionCounter
 	logMu      sync.Mutex
 	failOpen   bool // store-error policy: true falls back to fallback, false refuses the request
@@ -613,31 +623,67 @@ type rejectionScope struct {
 	id   string
 }
 
+// rejectionCounterMapCap bounds how many distinct (kind, id) scopes
+// rejectionCounter.current tracks before rotating (review fix,
+// adversarial verification 2026-08-23): replaceFileUsers (auth.go) can
+// hot-reload the configured user/group set at any time, and nothing
+// here ever removed a scope's entry when the user or group behind it
+// was renamed or deleted — over a long-running process's lifetime, a
+// deployment that renames or churns users keeps exporting a series FOR
+// EVERY NAME EVER SEEN, not just currently configured ones, growing
+// this map (and the resulting Prometheus series count) without bound.
+// 2000 comfortably exceeds the 1,000-user scale this codebase already
+// treats as a real deployment size elsewhere (adminUsageChunkScopes'
+// own doc comment, admin.go) with headroom left for renamed-user churn
+// and the synthetic store_down entry, while still bounding the worst
+// case.
+const rejectionCounterMapCap = 2000
+
 // rejectionCounter accumulates rate/budget-limit-violation counts per
 // scope for the lifetime of the process — limiter.rejections' own
 // backing store; see its doc comment for why this exists as a bare
-// in-process map rather than a counterStore key. Unlike authFailureTracker
-// (auth.go), there is no TTL or generation rotation here: a Prometheus
-// counter must only ever grow for as long as the process runs, so there
-// is nothing to roll over, and cardinality is bounded by the configured
-// user/group count (checkAndCount only ever sees scopes for an already-
-// authenticated caller's own user/group, never attacker-controlled
-// strings), the same bound scopeUsage's own per-scope metrics already
-// carry.
+// in-process map rather than a counterStore key.
+//
+// current/previous generation-rotation (review fix, adversarial
+// verification 2026-08-23) mirrors authFailureTracker's own shape
+// (auth.go) for the identical reason: bound total memory without ever
+// scanning. Rotation is a two-pointer swap (O(1)), triggered on
+// inserting a brand-new scope once current is already at
+// rejectionCounterMapCap; total memory is bounded to at most
+// 2×rejectionCounterMapCap entries. Unlike authFailureTracker, there is
+// no TTL — a Prometheus counter must only ever grow for as long as its
+// series is being reported, so a scope's count is never read back out
+// of previous once superseded (see snapshot, below): a scope displaced
+// by rotation, if it is ever rejected again, starts a fresh count at 1
+// rather than resuming its old total. That is a real, visible counter
+// reset for that one series — accepted, the same trade-off
+// authFailureTracker's own doc comment already accepts for a different
+// bounded resource, and one Prometheus's own counter-reset handling in
+// rate()/increase() already tolerates (the identical mechanism that
+// already tolerates a process restart).
 type rejectionCounter struct {
-	counts map[rejectionScope]int64
-	mu     sync.Mutex
+	current  map[rejectionScope]int64
+	previous map[rejectionScope]int64
+	mu       sync.Mutex
 }
 
-// increment records one rejection for (kind, id), initializing the
-// backing map on first use — rejectionCounter's zero value (as embedded,
-// unexported, in limiter) is ready to use without a constructor.
+// increment records one rejection for (kind, id), initializing current
+// on first use — rejectionCounter's zero value (as embedded, unexported,
+// in limiter) is ready to use without a constructor. Rotates current ->
+// previous before inserting a brand-new (kind, id) once current is
+// already at rejectionCounterMapCap, mirroring authFailureTracker.
+// increment's identical shape (auth.go).
 func (c *rejectionCounter) increment(kind, id string) {
+	key := rejectionScope{kind: kind, id: id}
 	c.mu.Lock()
-	if c.counts == nil {
-		c.counts = make(map[rejectionScope]int64)
+	if c.current == nil {
+		c.current = make(map[rejectionScope]int64)
 	}
-	c.counts[rejectionScope{kind: kind, id: id}]++
+	if _, ok := c.current[key]; !ok && len(c.current) >= rejectionCounterMapCap {
+		c.previous = c.current
+		c.current = make(map[rejectionScope]int64, rejectionCounterMapCap)
+	}
+	c.current[key]++
 	c.mu.Unlock()
 }
 
@@ -649,16 +695,41 @@ type rejectionSnapshot struct {
 	count int64
 }
 
-// snapshot returns every scope with at least one recorded rejection, in
-// no particular order (metrics.go sorts its own copy before rendering).
+// snapshot returns every scope in current with at least one recorded
+// rejection, in no particular order (metrics.go sorts its own copy
+// before rendering). previous is deliberately NOT merged in: a scope
+// there was displaced by rotation, and re-reporting its stale, no-
+// longer-growing count would misrepresent it as still current.
 func (c *rejectionCounter) snapshot() []rejectionSnapshot {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	out := make([]rejectionSnapshot, 0, len(c.counts))
-	for scope, n := range c.counts {
+	out := make([]rejectionSnapshot, 0, len(c.current))
+	for scope, n := range c.current {
 		out = append(out, rejectionSnapshot{kind: scope.kind, id: scope.id, count: n})
 	}
 	return out
+}
+
+// pruneUserScopes deletes every "user"-kind entry from both current and
+// previous whose id is not in keep — limiter.pruneRejections' own
+// backing implementation; see that method's doc comment for when and
+// why this runs. Walking and deleting from a live map mid-range is safe
+// in Go (deleting the current key during a range is explicitly
+// permitted); previous is included so a recently-rotated, still-stale
+// entry for a deleted user does not linger there either.
+func (c *rejectionCounter) pruneUserScopes(keep map[string]bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for scope := range c.current {
+		if scope.kind == "user" && !keep[scope.id] {
+			delete(c.current, scope)
+		}
+	}
+	for scope := range c.previous {
+		if scope.kind == "user" && !keep[scope.id] {
+			delete(c.previous, scope)
+		}
+	}
 }
 
 // rejectionScopeStoreDown is the synthetic scope id checkAndCount
@@ -676,6 +747,21 @@ const rejectionScopeStoreDown = "store_down"
 // itself.
 func (l *limiter) rejectionSnapshot() []rejectionSnapshot {
 	return l.rejections.snapshot()
+}
+
+// pruneRejections removes every "user"-kind rejection scope whose id is
+// not in keep (review fix, adversarial verification 2026-08-23): a user
+// removed from a hot-reloaded users file (auth.go's replaceFileUsers)
+// must not keep exporting llmgateway_rate_limit_rejections_total
+// forever. Called only from ServeHTTP, and only when authStore.
+// maybeReload just reported a REAL reload — see that method's own doc
+// comment (users_file.go) for why this must never run on every request.
+// Scope kinds other than "user" (group, the synthetic total and
+// store_down entries) are left untouched: groups and the total scope
+// are never hot-reloaded (Config.Groups is fixed at construction), and
+// store_down names no real scope at all.
+func (l *limiter) pruneRejections(keep map[string]bool) {
+	l.rejections.pruneUserScopes(keep)
 }
 
 // providerAttemptSpawnCap bounds how many concurrent recordProviderAttempt
@@ -1677,6 +1763,20 @@ type providerCounters struct {
 	failuresMinute int64
 	attemptsDay    int64
 	failuresDay    int64
+	// storeDown reports whether reading this scope's counters failed
+	// closed (a configured store errored and failOpen is false) —
+	// mirrors scopeUsage.storeDown exactly (review fix: the doc comment
+	// below used to claim "nothing downstream treats a provider's zero
+	// counters as confirmed no-traffic", which metrics.go's renderer
+	// made false the moment it existed — a Redis blip made every
+	// provider counter read as 0, then jump back to its real value on
+	// the next successful scrape, which Prometheus reads as a counter
+	// RESET followed by a fresh increase equal to the whole prior total:
+	// one transient store error paints a phantom multi-thousand-request
+	// spike. Every field is 0 when this is true; a caller must not
+	// present them as "confirmed zero usage", the identical rule
+	// scopeUsage's own doc comment states).
+	storeDown bool
 }
 
 // providerUsage reads every scope's current attempt/failure counters in
@@ -1688,11 +1788,16 @@ type providerCounters struct {
 // kindProviderModel entries for the per-model breakdown, all in one
 // slice, so both share this single round trip. Order is preserved:
 // providerUsage(scopes)[i] corresponds to scopes[i]. A failed read
-// (store down + fail-closed) returns every zero-value counters, exactly
-// like targetUsage — see its own doc comment for why that is acceptable
-// here: nothing downstream treats a provider's zero counters as
-// "confirmed no traffic" the way scopeUsage.storeDown guards against for
-// a limited scope.
+// (store down + fail-closed) returns every counter at its zero value
+// WITH storeDown set (review fix: adversarial verification, 2026-08-23
+// — the previous version of this comment claimed nothing downstream
+// treats a provider's zero counters as confirmed no-traffic; metrics.go
+// is exactly such a downstream, and without this flag a transient Redis
+// blip fabricated a hard 0 that Prometheus reads as a counter reset,
+// followed by a fresh "increase" equal to the whole prior total on the
+// next successful scrape). A caller reading providerCounters must skip
+// a storeDown entry the same way currentUsage's own callers already skip
+// a storeDown scopeUsage — see that type's doc comment.
 //
 // Slicing is by running offset, not a fixed i*stride multiply (SHOULD-2,
 // providerCounterKeysPerScope's own doc comment): a kindProvider and a
@@ -1715,7 +1820,10 @@ func (l *limiter) providerUsage(scopes []limitScope) []providerCounters {
 
 	vals, ok := l.storeGetMulti(allKeys)
 	if !ok || len(vals) != len(allKeys) {
-		return out // zero-value counters; see doc comment above
+		for i := range out {
+			out[i] = providerCounters{storeDown: true}
+		}
+		return out
 	}
 
 	for i, sc := range scopes {

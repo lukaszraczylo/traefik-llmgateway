@@ -830,7 +830,14 @@ func attachUsersFile(auth *authStore, path string, log gatewayLogger) error {
 func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	sw := &statusTrackingWriter{ResponseWriter: w}
 	defer recoverPanic(sw, g)
-	g.auth.maybeReload()
+	// pruneRejectionsAfterReload only runs when maybeReload just performed
+	// a REAL reload (users_file.go's own doc comment explains why it must
+	// never run on every request) — a deleted file-sourced user must not
+	// keep exporting llmgateway_rate_limit_rejections_total forever
+	// (metrics.go).
+	if g.auth.maybeReload() {
+		g.pruneRejectionsAfterReload()
+	}
 	g.registry.maybeRefresh(r.Context())
 
 	if r.Method == http.MethodGet && r.URL.Path == "/v1/models" {
