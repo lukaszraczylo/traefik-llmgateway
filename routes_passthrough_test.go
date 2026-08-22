@@ -532,6 +532,69 @@ func TestHandlePassthrough_HopByHopHeadersStripped(t *testing.T) {
 	}
 }
 
+// TestHandlePassthrough_DangerousResponseHeadersStripped is the security
+// review finding 5 (round 3, 2026-08-22) regression test: an upstream
+// setting Set-Cookie, Access-Control-*, Strict-Transport-Security, or
+// Content-Security-Policy on its response must never have those reach
+// the client — an upstream (or an in-cluster MCP/A2A target) must never
+// get to plant a cookie or dictate a security/CORS policy on this
+// gateway's own origin. An ordinary response header, and the two headers
+// this repo's own code actually reads off a response (Content-Type,
+// Retry-After), must still pass through unchanged.
+func TestHandlePassthrough_DangerousResponseHeadersStripped(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Set-Cookie", "session=stolen; Path=/")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Credentials", "true")
+		w.Header().Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+		w.Header().Set("Content-Security-Policy", "default-src 'evil.example'")
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Retry-After", "30")
+		w.Header().Set("X-Upstream-Custom", "keep-me")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{
+		"openai": {Type: "openai", BaseURL: srv.URL, APIKey: "sk-up"},
+	}
+	cfg.Groups = map[string]*GroupConfig{"default": {}}
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{{Name: "alice", Group: "default", APIKey: "sk-alice"}}}
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/openai/v1/thing", nil)
+	req.Header.Set("Authorization", "Bearer sk-alice")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	for _, hdr := range []string{
+		"Set-Cookie", "Access-Control-Allow-Origin", "Access-Control-Allow-Credentials",
+		"Strict-Transport-Security", "Content-Security-Policy",
+	} {
+		if v := rec.Header().Get(hdr); v != "" {
+			t.Errorf("client saw dangerous response header %s = %q, want stripped", hdr, v)
+		}
+	}
+	if rec.Header().Get("Content-Type") != "application/json" {
+		t.Error("client must still see Content-Type — the strip is a deny-list, not an allowlist")
+	}
+	if rec.Header().Get("Retry-After") != "30" {
+		t.Error("client must still see Retry-After — the strip is a deny-list, not an allowlist")
+	}
+	if rec.Header().Get("X-Upstream-Custom") != "keep-me" {
+		t.Error("client must still see an ordinary upstream response header — the strip must not be a full allowlist inversion")
+	}
+}
+
 // TestHandlePassthrough_NonStreamJSON_AccountsUsage proves a non-streaming
 // application/json response's usage is extracted and accounted against
 // the caller's own limiter counters.

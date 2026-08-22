@@ -180,6 +180,55 @@ var providerCredentialRetargetHeaders = map[string]bool{
 	"Anthropic-Beta":      true,
 }
 
+// dangerousResponseHeaders lists exact-match upstream RESPONSE headers
+// stripped before being relayed to the client (security review finding
+// 5, round 3, 2026-08-22) — additive to hopByHopHeaders, which
+// proxyUpstream already strips from both directions; this is the
+// RESPONSE-side counterpart to dangerousClientHeaders/
+// providerCredentialRetargetHeaders above, which already hardened the
+// REQUEST side. proxyUpstream copies every OTHER upstream response
+// header verbatim to the client — a raw reverse-proxy contract, not a
+// translation layer — but three of them let the upstream act on THIS
+// gateway's own origin, an origin that also serves the WAN-exposed
+// /admin dashboard (admin.go): an upstream provider, or an in-cluster
+// MCP/A2A target reached with no credential trust boundary of its own
+// (handleTargetProxy's own doc comment, mcp_a2a.go — this strip applies
+// there too, since both callers share this one function), could
+// otherwise plant a Set-Cookie under the gateway's own domain, or
+// rewrite the browser's security policy toward that domain via
+// Strict-Transport-Security/Content-Security-Policy, merely by
+// returning it in a response this gateway was only ever asked to relay.
+//
+// Deliberately a DENY-list, not an allowlist (unlike the request-side
+// dangerous-header strips, which are also deny-lists, for the same
+// reason): passthrough's whole purpose is exposing the provider's raw
+// response, including headers this gateway's own code never reads but a
+// client SDK does — grepping this repo for what it actually reads off a
+// response finds exactly two: Content-Type (every adapter's streaming/
+// non-streaming branch) and Retry-After (retry.go's OWN internal retry
+// decision on the unified routes, never read from a passthrough
+// response). Everything else — provider rate-limit telemetry headers
+// like x-ratelimit-remaining-requests/-tokens included — is opaque to
+// this gateway but commonly read by an external client's own SDK. An
+// allowlist would silently break that transparency for every header this
+// package does not already know to name; this narrow deny-list closes
+// exactly the origin-integrity holes named above without that cost.
+var dangerousResponseHeaders = map[string]bool{
+	"Set-Cookie":                true,
+	"Strict-Transport-Security": true,
+	"Content-Security-Policy":   true,
+}
+
+// dangerousResponseHeaderPrefixes strips every Access-Control-* header
+// (Access-Control-Allow-Origin, Access-Control-Allow-Credentials, ...)
+// an upstream response sets (security review finding 5, round 3,
+// 2026-08-22): an upstream provider or in-cluster MCP/A2A target has no
+// legitimate reason to dictate THIS gateway's own CORS policy toward
+// whatever browser called it — the gateway's own response to the client
+// is a separate origin boundary the upstream must never get to speak
+// for.
+var dangerousResponseHeaderPrefixes = []string{"Access-Control-"}
+
 // stripHeaderPrefixes deletes every header in h whose canonical name
 // starts with one of prefixes — the prefix-matching half of the
 // dangerous-header strip copyHeadersExcept's own exact-match excepts
@@ -849,6 +898,17 @@ type proxyResult struct {
 // since an MCP server or A2A agent is an in-cluster target that receives
 // no injected credential at all.
 //
+// The RESPONSE side is hardened too (security review finding 5, round 3,
+// 2026-08-22): every hop-by-hop header AND dangerousResponseHeaders
+// (Set-Cookie, Strict-Transport-Security, Content-Security-Policy) plus
+// dangerousResponseHeaderPrefixes (Access-Control-*) are stripped before
+// the upstream's response headers reach the client, for BOTH callers —
+// an upstream provider or an in-cluster MCP/A2A target must never get to
+// plant a cookie or dictate a security/CORS policy on this gateway's own
+// origin merely by setting it on a response this function was only ever
+// asked to relay. See dangerousResponseHeaders' own doc comment for why
+// this is a narrow deny-list, not an allowlist.
+//
 // A build failure or a dead upstream writes a 502 envelope to w and
 // returns ok=false; a canceled client context (errors.Is context.Canceled)
 // is logged, not surfaced, and also returns ok=false, writing nothing —
@@ -924,7 +984,8 @@ func (g *Gateway) proxyUpstream(w http.ResponseWriter, r *http.Request, upstream
 	}
 	defer resp.Body.Close() //nolint:errcheck // read-side close; nothing actionable on failure
 
-	copyHeadersExcept(w.Header(), resp.Header, hopByHopHeaders)
+	copyHeadersExcept(w.Header(), resp.Header, hopByHopHeaders, dangerousResponseHeaders)
+	stripHeaderPrefixes(w.Header(), dangerousResponseHeaderPrefixes)
 	w.WriteHeader(resp.StatusCode)
 	fw := newFlushWriter(w)
 
