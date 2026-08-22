@@ -1,6 +1,7 @@
 package traefikllmgateway
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -871,6 +872,117 @@ func TestModelRegistry_ListFor_Collision_LosingProviderStillReachableViaPrefixed
 	}
 	if got[0]["id"] != "beta/shared" || got[0]["owned_by"] != "beta" {
 		t.Errorf("entry = %v, want {id:beta/shared, owned_by:beta}", got[0])
+	}
+}
+
+// --- modelsJSON: cached encoded /v1/models body (perf finding 3) ---
+
+// TestModelRegistry_ModelsJSON_CachesUntilFinishRefresh proves the perf
+// fix: a group's encoded body is the SAME []byte (not merely
+// byte-equal — literally not re-marshaled) across repeated calls, until
+// finishRefresh actually records a refresh attempt for some provider
+// (modelsGen bumps), at which point the next call reflects the change.
+func TestModelRegistry_ModelsJSON_CachesUntilFinishRefresh(t *testing.T) {
+	t.Parallel()
+	adapters := map[string]providerAdapter{"openai": newFakeAdapter("openai")}
+	cfg := &Config{Providers: map[string]*ProviderConfig{"openai": {Models: []string{"gpt-test"}}}}
+	reg, err := newModelRegistry(adapters, cfg, func(string, ...any) {})
+	if err != nil {
+		t.Fatalf("newModelRegistry: %v", err)
+	}
+
+	grp := &group{name: "all"}
+	first := reg.modelsJSON(grp)
+	if len(first) == 0 {
+		t.Fatal("modelsJSON returned an empty body")
+	}
+	second := reg.modelsJSON(grp)
+	if len(first) == 0 || len(second) == 0 || &first[0] != &second[0] {
+		t.Error("two calls between refreshes returned different backing arrays, want the identical cached []byte")
+	}
+	if !strings.Contains(string(first), "gpt-test") {
+		t.Errorf("body = %s, want it to contain %q", first, "gpt-test")
+	}
+
+	// A discovery refresh — even for a provider whose own discovery is
+	// disabled here, driven directly via the registry's own finishRefresh
+	// wrapper rather than a real background goroutine — must invalidate
+	// the cache.
+	reg.finishRefresh(reg.states["openai"], reg.now(), []string{"gpt-test", "gpt-new"}, nil)
+
+	third := reg.modelsJSON(grp)
+	if string(third) == string(second) {
+		t.Error("modelsJSON body unchanged after finishRefresh added a new model, want it to reflect the new catalog")
+	}
+	if !strings.Contains(string(third), "gpt-new") {
+		t.Errorf("body after refresh = %s, want it to contain the newly discovered %q", third, "gpt-new")
+	}
+}
+
+// TestModelRegistry_ModelsJSON_PerGroupIsolation proves the cache never
+// leaks one group's catalog to another: two groups authorized for
+// disjoint providers must each get their own encoded body, keyed by
+// *group pointer identity (modelsJSON's own doc comment).
+func TestModelRegistry_ModelsJSON_PerGroupIsolation(t *testing.T) {
+	t.Parallel()
+	adapters := map[string]providerAdapter{
+		"openai":    newFakeAdapter("openai"),
+		"anthropic": newFakeAdapter("anthropic"),
+	}
+	cfg := &Config{Providers: map[string]*ProviderConfig{
+		"openai":    {Models: []string{"gpt-test"}},
+		"anthropic": {Models: []string{"claude-x"}},
+	}}
+	reg, err := newModelRegistry(adapters, cfg, func(string, ...any) {})
+	if err != nil {
+		t.Fatalf("newModelRegistry: %v", err)
+	}
+
+	grpOpenAI := &group{name: "openai-only", providers: []string{"openai"}}
+	grpAnthropic := &group{name: "anthropic-only", providers: []string{"anthropic"}}
+
+	bodyOpenAI := reg.modelsJSON(grpOpenAI)
+	bodyAnthropic := reg.modelsJSON(grpAnthropic)
+
+	if strings.Contains(string(bodyOpenAI), "claude-x") {
+		t.Errorf("openai-only group's body leaked anthropic's model: %s", bodyOpenAI)
+	}
+	if strings.Contains(string(bodyAnthropic), "gpt-test") {
+		t.Errorf("anthropic-only group's body leaked openai's model: %s", bodyAnthropic)
+	}
+	if !strings.Contains(string(bodyOpenAI), "gpt-test") {
+		t.Errorf("openai-only group's body = %s, want it to contain gpt-test", bodyOpenAI)
+	}
+	if !strings.Contains(string(bodyAnthropic), "claude-x") {
+		t.Errorf("anthropic-only group's body = %s, want it to contain claude-x", bodyAnthropic)
+	}
+}
+
+// TestModelRegistry_ModelsJSON_MatchesUncachedListFor proves modelsJSON's
+// output is byte-identical to the OLD, pre-cache call site
+// (json.NewEncoder(w).Encode(...), routes_unified.go before perf finding
+// 3) for the same envelope over listFor's own result — the cache changes
+// WHEN the body is computed, never WHAT it computes, including
+// json.Encoder.Encode's own trailing '\n' that a bare json.Marshal does
+// not add (review fix, Should-Fix 5 — modelsJSON appends it explicitly).
+func TestModelRegistry_ModelsJSON_MatchesUncachedListFor(t *testing.T) {
+	t.Parallel()
+	adapters := map[string]providerAdapter{"openai": newFakeAdapter("openai")}
+	cfg := &Config{Providers: map[string]*ProviderConfig{"openai": {Models: []string{"zeta", "alpha"}}}}
+	reg, err := newModelRegistry(adapters, cfg, func(string, ...any) {})
+	if err != nil {
+		t.Fatalf("newModelRegistry: %v", err)
+	}
+
+	grp := allowAllGroup()
+	got := reg.modelsJSON(grp)
+
+	var want bytes.Buffer
+	if err := json.NewEncoder(&want).Encode(map[string]any{"object": "list", "data": reg.listFor(grp)}); err != nil {
+		t.Fatalf("json.NewEncoder.Encode: %v", err)
+	}
+	if string(got) != want.String() {
+		t.Errorf("modelsJSON = %q, want %q (byte-identical to the old json.Encoder.Encode call site)", got, want.String())
 	}
 }
 

@@ -39,7 +39,11 @@ const gatewayAliasKey = "__alias"
 
 // handleModels implements GET /v1/models: an authenticated caller gets back
 // an OpenAI-compatible {"object":"list","data":[...]} envelope of the
-// models their group can see, via modelRegistry.listFor.
+// models their group can see, via modelRegistry.modelsJSON (perf finding
+// 3: modelsJSON caches the encoded body per (group, discovery generation)
+// so a request between discovery refreshes never re-walks listFor/
+// re-marshals — registry.go owns the cache; this call site just writes
+// its result).
 func (g *Gateway) handleModels(w http.ResponseWriter, r *http.Request) {
 	u, grp, ok := g.auth.identify(r)
 	g.logAuthEvent(ok, authEventUserName(u), r)
@@ -49,10 +53,7 @@ func (g *Gateway) handleModels(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{ // headers already committed; nothing useful to do on encode failure
-		"object": "list",
-		"data":   g.registry.listFor(grp),
-	})
+	_, _ = w.Write(g.registry.modelsJSON(grp)) // headers already committed; nothing useful to do on write failure
 }
 
 // adapterCall abstracts providerAdapter.chatCompletion and .embeddings:

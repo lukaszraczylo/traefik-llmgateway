@@ -2,11 +2,13 @@ package traefikllmgateway
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -199,8 +201,10 @@ func (st *providerState) snapshot() (models []string, lastRefresh time.Time, las
 // discovered model ids into the gateway's model-resolution and /v1/models
 // listing surfaces. adapters, providerNames, and states are all fixed at
 // construction; only providerState's own fields mutate afterward (each
-// guarded by its own mutex), so modelRegistry itself needs no lock beyond
-// warnedMu for the collision-log dedup below.
+// guarded by its own mutex). modelRegistry itself needs warnedMu for the
+// collision-log dedup below, and modelsCacheMu for modelsCache (perf
+// finding 3) — modelsGen is read/written only via sync/atomic and needs
+// no mutex of its own.
 type modelRegistry struct {
 	adapters map[string]providerAdapter
 	states   map[string]*providerState
@@ -213,7 +217,9 @@ type modelRegistry struct {
 	// shape through a method or interface method is unaffected — this is
 	// specific to a field holding a func value. Verified empirically
 	// against yaegi v0.16.1 (see tools/yaegi-check) and does not apply to
-	// g.logf/g.errorf, which are methods, not fields.
+	// g.logf/g.errorf, which are methods, not fields. modelsJSON (perf
+	// finding 3) follows this same rule: m.log("%s", fmt.Sprintf(...)),
+	// never a second variadic argument.
 	log func(string, ...any)
 	// aliases is the validated alias->target map from Config.ModelAliases
 	// (spec §5, v0.2), built once by newModelRegistry via
@@ -232,11 +238,35 @@ type modelRegistry struct {
 	// lookup (always a miss) that adds no branching cost to the
 	// no-overrides case — the same nil-vs-empty convention aliases above
 	// already establishes.
-	modelMeta     map[string]*ModelMetaConfig
-	nowFn         func() time.Time
-	warned        map[string]bool
+	modelMeta map[string]*ModelMetaConfig
+	nowFn     func() time.Time
+	warned    map[string]bool
+	// modelsCache holds one encoded GET /v1/models response body per
+	// group, tagged with the modelsGen it was built from (perf finding 3,
+	// 2026-08-2x audit: 15.9ms/21.3MB/552,884 allocs per uncached call at
+	// the live 1,033-model catalog) — see modelsJSON's own doc comment.
+	// Guarded by modelsCacheMu.
+	modelsCache   map[*group]modelsCacheEntry
 	providerNames []string
-	warnedMu      sync.Mutex
+	// modelsGen counts how many times finishRefresh (below) has recorded a
+	// discovery attempt for ANY provider — bumped unconditionally, success
+	// or failure, since a failed listModels fetch can still pair with a
+	// successful metadata capture (captureModelMetadata's own doc comment)
+	// that changes what listFor/modelsJSON would produce. Read and written
+	// only via sync/atomic — modelsJSON (below) reads it outside any lock,
+	// finishRefresh writes it from whichever goroutine (warmFill's caller,
+	// or maybeRefresh's background goroutine) is recording that refresh.
+	modelsGen int64
+	warnedMu  sync.Mutex
+	// modelsCacheMu guards modelsCache.
+	modelsCacheMu sync.Mutex
+}
+
+// modelsCacheEntry is one cached, encoded GET /v1/models response body
+// (modelRegistry.modelsCache) plus the modelsGen it was built from.
+type modelsCacheEntry struct {
+	body []byte
+	gen  int64
 }
 
 // newModelRegistry builds a modelRegistry from adapters and cfg's matching
@@ -253,6 +283,7 @@ func newModelRegistry(adapters map[string]providerAdapter, cfg *Config, log func
 		nowFn:         time.Now,
 		warned:        make(map[string]bool),
 		providerNames: make([]string, 0, len(adapters)),
+		modelsCache:   make(map[*group]modelsCacheEntry),
 	}
 	for name := range adapters {
 		m.providerNames = append(m.providerNames, name)
@@ -386,6 +417,21 @@ func (m *modelRegistry) now() time.Time {
 	return m.nowFn()
 }
 
+// finishRefresh records the outcome of a refresh attempt (st.finishRefresh)
+// and invalidates modelsJSON's cache by bumping modelsGen — the ONLY two
+// places that ever mutate st.discovered or st.discoveredContext both
+// funnel through here (warmFill, refreshProvider), so every change
+// listFor's output could possibly reflect is covered. Bumped
+// unconditionally, not just on a successful refresh: captureModelMetadata
+// (both call sites' own doc comments) always runs immediately alongside
+// this same refresh cycle regardless of whether listModels itself
+// succeeded, and a metadata-only change must invalidate the cache just as
+// much as a discovered-set change would.
+func (m *modelRegistry) finishRefresh(st *providerState, now time.Time, ids []string, err error) {
+	st.finishRefresh(now, ids, err)
+	atomic.AddInt64(&m.modelsGen, 1)
+}
+
 // warmFill performs newGateway's synchronous first discovery fill: for
 // every discovery-enabled provider, it fetches listModels once, bounded by
 // warmFillTimeout, and records the result via finishRefresh. A fetch error
@@ -402,7 +448,7 @@ func (m *modelRegistry) warmFill(ctx context.Context) {
 		fctx, cancel := context.WithTimeout(ctx, warmFillTimeout)
 		ids, err := m.adapters[name].listModels(fctx)
 		cancel()
-		st.finishRefresh(m.now(), ids, err)
+		m.finishRefresh(st, m.now(), ids, err)
 		if err != nil {
 			m.log("%s", fmt.Sprintf("model registry: initial discovery for provider %q failed: %v", name, err))
 		}
@@ -541,7 +587,7 @@ func (m *modelRegistry) refreshProvider(name string, st *providerState, adapter 
 		if rec := recover(); rec != nil {
 			err = fmt.Errorf("panic: %v", rec)
 		}
-		st.finishRefresh(m.now(), ids, err)
+		m.finishRefresh(st, m.now(), ids, err)
 		if err != nil {
 			m.log("%s", fmt.Sprintf("model registry: discovery refresh for provider %q failed: %v", name, err))
 		}
@@ -805,6 +851,62 @@ func (m *modelRegistry) warnCollisionOnce(id, winner string, provs []string) {
 	}
 	m.warned[id] = true
 	m.log("%s", fmt.Sprintf("model registry: model id %q is provided by multiple providers %v; %q wins the bare id", id, provs, winner))
+}
+
+// modelsJSON returns grp's encoded GET /v1/models response body
+// ({"object":"list","data":[...]} — routes_unified.go's handleModels
+// writes this straight to the response), cached per (group, modelsGen)
+// (perf finding 3, 2026-08-2x audit: 15.9ms/21.3MB/552,884 allocs per
+// call, uncached, at the live 1,033-model catalog — registry.go's listFor
+// plus routes_unified.go's json.Encoder, called on every request an
+// OpenAI SDK client's session-start model poll happens to land on).
+// listFor's output only changes when a discovery refresh runs
+// (finishRefresh, above, bumps modelsGen unconditionally on every
+// attempt) — between refreshes, every call for the same group returns
+// the identical cached bytes without re-walking every provider's model
+// set or re-marshaling.
+//
+// Cached per *group pointer, not by name or any other derived key:
+// authStore builds every group once, at construction (auth.go's
+// newAuthStore), and never rebuilds or replaces that map afterward — a
+// config reload constructs an entirely new Gateway (and so a new
+// modelRegistry with its own empty modelsCache), so a *group pointer here
+// can never alias a different group's catalog, either within one
+// registry's lifetime or across a reload.
+func (m *modelRegistry) modelsJSON(grp *group) []byte {
+	gen := atomic.LoadInt64(&m.modelsGen)
+
+	m.modelsCacheMu.Lock()
+	if entry, ok := m.modelsCache[grp]; ok && entry.gen == gen {
+		m.modelsCacheMu.Unlock()
+		return entry.body
+	}
+	m.modelsCacheMu.Unlock()
+
+	body, err := json.Marshal(map[string]any{
+		"object": "list",
+		"data":   m.listFor(grp),
+	})
+	if err != nil {
+		// listFor's map[string]any values are all JSON-safe primitives
+		// (string, int, float64, bool, and nested maps/slices of the
+		// same) — Marshal cannot fail on them in practice. Not caching a
+		// failure keeps this equivalent to the pre-cache
+		// json.NewEncoder(w).Encode call site, which also had nothing
+		// useful to do on an encode failure beyond logging.
+		m.log("%s", fmt.Sprintf("model registry: encoding /v1/models response for group %q failed: %v", grp.name, err))
+		return nil
+	}
+	// json.Encoder.Encode (the pre-cache call site) always appends a
+	// trailing '\n' after the value; json.Marshal does not — appended
+	// here so the cached body is byte-identical to what the old
+	// uncached path wrote (review fix, Should-Fix 5).
+	body = append(body, '\n')
+
+	m.modelsCacheMu.Lock()
+	m.modelsCache[grp] = modelsCacheEntry{gen: gen, body: body}
+	m.modelsCacheMu.Unlock()
+	return body
 }
 
 // listFor returns grp's visible model catalog as OpenAI-compatible model
