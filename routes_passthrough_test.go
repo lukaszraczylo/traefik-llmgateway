@@ -1708,3 +1708,38 @@ func TestHandlePassthrough_ZeroConfig_NewFieldsUnset_BehavesIdenticallyToBefore(
 		t.Errorf("upstream body = %q, want the client body preserved unchanged", gotBody)
 	}
 }
+
+// TestScanTopLevelModel_DuplicateModelKeyFailsClosed pins the fail-closed
+// rule for a duplicate top-level "model" key (security audit, 2026-08-22,
+// round 3). RFC 8259 permits duplicate names and every mainstream upstream
+// parser resolves them LAST-wins, while this gateway forwards a passthrough
+// body byte-for-byte — so reporting the FIRST occurrence (the behaviour
+// before this test existed) let a model-restricted caller authorize against
+// "allowed" and execute "expensive". scanTopLevelModel refuses to answer
+// instead, matching extractMultipartModel's errDuplicateModelField rule.
+func TestScanTopLevelModel_DuplicateModelKeyFailsClosed(t *testing.T) {
+	cases := []struct {
+		name      string
+		body      string
+		wantModel string
+		wantFound bool
+	}{
+		{"single model", `{"model":"allowed","messages":[]}`, "allowed", true},
+		{"model after other keys", `{"stream":true,"model":"allowed"}`, "allowed", true},
+		{"model found then body truncated", `{"model":"allowed","messages":[{"role":"user"`, "allowed", true},
+		{"duplicate model", `{"model":"allowed","model":"expensive","messages":[]}`, "", false},
+		{"duplicate across a nested object", `{"model":"allowed","opts":{"a":1},"model":"expensive"}`, "", false},
+		{"duplicate with identical values", `{"model":"same","model":"same"}`, "", false},
+		{"no model", `{"messages":[]}`, "", false},
+		{"nested model only", `{"opts":{"model":"x"}}`, "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			gotModel, gotFound := scanTopLevelModel([]byte(tc.body))
+			if gotModel != tc.wantModel || gotFound != tc.wantFound {
+				t.Fatalf("scanTopLevelModel(%s) = (%q, %v), want (%q, %v)",
+					tc.body, gotModel, gotFound, tc.wantModel, tc.wantFound)
+			}
+		})
+	}
+}

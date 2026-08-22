@@ -433,6 +433,7 @@ func peekPassthroughModel(r *http.Request) (model string, hasModel bool, err err
 // "model" never appears among its top-level keys before head runs out,
 // or "model" is present but its value is not a string.
 func scanTopLevelModel(head []byte) (model string, found bool) {
+	seenModel := false
 	dec := json.NewDecoder(bytes.NewReader(head))
 	tok, err := dec.Token()
 	if err != nil {
@@ -444,29 +445,48 @@ func scanTopLevelModel(head []byte) (model string, found bool) {
 	for dec.More() {
 		keyTok, err := dec.Token()
 		if err != nil {
-			return "", false
+			return model, found
 		}
 		key, ok := keyTok.(string)
 		if !ok {
-			return "", false // malformed: expected an object key
+			return model, found // malformed: expected an object key
 		}
 		valTok, err := dec.Token()
 		if err != nil {
-			return "", false
+			return model, found
 		}
 		if key == "model" {
-			s, ok := valTok.(string)
-			return s, ok && s != ""
+			// A DUPLICATE top-level "model" fails closed, matching
+			// extractMultipartModel's errDuplicateModelField rule
+			// (routes_media.go). Returning on the FIRST occurrence would be
+			// an authorization bypass: RFC 8259 permits duplicate names and
+			// every mainstream parser an upstream might use (Go's
+			// encoding/json, Python json.loads, Node JSON.parse, Ruby, PHP,
+			// Newtonsoft) resolves them LAST-wins, while this body is
+			// forwarded byte-for-byte unmodified — so a client could get
+			// {"model":"allowed","model":"expensive"} authorized against the
+			// first and executed as the second. Ambiguity is not
+			// resolvable here without rewriting the client's bytes, so the
+			// only safe answer is to refuse to answer.
+			if seenModel {
+				return "", false
+			}
+			seenModel = true
+			if s, isStr := valTok.(string); isStr && s != "" {
+				model = s
+				found = true
+			}
+			continue
 		}
 		if d, ok := valTok.(json.Delim); ok && (d == '{' || d == '[') {
 			if err := skipJSONValue(dec); err != nil {
-				return "", false
+				return model, found
 			}
 		}
 		// Otherwise valTok was a scalar (string/float64/bool/nil) other
 		// than "model" — nothing further to do; loop to the next key.
 	}
-	return "", false
+	return model, found
 }
 
 // skipJSONValue consumes the remainder of a nested JSON array/object
