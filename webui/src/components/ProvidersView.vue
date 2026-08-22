@@ -194,6 +194,11 @@ function healthBadgeLabel(p: AdminProviderView): string {
   return until ? `${p.healthState} (${until})` : p.healthState
 }
 
+/** healthDetailClass matches the accordion-content detail row's text color to healthBadgeVariant's own trigger-row Badge color, rather than hardcoding text-destructive for every non-closed state: destructive (red) for 'open', muted (grey, the same neutral tone secondary conveys on the Badge) for 'half-open'. */
+function healthDetailClass(state: AdminProviderView['healthState']): string {
+  return state === 'open' ? 'text-destructive' : 'text-muted-foreground'
+}
+
 // --- model aliases (sortable DataTable, operator directive) ---
 //
 // The alias id gets the ModelChip copy treatment (an alias name IS the
@@ -356,7 +361,7 @@ const aliasEmptyMessage = computed(() =>
                 </div>
                 <div v-if="p.healthState !== 'closed'">
                   <dt class="text-xs text-muted-foreground">Discovery health</dt>
-                  <dd class="text-destructive">{{ healthBadgeLabel(p) }}</dd>
+                  <dd :class="healthDetailClass(p.healthState)">{{ healthBadgeLabel(p) }}</dd>
                 </div>
                 <div v-if="p.lastErr">
                   <dt class="text-xs text-muted-foreground">Last error</dt>
