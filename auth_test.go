@@ -577,3 +577,145 @@ func TestAuthStore_Identify_NotBlockedByBuildMu(t *testing.T) {
 		t.Fatal("identify blocked while buildMu is held — reader lock must not depend on the writer-serialization lock")
 	}
 }
+
+// --- security audit finding 3: per-source-IP auth-failure throttling ---
+
+func TestClientIP_StripsPort(t *testing.T) {
+	r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	r.RemoteAddr = "203.0.113.9:54321"
+	if got := clientIP(r); got != "203.0.113.9" {
+		t.Errorf("clientIP = %q, want %q", got, "203.0.113.9")
+	}
+}
+
+func TestClientIP_MalformedRemoteAddr_UsedAsIs(t *testing.T) {
+	r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	r.RemoteAddr = "not-a-host-port"
+	if got := clientIP(r); got != "not-a-host-port" {
+		t.Errorf("clientIP = %q, want the raw RemoteAddr back unchanged", got)
+	}
+}
+
+// TestAuthStore_Identify_ThrottlesAfterRepeatedFailures_EvenValidKeyRejected
+// is the core regression for finding 3: identify previously had no
+// counter, no backoff, and no lockout at all. After authFailureLimit
+// failed attempts from one source IP, even a subsequently CORRECT key
+// from that same IP must be rejected — proving the throttle actually
+// short-circuits real auth once tripped, not merely that repeated wrong
+// keys keep failing (which they would anyway). A different source IP must
+// be entirely unaffected, proving the throttle is per-IP, not global.
+func TestAuthStore_Identify_ThrottlesAfterRepeatedFailures_EvenValidKeyRejected(t *testing.T) {
+	a, err := newAuthStore(testAuthCfg()) // inline user "a" / sk-secret
+	if err != nil {
+		t.Fatal(err)
+	}
+	const attackerIP = "203.0.113.9:54321"
+
+	for i := 0; i < authFailureLimit; i++ {
+		r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+		r.RemoteAddr = attackerIP
+		r.Header.Set("x-api-key", "wrong-key")
+		if _, _, ok := a.identify(r); ok {
+			t.Fatalf("attempt %d: want failure for a wrong key, got success", i)
+		}
+	}
+
+	// Throttle should now be engaged for attackerIP — even the CORRECT
+	// key must be rejected.
+	valid := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	valid.RemoteAddr = attackerIP
+	valid.Header.Set("Authorization", "Bearer sk-secret")
+	if _, _, ok := a.identify(valid); ok {
+		t.Fatal("want a throttled IP rejected even with a valid key")
+	}
+
+	// A different source IP must be unaffected by attackerIP's throttle.
+	other := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	other.RemoteAddr = "198.51.100.5:1111"
+	other.Header.Set("Authorization", "Bearer sk-secret")
+	if _, _, ok := a.identify(other); !ok {
+		t.Fatal("want a different source IP unaffected by another IP's throttle")
+	}
+}
+
+// TestAuthStore_Identify_ThrottleResetsAfterWindowExpires proves the
+// throttle is a fixed-window rate limit, not a permanent lockout: once
+// authFailureWindow has actually elapsed, the same IP's valid key works
+// again.
+func TestAuthStore_Identify_ThrottleResetsAfterWindowExpires(t *testing.T) {
+	a, err := newAuthStore(testAuthCfg()) // inline user "a" / sk-secret
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock := &fakeClock{now: time.Unix(1_700_000_000, 0)}
+	a.nowFn = clock.Now
+	const attackerIP = "203.0.113.9:54321"
+
+	for i := 0; i < authFailureLimit; i++ {
+		r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+		r.RemoteAddr = attackerIP
+		r.Header.Set("x-api-key", "wrong-key")
+		if _, _, ok := a.identify(r); ok {
+			t.Fatalf("attempt %d: want failure for a wrong key, got success", i)
+		}
+	}
+	blocked := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	blocked.RemoteAddr = attackerIP
+	blocked.Header.Set("Authorization", "Bearer sk-secret")
+	if _, _, ok := a.identify(blocked); ok {
+		t.Fatal("want throttled before the window elapses")
+	}
+
+	clock.Advance(authFailureWindow + time.Second)
+
+	recovered := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	recovered.RemoteAddr = attackerIP
+	recovered.Header.Set("Authorization", "Bearer sk-secret")
+	if _, _, ok := a.identify(recovered); !ok {
+		t.Fatal("want the same IP's valid key to work again once authFailureWindow has elapsed")
+	}
+}
+
+// TestAuthStore_Identify_FewFailedAttempts_NeverThrottled is the good-path
+// counterpart: a handful of failed attempts (well under authFailureLimit
+// — a human retrying a mistyped key a couple of times) must never trip
+// the throttle.
+func TestAuthStore_Identify_FewFailedAttempts_NeverThrottled(t *testing.T) {
+	a, err := newAuthStore(testAuthCfg())
+	if err != nil {
+		t.Fatal(err)
+	}
+	const ip = "203.0.113.9:54321"
+	for i := 0; i < 3; i++ {
+		r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+		r.RemoteAddr = ip
+		r.Header.Set("x-api-key", "wrong-key")
+		a.identify(r)
+	}
+	r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	r.RemoteAddr = ip
+	r.Header.Set("Authorization", "Bearer sk-secret")
+	if _, _, ok := a.identify(r); !ok {
+		t.Fatal("want a valid key to succeed after only 3 prior failures (well under authFailureLimit)")
+	}
+}
+
+// TestAuthStore_Identify_SuccessfulAuthDoesNotRecordFailure proves a
+// successful identify never itself counts toward the failure budget —
+// otherwise a legitimate, high-traffic user could eventually throttle
+// themselves.
+func TestAuthStore_Identify_SuccessfulAuthDoesNotRecordFailure(t *testing.T) {
+	a, err := newAuthStore(testAuthCfg())
+	if err != nil {
+		t.Fatal(err)
+	}
+	const ip = "203.0.113.9:54321"
+	r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	r.RemoteAddr = ip
+	r.Header.Set("Authorization", "Bearer sk-secret")
+	for i := 0; i < authFailureLimit+5; i++ {
+		if _, _, ok := a.identify(r); !ok {
+			t.Fatalf("attempt %d: want success (valid key), got failure", i)
+		}
+	}
+}

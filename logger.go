@@ -25,9 +25,21 @@ func (g *Gateway) errorf(format string, args ...any) {
 // line ever includes the presented API key itself — identify resolves a
 // key to a *user and hands this function only that user's name, never the
 // key it authenticated.
+//
+// The failure line is rate-limited via g.auth.shouldLogAuthFailure
+// (auth.go), the same technique limiter.logStoreError (limits.go) already
+// applies to store-error lines (security audit finding 3, 2026-08-22): an
+// unauthenticated caller driving unlimited failed attempts must never be
+// able to drive unlimited synchronous stderr writes on the shared Traefik
+// ingress — a slow log pipe would otherwise stall request handling for
+// every tenant, not just the one failing auth. The success line stays
+// unbounded — see shouldLogAuthFailure's own doc comment for why that is
+// safe.
 func (g *Gateway) logAuthEvent(ok bool, userName string, r *http.Request) {
 	if !ok {
-		g.logf("auth failed: %s %q from %s", r.Method, r.URL.Path, r.RemoteAddr)
+		if g.auth.shouldLogAuthFailure() {
+			g.logf("auth failed: %s %q from %s", r.Method, r.URL.Path, r.RemoteAddr)
+		}
 		return
 	}
 	g.logf("auth ok: user %q %s %q", userName, r.Method, r.URL.Path)

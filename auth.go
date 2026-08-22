@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"path"
@@ -187,6 +188,40 @@ type authEntry struct {
 	digest [32]byte
 }
 
+// authFailureWindow and authFailureLimit bound how many failed identify
+// attempts one source IP may make before further attempts from it are
+// throttled outright (security audit finding 3, 2026-08-22): identify
+// previously had no counter, no backoff, and no lockout at all — an
+// unauthenticated caller got unlimited digest-lookup attempts at line
+// rate. 20 failures per minute is generous headroom for a legitimate
+// client with a stale or mistyped key retried a few times (a human
+// pasting the wrong key, a misconfigured script cycling through a couple
+// of candidates) while still meaningfully bounding a scripted guesser's
+// throughput per source IP. This does not, and cannot, defend the
+// underlying key space on its own (a SHA-256 digest lookup already makes
+// brute force infeasible) — its real job is capping the synchronous cost
+// an unauthenticated caller can impose on the shared Traefik ingress per
+// unit time: identify's own digest lookup, and logAuthEvent's stderr
+// write (logger.go), both of which this finding's own framing calls out.
+const (
+	authFailureWindow = time.Minute
+	authFailureLimit  = 20
+	// authFailureLogEvery rate-limits logAuthEvent's own failed-auth log
+	// line (logger.go) the identical way limiter.logStoreError (limits.go)
+	// already rate-limits store-error lines — sharing that function's own
+	// storeErrorLogEvery interval keeps this codebase's "how often do we
+	// log a sustained failure condition" cadence consistent across both
+	// call sites, rather than picking a new, unrelated number here.
+	authFailureLogEvery = storeErrorLogEvery
+)
+
+// authFailureKeyPrefix namespaces authStore's failure-tracking keys in its
+// own memoryStore instance (failures, below) — a plain string key, not
+// windowKey's (kind, id, metric, window) tuple (limits.go), since auth
+// failures are tracked per SOURCE IP, a concept the rest of this
+// package's counter keying was never built to express.
+const authFailureKeyPrefix = "authfail:"
+
 // authStore identifies requests by API key and resolves them to a user and
 // their group. Raw API keys are never retained after construction — only
 // their SHA-256 digests.
@@ -198,19 +233,35 @@ type authEntry struct {
 // overwrite each other. buildMu is never held at the same time as mu, so a
 // rebuild in progress never blocks identify's readers. reloadMu (Task 4)
 // serializes maybeReload's throttle check and the reload it may trigger.
+//
+// failures is identify's own per-source-IP failed-attempt counter
+// (security audit finding 3, 2026-08-22) — the SAME in-process memoryStore
+// type limiter's fallback store already uses (limits.go), a deliberately
+// reused type rather than a new dependency, given its own TTL-bucketed
+// counter semantics already fit this need exactly. It is authStore's own
+// dedicated instance, not limiter.fallback: auth failures are a distinct
+// concept (throttling an unauthenticated caller) from LLM traffic limits
+// (throttling an authenticated one's usage), and authStore must work
+// identically whether or not a Gateway even has a limiter wired yet.
+// authFailLogMu/authFailLastLogAt back shouldLogAuthFailure, the identical
+// "guard a timestamp with a small mutex, rate-limit a log line" shape
+// limiter.logMu/lastLogAt already use.
 type authStore struct {
-	groups        map[string]*group
-	inline        map[[32]byte]*authEntry // built once by newAuthStore; never mutated afterward
-	byDigest      map[[32]byte]*authEntry // inline entries plus the current file-sourced set; guarded by mu
-	usersFile     *usersFile              // nil when Users.File is not configured; maybeReload no-ops
-	log           gatewayLogger           // set alongside usersFile; unused when usersFile is nil
-	nowFn         func() time.Time        // injected for tests; defaults to time.Now
-	lastCheck     time.Time               // guarded by reloadMu
-	lastModTime   time.Time               // guarded by reloadMu
-	fileUserCount int                     // guarded by mu; size of the current file-sourced user set
-	mu            sync.RWMutex
-	buildMu       sync.Mutex
-	reloadMu      sync.Mutex
+	groups            map[string]*group
+	inline            map[[32]byte]*authEntry // built once by newAuthStore; never mutated afterward
+	byDigest          map[[32]byte]*authEntry // inline entries plus the current file-sourced set; guarded by mu
+	usersFile         *usersFile              // nil when Users.File is not configured; maybeReload no-ops
+	log               gatewayLogger           // set alongside usersFile; unused when usersFile is nil
+	nowFn             func() time.Time        // injected for tests; defaults to time.Now
+	failures          *memoryStore            // per-source-IP failed-identify counters; see doc comment above
+	lastCheck         time.Time               // guarded by reloadMu
+	lastModTime       time.Time               // guarded by reloadMu
+	authFailLastLogAt time.Time               // guarded by authFailLogMu; last time a failed-auth line was logged
+	fileUserCount     int                     // guarded by mu; size of the current file-sourced user set
+	mu                sync.RWMutex
+	buildMu           sync.Mutex
+	reloadMu          sync.Mutex
+	authFailLogMu     sync.Mutex
 }
 
 // newAuthStore builds an authStore from cfg's groups and inline users. It
@@ -223,6 +274,13 @@ func newAuthStore(cfg *Config) (*authStore, error) {
 		byDigest: make(map[[32]byte]*authEntry),
 		nowFn:    time.Now,
 	}
+	a.failures = newMemoryStore()
+	// Delegate through a.nowFn rather than copying it: a test that
+	// overrides a.nowFn AFTER construction (the fakeClock convention
+	// newReloadableAuthStore already uses, users_file_test.go) must still
+	// control failures' own clock — this closure reads a.nowFn fresh on
+	// every call, so it always sees whichever func is currently assigned.
+	a.failures.nowFn = func() time.Time { return a.nowFn() }
 	for name, gc := range cfg.Groups {
 		if gc == nil {
 			return nil, fmt.Errorf("llmgateway: group %q: config must not be nil", name)
@@ -363,14 +421,95 @@ func (a *authStore) replaceFileUsers(us []*UserConfig) error {
 	return nil
 }
 
+// clientIP returns the source address identify's own throttle keys on:
+// r.RemoteAddr with any ":port" suffix stripped — net/http's own "address
+// as seen by this server's TCP accept", never a client-supplied header
+// (security audit finding 3, 2026-08-22). This plugin runs AS a Traefik
+// middleware inside the shared ingress process, not behind some second,
+// untrusted proxy of its own, so RemoteAddr is the same trust boundary
+// logAuthEvent's own RemoteAddr-only logging (logger.go) already assumes,
+// and the same one routes_passthrough.go's dangerousClientHeaderPrefixes
+// strip (X-Forwarded-*, X-Auth-*) exists to keep a client from spoofing on
+// the OUTBOUND side — deliberately NOT read here either, for the same
+// reason. A RemoteAddr with no ":port" (net.SplitHostPort's own error
+// case — not expected from net/http in practice, but not assumed) is used
+// as-is rather than discarded, so a throttle key still exists for
+// whatever value RemoteAddr carries.
+func clientIP(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
+}
+
+// authThrottled reports whether ip has already reached authFailureLimit
+// failed identify attempts within the current authFailureWindow — a
+// read-only check, so a throttled IP's later attempts cost nothing beyond
+// one in-process map read, never a digest computation or byDigest lookup.
+func (a *authStore) authThrottled(ip string) bool {
+	count, _ := a.failures.get(authFailureKeyPrefix + ip) // memoryStore.get never errors
+	return count >= authFailureLimit
+}
+
+// recordAuthFailure increments ip's failure count for the current
+// authFailureWindow, creating a fresh window if the previous one already
+// expired (memoryStore.incrBy's own fixed-window contract, limits.go).
+func (a *authStore) recordAuthFailure(ip string) {
+	_, _ = a.failures.incrBy(authFailureKeyPrefix+ip, 1, authFailureWindow) // memoryStore.incrBy never errors
+}
+
+// shouldLogAuthFailure reports whether the next failed-auth log line
+// (logAuthEvent, logger.go) should actually be written, rate-limited to
+// once per authFailureLogEvery regardless of how many attempts fail in
+// between — the identical technique limiter.logStoreError (limits.go)
+// already applies to store errors, applied here so an attacker driving
+// unlimited failed-auth attempts can never drive unlimited synchronous
+// stderr writes on the shared Traefik ingress (security audit finding 3,
+// 2026-08-22) even before authThrottled's own per-IP cap engages (a
+// distributed attempt spread across many source IPs never trips any
+// single IP's own threshold, but must still not flood the log).
+// Successful-auth logging is deliberately left unbounded: it requires an
+// already-valid API key, so its volume is bounded by legitimate
+// authenticated traffic — itself already governed by checkAndCount's
+// requests-per-minute/day limits elsewhere — not by an unauthenticated
+// caller's attempt rate, which is exactly what this finding is about
+// bounding.
+func (a *authStore) shouldLogAuthFailure() bool {
+	now := a.nowFn()
+	a.authFailLogMu.Lock()
+	defer a.authFailLogMu.Unlock()
+	if now.Sub(a.authFailLastLogAt) < authFailureLogEvery {
+		return false
+	}
+	a.authFailLastLogAt = now
+	return true
+}
+
 // identify resolves r's presented API key to a user and their group. It
 // reads "Authorization: Bearer <key>" (case-insensitive "bearer" prefix) or
 // "x-api-key: <key>"; Bearer wins when both are present. The presented key
 // is looked up by SHA-256 digest, then verified with a constant-time
 // compare — the key itself is never retained.
+//
+// Per-source-IP throttling (security audit finding 3, 2026-08-22): a
+// request from an IP already over authThrottled's own budget is rejected
+// immediately, before any digest work at all. Every OTHER failure path
+// below — no key presented, key not found, or a (practically unreachable,
+// see subtle.ConstantTimeCompare's own call site) digest mismatch —
+// records one failure for the caller's IP via recordAuthFailure. A
+// successful identify never records a failure and never resets a prior
+// count: this is a rate limit on failed attempts, not a lockout a
+// legitimate request can clear early.
 func (a *authStore) identify(r *http.Request) (*user, *group, bool) {
+	ip := clientIP(r)
+	if a.authThrottled(ip) {
+		return nil, nil, false
+	}
+
 	key, ok := presentedKey(r)
 	if !ok {
+		a.recordAuthFailure(ip)
 		return nil, nil, false
 	}
 	digest := sha256.Sum256([]byte(key))
@@ -379,9 +518,11 @@ func (a *authStore) identify(r *http.Request) (*user, *group, bool) {
 	entry, ok := a.byDigest[digest]
 	a.mu.RUnlock()
 	if !ok {
+		a.recordAuthFailure(ip)
 		return nil, nil, false
 	}
 	if subtle.ConstantTimeCompare(digest[:], entry.digest[:]) != 1 {
+		a.recordAuthFailure(ip)
 		return nil, nil, false
 	}
 	return entry.user, entry.group, true
