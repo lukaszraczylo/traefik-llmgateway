@@ -190,6 +190,7 @@ config accepts them as YAML, which decodes to the same JSON shape.
 | `modelAliases` | `map[string]string` | `{}` | Operator-defined alias id → target model id — see [Model aliases](#model-aliases). Omitted or empty means no aliases, byte-identical to a gateway built before this field existed. |
 | `modelMeta` | `map[string]*ModelMetaConfig` | `{}` | Per-model context-window and cost overrides, keyed by exact `provider/model` or a bare model id — see [Model metadata](#model-metadata). Omitted or empty means no overrides; every model's metadata still resolves through discovery and the built-in table. |
 | `passthroughUnknown` | `bool` | `false` | `false`: a request matching none of the plugin's routes gets a 404 JSON envelope. `true`: it falls through to the router's own backing service. **Does not cover the three media routes** — see the upgrade note below. |
+| `maxInFlightBodyRequests` | `int` | `0` (self-tuned) | Caps how many unified/media requests may concurrently be inside their own request-body read+decode step — see [Body-admission limit](#body-admission-limit). `0` self-tunes from the host's own `GOMAXPROCS`; a positive value pins an exact cap instead, clamped to a maximum of 10,000. |
 
 > **Upgrading from v0.1**: `POST /v1/images/generations`, `POST
 > /v1/audio/speech`, and `POST /v1/audio/transcriptions` are now handled by
@@ -754,6 +755,39 @@ model id) and per alias (`aliases[].modelMeta`) — see
   the attempt has already resolved — so it never writes a `provmodel`
   counter, only the provider-level ones above.
 
+### Body-admission limit
+
+The unified `chat/completions`/`embeddings` routes and the three media
+routes (`images/generations`, `audio/speech`, `audio/transcriptions`)
+each decode their request body into memory before doing anything else
+with it — a step that can use several times the body's own byte size,
+worst case, for an adversarially-shaped payload. To bound how many
+requests can be doing that at once, each of those routes claims a slot
+from a small in-process semaphore for exactly the duration of its own
+read-and-decode step, and releases it immediately afterward — **not**
+for the rest of the request. Resolving the model, checking the response
+cache, and the upstream call itself (which can run for seconds to
+minutes on a real completion) all happen with the slot already
+released, so this never becomes a ceiling on total concurrent requests.
+
+- On exhaustion (every slot in use at that instant), the request gets an
+  immediate **503** with a `Retry-After` header — never queued, never
+  blocked.
+- The slot count self-tunes from the host's own `GOMAXPROCS` by default;
+  `maxInFlightBodyRequests` (see the `Config` table above) pins an exact
+  value instead when set.
+- The unified chat/embeddings routes decode against a **4MiB** cap —
+  narrower than the 10MiB the media routes and `audio/transcriptions`'
+  multipart body still use (see [Body limits](#image-and-audio-endpoints)
+  above) — sized to comfortably fit a single inline base64-encoded image
+  in a chat message while bounding worst-case decode memory.
+- **Native passthrough is not gated by this at all**: it streams the
+  request/response body straight through rather than decoding it into
+  memory, so there is nothing here for this limit to bound (the one
+  exception, a bounded 64KiB peek for model-restricted groups, is
+  already capped independently — see [Native passthrough model
+  authorization](#native-passthrough-model-authorization)).
+
 ## Retry
 
 Same-provider retry for a transient upstream failure — no cross-provider
@@ -942,11 +976,13 @@ adapter call — minus response caching and token/cost accounting (below).
   increment the same as any other route. Token counters never move, and
   cost is always recorded as 0 — images and audio are not
   cost-accounted.
-- **Body limits**: `images/generations` and `audio/speech` share the
-  unified routes' 10MiB JSON cap. `audio/transcriptions` enforces the
-  same 10MiB cap explicitly, returning **413** over it — unlike an
-  oversized JSON body, which is silently truncated into a parse failure,
-  a truncated multipart body can still parse a valid prefix and would
+- **Body limits**: `images/generations` and `audio/speech` share a 10MiB
+  JSON cap — no longer the unified `chat/completions`/`embeddings`
+  routes' own cap, which is narrower (4MiB, see below); the media routes
+  kept the original 10MiB. `audio/transcriptions` enforces the same
+  10MiB cap explicitly, returning **413** over it — unlike an oversized
+  JSON body, which is silently truncated into a parse failure, a
+  truncated multipart body can still parse a valid prefix and would
   forward cut-off audio upstream if it were not rejected outright.
 - **Retry** (above) applies to all three the same as chat/embeddings; a
   streaming `audio/speech` response is retried only before the first
