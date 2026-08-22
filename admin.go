@@ -261,6 +261,12 @@ func sanitizeProviderErr(lastErr, rawBaseURL string) string {
 // sanitizeBaseURL before this view is ever built.
 type adminProviderView struct {
 	LastRefresh time.Time `json:"lastRefresh"`
+	// OpenUntil is when this provider's breaker will next attempt a
+	// half-open probe (feat/provider-health). The zero time.Time when
+	// HealthState is not "open". Grouped with LastRefresh above (both
+	// time.Time) for fieldalignment — see providerState's own doc
+	// comment for the convention this struct follows.
+	OpenUntil time.Time `json:"openUntil"`
 	// ModelMeta is this provider's resolved per-model metadata (feature
 	// v0.23: context window, per-token cost — resolveModelMeta,
 	// modelmeta.go), keyed by upstream model id. One entry per id in
@@ -283,7 +289,16 @@ type adminProviderView struct {
 	Type       string                        `json:"type"`
 	BaseURL    string                        `json:"baseUrl"`
 	LastErr    string                        `json:"lastErr,omitempty"`
-	Name       string                        `json:"name"`
+	// HealthState is this provider's discovery circuit breaker state
+	// (feat/provider-health): "closed" (normal), "open" (backing off
+	// after repeated discovery failures — maybeRefresh skips it until
+	// OpenUntil above), or "half-open" (a probe refresh is in flight,
+	// deciding whether to close the breaker again). A provider with
+	// discovery disabled, or one that has never failed a refresh, always
+	// reads "closed" — it has no health signal that could trip the
+	// breaker.
+	HealthState string `json:"healthState"`
+	Name        string `json:"name"`
 	// Models is the sorted explicit∪discovered model id set
 	// (registry.go's providerSnapshot.models — provider-model-accordion
 	// task, Vue admin panel): the dashboard's expandable provider row.
@@ -494,6 +509,8 @@ func (g *Gateway) buildAdminOverview() adminOverviewResponse {
 			LastRefresh:      s.lastRefresh,
 			LastErr:          sanitizeProviderErr(s.lastErr, s.baseURL),
 			DiscoveryEnabled: s.discoveryEnabled,
+			HealthState:      s.health.String(),
+			OpenUntil:        s.openUntil,
 			AttemptsDay:      pc.attemptsDay,
 			FailuresDay:      pc.failuresDay,
 			AttemptsMinute:   pc.attemptsMinute,
