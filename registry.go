@@ -28,6 +28,28 @@ const warmFillTimeout = 5 * time.Second
 // goroutine's lifetime if an upstream hangs.
 const backgroundRefreshTimeout = 30 * time.Second
 
+// defaultBreakerFailureThreshold is how many CONSECUTIVE failed discovery
+// refreshes open a provider's circuit breaker (feat/provider-health),
+// applied when BreakerConfig.FailureThreshold is left at 0. Chosen so a
+// single transient blip (one bad refresh) never trips it — only a
+// provider that is persistently broken, like xiaomi's ongoing 401s, does.
+const defaultBreakerFailureThreshold = 3
+
+// maxBreakerFailureThreshold bounds BreakerConfig.FailureThreshold — a
+// generous ceiling; there is no legitimate reason to require more
+// consecutive failures than this before backing off at all.
+const maxBreakerFailureThreshold = 100
+
+// defaultBreakerOpenDuration is the base backoff a newly opened breaker
+// waits before its first half-open probe, applied when BreakerConfig.
+// OpenDuration is left empty.
+const defaultBreakerOpenDuration = time.Minute
+
+// defaultBreakerMaxOpenDuration caps the exponential backoff the breaker
+// doubles into on every further failed probe, applied when BreakerConfig.
+// MaxOpenDuration is left empty.
+const defaultBreakerMaxOpenDuration = 30 * time.Minute
+
 // errModelUnknown is returned by modelRegistry.resolve when id does not
 // match any provider's known model set (explicit config plus the last
 // successful discovery fetch) — 404 semantics for the caller.
@@ -39,15 +61,59 @@ var errModelUnknown = errors.New("llmgateway: unknown model")
 // such model" from "that model exists, you cannot use it".
 var errModelDenied = errors.New("llmgateway: model access denied")
 
+// breakerState is one provider's discovery circuit breaker state
+// (feat/provider-health): closed (normal — refreshes run on the
+// configured interval, exactly like before this feature existed), open
+// (discovery refreshes are skipped until openUntil, backing off
+// exponentially on repeated failure), or halfOpen (exactly one probe
+// refresh is in flight, deciding whether to close the breaker again).
+// The zero value is closed, so a providerState built without ever
+// touching health fields (every existing construction path, and every
+// provider that never fails) behaves exactly as it did before this type
+// existed.
+type breakerState int32
+
+const (
+	breakerClosed breakerState = iota
+	breakerOpen
+	breakerHalfOpen
+)
+
+// String renders bs for logs and the admin dashboard (feat/
+// provider-health) — lower-case, hyphenated for the two-word state, to
+// read naturally as a status word in either place.
+func (bs breakerState) String() string {
+	switch bs {
+	case breakerOpen:
+		return "open"
+	case breakerHalfOpen:
+		return "half-open"
+	default:
+		return "closed"
+	}
+}
+
 // providerState tracks one provider's known model ids and discovery
 // bookkeeping. explicit is set once at construction from
 // ProviderConfig.Models and never mutated afterward; discovered is
 // stale-while-error — a failed refresh leaves the previous discovered set
 // in place rather than clearing it. mu guards every mutable field below it.
+//
+// Field order below is fieldalignment-sensitive (golangci-lint's govet
+// enable-all): every pointer-containing field (time.Time — its loc
+// *Location field carries a pointer — plus every map/string) is grouped
+// first, every pointer-free field (durations, sync.Mutex, the breaker's
+// own int/int32 counters, and the two trailing bools) last. Keep new
+// fields in the matching group rather than appending at the very end.
 type providerState struct {
 	lastRefresh time.Time
-	explicit    map[string]bool
-	discovered  map[string]bool
+	// openUntil is when an open breaker (feat/provider-health) next
+	// allows a half-open probe — see recordHealthLocked/tryBeginRefresh.
+	// Grouped with lastRefresh above (both time.Time) rather than beside
+	// the rest of the breaker fields further down, which are pointer-free.
+	openUntil  time.Time
+	explicit   map[string]bool
+	discovered map[string]bool
 	// discoveredContext holds discovery-captured per-model context
 	// lengths (feature v0.23, ProviderConfig.MetadataPath — currently
 	// only openai-type adapters ever populate this, via
@@ -66,11 +132,31 @@ type providerState struct {
 	// outcome, not the stale-while-error discovered set: a provider can
 	// show a non-empty lastErr while modelCount still reflects its last
 	// successful discovery.
-	lastErr          string
-	interval         time.Duration
-	mu               sync.Mutex
-	discoveryEnabled bool
-	inFlight         bool
+	lastErr  string
+	interval time.Duration
+	mu       sync.Mutex
+	// --- feat/provider-health: discovery circuit breaker, guarded by mu
+	// like every other mutable field above. consecutiveFailures counts
+	// unbroken failures while closed, toward breakerThreshold. backoff is
+	// the duration that produced openUntil above (doubled on the next
+	// failed probe, capped at breakerOpenMax). breakerThreshold/
+	// breakerOpenBase/breakerOpenMax are resolved once, at construction
+	// (newModelRegistry, from Config.Breaker via validateBreakerConfig),
+	// and never change afterward — copied onto every providerState
+	// rather than shared from one place, the same "baked in at
+	// construction" convention interval above already uses, so
+	// recordHealthLocked/tryBeginRefresh never need a second parameter or
+	// a pointer back to the registry. health is the breaker's current
+	// state, declared last among these since breakerState is a 4-byte
+	// int32, smaller than its 8-byte neighbors above.
+	consecutiveFailures int
+	backoff             time.Duration
+	breakerThreshold    int
+	breakerOpenBase     time.Duration
+	breakerOpenMax      time.Duration
+	health              breakerState
+	discoveryEnabled    bool
+	inFlight            bool
 }
 
 // hasModel reports whether id is in this provider's explicit or discovered
@@ -132,14 +218,36 @@ func (st *providerState) setDiscoveredContext(m map[string]int) {
 	st.discoveredContext = m
 }
 
-// tryBeginRefresh reports whether now is far enough past lastRefresh (or
-// this is the first refresh) to start a new one, and if so marks the
-// provider inFlight so a concurrent caller cannot start a second one. The
-// caller must pair a true result with a later finishRefresh call.
+// tryBeginRefresh reports whether now permits starting a new refresh, and
+// if so marks the provider inFlight so a concurrent caller cannot start a
+// second one. The caller must pair a true result with a later finishRefresh
+// call.
+//
+// A closed breaker (feat/provider-health) behaves EXACTLY as before this
+// feature existed: now far enough past lastRefresh (or this is the first
+// refresh) is the only gate — a provider that never fails never touches the
+// breaker branch below at all. An open breaker replaces that interval gate
+// with its own backoff window: refresh stays blocked until now reaches
+// openUntil, regardless of interval, and reaching it starts exactly one
+// half-open probe (state moves to halfOpen here, before the caller's fetch
+// even runs) rather than resuming normal per-interval refreshing outright —
+// recordHealthLocked decides whether that probe closes the breaker or
+// reopens it with a longer backoff.
 func (st *providerState) tryBeginRefresh(now time.Time) bool {
 	st.mu.Lock()
 	defer st.mu.Unlock()
-	if st.inFlight || now.Sub(st.lastRefresh) < st.interval {
+	if st.inFlight {
+		return false
+	}
+	if st.health == breakerOpen {
+		if now.Before(st.openUntil) {
+			return false
+		}
+		st.health = breakerHalfOpen
+		st.inFlight = true
+		return true
+	}
+	if now.Sub(st.lastRefresh) < st.interval {
 		return false
 	}
 	st.inFlight = true
@@ -152,7 +260,10 @@ func (st *providerState) tryBeginRefresh(now time.Time) bool {
 // what throttles a failing provider to one attempt per interval instead of
 // retrying on every call. On success (err == nil) ids replaces the
 // discovered set; on failure the previous discovered set is kept
-// (stale-while-error).
+// (stale-while-error). Either way, recordHealthLocked (feat/provider-health)
+// updates the discovery circuit breaker from this same outcome — a healthy
+// provider's breaker never leaves closed, so this adds no new behavior for
+// the common case, only for a provider that is actually failing.
 func (st *providerState) finishRefresh(now time.Time, ids []string, err error) {
 	st.mu.Lock()
 	defer st.mu.Unlock()
@@ -160,14 +271,97 @@ func (st *providerState) finishRefresh(now time.Time, ids []string, err error) {
 	st.lastRefresh = now
 	if err != nil {
 		st.lastErr = err.Error()
+	} else {
+		st.lastErr = ""
+		discovered := make(map[string]bool, len(ids))
+		for _, id := range ids {
+			discovered[id] = true
+		}
+		st.discovered = discovered
+	}
+	st.recordHealthLocked(now, err)
+}
+
+// recordHealthLocked updates st's discovery circuit breaker (feat/
+// provider-health) from one finished refresh attempt's outcome. Caller must
+// already hold st.mu.
+//
+// failed reuses limits.go's existing recordProviderAttempt classification —
+// isTransient(resp, err) with a nil *http.Response (a discovery fetch has no
+// response to inspect on a transport-level failure, unlike a proxied
+// request) plus isDeadlineExceeded(err) — rather than inventing a second
+// one, per this feature's own design mandate. Net effect: any non-nil error
+// except a caller-canceled context counts against the provider, the same
+// line recordProviderAttempt already draws for request-path attempts.
+//
+// While closed, breakerThreshold consecutive failures open the breaker at
+// its base backoff (breakerOpenBase); any success resets the counter to
+// zero. While halfOpen (the only other state finishRefresh can observe —
+// tryBeginRefresh never starts a refresh from open without first moving to
+// halfOpen), a successful probe closes the breaker outright; a failed one
+// reopens it with a DOUBLED backoff, capped at breakerOpenMax — the
+// exponential escalation that keeps a persistently broken provider (like
+// xiaomi's ongoing 401s) from being re-probed every single interval
+// forever.
+func (st *providerState) recordHealthLocked(now time.Time, err error) {
+	failed := isTransient(nil, err) || isDeadlineExceeded(err)
+	if st.health == breakerHalfOpen {
+		if failed {
+			st.openBreakerLocked(now, true)
+		} else {
+			st.closeBreakerLocked()
+		}
 		return
 	}
-	st.lastErr = ""
-	discovered := make(map[string]bool, len(ids))
-	for _, id := range ids {
-		discovered[id] = true
+	if !failed {
+		st.closeBreakerLocked()
+		return
 	}
-	st.discovered = discovered
+	st.consecutiveFailures++
+	if st.consecutiveFailures >= st.breakerThreshold {
+		st.openBreakerLocked(now, false)
+	}
+}
+
+// closeBreakerLocked resets st to a healthy, closed breaker — reachable
+// from a successful attempt while closed (nothing to do in practice, since
+// consecutiveFailures is already 0, but harmless to reset) or a successful
+// half-open probe (the "a provider that recovers must never stay dead"
+// requirement). Caller must already hold st.mu.
+func (st *providerState) closeBreakerLocked() {
+	st.health = breakerClosed
+	st.consecutiveFailures = 0
+	st.backoff = 0
+	st.openUntil = time.Time{}
+}
+
+// openBreakerLocked opens st's breaker as of now, computing the backoff
+// window a subsequent tryBeginRefresh must wait out before its next
+// half-open probe. escalate true (a failed half-open probe re-opening)
+// doubles the PREVIOUS backoff; escalate false (the closed->open trip)
+// starts fresh at breakerOpenBase — either way capped at breakerOpenMax so
+// a persistently broken provider's backoff grows but never exceeds it.
+// Caller must already hold st.mu.
+func (st *providerState) openBreakerLocked(now time.Time, escalate bool) {
+	if escalate && st.backoff > 0 {
+		st.backoff *= 2
+	} else {
+		st.backoff = st.breakerOpenBase
+	}
+	if st.backoff > st.breakerOpenMax {
+		st.backoff = st.breakerOpenMax
+	}
+	st.health = breakerOpen
+	st.openUntil = now.Add(st.backoff)
+}
+
+// usable reports whether st's discovery circuit breaker currently permits
+// routing to this provider — see modelRegistry.providerUsable's doc comment
+// for the full contract this backs.
+func (st *providerState) usable() bool {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return st.health != breakerOpen
 }
 
 // snapshot returns st's read-only view for the admin dashboard (spec §4,
@@ -191,10 +385,15 @@ func (st *providerState) finishRefresh(now time.Time, ids []string, err error) {
 // previous discovered set rather than clearing it. This method applies
 // no special handling for that case; it is simply the same set every
 // other snapshot consumer (modelCount, listFor) already reads.
-func (st *providerState) snapshot() (models []string, lastRefresh time.Time, lastErr string) {
+// health and openUntil (feat/provider-health) join the same locked pass for
+// the identical reason the doc comment above already gives for models/
+// lastRefresh/lastErr: a concurrent finishRefresh must never be able to
+// hand the admin dashboard a breaker state that disagrees with the
+// lastErr/models it is shown alongside.
+func (st *providerState) snapshot() (models []string, lastRefresh time.Time, lastErr string, health breakerState, openUntil time.Time) {
 	st.mu.Lock()
 	defer st.mu.Unlock()
-	return st.knownIDsLocked(), st.lastRefresh, st.lastErr
+	return st.knownIDsLocked(), st.lastRefresh, st.lastErr, st.health, st.openUntil
 }
 
 // modelRegistry aggregates every configured provider's explicit and
@@ -285,6 +484,65 @@ type modelsCacheEntry struct {
 	gen  int64
 }
 
+// breakerConfig is Config.Breaker (feat/provider-health), validated and
+// defaulted once by validateBreakerConfig — the resolved values
+// newModelRegistry copies onto every provider's providerState at
+// construction (providerState's own doc comment explains why copied,
+// not shared).
+type breakerConfig struct {
+	failureThreshold int
+	openBase         time.Duration
+	openMax          time.Duration
+}
+
+// validateBreakerConfig validates bc and returns the resolved breakerConfig
+// (feat/provider-health) — mirrors newRetryPolicy (retry.go) and
+// validateCacheConfig (cache.go)'s own zero-means-default, validated-and-
+// resolved shape. bc's zero value (BreakerConfig{}, an operator who
+// configures no breaker block at all) resolves to every default constant
+// above unchanged: a provider that never fails never has a reason to
+// consult any of these three numbers, so their defaults exist only to
+// bound how a FAILING provider backs off, never to alter a healthy one.
+func validateBreakerConfig(bc BreakerConfig) (breakerConfig, error) {
+	threshold := bc.FailureThreshold
+	if threshold == 0 {
+		threshold = defaultBreakerFailureThreshold
+	}
+	if threshold < 1 || threshold > maxBreakerFailureThreshold {
+		return breakerConfig{}, fmt.Errorf("llmgateway: breaker.failureThreshold must be between 1 and %d, got %d", maxBreakerFailureThreshold, threshold)
+	}
+
+	openBase := defaultBreakerOpenDuration
+	if bc.OpenDuration != "" {
+		d, err := time.ParseDuration(bc.OpenDuration)
+		if err != nil {
+			return breakerConfig{}, fmt.Errorf("llmgateway: breaker.openDuration %q is invalid: %w", bc.OpenDuration, err)
+		}
+		if d <= 0 {
+			return breakerConfig{}, fmt.Errorf("llmgateway: breaker.openDuration must be positive, got %q", bc.OpenDuration)
+		}
+		openBase = d
+	}
+
+	openMax := defaultBreakerMaxOpenDuration
+	if bc.MaxOpenDuration != "" {
+		d, err := time.ParseDuration(bc.MaxOpenDuration)
+		if err != nil {
+			return breakerConfig{}, fmt.Errorf("llmgateway: breaker.maxOpenDuration %q is invalid: %w", bc.MaxOpenDuration, err)
+		}
+		if d <= 0 {
+			return breakerConfig{}, fmt.Errorf("llmgateway: breaker.maxOpenDuration must be positive, got %q", bc.MaxOpenDuration)
+		}
+		openMax = d
+	}
+
+	if openMax < openBase {
+		return breakerConfig{}, fmt.Errorf("llmgateway: breaker.maxOpenDuration (%s) must be >= breaker.openDuration (%s)", openMax, openBase)
+	}
+
+	return breakerConfig{failureThreshold: threshold, openBase: openBase, openMax: openMax}, nil
+}
+
 // newModelRegistry builds a modelRegistry from adapters and cfg's matching
 // ProviderConfig entries. It does not perform discovery itself — the
 // caller (newGateway) runs the synchronous first fill separately via
@@ -292,6 +550,11 @@ type modelsCacheEntry struct {
 // provider's ProviderConfig.DiscoveryInterval that fails time.ParseDuration
 // is a constructor error; an empty one defaults to defaultDiscoveryInterval.
 func newModelRegistry(adapters map[string]providerAdapter, cfg *Config, log func(string, ...any)) (*modelRegistry, error) {
+	breaker, err := validateBreakerConfig(cfg.Breaker)
+	if err != nil {
+		return nil, err
+	}
+
 	m := &modelRegistry{
 		adapters:      adapters,
 		states:        make(map[string]*providerState, len(adapters)),
@@ -320,9 +583,14 @@ func newModelRegistry(adapters map[string]providerAdapter, cfg *Config, log func
 
 		interval := defaultDiscoveryInterval
 		if pc.DiscoveryInterval != "" {
-			d, err := time.ParseDuration(pc.DiscoveryInterval)
-			if err != nil {
-				return nil, fmt.Errorf("llmgateway: provider %q: invalid discoveryInterval %q: %w", name, pc.DiscoveryInterval, err)
+			// parseErr, not err: newModelRegistry's own outer err (from
+			// validateBreakerConfig above) is already in scope here, and
+			// govet's shadow check (golangci-lint's govet enable-all)
+			// flags a nested ":=" reusing that identifier even though it
+			// is scoped to this if-block only.
+			d, parseErr := time.ParseDuration(pc.DiscoveryInterval)
+			if parseErr != nil {
+				return nil, fmt.Errorf("llmgateway: provider %q: invalid discoveryInterval %q: %w", name, pc.DiscoveryInterval, parseErr)
 			}
 			interval = d
 		}
@@ -338,6 +606,9 @@ func newModelRegistry(adapters map[string]providerAdapter, cfg *Config, log func
 			discovered:       make(map[string]bool),
 			discoveryEnabled: pc.Discovery,
 			interval:         interval,
+			breakerThreshold: breaker.failureThreshold,
+			breakerOpenBase:  breaker.openBase,
+			breakerOpenMax:   breaker.openMax,
 		}
 	}
 
@@ -431,6 +702,32 @@ func validateModelAliases(raw map[string]string, providerNames []string, explici
 // tests to exercise refresh throttling deterministically.
 func (m *modelRegistry) now() time.Time {
 	return m.nowFn()
+}
+
+// providerUsable reports whether name's discovery circuit breaker
+// currently permits routing to it (feat/provider-health's queryable
+// health signal — the predicate feat/failover consults before sending a
+// request to a provider). false only while the breaker is OPEN: an
+// unconfigured provider name, one with discovery disabled (it has no
+// health signal to trip the breaker with, so it stays closed forever),
+// and one whose breaker is closed OR half-open all report true — a
+// half-open provider is actively being re-probed by the next discovery
+// cycle and must stay routable, per this feature's own "a provider that
+// recovers must never stay dead" requirement; only an OPEN breaker, still
+// backing off, is unusable.
+//
+// This is a single mutex-guarded read of state finishRefresh/
+// tryBeginRefresh already maintain — no round trip, no store lookup — per
+// this feature's own design: per-pod, in-memory, a latency optimization
+// rather than a correctness guarantee. Three pods learning independently
+// (each with its own view of a provider's health) is accepted and
+// intended, not a bug.
+func (m *modelRegistry) providerUsable(name string) bool {
+	st, ok := m.states[name]
+	if !ok {
+		return true
+	}
+	return st.usable()
 }
 
 // finishRefresh records the outcome of a refresh attempt (st.finishRefresh)
@@ -1104,14 +1401,28 @@ func (m *modelRegistry) resolveMetaForAlias(alias, targetProvider, targetModel s
 // model id names no credential, and this same set is already public
 // through /v1/models (listFor) to any authenticated caller the group
 // allows.
+// Field order below is fieldalignment-sensitive, the same convention
+// providerState's own doc comment explains: pointer-containing fields
+// (time.Time, string, []string) grouped first, pointer-free fields
+// (modelCount, health, discoveryEnabled) last.
 type providerSnapshot struct {
 	lastRefresh time.Time
-	name        string
-	typeName    string
-	baseURL     string
-	lastErr     string
-	models      []string
-	modelCount  int
+	// openUntil mirrors providerState's own field of the same name
+	// (feat/provider-health) — see providerState.snapshot's doc comment
+	// for why it is read in the same locked pass as the rest of this
+	// struct's fields.
+	openUntil  time.Time
+	name       string
+	typeName   string
+	baseURL    string
+	lastErr    string
+	models     []string
+	modelCount int
+	// health mirrors providerState's own field of the same name (feat/
+	// provider-health): the admin dashboard's breaker-state column. Every
+	// provider reads closed until a discovery failure actually trips its
+	// breaker — a healthy deployment's snapshot is unaffected.
+	health breakerState
 	// discoveryEnabled mirrors providerState.discoveryEnabled (Feature B,
 	// v0.22 last-refresh label honesty): read directly rather than through
 	// providerState.snapshot(), because it is set once at construction
@@ -1164,13 +1475,14 @@ func (m *modelRegistry) snapshot() []providerSnapshot {
 	out := make([]providerSnapshot, 0, len(m.providerNames))
 	for _, name := range m.providerNames {
 		adapter := m.adapters[name]
-		// Three-value multi-assign straight from the call, no intermediate
+		// Five-value multi-assign straight from the call, no intermediate
 		// named variables reused across a loop iteration boundary — Yaegi
 		// has had multi-assign edge cases around reused/shadowed loop
 		// variables in other parts of this codebase's history; this shape
 		// (fresh locals every iteration, assigned once, read once) avoids
-		// that class of trap entirely.
-		models, lastRefresh, lastErr := m.states[name].snapshot()
+		// that class of trap entirely. health/openUntil (feat/provider-
+		// health) widen the same tuple rather than a second locked call.
+		models, lastRefresh, lastErr, health, openUntil := m.states[name].snapshot()
 		out = append(out, providerSnapshot{
 			name:             adapter.name(),
 			typeName:         adapter.typeName(),
@@ -1180,6 +1492,8 @@ func (m *modelRegistry) snapshot() []providerSnapshot {
 			lastRefresh:      lastRefresh,
 			lastErr:          lastErr,
 			discoveryEnabled: m.states[name].discoveryEnabled,
+			health:           health,
+			openUntil:        openUntil,
 		})
 	}
 	return out
