@@ -65,6 +65,25 @@ export interface AdminProviderView {
    */
   discoveryEnabled: boolean
   /**
+   * healthState is the provider's DISCOVERY circuit breaker state
+   * (admin.go: adminProviderView.HealthState — feat/provider-health):
+   * 'closed' (normal), 'open' (backing off after repeated discovery
+   * failures — openUntil below is when it next probes), or 'half-open'
+   * (a probe is in flight, deciding whether to close again). Reflects
+   * the discovery endpoint ONLY, not request-path health — a provider
+   * whose model listing 401s while its actual completion endpoint works
+   * fine still reads 'open' here. A provider with discovery disabled, or
+   * one that has never failed a refresh, always reads 'closed'.
+   */
+  healthState: 'closed' | 'open' | 'half-open'
+  /**
+   * openUntil is when this provider's breaker will next attempt a
+   * half-open probe (admin.go: adminProviderView.OpenUntil). The unset
+   * zero-time sentinel (formatAgo/formatTimestamp's ZERO_TIME) when
+   * healthState is not 'open'.
+   */
+  openUntil: string
+  /**
    * attemptsDay/failuresDay/attemptsMinute/failuresMinute are this
    * provider's current-window upstream-attempt counters (admin.go:
    * adminProviderView's identically-named fields — Feature A, v0.22). See

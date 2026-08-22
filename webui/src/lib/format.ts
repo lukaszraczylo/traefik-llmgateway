@@ -156,6 +156,24 @@ export function formatAgo(iso: string | undefined): string {
   return ` (${secs}s ago)`
 }
 
+/**
+ * formatUntil renders a FUTURE ISO timestamp as "in Ns" — the discovery
+ * circuit breaker's openUntil (feat/provider-health, admin.go's
+ * adminProviderView.OpenUntil) is the only caller — or "" for the unset
+ * zero-time sentinel, an unparseable value, or a time already in the
+ * past (a stale poll reading an openUntil the breaker has since moved
+ * past; the next 5s refresh corrects it, so this just omits the detail
+ * rather than showing a negative/nonsensical countdown).
+ */
+export function formatUntil(iso: string | undefined): string {
+  if (!iso || iso === ZERO_TIME) return ''
+  const then = new Date(iso).getTime()
+  if (Number.isNaN(then)) return ''
+  const secs = Math.round((then - Date.now()) / 1000)
+  if (secs <= 0) return ''
+  return `in ${secs}s`
+}
+
 /** formatTimestamp renders an ISO timestamp for display, or "never" for the unset zero-time sentinel. */
 export function formatTimestamp(iso: string | undefined): string {
   if (!iso || iso === ZERO_TIME) return 'never'
