@@ -703,7 +703,7 @@ const mcpFederatedFanoutConcurrency = 4
 // replaces used, and the one pugbot's mcpclient and agentkit have already
 // persisted into their own tool-id databases (e.g.
 // "brave-search_brave_web_search" — verified live). A server that errors,
-// times out, or returns an unparsable/invalid result is logged
+// times out, panics, or returns an unparsable/invalid result is logged
 // and skipped, not surfaced as a whole-call failure — UNLESS every single
 // attempted server failed, in which case an empty tools list would
 // misleadingly look like "this caller's group has no MCP access" — see
@@ -712,7 +712,7 @@ const mcpFederatedFanoutConcurrency = 4
 // countTargetRequests (limits.go) attributes one request to EVERY server
 // ATTEMPTED here, in ONE batched call after wg.Wait() — "attempted", not
 // "reached" or "succeeded": a server this gateway dialed and got a
-// response (or a timeout, or a connection refusal) from still had
+// response (or a timeout, a connection refusal, or a panic) from still had
 // a real request sent to it and a real slot of this gateway's outbound
 // capacity spent on it, which is what these counters exist to track. A
 // single federated tools/list call can move several targets' own
@@ -730,6 +730,25 @@ func (g *Gateway) mcpFederatedToolsList(w http.ResponseWriter, r *http.Request, 
 		wg.Add(1)
 		go func(name string) {
 			defer wg.Done()
+			// Unrecovered-panic guard (security audit finding 2,
+			// 2026-08-22): this goroutine runs off the request's own
+			// goroutine, so a panic here has no ServeHTTP caller to
+			// unwind into and would crash the whole shared Traefik
+			// process — the same reasoning limiter.spawn (limits.go) and
+			// modelRegistry.refreshProvider/captureModelMetadata
+			// (registry.go) already apply to their own off-request
+			// goroutines. A panicking backend must degrade to "that
+			// server failed", exactly like an HTTP error from it, never
+			// a process-wide crash.
+			defer func() {
+				if rec := recover(); rec != nil {
+					g.logf("federated tools/list: server %q panicked: %v", name, rec)
+					mu.Lock()
+					failed = append(failed, name)
+					mu.Unlock()
+				}
+			}()
+
 			sem <- struct{}{}
 			defer func() { <-sem }()
 

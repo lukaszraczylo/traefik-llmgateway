@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -1306,6 +1307,88 @@ func TestHandleMCPFederated_ToolsList_FanoutBoundedConcurrency(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
 	}
+}
+
+// --- security audit finding 2: unrecovered panic in the fan-out ---
+
+// panicOnHostRoundTripper panics for any request to panicHost — simulating
+// an unrecovered interpreter-level panic reached deep inside one backend's
+// own call path (mcpBackendCall -> doBackendJSONRPC -> g.targetClient.Do)
+// — and delegates every other request to next unchanged. This exercises
+// the REAL code path a genuine Yaegi interpreter panic would take,
+// through the actual HTTP client the gateway uses, rather than adding any
+// test-only hook to production code.
+type panicOnHostRoundTripper struct {
+	next      http.RoundTripper
+	panicHost string
+}
+
+func (rt panicOnHostRoundTripper) RoundTrip(r *http.Request) (*http.Response, error) {
+	if r.URL.Host == rt.panicHost {
+		panic("simulated interpreter-level panic mid-flight")
+	}
+	return rt.next.RoundTrip(r)
+}
+
+// TestHandleMCPFederated_ToolsList_PanickingBackendDegradesNotCrashes is
+// the regression for the missing recover() in mcpFederatedToolsList's own
+// fan-out goroutine (security audit finding 2, 2026-08-22): that goroutine
+// runs off the request's own goroutine, so an unrecovered panic there has
+// no ServeHTTP caller to unwind into and would crash the whole shared
+// Traefik process, not just fail one backend. Reaching the end of this
+// test at all is part of the proof: if the recover() were missing, beta's
+// panicking RoundTrip call below would already have crashed the test
+// binary — exactly the registry.go precedent this fix follows
+// (TestModelRegistry_RefreshProvider_AdapterPanics_RecoversAndReleasesInFlight).
+func TestHandleMCPFederated_ToolsList_PanickingBackendDegradesNotCrashes(t *testing.T) {
+	alpha := newMockJSONRPCServer(t, []mcpTool{{Name: "lookup"}})
+	beta := newMockJSONRPCServer(t, []mcpTool{{Name: "search"}}) // never actually reached; RoundTrip panics first
+	cfg := newFederationTestConfig(alpha.srv.URL, beta.srv.URL, false)
+	h, err := New(context.Background(), http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	gw, ok := h.(*Gateway)
+	if !ok {
+		t.Fatal("handler is not *Gateway")
+	}
+	betaURL, err := betaHost(beta.srv.URL)
+	if err != nil {
+		t.Fatalf("parse beta URL: %v", err)
+	}
+	gw.targetClient.Transport = panicOnHostRoundTripper{panicHost: betaURL, next: http.DefaultTransport}
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, newFederatedRequest(t, "sk-alice", jsonrpcRequest{JSONRPC: jsonrpcVersion, Method: "tools/list", ID: json.RawMessage("1")}))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+
+	var got jsonrpcResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Error != nil {
+		t.Fatalf("error = %+v, want nil (a panicking server degrades the aggregate, it does not fail the call)", got.Error)
+	}
+	var result mcpToolsListResult
+	if err := json.Unmarshal(got.Result, &result); err != nil {
+		t.Fatalf("decode result: %v", err)
+	}
+	if len(result.Tools) != 1 || result.Tools[0].Name != "alpha_lookup" {
+		t.Errorf("tools = %+v, want exactly alpha_lookup (beta panicked, skipped)", result.Tools)
+	}
+}
+
+// betaHost extracts the host:port a RoundTripper sees on r.URL.Host for
+// requests aimed at rawURL — httptest.Server URLs are already in that
+// exact "http://host:port" form, so this just strips the scheme.
+func betaHost(rawURL string) (string, error) {
+	const prefix = "http://"
+	if !strings.HasPrefix(rawURL, prefix) {
+		return "", fmt.Errorf("unexpected test server URL shape: %q", rawURL)
+	}
+	return strings.TrimPrefix(rawURL, prefix), nil
 }
 
 // --- security audit finding 1b: tools/list weighted by backend count ---
