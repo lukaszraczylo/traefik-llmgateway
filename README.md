@@ -315,7 +315,7 @@ own is governed purely by their group's — see
 |---|---|---|---|
 | `failureThreshold` | `int` | `3` | Consecutive failed discovery refreshes that open the breaker — see [Provider health](#provider-health-discovery-circuit-breaker). `0` uses the default. Must be between `1` and `100`, or construction fails. |
 | `openDuration` | `string` (Go duration) | `1m` | Base backoff a newly opened breaker waits before its first half-open probe; doubles on every further failed probe, capped at `maxOpenDuration`. Invalid or non-positive duration string is a construction error. |
-| `maxOpenDuration` | `string` (Go duration) | `30m` | Ceiling on the backoff `openDuration` doubles into. Must be `>= openDuration` and no more than `24h`, or construction fails. |
+| `maxOpenDuration` | `string` (Go duration) | `6h` | Ceiling on the backoff `openDuration` doubles into. Must be `>= openDuration` and no more than `24h`, or construction fails. Deliberately longer than the default `discoveryInterval` (1h) — see [Provider health](#provider-health-discovery-circuit-breaker) for why a value at or below `discoveryInterval` suppresses nothing. |
 
 ### `AdminConfig`
 
@@ -912,10 +912,11 @@ A per-provider, in-memory, three-state circuit breaker (`closed` →
 `open` → `half-open`) driven entirely by `discovery` refresh outcomes —
 never by `/v1/chat/completions` or any other request-path traffic. It
 exists so a provider whose discovery endpoint fails on every cycle (an
-expired API key, a typo'd `baseUrl`, an upstream outage) backs off
-instead of being re-probed on every single `discoveryInterval` forever,
-and so the admin dashboard can show that provider as visibly broken
-instead of indistinguishable from a healthy one.
+expired API key, a typo'd `baseUrl`, an upstream outage) is re-probed
+LESS often the longer it stays broken, instead of at the same fixed
+`discoveryInterval` forever, and so the admin dashboard can show that
+provider as visibly broken instead of indistinguishable from a healthy
+one.
 
 - **States**: `closed` is normal — refreshes run on the provider's own
   `discoveryInterval`, exactly as if this feature did not exist.
@@ -923,17 +924,24 @@ instead of indistinguishable from a healthy one.
   open it; any success in between resets the count to zero. `open` skips
   refresh attempts until a backoff window elapses, starting at
   `breaker.openDuration` (default `1m`) and doubling on every further
-  failed probe, capped at `breaker.maxOpenDuration` (default `30m`).
+  failed probe, capped at `breaker.maxOpenDuration` (default `6h`).
   `half-open` is exactly one probe refresh, deciding whether to close the
   breaker again (success) or reopen it with a doubled backoff (failure).
-- **Never retries more often than plain interval throttling.** The
-  backoff window is an ADDITIONAL gate on top of `discoveryInterval`, not
-  a replacement for it — whichever of the two is currently longer wins.
-  With every default, `breaker.maxOpenDuration` (30m) is shorter than the
-  default `discoveryInterval` (1h), so under default settings the plain
-  interval remains the sole binding constraint and a persistently broken
-  provider is refreshed at exactly the same cadence a deployment without
-  this feature would already see — never more.
+- **The backoff window is an ADDITIONAL gate on top of
+  `discoveryInterval`, never a replacement for it** — whichever of the
+  two is currently longer wins, and the shorter one is masked entirely
+  rather than merely adding a little extra delay. This means
+  `breaker.maxOpenDuration` only ever reduces re-probe frequency once it
+  EXCEEDS `discoveryInterval`; set no higher, it changes nothing
+  observable and the provider is refreshed at the same cadence a
+  deployment without this feature would already see. The shipped
+  defaults are chosen with this in mind: `maxOpenDuration` (6h) is
+  deliberately longer than the default `discoveryInterval` (1h), so a
+  permanently broken provider under stock config backs off 1h, 2h, 4h,
+  6h, 6h, ... — roughly 5 re-probes a day instead of 24. A custom
+  `discoveryInterval` shorter than `maxOpenDuration` keeps this relationship;
+  one set LONGER than `maxOpenDuration` reverts to plain interval-only
+  throttling with no suppression from this feature at all.
 - **Classification**: any refresh outcome with a non-nil error counts as
   a failure, including a malformed-`baseUrl` request-build failure — this
   is deliberately NOT the same classification `retry` above uses for
