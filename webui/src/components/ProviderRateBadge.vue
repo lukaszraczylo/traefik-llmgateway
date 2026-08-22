@@ -37,10 +37,16 @@ const label = computed(() => (status.value === 'no-traffic' ? 'no traffic' : for
  * detail carries the "right now" (provider) or "today" (model) counts —
  * the spec's minute-window requirement where that data exists at all
  * (minuteRateTitle), falling back to dayRateTitle when it does not. Used
- * as BOTH the badge's title (mouse hover) and its aria-label (folded
- * review minor, v0.22 review round: title alone is mouse-only — a
- * keyboard or screen-reader user gets none of it without an aria-label
- * carrying the same sentence).
+ * as BOTH the badge's title (mouse hover) and, via the sr-only span in
+ * the template, its accessible name for keyboard/screen-reader users
+ * (folded review minor, v0.22 review round: title alone is mouse-only).
+ *
+ * Review fix (v0.23 round): this used to sit directly on `:aria-label`
+ * on the Badge/`<span>` element, which axe flags as `aria-prohibited-
+ * attr` — a `<span>`'s implicit role ("generic") does not support name
+ * computation. See CompactNumber.vue's own doc comment for the identical
+ * fix and the shared visible-abbreviation-plus-sr-only-full-text
+ * pattern this component now uses too.
  */
 const detail = computed(() =>
   props.attemptsMinute === undefined || props.failuresMinute === undefined
@@ -68,7 +74,8 @@ const extraClass = computed(() => {
 </script>
 
 <template>
-  <Badge as="span" :variant="variant" :class="extraClass" class="font-normal tabular-nums" :title="detail" :aria-label="detail">
-    {{ label }}
+  <Badge as="span" :variant="variant" :class="extraClass" class="font-normal tabular-nums" :title="detail">
+    <span aria-hidden="true">{{ label }}</span>
+    <span class="sr-only">{{ detail }}</span>
   </Badge>
 </template>

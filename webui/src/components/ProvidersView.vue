@@ -179,12 +179,18 @@ const aliasColumns: ColumnDef<AdminAliasView, unknown>[] = [
     id: 'alias',
     header: 'Alias',
     accessorFn: (a) => a.alias,
+    // Optional-chained (review fix, folded minor) the same way
+    // modelMetaFor guards the provider path below: AdminAliasView.
+    // modelMeta is typed as always-present, but a real response from a
+    // server build older than this field (version skew) would otherwise
+    // throw on `.modelMeta.contextTokens` here instead of just omitting
+    // the hover detail.
     cell: ({ row }) =>
       h(ModelChip, {
         id: row.original.alias,
-        contextTokens: row.original.modelMeta.contextTokens,
-        inputPerMTokUsd: row.original.modelMeta.inputPerMTokUsd,
-        outputPerMTokUsd: row.original.modelMeta.outputPerMTokUsd,
+        contextTokens: row.original.modelMeta?.contextTokens,
+        inputPerMTokUsd: row.original.modelMeta?.inputPerMTokUsd,
+        outputPerMTokUsd: row.original.modelMeta?.outputPerMTokUsd,
       }),
   },
   {
@@ -331,7 +337,8 @@ const aliasEmptyMessage = computed(() =>
                   -->
                   <span
                     v-if="modelMetaFor(p, m).contextTokens !== undefined"
-                    class="text-[10px] text-muted-foreground tabular-nums"
+                    title="context window"
+                    class="text-xs text-muted-foreground tabular-nums"
                   >
                     {{ formatContextWindow(modelMetaFor(p, m).contextTokens as number) }}
                   </span>
