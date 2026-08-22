@@ -4,8 +4,9 @@ package traefikllmgateway
 // model_prices_and_context_window.json — DO NOT EDIT.
 //
 // Source: https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json
-// Snapshot: 2026-08-22, 236 entries kept (pruned from 3111 upstream entries —
-// see tools/pricing-sync/main.go's own doc comment for the exact pruning
+// Source digest: sha256:0e8d23239c27
+// 236 entries kept (pruned from 3111 upstream entries — see
+// tools/pricing-sync/main.go's own doc comment for the exact pruning
 // rule and bare-id collision resolution).
 //
 // Regenerate with: make pricing-sync

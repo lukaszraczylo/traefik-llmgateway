@@ -92,6 +92,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"go/format"
@@ -272,7 +274,7 @@ func run() error {
 	}
 
 	src, err := renderGoSource(table, sourceMeta{
-		snapshot:      time.Now().UTC().Format("2006-01-02"),
+		sourceDigest:  contentDigest(data),
 		totalUpstream: totalUpstream,
 		kept:          len(table),
 	})
@@ -450,9 +452,32 @@ func providerPriorityIndex(provider string) int {
 	return len(providerPriority)
 }
 
-// sourceMeta is renderGoSource's header-comment material.
+// contentDigestLen is how many leading hex characters of the SHA-256
+// digest contentDigest keeps — enough to be a stable, practically
+// collision-free content fingerprint for a header comment, without
+// printing a full 64-character hash nobody reads in full.
+const contentDigestLen = 12
+
+// contentDigest returns a short SHA-256 fingerprint of data, hex
+// encoded — the generated file's snapshot label (review fix, folded
+// minor), so a `make pricing-sync` re-run against UNCHANGED upstream
+// bytes reproduces an identical file, with no diff at all, rather than a
+// wall-clock date bumping every run regardless of whether the data
+// itself changed.
+func contentDigest(data []byte) string {
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])[:contentDigestLen]
+}
+
+// sourceMeta is renderGoSource's header-comment material. sourceDigest is
+// a short content hash of the FETCHED upstream bytes (review fix,
+// folded minor), not a wall-clock date: a date-stamped header made every
+// `make pricing-sync` run touch the generated file even when the
+// upstream data had not changed at all, producing a spurious daily diff
+// with nothing real to review. A content hash changes only when the
+// underlying data actually changes.
 type sourceMeta struct {
-	snapshot      string
+	sourceDigest  string
 	totalUpstream int
 	kept          int
 }
@@ -476,8 +501,9 @@ func renderGoSource(table map[string]builtinEntry, meta sourceMeta) (string, err
 	fmt.Fprintf(&b, "// model_prices_and_context_window.json — DO NOT EDIT.\n")
 	fmt.Fprintf(&b, "//\n")
 	fmt.Fprintf(&b, "// Source: %s\n", litellmSourceURL)
-	fmt.Fprintf(&b, "// Snapshot: %s, %d entries kept (pruned from %d upstream entries —\n", meta.snapshot, meta.kept, meta.totalUpstream)
-	fmt.Fprintf(&b, "// see tools/pricing-sync/main.go's own doc comment for the exact pruning\n")
+	fmt.Fprintf(&b, "// Source digest: sha256:%s\n", meta.sourceDigest)
+	fmt.Fprintf(&b, "// %d entries kept (pruned from %d upstream entries — see\n", meta.kept, meta.totalUpstream)
+	fmt.Fprintf(&b, "// tools/pricing-sync/main.go's own doc comment for the exact pruning\n")
 	fmt.Fprintf(&b, "// rule and bare-id collision resolution).\n")
 	fmt.Fprintf(&b, "//\n")
 	fmt.Fprintf(&b, "// Regenerate with: make pricing-sync\n")

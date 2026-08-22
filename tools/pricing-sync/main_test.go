@@ -168,13 +168,13 @@ func TestParseAndPrune_Golden(t *testing.T) {
 // TestRenderGoSource_ValidSortedGo asserts renderGoSource produces
 // syntactically valid, gofmt-canonical Go source (parseable by go/
 // parser) whose entries appear in sorted key order, and that its header
-// documents the pruning provenance (source URL, snapshot, counts).
+// documents the pruning provenance (source URL, content digest, counts).
 func TestRenderGoSource_ValidSortedGo(t *testing.T) {
 	table := map[string]builtinEntry{
 		"zzz-model": {ContextTokens: 1, InputCostPerMTokMicroUSD: 1, OutputCostPerMTokMicroUSD: 1},
 		"aaa-model": {ContextTokens: 2, InputCostPerMTokMicroUSD: 2, OutputCostPerMTokMicroUSD: 2},
 	}
-	src, err := renderGoSource(table, sourceMeta{snapshot: "2026-08-22", totalUpstream: 3111, kept: 2})
+	src, err := renderGoSource(table, sourceMeta{sourceDigest: "deadbeefcafe", totalUpstream: 3111, kept: 2})
 	if err != nil {
 		t.Fatalf("renderGoSource: %v", err)
 	}
@@ -188,8 +188,8 @@ func TestRenderGoSource_ValidSortedGo(t *testing.T) {
 	if !strings.Contains(src, litellmSourceURL) {
 		t.Error("generated source missing source URL provenance comment")
 	}
-	if !strings.Contains(src, "2026-08-22") || !strings.Contains(src, "3111") {
-		t.Error("generated source missing snapshot date / upstream count provenance comment")
+	if !strings.Contains(src, "deadbeefcafe") || !strings.Contains(src, "3111") {
+		t.Error("generated source missing source-digest / upstream count provenance comment")
 	}
 	if got, want := strings.Index(src, `"aaa-model"`), strings.Index(src, `"zzz-model"`); got == -1 || want == -1 || got > want {
 		t.Errorf(`entries not sorted: index("aaa-model")=%d, index("zzz-model")=%d, want aaa before zzz`, got, want)
@@ -240,5 +240,27 @@ func TestApplyNamingBridges_DoesNotOverwriteExistingEntry(t *testing.T) {
 	want := builtinEntry{ContextTokens: 500_000, InputCostPerMTokMicroUSD: 999, OutputCostPerMTokMicroUSD: 999}
 	if got := table["MiniMax-M2.1-highspeed"]; got != want {
 		t.Errorf(`table["MiniMax-M2.1-highspeed"] = %+v, want %+v (its own direct LiteLLM entry, not the bridged duplicate)`, got, want)
+	}
+}
+
+// TestContentDigest covers the review-fix replacement for a wall-clock
+// snapshot date: identical bytes must always produce an identical
+// digest (the whole point — a `make pricing-sync` re-run against
+// unchanged upstream data must reproduce a byte-identical file, with no
+// spurious diff), different bytes must produce a different digest, and
+// the digest is always exactly contentDigestLen hex characters.
+func TestContentDigest(t *testing.T) {
+	a := contentDigest([]byte(`{"gpt-5":{}}`))
+	b := contentDigest([]byte(`{"gpt-5":{}}`))
+	c := contentDigest([]byte(`{"gpt-5":{"changed":true}}`))
+
+	if a != b {
+		t.Errorf("contentDigest is not deterministic: %q != %q for identical input", a, b)
+	}
+	if a == c {
+		t.Errorf("contentDigest(%q) == contentDigest(%q) = %q, want different digests for different input", `{"gpt-5":{}}`, `{"gpt-5":{"changed":true}}`, a)
+	}
+	if len(a) != contentDigestLen {
+		t.Errorf("len(contentDigest(...)) = %d, want %d", len(a), contentDigestLen)
 	}
 }
