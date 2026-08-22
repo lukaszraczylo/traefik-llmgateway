@@ -295,8 +295,8 @@ func passthroughRoute(path string) (providerName, rest string, ok bool) {
 }
 
 // hasTraversalSegment reports whether rest, once percent-decoded and
-// normalized, contains a path segment that resolves to ".." or ".". rest
-// is still in its escaped form here (see passthroughRoute) — decoding it
+// normalized, contains a path segment that resolves to exactly "..".
+// rest is still in its escaped form here (see passthroughRoute) — decoding it
 // is a validation-only step, never used to build the outgoing upstream
 // URL, so a legitimate percent-encoded segment (e.g. "a%2Fb" naming a
 // literal "a/b" resource) still reaches the upstream exactly as the
@@ -317,12 +317,14 @@ func passthroughRoute(path string) (providerName, rest string, ok bool) {
 //     convention): a segment's own identity is everything BEFORE its
 //     first ";" — an upstream honoring that convention resolves
 //     "..;foo=bar" identically to "..". Every segment has its
-//     ";"-suffix stripped before the ".."/"." comparison below.
+//     ";"-suffix stripped before the ".." comparison below.
+//
 //   - Backslash normalization ("..%5c..%5cx", decoding to "..\..\x"):
 //     Windows/.NET and other backslash-normalizing upstreams treat "\"
 //     as an equivalent path separator. The fully decoded string has
 //     every "\" replaced with "/" before splitting, so a segment
 //     hidden behind a backslash is caught the same as one behind "/".
+//
 //   - Double-encoding ("%252e%252e/x"): one url.PathUnescape pass
 //     decodes this to "%2e%2e/x" — still containing "%", meaning a
 //     SECOND decode pass (which this function deliberately never
@@ -331,10 +333,25 @@ func passthroughRoute(path string) (providerName, rest string, ok bool) {
 //     still contains "%" after the one legitimate unescape pass is
 //     rejected outright — fail closed on ambiguity, matching this
 //     function's existing rule for a rest that fails to unescape at
-//     all. This does reject an operator's literal, intentionally
-//     double-encoded "%25" in a resource name; accepted, since this
-//     package has no legitimate use for one and the alternative is an
-//     unbounded decode loop.
+//     all.
+//
+//     CORRECTED (round 3, 2026-08-22 review): this rule's own comment
+//     used to say it "rejects an intentionally double-encoded %25" —
+//     that is not quite right and overstated the certainty. "%25" is
+//     the CORRECT, single, standards-conforming encoding of a literal
+//     "%" character (RFC 3986). After exactly one unescape pass, a
+//     legitimately single-encoded literal "%" is byte-for-byte
+//     indistinguishable from a genuinely double-encoded sequence (e.g.
+//     "%252e") that would reveal a hidden "..%2e" on a second pass —
+//     there is no way to tell them apart from the decoded bytes alone.
+//     The false-positive cost is real and known: a rest like
+//     "v1/100%25done" (a literal "100%done" resource path) decodes once
+//     to "v1/100%done", still contains "%", and is rejected here even
+//     though the ORIGINAL request carried no traversal attempt at all.
+//     Fail-closed on this ambiguity is still the correct call — refusing
+//     an occasional legitimate literal "%" is a far smaller cost than
+//     admitting a real double-encoded traversal — but the comment should
+//     not have implied the rejected input was provably malicious.
 //
 // Literal ".." and single-encoded "..%2f" keep their existing, already
 // correct behavior — both still resolve to a segment of exactly "..".
@@ -351,7 +368,7 @@ func hasTraversalSegment(rest string) bool {
 		if i := strings.IndexByte(seg, ';'); i >= 0 {
 			seg = seg[:i]
 		}
-		if seg == ".." || seg == "." {
+		if seg == ".." {
 			return true
 		}
 	}

@@ -225,11 +225,21 @@ func TestHasTraversalSegment(t *testing.T) {
 		// a second time).
 		{"%252e%252e/x", true},
 		{"%252E%252E/x", true},
-		{"a%25b", true}, // a literal, intentionally double-encoded "%25" (a percent sign) is refused too — accepted trade-off, no legitimate use in this package
+		// A false positive, KNOWN and accepted (SHOULD-5, round 3
+		// review, corrected doc comment): "%25" is the correct, single
+		// encoding of a literal "%", indistinguishable after one decode
+		// pass from a genuine double-encoding — this rejects a
+		// completely benign request naming a literal "%" in its path.
+		{"a%25b", true},
+		{"v1/100%25done", true}, // decodes once to "v1/100%done" — a real resource path, still rejected
 
 		// Existing correct behavior must be unchanged: a legitimate
-		// single-encoded "/" within one segment, and literal "..".
+		// single-encoded "/" within one segment, literal "..", and a
+		// literal "." segment (dropped from finding 4's scope, round 3
+		// review — "v1/x/./y" is a legal, non-traversal path and must
+		// not 400).
 		{"a%2Fb%2Fc", false},
+		{"v1/x/./y", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.rest, func(t *testing.T) {
