@@ -724,11 +724,15 @@ func TestOpenAIMessagesFromAnthropic_InterspersedToolResults(t *testing.T) {
 }
 
 // TestOpenAIToolMessageFromAnthropic_PreservesIsError is the regression
-// for item 11a (IMPORTANT, 2026-08-22 review): Anthropic's
-// tool_result.is_error has no native OpenAI tool-message field, so the
-// previous version of this function silently dropped it. A string
-// content now gets an "Error: " prefix so the failure signal survives
-// into the one shape OpenAI's tool message actually carries.
+// for item 11a and F4 (IMPORTANT/BLOCKING-adjacent, 2026-08-22/23
+// review): Anthropic's tool_result.is_error has no native OpenAI
+// tool-message field, so a prior version of this function silently
+// dropped it — and a second prior version prefixed only a Go string,
+// silently dropping the signal again for the array-content form Claude
+// Code actually sends. All content shapes now normalize to a string
+// (openAIToolResultContentString) before the "Error: " prefix applies,
+// and an absent content becomes "" rather than the JSON null OpenAI
+// rejects for a tool message.
 func TestOpenAIToolMessageFromAnthropic_PreservesIsError(t *testing.T) {
 	cases := []struct {
 		content     any
@@ -738,13 +742,22 @@ func TestOpenAIToolMessageFromAnthropic_PreservesIsError(t *testing.T) {
 	}{
 		{name: "string content with is_error prefixes Error:", content: "boom", isError: true, wantContent: "Error: boom"},
 		{name: "string content without is_error is unchanged", content: "ok", isError: false, wantContent: "ok"},
-		{name: "non-string content is left as-is even with is_error", content: []any{"x"}, isError: true, wantContent: []any{"x"}},
+		{name: "array-form content with is_error is normalized to a string and prefixed (F4)", content: []any{map[string]any{"type": "text", "text": "boom"}}, isError: true, wantContent: "Error: boom"},
+		{name: "array-form content without is_error joins its text blocks (F4)", content: []any{map[string]any{"type": "text", "text": "part1"}, map[string]any{"type": "text", "text": "part2"}}, isError: false, wantContent: "part1part2"},
+		{name: "absent content with is_error still prefixes onto an empty string, never null (F4)", content: nil, isError: true, wantContent: "Error: "},
+		{name: "absent content without is_error is an empty string, never null (F4)", content: nil, isError: false, wantContent: ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			bm := map[string]any{"tool_use_id": "call_1", "content": tc.content, "is_error": tc.isError}
+			bm := map[string]any{"tool_use_id": "call_1", "is_error": tc.isError}
+			if tc.content != nil {
+				bm["content"] = tc.content
+			}
 			got := openAIToolMessageFromAnthropic(bm)
 			assert.Equal(t, tc.wantContent, got["content"])
+			if _, ok := got["content"].(string); !ok {
+				t.Errorf("content = %#v (%T), want a string (OpenAI rejects a null/non-string tool message content)", got["content"], got["content"])
+			}
 		})
 	}
 }

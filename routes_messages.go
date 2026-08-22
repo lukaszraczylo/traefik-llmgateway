@@ -118,15 +118,20 @@ func (g *Gateway) handleMessages(w http.ResponseWriter, r *http.Request, u *user
 }
 
 // isStreamingRequested reports whether req's "stream" field is anything
-// other than the JSON literal false or an absent key (item 9 fix,
-// 2026-08-22 review). A bare req["stream"].(bool) assertion silently
-// treats a non-bool value ("stream":"true", "stream":1) as false and lets
-// it through to an upstream that might itself honor a loosely-typed
-// truthy value — exactly the "silently answered non-streamed" outcome
-// this route must reject explicitly instead of allowing by accident.
+// other than the JSON literal false, JSON null, or an absent key (item
+// 9/F7 fix, 2026-08-22/23 review). A bare req["stream"].(bool) assertion
+// silently treats a non-bool value ("stream":"true", "stream":1) as
+// false and lets it through to an upstream that might itself honor a
+// loosely-typed truthy value — exactly the "silently answered
+// non-streamed" outcome this route must reject explicitly instead of
+// allowing by accident. JSON null is treated the same as an absent key
+// (F7 fix): an SDK that serializes an unset optional field as explicit
+// null must not get a hard 400 on an ordinary non-streaming call — null
+// decodes to a Go nil interface value, which the item-9 fix's "anything
+// not the literal false" rule would otherwise also reject.
 func isStreamingRequested(req map[string]any) bool {
 	v, ok := req["stream"]
-	if !ok {
+	if !ok || v == nil {
 		return false
 	}
 	return v != false
@@ -177,20 +182,16 @@ func (e *responseTranslationError) Error() string { return "translate response: 
 // through anthropicPassthroughForwardedHeaders' allowlist only (item 5
 // fix, above).
 //
-// The response body reaches the client almost byte-for-byte: this
-// function decodes it twice, read-only, to (a) extract usage
-// (input_tokens/output_tokens/cache_*_tokens, via the existing
-// anthropicResponseBody type, translate_anthropic.go — reused rather
-// than declared again) for accounting, and (b) rewrite only the "model"
-// field to requestedModel — the client's own requested alias — before
-// re-encoding and writing it (item 4 fix, 2026-08-22 review: the
-// PREVIOUS version left the upstream's own real model id in the
-// response, inconsistent with callTranslatedMessages' own alias echo on
-// the same route, and leaking the operator's real upstream model id,
-// which gatewayAliasKey exists specifically to prevent). Every other
-// field survives the round trip unchanged, since the rewrite decodes
-// into a generic map rather than a narrow typed struct — rewriting one
-// field this way is routing, not translating the message body.
+// The response body reaches the client BYTE-FOR-BYTE except "model",
+// rewritten to requestedModel — the client's own requested alias (item 4
+// fix, 2026-08-22 review: the PREVIOUS version left the upstream's own
+// real model id in the response, inconsistent with callTranslatedMessages'
+// own alias echo on the same route, and leaking the operator's real
+// upstream model id, which gatewayAliasKey exists specifically to
+// prevent). Byte-for-byte is load-bearing, not a nicety: see
+// rewriteModelField's own doc comment (item 4/F1 fix, 2026-08-23 review)
+// for why a decode-then-re-marshal round trip through a Go value
+// silently corrupts data on this route.
 func (g *Gateway) callAnthropicMessagesPassthrough(ctx context.Context, w http.ResponseWriter, clientHeaders http.Header, adapter providerAdapter, req map[string]any, requestedModel string) (usage, error) {
 	delete(req, gatewayAliasKey) // this route never sets it via req itself, but a client-sent "__alias" field must never reach the real Anthropic API
 
@@ -233,33 +234,44 @@ func (g *Gateway) callAnthropicMessagesPassthrough(ctx context.Context, w http.R
 
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
 	if err != nil {
-		return usage{}, fmt.Errorf("%w: read response body: %w", errUpstream, err)
+		// F5 fix, 2026-08-23 review: the upstream already answered 200
+		// (already billed server-side) — a body-read failure past that
+		// point is classified as a translation failure, not a
+		// connectivity problem, consistent with the usage-decode failure
+		// below. Nothing is recoverable here: with no bytes read at all,
+		// there is neither a usage number to extract nor a body to
+		// deliver, so this is still an error return.
+		return usage{}, &responseTranslationError{err: fmt.Errorf("read response body: %w", err)}
 	}
 
+	// F5 fix, 2026-08-23 review: a failure parsing USAGE out of raw must
+	// never block delivering raw itself to the client — the upstream
+	// already fully answered, and this route's whole purpose is passing
+	// that answer through. billed stays usage{} on a parse failure;
+	// runMeteredCall's own zero-usage estimate (from request body size,
+	// routes_unified.go) takes over, exactly like every other
+	// unparseable-usage-shape case already relies on. This is NOT a
+	// repeat of the "silently drop tokens a client can exploit" bug item
+	// 1 fixed elsewhere: there, callErr was returned non-nil and skipped
+	// that estimate fallback entirely; here callErr stays nil, so the
+	// fallback still runs and the request still gets billed something.
 	var parsed anthropicResponseBody
+	var billed usage
 	if unmarshalErr := json.Unmarshal(raw, &parsed); unmarshalErr != nil {
-		return usage{}, fmt.Errorf("%w: decode anthropic response: %w", errUpstream, unmarshalErr)
+		g.warnf("messages route: could not decode usage from an anthropic passthrough response (forwarding the response to the client regardless): %v", unmarshalErr)
+	} else {
+		// totalInputTokens folds Anthropic's prompt-cache counters
+		// (cache_creation_input_tokens/cache_read_input_tokens) into the
+		// billed prompt count (item 6 fix, 2026-08-22 review) — see its
+		// own doc comment, translate_anthropic.go, for why dropping them
+		// under-bills a cache-heavy caller (the common case for Claude
+		// Code) by orders of magnitude.
+		billed = usage{prompt: parsed.Usage.totalInputTokens(), completion: parsed.Usage.OutputTokens}
 	}
-	// totalInputTokens folds Anthropic's prompt-cache counters
-	// (cache_creation_input_tokens/cache_read_input_tokens) into the
-	// billed prompt count (item 6 fix, 2026-08-22 review) — see its own
-	// doc comment, translate_anthropic.go, for why dropping them
-	// under-bills a cache-heavy caller (the common case for Claude Code)
-	// by orders of magnitude.
-	billed := usage{prompt: parsed.Usage.totalInputTokens(), completion: parsed.Usage.OutputTokens}
 
-	// The upstream call already succeeded and billed above by this
-	// point — any failure from here on is a *responseTranslationError,
-	// not a connectivity problem, so billed still reaches the caller
-	// even if the field rewrite below somehow fails (item 1/12 fix).
-	var envelope map[string]any
-	if unmarshalErr := json.Unmarshal(raw, &envelope); unmarshalErr != nil {
-		return billed, &responseTranslationError{err: fmt.Errorf("decode anthropic response envelope: %w", unmarshalErr)}
-	}
-	envelope["model"] = requestedModel
-	out, err := json.Marshal(envelope)
+	out, err := rewriteModelField(raw, requestedModel)
 	if err != nil {
-		return billed, &responseTranslationError{err: fmt.Errorf("re-marshal anthropic response: %w", err)}
+		return billed, &responseTranslationError{err: err}
 	}
 
 	if ct := resp.Header.Get("Content-Type"); ct != "" {
@@ -271,6 +283,81 @@ func (g *Gateway) callAnthropicMessagesPassthrough(ctx context.Context, w http.R
 	_, _ = w.Write(out)
 
 	return billed, nil
+}
+
+// rewriteModelField replaces raw's top-level "model" field with a JSON
+// string of newModel, preserving every other field's VALUE bytes and
+// their original relative order exactly (item 4/F1 fix, 2026-08-23
+// review). A prior version decoded the whole response into
+// map[string]any and re-marshaled it — not enough: Go's float64 cannot
+// represent every JSON integer exactly (verified repro:
+// 12345678901234567890 becomes 12345678901234567000, and
+// 9007199254740993 becomes 9007199254740992 — both silent corruption of
+// a value that could be, for instance, a long numeric id inside a
+// tool_use block's arbitrary "input"), json.Marshal also rewrites 1.0 to
+// 1 and HTML-escapes < and & by default, and re-marshaling a Go map
+// always re-sorts its keys regardless of the source's own order — wrong
+// on a route documented as passthrough.
+//
+// This function never turns any value but "model" into a Go value at
+// all: it walks raw's top-level object with json.Decoder.Token()/Decode()
+// and captures every other field's value as a json.RawMessage, which
+// preserves the exact source bytes of that value — including a nested
+// object or array's own internal structure — without parsing it further.
+// The rebuilt object is written compactly (no inter-token whitespace):
+// for the compact JSON every provider in this codebase actually returns
+// over the wire, that reproduces the input byte-for-byte apart from the
+// "model" field; a pretty-printed input's insignificant whitespace would
+// not survive, which no known caller of this function ever produces.
+func rewriteModelField(raw []byte, newModel string) ([]byte, error) {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	if tok, err := dec.Token(); err != nil || tok != json.Delim('{') {
+		return nil, fmt.Errorf("response is not a JSON object")
+	}
+
+	newModelJSON, err := json.Marshal(newModel)
+	if err != nil {
+		return nil, fmt.Errorf("marshal model field: %w", err)
+	}
+
+	var out bytes.Buffer
+	out.WriteByte('{')
+	first := true
+	for dec.More() {
+		keyTok, err := dec.Token()
+		if err != nil {
+			return nil, fmt.Errorf("read field key: %w", err)
+		}
+		key, ok := keyTok.(string)
+		if !ok {
+			return nil, fmt.Errorf("unexpected non-string object key")
+		}
+
+		var val json.RawMessage
+		if decodeErr := dec.Decode(&val); decodeErr != nil {
+			return nil, fmt.Errorf("read field %q value: %w", key, decodeErr)
+		}
+
+		if !first {
+			out.WriteByte(',')
+		}
+		first = false
+
+		keyJSON, err := json.Marshal(key)
+		if err != nil {
+			return nil, fmt.Errorf("marshal field key %q: %w", key, err)
+		}
+		out.Write(keyJSON)
+		out.WriteByte(':')
+		if key == "model" {
+			out.Write(newModelJSON)
+		} else {
+			out.Write(val)
+		}
+	}
+	out.WriteByte('}')
+
+	return out.Bytes(), nil
 }
 
 // callTranslatedMessages handles a /v1/messages request resolved to a
@@ -316,7 +403,17 @@ func (g *Gateway) callTranslatedMessages(ctx context.Context, w http.ResponseWri
 	rec := newMessagesResponseRecorder()
 	result, err := adapter.chatCompletion(ctx, rec, openaiReq)
 	if err != nil {
-		return usage{}, err
+		// result, not usage{} (F5 fix, 2026-08-23 review): harmless today
+		// — streaming is rejected before this route ever reaches here, so
+		// chatCompletion's non-streaming contract already guarantees
+		// usage{} on any error. It matters the day streaming lands: a
+		// streaming chatCompletion call (forwardStream) CAN return
+		// nonzero usage alongside an error — a usage chunk that arrived
+		// just before a dropped connection must still be billed — and
+		// discarding it here would reintroduce item 1's original
+		// CRITICAL (usage silently dropped on an error path) the moment
+		// this route gains streaming support.
+		return result, err
 	}
 
 	out, err := anthropicResponseFromOpenAI(rec.body.Bytes(), requestedModel)

@@ -388,6 +388,39 @@ func TestHandleMessages_StreamingRejected(t *testing.T) {
 	}
 }
 
+// TestHandleMessages_NullStream_IsNotStreaming is the regression for F7
+// (2026-08-23 review): isStreamingRequested's item-9 fix ("anything not
+// the literal false is streaming") had the side effect of also
+// rejecting "stream": null, since a bare v != false comparison treats a
+// JSON null (decoded as a Go nil interface) as "present and not false".
+// An SDK that serializes an unset optional field as explicit null must
+// still get an ordinary, successful non-streaming response, not a false
+// -positive 400.
+func TestHandleMessages_NullStream_IsNotStreaming(t *testing.T) {
+	const anthResp = `{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}],"model":"claude-real","stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`
+	called := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(anthResp))
+	}))
+	defer srv.Close()
+
+	gw := newMessagesTestGateway(t, srv.URL, "")
+	body := map[string]any{"model": "claude-test", "max_tokens": 10, "stream": nil, "messages": []any{map[string]any{"role": "user", "content": "hi"}}}
+	req := newMessagesRequest(t, body, "x-api-key", "sk-alice")
+	rec := httptest.NewRecorder()
+	gw.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	if !called {
+		t.Error("upstream was never called; \"stream\": null must be treated as an ordinary non-streaming request")
+	}
+}
+
 // TestHandleMessages_RateLimited_Returns429 proves this route enforces
 // the caller's group/user requestsPerMinute limit exactly like
 // routes_unified.go's runUnified: a second request past the limit is
@@ -540,5 +573,109 @@ func TestHandleMessages_TranslationFailureAfterBilledUsage_PreservesUsage(t *tes
 	}
 	if strings.Contains(logs, "upstream connection error") {
 		t.Errorf("log output = %q, want it to NOT be classified as an upstream connection error", logs)
+	}
+}
+
+// TestHandleMessages_AnthropicProvider_Passthrough_PreservesExactBytes is
+// the regression for F1 (BLOCKING, 2026-08-23 review): the previous
+// alias-echo fix decoded the upstream's 200 into map[string]any and
+// re-marshaled it, which silently corrupted data on a route documented
+// as passthrough — a JSON integer beyond float64's exact-integer range
+// (verified repro: 12345678901234567890 became 12345678901234567000),
+// a trailing ".0" on a float (1.0 became 1), and HTML-escaped "<" and
+// "&". A tool_use block's "input" is arbitrary model-generated JSON, so
+// a long numeric id inside tool arguments was silently corrupted on
+// every anthropic-type request through this route. This proves the
+// fixed version (rewriteModelField, routes_messages.go) reproduces the
+// upstream body byte-for-byte apart from the "model" field alone: same
+// field order, same big-integer digits, same "1.0", same literal "<".
+func TestHandleMessages_AnthropicProvider_Passthrough_PreservesExactBytes(t *testing.T) {
+	const anthResp = `{"id":"msg_01ABC","type":"message","role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"calc","input":{"big_id":12345678901234567890,"score":1.0,"note":"1 < 2 & 3"}}],"model":"claude-real","stop_reason":"end_turn","usage":{"input_tokens":5,"output_tokens":3}}`
+	const wantBody = `{"id":"msg_01ABC","type":"message","role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"calc","input":{"big_id":12345678901234567890,"score":1.0,"note":"1 < 2 & 3"}}],"model":"claude-test","stop_reason":"end_turn","usage":{"input_tokens":5,"output_tokens":3}}`
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(anthResp))
+	}))
+	defer srv.Close()
+
+	gw := newMessagesTestGateway(t, srv.URL, "")
+
+	body := map[string]any{
+		"model":      "claude-test",
+		"max_tokens": 100,
+		"messages":   []any{map[string]any{"role": "user", "content": "hello"}},
+	}
+	req := newMessagesRequest(t, body, "x-api-key", "sk-alice")
+	rec := httptest.NewRecorder()
+	gw.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Body.String(); got != wantBody {
+		t.Errorf("body = %s\nwant  = %s\n(must be byte-for-byte identical apart from the \"model\" field: no float64 rounding, no 1.0->1, no HTML-escaping, no key reordering)", got, wantBody)
+	}
+}
+
+// TestHandleMessages_AnthropicProvider_Passthrough_HeaderAllowlist is the
+// regression for F3 (BLOCKING, 2026-08-23 review): negative assertions
+// that a blanket header-forward, or reordering injectAuth ahead of the
+// allowlist copy while adding x-api-key to it, would both defeat.
+// Authorization, x-api-key (the CLIENT's own value), and Cookie must
+// never reach the anthropic-type upstream, and the upstream must see
+// exactly ONE x-api-key value: the gateway's own configured key
+// ("sk-ant-up"), never the client's own ("sk-alice"). The exactly-ONE
+// check matters on its own: injectAuth's Set() call replaces any
+// existing x-api-key value, so a mutant that adds x-api-key to the
+// allowlist and reorders injectAuth BEFORE that copy would still leave
+// Get("x-api-key") returning "sk-ant-up" (Set ran first, Add appended
+// after) while a second, leaked "sk-alice" value silently rode along —
+// invisible to a bare .Get() check, which only ever returns the first
+// value.
+func TestHandleMessages_AnthropicProvider_Passthrough_HeaderAllowlist(t *testing.T) {
+	const anthResp = `{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}],"model":"claude-real","stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`
+
+	var gotHeaders http.Header
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHeaders = r.Header.Clone()
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(anthResp))
+	}))
+	defer srv.Close()
+
+	gw := newMessagesTestGateway(t, srv.URL, "")
+
+	body := map[string]any{"model": "claude-test", "max_tokens": 10, "messages": []any{map[string]any{"role": "user", "content": "hi"}}}
+	// Authenticate via Authorization: Bearer (presentedKey, auth.go,
+	// gives it priority over x-api-key when both are present) and
+	// ADDITIONALLY send an x-api-key header of the client's own — unused
+	// for auth here, but still present on the request and must still
+	// never reach the upstream — plus a Cookie header. None of the three
+	// has any business reaching the upstream.
+	req := newMessagesRequest(t, body, "Authorization", "Bearer sk-alice")
+	req.Header.Set("x-api-key", "some-other-client-value") // #nosec G101 -- test fixture literal, not a real credential
+	req.Header.Set("Cookie", "session=client-side-secret")
+	rec := httptest.NewRecorder()
+	gw.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+
+	if got := gotHeaders.Get("Authorization"); got != "" {
+		t.Errorf("upstream Authorization = %q, want empty (never forwarded)", got)
+	}
+	if got := gotHeaders.Get("Cookie"); got != "" {
+		t.Errorf("upstream Cookie = %q, want empty (never forwarded)", got)
+	}
+	apiKeyValues := gotHeaders.Values("x-api-key")
+	if len(apiKeyValues) != 1 {
+		t.Fatalf("upstream x-api-key values = %v, want exactly 1 (the client's own key must never ride along as a second value)", apiKeyValues)
+	}
+	if apiKeyValues[0] != "sk-ant-up" { // #nosec G101 -- test fixture literal, not a real credential
+		t.Errorf("upstream x-api-key = %q, want the gateway's own configured key sk-ant-up, never the client's sk-alice", apiKeyValues[0])
 	}
 }

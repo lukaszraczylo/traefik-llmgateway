@@ -937,36 +937,58 @@ func openAIToolCallFromAnthropic(bm map[string]any) (map[string]any, error) {
 // openAIToolMessageFromAnthropic maps one Anthropic {"type":"tool_result",
 // "tool_use_id","content","is_error"} content block to an OpenAI
 // role:"tool" message ({"role":"tool","tool_call_id","content"}), the
-// mirror of anthropicToolResultBlock above. is_error (item 11 fix,
-// 2026-08-22 review) has no native OpenAI equivalent — a tool message
-// carries no error flag — so it is preserved via prefixErrorMarker
-// instead of being silently dropped: the previous version of this
-// function read only tool_use_id/content and discarded is_error
-// entirely, losing the failure signal for any OpenAI-backed agentic loop
-// that branches on whether a tool call succeeded.
+// mirror of anthropicToolResultBlock above. is_error (item 11/F4 fix,
+// 2026-08-22/23 review) has no native OpenAI equivalent — a tool message
+// carries no error flag — so it is preserved by prefixing "Error: " onto
+// content once openAIToolResultContentString (below) has normalized it
+// to a plain string, instead of being silently dropped: an earlier
+// version of this function read only tool_use_id/content and discarded
+// is_error entirely, and a second earlier version only prefixed a Go
+// string, still dropping the signal for Anthropic's array-content form.
 func openAIToolMessageFromAnthropic(bm map[string]any) map[string]any {
 	toolUseID, _ := bm["tool_use_id"].(string)
-	content := bm["content"]
+	content := openAIToolResultContentString(bm["content"])
 	if isErr, _ := bm["is_error"].(bool); isErr {
-		content = prefixErrorMarker(content)
+		content = "Error: " + content
 	}
 	return map[string]any{"role": "tool", "tool_call_id": toolUseID, "content": content}
 }
 
-// prefixErrorMarker preserves Anthropic's tool_result.is_error signal
-// across the translation to OpenAI's tool message shape (item 11 fix,
-// 2026-08-22 review): a string content gets an "Error: " prefix so the
-// model still sees the failure signal in the one shape OpenAI's tool
-// message actually carries. Any other content shape (a block array, or
-// absent) is left as-is rather than guessing how to annotate it —
-// OpenAI-compatible upstreams generally infer failure from content
-// itself in that case, same as before this fix; only the common
-// string-content case previously lost the signal entirely.
-func prefixErrorMarker(content any) any {
-	if s, ok := content.(string); ok {
-		return "Error: " + s
+// openAIToolResultContentString normalizes an Anthropic tool_result
+// block's "content" into the single string OpenAI's tool message
+// "content" field requires (item 11/F4 fix, 2026-08-22/23 review). Three
+// source shapes all collapse to a string: a plain string passes through
+// unchanged; a content-block array (Anthropic permits this, and Claude
+// Code sends it for a tool_result carrying more than plain text) has its
+// text blocks concatenated; an absent/nil content becomes "". Handling
+// all three uniformly, here, is what lets openAIToolMessageFromAnthropic's
+// is_error prefix apply regardless of the source shape — the PREVIOUS
+// version only prefixed a Go string and left the array form unmarked
+// entirely, silently dropping the failure signal for real Claude Code
+// traffic (item 11 only covered half of it). It also fixes a second,
+// separate bug the array-only gap masked: an absent content previously
+// passed through as a literal Go nil, which this function's caller wrote
+// out as the JSON literal null — OpenAI rejects a null tool-message
+// content outright, where "" is accepted.
+func openAIToolResultContentString(content any) string {
+	switch c := content.(type) {
+	case string:
+		return c
+	case []any:
+		var parts []string
+		for _, block := range c {
+			bm, ok := block.(map[string]any)
+			if !ok {
+				continue
+			}
+			if text, ok := bm["text"].(string); ok {
+				parts = append(parts, text)
+			}
+		}
+		return strings.Join(parts, "")
+	default:
+		return ""
 	}
-	return content
 }
 
 // openAIMessagesFromAnthropic maps one Anthropic message ({"role",

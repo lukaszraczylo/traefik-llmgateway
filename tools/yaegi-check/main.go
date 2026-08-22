@@ -764,9 +764,17 @@ func exerciseMessagesRoute(handler http.Handler) error {
 	if err := assertAnthropicErrorShape("upstream 429", upErrRec.Body.Bytes()); err != nil {
 		return err
 	}
-	if upErrRec.Header().Get("X-Llmgw-Cache") != "" {
-		return fmt.Errorf("POST /v1/messages (upstream 429) carries a stale X-Llmgw-Cache header: %q", upErrRec.Header().Get("X-Llmgw-Cache"))
-	}
+	// A stale X-Llmgw-Cache header on an error response was deliberately
+	// NOT asserted here (F6 fix, 2026-08-23 review): this harness's own
+	// fixture configures no cache/Redis, so g.cache is nil and the
+	// header is never set on any response regardless of what this route
+	// does — the assertion could not fail no matter what code ran,
+	// confirmed by a mutation pass that deleted the header-clear line it
+	// was meant to guard (handleAdapterErrorEnvelope, routes_unified.go)
+	// with make yaegi-check still reporting OK. That behavior is already
+	// covered where it can actually fail — a real cache fixture, go
+	// test: TestHandleChat_CacheableRequest_UpstreamDown_502HasNoCacheHeader
+	// (routes_unified_test.go).
 
 	// 7. A tool_use round trip through the TRANSLATED path, to drive
 	// openAIToolCallFromAnthropic/openAIToolMessageFromAnthropic and

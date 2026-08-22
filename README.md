@@ -965,7 +965,7 @@ Behavior depends entirely on the resolved provider's configured `type`:
 
 | Resolved provider `type` | Behavior |
 |---|---|
-| `anthropic` | **Passthrough.** The request reaches that provider's own `/v1/messages` endpoint untranslated — no message-body translation of any kind. The response reaches the client unchanged, field for field, with one exception: `"model"` is rewritten to the client's own requested alias, the same routing rewrite every route applies before any adapter call — not a translation of the response body. |
+| `anthropic` | **Passthrough.** The request reaches that provider's own `/v1/messages` endpoint untranslated — no message-body translation of any kind. The response reaches the client BYTE-FOR-BYTE identical, with one exception: `"model"` is rewritten to the client's own requested alias, the same routing rewrite every route applies before any adapter call — not a translation of the response body. This is a real byte-level guarantee, not an approximation: every other field's value is copied from the upstream's raw bytes without ever passing through a Go value, so a JSON integer beyond `float64`'s exact range (inside, say, a `tool_use` block's arbitrary `input`) survives intact instead of being silently rounded. |
 | `openai` or `gemini` | **Full bidirectional translation**, through the same `providerAdapter.chatCompletion` a `/v1/chat/completions` request against that provider already uses — its contract is OpenAI-shape in, OpenAI-shape out regardless of provider type. The Anthropic-shaped request is translated to OpenAI's shape before the call; that provider's OpenAI-shaped response is translated back to Anthropic's shape before it reaches the client. |
 
 A few translation specifics worth knowing:
@@ -981,9 +981,13 @@ A few translation specifics worth knowing:
   the same combined prompt-token count every other route's budgets
   track, alongside `input_tokens` — not dropped, and not priced at a
   separate cache-tier rate.
-- **`tool_result.is_error`** has no native OpenAI tool-message field; a
-  string `content` gets an `"Error: "` prefix so an OpenAI-backed
-  agentic loop still sees the failure signal.
+- **`tool_result.is_error`** has no native OpenAI tool-message field.
+  `content` — a string, Anthropic's content-block array form (Claude
+  Code sends this), or absent — is normalized to a plain string first
+  (OpenAI's own tool message requires one; a `null` content is
+  rejected), then gets an `"Error: "` prefix, so an OpenAI-backed
+  agentic loop still sees the failure signal regardless of which shape
+  the client sent.
 - **Reasoning models** (OpenAI's `o1`/`o3`/`o4`/`gpt-5` families) get
   `max_completion_tokens` instead of `max_tokens` — the field those
   models reject with a 400.
@@ -994,18 +998,33 @@ A few translation specifics worth knowing:
 
 ### Streaming is not yet supported
 
-`"stream"` set to anything other than the JSON literal `false` (or left
-unset) gets a clean **400** `invalid_request_error` — never silently
-ignored, never answered non-streamed. This is deliberately a 400, not a
-501: Anthropic's own SDKs retry any status ≥ 500, so a 501 here would
-turn every streaming call — the default for Claude Code — into a
-multi-request retry storm against the caller's own request-rate limit.
-The rejection happens *before* the rate limiter runs, so a
-streaming-rejected request never consumes budget either. A follow-up
-release adds the Anthropic SSE event translator
-(`message_start`/`content_block_delta`/`message_stop`) — a genuinely
-different event model from OpenAI's own stream shape this plugin already
-forwards on `/v1/chat/completions`.
+`"stream"` set to anything other than the JSON literal `false`, `null`,
+or an absent key gets a clean **400** `invalid_request_error` — never
+silently ignored, never answered non-streamed. `null` is treated the
+same as unset, so an SDK that serializes an unset optional field as
+explicit `null` never gets a false-positive rejection on an ordinary
+non-streaming call. This is deliberately a 400, not a 501: Anthropic's
+own SDKs retry any status ≥ 500, so a 501 here would turn every
+streaming call — the default for Claude Code — into a multi-request
+retry storm against the caller's own request-rate limit. The rejection
+happens *before* the rate limiter runs, so a streaming-rejected request
+never consumes budget either. A follow-up release adds the Anthropic SSE
+event translator (`message_start`/`content_block_delta`/`message_stop`)
+— a genuinely different event model from OpenAI's own stream shape this
+plugin already forwards on `/v1/chat/completions`.
+
+### Route takeover
+
+On a deployment running `passthroughUnknown: true`, `POST /v1/messages`
+used to fall through to `next` (the router's own backing service) before
+this route existed — nothing in this plugin recognized the path. Now the
+gateway intercepts it unconditionally: `next` is never reached for this
+path again, regardless of `passthroughUnknown`. This is intended — the
+whole point of this route is for the gateway itself to answer
+`/v1/messages` — but it is a real behavior change for any deployment
+currently proxying `/v1/messages` downstream through
+`passthroughUnknown`. Route that traffic elsewhere, or expect the
+gateway to answer it directly, before upgrading.
 
 ## Image and audio endpoints
 
@@ -1421,6 +1440,14 @@ the plugin's only non-standard-library runtime dependency.
   integration suite's true incremental-delivery timing assertion is gated
   behind `INTEGRATION_STREAMING=1` and skipped by default for exactly this
   reason — re-run it once the upstream issue is fixed.
+- **`POST /v1/messages` now intercepts unconditionally, even with
+  `passthroughUnknown: true`.** Before this route existed, that path
+  fell through to `next` on a `passthroughUnknown` deployment like any
+  other unrecognized path. The gateway now answers it directly and
+  `next` is never reached for it again — intended, but a real behavior
+  change for a deployment currently proxying `/v1/messages` downstream.
+  See [Anthropic Messages API — Route
+  takeover](#route-takeover).
 - **A request rejected before it reaches a provider never consumes
   request-rate quota.** On the unified routes, a malformed body, a missing
   `model` field, or an unknown/denied model (404/403) is rejected before
