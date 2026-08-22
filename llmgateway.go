@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"runtime"
 )
 
 // Config is the plugin's dynamic configuration, populated by Traefik from
@@ -61,6 +62,22 @@ type Config struct {
 	// above: its own Enabled field is the on/off signal.
 	Cache              CacheConfig `json:"cache"`
 	PassthroughUnknown bool        `json:"passthroughUnknown,omitempty"`
+	// MaxInFlightBodyRequests caps how many unified and media JSON/
+	// multipart requests (routes_unified.go's runUnified; routes_media.go's
+	// handleImagesGenerations/handleAudioSpeech/handleAudioTranscriptions)
+	// may concurrently hold a decoded request body in memory at once
+	// (security review finding 1b, 2026-08-22) — see
+	// acquireBodyAdmission's own doc comment (routes_unified.go) for the
+	// OOM this bounds. 0 (the default) self-tunes from GOMAXPROCS
+	// (defaultBodyAdmissionCap) rather than adding an operator knob for a
+	// value the runtime can already infer (house rule: prefer self-tuning
+	// over operator knobs where the right value can be inferred; add a
+	// flag only when it genuinely cannot be). A positive value pins an
+	// exact cap instead and always wins over the auto-tuned default
+	// (house rule: an explicit override always wins) — e.g. a deployment
+	// with a known, tighter memory budget than GOMAXPROCS alone would
+	// infer.
+	MaxInFlightBodyRequests int `json:"maxInFlightBodyRequests,omitempty"`
 }
 
 // ProviderConfig describes one upstream LLM provider.
@@ -303,6 +320,45 @@ func CreateConfig() *Config {
 	return &Config{}
 }
 
+// minBodyAdmissionCap/maxBodyAdmissionCap clamp defaultBodyAdmissionCap's
+// self-tuned result (security review finding 1b, 2026-08-22): the floor
+// keeps a single-vCPU sidecar from self-tuning down to a cap so small it
+// throttles ordinary traffic, and the ceiling keeps a very large host from
+// self-tuning up to a cap so high the semaphore stops bounding anything —
+// each in-flight request can hold tens of MiB (maxUnifiedRequestBytes's
+// own doc comment, routes_unified.go), so even the ceiling still bounds
+// worst-case memory to a fixed, known order of magnitude.
+const (
+	minBodyAdmissionCap = 16
+	maxBodyAdmissionCap = 128
+)
+
+// bodyAdmissionCapPerCPU is defaultBodyAdmissionCap's GOMAXPROCS
+// multiplier: generous headroom for a body-buffering request, which spends
+// most of its lifetime waiting on network I/O (upstream latency) rather
+// than burning CPU, so a cap tied 1:1 to CPU count would leave real
+// concurrency on the table.
+const bodyAdmissionCapPerCPU = 8
+
+// defaultBodyAdmissionCap returns the self-tuned in-flight cap
+// acquireBodyAdmission's semaphore is sized to when Config.
+// MaxInFlightBodyRequests is left at 0 (security review finding 1b,
+// 2026-08-22): GOMAXPROCS-derived rather than a single constant that would
+// be wrong for both a 1-vCPU sidecar and a 32-vCPU ingress node alike
+// (house rule: prefer self-tuning over operator knobs where the right
+// value can be inferred from the environment), clamped to
+// [minBodyAdmissionCap, maxBodyAdmissionCap].
+func defaultBodyAdmissionCap() int {
+	n := runtime.GOMAXPROCS(0) * bodyAdmissionCapPerCPU
+	if n < minBodyAdmissionCap {
+		return minBodyAdmissionCap
+	}
+	if n > maxBodyAdmissionCap {
+		return maxBodyAdmissionCap
+	}
+	return n
+}
+
 // Gateway is the Traefik middleware handler.
 type Gateway struct {
 	next     http.Handler
@@ -329,7 +385,14 @@ type Gateway struct {
 	// pooled connections through. nil when config.Redis is absent, same
 	// as buildRedisClient's own nil-for-unconfigured contract.
 	redisClient *respClient
-	name        string
+	// bodyAdmission is the buffered-channel semaphore acquireBodyAdmission
+	// (routes_unified.go) claims from and releases: security review
+	// finding 1b, 2026-08-22. Sized once, here, by newGateway (see
+	// defaultBodyAdmissionCap/Config.MaxInFlightBodyRequests) — never
+	// resized afterward, matching a Go channel's own fixed-capacity
+	// contract.
+	bodyAdmission chan struct{}
+	name          string
 }
 
 // New creates the middleware. NOTE: no tail call — Yaegi zeroes
@@ -383,6 +446,19 @@ func newGateway(ctx context.Context, next http.Handler, config *Config, name str
 		return nil, err
 	}
 	g := &Gateway{next: next, name: name, cfg: config, auth: auth}
+
+	// bodyAdmissionCap: an explicit MaxInFlightBodyRequests always wins
+	// over the self-tuned default (house rule: explicit override always
+	// wins) — see Config.MaxInFlightBodyRequests' own doc comment. 0 (the
+	// field's zero value, and every config that predates this field) means
+	// "self-tune", never "cap at zero" — a channel with a zero buffer
+	// would reject every request outright, which is never the intent of
+	// an operator who simply never set this field.
+	bodyAdmissionCap := defaultBodyAdmissionCap()
+	if config.MaxInFlightBodyRequests > 0 {
+		bodyAdmissionCap = config.MaxInFlightBodyRequests
+	}
+	g.bodyAdmission = make(chan struct{}, bodyAdmissionCap)
 
 	if config.Users != nil && config.Users.File != "" {
 		if err = attachUsersFile(auth, config.Users.File, g); err != nil {

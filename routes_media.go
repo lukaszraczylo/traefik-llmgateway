@@ -55,22 +55,27 @@ func (g *Gateway) decodeMediaJSONRequest(sw *statusTrackingWriter, r *http.Reque
 	return req, model, true
 }
 
-// resolveMediaRequest runs the shared model-routing/authz/limits steps
-// every media route needs before calling its adapter (spec §3's "auth →
-// model routing (registry) → group authz → limits" — group authz is
-// folded into modelRegistry.resolve itself, the same as
-// routes_unified.go's runUnified). On success it returns the resolved
-// adapter and the upstream model id to route to; ok reports whether the
-// caller may proceed — a resolve or limit failure has already written its
-// response to sw.
-func (g *Gateway) resolveMediaRequest(sw *statusTrackingWriter, u *user, grp *group, requestedModel string) (adapter providerAdapter, upstreamModel string, ok bool) {
+// resolveMediaModel runs the shared model-routing/authz step every media
+// route needs before calling its adapter (spec §3's "auth → model routing
+// (registry) → group authz" — group authz is folded into
+// modelRegistry.resolve itself, the same as routes_unified.go's
+// runUnified). On success it returns the resolved adapter and the
+// upstream model id to route to; ok reports whether the caller may
+// proceed — a resolve failure has already written its response to sw.
+//
+// This used to also run checkAndCount (a limit check), and was named
+// resolveMediaRequest — security review finding 1a, 2026-08-22, split
+// that out into admitRequest (routes_unified.go), called by every media
+// handler BEFORE the request body is even read: checkAndCount needs only
+// u and grp, both already known ahead of decode, so there was never a
+// reason to make a rate-limited caller pay for reading and decoding a
+// body that was always going to be discarded. See admitRequest's own doc
+// comment for the full rationale, shared verbatim with runUnified's
+// identical fix.
+func (g *Gateway) resolveMediaModel(sw *statusTrackingWriter, grp *group, requestedModel string) (adapter providerAdapter, upstreamModel string, ok bool) {
 	adapter, upstreamModel, _, err := g.registry.resolve(requestedModel, grp)
 	if err != nil {
 		writeModelResolveError(sw, err)
-		return nil, "", false
-	}
-	if violation := g.limiter.checkAndCount(withTotalScope(buildLimitScopes(u, grp))); violation != nil {
-		writeLimitViolation(sw, violation)
 		return nil, "", false
 	}
 	return adapter, upstreamModel, true
@@ -81,16 +86,24 @@ func (g *Gateway) resolveMediaRequest(sw *statusTrackingWriter, u *user, grp *gr
 // Imagen (translate_gemini_images.go); anthropic always answers 501
 // (provider_anthropic.go's imagesGeneration). Images are never cached
 // (spec §2) and never cost-accounted (spec §3) — only the request
-// counters resolveMediaRequest's checkAndCount call already incremented
-// move.
+// counters admitRequest's checkAndCount call already incremented move.
 func (g *Gateway) handleImagesGenerations(w http.ResponseWriter, r *http.Request, u *user, grp *group) {
 	sw := &statusTrackingWriter{ResponseWriter: w}
+
+	release, ok := g.acquireBodyAdmission(sw)
+	defer release()
+	if !ok {
+		return
+	}
+	if _, ok = g.admitRequest(sw, u, grp); !ok {
+		return
+	}
 
 	req, requestedModel, ok := g.decodeMediaJSONRequest(sw, r)
 	if !ok {
 		return
 	}
-	adapter, upstreamModel, ok := g.resolveMediaRequest(sw, u, grp, requestedModel)
+	adapter, upstreamModel, ok := g.resolveMediaModel(sw, grp, requestedModel)
 	if !ok {
 		return
 	}
@@ -119,11 +132,20 @@ func (g *Gateway) handleImagesGenerations(w http.ResponseWriter, r *http.Request
 func (g *Gateway) handleAudioSpeech(w http.ResponseWriter, r *http.Request, u *user, grp *group) {
 	sw := &statusTrackingWriter{ResponseWriter: w}
 
+	release, ok := g.acquireBodyAdmission(sw)
+	defer release()
+	if !ok {
+		return
+	}
+	if _, ok = g.admitRequest(sw, u, grp); !ok {
+		return
+	}
+
 	req, requestedModel, ok := g.decodeMediaJSONRequest(sw, r)
 	if !ok {
 		return
 	}
-	adapter, upstreamModel, ok := g.resolveMediaRequest(sw, u, grp, requestedModel)
+	adapter, upstreamModel, ok := g.resolveMediaModel(sw, grp, requestedModel)
 	if !ok {
 		return
 	}
@@ -175,6 +197,15 @@ func (g *Gateway) handleAudioSpeech(w http.ResponseWriter, r *http.Request, u *u
 func (g *Gateway) handleAudioTranscriptions(w http.ResponseWriter, r *http.Request, u *user, grp *group) {
 	sw := &statusTrackingWriter{ResponseWriter: w}
 
+	release, ok := g.acquireBodyAdmission(sw)
+	defer release()
+	if !ok {
+		return
+	}
+	if _, ok = g.admitRequest(sw, u, grp); !ok {
+		return
+	}
+
 	body, oversize, err := readCapped(r.Body, maxRequestBytes)
 	if err != nil {
 		writeOAIError(sw, http.StatusBadRequest, "invalid_request_error", "cannot read request body")
@@ -222,7 +253,7 @@ func (g *Gateway) handleAudioTranscriptions(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	adapter, upstreamModel, ok := g.resolveMediaRequest(sw, u, grp, requestedModel)
+	adapter, upstreamModel, ok := g.resolveMediaModel(sw, grp, requestedModel)
 	if !ok {
 		return
 	}

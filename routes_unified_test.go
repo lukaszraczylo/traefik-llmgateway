@@ -1898,3 +1898,318 @@ func TestHandleChat_ContextDeadlineExceeded_RecordsProviderFailure(t *testing.T)
 		t.Errorf("provider fails/day = %d, want 1 — a real context-deadline timeout must count as a provider-health failure (SHOULD-1)", fails)
 	}
 }
+
+// --- security review finding 1, 2026-08-22: admission before decode,
+// body-admission semaphore, narrower unified body cap ---
+
+// readTrackingBody is an io.ReadCloser that records whether Read was ever
+// invoked, wrapping a real reader so a request that DOES get read still
+// decodes normally. Used to prove a request rejected before the body is
+// read (finding 1a) never actually touches it.
+type readTrackingBody struct {
+	r      io.Reader
+	called bool
+}
+
+func (b *readTrackingBody) Read(p []byte) (int, error) {
+	b.called = true
+	return b.r.Read(p)
+}
+
+func (b *readTrackingBody) Close() error { return nil }
+
+// TestHandleChat_RequestLimitExceeded_BodyNeverRead is the GATE's own
+// explicit requirement: a 429'd user's body must never be read at all,
+// proving admitRequest now runs strictly before io.ReadAll in runUnified
+// (finding 1a) rather than merely returning the same status code for a
+// different reason.
+func TestHandleChat_RequestLimitExceeded_BodyNeverRead(t *testing.T) {
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{
+		"openai": {Type: "openai", APIKey: "k", Models: []string{"gpt-test"}},
+	}
+	cfg.Groups = map[string]*GroupConfig{"default": {}}
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{
+		{Name: "alice", Group: "default", APIKey: "sk-alice", Limits: &LimitsConfig{RequestsPerMinute: 1}},
+	}}
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	// First request consumes the one-per-minute budget; its body is a
+	// real, valid body so the request completes normally end to end
+	// (upstream is unreachable — irrelevant here, only the request
+	// counter matters).
+	req1 := newUnifiedRequest(t, http.MethodPost, "/v1/chat/completions", "sk-alice", map[string]any{"model": "gpt-test", "messages": []any{}})
+	rec1 := httptest.NewRecorder()
+	h.ServeHTTP(rec1, req1)
+
+	// Second request: now over budget. Its body is wrapped in
+	// readTrackingBody — if runUnified reads it before checking the
+	// limit, called flips to true.
+	tracked := &readTrackingBody{r: strings.NewReader(`{"model":"gpt-test","messages":[]}`)}
+	req2 := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", tracked)
+	req2.Header.Set("Authorization", "Bearer sk-alice")
+	rec2 := httptest.NewRecorder()
+	h.ServeHTTP(rec2, req2)
+
+	if rec2.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want 429, body=%s", rec2.Code, rec2.Body.String())
+	}
+	if tracked.called {
+		t.Error("a 429'd request's body must never be read — admitRequest must run before io.ReadAll")
+	}
+}
+
+// TestHandleImagesGenerations_RequestLimitExceeded_BodyNeverRead mirrors
+// the unified-route test above for the media JSON routes, which share the
+// identical admission-before-decode ordering (finding 1a).
+func TestHandleImagesGenerations_RequestLimitExceeded_BodyNeverRead(t *testing.T) {
+	cfg := newMediaTestConfig("http://127.0.0.1:1", "img-test")
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{
+		{Name: "alice", Group: "default", APIKey: "sk-alice", Limits: &LimitsConfig{RequestsPerMinute: 1}},
+	}}
+	gw := newMediaTestGateway(t, cfg)
+
+	req1 := newUnifiedRequest(t, http.MethodPost, imagesGenerationsPath, "sk-alice", map[string]any{"model": "img-test", "prompt": "a cat"})
+	rec1 := httptest.NewRecorder()
+	gw.ServeHTTP(rec1, req1)
+
+	tracked := &readTrackingBody{r: strings.NewReader(`{"model":"img-test","prompt":"a cat"}`)}
+	req2 := httptest.NewRequest(http.MethodPost, imagesGenerationsPath, tracked)
+	req2.Header.Set("Authorization", "Bearer sk-alice")
+	rec2 := httptest.NewRecorder()
+	gw.ServeHTTP(rec2, req2)
+
+	if rec2.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want 429, body=%s", rec2.Code, rec2.Body.String())
+	}
+	if tracked.called {
+		t.Error("a 429'd media request's body must never be read — admitRequest must run before decode")
+	}
+}
+
+// TestAcquireBodyAdmission_ExhaustionReturns503WithRetryAfter is the
+// GATE's own explicit requirement: on semaphore exhaustion,
+// acquireBodyAdmission must refuse immediately with 503 and a
+// Retry-After header, never block. gw.bodyAdmission is filled directly
+// (same package — this test manipulates the exact channel newGateway
+// constructed) to make exhaustion deterministic without needing real
+// concurrent goroutines.
+func TestAcquireBodyAdmission_ExhaustionReturns503WithRetryAfter(t *testing.T) {
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{"openai": {Type: "openai", APIKey: "k", Models: []string{"gpt-test"}}}
+	cfg.Groups = map[string]*GroupConfig{"default": {}}
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{{Name: "alice", Group: "default", APIKey: "sk-alice"}}}
+	cfg.MaxInFlightBodyRequests = 1
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	gw, ok := h.(*Gateway)
+	if !ok {
+		t.Fatal("handler is not *Gateway")
+	}
+	if cap(gw.bodyAdmission) != 1 {
+		t.Fatalf("bodyAdmission cap = %d, want 1 (explicit override)", cap(gw.bodyAdmission))
+	}
+
+	// Occupy the only slot directly, simulating another in-flight request.
+	gw.bodyAdmission <- struct{}{}
+	defer func() { <-gw.bodyAdmission }()
+
+	req := newUnifiedRequest(t, http.MethodPost, "/v1/chat/completions", "sk-alice", map[string]any{"model": "gpt-test", "messages": []any{}})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503, body=%s", rec.Code, rec.Body.String())
+	}
+	if ra := rec.Header().Get("Retry-After"); ra == "" {
+		t.Error("want a Retry-After header on 503, got none")
+	}
+}
+
+// TestNewGateway_BodyAdmissionCap_SelfTunesFromGOMAXPROCS_ExplicitOverrideWins
+// pins both halves of the house rule (self-tuning over operator knobs,
+// but an explicit override always wins): a zero-config MaxInFlightBodyRequests
+// self-tunes to defaultBodyAdmissionCap(), and a positive value overrides
+// it exactly, regardless of what GOMAXPROCS would otherwise infer.
+func TestNewGateway_BodyAdmissionCap_SelfTunesFromGOMAXPROCS_ExplicitOverrideWins(t *testing.T) {
+	baseCfg := func() *Config {
+		cfg := CreateConfig()
+		cfg.Providers = map[string]*ProviderConfig{"openai": {Type: "openai", APIKey: "k"}}
+		cfg.Groups = map[string]*GroupConfig{"default": {}}
+		return cfg
+	}
+
+	t.Run("zero value self-tunes", func(t *testing.T) {
+		cfg := baseCfg()
+		h, err := New(context.Background(), http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), cfg, "llmgw")
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		gw := h.(*Gateway)
+		if got, want := cap(gw.bodyAdmission), defaultBodyAdmissionCap(); got != want {
+			t.Errorf("bodyAdmission cap = %d, want %d (defaultBodyAdmissionCap)", got, want)
+		}
+	})
+
+	t.Run("explicit override wins", func(t *testing.T) {
+		cfg := baseCfg()
+		cfg.MaxInFlightBodyRequests = 7
+		h, err := New(context.Background(), http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), cfg, "llmgw")
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		gw := h.(*Gateway)
+		if got := cap(gw.bodyAdmission); got != 7 {
+			t.Errorf("bodyAdmission cap = %d, want 7 (explicit override)", got)
+		}
+	})
+}
+
+// TestDefaultBodyAdmissionCap_ClampedToBounds pins defaultBodyAdmissionCap's
+// own contract directly: its result always lies within
+// [minBodyAdmissionCap, maxBodyAdmissionCap], regardless of the host's own
+// GOMAXPROCS.
+func TestDefaultBodyAdmissionCap_ClampedToBounds(t *testing.T) {
+	got := defaultBodyAdmissionCap()
+	if got < minBodyAdmissionCap || got > maxBodyAdmissionCap {
+		t.Errorf("defaultBodyAdmissionCap() = %d, want within [%d, %d]", got, minBodyAdmissionCap, maxBodyAdmissionCap)
+	}
+}
+
+// TestHandleChat_ZeroConfig_BodyAdmissionDoesNotThrottleOrdinaryTraffic is
+// the DEFAULT-PRESERVING gate's own explicit requirement: a config that
+// never sets MaxInFlightBodyRequests must behave exactly as before this
+// finding for ordinary, non-bursty traffic — a modest run of sequential
+// requests must never see a 503 from the new semaphore.
+func TestHandleChat_ZeroConfig_BodyAdmissionDoesNotThrottleOrdinaryTraffic(t *testing.T) {
+	const respBody = `{"id":"c1","choices":[{"message":{"role":"assistant","content":"hi"}}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(respBody))
+	}))
+	defer srv.Close()
+
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{
+		"openai": {Type: "openai", BaseURL: srv.URL, APIKey: "k", Models: []string{"gpt-test"}},
+	}
+	cfg.Groups = map[string]*GroupConfig{"default": {}}
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{{Name: "alice", Group: "default", APIKey: "sk-alice"}}}
+	// Deliberately no MaxInFlightBodyRequests set — every config that
+	// predates this finding.
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	for i := 0; i < 20; i++ {
+		body := map[string]any{"model": "gpt-test", "messages": []any{}}
+		req := newUnifiedRequest(t, http.MethodPost, "/v1/chat/completions", "sk-alice", body)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("request %d: status = %d, want 200, body=%s", i, rec.Code, rec.Body.String())
+		}
+	}
+}
+
+// TestHandleChat_OversizedBody_TruncatedByNarrowerUnifiedCap proves the
+// unified routes now enforce maxUnifiedRequestBytes (4MiB), narrower than
+// the general maxRequestBytes (10MiB) media/MCP-federation routes still
+// use (finding 1c): a body whose valid JSON only closes past 4MiB is
+// silently truncated by the LimitReader and fails to decode, exactly the
+// existing "invalid JSON body" contract an oversized body has always hit
+// — no new status code, just a lower threshold.
+func TestHandleChat_OversizedBody_TruncatedByNarrowerUnifiedCap(t *testing.T) {
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{"openai": {Type: "openai", APIKey: "k", Models: []string{"gpt-test"}}}
+	cfg.Groups = map[string]*GroupConfig{"default": {}}
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{{Name: "alice", Group: "default", APIKey: "sk-alice"}}}
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	// A padding field alone bigger than maxUnifiedRequestBytes, so the
+	// LimitReader cap lands before the object closes.
+	padding := strings.Repeat("A", maxUnifiedRequestBytes+1024)
+	body := `{"model":"gpt-test","padding":"` + padding + `","messages":[]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer sk-alice")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (body silently truncated, invalid JSON), body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestHandleChat_UnderNewUnifiedCap_InlineBase64Image_StillWorks proves
+// the chosen 4MiB unified cap (finding 1c) preserves the documented
+// single-inline-base64-image use case maxUnifiedRequestBytes' own doc
+// comment names: a chat request carrying a realistic ~1.5MiB base64
+// image_url content part, comfortably under 4MiB, must decode and reach
+// the adapter exactly as before this finding — proving 1MiB (the audit's
+// first suggestion, rejected in the doc comment) would have been too
+// tight for this real feature, while the chosen number is not.
+func TestHandleChat_UnderNewUnifiedCap_InlineBase64Image_StillWorks(t *testing.T) {
+	var gotBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"id":"c1","choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`))
+	}))
+	defer srv.Close()
+
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{
+		"openai": {Type: "openai", BaseURL: srv.URL, APIKey: "k", Models: []string{"gpt-test"}},
+	}
+	cfg.Groups = map[string]*GroupConfig{"default": {}}
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{{Name: "alice", Group: "default", APIKey: "sk-alice"}}}
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	// ~1.5MiB of base64 payload — a realistic single inline photo, well
+	// under maxUnifiedRequestBytes (4MiB) and well OVER the audit's
+	// rejected 1MiB suggestion, proving that number would have broken
+	// this exact case.
+	imageB64 := strings.Repeat("A", 1_500_000)
+	body := map[string]any{
+		"model": "gpt-test",
+		"messages": []any{
+			map[string]any{
+				"role": "user",
+				"content": []any{
+					map[string]any{"type": "text", "text": "what is this?"},
+					map[string]any{"type": "image_url", "image_url": map[string]any{"url": "data:image/jpeg;base64," + imageB64}},
+				},
+			},
+		},
+	}
+	req := newUnifiedRequest(t, http.MethodPost, "/v1/chat/completions", "sk-alice", body)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (a ~1.5MiB inline image must fit under the new 4MiB cap), body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(string(gotBody), imageB64) {
+		t.Error("upstream did not receive the full inline image payload — the cap silently truncated a request under its own limit")
+	}
+}

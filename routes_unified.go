@@ -11,11 +11,48 @@ import (
 	"strconv"
 )
 
-// maxRequestBytes caps a client request body the unified routes decode
-// into a map[string]any: 10MiB, generous for a chat or embeddings request
-// (including an inline base64 image) while bounding memory against an
-// oversized or malicious body.
+// maxRequestBytes caps a client request body decoded into a
+// map[string]any: 10MiB. As of the security review below, the unified
+// chat/embeddings routes (runUnified) no longer use this constant
+// directly — they use the narrower maxUnifiedRequestBytes instead. This
+// constant remains unchanged, at its original value, for every OTHER
+// caller that was never in this finding's scope: the media JSON routes'
+// own decode (decodeMediaJSONRequest, routes_media.go — shared by
+// images.generations and audio.speech), audio.transcriptions' multipart
+// cap (readCapped, routes_media.go), and the MCP federation JSON-RPC
+// routes (mcp_federation.go). Splitting the constant, rather than
+// lowering this shared one, keeps those callers' documented body-size
+// behavior (README's "Body limits" section) byte-for-byte unchanged.
 const maxRequestBytes = 10 << 20
+
+// maxUnifiedRequestBytes caps a client request body specifically for the
+// unified chat/embeddings routes' own decode into map[string]any
+// (security review finding 1c, 2026-08-22): 4MiB, down from the general
+// maxRequestBytes (10MiB) above. The measured amplification — an
+// encoding/json decode into map[string]any costs roughly 11x the wire
+// body's own bytes in live heap — meant the original 10MiB cap alone let
+// one request materialize ~110MiB just for this decode, before cacheKey's
+// re-marshal, forwardJSON's 32MiB response buffer, and the cache capture
+// writer are even counted (see acquireBodyAdmission's own doc comment,
+// below, for how the semaphore and this cap now work together).
+//
+// 1MiB — the audit's own first suggestion — was evaluated and rejected:
+// this constant's PRIOR doc comment (before this finding) said the
+// original 10MiB was "generous for a chat or embeddings request
+// (including an inline base64 image)", and that is a real, exercised
+// code path, not a hypothetical one — translate_anthropic.go's
+// imageContentPart and translate_gemini.go's own image handling both
+// accept a "data:<type>;base64,<data>" image_url content part inside a
+// chat message, and a single moderately-sized photo commonly exceeds
+// 1MiB once base64-encoded (roughly +33% over its raw bytes; a compressed
+// phone photo alone is often 1-3MB raw). Capping at 1MiB would silently
+// break that documented, tested capability for any real-world image.
+// 4MiB keeps headroom for the single-inline-image case the original
+// comment named, while still cutting the worst-case per-request decode
+// amplification from ~110MiB to ~44MiB — a defensible middle ground, not
+// the audit's suggested number, chosen because the smaller number would
+// have broken a real feature this package ships.
+const maxUnifiedRequestBytes = 4 << 20
 
 // gatewayAliasKey is the request map's internal-convention key carrying
 // the client-requested model id through to an adapter (ruling a, ALIAS
@@ -76,20 +113,46 @@ func (g *Gateway) handleEmbeddings(w http.ResponseWriter, r *http.Request, u *us
 	})
 }
 
-// runUnified is the shared chat/embeddings pipeline: decode the request,
-// resolve its model, enforce per-user and per-group limits, invoke the
-// adapter via call, then account the resulting usage — even when call
-// itself returned an error, so usage captured before a mid-stream failure
-// still gets billed — before translating that error into a response. w is
-// wrapped in its own statusTrackingWriter so a mid-stream adapter error
-// (headers already sent) can be told apart from one that failed before any
-// write. endpoint is cacheEndpointChat or cacheEndpointEmbeddings — one of
-// cacheKey's key-material components (cache.go), so the two routes never
-// collide into one cache entry.
+// runUnified is the shared chat/embeddings pipeline: claim a body-admission
+// slot, enforce per-user/per-group/total REQUEST-RATE limits, decode the
+// request, resolve its model, invoke the adapter via call, then account
+// the resulting usage — even when call itself returned an error, so usage
+// captured before a mid-stream failure still gets billed — before
+// translating that error into a response. w is wrapped in its own
+// statusTrackingWriter so a mid-stream adapter error (headers already
+// sent) can be told apart from one that failed before any write. endpoint
+// is cacheEndpointChat or cacheEndpointEmbeddings — one of cacheKey's
+// key-material components (cache.go), so the two routes never collide
+// into one cache entry.
+//
+// ORDERING (security review finding 1a, 2026-08-22): admission and the
+// rate-limit check both run BEFORE the body is ever read, not after —
+// the previous ordering (decode, resolve model, THEN checkAndCount) meant
+// a caller already over their requestsPerMinute paid the full cost of
+// reading and json-decoding a body that was always going to be discarded.
+// acquireBodyAdmission and admitRequest both need only u/grp, already
+// available as this function's own parameters, so neither has any reason
+// to wait for the body. Model resolution still runs AFTER decode — it
+// genuinely needs the client's requested model id, which only exists once
+// the body is parsed — so its own errors (unknown/denied model) are still
+// reported after a successful admission+rate-check, exactly as before
+// this fix; only the RATE-LIMIT check's position relative to the body
+// moved. writeLimitViolation's own response body/headers are unchanged.
 func (g *Gateway) runUnified(w http.ResponseWriter, r *http.Request, u *user, grp *group, endpoint string, call adapterCall) {
 	sw := &statusTrackingWriter{ResponseWriter: w}
 
-	body, err := io.ReadAll(io.LimitReader(r.Body, maxRequestBytes))
+	release, ok := g.acquireBodyAdmission(sw)
+	defer release()
+	if !ok {
+		return
+	}
+
+	scopes, ok := g.admitRequest(sw, u, grp)
+	if !ok {
+		return
+	}
+
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxUnifiedRequestBytes))
 	if err != nil {
 		writeOAIError(sw, http.StatusBadRequest, "invalid_request_error", "cannot read request body")
 		return
@@ -111,12 +174,6 @@ func (g *Gateway) runUnified(w http.ResponseWriter, r *http.Request, u *user, gr
 	adapter, upstreamModel, canonical, err := g.registry.resolve(requestedModel, grp)
 	if err != nil {
 		writeModelResolveError(sw, err)
-		return
-	}
-
-	scopes := withTotalScope(buildLimitScopes(u, grp))
-	if violation := g.limiter.checkAndCount(scopes); violation != nil {
-		writeLimitViolation(sw, violation)
 		return
 	}
 
@@ -270,20 +327,82 @@ func buildLimitScopes(u *user, grp *group) []limitScope {
 
 // withTotalScope returns scopes with the synthetic total scope
 // (totalScopeKind/totalScopeID, limits.go) appended — the single helper
-// every metered route (runUnified above; resolveMediaRequest,
-// routes_media.go; handlePassthrough, routes_passthrough.go;
-// handleTargetProxy, mcp_a2a.go; handleMCPFederated, mcp_federation.go)
-// calls around its own buildLimitScopes result, so none of them can forget
-// it and none of them duplicate the scope literal. Deliberately not folded
-// into buildLimitScopes itself: buildLimitScopes' own doc comment now
-// explains why admin traffic needs no special-casing here at all —
-// handleAdminAPI never calls either function, so there was never a real
-// "admin traffic must not contribute to total" case for this split to
-// guard against; the split is kept anyway because buildLimitScopes'
-// {user, group} pair and the synthetic total scope are conceptually
-// different additions, worth two names.
+// every metered route (runUnified above, via admitRequest below;
+// handleImagesGenerations/handleAudioSpeech/handleAudioTranscriptions,
+// routes_media.go, via the same admitRequest; handlePassthrough,
+// routes_passthrough.go; handleTargetProxy, mcp_a2a.go; handleMCPFederated,
+// mcp_federation.go) calls around its own buildLimitScopes result, so none
+// of them can forget it and none of them duplicate the scope literal.
+// Deliberately not folded into buildLimitScopes itself: buildLimitScopes'
+// own doc comment now explains why admin traffic needs no special-casing
+// here at all — handleAdminAPI never calls either function, so there was
+// never a real "admin traffic must not contribute to total" case for this
+// split to guard against; the split is kept anyway because
+// buildLimitScopes' {user, group} pair and the synthetic total scope are
+// conceptually different additions, worth two names.
 func withTotalScope(scopes []limitScope) []limitScope {
 	return append(scopes, limitScope{kind: totalScopeKind, id: totalScopeID, limits: nil})
+}
+
+// admitRequest enforces per-user/per-group/total REQUEST-RATE limits
+// (checkAndCount) using only u and grp — never a request body — so every
+// caller can, and now does, call this before reading or decoding
+// anything (security review finding 1a, 2026-08-22): a caller already
+// over budget is refused on the strength of who they are alone, never
+// after paying the cost of reading and json-decoding a body that turns
+// out to be discarded anyway. scopes is returned alongside ok so the
+// caller can reuse the identical scope slice for its own later account
+// call, rather than rebuilding (and risking scope-list drift from) a
+// second buildLimitScopes/withTotalScope pair. A violation writes its
+// response to sw itself (writeLimitViolation, unchanged body/headers from
+// before this fix) and returns ok=false.
+func (g *Gateway) admitRequest(sw *statusTrackingWriter, u *user, grp *group) (scopes []limitScope, ok bool) {
+	scopes = withTotalScope(buildLimitScopes(u, grp))
+	if violation := g.limiter.checkAndCount(scopes); violation != nil {
+		writeLimitViolation(sw, violation)
+		return scopes, false
+	}
+	return scopes, true
+}
+
+// bodyAdmissionRetryAfterSeconds is the Retry-After value
+// acquireBodyAdmission writes on a 503: a short, fixed window rather than
+// a computed one — the semaphore's own occupancy has no natural "when
+// will a slot free" answer the way a rate-limit window does (unlike
+// writeLimitViolation's retryAfter, which names a real window boundary),
+// and the in-flight cap is expected to drain within single-digit seconds
+// under normal request latency.
+const bodyAdmissionRetryAfterSeconds = 2
+
+// acquireBodyAdmission non-blockingly claims one of g.bodyAdmission's
+// slots (security review finding 1b, 2026-08-22) — bounding how many
+// unified/media requests may concurrently hold a decoded request body (and
+// every downstream buffer it feeds: cacheKey's re-marshal, forwardJSON's
+// response buffer, the cache capture writer) in memory at once, so an
+// unbounded burst of concurrent requests cannot OOM the whole shared
+// Traefik ingress process this plugin runs inside (package doc,
+// llmgateway.go) merely by arriving faster than any one of them can be
+// rejected. Mirrors limiter.spawnTokens' own non-blocking acquire shape
+// (limits.go) exactly: on exhaustion this NEVER queues or blocks waiting
+// for a slot — a blocking acquire would just replace one unbounded-growth
+// vector (unbounded concurrent decodes) with another (an unbounded pile of
+// goroutines blocked on a channel receive) — it fails immediately instead,
+// writing a 503 with a Retry-After header to sw and returning a no-op
+// release so the caller's own `defer release()` stays valid either way.
+//
+// release must be deferred by the caller immediately after this returns,
+// BEFORE checking ok — every code path through the caller, including this
+// function's own 503 branch, must release exactly the number of slots it
+// acquired (zero, on the 503 path, via the no-op release).
+func (g *Gateway) acquireBodyAdmission(sw *statusTrackingWriter) (release func(), ok bool) {
+	select {
+	case g.bodyAdmission <- struct{}{}:
+		return func() { <-g.bodyAdmission }, true
+	default:
+		sw.Header().Set("Retry-After", strconv.Itoa(bodyAdmissionRetryAfterSeconds))
+		writeOAIError(sw, http.StatusServiceUnavailable, "server_error", "server is at capacity; try again shortly")
+		return func() {}, false
+	}
 }
 
 // unifiedCostMicros resolves the price to charge one request's usage
