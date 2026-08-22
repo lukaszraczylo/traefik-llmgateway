@@ -70,7 +70,13 @@ type Config struct {
 	// at all) resolves to every documented default and behaves exactly
 	// like a deployment with no circuit breaker at all for a provider
 	// that never fails — see validateBreakerConfig's own doc comment.
-	Breaker BreakerConfig `json:"breaker"`
+	// Failover configures feat/failover — cross-provider failover for a
+	// bare model id more than one configured provider serves. See
+	// FailoverConfig's own doc comment (failover.go) for the full
+	// contract; a struct value, not a pointer, for the same
+	// zero-means-default reason as Breaker/Retry/Cache below.
+	Failover FailoverConfig `json:"failover"`
+	Breaker  BreakerConfig  `json:"breaker"`
 	// Retry is a struct value, not a pointer, because its own Enabled
 	// field is the on/off signal (unlike Redis/Users, where the block's
 	// mere presence is the signal) — so its tag omits "omitempty":
@@ -493,18 +499,24 @@ func defaultBodyAdmissionCap() int {
 const maxExplicitBodyAdmissionCap = 10_000
 
 // Gateway is the Traefik middleware handler.
+//
+// Field order below is fieldalignment-verified (golangci-lint's govet
+// enable-all, run with -fix against a scratch copy to derive the exact
+// zero-waste sequence, then hand-applied here so every field keeps its
+// original doc comment) — see providerState's own doc comment
+// (registry.go) for the general convention.
 type Gateway struct {
-	next     http.Handler
-	cfg      *Config
-	auth     *authStore
-	limiter  *limiter
-	registry *modelRegistry
-	adapters map[string]providerAdapter
+	next http.Handler
 	// targetClient is the shared, connection-pooled *http.Client the
 	// MCP/A2A target proxy (mcp_a2a.go) issues every upstream request
 	// through — built once via newAdapterHTTPClient, the same constructor
 	// each provider adapter uses for its own client.
 	targetClient *http.Client
+	auth         *authStore
+	limiter      *limiter
+	registry     *modelRegistry
+	adapters     map[string]providerAdapter
+	cfg          *Config
 	// cache is nil whenever response caching is not configured or not
 	// usable (cfg.Cache.Enabled is false, or true with no config.Redis —
 	// see buildResponseCache, cache.go). Every call site checks for nil
@@ -525,7 +537,17 @@ type Gateway struct {
 	// resized afterward, matching a Go channel's own fixed-capacity
 	// contract.
 	bodyAdmission chan struct{}
-	name          string
+	// failoverHealth is feat/failover's own per-pod, in-memory
+	// request-path health signal (failover.go), built once, here, by
+	// newGateway. Every method on it is nil-receiver-safe, so a Gateway
+	// assembled directly (bypassing newGateway, as a few older tests do)
+	// degrades to "failover never skips a candidate for request health"
+	// rather than a nil-pointer panic.
+	failoverHealth *requestHealthTracker
+	name           string
+	// failover is Config.Failover, validated and resolved once by
+	// newGateway (validateFailoverConfig, failover.go).
+	failover failoverConfig
 }
 
 // telemetryStartupOnce keeps the anonymous "plugin loaded" ping to one per
@@ -633,6 +655,16 @@ func newGateway(ctx context.Context, next http.Handler, config *Config, name str
 		return nil, err
 	}
 	g := &Gateway{next: next, name: name, cfg: config, auth: auth}
+
+	// feat/failover: validated once, here — see FailoverConfig's own doc
+	// comment (failover.go) for the default (enabled) and what "single-
+	// provider deployment behaves exactly as before" means in practice.
+	failoverCfg, err := validateFailoverConfig(config.Failover)
+	if err != nil {
+		return nil, err
+	}
+	g.failover = failoverCfg
+	g.failoverHealth = newRequestHealthTracker()
 
 	// bodyAdmissionCap: an explicit MaxInFlightBodyRequests always wins
 	// over the self-tuned default (house rule: explicit override always

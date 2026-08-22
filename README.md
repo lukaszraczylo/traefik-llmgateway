@@ -193,6 +193,7 @@ config accepts them as YAML, which decodes to the same JSON shape.
 | `users` | `UsersConfig` | — | Inline and/or file-backed API-key holders. With none configured, every request is unauthenticated and gets 401. |
 | `redis` | `RedisConfig` | — | Distributed limit-counter backend. Omitted means in-process counters only (per-replica, approximate across multiple Traefik instances). |
 | `retry` | `RetryConfig` | `{}` (disabled) | Same-provider retry for transient upstream failures — see [Retry](#retry). Omitted or `enabled: false` means no retry: every request makes exactly one upstream attempt, byte-identical to a gateway built before this field existed. |
+| `failover` | `FailoverConfig` | `{}` (enabled) | Cross-provider failover for a bare model id more than one configured provider serves — see [Failover](#failover). `enabled: false` turns it off; a deployment with no overlapping providers behaves exactly as before regardless of this setting. |
 | `cache` | `CacheConfig` | `{}` (disabled) | Opt-in Redis-backed response cache for unified non-streaming chat/embeddings — see [Caching](#caching). Omitted or `enabled: false` means no caching, byte-identical to a gateway built before this field existed. |
 | `breaker` | `BreakerConfig` | `{}` (every default) | Per-provider discovery circuit breaker — see [Provider health (discovery circuit breaker)](#provider-health-discovery-circuit-breaker). Every field is individually zero-means-default; a provider whose discovery never fails is unaffected regardless of what this block contains. |
 | `admin` | `*AdminConfig` | `nil` (disabled) | Read-only admin dashboard — see [Admin](#admin). `nil` or `enabled: false` means the `/admin*` routes are not registered at all. |
@@ -807,10 +808,10 @@ released, so this never becomes a ceiling on total concurrent requests.
 
 ## Retry
 
-Same-provider retry for a transient upstream failure — no cross-provider
-failover. Off by default (`retry.enabled: false`); every config that
-predates this field keeps making exactly one upstream attempt per
-request.
+Same-provider retry for a transient upstream failure. Off by default
+(`retry.enabled: false`); every config that predates this field keeps
+making exactly one upstream attempt per request. See [Failover](#failover)
+below for the separate, cross-provider mechanism.
 
 - **Scope**: every adapter upstream call — chat, embeddings, model
   listing, and the three media endpoints (`images/generations`,
@@ -845,6 +846,56 @@ request.
   attempt's body is drained and discarded, never parsed for usage, so it
   is never double-counted. Request counters still increment once per
   client request, unchanged.
+
+## Failover
+
+Cross-provider failover for a bare model id more than one configured
+provider serves — for example `whisper-1` configured on both `openai` and
+`openai-audio`. On by default (`failover.enabled: true` unless set
+otherwise); a deployment with no overlapping providers, or with a single
+provider, behaves exactly as before regardless of this setting, since
+there is never a second candidate to try.
+
+- **Scope**: `POST /v1/chat/completions`, `POST /v1/embeddings`, and
+  `POST /v1/messages` only. The image/audio endpoints
+  (`images/generations`, `audio/speech`, `audio/transcriptions`) are not
+  wired into failover yet — each has its own request-shape handling
+  (multipart rebuild, binary/streaming responses) that needs its own
+  scoped follow-up.
+- **Eligible candidates**: a bare model id resolved via the collision
+  winner (the same mechanism `GET /v1/models` documents for overlapping
+  catalogs) offers every OTHER configured provider that also serves that
+  id and that the caller's group is authorized to use. A `provider/model`
+  request, or an alias whose target is `provider/model`, is an explicit,
+  exact choice and is never eligible for substitution.
+- **What falls through**: everything except HTTP 400 — connection
+  failures, timeouts, HTTP 429/401/403/404, and any 5xx. A 400 never
+  falls through: the request is malformed and every provider would reject
+  it identically. A failover past a 404 is logged loudly, naming both
+  providers and the model — a 404 usually means a real configuration
+  mistake, not a transient outage.
+- **Never mid-stream**: failover only happens while nothing has reached
+  the client yet. Once the first byte of a response is written, status
+  and body are committed and the request is never retried elsewhere.
+- **Health signals, kept separate**: the discovery-endpoint health
+  surfaced on the admin dashboard is an ordering hint only — a provider
+  whose `/v1/models` is unhealthy is tried later, never skipped outright,
+  since plenty of providers serve chat completions fine while their model
+  listing is broken. A separate, in-memory, per-pod request-path health
+  signal (not exposed to config) is the actual routing gate: a provider
+  that has failed several consecutive live requests is skipped without
+  being called until it recovers.
+- **Accounting**: a failover chain still counts as exactly one client
+  request against `requestsPerMinute`/`requestsPerDay` — never once per
+  attempt. Per-provider attempt/failure counters (the admin dashboard's
+  success-rate badge) attribute every attempt to the provider that
+  actually made it.
+- **Caching**: a cacheable response produced by a failover provider is
+  stored under that provider's own cache key, never the first candidate's.
+- **Configurable**: `failover.maxAttempts` caps how many different
+  providers one request will try in total, primary included (default 3,
+  maximum 10) — distinct from `retry.attempts`, which retries the SAME
+  provider. `failover.enabled: false` turns the whole mechanism off.
 
 ## Caching
 

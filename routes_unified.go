@@ -256,123 +256,223 @@ func (g *Gateway) runUnified(w http.ResponseWriter, r *http.Request, u *user, gr
 // envelope shape they answer in. logPrefix names the route in every log
 // line this function writes, so a log reader can always tell which route
 // produced a given line without the classification logic existing twice.
+//
+// feat/failover: this function now tries a LIST of candidate providers
+// (g.registry.resolveWithCandidates/g.orderedFailoverCandidates,
+// failover.go), not just the one resolve alone would pick, and is the
+// ONE hook point both /v1/chat/completions (runUnified, above) and
+// /v1/messages (handleMessages, routes_messages.go) share — per the
+// brief's own instruction, failover is wired here once rather than
+// forked into a second implementation. THE HARD CONSTRAINT this loop is
+// built around: call(...) writes directly to respWriter, which tees
+// straight through to sw; the very first byte written commits the
+// response, so a candidate is only ever retried while sw.wroteHeader is
+// still false. Every step that was a one-shot computation before this
+// feature (the cache key, the attempt recorder's bound provider name,
+// the usage/canonical id billed) now happens fresh INSIDE the loop, once
+// per candidate — this is what "rebind the attempt recorder per
+// attempt" and "cache under the winning provider's key" actually mean
+// in code, not just in the brief's prose.
 func (g *Gateway) runMeteredCall(sw *statusTrackingWriter, r *http.Request, scopes []limitScope, body []byte, req map[string]any, requestedModel string, grp *group, endpoint, logPrefix string, envelope envelopeWriter, writeUpstream providerUpstreamErrorWriter, call adapterCall) {
-	adapter, upstreamModel, canonical, err := g.registry.resolve(requestedModel, grp)
+	primary, extra, err := g.registry.resolveWithCandidates(requestedModel, grp)
 	if err != nil {
 		writeModelResolveErrorEnvelope(sw, err, envelope)
 		return
 	}
+	candidates := g.orderedFailoverCandidates(primary, extra)
 
-	req["model"] = upstreamModel
-
-	// cacheable gates every cache step below on spec §2's scope: a
-	// non-streaming request, with a working cache (g.cache is nil
-	// whenever caching is off or Redis was absent — buildResponseCache,
-	// cache.go), for a group that has not opted out (groupCacheEnabled).
-	// cacheKey is computed here — after "model" is rewritten to
-	// upstreamModel but deliberately BEFORE gatewayAliasKey is injected
-	// below — so the hashed request body reflects exactly what goes
-	// upstream. requestedModel (the client's own, un-rewritten alias
-	// string) and endpoint are passed as separate cacheKey arguments,
-	// not left in req: a translating adapter bakes the echoed alias
-	// straight into the cached response body's own "model" field, so two
-	// clients requesting the same upstream model under different alias
-	// forms (e.g. "claude-x" vs "anthropic/claude-x") must never collide
-	// into one cache entry (cacheKey's own doc comment, cache.go).
+	// cacheable/streaming gate every cache step below on spec §2's scope,
+	// exactly as before this feature: a non-streaming request, with a
+	// working cache (g.cache is nil whenever caching is off or Redis was
+	// absent — buildResponseCache, cache.go), for a group that has not
+	// opted out (groupCacheEnabled). Computed once, outside the loop: it
+	// depends only on req["stream"]/grp, neither of which a failover
+	// attempt changes.
 	streaming, _ := req["stream"].(bool)
 	cacheable := !streaming && g.cache != nil && groupCacheEnabled(grp)
-	var cacheKeyStr string
-	if cacheable {
-		cacheKeyStr = cacheKey(adapter.name(), upstreamModel, requestedModel, endpoint, req)
-		if cached, hit := g.cache.lookup(cacheKeyStr); hit {
-			// A cache hit accounts the request only — checkAndCount
-			// above already counted it — never token/cost, and never
-			// runs the zero-usage estimate branch below: the client
-			// never reached the upstream provider its body size would
-			// be estimating against.
-			sw.Header().Set("X-Llmgw-Cache", "hit")
-			if cached.ContentType != "" {
-				sw.Header().Set("Content-Type", cached.ContentType)
+
+	for i, cand := range candidates {
+		if i > 0 {
+			// checkAndCount above (admitRequest, this file) already
+			// counted this request exactly once — never double-count: a
+			// failover attempt is a NEW upstream attempt, not a new
+			// logical request, so nothing here calls checkAndCount
+			// again. Per-provider ATTEMPT counters, below, still record
+			// every attempt independently via the freshly-bound
+			// recorder.
+			g.warnf("%s: failing over from provider %q to %q for model %q", logPrefix, candidates[i-1].providerName, cand.providerName, requestedModel)
+		}
+
+		// req["model"] is reset on EVERY iteration: cand.upstreamModel is
+		// the identical string across every candidate in a failover chain
+		// by construction (failoverCandidates, failover.go, only ever
+		// adds providers sharing the SAME bare id resolve's primary
+		// already resolved to), so this is a no-op rewrite on the common
+		// single-candidate path, not new cost.
+		req["model"] = cand.upstreamModel
+
+		// cacheKey is computed fresh per candidate — cache correctness
+		// (brief): a response produced by a failover provider must be
+		// stored under THAT provider's own key, never the first
+		// candidate's. Called here, BEFORE gatewayAliasKey is injected
+		// below, preserving the ordering cacheKey's own doc comment
+		// (cache.go) requires of every caller: gatewayAliasKey is a
+		// purely internal echo-back mechanism cacheKey does not itself
+		// strip, so computing the key after injecting it would hash an
+		// extra, noisy field.
+		var cacheKeyStr string
+		if cacheable {
+			cacheKeyStr = cacheKey(cand.providerName, cand.upstreamModel, requestedModel, endpoint, req)
+			if cached, hit := g.cache.lookup(cacheKeyStr); hit {
+				// A cache hit accounts the request only — checkAndCount
+				// above already counted it — never token/cost, and never
+				// runs the zero-usage estimate branch below: the client
+				// never reached the upstream provider its body size would
+				// be estimating against.
+				sw.Header().Set("X-Llmgw-Cache", "hit")
+				if cached.ContentType != "" {
+					sw.Header().Set("Content-Type", cached.ContentType)
+				}
+				sw.WriteHeader(cached.Status)
+				_, _ = sw.Write(cached.Body)
+				return
 			}
-			sw.WriteHeader(cached.Status)
-			_, _ = sw.Write(cached.Body)
+			// Set before call() below writes anything — headers must
+			// precede the body a miss is about to produce (spec §2). A
+			// later iteration's own miss overwrites this harmlessly: it
+			// is never observable until SOME candidate actually writes,
+			// by which point the loop has already committed to that
+			// candidate's outcome (THE HARD CONSTRAINT, this function's
+			// own doc comment).
+			sw.Header().Set("X-Llmgw-Cache", "miss")
+		}
+
+		// gatewayAliasKey is (re-)injected on every iteration, AFTER the
+		// cacheKey computation above: every providerAdapter implementation
+		// unconditionally deletes it before it ever touches the network
+		// (its own doc comment, providers.go) — a failed first attempt
+		// leaves req without it, and the next candidate needs it set
+		// again to echo the client's own requested alias correctly
+		// (anthropic/gemini-type adapters read it to build their own
+		// response envelope).
+		req[gatewayAliasKey] = requestedModel
+
+		// respWriter is sw, wrapped in a capture tee only when this
+		// request is cacheable — cacheCaptureWriter buffers everything
+		// written so a 200 non-stream response can be stored after
+		// call() returns, without any adapter knowing caching exists
+		// (adapterCall's contract is unchanged either way). A fresh
+		// capture per candidate: reusing one across attempts would let a
+		// candidate that never wrote anything (the common failover case)
+		// leave a stale buffer behind — capture.status stays 0 either
+		// way, so this is defensive clarity, not a proven bug fix.
+		var respWriter http.ResponseWriter = sw
+		var capture *cacheCaptureWriter
+		if cacheable {
+			capture = newCacheCaptureWriter(sw, g.cache.maxBodyBytes)
+			respWriter = capture
+		}
+
+		// Feature A (v0.22) attempt recorder, REBOUND every iteration to
+		// THIS candidate's own provider name (feat/failover's own "never
+		// misattribute a retried attempt to the first provider"
+		// requirement) — every upstream attempt call() makes, via
+		// upstreamJSON's retryPolicy.do (providers.go), reports through
+		// here. The same closure also feeds g.failoverHealth (failover.go),
+		// feat/failover's own request-path health signal, with the
+		// IDENTICAL isTransient||isDeadlineExceeded classification
+		// limiter.recordProviderAttempt already applies — see
+		// requestHealthTracker.record's own doc comment for why this must
+		// stay the same classification, not a wider one.
+		providerName := cand.providerName
+		upstreamModel := cand.upstreamModel
+		ctx := withAttemptRecorder(r.Context(), func(resp *http.Response, attemptErr error) {
+			g.limiter.recordProviderAttempt(providerName, upstreamModel, resp, attemptErr)
+			g.failoverHealth.record(providerName, !isTransient(resp, attemptErr) && !isDeadlineExceeded(attemptErr))
+		})
+		result, callErr := call(cand.adapter, ctx, respWriter, req)
+
+		// Usage is accounted before the error branch below runs, not
+		// after: every adapter that can fail mid-stream (forwardStream
+		// in each of the three provider files) still returns whatever
+		// usage it had already captured alongside the error — a usage
+		// chunk that arrived just before a dropped connection must
+		// still be billed, or a client that aborts right after that
+		// frame arrives could repeat the trick to dodge every
+		// token/cost budget. A non-streaming failure (providerHTTPError,
+		// translateError, or a connection failure before any write)
+		// always carries zero usage by contract, so accounting it here
+		// is a no-op — account skips every write once both total tokens
+		// and cost are zero. routes_messages.go's
+		// callTranslatedMessages/callAnthropicMessagesPassthrough follow
+		// the identical contract for their own error paths (item 1 fix,
+		// 2026-08-22 review). This still runs exactly once per
+		// CANDIDATE, including a candidate that goes on to fail over —
+		// its own (zero, by contract) usage is billed as a no-op, never
+		// skipped, so a later successful candidate's real usage is never
+		// silently doubled with a phantom first entry either.
+		if callErr == nil && result.total() == 0 {
+			if streaming {
+				g.logf("%s: zero usage reported for a streaming response from model %q; accounting the request only", logPrefix, cand.canonical)
+			} else {
+				result.prompt = int64(math.Ceil(float64(len(body)) / 4))
+				result.estimated = true
+			}
+		}
+		g.limiter.account(scopes, result, unifiedCostMicros(cand.canonical, cand.upstreamModel, result, g.cfg.Pricing))
+		if result.estimated {
+			g.logf("%s: usage for model %q logged as estimated (%d prompt tokens derived from request body size, not the provider's reported usage)", logPrefix, cand.canonical, result.prompt)
+		}
+
+		// A miss stores the response after everything above has already
+		// run — accounting must never be skipped or delayed waiting on a
+		// cache write. Only a genuine upstream 200 is stored (spec §2's
+		// "on 200 non-stream, tee and SET"): a non-2xx status never
+		// reaches here as capture.status (forwardJSON/translate error
+		// paths return *providerHTTPError/*translateError instead of
+		// writing through respWriter, so callErr is non-nil and
+		// capture.status stays 0), and callErr == nil is checked
+		// directly regardless. capture.oversize excludes a response
+		// cacheCaptureWriter stopped buffering past maxBodyBytes:
+		// store's own maxBodyBytes check would reject it too, but only
+		// after being handed a silently truncated body — skip the call
+		// outright instead of ever constructing a corrupt cache entry.
+		if cacheable && callErr == nil && capture.status == http.StatusOK && !capture.oversize {
+			g.cache.store(cacheKeyStr, capture.status, capture.contentType, capture.buf.Bytes(), effectiveTTL(g.cache, grp))
+		}
+
+		if callErr == nil {
 			return
 		}
-		// Set before call() below writes anything — headers must precede
-		// the body a miss is about to produce (spec §2).
-		sw.Header().Set("X-Llmgw-Cache", "miss")
-	}
 
-	req[gatewayAliasKey] = requestedModel
-
-	// respWriter is sw, wrapped in a capture tee only when this request
-	// is cacheable — cacheCaptureWriter buffers everything written so a
-	// 200 non-stream response can be stored after call() returns, without
-	// any adapter knowing caching exists (adapterCall's contract is
-	// unchanged either way).
-	var respWriter http.ResponseWriter = sw
-	var capture *cacheCaptureWriter
-	if cacheable {
-		capture = newCacheCaptureWriter(sw, g.cache.maxBodyBytes)
-		respWriter = capture
-	}
-
-	// Feature A (v0.22): every upstream attempt call() makes — via
-	// upstreamJSON's retryPolicy.do, providers.go — reports through to
-	// this recorder, closing over the adapter/model this request already
-	// resolved to. See attemptRecorder's own doc comment (providers.go).
-	ctx := withAttemptRecorder(r.Context(), func(resp *http.Response, attemptErr error) {
-		g.limiter.recordProviderAttempt(adapter.name(), upstreamModel, resp, attemptErr)
-	})
-	result, callErr := call(adapter, ctx, respWriter, req)
-
-	// Usage is accounted before the error branch below runs, not after:
-	// every adapter that can fail mid-stream (forwardStream in each of the
-	// three provider files) still returns whatever usage it had already
-	// captured alongside the error — a usage chunk that arrived just before
-	// a dropped connection must still be billed, or a client that aborts
-	// right after that frame arrives could repeat the trick to dodge every
-	// token/cost budget. A non-streaming failure (providerHTTPError,
-	// translateError, or a connection failure before any write) always
-	// carries zero usage by contract, so accounting it here is a no-op —
-	// account skips every write once both total tokens and cost are zero.
-	// routes_messages.go's callTranslatedMessages/
-	// callAnthropicMessagesPassthrough follow the identical contract for
-	// their own error paths (item 1 fix, 2026-08-22 review: a translation
-	// failure AFTER a successful, billed upstream call must still return
-	// that call's real usage, not usage{}).
-	if callErr == nil && result.total() == 0 {
-		if streaming {
-			g.logf("%s: zero usage reported for a streaming response from model %q; accounting the request only", logPrefix, canonical)
-		} else {
-			result.prompt = int64(math.Ceil(float64(len(body)) / 4))
-			result.estimated = true
+		// THE HARD CONSTRAINT: once sw has written anything, status and
+		// body are committed and can never be retried elsewhere — a
+		// mid-stream failure (headers, or a partial SSE body, already
+		// reached the client) always falls straight through to the
+		// existing, unchanged error classification, exactly as it did
+		// before this feature existed, regardless of how many candidates
+		// remain.
+		if sw.wroteHeader {
+			g.handleAdapterErrorEnvelope(sw, callErr, providerName, logPrefix, envelope, writeUpstream)
+			return
 		}
-	}
-	g.limiter.account(scopes, result, unifiedCostMicros(canonical, upstreamModel, result, g.cfg.Pricing))
-	if result.estimated {
-		g.logf("%s: usage for model %q logged as estimated (%d prompt tokens derived from request body size, not the provider's reported usage)", logPrefix, canonical, result.prompt)
-	}
 
-	// A miss stores the response after everything above has already run —
-	// accounting must never be skipped or delayed waiting on a cache
-	// write. Only a genuine upstream 200 is stored (spec §2's "on 200
-	// non-stream, tee and SET"): a non-2xx status never reaches here as
-	// capture.status (forwardJSON/translate error paths return
-	// *providerHTTPError/*translateError instead of writing through
-	// respWriter, so callErr is non-nil and capture.status stays 0), and
-	// callErr == nil is checked directly regardless. capture.oversize
-	// excludes a response cacheCaptureWriter stopped buffering past
-	// maxBodyBytes: store's own maxBodyBytes check would reject it too,
-	// but only after being handed a silently truncated body — skip the
-	// call outright instead of ever constructing a corrupt cache entry.
-	if cacheable && callErr == nil && capture.status == http.StatusOK && !capture.oversize {
-		g.cache.store(cacheKeyStr, capture.status, capture.contentType, capture.buf.Bytes(), effectiveTTL(g.cache, grp))
-	}
-
-	if callErr != nil {
-		g.handleAdapterErrorEnvelope(sw, callErr, adapter.name(), logPrefix, envelope, writeUpstream)
-		return
+		hasNext := i < len(candidates)-1 && failoverEligible(callErr)
+		if hasNext && isProviderNotFoundError(callErr) {
+			// Loud, non-suppressed log line (brief: "Failover after a 404
+			// must log loudly ... a 404 usually means a real
+			// configuration mistake, and silently succeeding elsewhere
+			// would hide it") — deliberately g.errorf, not g.logf, and
+			// deliberately its own line rather than folded into the
+			// generic "failing over" line above the next iteration
+			// already prints.
+			g.errorf("%s: provider %q returned 404 for model %q; failing over to %q — this usually means a real provider/model configuration mistake, not a transient outage", logPrefix, providerName, requestedModel, candidates[i+1].providerName)
+		}
+		if !hasNext {
+			g.handleAdapterErrorEnvelope(sw, callErr, providerName, logPrefix, envelope, writeUpstream)
+			return
+		}
+		// Falls through to the next candidate.
 	}
 }
 
