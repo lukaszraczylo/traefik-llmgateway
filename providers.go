@@ -417,6 +417,7 @@ func buildAdapters(cfg *Config) (map[string]providerAdapter, error) {
 		case providerTypeOpenAI:
 			a := newOpenAIAdapter(name, base, apiKey)
 			a.retry = policy
+			a.metadataPath = pc.MetadataPath
 			adapters[name] = a
 		case providerTypeAnthropic:
 			a, err := newAnthropicAdapter(name, base, apiKey)

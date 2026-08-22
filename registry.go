@@ -46,6 +46,17 @@ type providerState struct {
 	lastRefresh time.Time
 	explicit    map[string]bool
 	discovered  map[string]bool
+	// discoveredContext holds discovery-captured per-model context
+	// lengths (feature v0.23, ProviderConfig.MetadataPath — currently
+	// only openai-type adapters ever populate this, via
+	// modelMetadataFetcher), keyed by upstream model id. nil for a
+	// provider with no metadataPath configured, or whose adapter does
+	// not implement modelMetadataFetcher at all — contextFor treats a
+	// nil map the same as an absent entry: (0, false). Stale-while-
+	// error, the same convention discovered itself already uses: a
+	// failed capture leaves the previous map in place rather than
+	// clearing it (captureModelMetadata, below).
+	discoveredContext map[string]int
 	// lastErr is the most recent finishRefresh call's error message, or
 	// "" when that call succeeded (or discovery is disabled and
 	// finishRefresh was never called at all). Read by snapshot for the
@@ -97,6 +108,26 @@ func (st *providerState) knownIDs() []string {
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	return st.knownIDsLocked()
+}
+
+// contextFor returns id's discovery-captured context length and whether
+// one is known (feature v0.23) — mirroring hasModel's own locked-read
+// shape.
+func (st *providerState) contextFor(id string) (int, bool) {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	n, ok := st.discoveredContext[id]
+	return n, ok
+}
+
+// setDiscoveredContext replaces st's discoveredContext wholesale on a
+// successful metadata capture (feature v0.23, captureModelMetadata below)
+// — the same replace-on-success, stale-while-error shape finishRefresh
+// already applies to discovered.
+func (st *providerState) setDiscoveredContext(m map[string]int) {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	st.discoveredContext = m
 }
 
 // tryBeginRefresh reports whether now is far enough past lastRefresh (or
@@ -192,7 +223,16 @@ type modelRegistry struct {
 	// configured no aliases at all, so every alias-aware code path is a
 	// cheap nil-map lookup (always false/zero) that adds no branching
 	// cost to the v0.1 no-aliases case.
-	aliases       map[string]string
+	aliases map[string]string
+	// modelMeta is the validated Config.ModelMeta config-override map
+	// (feature v0.23), built once by newModelRegistry via
+	// validateModelMeta and never mutated afterward. nil (not merely
+	// empty) when the operator configured no metadata overrides at all,
+	// so resolveModelMeta's config-override layer is a cheap nil-map
+	// lookup (always a miss) that adds no branching cost to the
+	// no-overrides case — the same nil-vs-empty convention aliases above
+	// already establishes.
+	modelMeta     map[string]*ModelMetaConfig
 	nowFn         func() time.Time
 	warned        map[string]bool
 	providerNames []string
@@ -259,6 +299,12 @@ func newModelRegistry(adapters map[string]providerAdapter, cfg *Config, log func
 		return nil, err
 	}
 	m.aliases = aliases
+
+	modelMeta, err := validateModelMeta(cfg.ModelMeta)
+	if err != nil {
+		return nil, err
+	}
+	m.modelMeta = modelMeta
 
 	return m, nil
 }
@@ -355,12 +401,67 @@ func (m *modelRegistry) warmFill(ctx context.Context) {
 		}
 		fctx, cancel := context.WithTimeout(ctx, warmFillTimeout)
 		ids, err := m.adapters[name].listModels(fctx)
-		cancel()
 		st.finishRefresh(m.now(), ids, err)
 		if err != nil {
 			m.log("%s", fmt.Sprintf("model registry: initial discovery for provider %q failed: %v", name, err))
 		}
+		m.captureModelMetadata(fctx, name, m.adapters[name], st)
+		cancel()
 	}
+}
+
+// modelMetadataFetcher is an OPTIONAL providerAdapter capability (feature
+// v0.23): an adapter that can also fetch per-model discovery metadata
+// (currently: context window) beyond the plain model-id list listModels
+// returns. Only openai-type adapters configured with ProviderConfig.
+// MetadataPath implement it (provider_openai.go's openaiAdapter) —
+// anthropic/gemini adapters do not, so captureModelMetadata checks for
+// this via a comma-ok type assertion rather than every providerAdapter
+// implementation growing a no-op method for it.
+//
+// Safe under Yaegi despite the documented Trap-4 restriction
+// (matchesSentinel's own doc comment, limits.go): that trap is a comma-ok
+// assertion of a COMPILED concrete value (a stdlib type, e.g.
+// *fmt.wrapErrors or *url.Error) against an INTERPRETER-declared
+// interface, which silently returns ok=false. Every adapter's dynamic
+// type behind the providerAdapter interface here (*openaiAdapter,
+// *anthropicAdapter, *geminiAdapter) is itself plugin-declared and
+// interpreted right alongside modelMetadataFetcher — an
+// interpreted-concrete-value-against-interpreted-interface assertion,
+// the opposite, unaffected direction.
+type modelMetadataFetcher interface {
+	// fetchModelMetadata returns discovery-captured per-model context
+	// lengths, keyed by upstream model id. A nil map with a nil error
+	// means the adapter has nothing to report (e.g. metadataPath left
+	// unconfigured) — a fast, cheap no-op the caller can invoke
+	// unconditionally on every adapter that implements this interface.
+	fetchModelMetadata(ctx context.Context) (map[string]int, error)
+}
+
+// captureModelMetadata is warmFill/refreshProvider's shared, best-effort
+// discovery-metadata step (feature v0.23): when adapter also implements
+// modelMetadataFetcher (see that interface's own doc comment for why
+// this assertion is yaegi-safe), it fetches per-model context lengths
+// and records them on st. A fetch error, or an adapter that does not
+// implement the interface at all, is intentionally non-fatal beyond one
+// log line — per this feature's own "absent/failed = no metadata
+// captured" ruling, it must never fail discovery itself, which
+// listModels (warmFill/refreshProvider's own caller) already accounts
+// for independently.
+func (m *modelRegistry) captureModelMetadata(ctx context.Context, name string, adapter providerAdapter, st *providerState) {
+	mf, ok := adapter.(modelMetadataFetcher)
+	if !ok {
+		return
+	}
+	meta, err := mf.fetchModelMetadata(ctx)
+	if err != nil {
+		m.log("%s", fmt.Sprintf("model registry: metadata capture for provider %q failed: %v", name, err))
+		return
+	}
+	if meta == nil {
+		return
+	}
+	st.setDiscoveredContext(meta)
 }
 
 // maybeRefresh is called at every ServeHTTP entry. For each discovery-
@@ -424,6 +525,7 @@ func (m *modelRegistry) refreshProvider(name string, st *providerState, adapter 
 	fctx, cancel := context.WithTimeout(context.Background(), backgroundRefreshTimeout)
 	defer cancel()
 	ids, err = adapter.listModels(fctx)
+	m.captureModelMetadata(fctx, name, adapter, st)
 }
 
 // splitConfiguredProvider reports whether id has "prefix/rest" form where
@@ -697,7 +799,7 @@ func (m *modelRegistry) listFor(grp *group) []map[string]any {
 	for id, provs := range owners {
 		winner := provs[0]
 		if grp.allowsModel(id) && grp.allowsProvider(winner) {
-			out = append(out, modelObject(id, winner))
+			out = append(out, modelObject(id, winner, m.resolveMetaFor(winner, id)))
 			listed[id] = true
 		}
 		if len(provs) < 2 {
@@ -710,7 +812,7 @@ func (m *modelRegistry) listFor(grp *group) []map[string]any {
 			// prefixed form and its bare suffix, same as resolveAgainst does
 			// for the equivalent client request.
 			if (grp.allowsModel(pid) || grp.allowsModel(id)) && grp.allowsProvider(p) {
-				out = append(out, modelObject(pid, p))
+				out = append(out, modelObject(pid, p, m.resolveMetaFor(p, id)))
 				listed[pid] = true
 			}
 		}
@@ -746,8 +848,8 @@ func (m *modelRegistry) listFor(grp *group) []map[string]any {
 		if err != nil {
 			continue
 		}
-		providerName, _, _ := strings.Cut(canonical, "/")
-		out = append(out, modelObject(alias, providerName))
+		providerName, bareTarget, _ := strings.Cut(canonical, "/")
+		out = append(out, modelObject(alias, providerName, m.resolveMetaForAlias(alias, providerName, bareTarget)))
 	}
 
 	sort.Slice(out, func(i, j int) bool {
@@ -756,9 +858,73 @@ func (m *modelRegistry) listFor(grp *group) []map[string]any {
 	return out
 }
 
-// modelObject builds one OpenAI-compatible model list entry.
-func modelObject(id, ownedBy string) map[string]any {
-	return map[string]any{"id": id, "object": "model", "owned_by": ownedBy}
+// modelObject builds one OpenAI-compatible model list entry, extended
+// with two OpenAI-compat-safe extension fields (feature v0.23):
+// "context_window" (int) and "pricing" ({"input_per_mtok_usd",
+// "output_per_mtok_usd"} floats, USD per million tokens) — both omitted
+// entirely when meta reports them unknown, never emitted as a
+// misleading zero. "pricing" IS emitted with zeros for an explicitly
+// free model (meta.CostKnown true, both cost fields 0) — that is a
+// known, meaningful zero, not an absent one.
+func modelObject(id, ownedBy string, meta resolvedModelMeta) map[string]any {
+	obj := map[string]any{"id": id, "object": "model", "owned_by": ownedBy}
+	if meta.ContextKnown {
+		obj["context_window"] = meta.ContextTokens
+	}
+	if meta.CostKnown {
+		obj["pricing"] = map[string]any{
+			"input_per_mtok_usd":  microUSDPerMTokToUSD(meta.InputCostPerMTokMicroUSD),
+			"output_per_mtok_usd": microUSDPerMTokToUSD(meta.OutputCostPerMTokMicroUSD),
+		}
+	}
+	return obj
+}
+
+// resolveMetaFor resolves (provider, bareModel)'s metadata (feature
+// v0.23), supplying this registry's config-override map and that
+// provider's own discovery-captured context for bareModel.
+func (m *modelRegistry) resolveMetaFor(provider, bareModel string) resolvedModelMeta {
+	var ctxVal int
+	var ctxKnown bool
+	if st, ok := m.states[provider]; ok {
+		ctxVal, ctxKnown = st.contextFor(bareModel)
+	}
+	return resolveModelMeta(provider, bareModel, m.modelMeta, ctxVal, ctxKnown)
+}
+
+// resolveMetaForAliasName resolves alias's metadata for the admin
+// dashboard's unrestricted view (feature v0.23, hover-detail
+// refinement): unlike listFor's request-authorized alias handling, this
+// ignores group authorization entirely (an internal, unrestricted
+// &group{} — GroupConfig's own documented "empty means all" semantics,
+// llmgateway.go), matching buildAdminOverview's existing behavior of
+// showing every configured provider/alias unconditionally, with no
+// group filtering anywhere else in its response either. Returns an
+// entirely-unknown resolvedModelMeta when alias is not a configured
+// alias at all, or its target does not resolve to any known model yet.
+func (m *modelRegistry) resolveMetaForAliasName(alias string) resolvedModelMeta {
+	target, ok := m.aliases[alias]
+	if !ok {
+		return resolvedModelMeta{}
+	}
+	_, _, canonical, err := m.resolveAliasTarget(alias, target, &group{})
+	if err != nil {
+		return resolvedModelMeta{}
+	}
+	providerName, bareTarget, _ := strings.Cut(canonical, "/")
+	return m.resolveMetaForAlias(alias, providerName, bareTarget)
+}
+
+// resolveMetaForAlias resolves alias's metadata (feature v0.23) via
+// resolveAliasModelMeta: target-inherited unless the alias itself has
+// its own modelMeta entry — see that function's own doc comment.
+func (m *modelRegistry) resolveMetaForAlias(alias, targetProvider, targetModel string) resolvedModelMeta {
+	var ctxVal int
+	var ctxKnown bool
+	if st, ok := m.states[targetProvider]; ok {
+		ctxVal, ctxKnown = st.contextFor(targetModel)
+	}
+	return resolveAliasModelMeta(alias, targetProvider, targetModel, m.modelMeta, ctxVal, ctxKnown)
 }
 
 // providerSnapshot is one provider's read-only view for the admin

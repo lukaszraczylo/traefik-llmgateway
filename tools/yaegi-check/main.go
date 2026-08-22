@@ -88,6 +88,12 @@ const (
 	slowProviderModel            = "gpt-test"
 	slowUpstreamSleep            = 600 * time.Millisecond
 	slowRequestDeadline          = 60 * time.Millisecond
+	// yaegiMetaContextTokens is the modelMeta config-override
+	// contextTokens value the attempt-accounting harness sets for
+	// testDataWantModel (feature v0.23) — a string, not an int, since it
+	// is spliced directly into attemptAccountingOverride's hand-built
+	// JSON text below.
+	yaegiMetaContextTokens = "128000"
 )
 
 // excludedTopLevelDirs lists repo-root directories the GOPATH copy must
@@ -221,6 +227,15 @@ func run() error {
 
 	attemptAccountingOverride := `{"providers":{"openai":{"type":"openai","baseUrl":"` + upstream.URL + `","apiKey":"sk-up","models":["` + testDataWantModel + `"]},"` +
 		slowProviderName + `":{"type":"openai","baseUrl":"` + slowUpstream.URL + `","apiKey":"sk-up","models":["` + slowProviderModel + `"]}},` +
+		// modelMeta (feature v0.23): a config-override entry for
+		// testDataWantModel, so exerciseHandler's GET /v1/models
+		// assertion below proves resolveModelMeta's config-override
+		// layer, modelObject's context_window/pricing extension fields,
+		// and the whole registry.go/modelmeta.go resolution path all
+		// run correctly INTERPRETED, not merely compiled — cheap to add
+		// to this existing harness request, per this feature's own gate
+		// requirement.
+		`"modelMeta":{"` + testDataWantModel + `":{"contextTokens":` + yaegiMetaContextTokens + `,"inputCostPerMTokMicroUsd":1250000,"outputCostPerMTokMicroUsd":10000000}},` +
 		`"admin":{"enabled":true},"users":{"inline":[{"name":"tester","group":"default","apiKey":"` + testDataUserAPIKey + `"},{"name":"admin1","group":"default","apiKey":"` + attemptAccountingAdminAPIKey + `","admin":true}]}}`
 	if err = json.Unmarshal([]byte(attemptAccountingOverride), cfgVal.Interface()); err != nil {
 		return fmt.Errorf("decode attempt-accounting harness override into the interpreted Config: %w", err)
@@ -276,6 +291,19 @@ func exerciseHandler(handler http.Handler) error {
 	}
 	if !strings.Contains(authedRec.Body.String(), testDataWantModel) {
 		return fmt.Errorf("GET /v1/models body does not contain %q: %s", testDataWantModel, authedRec.Body.String())
+	}
+	// modelMeta (feature v0.23), interpreted: run() layers a modelMeta
+	// config override for testDataWantModel onto cfgVal before New() is
+	// ever called (attemptAccountingOverride above) — proving under the
+	// real Yaegi interpreter, not just `go test`, that resolveModelMeta's
+	// config-override layer and modelObject's context_window/pricing
+	// extension fields both run correctly through registry.go's
+	// listFor/resolveMetaFor.
+	if !strings.Contains(authedRec.Body.String(), `"context_window":128000`) {
+		return fmt.Errorf("GET /v1/models body does not contain the modelMeta-resolved context_window (feature v0.23 metadata harness): %s", authedRec.Body.String())
+	}
+	if !strings.Contains(authedRec.Body.String(), `"input_per_mtok_usd":1.25`) || !strings.Contains(authedRec.Body.String(), `"output_per_mtok_usd":10`) {
+		return fmt.Errorf("GET /v1/models body does not contain the modelMeta-resolved pricing (feature v0.23 metadata harness): %s", authedRec.Body.String())
 	}
 
 	if err := exerciseAttemptAccounting(handler); err != nil {

@@ -528,6 +528,106 @@ func TestOpenAIAdapter_ListModels(t *testing.T) {
 	}
 }
 
+// TestOpenAIAdapter_FetchModelMetadata covers fetchModelMetadata (feature
+// v0.23) against an httptest fixture shaped like LM Studio's real, live
+// "/api/v0/models" response (task brief: llm/vlm models report
+// max_context_length 262144, qwen2.5-0.5b 32768, embeddings 512-8192) —
+// including the loaded_context_length-preferred-over-max_context_length
+// rule, an entry with no loaded_context_length at all, and a
+// metadataPath left unset (the default: a fast no-op, no HTTP call at
+// all).
+func TestOpenAIAdapter_FetchModelMetadata(t *testing.T) {
+	t.Run("metadataPath unset is a fast no-op", func(t *testing.T) {
+		called := false
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			called = true
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer srv.Close()
+
+		a := newOpenAIAdapter("p1", srv.URL, "sk-test")
+		got, err := a.fetchModelMetadata(context.Background())
+		if err != nil || got != nil {
+			t.Errorf("fetchModelMetadata = (%v, %v), want (nil, nil)", got, err)
+		}
+		if called {
+			t.Error("unset metadataPath must never issue an HTTP request")
+		}
+	})
+
+	t.Run("LM Studio shaped fixture: prefers loaded over max, falls back when absent", func(t *testing.T) {
+		var gotPath string
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			gotPath = r.URL.Path
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"data":[
+				{"id":"qwen/qwen3-vl-30b","max_context_length":262144,"loaded_context_length":262144},
+				{"id":"qwen2.5-0.5b","max_context_length":32768,"loaded_context_length":4096},
+				{"id":"text-embedding-nomic-embed-text-v1.5","max_context_length":2048,"loaded_context_length":512},
+				{"id":"no-loaded-field","max_context_length":8192},
+				{"id":"zero-everything","max_context_length":0,"loaded_context_length":0}
+			]}`))
+		}))
+		defer srv.Close()
+
+		a := newOpenAIAdapter("lmstudio", srv.URL, "")
+		a.metadataPath = "/api/v0/models"
+		got, err := a.fetchModelMetadata(context.Background())
+		if err != nil {
+			t.Fatalf("fetchModelMetadata: %v", err)
+		}
+		if gotPath != "/api/v0/models" {
+			t.Errorf("request path = %q, want /api/v0/models", gotPath)
+		}
+
+		want := map[string]int{
+			"qwen/qwen3-vl-30b":                    262144,
+			"qwen2.5-0.5b":                         4096, // loaded_context_length preferred over max_context_length
+			"text-embedding-nomic-embed-text-v1.5": 512,
+			"no-loaded-field":                      8192, // falls back to max_context_length
+			// "zero-everything" omitted entirely: both fields are 0.
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("got %#v, want %#v", got, want)
+		}
+	})
+
+	t.Run("non-2xx response is an error, not a captured empty map", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusInternalServerError)
+		}))
+		defer srv.Close()
+
+		a := newOpenAIAdapter("p1", srv.URL, "")
+		a.metadataPath = "/api/v0/models"
+		if _, err := a.fetchModelMetadata(context.Background()); err == nil {
+			t.Error("want an error for a non-2xx metadata response")
+		}
+	})
+
+	t.Run("malformed JSON body is a decode error", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{not json`))
+		}))
+		defer srv.Close()
+
+		a := newOpenAIAdapter("p1", srv.URL, "")
+		a.metadataPath = "/api/v0/models"
+		if _, err := a.fetchModelMetadata(context.Background()); err == nil {
+			t.Error("want a decode error for a malformed metadata response body")
+		}
+	})
+
+	t.Run("unreachable upstream is an error", func(t *testing.T) {
+		a := newOpenAIAdapter("p1", "http://127.0.0.1:1", "") // reserved, never listening
+		a.metadataPath = "/api/v0/models"
+		if _, err := a.fetchModelMetadata(context.Background()); err == nil {
+			t.Error("want an error when the metadata endpoint is unreachable")
+		}
+	})
+}
+
 // TestOpenAIAdapter_Keyless proves a resolved-empty API key sends no
 // Authorization header at all, not one with an empty token — the
 // operator's own keyless gateway is a real deployment target.
@@ -588,6 +688,23 @@ func TestBuildAdapters(t *testing.T) {
 		a.injectAuth(req)
 		if got := req.Header.Get("Authorization"); got != "Bearer sk-test" {
 			t.Errorf("Authorization = %q, want %q", got, "Bearer sk-test")
+		}
+	})
+
+	t.Run("good: metadataPath is wired onto the openai adapter (feature v0.23)", func(t *testing.T) {
+		cfg := &Config{Providers: map[string]*ProviderConfig{
+			"lmstudio": {Type: "openai", MetadataPath: "/api/v0/models"},
+		}}
+		adapters, err := buildAdapters(cfg)
+		if err != nil {
+			t.Fatalf("buildAdapters: %v", err)
+		}
+		a, ok := adapters["lmstudio"].(*openaiAdapter)
+		if !ok {
+			t.Fatalf("adapters[%q] is not *openaiAdapter", "lmstudio")
+		}
+		if a.metadataPath != "/api/v0/models" {
+			t.Errorf("metadataPath = %q, want %q", a.metadataPath, "/api/v0/models")
 		}
 	})
 

@@ -23,6 +23,12 @@ type openaiAdapter struct {
 	adapterName string
 	baseURL     string
 	apiKey      string
+	// metadataPath is ProviderConfig.MetadataPath (feature v0.23), set by
+	// buildAdapters (providers.go) after construction — empty (the
+	// default) makes fetchModelMetadata a no-op, so every existing
+	// newOpenAIAdapter call site (every test, and any caller that never
+	// sets this) keeps behaving exactly as before this feature existed.
+	metadataPath string
 }
 
 // newOpenAIAdapter returns an openaiAdapter for provider name, with base as
@@ -400,4 +406,73 @@ func (a *openaiAdapter) listModels(ctx context.Context) ([]string, error) {
 		ids[i] = d.ID
 	}
 	return ids, nil
+}
+
+// lmStudioModelsPayload is the wire shape of LM Studio's own, native
+// models endpoint (ProviderConfig.MetadataPath — a real deployment sets
+// it to "/api/v0/models"), verified live against a running LM Studio
+// instance (2026-08): {"data":[{"id":...,"max_context_length":262144,
+// "loaded_context_length":4096}, ...]}. Distinct from modelsPayload
+// above, which is OpenAI's own /v1/models shape (LM Studio also serves
+// that, unchanged, but it carries no per-model context metadata) — this
+// is LM Studio's separate, additional endpoint this feature (v0.23)
+// opts into reading.
+type lmStudioModelsPayload struct {
+	Data []struct {
+		ID                  string `json:"id"`
+		MaxContextLength    int    `json:"max_context_length"`
+		LoadedContextLength int    `json:"loaded_context_length"`
+	} `json:"data"`
+}
+
+// fetchModelMetadata implements modelMetadataFetcher (feature v0.23,
+// registry.go): when a.metadataPath is configured, fetches it and
+// returns each reported model id's discovery-captured context length.
+// It prefers loaded_context_length when the upstream reports one greater
+// than zero — the context actually usable right now, which a runtime can
+// configure smaller than the model's own maximum under VRAM-constrained
+// settings — and falls back to max_context_length otherwise. a.
+// metadataPath left empty (the default; every provider except an
+// operator's opt-in) is a fast no-op: (nil, nil), never an error, so
+// registry.go's captureModelMetadata can invoke this unconditionally on
+// every openai-type adapter without a config check of its own. A
+// non-2xx response or a decode failure returns an error — the caller
+// treats it as non-fatal, per this feature's own "absent/failed = no
+// metadata captured" ruling.
+func (a *openaiAdapter) fetchModelMetadata(ctx context.Context) (map[string]int, error) {
+	if a.metadataPath == "" {
+		return nil, nil
+	}
+
+	resp, err := upstreamJSON(ctx, a.client, http.MethodGet, a.baseURL+a.metadataPath, a.requestHeaders(false), nil, a.retry)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close() //nolint:errcheck
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, newProviderHTTPError(resp)
+	}
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
+	if err != nil {
+		return nil, fmt.Errorf("%w: read metadata response body: %w", errUpstream, err)
+	}
+
+	var payload lmStudioModelsPayload
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil, fmt.Errorf("%w: decode metadata response: %w", errUpstream, err)
+	}
+
+	out := make(map[string]int, len(payload.Data))
+	for _, d := range payload.Data {
+		ctxLen := d.MaxContextLength
+		if d.LoadedContextLength > 0 {
+			ctxLen = d.LoadedContextLength
+		}
+		if ctxLen > 0 {
+			out[d.ID] = ctxLen
+		}
+	}
+	return out, nil
 }

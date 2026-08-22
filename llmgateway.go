@@ -36,6 +36,20 @@ type Config struct {
 	// model id's resolution changes. Validated at construction
 	// (validateModelAliases, registry.go).
 	ModelAliases map[string]string `json:"modelAliases,omitempty"`
+	// ModelMeta declares per-model metadata overrides (feature v0.23):
+	// context window size and per-token cost, keyed by an exact
+	// "provider/model" id or a bare model id (applying wherever that bare
+	// id resolves — modelmeta.go's lookupModelMetaConfig checks the exact
+	// form first). This ALWAYS wins over discovery-captured context or
+	// the built-in LiteLLM-synced table (resolveModelMeta, modelmeta.go)
+	// — distinct from Pricing above, which drives request cost
+	// ACCOUNTING (costMicros); ModelMeta drives metadata EXPOSURE
+	// (GET /v1/models' context_window/pricing extension fields, the
+	// admin dashboard) and never affects billing. nil/omitted preserves
+	// prior behavior exactly: every model's metadata falls through to
+	// discovery/builtin/absent, same as before this feature existed.
+	// Validated at construction (validateModelMeta, modelmeta.go).
+	ModelMeta map[string]*ModelMetaConfig `json:"modelMeta,omitempty"`
 	// Retry is a struct value, not a pointer, because its own Enabled
 	// field is the on/off signal (unlike Redis/Users, where the block's
 	// mere presence is the signal) — so its tag omits "omitempty":
@@ -51,12 +65,23 @@ type Config struct {
 
 // ProviderConfig describes one upstream LLM provider.
 type ProviderConfig struct {
-	Type              string   `json:"type"`
-	BaseURL           string   `json:"baseUrl,omitempty"`
-	APIKey            string   `json:"apiKey"`
-	DiscoveryInterval string   `json:"discoveryInterval,omitempty"`
-	Models            []string `json:"models,omitempty"`
-	Discovery         bool     `json:"discovery,omitempty"`
+	Type              string `json:"type"`
+	BaseURL           string `json:"baseUrl,omitempty"`
+	APIKey            string `json:"apiKey"`
+	DiscoveryInterval string `json:"discoveryInterval,omitempty"`
+	// MetadataPath is an optional second discovery endpoint (feature
+	// v0.23), fetched alongside the provider's normal listModels call
+	// when set: a path such as "/api/v0/models" (LM Studio's own,
+	// non-OpenAI-compatible models endpoint) that reports per-model
+	// context length. Only openai-type adapters read this field
+	// (provider_openai.go's openaiAdapter.fetchModelMetadata) — an
+	// anthropic/gemini provider configuring it has no effect. Empty (the
+	// default) captures no metadata, preserving prior behavior exactly.
+	// A failed or absent fetch is always non-fatal to discovery itself:
+	// no metadata is captured, nothing else changes.
+	MetadataPath string   `json:"metadataPath,omitempty"`
+	Models       []string `json:"models,omitempty"`
+	Discovery    bool     `json:"discovery,omitempty"`
 }
 
 // GroupConfig describes a group's access and limits. Empty/omitted
@@ -181,6 +206,25 @@ type AdminConfig struct {
 type ModelPricing struct {
 	InputPerM  float64 `json:"inputPerM"`
 	OutputPerM float64 `json:"outputPerM"`
+}
+
+// ModelMetaConfig overrides one model's context window and per-token
+// cost (feature v0.23, Config.ModelMeta) — layered ahead of discovery-
+// captured context and the built-in LiteLLM-synced table
+// (resolveModelMeta, modelmeta.go). ContextTokens left at 0 falls
+// through to the next layer rather than overriding with an explicit
+// unknown; the same holds for InputCostPerMTokMicroUSD/
+// OutputCostPerMTokMicroUSD when Free is false. Free, when true,
+// explicitly zeroes both cost fields regardless of whatever they are
+// set to — a KNOWN zero cost, distinct from the "not overridden here"
+// fallback a zero cost field means when Free is false. Setting Free
+// true together with a non-zero cost field is rejected at construction
+// (validateModelMeta) as a contradictory config.
+type ModelMetaConfig struct {
+	ContextTokens             int   `json:"contextTokens,omitempty"`
+	InputCostPerMTokMicroUSD  int64 `json:"inputCostPerMTokMicroUsd,omitempty"`
+	OutputCostPerMTokMicroUSD int64 `json:"outputCostPerMTokMicroUsd,omitempty"`
+	Free                      bool  `json:"free,omitempty"`
 }
 
 // TargetConfig is a proxied upstream target (MCP server).
