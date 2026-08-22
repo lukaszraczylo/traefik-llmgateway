@@ -189,38 +189,162 @@ type authEntry struct {
 }
 
 // authFailureWindow and authFailureLimit bound how many failed identify
-// attempts one source IP may make before further attempts from it are
-// throttled outright (security audit finding 3, 2026-08-22): identify
-// previously had no counter, no backoff, and no lockout at all — an
-// unauthenticated caller got unlimited digest-lookup attempts at line
-// rate. 20 failures per minute is generous headroom for a legitimate
-// client with a stale or mistyped key retried a few times (a human
-// pasting the wrong key, a misconfigured script cycling through a couple
-// of candidates) while still meaningfully bounding a scripted guesser's
-// throughput per source IP. This does not, and cannot, defend the
-// underlying key space on its own (a SHA-256 digest lookup already makes
-// brute force infeasible) — its real job is capping the synchronous cost
-// an unauthenticated caller can impose on the shared Traefik ingress per
-// unit time: identify's own digest lookup, and logAuthEvent's stderr
-// write (logger.go), both of which this finding's own framing calls out.
+// attempts one source IP may make within a window before this package
+// treats it as "throttled" for OBSERVABILITY purposes only (security
+// audit finding 3, 2026-08-22; revised by security review round 2,
+// 2026-08-22, critical finding 1 — see identify's own doc comment for
+// why this is observability, not enforcement, post-revision). 20
+// failures per minute is generous headroom for a legitimate client with
+// a stale or mistyped key retried a few times, while still flagging a
+// source failing fast enough to be worth an operator's attention.
 const (
 	authFailureWindow = time.Minute
 	authFailureLimit  = 20
-	// authFailureLogEvery rate-limits logAuthEvent's own failed-auth log
-	// line (logger.go) the identical way limiter.logStoreError (limits.go)
-	// already rate-limits store-error lines — sharing that function's own
-	// storeErrorLogEvery interval keeps this codebase's "how often do we
-	// log a sustained failure condition" cadence consistent across both
-	// call sites, rather than picking a new, unrelated number here.
+	// authFailureLogEvery rate-limits BOTH logAuthEvent's routine
+	// failed-auth line and its distinct throttle-engaged line (logger.go)
+	// — the identical technique limiter.logStoreError (limits.go) already
+	// applies to store-error lines, sharing that function's own
+	// storeErrorLogEvery interval for cadence consistency.
 	authFailureLogEvery = storeErrorLogEvery
 )
 
-// authFailureKeyPrefix namespaces authStore's failure-tracking keys in its
-// own memoryStore instance (failures, below) — a plain string key, not
-// windowKey's (kind, id, metric, window) tuple (limits.go), since auth
-// failures are tracked per SOURCE IP, a concept the rest of this
-// package's counter keying was never built to express.
-const authFailureKeyPrefix = "authfail:"
+// authFailureMapCap bounds authFailureTracker's total tracked-source-IP
+// count across both its generations (security review round 2,
+// 2026-08-22, important finding 1): a distributed attacker sending
+// failed attempts from many distinct IPs could otherwise grow the
+// tracker's memory without any limit, and a naive full-map sweep to
+// expire old entries would hold its lock for a duration that scales with
+// tracked-IP count (measured, on the general-purpose memoryStore this
+// field used before this revision: ~83ms mutex-held at 1M tracked IPs,
+// blocking every identify call for that duration). authFailureTracker's
+// own two-generation rotation (its doc comment below) bounds total memory
+// to at most 2×authFailureMapCap entries with an O(1) rotation, never a
+// scan.
+const authFailureMapCap = 50_000
+
+// authFailureEntry is one source IP's failure count within
+// authFailureTracker, expiring authFailureWindow after its first failure
+// in the current generation.
+type authFailureEntry struct {
+	expiry time.Time
+	count  int64
+}
+
+// authFailureTracker is a bounded, two-generation per-source-IP failed-
+// auth-attempt counter (security review round 2, 2026-08-22, important
+// finding 1) — deliberately NOT the general-purpose memoryStore
+// (limits.go): memoryStore's map has no size cap at all and its
+// sweepLocked does a full, mutex-held O(n) scan, which is fine for the
+// bounded-by-configuration scope space checkAndCount/account use (one
+// entry per configured user/group) but wrong for a value with no
+// configured upper bound like source IP.
+//
+// current is the active generation every increment/read goes to first;
+// previous is the immediately-prior generation, consulted as a read-only
+// fallback so an IP's count does not spuriously read as zero the instant
+// after a rotation. Rotation — current becomes previous, a fresh empty
+// map becomes current — is a two-pointer swap (O(1), never a scan),
+// triggered on inserting a brand-new IP once current is already at
+// authFailureMapCap; total memory is bounded to at most
+// 2×authFailureMapCap entries. An IP whose entry is displaced by a
+// rotation simply starts a fresh count on its next failure — the same
+// outcome a normal authFailureWindow rollover already produces for any
+// tracked IP; this is accepted, lossy-under-extreme-load behavior, the
+// same trade-off limiter.spawnTokens' own doc comment (limits.go)
+// accepts for a different bounded resource.
+type authFailureTracker struct {
+	current  map[string]*authFailureEntry
+	previous map[string]*authFailureEntry
+	nowFn    func() time.Time
+	mu       sync.Mutex
+}
+
+// newAuthFailureTracker returns an empty tracker using nowFn for its
+// clock — a func value, not a copied time.Time, so a caller that later
+// swaps what nowFn points to (authStore's own fakeClock-in-tests
+// convention) is honored on every subsequent call.
+func newAuthFailureTracker(nowFn func() time.Time) *authFailureTracker {
+	return &authFailureTracker{current: make(map[string]*authFailureEntry), nowFn: nowFn}
+}
+
+// get returns ip's current failure count, or 0 if it is untracked or its
+// window has expired. Checks current first, then previous.
+func (t *authFailureTracker) get(ip string) int64 {
+	now := t.nowFn()
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if e, ok := t.current[ip]; ok && now.Before(e.expiry) {
+		return e.count
+	}
+	if e, ok := t.previous[ip]; ok && now.Before(e.expiry) {
+		return e.count
+	}
+	return 0
+}
+
+// increment records one failure for ip and returns its new count for the
+// current window, creating a fresh entry in current if ip is untracked in
+// current or its own entry there already expired — a plain fixed-window
+// counter, matching memoryStore.incrBy's own contract (limits.go) in
+// spirit. Rotates current -> previous before inserting a brand-new ip
+// once current is already at authFailureMapCap — see this type's own doc
+// comment for why that bounds total memory without ever scanning.
+func (t *authFailureTracker) increment(ip string) int64 {
+	now := t.nowFn()
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	if e, ok := t.current[ip]; ok {
+		if now.Before(e.expiry) {
+			e.count++
+			return e.count
+		}
+		e.count = 1
+		e.expiry = now.Add(authFailureWindow)
+		return 1
+	}
+	if len(t.current) >= authFailureMapCap {
+		t.previous = t.current
+		t.current = make(map[string]*authFailureEntry, authFailureMapCap)
+	}
+	t.current[ip] = &authFailureEntry{count: 1, expiry: now.Add(authFailureWindow)}
+	return 1
+}
+
+// logGate rate-limits a single log line to once per authFailureLogEvery,
+// counting how many calls were suppressed in between so the next actually
+// -written line can report them (security review round 2, 2026-08-22,
+// important finding 6): a single global rate-limit gate would otherwise
+// make several DISTINCT attacker IPs failing within one interval look
+// identical to a single noisy one — three separate IPs each failing once
+// in a 30s window previously produced only ONE log line total, with no
+// sign two more existed. Reporting the suppressed count in the next line
+// restores that visibility without tracking a per-IP gate (an LRU of
+// recently-logged IPs was the documented alternative; a suppressed count
+// is simpler and gives an operator the same "something else happened"
+// signal). Two independent zero-value-usable instances back authStore's
+// routine-failure and throttle-engaged lines (below) so a burst of one
+// can never suppress, or be suppressed by, the other. The very first call
+// on a fresh gate always logs (lastLogAt's zero value is more than
+// authFailureLogEvery before any real now).
+type logGate struct {
+	lastLogAt  time.Time
+	suppressed int64
+	mu         sync.Mutex
+}
+
+func (g *logGate) shouldLog(now time.Time) (log bool, suppressed int64) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if !g.lastLogAt.IsZero() && now.Sub(g.lastLogAt) < authFailureLogEvery {
+		g.suppressed++
+		return false, 0
+	}
+	suppressed = g.suppressed
+	g.suppressed = 0
+	g.lastLogAt = now
+	return true, suppressed
+}
 
 // authStore identifies requests by API key and resolves them to a user and
 // their group. Raw API keys are never retained after construction — only
@@ -235,33 +359,31 @@ const authFailureKeyPrefix = "authfail:"
 // serializes maybeReload's throttle check and the reload it may trigger.
 //
 // failures is identify's own per-source-IP failed-attempt counter
-// (security audit finding 3, 2026-08-22) — the SAME in-process memoryStore
-// type limiter's fallback store already uses (limits.go), a deliberately
-// reused type rather than a new dependency, given its own TTL-bucketed
-// counter semantics already fit this need exactly. It is authStore's own
-// dedicated instance, not limiter.fallback: auth failures are a distinct
-// concept (throttling an unauthenticated caller) from LLM traffic limits
-// (throttling an authenticated one's usage), and authStore must work
-// identically whether or not a Gateway even has a limiter wired yet.
-// authFailLogMu/authFailLastLogAt back shouldLogAuthFailure, the identical
-// "guard a timestamp with a small mutex, rate-limit a log line" shape
-// limiter.logMu/lastLogAt already use.
+// (security audit finding 3, 2026-08-22; failureLog/throttleLog added by
+// security review round 2, 2026-08-22) — see identify's own doc comment
+// for why this is pure observability, never enforcement, and
+// authFailureTracker's own doc comment for why it is not the
+// general-purpose memoryStore (limits.go). It is authStore's own
+// dedicated instance: auth failures are a distinct concept from LLM
+// traffic limits, and authStore must work identically whether or not a
+// Gateway even has a limiter wired yet. failureLog/throttleLog back
+// logAuthEvent's two distinct rate-limited lines (logger.go).
 type authStore struct {
-	groups            map[string]*group
-	inline            map[[32]byte]*authEntry // built once by newAuthStore; never mutated afterward
-	byDigest          map[[32]byte]*authEntry // inline entries plus the current file-sourced set; guarded by mu
-	usersFile         *usersFile              // nil when Users.File is not configured; maybeReload no-ops
-	log               gatewayLogger           // set alongside usersFile; unused when usersFile is nil
-	nowFn             func() time.Time        // injected for tests; defaults to time.Now
-	failures          *memoryStore            // per-source-IP failed-identify counters; see doc comment above
-	lastCheck         time.Time               // guarded by reloadMu
-	lastModTime       time.Time               // guarded by reloadMu
-	authFailLastLogAt time.Time               // guarded by authFailLogMu; last time a failed-auth line was logged
-	fileUserCount     int                     // guarded by mu; size of the current file-sourced user set
-	mu                sync.RWMutex
-	buildMu           sync.Mutex
-	reloadMu          sync.Mutex
-	authFailLogMu     sync.Mutex
+	lastModTime   time.Time
+	lastCheck     time.Time
+	log           gatewayLogger
+	failures      *authFailureTracker
+	usersFile     *usersFile
+	nowFn         func() time.Time
+	groups        map[string]*group
+	byDigest      map[[32]byte]*authEntry
+	inline        map[[32]byte]*authEntry
+	failureLog    logGate
+	throttleLog   logGate
+	fileUserCount int
+	mu            sync.RWMutex
+	buildMu       sync.Mutex
+	reloadMu      sync.Mutex
 }
 
 // newAuthStore builds an authStore from cfg's groups and inline users. It
@@ -274,13 +396,12 @@ func newAuthStore(cfg *Config) (*authStore, error) {
 		byDigest: make(map[[32]byte]*authEntry),
 		nowFn:    time.Now,
 	}
-	a.failures = newMemoryStore()
 	// Delegate through a.nowFn rather than copying it: a test that
 	// overrides a.nowFn AFTER construction (the fakeClock convention
 	// newReloadableAuthStore already uses, users_file_test.go) must still
 	// control failures' own clock — this closure reads a.nowFn fresh on
 	// every call, so it always sees whichever func is currently assigned.
-	a.failures.nowFn = func() time.Time { return a.nowFn() }
+	a.failures = newAuthFailureTracker(func() time.Time { return a.nowFn() })
 	for name, gc := range cfg.Groups {
 		if gc == nil {
 			return nil, fmt.Errorf("llmgateway: group %q: config must not be nil", name)
@@ -487,47 +608,51 @@ func clientIP(r *http.Request) string {
 	return host
 }
 
-// authThrottled reports whether ip has already reached authFailureLimit
-// failed identify attempts within the current authFailureWindow — a
-// read-only check, so a throttled IP's later attempts cost nothing beyond
-// one in-process map read, never a digest computation or byDigest lookup.
+// authThrottled reports whether ip has reached authFailureLimit failed
+// identify attempts within the current authFailureWindow — a read-only
+// observability signal for logAuthEvent's distinct throttle-engaged line
+// (logger.go). identify itself never consults this (security review
+// round 2, 2026-08-22, critical finding 1 — see identify's own doc
+// comment for why).
 func (a *authStore) authThrottled(ip string) bool {
-	count, _ := a.failures.get(authFailureKeyPrefix + ip) // memoryStore.get never errors
-	return count >= authFailureLimit
+	return a.failures.get(ip) >= authFailureLimit
 }
 
 // recordAuthFailure increments ip's failure count for the current
-// authFailureWindow, creating a fresh window if the previous one already
-// expired (memoryStore.incrBy's own fixed-window contract, limits.go).
+// authFailureWindow (authFailureTracker.increment's own fixed-window
+// contract). Pure observability post security review round 2's critical
+// finding 1: it never influences identify's own return value (see
+// identify's doc comment) — only authThrottled's read, for
+// logAuthEvent's distinct throttle-engaged line.
 func (a *authStore) recordAuthFailure(ip string) {
-	_, _ = a.failures.incrBy(authFailureKeyPrefix+ip, 1, authFailureWindow) // memoryStore.incrBy never errors
+	a.failures.increment(ip)
 }
 
-// shouldLogAuthFailure reports whether the next failed-auth log line
-// (logAuthEvent, logger.go) should actually be written, rate-limited to
-// once per authFailureLogEvery regardless of how many attempts fail in
-// between — the identical technique limiter.logStoreError (limits.go)
-// already applies to store errors, applied here so an attacker driving
-// unlimited failed-auth attempts can never drive unlimited synchronous
-// stderr writes on the shared Traefik ingress (security audit finding 3,
-// 2026-08-22) even before authThrottled's own per-IP cap engages (a
-// distributed attempt spread across many source IPs never trips any
-// single IP's own threshold, but must still not flood the log).
-// Successful-auth logging is deliberately left unbounded: it requires an
-// already-valid API key, so its volume is bounded by legitimate
-// authenticated traffic — itself already governed by checkAndCount's
-// requests-per-minute/day limits elsewhere — not by an unauthenticated
-// caller's attempt rate, which is exactly what this finding is about
-// bounding.
-func (a *authStore) shouldLogAuthFailure() bool {
-	now := a.nowFn()
-	a.authFailLogMu.Lock()
-	defer a.authFailLogMu.Unlock()
-	if now.Sub(a.authFailLastLogAt) < authFailureLogEvery {
-		return false
-	}
-	a.authFailLastLogAt = now
-	return true
+// shouldLogAuthFailure reports whether the next ROUTINE failed-auth log
+// line (logAuthEvent, logger.go) should actually be written, and how many
+// prior failure events were suppressed since the last line actually
+// wrote (logGate's own doc comment covers the suppressed-count
+// reasoning) — the same rate-limiting technique limiter.logStoreError
+// (limits.go) already applies to store-error lines, applied here so an
+// attacker driving unlimited failed-auth attempts can never drive
+// unlimited synchronous stderr writes on the shared Traefik ingress
+// (security audit finding 3, 2026-08-22). Successful-auth logging is
+// deliberately left unbounded: it requires an already-valid API key, so
+// its volume is bounded by legitimate authenticated traffic — itself
+// already governed by checkAndCount's requests-per-minute/day limits
+// elsewhere — not by an unauthenticated caller's attempt rate, which is
+// exactly what this finding is about bounding.
+func (a *authStore) shouldLogAuthFailure() (log bool, suppressed int64) {
+	return a.failureLog.shouldLog(a.nowFn())
+}
+
+// shouldLogThrottleEngaged is shouldLogAuthFailure's counterpart for the
+// distinct "this source IP is currently throttled" line (security review
+// round 2, 2026-08-22, important finding 5) — its own separate rate-limit
+// gate (logGate's own doc comment), so a burst of routine failure lines
+// can never suppress, or be suppressed by, this higher-signal line.
+func (a *authStore) shouldLogThrottleEngaged() (log bool, suppressed int64) {
+	return a.throttleLog.shouldLog(a.nowFn())
 }
 
 // identify resolves r's presented API key to a user and their group. It
@@ -536,40 +661,50 @@ func (a *authStore) shouldLogAuthFailure() bool {
 // is looked up by SHA-256 digest, then verified with a constant-time
 // compare — the key itself is never retained.
 //
-// Per-source-IP throttling (security audit finding 3, 2026-08-22): a
-// request from an IP already over authThrottled's own budget is rejected
-// immediately, before any digest work at all. Every OTHER failure path
-// below — no key presented, key not found, or a (practically unreachable,
-// see subtle.ConstantTimeCompare's own call site) digest mismatch —
-// records one failure for the caller's IP via recordAuthFailure. A
-// successful identify never records a failure and never resets a prior
-// count: this is a rate limit on failed attempts, not a lockout a
-// legitimate request can clear early.
+// The presented key is verified FIRST, UNCONDITIONALLY (security review
+// round 2, 2026-08-22, critical finding 1): a request carrying a VALID
+// key always succeeds, before any per-source-IP throttle state is even
+// read. The prior revision of this function checked authThrottled BEFORE
+// verifying the key at all — but this plugin runs as a Traefik middleware
+// behind a Kubernetes Service, and with externalTrafficPolicy: Cluster
+// (this operator's own live deployment), r.RemoteAddr is the NODE's own
+// SNAT address, shared by every external caller reaching that node, not
+// a per-tenant address. Confirmed against this operator's own 10 live
+// users: 20 failed requests from anywhere on the internet, sharing that
+// node, locked out every one of them, including the admin dashboard's own
+// poll. Verifying the key first makes that impossible — a legitimate,
+// already-valid request can never be rejected by another caller's failed
+// attempts, from the same address or not.
+//
+// Every failure path below — no key presented, key not found, or a
+// (practically unreachable, see subtle.ConstantTimeCompare's own call
+// site) digest mismatch — records one failure for the caller's source IP
+// via recordAuthFailure; logAuthEvent (logger.go) separately decides, per
+// call, whether to emit a routine failure line or a distinct throttle-
+// engaged line by consulting authThrottled itself. No branch in this
+// function ever changes its own return value based on throttle state —
+// throttling is pure observability now (bounding the log's write volume
+// and the tracker's own memory; authFailureTracker's doc comment,
+// above), never enforcement: an attacker with no valid key gains nothing
+// from this change (every failure path here already returned false
+// either way, throttled or not), and the raw per-attempt cost this
+// function pays (one SHA-256 digest, one map lookup, one
+// ConstantTimeCompare) is already cheap enough — nanoseconds — that
+// gating it early bought negligible protection against the cost itself,
+// only the false-positive risk the paragraph above describes.
 func (a *authStore) identify(r *http.Request) (*user, *group, bool) {
-	ip := clientIP(r)
-	if a.authThrottled(ip) {
-		return nil, nil, false
-	}
-
 	key, ok := presentedKey(r)
-	if !ok {
-		a.recordAuthFailure(ip)
-		return nil, nil, false
+	if ok {
+		digest := sha256.Sum256([]byte(key))
+		a.mu.RLock()
+		entry, found := a.byDigest[digest]
+		a.mu.RUnlock()
+		if found && subtle.ConstantTimeCompare(digest[:], entry.digest[:]) == 1 {
+			return entry.user, entry.group, true
+		}
 	}
-	digest := sha256.Sum256([]byte(key))
-
-	a.mu.RLock()
-	entry, ok := a.byDigest[digest]
-	a.mu.RUnlock()
-	if !ok {
-		a.recordAuthFailure(ip)
-		return nil, nil, false
-	}
-	if subtle.ConstantTimeCompare(digest[:], entry.digest[:]) != 1 {
-		a.recordAuthFailure(ip)
-		return nil, nil, false
-	}
-	return entry.user, entry.group, true
+	a.recordAuthFailure(clientIP(r))
+	return nil, nil, false
 }
 
 // presentedKey extracts the API key from r's Authorization Bearer header or

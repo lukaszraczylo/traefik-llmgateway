@@ -597,83 +597,157 @@ func TestClientIP_MalformedRemoteAddr_UsedAsIs(t *testing.T) {
 	}
 }
 
-// TestAuthStore_Identify_ThrottlesAfterRepeatedFailures_EvenValidKeyRejected
-// is the core regression for finding 3: identify previously had no
-// counter, no backoff, and no lockout at all. After authFailureLimit
-// failed attempts from one source IP, even a subsequently CORRECT key
-// from that same IP must be rejected — proving the throttle actually
-// short-circuits real auth once tripped, not merely that repeated wrong
-// keys keep failing (which they would anyway). A different source IP must
-// be entirely unaffected, proving the throttle is per-IP, not global.
-func TestAuthStore_Identify_ThrottlesAfterRepeatedFailures_EvenValidKeyRejected(t *testing.T) {
-	a, err := newAuthStore(testAuthCfg()) // inline user "a" / sk-secret
+// TestAuthStore_Identify_ValidKeyAlwaysSucceeds_EvenWhenIPThrottled is the
+// core regression for security review round 2's critical finding 1: this
+// plugin runs as a Traefik middleware behind a Kubernetes Service — with
+// externalTrafficPolicy: Cluster, r.RemoteAddr is the NODE's own SNAT
+// address, shared by every external caller reaching that node, not a
+// per-tenant one. The prior revision of identify checked the per-IP
+// throttle BEFORE verifying the key, so 20 failed requests from anywhere
+// sharing that node locked out every legitimate tenant too. After well
+// past authFailureLimit failed attempts from one source IP, a SUBSEQUENT
+// VALID key from that EXACT same IP must still succeed immediately.
+func TestAuthStore_Identify_ValidKeyAlwaysSucceeds_EvenWhenIPThrottled(t *testing.T) {
+	a, err := newAuthStore(testAuthCfg()) // inline user "a" / sk-secret, group eng
 	if err != nil {
 		t.Fatal(err)
 	}
-	const attackerIP = "203.0.113.9:54321"
+	const sharedIP = "203.0.113.9:54321"
 
-	for i := 0; i < authFailureLimit; i++ {
+	for i := 0; i < authFailureLimit*2; i++ { // well past the threshold
 		r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
-		r.RemoteAddr = attackerIP
+		r.RemoteAddr = sharedIP
 		r.Header.Set("x-api-key", "wrong-key")
-		if _, _, ok := a.identify(r); ok {
-			t.Fatalf("attempt %d: want failure for a wrong key, got success", i)
-		}
+		a.identify(r)
+	}
+	// Sanity: the tracker really did cross the threshold — otherwise this
+	// test would not actually exercise the throttled-IP path at all.
+	if !a.authThrottled("203.0.113.9") {
+		t.Fatal("test setup: expected the tracker to be over authFailureLimit for the shared IP")
 	}
 
-	// Throttle should now be engaged for attackerIP — even the CORRECT
-	// key must be rejected.
 	valid := httptest.NewRequest("POST", "/v1/chat/completions", nil)
-	valid.RemoteAddr = attackerIP
+	valid.RemoteAddr = sharedIP
 	valid.Header.Set("Authorization", "Bearer sk-secret")
-	if _, _, ok := a.identify(valid); ok {
-		t.Fatal("want a throttled IP rejected even with a valid key")
-	}
-
-	// A different source IP must be unaffected by attackerIP's throttle.
-	other := httptest.NewRequest("POST", "/v1/chat/completions", nil)
-	other.RemoteAddr = "198.51.100.5:1111"
-	other.Header.Set("Authorization", "Bearer sk-secret")
-	if _, _, ok := a.identify(other); !ok {
-		t.Fatal("want a different source IP unaffected by another IP's throttle")
+	u, grp, ok := a.identify(valid)
+	if !ok || u.name != "a" || grp.name != "eng" {
+		t.Fatalf("want a valid key to succeed even from a throttled source IP, got user=%v group=%v ok=%v", u, grp, ok)
 	}
 }
 
-// TestAuthStore_Identify_ThrottleResetsAfterWindowExpires proves the
-// throttle is a fixed-window rate limit, not a permanent lockout: once
-// authFailureWindow has actually elapsed, the same IP's valid key works
-// again.
-func TestAuthStore_Identify_ThrottleResetsAfterWindowExpires(t *testing.T) {
-	a, err := newAuthStore(testAuthCfg()) // inline user "a" / sk-secret
+// TestAuthStore_AuthThrottled_TracksPerIPIndependently proves
+// authFailureTracker's own counting (used only by logAuthEvent's distinct
+// throttle-engaged line now, logger.go — never by identify's return
+// value, see identify's own doc comment) is still scoped per source IP:
+// one IP crossing the threshold must never affect a different IP's own
+// count.
+func TestAuthStore_AuthThrottled_TracksPerIPIndependently(t *testing.T) {
+	a, err := newAuthStore(testAuthCfg())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < authFailureLimit; i++ {
+		r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+		r.RemoteAddr = "203.0.113.9:1"
+		r.Header.Set("x-api-key", "wrong-key")
+		a.identify(r)
+	}
+	if !a.authThrottled("203.0.113.9") {
+		t.Error("want 203.0.113.9 throttled after authFailureLimit failures")
+	}
+	if a.authThrottled("198.51.100.5") {
+		t.Error("want a different, never-failing IP to remain unthrottled")
+	}
+}
+
+// TestAuthStore_AuthThrottled_ResetsAfterWindowExpires proves
+// authFailureTracker is a fixed-window counter, not a permanent record:
+// once authFailureWindow has elapsed, a source IP's earlier failures no
+// longer count toward authThrottled.
+func TestAuthStore_AuthThrottled_ResetsAfterWindowExpires(t *testing.T) {
+	a, err := newAuthStore(testAuthCfg())
 	if err != nil {
 		t.Fatal(err)
 	}
 	clock := &fakeClock{now: time.Unix(1_700_000_000, 0)}
 	a.nowFn = clock.Now
-	const attackerIP = "203.0.113.9:54321"
-
 	for i := 0; i < authFailureLimit; i++ {
 		r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
-		r.RemoteAddr = attackerIP
+		r.RemoteAddr = "203.0.113.9:1"
 		r.Header.Set("x-api-key", "wrong-key")
-		if _, _, ok := a.identify(r); ok {
-			t.Fatalf("attempt %d: want failure for a wrong key, got success", i)
-		}
+		a.identify(r)
 	}
-	blocked := httptest.NewRequest("POST", "/v1/chat/completions", nil)
-	blocked.RemoteAddr = attackerIP
-	blocked.Header.Set("Authorization", "Bearer sk-secret")
-	if _, _, ok := a.identify(blocked); ok {
+	if !a.authThrottled("203.0.113.9") {
 		t.Fatal("want throttled before the window elapses")
 	}
 
 	clock.Advance(authFailureWindow + time.Second)
 
-	recovered := httptest.NewRequest("POST", "/v1/chat/completions", nil)
-	recovered.RemoteAddr = attackerIP
-	recovered.Header.Set("Authorization", "Bearer sk-secret")
-	if _, _, ok := a.identify(recovered); !ok {
-		t.Fatal("want the same IP's valid key to work again once authFailureWindow has elapsed")
+	if a.authThrottled("203.0.113.9") {
+		t.Error("want the throttle cleared once authFailureWindow has elapsed")
+	}
+}
+
+// --- authFailureTracker: direct unit tests ---
+
+func TestAuthFailureTracker_IncrementAndGet(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	tr := newAuthFailureTracker(func() time.Time { return now })
+
+	if got := tr.get("1.2.3.4"); got != 0 {
+		t.Errorf("get on untracked ip = %d, want 0", got)
+	}
+	for i := int64(1); i <= 5; i++ {
+		if got := tr.increment("1.2.3.4"); got != i {
+			t.Errorf("increment #%d = %d, want %d", i, got, i)
+		}
+	}
+	if got := tr.get("1.2.3.4"); got != 5 {
+		t.Errorf("get after 5 increments = %d, want 5", got)
+	}
+}
+
+func TestAuthFailureTracker_WindowExpiry(t *testing.T) {
+	clock := &fakeClock{now: time.Unix(1_700_000_000, 0)}
+	tr := newAuthFailureTracker(clock.Now)
+
+	tr.increment("1.2.3.4")
+	tr.increment("1.2.3.4")
+	if got := tr.get("1.2.3.4"); got != 2 {
+		t.Fatalf("get = %d, want 2", got)
+	}
+
+	clock.Advance(authFailureWindow + time.Second)
+	if got := tr.get("1.2.3.4"); got != 0 {
+		t.Errorf("get after window expiry = %d, want 0", got)
+	}
+	if got := tr.increment("1.2.3.4"); got != 1 {
+		t.Errorf("increment after window expiry = %d, want 1 (fresh window)", got)
+	}
+}
+
+// TestAuthFailureTracker_BoundsMemoryViaRotation is the regression for
+// security review round 2's important finding 1: the tracker must never
+// grow past 2×authFailureMapCap total entries — filling it past
+// authFailureMapCap distinct IPs must trigger an O(1) generation
+// rotation, not unbounded growth.
+func TestAuthFailureTracker_BoundsMemoryViaRotation(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	tr := newAuthFailureTracker(func() time.Time { return now })
+
+	for i := 0; i < authFailureMapCap+10; i++ {
+		tr.increment(fmt.Sprintf("10.%d.%d.%d", i/65536, (i/256)%256, i%256))
+	}
+
+	tr.mu.Lock()
+	total := len(tr.current) + len(tr.previous)
+	currentLen := len(tr.current)
+	tr.mu.Unlock()
+	if total > 2*authFailureMapCap {
+		t.Errorf("tracked entries = %d, want <= %d (2x cap)", total, 2*authFailureMapCap)
+	}
+	if currentLen > authFailureMapCap {
+		t.Errorf("current generation = %d entries, want <= %d", currentLen, authFailureMapCap)
 	}
 }
 

@@ -122,3 +122,61 @@ func TestLogAuthEvent_Success_NeverRateLimited(t *testing.T) {
 		t.Fatalf("auth-ok lines = %d, want 5 (success logging must never be rate-limited), output=%q", n, out)
 	}
 }
+
+// TestLogAuthEvent_ThrottleEngaged_DistinctLine proves logAuthEvent emits
+// a distinct "auth throttle:" line, not the routine "auth failed:" one,
+// once a source IP has crossed authFailureLimit (security review round
+// 2, 2026-08-22, important finding 5) — an operator seeing this line
+// knows a SOURCE, not just one request, needs attention.
+func TestLogAuthEvent_ThrottleEngaged_DistinctLine(t *testing.T) {
+	gw := newTestGatewayForLogger(t)
+	clock := &fakeClock{now: time.Unix(1_700_000_000, 0)}
+	gw.auth.nowFn = clock.Now
+
+	r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	r.RemoteAddr = "203.0.113.9:1234"
+	for i := 0; i < authFailureLimit; i++ {
+		gw.auth.recordAuthFailure(clientIP(r))
+	}
+
+	out := captureStderr(t, func() {
+		gw.logAuthEvent(false, "", r)
+	})
+
+	if !strings.Contains(out, "auth throttle:") {
+		t.Errorf("want an 'auth throttle:' line once the IP has crossed the limit, got %q", out)
+	}
+	if strings.Contains(out, "auth failed:") {
+		t.Errorf("want the routine 'auth failed:' line suppressed in favor of the distinct throttle line, got %q", out)
+	}
+}
+
+// TestLogAuthEvent_Failure_SuppressedCountReported proves the routine
+// failure line's rate-limit gate reports how many events it suppressed
+// (security review round 2, 2026-08-22, important finding 6): a single
+// global gate would otherwise make several rapid failures within one
+// window indistinguishable from a single one — the next line actually
+// written must name how many were collapsed into it.
+func TestLogAuthEvent_Failure_SuppressedCountReported(t *testing.T) {
+	gw := newTestGatewayForLogger(t)
+	clock := &fakeClock{now: time.Unix(1_700_000_000, 0)}
+	gw.auth.nowFn = clock.Now
+
+	r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	r.RemoteAddr = "203.0.113.9:1234"
+
+	captureStderr(t, func() {
+		gw.logAuthEvent(false, "", r) // logged (first call on a fresh gate)
+		gw.logAuthEvent(false, "", r) // suppressed #1
+		gw.logAuthEvent(false, "", r) // suppressed #2
+	})
+
+	clock.Advance(authFailureLogEvery + time.Second)
+	out := captureStderr(t, func() {
+		gw.logAuthEvent(false, "", r)
+	})
+
+	if !strings.Contains(out, "2 more suppressed since last log") {
+		t.Errorf("want the next line to report 2 suppressed events, got %q", out)
+	}
+}
