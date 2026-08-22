@@ -190,6 +190,7 @@ config accepts them as YAML, which decodes to the same JSON shape.
 | `redis` | `RedisConfig` | — | Distributed limit-counter backend. Omitted means in-process counters only (per-replica, approximate across multiple Traefik instances). |
 | `retry` | `RetryConfig` | `{}` (disabled) | Same-provider retry for transient upstream failures — see [Retry](#retry). Omitted or `enabled: false` means no retry: every request makes exactly one upstream attempt, byte-identical to a gateway built before this field existed. |
 | `cache` | `CacheConfig` | `{}` (disabled) | Opt-in Redis-backed response cache for unified non-streaming chat/embeddings — see [Caching](#caching). Omitted or `enabled: false` means no caching, byte-identical to a gateway built before this field existed. |
+| `breaker` | `BreakerConfig` | `{}` (every default) | Per-provider discovery circuit breaker — see [Provider health (discovery circuit breaker)](#provider-health-discovery-circuit-breaker). Every field is individually zero-means-default; a provider whose discovery never fails is unaffected regardless of what this block contains. |
 | `admin` | `*AdminConfig` | `nil` (disabled) | Read-only admin dashboard — see [Admin](#admin). `nil` or `enabled: false` means the `/admin*` routes are not registered at all. |
 | `modelAliases` | `map[string]string` | `{}` | Operator-defined alias id → target model id — see [Model aliases](#model-aliases). Omitted or empty means no aliases, byte-identical to a gateway built before this field existed. |
 | `modelMeta` | `map[string]*ModelMetaConfig` | `{}` | Per-model context-window and cost overrides, keyed by exact `provider/model` or a bare model id — see [Model metadata](#model-metadata). Omitted or empty means no overrides; every model's metadata still resolves through discovery and the built-in table. |
@@ -307,6 +308,14 @@ own is governed purely by their group's — see
 | `enabled` | `bool` | `false` | `false`: no caching, `/v1/chat/completions` and `/v1/embeddings` behave byte-identically to a gateway built before this field existed. `true`: caching per [Caching](#caching) below — requires `redis` to be configured too, or it silently stays off (one warning logged). |
 | `ttl` | `string` (Go duration) | `5m` | How long a cached response stays valid. Invalid duration string is a construction error. |
 | `maxBodyBytes` | `int` | `1048576` (1MiB) | Largest response body still eligible for caching; a larger one is skipped (never stored, never an error). Maximum accepted value is `8388608` (8MiB) — above that is a construction error. |
+
+### `BreakerConfig`
+
+| Field | Type | Default | Semantics |
+|---|---|---|---|
+| `failureThreshold` | `int` | `3` | Consecutive failed discovery refreshes that open the breaker — see [Provider health](#provider-health-discovery-circuit-breaker). `0` uses the default. Must be between `1` and `100`, or construction fails. |
+| `openDuration` | `string` (Go duration) | `1m` | Base backoff a newly opened breaker waits before its first half-open probe; doubles on every further failed probe, capped at `maxOpenDuration`. Invalid or non-positive duration string is a construction error. |
+| `maxOpenDuration` | `string` (Go duration) | `30m` | Ceiling on the backoff `openDuration` doubles into. Must be `>= openDuration` and no more than `24h`, or construction fails. |
 
 ### `AdminConfig`
 
@@ -897,6 +906,58 @@ cached bodies for the same request.
   rate-limited) and never fails the request; the upstream call still
   happens and the client still gets a correct answer.
 
+## Provider health (discovery circuit breaker)
+
+A per-provider, in-memory, three-state circuit breaker (`closed` →
+`open` → `half-open`) driven entirely by `discovery` refresh outcomes —
+never by `/v1/chat/completions` or any other request-path traffic. It
+exists so a provider whose discovery endpoint fails on every cycle (an
+expired API key, a typo'd `baseUrl`, an upstream outage) backs off
+instead of being re-probed on every single `discoveryInterval` forever,
+and so the admin dashboard can show that provider as visibly broken
+instead of indistinguishable from a healthy one.
+
+- **States**: `closed` is normal — refreshes run on the provider's own
+  `discoveryInterval`, exactly as if this feature did not exist.
+  `breaker.failureThreshold` (default `3`) CONSECUTIVE failed refreshes
+  open it; any success in between resets the count to zero. `open` skips
+  refresh attempts until a backoff window elapses, starting at
+  `breaker.openDuration` (default `1m`) and doubling on every further
+  failed probe, capped at `breaker.maxOpenDuration` (default `30m`).
+  `half-open` is exactly one probe refresh, deciding whether to close the
+  breaker again (success) or reopen it with a doubled backoff (failure).
+- **Never retries more often than plain interval throttling.** The
+  backoff window is an ADDITIONAL gate on top of `discoveryInterval`, not
+  a replacement for it — whichever of the two is currently longer wins.
+  With every default, `breaker.maxOpenDuration` (30m) is shorter than the
+  default `discoveryInterval` (1h), so under default settings the plain
+  interval remains the sole binding constraint and a persistently broken
+  provider is refreshed at exactly the same cadence a deployment without
+  this feature would already see — never more.
+- **Classification**: any refresh outcome with a non-nil error counts as
+  a failure, including a malformed-`baseUrl` request-build failure — this
+  is deliberately NOT the same classification `retry` above uses for
+  deciding whether to retry a request, since a permanently broken
+  provider must still be able to trip the breaker. A client-canceled
+  context (plugin shutdown, an outer context canceled upstream) is
+  NEUTRAL: it counts as neither a failure nor a success, and never resets
+  or closes an open breaker.
+- **A provider that never fails is completely unaffected** — every
+  default is chosen so `closed` never diverges from plain
+  `discoveryInterval` gating.
+- **Scope**: this reflects the DISCOVERY endpoint only. A provider whose
+  model listing 401s while its actual completion endpoint works fine
+  (common behind a proxy that exposes chat but not model listing) is
+  reported unhealthy here despite being entirely usable for real traffic
+  — this signal must never be the sole reason to refuse routing to a
+  provider.
+- **Per-pod, not distributed.** Each replica learns a provider's
+  discovery health independently — a latency optimization, not a
+  correctness guarantee. Three replicas disagreeing briefly after a
+  provider starts failing is expected, not a bug.
+- **Dashboard**: the Providers tab shows a provider's current state and,
+  while open, when it will next be probed — see [Admin](#admin).
+
 ## Unified vs. passthrough
 
 | | Unified (`/v1/...`) | Native passthrough (`/{provider}/...`) |
@@ -1057,8 +1118,12 @@ or in CI.
   per-model minute figures, since nothing displays them; the dashboard's
   per-model badge falls back to a day-window-only detail instead), and
   `modelMeta` (the resolved context window and cost per known model —
-  see [Model metadata](#model-metadata)); each alias entry carries its
-  own `modelMeta` too. `usage`
+  see [Model metadata](#model-metadata)), and `healthState`/`openUntil`
+  (the discovery circuit breaker's current state — `"closed"`, `"open"`,
+  or `"half-open"` — and, while open, when it will next attempt a
+  half-open probe; see [Provider health](#provider-health-discovery-circuit-breaker)).
+  `openUntil` is the zero time when `healthState` is not `"open"`. Each
+  alias entry carries its own `modelMeta` too. `usage`
   returns every user's and every group's
   current-window counter values — `requestsPerMinute`, `requestsPerDay`,
   `tokensInPerDay`/`tokensOutPerDay`, `tokensInPerMonth`/
