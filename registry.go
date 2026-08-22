@@ -547,17 +547,22 @@ func (m *modelRegistry) refreshProvider(name string, st *providerState, adapter 
 		}
 	}()
 
+	// Both cancels are deferred: this function has a recover above, so a
+	// panicking listModels would skip an inline cancel() and hold the
+	// timer until backgroundRefreshTimeout fires. Deferring costs nothing
+	// (the function ends right after the capture) and survives the panic
+	// path.
 	fctx, cancel := context.WithTimeout(context.Background(), backgroundRefreshTimeout)
+	defer cancel()
 	ids, err = adapter.listModels(fctx)
-	cancel()
 
 	// Own timeout budget, review fix (SHOULD-4) — see warmFill's
 	// identical comment: reusing fctx here would hand the metadata fetch
 	// an already-spent context on every refresh whose listModels call
 	// ran long, not just a slow or timed-out one.
 	mctx, mcancel := context.WithTimeout(context.Background(), backgroundRefreshTimeout)
+	defer mcancel()
 	m.captureModelMetadata(mctx, name, adapter, st)
-	mcancel()
 }
 
 // splitConfiguredProvider reports whether id has "prefix/rest" form where
