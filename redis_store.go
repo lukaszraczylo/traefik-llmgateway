@@ -120,6 +120,75 @@ func (s *redisStore) incrMulti(entries []counterIncr) ([]int64, error) {
 	return out, nil
 }
 
+// incrAndGetMulti implements counterStore: every entry's INCRBY+EXPIRE pair
+// AND every read key's GET, sent as ONE pipeline (perf review round 3,
+// 2026-08-22) — 2*len(entries)+len(reads) commands, one round trip
+// regardless of how many of each there are, fusing checkAndCount's own
+// request-counter increments with its token/cost budget reads (limits.go's
+// counterStore doc comment explains why that fusion is safe). Reply layout
+// mirrors incrMulti's own: entry i's INCRBY reply sits at reply index 2*i
+// (EXPIRE's reply at 2*i+1 is not otherwise inspected, same reasoning as
+// incrMulti's own doc comment), followed by one GET reply per read key, in
+// order — a missing read key (RESP null bulk) maps to 0, matching
+// getBatch's own convention. The same at-least-once semantics as incrMulti
+// (see its own doc comment) apply to the INCRBY half of this call; the GET
+// half is read-only and carries no such caveat.
+func (s *redisStore) incrAndGetMulti(entries []counterIncr, reads []string) ([]int64, []int64, error) {
+	cmds := make([][]string, 0, len(entries)*2+len(reads))
+	for _, e := range entries {
+		cmds = append(cmds,
+			[]string{"INCRBY", e.key, strconv.FormatInt(e.delta, 10)},
+			[]string{"EXPIRE", e.key, strconv.FormatInt(ttlToSeconds(e.ttl), 10)},
+		)
+	}
+	for _, k := range reads {
+		cmds = append(cmds, []string{"GET", k})
+	}
+
+	replies, err := s.client.pipeline(cmds)
+	if err != nil {
+		return nil, nil, fmt.Errorf("redisStore: incrAndGetMulti: %w", err)
+	}
+	if len(replies) != len(cmds) {
+		return nil, nil, fmt.Errorf("redisStore: incrAndGetMulti: expected %d replies, got %d", len(cmds), len(replies))
+	}
+
+	incrVals := make([]int64, len(entries))
+	for i, e := range entries {
+		reply := replies[i*2]
+		if re, ok := reply.(error); ok {
+			return nil, nil, fmt.Errorf("redisStore: incrAndGetMulti %q: INCRBY failed: %w", e.key, re)
+		}
+		v, ok := reply.(int64)
+		if !ok {
+			return nil, nil, fmt.Errorf("redisStore: incrAndGetMulti %q: unexpected INCRBY reply type %T", e.key, reply)
+		}
+		incrVals[i] = v
+	}
+
+	base := len(entries) * 2
+	readVals := make([]int64, len(reads))
+	for i, k := range reads {
+		reply := replies[base+i]
+		if reply == nil {
+			continue // missing key -> 0, matching getBatch's own convention
+		}
+		if re, ok := reply.(error); ok {
+			return nil, nil, fmt.Errorf("redisStore: incrAndGetMulti %q: GET failed: %w", k, re)
+		}
+		b, ok := reply.([]byte)
+		if !ok {
+			return nil, nil, fmt.Errorf("redisStore: incrAndGetMulti %q: unexpected GET reply type %T", k, reply)
+		}
+		n, perr := strconv.ParseInt(string(b), 10, 64)
+		if perr != nil {
+			return nil, nil, fmt.Errorf("redisStore: incrAndGetMulti %q: non-integer value %q: %w", k, b, perr)
+		}
+		readVals[i] = n
+	}
+	return incrVals, readVals, nil
+}
+
 // getMulti implements counterStore: one pipelined GET per key
 // (respClient.getBatch), a single round trip regardless of len(keys) —
 // used by limiter.currentUsage (admin dashboard, spec §4) to read a

@@ -213,13 +213,38 @@ type counterStore interface {
 	// call; memoryStore's in-process map needs no such optimization but
 	// implements the same contract for interface conformance), returning
 	// each entry's new counter value in the same order (perf review,
-	// 2026-08-21: checkAndCount/account previously paid one round trip per
-	// counter — up to 9 and 27 respectively for a 3-scope request — this
-	// collapses each down to one). An error fails the whole batch, never a
-	// partial result, mirrored by the limiter's storeIncrMulti as a single
-	// fail-open/fail-closed decision, the same shape storeGetMulti already
-	// applies to a batch read.
+	// 2026-08-21: account previously paid one round trip per counter — up
+	// to 27 for a 3-scope request with all three metrics nonzero — this
+	// collapses it down to one; checkAndCount's own increments moved on to
+	// incrAndGetMulti below, perf review round 3, 2026-08-22). An error
+	// fails the whole batch, never a partial result, mirrored by the
+	// limiter's storeIncrMulti as a single fail-open/fail-closed decision,
+	// the same shape storeGetMulti already applies to a batch read.
 	incrMulti(entries []counterIncr) ([]int64, error)
+	// incrAndGetMulti applies incrMulti's own per-entry contract to every
+	// entry in entries AND reads every key in reads, in ONE round trip
+	// where the backend supports it (redisStore pipelines every entry's
+	// INCRBY+EXPIRE pair together with every read key's GET into a single
+	// pipeline call; memoryStore's in-process map needs no such
+	// optimization but implements the same contract for interface
+	// conformance) — fusing checkAndCount's request-counter increments
+	// with its own token/cost budget reads into the single round trip
+	// that used to cost up to 9 separate ones for a 2-scope request, both
+	// fully limited (perf review round 3, 2026-08-22: reads carries the
+	// tokin/tokout/cost keys checkAndCount's own evaluateScope helper used
+	// to read via its own separate storeGetMulti calls — see
+	// buildBudgetProbes, below). This is safe because every read key is
+	// DISJOINT from every entry's key (req:* vs tokin:*/tokout:*/cost:*),
+	// and tokens/cost are only ever WRITTEN by account() after the
+	// upstream response completes — never by this call — so there is no
+	// read-after-write ordering hazard in reading them alongside the
+	// increments. Returns incrMulti's own per-entry post-increment values
+	// and getMulti's own per-key values (0 for a missing/expired key),
+	// each in entries'/reads' own order. An error fails the whole batch,
+	// mirrored by the limiter's storeIncrAndGetMulti as one
+	// fail-open/fail-closed decision, the same shape storeIncrMulti/
+	// storeGetMulti already apply to their own separate batches.
+	incrAndGetMulti(entries []counterIncr, reads []string) (incrVals, readVals []int64, err error)
 }
 
 // memoryEntry is one counter's value and expiry in memoryStore.
@@ -412,6 +437,19 @@ func (m *memoryStore) incrMulti(entries []counterIncr) ([]int64, error) {
 		out[i] = m.applyIncr(e.key, e.delta, clampTTL(e.ttl, e.enforceTTL))
 	}
 	return out, nil
+}
+
+// incrAndGetMulti implements counterStore by composing incrMulti and
+// getMulti: memoryStore's in-process map access is already effectively
+// free per key, so there is no round-trip cost to fuse away here — this
+// exists purely so memoryStore satisfies counterStore's incrAndGetMulti
+// contract (perf review round 3, 2026-08-22) for the limiter's nil-store
+// fallback path and its own failOpen fallback, mirroring incrMulti/
+// getMulti's own "implements the contract, buys nothing locally" role.
+func (m *memoryStore) incrAndGetMulti(entries []counterIncr, reads []string) ([]int64, []int64, error) {
+	incrVals, _ := m.incrMulti(entries) // memoryStore.incrMulti never errors
+	readVals, _ := m.getMulti(reads)    // memoryStore.getMulti never errors
+	return incrVals, readVals, nil
 }
 
 // sweepLocked deletes every expired entry. Callers must hold m.mu.
@@ -783,9 +821,11 @@ func (l *limiter) failPolicyGetMulti(keys []string) ([]int64, bool) {
 // trip against the configured store (or the in-process fallback) for the
 // whole slice, applying the identical fail-open/fail-closed/latched
 // policy storeIncrBy applies per key. ok is false only in the fail-closed
-// case — a caller must refuse the request (checkAndCount) or drop the
-// sample (account) for that, rather than treating a nil/short slice as
-// real counter readings.
+// case — a caller must drop the sample (account) or skip the write
+// (countTargetRequests, recordProviderAttempt) for that, rather than
+// treating a nil/short slice as real counter readings. checkAndCount's own
+// increments moved to storeIncrAndGetMulti (perf review round 3,
+// 2026-08-22), so it is no longer a caller of this method.
 func (l *limiter) storeIncrMulti(entries []counterIncr) (v []int64, ok bool) {
 	if l.store == nil {
 		v, _ = l.fallback.incrMulti(entries) // fallback never errors
@@ -809,6 +849,40 @@ func (l *limiter) failPolicyIncrMulti(entries []counterIncr) ([]int64, bool) {
 	}
 	v, _ := l.fallback.incrMulti(entries)
 	return v, true
+}
+
+// storeIncrAndGetMulti mirrors storeIncrMulti for checkAndCount's fused
+// admission round trip (perf review round 3, 2026-08-22): one call against
+// the configured store (or the in-process fallback) for BOTH entries' own
+// increments and reads' own current values, applying the identical
+// fail-open/fail-closed/latched policy storeIncrMulti/storeGetMulti already
+// apply to their own separate batches. ok is false only in the fail-closed
+// case — checkAndCount must refuse the request for that, rather than
+// treating a nil/short slice as real counter readings.
+func (l *limiter) storeIncrAndGetMulti(entries []counterIncr, reads []string) (incrVals, readVals []int64, ok bool) {
+	if l.store == nil {
+		incrVals, readVals, _ = l.fallback.incrAndGetMulti(entries, reads) // fallback never errors
+		return incrVals, readVals, true
+	}
+	if l.storeLatched() {
+		return l.failPolicyIncrAndGetMulti(entries, reads)
+	}
+	incrVals, readVals, err := l.store.incrAndGetMulti(entries, reads)
+	if err == nil {
+		return incrVals, readVals, true
+	}
+	l.recordStoreFailure(err)
+	return l.failPolicyIncrAndGetMulti(entries, reads)
+}
+
+// failPolicyIncrAndGetMulti mirrors failPolicyIncrMulti for the fused
+// admission round trip.
+func (l *limiter) failPolicyIncrAndGetMulti(entries []counterIncr, reads []string) ([]int64, []int64, bool) {
+	if !l.failOpen {
+		return nil, nil, false
+	}
+	incrVals, readVals, _ := l.fallback.incrAndGetMulti(entries, reads)
+	return incrVals, readVals, true
 }
 
 // storeDownViolation is the violation checkAndCount/budgetViolation return
@@ -904,30 +978,107 @@ func (l *limiter) getCounter(kind, id, metric, window string, t time.Time) (int6
 // counts by.
 const checkAndCountKeysPerScope = 3
 
+// budgetProbe names one token/cost budget checkAndCount's fused admission
+// round trip must evaluate — the same values the pre-fusion implementation
+// checked via its own evaluateScope/budgetViolation/tokenBudgetViolation
+// helpers (removed by perf review round 3, 2026-08-22), now inlined into
+// checkAndCount itself so their GET reads can ride the same round trip as
+// checkAndCount's own request-counter increments (see incrAndGetMulti,
+// counterStore's own doc comment above, for why that fusion is safe).
+type budgetProbe struct {
+	name     string // e.g. "tokens-per-day" — echoed into the violation message verbatim
+	window   string // windowDay or windowMonth; retryAfterSeconds is computed against this
+	scopeIdx int    // index into the scopes slice checkAndCount was given
+	limit    int64  // already micro-USD for a cost probe (usdToMicros); always > 0
+	keyStart int    // index into buildBudgetProbes' own reads slice
+	tokens   bool   // true: keyStart/keyStart+1 are tokin/tokout, summed; false: keyStart alone is cost
+}
+
+// buildBudgetProbes returns, for every scope in scopes that has a
+// TokensPerDay/TokensPerMonth/CostPerDayUSD/CostPerMonthUSD limit set
+// (limit<=0 means unlimited and needs no read at all — the same
+// "limit<=0 returns immediately, before touching the store" short-circuit
+// the pre-fusion budgetViolation/tokenBudgetViolation applied), the probe
+// describing that budget and the flat list of counterStore keys
+// checkAndCount's fused round trip must read to evaluate it. Probes are
+// appended in the SAME order the pre-fusion evaluateScope checked them,
+// scope by scope: tokens-per-day, tokens-per-month, cost-per-day,
+// cost-per-month within each scope, scopes themselves in their own given
+// order — so a caller that walks probes in order after the round trip
+// completes reproduces the identical violation precedence.
+func buildBudgetProbes(scopes []limitScope, now time.Time) (probes []budgetProbe, reads []string) {
+	for i, sc := range scopes {
+		if sc.limits == nil {
+			continue
+		}
+		lim := sc.limits
+		add := func(name, window string, limit int64, tokens bool) {
+			if limit <= 0 {
+				return
+			}
+			probes = append(probes, budgetProbe{scopeIdx: i, name: name, window: window, limit: limit, tokens: tokens, keyStart: len(reads)})
+			if tokens {
+				reads = append(reads,
+					windowKey(sc.kind, sc.id, metricTokIn, window, now),
+					windowKey(sc.kind, sc.id, metricTokOut, window, now))
+			} else {
+				reads = append(reads, windowKey(sc.kind, sc.id, metricCost, window, now))
+			}
+		}
+		add("tokens-per-day", windowDay, lim.TokensPerDay, true)
+		add("tokens-per-month", windowMonth, lim.TokensPerMonth, true)
+		add("cost-per-day", windowDay, usdToMicros(lim.CostPerDayUSD), false)
+		add("cost-per-month", windowMonth, usdToMicros(lim.CostPerMonthUSD), false)
+	}
+	return probes, reads
+}
+
 // checkAndCount increments every scope's req:min, req:day, and req:hour
 // counters — unconditionally, before any evaluation, so a request that
 // ultimately gets refused by one scope's limit still counts toward every
-// other scope's rate tracking — then evaluates each scope's set limits in
-// order and returns the first violation found, or nil if the request may
-// proceed. If the batch fails closed (a configured store errored and
+// other scope's rate tracking — then evaluates each scope's set limits, in
+// order, and returns the first violation found, or nil if the request may
+// proceed. If the round trip fails closed (a configured store errored and
 // failOpen is false), it returns a storeDownViolation immediately — the
 // request is refused rather than evaluated against partial or
 // fallback-only counters.
 //
-// Every scope's three counters are built into ONE storeIncrMulti call
-// (perf review, 2026-08-21): a 3-scope request (user, group, total —
-// withTotalScope, routes_unified.go) previously paid up to 9 separate
-// round trips here, one per counter. incrMulti's own reply already
-// carries each entry's post-increment value in order, so no extra read
-// is needed to recover req:min/req:day for evaluation below — only
-// req:hour's slot goes unread, since windowHour is stats-only (its own
-// doc comment) and never evaluated.
+// Every scope's three increments AND every scope's token/cost budget reads
+// ride ONE storeIncrAndGetMulti round trip (perf review round 3,
+// 2026-08-22, fusing on top of round 1's own "one round trip for the
+// increments" fix): a 2-scope request (user, group — buildLimitScopes,
+// routes_unified.go) with both scopes fully limited previously paid that
+// one round trip for the increments, PLUS up to 4 more SEPARATE, SERIAL
+// round trips per scope for its token/cost budgets (evaluateScope calling
+// tokenBudgetViolation twice and budgetViolation twice) — 9 total before
+// this fix. incrAndGetMulti's own reply already carries each entry's
+// post-increment value AND each budget key's current value, in order, so
+// evaluation below needs no further store call at all. This is safe
+// because every budget key (tokin/tokout/cost:*) is disjoint from every
+// increment's key (req:*), and tokens/cost are only ever written by
+// account() AFTER the upstream response completes — never by this call —
+// so reading them alongside the increments carries no read-after-write
+// hazard; see incrAndGetMulti's own doc comment (counterStore, above) for
+// the full argument.
+//
+// Violation precedence is unchanged from the pre-fusion implementation:
+// scopes are evaluated in their own given order (buildLimitScopes puts a
+// user before their group; withTotalScope appends the synthetic total
+// scope last), and within one scope: requests-per-minute, requests-per-day,
+// tokens-per-day, tokens-per-month, cost-per-day, cost-per-month — the
+// first violation found anywhere in that walk is returned immediately, and
+// evaluation of any later scope never runs. evaluateScope/budgetViolation/
+// tokenBudgetViolation (the pre-fusion, separate-round-trip
+// implementation) are removed by this change — buildBudgetProbes plus the
+// loop below inline their exact logic instead, which is what lets their
+// store reads ride this one round trip.
 //
 // Requests limits compare against the value just incremented in this call.
 // Token and cost limits compare against the value already accumulated by
-// account (via get): a request that would start over budget is refused,
-// but because usage is only known after the upstream call completes, one
-// request may still push a scope over its budget — an accepted trade-off.
+// account (via this call's own reads): a request that would start over
+// budget is refused, but because usage is only known after the upstream
+// call completes, one request may still push a scope over its budget — an
+// accepted trade-off, unchanged from before this round.
 func (l *limiter) checkAndCount(scopes []limitScope) *limitViolation {
 	now := l.now()
 
@@ -939,58 +1090,43 @@ func (l *limiter) checkAndCount(scopes []limitScope) *limitViolation {
 			newCounterIncr(sc.kind, sc.id, metricReq, windowHour, now, 1, hourWindowTTL),
 		)
 	}
+	probes, reads := buildBudgetProbes(scopes, now)
 
-	vals, ok := l.storeIncrMulti(entries)
-	if !ok || len(vals) != len(entries) {
+	incrVals, readVals, ok := l.storeIncrAndGetMulti(entries, reads)
+	if !ok || len(incrVals) != len(entries) || len(readVals) != len(reads) {
 		return storeDownViolation()
 	}
 
 	for i, sc := range scopes {
-		minCount := vals[i*checkAndCountKeysPerScope]
-		dayCount := vals[i*checkAndCountKeysPerScope+1]
-		// vals[i*checkAndCountKeysPerScope+2] is the req:hour count —
+		if sc.limits == nil {
+			continue
+		}
+		minCount := incrVals[i*checkAndCountKeysPerScope]
+		dayCount := incrVals[i*checkAndCountKeysPerScope+1]
+		// incrVals[i*checkAndCountKeysPerScope+2] is the req:hour count —
 		// stats-only, deliberately never read here.
-		if v := l.evaluateScope(sc, minCount, dayCount, now); v != nil {
+		if v := requestLimitViolation(sc, "requests-per-minute", sc.limits.RequestsPerMinute, minCount, windowMin, now); v != nil {
 			return v
 		}
-	}
-	return nil
-}
-
-// evaluateScope checks one scope's already-set limits against its
-// just-incremented request counts and its accumulated token/cost counts.
-// A nil limits field means nothing to evaluate for this scope — the real,
-// commonly-exercised path since the v0.21 accounting fix: buildLimitScopes
-// (routes_unified.go) now ALWAYS builds a user and a group scope, so a
-// limit-less user or group reaches here on every request, with its req
-// counters already incremented by checkAndCount (that increment runs before
-// any evaluation) and nothing for this function to enforce against them.
-// This is exactly the mechanism that decouples accounting from
-// enforcement: the scope is counted unconditionally, evaluated only when it
-// actually has a limit configured.
-func (l *limiter) evaluateScope(sc limitScope, minCount, dayCount int64, now time.Time) *limitViolation {
-	if sc.limits == nil {
-		return nil
-	}
-	lim := sc.limits
-
-	if v := requestLimitViolation(sc, "requests-per-minute", lim.RequestsPerMinute, minCount, windowMin, now); v != nil {
-		return v
-	}
-	if v := requestLimitViolation(sc, "requests-per-day", lim.RequestsPerDay, dayCount, windowDay, now); v != nil {
-		return v
-	}
-	if v := l.tokenBudgetViolation(sc, "tokens-per-day", lim.TokensPerDay, windowDay, now); v != nil {
-		return v
-	}
-	if v := l.tokenBudgetViolation(sc, "tokens-per-month", lim.TokensPerMonth, windowMonth, now); v != nil {
-		return v
-	}
-	if v := l.budgetViolation(sc, metricCost, "cost-per-day", usdToMicros(lim.CostPerDayUSD), windowDay, now); v != nil {
-		return v
-	}
-	if v := l.budgetViolation(sc, metricCost, "cost-per-month", usdToMicros(lim.CostPerMonthUSD), windowMonth, now); v != nil {
-		return v
+		if v := requestLimitViolation(sc, "requests-per-day", sc.limits.RequestsPerDay, dayCount, windowDay, now); v != nil {
+			return v
+		}
+		for _, p := range probes {
+			if p.scopeIdx != i {
+				continue
+			}
+			used := readVals[p.keyStart]
+			if p.tokens {
+				used += readVals[p.keyStart+1]
+			}
+			if used < p.limit {
+				continue
+			}
+			return &limitViolation{
+				message:    fmt.Sprintf("%s %q exceeded %s budget", sc.kind, sc.id, p.name),
+				retryAfter: retryAfterSeconds(now, p.window),
+			}
+		}
 	}
 	return nil
 }
@@ -1003,60 +1139,6 @@ func requestLimitViolation(sc limitScope, name string, limit, count int64, windo
 	}
 	return &limitViolation{
 		message:    fmt.Sprintf("%s %q exceeded %s limit (%d)", sc.kind, sc.id, name, limit),
-		retryAfter: retryAfterSeconds(now, window),
-	}
-}
-
-// budgetViolation reports a violation when the scope's accumulated
-// counter for metric/window is already at or above limit. limit<=0 means
-// unlimited. A failed-closed read (configured store errored, failOpen
-// false) returns storeDownViolation rather than silently passing the
-// check — a store outage must never look the same as staying under
-// budget.
-func (l *limiter) budgetViolation(sc limitScope, metric, name string, limit int64, window string, now time.Time) *limitViolation {
-	if limit <= 0 {
-		return nil
-	}
-	used, ok := l.getCounter(sc.kind, sc.id, metric, window, now)
-	if !ok {
-		return storeDownViolation()
-	}
-	if used < limit {
-		return nil
-	}
-	return &limitViolation{
-		message:    fmt.Sprintf("%s %q exceeded %s budget", sc.kind, sc.id, name),
-		retryAfter: retryAfterSeconds(now, window),
-	}
-}
-
-// tokenBudgetViolation mirrors budgetViolation for a token limit, which —
-// unlike a request or cost limit — enforces a TOTAL budget over two split
-// counters (metricTokIn, metricTokOut; v0.2 data-layer task): it reads
-// both of the scope's accumulated tok-in/tok-out counters for window in
-// ONE storeGetMulti round trip and compares their sum against limit.
-// limit<=0 means unlimited. A fail-closed read returns
-// storeDownViolation, matching budgetViolation's own contract; name is
-// still e.g. "tokens-per-day", so the violation message still says
-// "tokens" regardless of which direction pushed the total over.
-func (l *limiter) tokenBudgetViolation(sc limitScope, name string, limit int64, window string, now time.Time) *limitViolation {
-	if limit <= 0 {
-		return nil
-	}
-	keys := []string{
-		windowKey(sc.kind, sc.id, metricTokIn, window, now),
-		windowKey(sc.kind, sc.id, metricTokOut, window, now),
-	}
-	vals, ok := l.storeGetMulti(keys)
-	if !ok || len(vals) != 2 {
-		return storeDownViolation()
-	}
-	used := vals[0] + vals[1]
-	if used < limit {
-		return nil
-	}
-	return &limitViolation{
-		message:    fmt.Sprintf("%s %q exceeded %s budget", sc.kind, sc.id, name),
 		retryAfter: retryAfterSeconds(now, window),
 	}
 }

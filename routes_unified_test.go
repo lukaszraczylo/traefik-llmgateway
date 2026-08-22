@@ -87,6 +87,10 @@ func (alwaysErrStore) incrMulti([]counterIncr) ([]int64, error) {
 	return nil, errStoreDownStub
 }
 
+func (alwaysErrStore) incrAndGetMulti([]counterIncr, []string) ([]int64, []int64, error) {
+	return nil, nil, errStoreDownStub
+}
+
 // TestHandleChat_HappyPath_NonStreaming_AccountsUsage drives a full
 // chat-completion request through Gateway.ServeHTTP against a fake
 // openai-shaped upstream, and asserts the response is forwarded verbatim
@@ -1755,7 +1759,7 @@ func TestCacheCaptureWriter_ImplicitStatus_CapturesContentType(t *testing.T) {
 // builds a user AND a group limitScope unconditionally (v0.21 accounting
 // fix): whether either entity has Limits configured or not, both scopes
 // must always be present — a nil Limits field turns off ENFORCEMENT
-// (evaluateScope's own nil check, limits.go) for that scope, never
+// (checkAndCount's own nil check, limits.go) for that scope, never
 // accounting. Table-driven over every nil/non-nil combination of user and
 // group limits.
 func TestBuildLimitScopes_AlwaysBuildsBothScopes(t *testing.T) {

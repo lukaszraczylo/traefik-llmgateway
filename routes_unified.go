@@ -234,7 +234,7 @@ func (g *Gateway) runUnified(w http.ResponseWriter, r *http.Request, u *user, gr
 // same request.
 //
 // u.limits or grp.limits may be nil — that scope simply carries no limit for
-// evaluateScope (limits.go) to enforce, and evaluateScope's own nil-limits
+// checkAndCount (limits.go) to enforce, and checkAndCount's own nil-limits
 // check skips it during evaluation. It is NOT omitted from the slice: usage
 // accounting (checkAndCount's own counting half, and account) is
 // unconditional and must never be coupled to whether a limit happens to be

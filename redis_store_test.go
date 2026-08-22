@@ -70,6 +70,69 @@ func TestRedisStore_IncrMulti_PipelinesAllPairsInOneCall(t *testing.T) {
 	}
 }
 
+// TestRedisStore_IncrAndGetMulti_PipelinesEverythingInOneCall is the
+// perf-review round-3 (2026-08-22) case: incrAndGetMulti sends every
+// entry's INCRBY+EXPIRE pair AND every read key's GET as ONE pipeline —
+// no SELECT (or any other command) interleaved, which would only happen
+// if it dialled a fresh connection or split the call into more than one
+// round trip — and returns entries' INCRBY replies and reads' GET replies
+// each in their own given order, not the reply stream's flat position.
+func TestRedisStore_IncrAndGetMulti_PipelinesEverythingInOneCall(t *testing.T) {
+	ln := newFakeListener(t)
+	runFakeRESPServer(t, ln, []respStep{
+		{wantArgs: []string{"SELECT", "0"}, reply: []byte("+OK\r\n")},
+		{wantArgs: []string{"INCRBY", "llmgw:user:a:req:min:202608220900", "1"}, reply: []byte(":3\r\n")},
+		{wantArgs: []string{"EXPIRE", "llmgw:user:a:req:min:202608220900", "120"}, reply: []byte(":1\r\n")},
+		{wantArgs: []string{"INCRBY", "llmgw:user:a:req:day:20260822", "1"}, reply: []byte(":7\r\n")},
+		{wantArgs: []string{"EXPIRE", "llmgw:user:a:req:day:20260822", "3024000"}, reply: []byte(":1\r\n")},
+		{wantArgs: []string{"GET", "llmgw:user:a:tokin:day:20260822"}, reply: []byte("$3\r\n150\r\n")},
+		{wantArgs: []string{"GET", "llmgw:user:a:tokout:day:20260822"}, reply: []byte("$-1\r\n")}, // missing -> 0
+		{wantArgs: []string{"GET", "llmgw:user:a:cost:day:20260822"}, reply: []byte("$2\r\n50\r\n")},
+	})
+
+	store := newRedisStore(newRESPClient(ln.Addr().String(), "", 0))
+	entries := []counterIncr{
+		{key: "llmgw:user:a:req:min:202608220900", delta: 1, ttl: minWindowTTL},
+		{key: "llmgw:user:a:req:day:20260822", delta: 1, ttl: dayWindowTTL},
+	}
+	reads := []string{
+		"llmgw:user:a:tokin:day:20260822",
+		"llmgw:user:a:tokout:day:20260822",
+		"llmgw:user:a:cost:day:20260822",
+	}
+	incrVals, readVals, err := store.incrAndGetMulti(entries, reads)
+	if err != nil {
+		t.Fatalf("incrAndGetMulti: %v", err)
+	}
+	assert.Equal(t, []int64{3, 7}, incrVals)
+	assert.Equal(t, []int64{150, 0, 50}, readVals)
+}
+
+// TestRedisStore_IncrAndGetMulti_EmptyReads asserts a nil/empty reads
+// slice (no scope in the request has a token/cost budget configured — the
+// common case) still sends and returns the increment half correctly, with
+// no GET commands at all.
+func TestRedisStore_IncrAndGetMulti_EmptyReads(t *testing.T) {
+	ln := newFakeListener(t)
+	runFakeRESPServer(t, ln, []respStep{
+		{wantArgs: []string{"SELECT", "0"}, reply: []byte("+OK\r\n")},
+		{wantArgs: []string{"INCRBY", "k", "1"}, reply: []byte(":1\r\n")},
+		{wantArgs: []string{"EXPIRE", "k", "60"}, reply: []byte(":1\r\n")},
+	})
+
+	store := newRedisStore(newRESPClient(ln.Addr().String(), "", 0))
+	incrVals, readVals, err := store.incrAndGetMulti([]counterIncr{{key: "k", delta: 1, ttl: time.Minute}}, nil)
+	if err != nil {
+		t.Fatalf("incrAndGetMulti: %v", err)
+	}
+	if len(incrVals) != 1 || incrVals[0] != 1 {
+		t.Errorf("incrVals = %v, want [1]", incrVals)
+	}
+	if len(readVals) != 0 {
+		t.Errorf("readVals = %v, want empty", readVals)
+	}
+}
+
 // TestRedisStore_IncrBy_RoundsSubSecondTTLUp asserts a ttl under one
 // second is never sent to EXPIRE as 0 (which would delete the key
 // immediately) — it is rounded up to a 1s floor.

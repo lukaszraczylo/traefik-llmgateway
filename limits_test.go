@@ -366,6 +366,10 @@ func (s *historyCountingStore) getMulti(keys []string) ([]int64, error) {
 func (s *historyCountingStore) incrMulti(entries []counterIncr) ([]int64, error) {
 	return make([]int64, len(entries)), nil
 }
+func (s *historyCountingStore) incrAndGetMulti(entries []counterIncr, reads []string) ([]int64, []int64, error) {
+	readVals, err := s.getMulti(reads)
+	return make([]int64, len(entries)), readVals, err
+}
 
 // TestLimiterHistory_StoreDown asserts limiter.history reports ok=false
 // when the configured store errors and failOpen is false — the caller
@@ -404,7 +408,7 @@ func TestWithTotalScope_AppendsUnlimitedTotalScope(t *testing.T) {
 // TestWithTotalScope_CountedButNeverEvaluated drives checkAndCount many
 // times against a scopes slice built via withTotalScope: the total
 // scope's own limits are always nil, so no volume of traffic can ever
-// make it violate — evaluateScope's nil-limits check skips it — while its
+// make it violate — checkAndCount's own nil-limits check skips it — while its
 // req counter still climbs by exactly one per call, proving
 // checkAndCount's counting loop does not skip a nil-limits scope the way
 // evaluation does.
@@ -788,6 +792,9 @@ func (s *erroringStore) incrBy(string, int64, time.Duration) (int64, error) { re
 func (s *erroringStore) get(string) (int64, error)                          { return 0, s.err }
 func (s *erroringStore) getMulti([]string) ([]int64, error)                 { return nil, s.err }
 func (s *erroringStore) incrMulti([]counterIncr) ([]int64, error)           { return nil, s.err }
+func (s *erroringStore) incrAndGetMulti([]counterIncr, []string) ([]int64, []int64, error) {
+	return nil, nil, s.err
+}
 
 // TestLimiter_FailOpen_StoreErrorUsesFallback is carried-item (c): a store
 // error with failOpen=true must not block the request — the operation
@@ -832,13 +839,14 @@ func TestLimiter_FailClosed_StoreErrorReturnsStoreDownViolation(t *testing.T) {
 }
 
 // succeedIncrFailGetStore is a counterStore stub whose incrBy/incrMulti
-// always succeed and whose get/getMulti always error. It isolates
-// budgetViolation's own storeDown branch (limits.go) from checkAndCount's
-// earlier incrMulti one: an erroringStore that fails every method makes
-// checkAndCount's batched req:min/req:day/req:hour increment fail closed
-// and return before evaluateScope — and therefore budgetViolation — ever
-// runs, so a test built on it cannot actually prove budgetViolation's own
-// branch works.
+// always succeed and whose get/getMulti/incrAndGetMulti always error. Its
+// incrMulti/get/getMulti stay independently overridable (used by any
+// OTHER caller — account, currentUsage, and so on — that still calls them
+// separately) even though checkAndCount itself, since the round-3 fusion
+// (2026-08-22), calls incrAndGetMulti exclusively: a store that cannot
+// serve a read reliably fails that ONE combined round trip as a whole,
+// there being no longer a separate "increment succeeded, read failed"
+// split to isolate at the store level for checkAndCount specifically.
 type succeedIncrFailGetStore struct {
 	getErr error
 }
@@ -857,16 +865,18 @@ func (s *succeedIncrFailGetStore) incrMulti(entries []counterIncr) ([]int64, err
 	}
 	return out, nil
 }
+func (s *succeedIncrFailGetStore) incrAndGetMulti([]counterIncr, []string) ([]int64, []int64, error) {
+	return nil, nil, s.getErr
+}
 
 // TestLimiter_FailClosed_BudgetReadReturnsStoreDownViolation covers the
-// budgetViolation fail-closed path specifically (as opposed to the
-// request-counter incrMulti path TestLimiter_FailClosed_
-// StoreErrorReturnsStoreDownViolation covers above): a store error on a
-// token/cost budget read also refuses the request when failOpen is false.
-// The store's incrMulti succeeds so checkAndCount's batched
-// req:min/req:day/req:hour increment passes and evaluateScope actually
-// reaches budgetViolation; a TokensPerDay limit makes evaluateScope call
-// it.
+// budget-read fail-closed path: a store that cannot be trusted to serve a
+// token/cost budget read refuses the request when failOpen is false, via
+// checkAndCount's own storeDownViolation short-circuit (limits.go) — the
+// same contract the pre-fusion budgetViolation helper enforced before
+// checkAndCount's admission round trip was fused (perf review round 3,
+// 2026-08-22). A TokensPerDay limit is what makes checkAndCount build a
+// budget probe/read for this scope at all.
 func TestLimiter_FailClosed_BudgetReadReturnsStoreDownViolation(t *testing.T) {
 	store := &succeedIncrFailGetStore{getErr: errors.New("boom")}
 	l := newLimiter(store, false)
@@ -971,6 +981,16 @@ func (s *countingErrorStore) getMulti([]string) ([]int64, error) {
 func (s *countingErrorStore) incrMulti([]counterIncr) ([]int64, error) {
 	s.incrCalls++
 	return nil, s.err
+}
+
+// incrAndGetMulti counts against the same incrCalls field incrMulti uses:
+// checkAndCount's own admission round trip calls incrAndGetMulti
+// exclusively since the round-3 fusion (2026-08-22, perf review), so
+// TestLimiter_StoreDownLatch_SkipsStoreCallsWithinWindow's "the store must
+// not be called" assertion needs this call counted the same way.
+func (s *countingErrorStore) incrAndGetMulti([]counterIncr, []string) ([]int64, []int64, error) {
+	s.incrCalls++
+	return nil, nil, s.err
 }
 
 // TestLimiter_StoreDownLatch_SkipsStoreCallsWithinWindow is review-round-3
@@ -1081,17 +1101,21 @@ func TestLimiter_FailPolicyGet(t *testing.T) {
 
 // --- perf review, 2026-08-21: single-batch counter writes ---
 
-// countingIncrStore is a counterStore stub whose incrMulti/get/getMulti
-// all succeed against a real backing map (so repeated calls actually
-// accumulate, proving checkAndCount/account read back correct values
-// after batching, not just that batching happened at all), counting how
-// many times incrMulti and getMulti were each called. incrBy is never
-// exercised by checkAndCount/account after the perf-review batching and
-// just returns a zero value.
+// countingIncrStore is a counterStore stub whose incrMulti/getMulti/
+// incrAndGetMulti all succeed against a real backing map (so repeated
+// calls actually accumulate, proving checkAndCount/account read back
+// correct values after batching, not just that batching happened at all),
+// counting how many times each was called. account still calls incrMulti
+// directly; checkAndCount, since the round-3 fusion (2026-08-22, perf
+// review), calls incrAndGetMulti exclusively — so the two counters below
+// track genuinely different callers, not the same round trip under two
+// names. incrBy is never exercised by either caller and just returns a
+// zero value.
 type countingIncrStore struct {
-	values         map[string]int64
-	incrMultiCalls int
-	getMultiCalls  int
+	values               map[string]int64
+	incrMultiCalls       int
+	incrAndGetMultiCalls int
+	getMultiCalls        int
 }
 
 func (s *countingIncrStore) incrBy(string, int64, time.Duration) (int64, error) { return 0, nil }
@@ -1127,13 +1151,35 @@ func (s *countingIncrStore) incrMulti(entries []counterIncr) ([]int64, error) {
 	return out, nil
 }
 
-// TestCheckAndCount_OneIncrMultiCallRegardlessOfScopeCount is the
-// perf-review (2026-08-21) case for checkAndCount: a 3-scope request
-// (user, group, total — 9 counters, min/day/hour x 3 scopes) must cost
-// exactly ONE incrMulti round trip, not one per counter, and the batched
-// reply must still drive correct evaluation — a real requestsPerMinute
-// violation on the 3rd call, with the exact right counter value.
-func TestCheckAndCount_OneIncrMultiCallRegardlessOfScopeCount(t *testing.T) {
+func (s *countingIncrStore) incrAndGetMulti(entries []counterIncr, reads []string) ([]int64, []int64, error) {
+	s.incrAndGetMultiCalls++
+	if s.values == nil {
+		s.values = make(map[string]int64)
+	}
+	incrVals := make([]int64, len(entries))
+	for i, e := range entries {
+		s.values[e.key] += e.delta
+		incrVals[i] = s.values[e.key]
+	}
+	readVals := make([]int64, len(reads))
+	for i, k := range reads {
+		readVals[i] = s.values[k]
+	}
+	return incrVals, readVals, nil
+}
+
+// TestCheckAndCount_OneIncrAndGetMultiCallRegardlessOfScopeCount is the
+// perf-review round-3 (2026-08-22) case for checkAndCount: a 3-scope
+// request (user, group, total — 9 req counters, min/day/hour x 3 scopes)
+// must cost exactly ONE incrAndGetMulti round trip, not one per counter
+// and not a separate round trip for token/cost budget reads, and the
+// batched reply must still drive correct evaluation — a real
+// requestsPerMinute violation on the 3rd call, with the exact right
+// counter value. Supersedes the pre-fusion incrMulti-only version of this
+// test (perf review, 2026-08-21): checkAndCount no longer calls incrMulti
+// at all, only incrAndGetMulti (account still does, covered separately
+// below by TestAccount_OneIncrMultiCallRegardlessOfScopeOrMetricCount).
+func TestCheckAndCount_OneIncrAndGetMultiCallRegardlessOfScopeCount(t *testing.T) {
 	store := &countingIncrStore{}
 	l := newLimiter(store, true)
 	now := time.Date(2026, 8, 21, 9, 0, 0, 0, time.UTC)
@@ -1148,15 +1194,15 @@ func TestCheckAndCount_OneIncrMultiCallRegardlessOfScopeCount(t *testing.T) {
 	if v := l.checkAndCount(scopes); v != nil {
 		t.Fatalf("1st call should pass, got %+v", v)
 	}
-	if store.incrMultiCalls != 1 {
-		t.Errorf("incrMultiCalls after 1st checkAndCount = %d, want 1", store.incrMultiCalls)
+	if store.incrAndGetMultiCalls != 1 {
+		t.Errorf("incrAndGetMultiCalls after 1st checkAndCount = %d, want 1", store.incrAndGetMultiCalls)
 	}
 
 	if v := l.checkAndCount(scopes); v != nil {
 		t.Fatalf("2nd call should pass, got %+v", v)
 	}
-	if store.incrMultiCalls != 2 {
-		t.Errorf("incrMultiCalls after 2nd checkAndCount = %d, want 2 (one call per checkAndCount, not per scope or per counter)", store.incrMultiCalls)
+	if store.incrAndGetMultiCalls != 2 {
+		t.Errorf("incrAndGetMultiCalls after 2nd checkAndCount = %d, want 2 (one call per checkAndCount, not per scope or per counter)", store.incrAndGetMultiCalls)
 	}
 
 	v := l.checkAndCount(scopes)
@@ -1166,8 +1212,11 @@ func TestCheckAndCount_OneIncrMultiCallRegardlessOfScopeCount(t *testing.T) {
 	if v.storeDown {
 		t.Error("v.storeDown must be false — this is a real limit breach, not a store failure")
 	}
-	if store.incrMultiCalls != 3 {
-		t.Errorf("incrMultiCalls after 3rd checkAndCount = %d, want 3", store.incrMultiCalls)
+	if store.incrAndGetMultiCalls != 3 {
+		t.Errorf("incrAndGetMultiCalls after 3rd checkAndCount = %d, want 3", store.incrAndGetMultiCalls)
+	}
+	if store.incrMultiCalls != 0 {
+		t.Errorf("incrMultiCalls = %d, want 0 (checkAndCount must never call the separate incrMulti after fusion)", store.incrMultiCalls)
 	}
 
 	// Values correct: batching three scopes into one call must not
@@ -1257,6 +1306,168 @@ func TestTokenBudget_ExactBoundaryViolates(t *testing.T) {
 	if v.storeDown {
 		t.Error("storeDown must be false for a real limit breach")
 	}
+}
+
+// --- perf review round 3, 2026-08-22: fused admission round trip ---
+
+// TestCheckAndCount_FusedViolationPrecedence is the fusion-equivalence
+// case: checkAndCount's admission round trip now fuses the request-counter
+// increments with every scope's token/cost budget reads into ONE store
+// call (buildBudgetProbes, incrAndGetMulti), replacing the pre-fusion
+// evaluateScope/budgetViolation/tokenBudgetViolation helpers that made
+// those reads as separate, serial round trips. This table pins that the
+// VIOLATION PRECEDENCE those helpers enforced is byte-for-byte unchanged:
+// within one scope, requests-per-minute, then requests-per-day, then
+// tokens-per-day, then tokens-per-month, then cost-per-day, then
+// cost-per-month; across scopes, the scope earlier in the given slice
+// (buildLimitScopes puts a user before their group) wins. Every subtest
+// engineers TWO simultaneously-true violation conditions and asserts only
+// the higher-precedence one is ever reported.
+func TestCheckAndCount_FusedViolationPrecedence(t *testing.T) {
+	t.Run("requests-per-minute beats requests-per-day in the same scope", func(t *testing.T) {
+		l := newLimiter(nil, true)
+		scopes := []limitScope{{kind: "user", id: "u", limits: &LimitsConfig{RequestsPerMinute: 1, RequestsPerDay: 1}}}
+		if v := l.checkAndCount(scopes); v != nil {
+			t.Fatalf("1st call must pass (both counters land exactly on their limit), got %+v", v)
+		}
+		v := l.checkAndCount(scopes)
+		if v == nil {
+			t.Fatal("2nd call must violate: both requests-per-minute and requests-per-day are now over limit")
+		}
+		assert.Contains(t, v.message, "requests-per-minute")
+		assert.NotContains(t, v.message, "requests-per-day")
+	})
+
+	t.Run("requests-per-day beats tokens-per-day in the same scope", func(t *testing.T) {
+		l := newLimiter(nil, true)
+		scopes := []limitScope{{kind: "user", id: "u", limits: &LimitsConfig{RequestsPerDay: 1, TokensPerDay: 10}}}
+		if v := l.checkAndCount(scopes); v != nil {
+			t.Fatalf("1st call must pass (req:day lands exactly on its limit, no tokens seeded yet), got %+v", v)
+		}
+		l.account(scopes, usage{prompt: 20}, 0) // tokin:day now 20, over the 10 budget
+		v := l.checkAndCount(scopes)
+		if v == nil {
+			t.Fatal("2nd call must violate: both requests-per-day and tokens-per-day are now over limit")
+		}
+		assert.Contains(t, v.message, "requests-per-day")
+		assert.NotContains(t, v.message, "tokens-per-day")
+	})
+
+	t.Run("tokens-per-day beats tokens-per-month in the same scope", func(t *testing.T) {
+		l := newLimiter(nil, true)
+		scopes := []limitScope{{kind: "user", id: "u", limits: &LimitsConfig{TokensPerDay: 10, TokensPerMonth: 10}}}
+		l.account(scopes, usage{prompt: 20}, 0) // tokin:day and tokin:month both now 20, both over budget
+		v := l.checkAndCount(scopes)
+		if v == nil {
+			t.Fatal("must violate: both tokens-per-day and tokens-per-month are over limit")
+		}
+		assert.Contains(t, v.message, "tokens-per-day")
+		assert.NotContains(t, v.message, "tokens-per-month")
+	})
+
+	t.Run("tokens-per-month beats cost-per-day in the same scope", func(t *testing.T) {
+		l := newLimiter(nil, true)
+		scopes := []limitScope{{kind: "user", id: "u", limits: &LimitsConfig{TokensPerMonth: 10, CostPerDayUSD: 0.0001}}}
+		l.account(scopes, usage{prompt: 20}, 200) // tokin:month = 20 (>10); cost:day = 200 micros (>100 micros)
+		v := l.checkAndCount(scopes)
+		if v == nil {
+			t.Fatal("must violate: both tokens-per-month and cost-per-day are over limit")
+		}
+		assert.Contains(t, v.message, "tokens-per-month")
+		assert.NotContains(t, v.message, "cost-per-day")
+	})
+
+	t.Run("cost-per-day beats cost-per-month in the same scope", func(t *testing.T) {
+		l := newLimiter(nil, true)
+		scopes := []limitScope{{kind: "user", id: "u", limits: &LimitsConfig{CostPerDayUSD: 0.0001, CostPerMonthUSD: 0.0001}}}
+		l.account(scopes, usage{}, 200) // cost:day and cost:month both now 200 micros, both over the 100-micro budget
+		v := l.checkAndCount(scopes)
+		if v == nil {
+			t.Fatal("must violate: both cost-per-day and cost-per-month are over limit")
+		}
+		assert.Contains(t, v.message, "cost-per-day")
+		assert.NotContains(t, v.message, "cost-per-month")
+	})
+
+	t.Run("user scope beats group scope when both violate", func(t *testing.T) {
+		l := newLimiter(nil, true)
+		scopes := []limitScope{
+			{kind: "user", id: "u", limits: &LimitsConfig{RequestsPerMinute: 1}},
+			{kind: "group", id: "g", limits: &LimitsConfig{RequestsPerMinute: 1}},
+		}
+		if v := l.checkAndCount(scopes); v != nil {
+			t.Fatalf("1st call must pass, got %+v", v)
+		}
+		v := l.checkAndCount(scopes)
+		if v == nil {
+			t.Fatal("2nd call must violate: both user and group are now over their requests-per-minute limit")
+		}
+		assert.Contains(t, v.message, `user "u"`)
+	})
+
+	t.Run("group scope evaluated when the earlier user scope has no violation", func(t *testing.T) {
+		l := newLimiter(nil, true)
+		scopes := []limitScope{
+			{kind: "user", id: "u", limits: nil},
+			{kind: "group", id: "g", limits: &LimitsConfig{RequestsPerMinute: 1}},
+		}
+		if v := l.checkAndCount(scopes); v != nil {
+			t.Fatalf("1st call must pass, got %+v", v)
+		}
+		v := l.checkAndCount(scopes)
+		if v == nil {
+			t.Fatal("2nd call must violate: group is now over its requests-per-minute limit")
+		}
+		assert.Contains(t, v.message, `group "g"`)
+	})
+}
+
+// TestCheckAndCount_FusedRoundTrip_MemoryFallback proves the fused
+// admission round trip works correctly end to end against memoryStore —
+// the limiter's ALWAYS-available in-process fallback (newLimiter(nil, _)
+// uses it directly; a configured store also falls back to it on error or
+// while store-latched) — covering both an increment-only scope and a
+// scope with every budget type configured at once, in one round trip.
+func TestCheckAndCount_FusedRoundTrip_MemoryFallback(t *testing.T) {
+	l := newLimiter(nil, true)
+	now := time.Date(2026, 8, 22, 9, 0, 0, 0, time.UTC)
+	l.nowFn = func() time.Time { return now }
+
+	scopes := []limitScope{
+		{kind: "user", id: "u", limits: &LimitsConfig{
+			RequestsPerMinute: 100, RequestsPerDay: 100,
+			TokensPerDay: 1000, TokensPerMonth: 1000,
+			CostPerDayUSD: 1, CostPerMonthUSD: 1,
+		}},
+		{kind: totalScopeKind, id: totalScopeID, limits: nil},
+	}
+
+	// Well under every budget: must pass and must have actually
+	// incremented every request counter (proving the fused write side
+	// still lands correctly, not just that no violation was reported).
+	if v := l.checkAndCount(scopes); v != nil {
+		t.Fatalf("want no violation comfortably under every limit, got %+v", v)
+	}
+	uMin, ok := l.getCounter("user", "u", metricReq, windowMin, now)
+	if !ok || uMin != 1 {
+		t.Errorf("user req:min = %d, ok=%v, want 1", uMin, ok)
+	}
+	totalMin, ok := l.getCounter(totalScopeKind, totalScopeID, metricReq, windowMin, now)
+	if !ok || totalMin != 1 {
+		t.Errorf("total req:min = %d, ok=%v, want 1 (the unlimited total scope is still counted)", totalMin, ok)
+	}
+
+	// Push tokens over budget via account, then confirm the SAME fused
+	// round trip catches it on the very next call.
+	l.account(scopes, usage{prompt: 2000}, 0)
+	v := l.checkAndCount(scopes)
+	if v == nil {
+		t.Fatal("want a tokens-per-day violation now that usage exceeds the 1000 budget")
+	}
+	if v.storeDown {
+		t.Error("v.storeDown must be false — this is a real limit breach, not a store failure")
+	}
+	assert.Contains(t, v.message, "tokens-per-day")
 }
 
 // --- review round 2, 2026-08-21: enforcement-aware fallback TTL clamp ---
