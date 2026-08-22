@@ -588,6 +588,9 @@ func newGateway(ctx context.Context, next http.Handler, config *Config, name str
 	if err != nil {
 		return nil, err
 	}
+	// Routes the self-resolving conditions (a model id two providers both
+	// serve) to WARN instead of ERROR — see the registry's warn field.
+	registry.warn = g.warnf
 	// ctx is passed through unwrapped, not re-bounded to warmFillTimeout here:
 	// warmFill already gives each discovery-enabled provider its own fresh
 	// warmFillTimeout budget per provider (registry.go). Wrapping ctx to a

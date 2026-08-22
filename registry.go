@@ -221,6 +221,22 @@ type modelRegistry struct {
 	// finding 3) follows this same rule: m.log("%s", fmt.Sprintf(...)),
 	// never a second variadic argument.
 	log func(string, ...any)
+	// warn is the warning-level counterpart of log (g.warnf), for a
+	// condition this registry resolved by itself with no request affected
+	// — a model id two providers both serve, which resolve settles
+	// deterministically. It is set by the production caller AFTER
+	// newModelRegistry returns rather than being a fourth constructor
+	// parameter, so the 45 existing call sites (almost all tests passing a
+	// no-op) stay untouched: threading a parameter through all of them
+	// would bury a log-severity change in unrelated churn. A nil warn
+	// falls back to log, so a registry built without one keeps its old
+	// behavior instead of panicking or silently dropping the line.
+	//
+	// The same Yaegi CFG restriction the log field documents above applies
+	// here, for the same reason — it is a struct FIELD of variadic func
+	// type: call it only as m.warn("%s", fmt.Sprintf(...)), never with two
+	// or more variadic arguments.
+	warn func(string, ...any)
 	// aliases is the validated alias->target map from Config.ModelAliases
 	// (spec §5, v0.2), built once by newModelRegistry via
 	// validateModelAliases and never mutated afterward — resolve checks
@@ -850,7 +866,20 @@ func (m *modelRegistry) warnCollisionOnce(id, winner string, provs []string) {
 		return
 	}
 	m.warned[id] = true
-	m.log("%s", fmt.Sprintf("model registry: model id %q is provided by multiple providers %v; %q wins the bare id", id, provs, winner))
+	m.warnf(fmt.Sprintf("model registry: model id %q is provided by multiple providers %v; %q wins the bare id", id, provs, winner))
+}
+
+// warnf writes msg through the warn field, falling back to log when no
+// warn was injected (see the warn field's own doc comment). It takes an
+// ALREADY-FORMATTED string rather than a format plus arguments, so that
+// both call shapes below stay single-variadic-argument — the Yaegi CFG
+// restriction that applies to any struct field of variadic func type.
+func (m *modelRegistry) warnf(msg string) {
+	if m.warn != nil {
+		m.warn("%s", msg)
+		return
+	}
+	m.log("%s", msg)
 }
 
 // modelsJSON returns grp's encoded GET /v1/models response body

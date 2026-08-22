@@ -12,6 +12,19 @@ func (g *Gateway) logf(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, "llmgw[%s] INFO %s\n", g.name, fmt.Sprintf(format, args...))
 }
 
+// warnf writes a warning-level log line to stderr. No timestamps —
+// Traefik adds its own. Never log key material.
+//
+// Use this for a condition an operator may want to know about but that
+// the gateway resolved by itself, deterministically, with no request
+// affected — a model id served by two providers, for instance. Those
+// lines were ERROR until 2026-08-22, which put 144 of them in a healthy
+// pod's boot log on a cluster with overlapping catalogs and made real
+// errors harder to find. Reserve errorf for something actually broken.
+func (g *Gateway) warnf(format string, args ...any) {
+	fmt.Fprintf(os.Stderr, "llmgw[%s] WARN %s\n", g.name, fmt.Sprintf(format, args...))
+}
+
 // errorf writes an error-level log line to stderr. No timestamps — Traefik
 // adds its own. Never log key material.
 func (g *Gateway) errorf(format string, args ...any) {

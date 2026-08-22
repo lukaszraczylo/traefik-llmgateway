@@ -3,6 +3,7 @@ package traefikllmgateway
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -178,5 +179,82 @@ func TestLogAuthEvent_Failure_SuppressedCountReported(t *testing.T) {
 
 	if !strings.Contains(out, "2 more suppressed since last log") {
 		t.Errorf("want the next line to report 2 suppressed events, got %q", out)
+	}
+}
+
+// TestWarnf_WritesWarnPrefix pins warnf's own severity token, so the
+// level cannot drift back without a test noticing.
+func TestWarnf_WritesWarnPrefix(t *testing.T) {
+	gw := newTestGatewayForLogger(t)
+
+	out := captureStderr(t, func() {
+		gw.warnf("something resolved itself: %d", 7)
+	})
+
+	if !strings.Contains(out, "llmgw[llmgw] WARN something resolved itself: 7") {
+		t.Errorf("warnf output = %q, want a WARN-prefixed line", out)
+	}
+	if strings.Contains(out, "ERROR") {
+		t.Errorf("warnf must not emit an ERROR line, got %q", out)
+	}
+}
+
+// TestWarnCollisionOnce_LogsAtWarnNotError is the regression for the
+// model-id collision line's severity (2026-08-22). A model id served by
+// two configured providers is resolved deterministically by the registry
+// and affects no request, so it must not be an ERROR: on a cluster with
+// overlapping catalogs it put 144 ERROR lines in a healthy pod's boot
+// log, which is exactly the noise that hides a real failure.
+func TestWarnCollisionOnce_LogsAtWarnNotError(t *testing.T) {
+	gw := newTestGatewayForLogger(t)
+	reg, err := newModelRegistry(map[string]providerAdapter{}, CreateConfig(), gw.errorf)
+	if err != nil {
+		t.Fatalf("newModelRegistry: %v", err)
+	}
+	reg.warn = gw.warnf
+
+	out := captureStderr(t, func() {
+		reg.warnCollisionOnce("gpt-4o", "openai", []string{"openai", "openai-audio"})
+	})
+
+	if !strings.Contains(out, "WARN model registry: model id \"gpt-4o\" is provided by multiple providers") {
+		t.Errorf("collision line = %q, want it emitted at WARN", out)
+	}
+	if strings.Contains(out, "ERROR") {
+		t.Errorf("collision line must not be an ERROR, got %q", out)
+	}
+
+	// Still logged only once per id, regardless of severity.
+	second := captureStderr(t, func() {
+		reg.warnCollisionOnce("gpt-4o", "openai", []string{"openai", "openai-audio"})
+	})
+	if second != "" {
+		t.Errorf("second collision for the same id logged again: %q", second)
+	}
+}
+
+// TestRegistryWarnf_FallsBackToLogWhenWarnNil covers the nil-warn path:
+// a registry built without an injected warn (every test call site, and
+// any future caller that forgets) must still emit the line through log
+// rather than panicking or dropping it silently.
+func TestRegistryWarnf_FallsBackToLogWhenWarnNil(t *testing.T) {
+	var got []string
+	reg, err := newModelRegistry(map[string]providerAdapter{}, CreateConfig(), func(format string, args ...any) {
+		got = append(got, fmt.Sprintf(format, args...))
+	})
+	if err != nil {
+		t.Fatalf("newModelRegistry: %v", err)
+	}
+	if reg.warn != nil {
+		t.Fatal("newModelRegistry must leave warn nil; it is injected by the caller")
+	}
+
+	reg.warnCollisionOnce("m1", "p1", []string{"p1", "p2"})
+
+	if len(got) != 1 {
+		t.Fatalf("log calls = %d, want 1 (the fallback path), got %v", len(got), got)
+	}
+	if !strings.Contains(got[0], `model id "m1" is provided by multiple providers`) {
+		t.Errorf("fallback line = %q, want the collision message", got[0])
 	}
 }
