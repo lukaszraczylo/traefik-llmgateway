@@ -1610,6 +1610,47 @@ func TestHandlePassthrough_PassthroughPaths_Restrictive(t *testing.T) {
 	}
 }
 
+// TestHandlePassthrough_PassthroughPaths_EncodedSlashBypass_Returns403 is
+// the end-to-end regression test for security review finding 3, round 3,
+// 2026-08-22: a group restricted to PassthroughPaths: ["v1/*"] must deny
+// "/openai/v1/fine_tuning%2Fjobs" (an encoded "/" hiding a second
+// segment from the escaped-form matcher) exactly as it would deny the
+// literal, decoded three-segment path. Before this fix, path.Match
+// evaluated the escaped rest directly and reported a match, letting the
+// request reach the upstream — which, if it decodes %2F itself, would
+// have read the same bytes as "v1/fine_tuning/jobs", a path this group's
+// glob was never meant to authorize.
+func TestHandlePassthrough_PassthroughPaths_EncodedSlashBypass_Returns403(t *testing.T) {
+	var upstreamCalled bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalled = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{"openai": {Type: "openai", BaseURL: srv.URL, APIKey: "sk-up"}}
+	cfg.Groups = map[string]*GroupConfig{"default": {PassthroughPaths: []string{"v1/*"}}}
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{{Name: "alice", Group: "default", APIKey: "sk-alice"}}}
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/openai/v1/fine_tuning%2Fjobs", nil)
+	req.Header.Set("Authorization", "Bearer sk-alice")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 (the encoded slash must not defeat the \"v1/*\" allowlist), body=%s", rec.Code, rec.Body.String())
+	}
+	if upstreamCalled {
+		t.Error("upstream must never be called: the decoded rest is a three-segment path \"v1/*\" does not authorize")
+	}
+}
+
 // TestHandlePassthrough_DangerousHeadersStripped proves every
 // client-supplied identity/forwarding header, plus the provider-billing-
 // retargeting headers, are stripped before the request reaches the

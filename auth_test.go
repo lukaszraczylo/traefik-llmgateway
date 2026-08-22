@@ -325,6 +325,61 @@ func TestGroup_AllowsPassthroughPath_Glob(t *testing.T) {
 	}
 }
 
+// TestGroup_AllowsPassthroughPath_RejectsEncodedSlashBypass is the
+// security review finding 3 regression test (round 3, 2026-08-22): a
+// glob of ["v1/*"] (one wildcard segment) must not be defeated by
+// encoding the "/" that would otherwise split the candidate into a
+// second segment. Before this fix, matchesGlob ran against the escaped
+// form directly, so path.Match("v1/*", "v1/fine_tuning%2Fjobs") reported
+// true — the escaped rest looks like exactly two segments to path.Match,
+// same as the decoded intent, but MEASURED to actually still match
+// because "%2Fjobs" contains no literal "/" for the glob to split on
+// differently — while an upstream that itself decodes %2F would read the
+// same rest as "v1/fine_tuning/jobs", a THREE-segment path "v1/*" was
+// never meant to authorize.
+func TestGroup_AllowsPassthroughPath_RejectsEncodedSlashBypass(t *testing.T) {
+	grp := &group{name: "eng", passthroughPaths: []string{"v1/*"}}
+	if grp.allowsPassthroughPath("v1/fine_tuning%2Fjobs") {
+		t.Error("want no match: the decoded form is three segments (v1/fine_tuning/jobs), which \"v1/*\" does not authorize")
+	}
+	// Sanity: the decoded-equivalent form is independently denied too,
+	// proving the glob genuinely does not authorize the deeper path — not
+	// just that encoding happens to break matching by accident.
+	if grp.allowsPassthroughPath("v1/fine_tuning/jobs") {
+		t.Error("want no match for the literal three-segment form either")
+	}
+	// A genuinely single-segment encoded value must still match: "v1/*"
+	// authorizes any ONE segment after "v1", encoded or not.
+	if !grp.allowsPassthroughPath("v1/chat%2Dcompletions") {
+		t.Error("want match: a single encoded segment (no literal slash once decoded) is still one segment")
+	}
+}
+
+// TestGroup_AllowsPassthroughPath_MalformedEncoding_DeniesWhenRestricted
+// mirrors hasTraversalSegment's own "fails to unescape at all is
+// rejected too" rule (routes_passthrough.go) — applied here to the
+// allowlist match itself, for a group that actually restricts paths.
+func TestGroup_AllowsPassthroughPath_MalformedEncoding_DeniesWhenRestricted(t *testing.T) {
+	grp := &group{name: "eng", passthroughPaths: []string{"v1/*"}}
+	if grp.allowsPassthroughPath("v1/%zz") {
+		t.Error("want no match: malformed percent-encoding must fail closed for a restricted group")
+	}
+}
+
+// TestGroup_AllowsPassthroughPath_MalformedEncoding_StillAllowsWhenUnrestricted
+// pins the zero-config default-preserving requirement precisely at the
+// boundary this fix touches: an EMPTY PassthroughPaths list (the fast
+// path, checked before any decoding) must keep allowing a request whose
+// rest fails to percent-decode — exactly as before this finding, since
+// hasTraversalSegment (unconditional, in handlePassthrough) is still the
+// gate for that case, unchanged by this fix.
+func TestGroup_AllowsPassthroughPath_MalformedEncoding_StillAllowsWhenUnrestricted(t *testing.T) {
+	grp := &group{name: "eng"} // no PassthroughPaths configured
+	if !grp.allowsPassthroughPath("v1/%zz") {
+		t.Error("want match: an unrestricted group's fast path must never decode rest at all")
+	}
+}
+
 func TestAuthStore_ReplaceFileUsers_AddsAndSwapsUsers(t *testing.T) {
 	a, err := newAuthStore(testAuthCfg()) // inline user "a" / sk-secret in group eng
 	if err != nil {

@@ -5,6 +5,7 @@ import (
 	"crypto/subtle"
 	"fmt"
 	"net/http"
+	"net/url"
 	"path"
 	"sort"
 	"strings"
@@ -110,8 +111,39 @@ func (grp *group) allowsAgent(name string) bool {
 // PassthroughPaths' own doc comment (llmgateway.go) for a path.Match
 // footgun a non-empty list inherits: "*" does not cross "/", so ["*"]
 // is NOT "allow everything".
+//
+// %2f BYPASS (security review finding 3, round 3, 2026-08-22): rest
+// arrives here still in its ESCAPED form (passthroughRoute's own
+// contract, routes_passthrough.go — callers must pass r.URL.
+// EscapedPath()), the same form path.Match evaluates literally, with no
+// notion of percent-decoding. hasTraversalSegment (routes_passthrough.go)
+// decodes rest before reasoning about it; this function used to match
+// the RAW escaped form instead — an asymmetry a client can exploit:
+// path.Match("v1/*", "v1/chat%2fcompletions") reports true (one escaped
+// segment, no literal "/" for the glob to see splitting it), while the
+// DECODED equivalent, "v1/chat/completions", is two segments and does
+// NOT match "v1/*". A group restricted to ["v1/*"] therefore let
+// "/openai/v1/fine_tuning%2Fjobs" through — a path an upstream that
+// itself decodes %2F would read as "v1/fine_tuning/jobs", a different,
+// unauthorized endpoint. Fixed by decoding rest with the SAME
+// url.PathUnescape call hasTraversalSegment already uses before matching,
+// and rejecting (denying) a rest that fails to unescape at all — the
+// same fail-closed rule hasTraversalSegment already applies. The
+// zero-pattern (empty-means-all) fast path runs BEFORE decoding: a group
+// that has not opted into PassthroughPaths at all keeps allowing every
+// request, malformed encoding included, exactly as before this fix —
+// hasTraversalSegment (called unconditionally, later, in
+// handlePassthrough) is still the gate that denies a malformed rest for
+// that case, unchanged.
 func (grp *group) allowsPassthroughPath(rest string) bool {
-	return matchesGlob(grp.passthroughPaths, rest)
+	if len(grp.passthroughPaths) == 0 {
+		return true
+	}
+	decoded, err := url.PathUnescape(rest)
+	if err != nil {
+		return false
+	}
+	return matchesGlob(grp.passthroughPaths, decoded)
 }
 
 // cloneStringSlice returns an independent copy of s, preserving nil (a nil
