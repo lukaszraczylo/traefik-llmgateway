@@ -16,10 +16,17 @@
 //
 // This module is intentionally separate from the plugin module
 // (llmgw-yaegi-check, not github.com/lukaszraczylo/traefik-llmgateway):
-// the plugin module must stay free of any non-stdlib dependency, since
-// Yaegi interprets it with only the Go standard library available: a
-// third-party import in the plugin module's own go.mod would break under
-// interpretation even though `go build` never notices.
+// this harness's own dependencies (yaegi itself) must never become the
+// plugin's, and nothing here may be reachable from interpreted code.
+//
+// The plugin module carries exactly ONE non-stdlib runtime dependency,
+// github.com/lukaszraczylo/oss-telemetry, which is vendored and therefore
+// interpretable — Yaegi resolves it out of vendor/ in the GOPATH copy,
+// the same way Traefik resolves it from the cloned plugin tree. That is
+// why vendor/ is no longer excluded below. Every OTHER runtime import
+// must stay stdlib-only: an unvendored third-party import breaks under
+// interpretation even though `go build` never notices, and this harness
+// is what catches it.
 package main
 
 import (
@@ -99,15 +106,23 @@ const (
 )
 
 // excludedTopLevelDirs lists repo-root directories the GOPATH copy must
-// never include: build tooling, integration fixtures, planning docs, VCS
-// metadata, and vendor (task-8's test-only testify dependency — _test.go
-// files are never interpreted by Yaegi, so vendor/ has nothing this check
-// needs, and copying its "go.yaml.in"-style nested module dirs into a
-// module-less GOPATH tree would otherwise confuse Yaegi's own import
-// resolution) have nothing to do with the plugin package Yaegi imports.
-// webui/ (Vue admin-panel task) is excluded for the same reason vendor/
-// is: its own go.mod already walls it off from the repo root's `go
-// build`/`vet`/`test ./...`, and its node_modules tree — hundreds of MB,
+// never include: build tooling, integration fixtures, planning docs and
+// VCS metadata have nothing to do with the plugin package Yaegi imports.
+//
+// vendor/ USED TO be excluded here, on the reasoning that it held only
+// the test-only testify dependency and _test.go files are never
+// interpreted. That stopped being true when the plugin took on
+// oss-telemetry as a runtime dependency: leaving vendor/ out would make
+// the interpreted copy unable to resolve an import the real plugin tree
+// resolves fine, so this harness would fail on code that works in
+// production — or, worse, quietly stop representing it. Copying the whole
+// vendor tree, nested "go.yaml.in"-style module dirs included, resolves
+// correctly under yaegi v0.16.1 (verified: the gate passes with the
+// telemetry import live and reached).
+//
+// webui/ (Vue admin-panel task) is still excluded: its own go.mod already
+// walls it off from the repo root's `go build`/`vet`/`test ./...`, and
+// its node_modules tree — hundreds of MB,
 // including a stray bundled .go file
 // (node_modules/flatted/golang/pkg/flatted.go) — would otherwise both
 // balloon copyRepoSource's wall time and risk Yaegi tripping over code
@@ -120,7 +135,6 @@ var excludedTopLevelDirs = map[string]bool{
 	".superpowers": true,
 	"docs":         true,
 	".git":         true,
-	"vendor":       true,
 	"webui":        true,
 }
 
@@ -161,6 +175,24 @@ func run() error {
 	pkgDir := filepath.Join(gopath, "src", modulePath)
 	if err = copyRepoSource(repoRoot, pkgDir); err != nil {
 		return fmt.Errorf("copy repo source into GOPATH: %w", err)
+	}
+
+	// Suppress telemetry BEFORE anything is interpreted, and keep it
+	// suppressed for the whole run. stampReleaseVersion below makes the
+	// interpreted copy look like a stamped release build so that New's
+	// telemetry call is actually REACHED under Yaegi; without these env
+	// vars that would fire a real ping at the public ingest endpoint from
+	// every CI run and every developer's `make yaegi-check`. Both names
+	// are set because either one alone suppresses, so a rename upstream
+	// cannot silently re-enable it.
+	if err = os.Setenv("DO_NOT_TRACK", "1"); err != nil {
+		return fmt.Errorf("set DO_NOT_TRACK: %w", err)
+	}
+	if err = os.Setenv("OSS_TELEMETRY_DISABLED", "1"); err != nil {
+		return fmt.Errorf("set OSS_TELEMETRY_DISABLED: %w", err)
+	}
+	if err = stampReleaseVersion(pkgDir); err != nil {
+		return fmt.Errorf("stamp a release version into the interpreted copy: %w", err)
 	}
 
 	pkgName, err := readPackageName(pkgDir)
@@ -350,6 +382,45 @@ const mcpProbeOversizeBytes = 11 << 20
 // harness exists to catch, and which no compiled test can see.
 const mcpTooLargeWantMessage = "response too large"
 
+// stampedCheckVersion is the fake release version stampReleaseVersion
+// writes into the interpreted copy. It only has to differ from
+// devPluginVersion; nothing asserts its value.
+const stampedCheckVersion = "9.9.9-yaegicheck"
+
+// stampReleaseVersion rewrites pluginVersion in the GOPATH COPY of
+// version.go (never the repo's own file) so the copy no longer carries
+// the dev sentinel.
+//
+// Without this, New's telemetry gate returns before ever calling into the
+// vendored oss-telemetry package, and this harness would report OK while
+// leaving the plugin's only non-stdlib runtime import unexercised under
+// the interpreter — precisely the blind spot yaegi-check exists to close.
+// Import resolution alone is not enough: a cross-package call into
+// interpreted third-party code is its own risk under Yaegi.
+//
+// Telemetry stays suppressed by the DO_NOT_TRACK/OSS_TELEMETRY_DISABLED
+// env vars the caller sets first, so Send is entered and returns without
+// touching the network. The HTTP path beyond that env check is plain
+// net/http, already exercised elsewhere in this harness.
+func stampReleaseVersion(pkgDir string) error {
+	path := filepath.Join(pkgDir, "version.go")
+	data, err := os.ReadFile(path) //nolint:gosec // a temp dir this harness just created
+	if err != nil {
+		return fmt.Errorf("read %s: %w", path, err)
+	}
+	pattern := regexp.MustCompile(`(pluginVersion\s*=\s*")[^"]*(")`)
+	if !pattern.Match(data) {
+		return fmt.Errorf("no pluginVersion constant found in %s — has version.go been renamed?", path)
+	}
+	stamped := pattern.ReplaceAll(data, []byte(`${1}`+stampedCheckVersion+`${2}`))
+	// pkgDir is a temp dir run() created itself, and the filename is a
+	// constant — no external input reaches this path.
+	if err := os.WriteFile(path, stamped, 0o600); err != nil { //nolint:gosec // G703: path is filepath.Join(<temp dir we created>, "version.go")
+		return fmt.Errorf("write %s: %w", path, err)
+	}
+	return nil
+}
+
 // readBuiltinContextTokens reads repoRoot/pricing_data_gen.go and
 // extracts modelID's own ContextTokens value directly out of the
 // generated source (review fix, SHOULD-6) — rather than hardcoding a
@@ -457,6 +528,10 @@ func exerciseHandler(handler http.Handler, builtinContextTokens int) error {
 		return err
 	}
 
+	if err := exerciseStampedVersion(handler); err != nil {
+		return err
+	}
+
 	unauthedReq := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
 	unauthedRec := httptest.NewRecorder()
 	handler.ServeHTTP(unauthedRec, unauthedReq)
@@ -495,6 +570,37 @@ func exerciseHandler(handler http.Handler, builtinContextTokens int) error {
 // a compiled concrete value's method set in Yaegi. matchesSentinel now
 // uses real errors.Is instead (its own doc comment in limits.go has the
 // full account); this harness is what caught the difference.
+// exerciseStampedVersion asserts the interpreted plugin reports
+// stampedCheckVersion in GET /admin/api/overview.
+//
+// This is the proof that stampReleaseVersion actually landed, and so the
+// proof that New's telemetry gate was PASSED rather than short-circuited:
+// the gate compares this same pluginVersion constant against
+// devPluginVersion, so a version of stampedCheckVersion here means the
+// interpreted code went on to call into the vendored oss-telemetry
+// package. Without this assertion a silently failed stamp would leave the
+// dev sentinel in place and the harness would still print OK, claiming
+// coverage it does not have.
+func exerciseStampedVersion(handler http.Handler) error {
+	req := httptest.NewRequest(http.MethodGet, "/admin/api/overview", nil)
+	req.Header.Set("Authorization", "Bearer "+attemptAccountingAdminAPIKey)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		return fmt.Errorf("GET /admin/api/overview: status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	var overview struct {
+		Version string `json:"version"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &overview); err != nil {
+		return fmt.Errorf("decode GET /admin/api/overview body: %w", err)
+	}
+	if overview.Version != stampedCheckVersion {
+		return fmt.Errorf("interpreted plugin reports version %q, want %q — stampReleaseVersion did not take effect, so New's telemetry gate short-circuited on the dev sentinel and the vendored oss-telemetry call was never exercised under Yaegi", overview.Version, stampedCheckVersion)
+	}
+	return nil
+}
+
 // exerciseFederatedTooLarge drives POST /mcp (federation's tools/call
 // path) against mcpProbeUpstream, whose response deliberately exceeds
 // mcpBackendCallResponseMaxBytes, and asserts the interpreted plugin

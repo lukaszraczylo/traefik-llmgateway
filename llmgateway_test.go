@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -852,4 +853,75 @@ func TestNewGateway_SetsPricingWarnFn(t *testing.T) {
 	if !strings.Contains(buf.String(), "llmgw[mygw]") {
 		t.Fatalf("want the pricing warning routed through the gateway's own logf, got %q", buf.String())
 	}
+}
+
+// TestShouldSendTelemetry pins the guard that keeps unstamped builds from
+// phoning home. Every developer checkout and every CI run carries
+// devPluginVersion, so the false cases are the state this code is in
+// nearly all of the time: if the guard inverts, `go test` itself starts
+// emitting pings.
+func TestShouldSendTelemetry(t *testing.T) {
+	tests := []struct {
+		name    string
+		version string
+		want    bool
+	}{
+		{"dev sentinel stays silent", devPluginVersion, false},
+		{"empty version stays silent", "", false},
+		{"stamped release sends", "0.2.38", true},
+		{"stamped prerelease sends", "1.0.0-rc1", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := shouldSendTelemetry(tt.version); got != tt.want {
+				t.Errorf("shouldSendTelemetry(%q) = %v, want %v", tt.version, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestPluginVersion_UnstampedInSourceTree guards the committed state: the
+// repository must never carry a stamped version, or a developer's own
+// build would phone home. workflow-prepare.sh stamps a COPY at release
+// time; if a stamped value is ever committed by mistake, this fails.
+func TestPluginVersion_UnstampedInSourceTree(t *testing.T) {
+	if pluginVersion != devPluginVersion {
+		t.Errorf("committed pluginVersion = %q, want the %q sentinel — a stamped version must never be committed", pluginVersion, devPluginVersion)
+	}
+}
+
+// TestNew_DoesNotPanicOnRepeatedConstruction covers the telemetry
+// sync.Once gate under the real call pattern: Traefik constructs this
+// middleware once PER ROUTE, so New runs many times in one process.
+// Construction must stay safe and cheap on every later call.
+func TestNew_DoesNotPanicOnRepeatedConstruction(t *testing.T) {
+	t.Setenv("DO_NOT_TRACK", "1")
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{"openai": {Type: "openai", APIKey: "k"}}
+	for i := 0; i < 5; i++ {
+		h, err := New(context.Background(), http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), cfg, "llmgw")
+		if err != nil {
+			t.Fatalf("New #%d: %v", i, err)
+		}
+		if h == nil {
+			t.Fatalf("New #%d returned a nil handler", i)
+		}
+	}
+}
+
+// TestSendStartupTelemetry_OnceAcrossConcurrentCalls pins the sync.Once
+// gate itself: Traefik can construct several routes concurrently at
+// startup, and oss-telemetry does not deduplicate client-side, so a
+// missing gate would emit one ping per route.
+func TestSendStartupTelemetry_OnceAcrossConcurrentCalls(t *testing.T) {
+	t.Setenv("DO_NOT_TRACK", "1")
+	var wg sync.WaitGroup
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			sendStartupTelemetry()
+		}()
+	}
+	wg.Wait() // -race proves the Once is the only synchronisation needed
 }

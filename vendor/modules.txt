@@ -1,3 +1,6 @@
+# github.com/lukaszraczylo/oss-telemetry v0.2.3
+## explicit; go 1.22
+github.com/lukaszraczylo/oss-telemetry
 # github.com/stretchr/testify v1.12.1
 ## explicit; go 1.17
 github.com/stretchr/testify/assert

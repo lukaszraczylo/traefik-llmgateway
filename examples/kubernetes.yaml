@@ -198,16 +198,16 @@ spec:
 # field names against the chart version you deploy. Two things are
 # required beyond a stock install:
 #
-# 1. Load the plugin. Either the catalog form (once this plugin is listed
-#    in the Traefik Plugin Catalog, see ../.traefik.yml) or localPlugins,
-#    mounting this repository's source into the Traefik pod the same way
+# 1. Load the plugin. Either the catalog form, which pins a released tag
+#    and is the better default for production, or localPlugins, mounting
+#    this repository's source into the Traefik pod the same way
 #    ../examples/docker-compose.yml does for its local demo:
 #
 #      experimental:
 #        plugins:
 #          llmgateway:
 #            moduleName: "github.com/lukaszraczylo/traefik-llmgateway"
-#            version: "v0.1.0"
+#            version: "v1.0.3"
 #
 # 2. Every "env:VAR_NAME" secret this Middleware references as env vars,
 #    sourced from Secrets — never inlined into the Middleware CR above.

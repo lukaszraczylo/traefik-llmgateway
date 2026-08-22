@@ -11,16 +11,15 @@ It runs as a [Yaegi](https://github.com/traefik/yaegi)-interpreted Go
 module, the same way [`traefikoidc`](https://github.com/lukaszraczylo/traefikoidc)
 does, configured per-middleware in Traefik's dynamic configuration.
 
-> **⚠️ WARNING — experimental, proof of concept.**
-> Until version 1.0 this project is an
-> experiment in PoC development stage, not production ready. Configuration
-> keys, endpoints, and behaviour can change between pre-1.0 releases without
-> a deprecation period. Evaluate it, test it, break it — but do not put it
-> in front of production traffic yet.
+**Status:** stable at **v1.0**. Configuration keys, endpoints, and
+behaviour now follow semver — breaking changes wait for a major release
+instead of landing between patches, as they could before 1.0.
 
-**Status:** feature-complete, all gates green (unit tests, `-race`,
-`yaegi-check`, integration). Not yet published to the Traefik Plugin
-Catalog — see [Development](#development) for what that needs.
+Feature-complete, all gates green (unit tests, `-race`, `yaegi-check`,
+integration), and published to the Traefik Plugin Catalog. One behaviour
+worth knowing before you deploy: [streaming is delivered buffered rather
+than token-by-token](#known-limitations) under the current Traefik + Yaegi
+combination.
 
 ## What it is
 
@@ -88,12 +87,23 @@ reached when a request matches none of the plugin's routes and
 
 ### Static configuration
 
-The plugin is not yet in the Traefik Plugin Catalog (see
-[Development](#development)), so the catalog form of static configuration
-(`experimental.plugins.llmgateway`) is not usable yet. Until then, load it
-as a [`localPlugin`](https://doc.traefik.io/traefik/plugins/#defining-a-local-plugin),
+The plugin is in the Traefik Plugin Catalog, so the catalog form of static
+configuration works:
+
+```yaml
+experimental:
+  plugins:
+    llmgateway:
+      moduleName: github.com/lukaszraczylo/traefik-llmgateway
+      version: v1.0.3
+```
+
+You can also load it as a
+[`localPlugin`](https://doc.traefik.io/traefik/plugins/#defining-a-local-plugin),
 mounting this repository's source into the Traefik container at
-`<plugins-local dir>/src/github.com/lukaszraczylo/traefik-llmgateway` — see
+`<plugins-local dir>/src/github.com/lukaszraczylo/traefik-llmgateway`.
+That form tracks a branch instead of a pinned release, which suits
+development and any deployment that wants to follow `main` — see
 [`examples/docker-compose.yml`](examples/docker-compose.yml) for a
 working, tested setup that does exactly this:
 
@@ -105,15 +115,9 @@ experimental:
       moduleName: github.com/lukaszraczylo/traefik-llmgateway
 ```
 
-Once the plugin is published, the catalog form replaces this:
-
-```yaml
-experimental:
-  plugins:
-    llmgateway:
-      moduleName: github.com/lukaszraczylo/traefik-llmgateway
-      version: "v0.1.0" # substitute the tag you actually deploy
-```
+The catalog form above pins a released tag instead, which is the better
+default for production: a pod restart cannot pick up a change you have not
+deployed on purpose.
 
 ### Dynamic configuration
 
@@ -1269,6 +1273,58 @@ or in CI.
   route. Neither line ever includes the presented API key — only the
   identity it resolved to, never the key material itself.
 
+## Anonymous usage reporting
+
+Release builds send **one** anonymous "plugin loaded" ping per process, at
+startup, so the project can see roughly how many installs exist and which
+versions are in use.
+
+**What is sent** — the whole payload:
+
+```json
+{ "project": "traefik-llmgateway", "version": "1.0.3", "ts": 1747782200 }
+```
+
+**What is never sent:** no identifiers, no hostname or IP, no machine
+information, no configuration, no provider names or base URLs, no API
+keys, no user or group names, no model names, and nothing derived from a
+request. The gateway sends the three fields above and nothing else.
+
+**When it does not happen at all:**
+
+- **Builds from source stay silent.** The version constant is stamped only
+  at release time, so a checkout, a local build, and every test run carry
+  the `0.0.0-dev` sentinel and never ping.
+- **Failed startups stay silent.** The ping is sent only after the plugin
+  constructs successfully, so a rejected configuration is never counted.
+- Only once per process, however many routes use the plugin.
+
+**How to turn it off** in a release build — set any one of these in
+Traefik's environment:
+
+```bash
+DO_NOT_TRACK=1                          # honours the do-not-track.dev convention
+OSS_TELEMETRY_DISABLED=1
+TRAEFIK_LLMGATEWAY_DISABLE_TELEMETRY=1  # this project only
+```
+
+In Kubernetes, add it to the Traefik deployment:
+
+```yaml
+env:
+  - name: DO_NOT_TRACK
+    value: "1"
+```
+
+**It cannot affect your gateway.** The call runs in its own goroutine with
+a 2-second timeout, never blocks request handling or startup, never
+retries, never persists anything, and swallows every error. If the
+endpoint is unreachable or blocked by egress rules, nothing happens.
+
+The client is [oss-telemetry](https://github.com/lukaszraczylo/oss-telemetry),
+vendored in this repository, so you can read exactly what it does — it is
+the plugin's only non-standard-library runtime dependency.
+
 ## Known limitations
 
 - **Streaming is delivered buffered, not token-by-token, under the current
@@ -1476,18 +1532,24 @@ preference. [`resp.go`](resp.go) is the clearest example: a hand-rolled,
 ~400-line RESP2 client instead of `go-redis`, which proved unsuitable for
 Yaegi interpretation.
 
-### Catalog submission
+### Catalog
 
-[`.traefik.yml`](.traefik.yml) is in place, with a `basePkg` override
-(`traefikllmgateway`) required because Traefik's Yaegi middleware loader
-otherwise binds the interpreted package under
+The plugin is listed, and the catalog serves the released tags.
+
+[`.traefik.yml`](.traefik.yml) carries a `basePkg` override
+(`traefikllmgateway`) because Traefik's Yaegi middleware loader otherwise
+binds the interpreted package under
 `strings.ReplaceAll(path.Base(import), "-", "_")` — `traefik_llmgateway`
 — which does not match this package's actual `package traefikllmgateway`
 declaration. This was discovered running the plugin in real Traefik for
-the first time; see the comment in `.traefik.yml` itself. **The Plugin
-Catalog's own analyzer (piceus) has not yet been run against this
-repository** — whether it accepts the same `basePkg` override the same
-way real Traefik does is unverified until actual submission.
+the first time; see the comment in `.traefik.yml` itself. The catalog's
+own analyzer (piceus) accepts the override the same way real Traefik
+does, which the successful listing confirms.
+
+Note that the catalog renders `.traefik.yml`'s description with a plain
+CommonMark renderer: GitHub callout syntax (`> [!WARNING]`) and mermaid
+blocks appear as literal text there, so keep that file's prose to plain
+Markdown.
 
 ## License
 

@@ -10,6 +10,9 @@ import (
 	"net/http"
 	"os"
 	"runtime"
+	"sync"
+
+	telemetry "github.com/lukaszraczylo/oss-telemetry"
 )
 
 // Config is the plugin's dynamic configuration, populated by Traefik from
@@ -479,6 +482,56 @@ type Gateway struct {
 	name          string
 }
 
+// telemetryStartupOnce keeps the anonymous "plugin loaded" ping to one per
+// process. Traefik calls New once per ROUTE that uses this plugin, and a
+// busy ingress can have many; oss-telemetry does not deduplicate on the
+// client side (the server does), so the gate belongs here.
+var telemetryStartupOnce sync.Once
+
+// sendStartupTelemetry fires at most one anonymous "plugin loaded" ping
+// per process, matching traefikoidc's behaviour.
+//
+// What leaves the pod: project name, version and a timestamp. No
+// identifiers, no config, no provider names, no keys, no request data.
+// The call never blocks (it runs in oss-telemetry's own goroutine), never
+// panics, never retries and never returns an error, so it cannot affect
+// request handling or delay Traefik's startup.
+//
+// Silent unless the build was stamped: an unstamped tree still carries
+// devPluginVersion, so developers and operators building from a checkout
+// never phone home. Operators of a RELEASE build opt out with any of
+// DO_NOT_TRACK=1, OSS_TELEMETRY_DISABLED=1, or
+// TRAEFIK_LLMGATEWAY_DISABLE_TELEMETRY=1 (oss-telemetry reads all three;
+// the last is this project's name uppercased with dashes replaced). This
+// is documented in README.md — a plugin that phones home without saying
+// so in its own README would be indefensible.
+func sendStartupTelemetry() {
+	telemetryStartupOnce.Do(func() {
+		if !shouldSendTelemetry(pluginVersion) {
+			return
+		}
+		telemetry.Send(telemetryProjectName, pluginVersion)
+	})
+}
+
+// telemetryProjectName is the project identifier reported in the ping. It
+// matches the repository name, and doubles as the prefix oss-telemetry
+// derives its per-project opt-out variable from
+// (TRAEFIK_LLMGATEWAY_DISABLE_TELEMETRY).
+const telemetryProjectName = "traefik-llmgateway"
+
+// shouldSendTelemetry reports whether a build stamped with version may
+// emit a startup ping. Only release-stamped builds may: an empty or
+// dev-sentinel version means nothing stamped this tree, so it is a
+// checkout, a test run or a local build, none of which should phone home.
+//
+// Split out from sendStartupTelemetry so the decision is testable without
+// a network: the send itself goes through oss-telemetry, whose endpoint
+// is deliberately not overridable from consuming code.
+func shouldSendTelemetry(version string) bool {
+	return version != "" && version != devPluginVersion
+}
+
 // New creates the middleware. NOTE: no tail call — Yaegi zeroes
 // multi-value tail-call returns across the reflect boundary.
 func New(ctx context.Context, next http.Handler, config *Config, name string) (http.Handler, error) {
@@ -486,6 +539,10 @@ func New(ctx context.Context, next http.Handler, config *Config, name string) (h
 	if err != nil {
 		return nil, err
 	}
+	// Deliberately AFTER construction succeeds: a config the gateway
+	// rejects never loaded a working plugin, so counting it as an install
+	// would inflate the numbers with failures.
+	sendStartupTelemetry()
 	return g, nil
 }
 
