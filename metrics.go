@@ -31,14 +31,29 @@ import (
 // either "everyone" or "no one" depending on what address arrives.
 // Confirm RemoteAddr reflects the scraper's own address in your
 // deployment before relying on this instead of a key.
+//
+// THE FAILURE MODE TO AVOID IS NOT "the allowlist does not work" — it is
+// "the allowlist works exactly as configured, and what survives to
+// RemoteAddr is an address you never intended to trust" (review fix,
+// adversarial verification 2026-08-23, reproduced live): a whole RFC1918
+// block such as 10.0.0.0/8 is never a correct entry, because a SNAT-ing
+// router or load balancer makes EXTERNAL traffic arrive from an address
+// inside that same private range — on the reproduction cluster,
+// AllowedCIDRs: ["10.0.0.0/8"] paired with the router's own SNAT address
+// returned full per-user cost data to an external caller with no key at
+// all. Always scope this to the NARROWEST block that covers only your
+// actual scrapers — a Prometheus/VictoriaMetrics pod CIDR such as
+// 10.42.0.0/16, not the broad private range it happens to sit inside.
 type MetricsConfig struct {
 	// Path overrides the served path. Empty (the default) serves at
 	// metricsPathDefault ("/metrics").
 	Path string `json:"path,omitempty"`
-	// AllowedCIDRs lists CIDR blocks (e.g. "10.0.0.0/8") whose source
-	// address may scrape without an admin key. Empty means every
-	// scrape must carry a valid admin bearer token — see this type's
-	// own doc comment for the trust assumption this relies on.
+	// AllowedCIDRs lists CIDR blocks whose source address may scrape
+	// without an admin key — e.g. "10.42.0.0/16" for a cluster's pod
+	// network, never a whole RFC1918 range like "10.0.0.0/8". Empty
+	// means every scrape must carry a valid admin bearer token — see
+	// this type's own doc comment for the trust assumption this relies
+	// on, and for why the narrowest-possible block matters here.
 	AllowedCIDRs []string `json:"allowedCIDRs,omitempty"`
 	Enabled      bool     `json:"enabled,omitempty"`
 	// ModelLabel adds a `model` label to the provider attempt/failure
@@ -168,17 +183,36 @@ func (g *Gateway) serveMetrics(w http.ResponseWriter) {
 // one bad line, so this is a correctness requirement, not a formatting
 // nicety.
 //
-// This walks s rune by rune and classifies each one independently, never
+// This walks s BYTE by byte and classifies each one independently, never
 // a sequential find-and-replace pass: replacing quotes first and
 // backslashes second (or vice versa) would double-escape a backslash
 // this function itself just inserted — a real, classic bug class for
 // this exact kind of escaping. A single forward pass has no such
 // ordering hazard.
+//
+// Byte-oriented, deliberately NOT `for _, r := range s` (review fix,
+// adversarial verification 2026-08-23): ranging over a string decodes
+// UTF-8 and substitutes U+FFFD for every invalid byte, which makes the
+// function NOT injective — two distinct configured names that both
+// contain invalid UTF-8 (a byte sequence auth.go's buildEntry never
+// rejects; it validates non-empty only, see its own doc comment) can
+// decode to the identical U+FFFD run and render as the SAME escaped
+// label value. Two scope_id values colliding onto one series is a
+// duplicate-series scrape failure — confirmed against a real Prometheus
+// scrape parser: the whole target reports DOWN, and promtool alone will
+// not catch it, since expfmt silently dedupes. Escaping byte-for-byte
+// passes every raw byte through unchanged except the three ASCII
+// characters requiring escaping ('\\', '"', '\n') — none of which can
+// ever appear as a UTF-8 continuation byte (continuation bytes are
+// always >= 0x80), so this never misinterprets a multi-byte sequence's
+// internal bytes as one of these three, and every distinct input byte
+// string still maps to a distinct output. It also avoids WriteRune's
+// per-rune decode cost on a large value.
 func escapeLabelValue(s string) string {
 	var b bytes.Buffer
 	b.Grow(len(s))
-	for _, r := range s {
-		switch r {
+	for i := 0; i < len(s); i++ {
+		switch c := s[i]; c {
 		case '\\':
 			b.WriteString(`\\`)
 		case '"':
@@ -186,7 +220,7 @@ func escapeLabelValue(s string) string {
 		case '\n':
 			b.WriteString(`\n`)
 		default:
-			b.WriteRune(r)
+			b.WriteByte(c)
 		}
 	}
 	return b.String()
@@ -257,6 +291,38 @@ func (m *metricWriter) sampleFloat(name string, labels []metricLabel, v float64)
 	m.sample(name, labels, strconv.FormatFloat(v, 'g', -1, 64))
 }
 
+// aggregationNoteStoreBacked is appended to every store-backed family's
+// HELP text below (item 1, adversarial verification 2026-08-23,
+// reproduced against a 3-replica Traefik deployment): windowKey
+// (limits.go) carries no per-instance component, so with Config.Redis
+// configured every replica's counterStore read returns the SAME
+// gateway-wide value — Prometheus scrapes each replica as its own
+// target, so sum(rate(...)) or sum(...) across replicas TRIPLE-COUNTS
+// on 3 replicas (a cost alert fires at a third of its intended
+// threshold). The correct cross-replica aggregation is max(), since
+// every replica already reports the true total on its own. Without
+// Config.Redis (the in-memory memoryStore fallback), the IDENTICAL
+// family becomes genuinely per-process instead — each replica counts
+// only the traffic it personally handled — and sum() becomes the
+// correct aggregation instead of max(). This flips on that one config
+// bit; know which one a deployment is running before wiring an alert.
+const aggregationNoteStoreBacked = " AGGREGATION ACROSS REPLICAS: with Redis configured, this value is the gateway-wide total read from shared limit state and is IDENTICAL on every replica's own /metrics response — aggregate with max(), never sum(), or a multi-replica deployment overcounts by the replica count. Without Redis (the in-memory fallback), this SAME family becomes genuinely per-process instead, and sum() becomes the correct aggregation. Know which one you are running."
+
+// aggregationNotePerProcess is appended to llmgateway_rate_limit_
+// rejections_total's HELP text: limiter.rejections (limits.go) is a
+// bare in-process map, never written to or read from Redis regardless
+// of Config.Redis — unlike every store-backed family above, this one
+// never flips, and sum() is always the right cross-replica aggregation.
+const aggregationNotePerProcess = " AGGREGATION ACROSS REPLICAS: this counter lives only in this process's memory, never in Redis, regardless of Config.Redis — aggregate with sum(), which is always correct for it, unlike the store-backed families above."
+
+// aggregationNoteProviderHealthy is appended to llmgateway_provider_
+// healthy's HELP text: the discovery circuit breaker (registry.go's
+// providerState.health) is per-process state, set by each replica's own
+// discovery polling loop, and is never written to Redis — two replicas
+// can legitimately disagree about one provider's health at the same
+// instant (e.g. one mid-backoff, one already recovered).
+const aggregationNoteProviderHealthy = " AGGREGATION ACROSS REPLICAS: each replica runs its own discovery circuit breaker in-process, never shared via Redis, so this can legitimately differ per replica. Read it per-instance where possible; if you must aggregate, use min() to surface \"at least one replica sees this provider as unhealthy\" — sum() is meaningless for a 0/1 gauge."
+
 // renderMetrics builds the full Prometheus text-exposition document for
 // GET <metrics path>. Every read below goes through the SAME batched,
 // chunked accessors GET /admin/api/overview and GET /admin/api/usage
@@ -304,7 +370,7 @@ func (g *Gateway) writeUsageMetrics(m *metricWriter) {
 	usage := g.chunkedCurrentUsage(scopes)
 
 	m.family("llmgateway_requests_total", "counter",
-		"Total requests admitted for accounting today (UTC calendar day; resets at UTC midnight), by scope.")
+		"Total requests admitted for accounting today (UTC calendar day; resets at UTC midnight), by scope."+aggregationNoteStoreBacked)
 	for _, su := range usage {
 		if su.storeDown {
 			continue
@@ -314,7 +380,7 @@ func (g *Gateway) writeUsageMetrics(m *metricWriter) {
 	}
 
 	m.family("llmgateway_tokens_total", "counter",
-		"Total tokens accounted today (UTC calendar day; resets at UTC midnight), by scope and direction.")
+		"Total tokens accounted today (UTC calendar day; resets at UTC midnight), by scope and direction."+aggregationNoteStoreBacked)
 	for _, su := range usage {
 		if su.storeDown {
 			continue
@@ -326,7 +392,7 @@ func (g *Gateway) writeUsageMetrics(m *metricWriter) {
 	}
 
 	m.family("llmgateway_cost_micro_usd_total", "counter",
-		"Total cost accounted today (UTC calendar day; resets at UTC midnight), in micro-USD (1000000 = $1), by scope.")
+		"Total cost accounted today (UTC calendar day; resets at UTC midnight), in micro-USD (1000000 = $1), by scope."+aggregationNoteStoreBacked)
 	for _, su := range usage {
 		if su.storeDown {
 			continue
@@ -336,7 +402,7 @@ func (g *Gateway) writeUsageMetrics(m *metricWriter) {
 	}
 
 	m.family("llmgateway_budget_consumed_ratio", "gauge",
-		"Fraction of a configured limit already consumed in its own window; 1.0 means fully consumed, above 1.0 means the limit has been breached. Emitted only for a scope with that particular limit configured.")
+		"Fraction of a configured limit already consumed in its own window; 1.0 means fully consumed, above 1.0 means the limit has been breached. Emitted only for a scope with that particular limit configured."+aggregationNoteStoreBacked)
 	for i, su := range usage {
 		if su.storeDown {
 			continue
@@ -416,17 +482,29 @@ func (g *Gateway) writeProviderMetrics(m *metricWriter) {
 	providerCounts := counters[:len(snaps)]
 
 	m.family("llmgateway_provider_attempts_total", "counter",
-		"Total upstream attempts today (UTC calendar day; resets at UTC midnight), by provider.")
+		"Total upstream attempts today (UTC calendar day; resets at UTC midnight), by provider."+aggregationNoteStoreBacked)
 	m.family("llmgateway_provider_failures_total", "counter",
-		"Total upstream attempts today classified as a provider fault (transport error, 429, or 5xx — the same classification recordProviderAttempt/isTransient apply), by provider.")
+		"Total upstream attempts today classified as a provider fault (transport error, 429, or 5xx — the same classification recordProviderAttempt/isTransient apply), by provider."+aggregationNoteStoreBacked)
 	for i, s := range snaps {
+		// A storeDown counter is a failed-closed read (limits.go's
+		// providerUsage), not a real zero (review fix, adversarial
+		// verification 2026-08-23): emitting it as a hard 0 here is
+		// exactly the bug writeUsageMetrics' own storeDown guard above
+		// already avoids for the request/token/cost families — a Redis
+		// blip would otherwise paint a phantom counter-reset spike the
+		// instant the store recovers and this value jumps back to its
+		// real total. Skip the series entirely; a temporary gap is the
+		// honest signal, a fabricated 0 is not.
+		if providerCounts[i].storeDown {
+			continue
+		}
 		labels := []metricLabel{{"provider", s.name}}
 		m.sampleInt("llmgateway_provider_attempts_total", labels, providerCounts[i].attemptsDay)
 		m.sampleInt("llmgateway_provider_failures_total", labels, providerCounts[i].failuresDay)
 	}
 
 	m.family("llmgateway_provider_healthy", "gauge",
-		"1 when the provider's discovery circuit breaker is not open (closed or half-open), 0 when open (discoveryHealthy, registry.go).")
+		"1 when the provider's discovery circuit breaker is not open (closed or half-open), 0 when open (discoveryHealthy, registry.go)."+aggregationNoteProviderHealthy)
 	for _, s := range snaps {
 		healthy := int64(1)
 		if s.health == breakerOpen {
@@ -441,14 +519,17 @@ func (g *Gateway) writeProviderMetrics(m *metricWriter) {
 	modelCounts := counters[len(snaps):]
 
 	m.family("llmgateway_provider_model_attempts_total", "counter",
-		"Total upstream attempts today (UTC calendar day; resets at UTC midnight), by provider and model. Opt-in via metrics.modelLabel — see MetricsConfig's own doc comment for the cardinality trade-off.")
+		"Total upstream attempts today (UTC calendar day; resets at UTC midnight), by provider and model. Opt-in via metrics.modelLabel — see MetricsConfig's own doc comment for the cardinality trade-off."+aggregationNoteStoreBacked)
 	m.family("llmgateway_provider_model_failures_total", "counter",
-		"Total upstream attempts today classified as a provider fault, by provider and model. Opt-in via metrics.modelLabel.")
+		"Total upstream attempts today classified as a provider fault, by provider and model. Opt-in via metrics.modelLabel."+aggregationNoteStoreBacked)
 	mi := 0
 	for _, s := range snaps {
 		for _, model := range s.models {
 			mc := modelCounts[mi]
 			mi++
+			if mc.storeDown { // same fabricated-reset hazard as the provider-level loop above
+				continue
+			}
 			labels := []metricLabel{{"provider", s.name}, {"model", model}}
 			m.sampleInt("llmgateway_provider_model_attempts_total", labels, mc.attemptsDay)
 			m.sampleInt("llmgateway_provider_model_failures_total", labels, mc.failuresDay)
@@ -475,9 +556,27 @@ func (g *Gateway) writeRejectionMetrics(m *metricWriter) {
 	})
 
 	m.family("llmgateway_rate_limit_rejections_total", "counter",
-		"Total requests refused by a rate or budget limit since process start, by scope. Unlike the request/token/cost counters above, this is a process-lifetime counter, not UTC-day-windowed — it resets only on restart.")
+		"Total requests refused by a rate or budget limit since process start, by scope. Unlike the request/token/cost counters above, this is a process-lifetime counter, not UTC-day-windowed — it resets only on restart."+aggregationNotePerProcess)
 	for _, s := range snaps {
 		m.sampleInt("llmgateway_rate_limit_rejections_total",
 			[]metricLabel{{"scope_kind", s.kind}, {"scope_id", s.id}}, s.count)
 	}
+}
+
+// pruneRejectionsAfterReload evicts every "user"-kind rejection scope
+// (limiter.pruneRejections, limits.go) whose name is no longer among
+// g.auth's currently active users — ServeHTTP's own call site
+// (llmgateway.go), gated on authStore.maybeReload just having performed
+// a REAL file-sourced reload, never run unconditionally (see
+// maybeReload's own doc comment, users_file.go, for why). Without this,
+// a user removed from a hot-reloaded users file would keep exporting
+// llmgateway_rate_limit_rejections_total for the rest of the process's
+// life (review fix, adversarial verification 2026-08-23).
+func (g *Gateway) pruneRejectionsAfterReload() {
+	userSummaries, _ := g.auth.snapshot()
+	keep := make(map[string]bool, len(userSummaries))
+	for _, us := range userSummaries {
+		keep[us.name] = true
+	}
+	g.limiter.pruneRejections(keep)
 }

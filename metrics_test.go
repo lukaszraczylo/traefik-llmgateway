@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -172,6 +173,38 @@ func TestMetrics_NoAllowlistConfigured_KeylessRequestRejected(t *testing.T) {
 	h.ServeHTTP(rec, metricsRequest(http.MethodGet, metricsPathDefault, ""))
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want 401 (no allowlist configured)", rec.Code)
+	}
+}
+
+// TestMetrics_AllowlistedRequest_NeverTouchesAuthFailureTracking pins the
+// ORDERING handleMetrics' own doc comment claims (metrics.go): the CIDR
+// allowlist is checked BEFORE auth.identify ever runs, so a keyless,
+// allowlisted scrape never records a failed-auth attempt for its own
+// source address. This is not observable from status codes alone — a
+// handler that checked identify FIRST and fell back to the CIDR
+// allowlist only on failure would return the identical 200 for every
+// case TestMetrics_GateMatrix asserts, while still quietly feeding
+// authStore's failure tracker on every single scrape. Mutation-proofing:
+// reordering the two checks changes only this test's outcome, nothing
+// else in this file.
+func TestMetrics_AllowlistedRequest_NeverTouchesAuthFailureTracking(t *testing.T) {
+	t.Parallel()
+	cfg := newMetricsTestConfig()
+	cfg.Metrics.AllowedCIDRs = []string{"192.0.2.0/24"}
+	h, gw := newMetricsGatewayHandle(t, cfg)
+
+	for i := 0; i < 5; i++ {
+		rec := httptest.NewRecorder()
+		// Default RemoteAddr (192.0.2.1:1234, verified empirically) —
+		// inside the allowlist, no key presented at all.
+		h.ServeHTTP(rec, metricsRequest(http.MethodGet, metricsPathDefault, ""))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("request %d: status = %d, want 200", i, rec.Code)
+		}
+	}
+
+	if got := gw.auth.failures.get("192.0.2.1"); got != 0 {
+		t.Errorf("auth failure count for the allowlisted scraper's address = %d, want 0 — the CIDR check must run before auth.identify, never after", got)
 	}
 }
 
@@ -453,6 +486,13 @@ func TestEscapeLabelValue(t *testing.T) {
 		{"quote_then_backslash", `"\`, `\"\\`},
 		{"backslash_then_quote", `\"`, `\\\"`},
 		{"all_three", "a\"b\\c\nd", `a\"b\\c\nd`},
+		// Invalid UTF-8 bytes (0x80/0x81 are bare continuation bytes,
+		// never valid as the START of any UTF-8 sequence) must pass
+		// through UNCHANGED, byte-for-byte — see
+		// TestEscapeLabelValue_InvalidUTF8_Injective below for why this
+		// matters beyond just "does not crash".
+		{"invalid_utf8_lone_0x80", "u\x80", "u\x80"},
+		{"invalid_utf8_lone_0x81", "u\x81", "u\x81"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -461,6 +501,30 @@ func TestEscapeLabelValue(t *testing.T) {
 				t.Errorf("escapeLabelValue(%q) = %q, want %q", tt.in, got, tt.want)
 			}
 		})
+	}
+}
+
+// TestEscapeLabelValue_InvalidUTF8_Injective is the mutation-proofing
+// test for the byte-oriented rewrite (review fix, adversarial
+// verification 2026-08-23): a rune-oriented `for _, r := range s`
+// implementation decodes invalid UTF-8 to U+FFFD, which makes escaping
+// NOT injective — "u\x80" and "u\x81" are two distinct, real inputs
+// (auth.go's buildEntry validates a user name as non-empty only, never
+// restricted to valid UTF-8) that would both render as "u�" under
+// that approach, colliding two distinct scope_id label values onto one
+// series — confirmed against a real Prometheus scrape parser: a
+// duplicate series, and the whole scrape target reported DOWN. The
+// byte-oriented implementation must keep every input byte-for-byte
+// distinguishable.
+func TestEscapeLabelValue_InvalidUTF8_Injective(t *testing.T) {
+	t.Parallel()
+	a := escapeLabelValue("u\x80")
+	b := escapeLabelValue("u\x81")
+	if a == b {
+		t.Fatalf("escapeLabelValue(%q) == escapeLabelValue(%q) == %q — two distinct inputs collided onto one label value", "u\x80", "u\x81", a)
+	}
+	if strings.Contains(a, "�") || strings.Contains(b, "�") {
+		t.Errorf("escaped output contains U+FFFD (replacement character) — the rune-decoding bug this test guards against: a=%q b=%q", a, b)
 	}
 }
 
@@ -689,6 +753,69 @@ func TestMetrics_ProviderHealthy_ReflectsOpenBreaker(t *testing.T) {
 	assertSample(t, samples, "llmgateway_provider_healthy", map[string]string{"provider": "openai"}, "0")
 }
 
+// --- store outage: skip, never fabricate a zero ---
+
+// TestMetrics_StoreDown_SkipsRatherThanFabricatesZero is the mutation-
+// proofing test for every `if su.storeDown { continue }` /
+// `if mc.storeDown { continue }` guard in metrics.go: deleting any of
+// them makes this test fail. Forces the SAME limiter every family in
+// this file reads from into a fail-closed store outage (alwaysErrStore,
+// failOpen=false — routes_unified_test.go's own stub), then asserts
+// every store-backed family emits NO samples at all rather than a
+// fabricated 0 (review fix, adversarial verification 2026-08-23:
+// without the guards, a Redis blip reads as a hard 0 mid-outage, then
+// jumps back to the real total on recovery — Prometheus treats that as
+// a counter reset followed by a spurious full-total "increase").
+// llmgateway_provider_healthy is deliberately excluded from the "must be
+// absent" list: it comes from the in-process discovery breaker, never
+// the counterStore, so a store outage must NOT affect it — asserted
+// present here for exactly that reason.
+func TestMetrics_StoreDown_SkipsRatherThanFabricatesZero(t *testing.T) {
+	t.Parallel()
+	cfg := newMetricsTestConfig()
+	cfg.Metrics.ModelLabel = true
+	cfg.Users.Inline[0].Limits = &LimitsConfig{RequestsPerDay: 100}
+	h, gw := newMetricsGatewayHandle(t, cfg)
+
+	gw.limiter.store = alwaysErrStore{}
+	gw.limiter.failOpen = false
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, metricsRequest(http.MethodGet, metricsPathDefault, "sk-admin1"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+
+	_, samples := parsePrometheusText(t, rec.Body.Bytes())
+	mustBeAbsent := []string{
+		"llmgateway_requests_total",
+		"llmgateway_tokens_total",
+		"llmgateway_cost_micro_usd_total",
+		"llmgateway_budget_consumed_ratio",
+		"llmgateway_provider_attempts_total",
+		"llmgateway_provider_failures_total",
+		"llmgateway_provider_model_attempts_total",
+		"llmgateway_provider_model_failures_total",
+	}
+	for _, s := range samples {
+		for _, absent := range mustBeAbsent {
+			if s.name == absent {
+				t.Errorf("sample %s%v present during a store outage — must be skipped, not fabricated as 0", s.name, s.labels)
+			}
+		}
+	}
+
+	var providerHealthyPresent bool
+	for _, s := range samples {
+		if s.name == "llmgateway_provider_healthy" {
+			providerHealthyPresent = true
+		}
+	}
+	if !providerHealthyPresent {
+		t.Error("llmgateway_provider_healthy missing — this family reads in-process breaker state, not the store, and must still render during a store outage")
+	}
+}
+
 // --- rate-limit rejections ---
 
 // TestMetrics_RateLimitRejections_CountedByScope drives a real 429
@@ -742,6 +869,65 @@ func TestLimiter_RejectionSnapshot_StoreDown(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("rejectionSnapshot = %+v, want one store_down entry with count 1", snaps)
+	}
+}
+
+// TestMetrics_PruneRejectionsAfterReload_EndToEnd is the end-to-end proof
+// for item 7 (adversarial verification, 2026-08-23): a file-sourced user
+// removed via a real users-file hot-reload (auth.go's replaceFileUsers,
+// driven through ServeHTTP exactly as production traffic drives it, not
+// a direct limiter call) must stop exporting
+// llmgateway_rate_limit_rejections_total, proving the wiring from
+// ServeHTTP through authStore.maybeReload's new return value to
+// Gateway.pruneRejectionsAfterReload actually runs, not just the
+// pruning logic in isolation (TestLimiter_PruneRejections_
+// RemovesDeletedUserScope, limits_test.go).
+func TestMetrics_PruneRejectionsAfterReload_EndToEnd(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "users.json")
+	writeUsersDoc(t, fp, []*UserConfig{
+		{Name: "alice", Group: "g", APIKey: "sk-alice", Limits: &LimitsConfig{RequestsPerMinute: 1}},
+	}, time.Time{})
+
+	cfg := newMetricsTestConfig()
+	cfg.Users = &UsersConfig{
+		File:   fp,
+		Inline: []*UserConfig{{Name: "admin1", Group: "g", APIKey: "sk-admin1", Admin: true}},
+	}
+	h, gw := newMetricsGatewayHandle(t, cfg)
+
+	body := map[string]any{"model": "gpt-test", "messages": []any{map[string]any{"role": "user", "content": "hi"}}}
+	h.ServeHTTP(httptest.NewRecorder(), newUnifiedRequest(t, http.MethodPost, "/v1/chat/completions", "sk-alice", body))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, newUnifiedRequest(t, http.MethodPost, "/v1/chat/completions", "sk-alice", body))
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want 429 (RequestsPerMinute:1 exhausted)", rec.Code)
+	}
+
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, metricsRequest(http.MethodGet, metricsPathDefault, "sk-admin1"))
+	_, samples := parsePrometheusText(t, rec.Body.Bytes())
+	assertSample(t, samples, "llmgateway_rate_limit_rejections_total", map[string]string{"scope_kind": "user", "scope_id": "alice"}, "1")
+
+	// Remove alice from the users file and force ServeHTTP's own
+	// maybeReload call to pick it up — mirrors users_file_test.go's own
+	// clock-advance idiom (newReloadableAuthStore).
+	clock := &fakeClock{now: time.Now()}
+	gw.auth.nowFn = clock.Now
+	writeUsersDoc(t, fp, nil, time.Now().Add(time.Hour))
+	clock.Advance(reloadEvery + time.Second)
+
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, metricsRequest(http.MethodGet, metricsPathDefault, "sk-admin1"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	_, samples = parsePrometheusText(t, rec.Body.Bytes())
+	for _, s := range samples {
+		if s.name == "llmgateway_rate_limit_rejections_total" && s.labels["scope_id"] == "alice" {
+			t.Errorf("alice's rejection series is still present after being removed from the users file and reloaded: %+v", s)
+		}
 	}
 }
 
