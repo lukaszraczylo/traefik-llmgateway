@@ -28,16 +28,26 @@ const (
 // of data.
 const maxMultipartModelFieldBytes = 4096
 
-// decodeMediaJSONRequest reads r.Body capped at maxRequestBytes (routes_
-// unified.go's cap, shared here) and decodes it as a JSON object, then
-// extracts its "model" field. It mirrors runUnified's own decode path
-// exactly (spec §3's "reuse the unified decode path") — used by both the
-// images and audio-speech routes, whose request bodies are both single
-// JSON objects carrying a top-level "model" field, unlike
-// audio-transcriptions' multipart body. A read failure or invalid/missing
-// JSON is a 400, already written to sw; ok reports whether the caller may
-// proceed.
+// decodeMediaJSONRequest claims a body-admission slot (acquireBodyAdmission),
+// reads r.Body capped at maxRequestBytes (routes_unified.go's cap, shared
+// here) and decodes it as a JSON object, then extracts its "model"
+// field — releasing the slot before returning, on every path (security
+// review finding 1b, round 3, 2026-08-22: the slot is scoped to this
+// read+decode step alone, exactly like readAndDecodeUnifiedBody
+// (routes_unified.go), never held across the adapter call that follows
+// in the caller). It mirrors runUnified's own decode path exactly (spec
+// §3's "reuse the unified decode path") — used by both the images and
+// audio-speech routes, whose request bodies are both single JSON objects
+// carrying a top-level "model" field, unlike audio-transcriptions'
+// multipart body. A read failure or invalid/missing JSON is a 400,
+// already written to sw; ok reports whether the caller may proceed.
 func (g *Gateway) decodeMediaJSONRequest(sw *statusTrackingWriter, r *http.Request) (req map[string]any, model string, ok bool) {
+	release, admitted := g.acquireBodyAdmission(sw)
+	defer release()
+	if !admitted {
+		return nil, "", false
+	}
+
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxRequestBytes))
 	if err != nil {
 		writeOAIError(sw, http.StatusBadRequest, "invalid_request_error", "cannot read request body")
@@ -90,12 +100,7 @@ func (g *Gateway) resolveMediaModel(sw *statusTrackingWriter, grp *group, reques
 func (g *Gateway) handleImagesGenerations(w http.ResponseWriter, r *http.Request, u *user, grp *group) {
 	sw := &statusTrackingWriter{ResponseWriter: w}
 
-	release, ok := g.acquireBodyAdmission(sw)
-	defer release()
-	if !ok {
-		return
-	}
-	if _, ok = g.admitRequest(sw, u, grp); !ok {
+	if _, ok := g.admitRequest(sw, u, grp); !ok {
 		return
 	}
 
@@ -132,12 +137,7 @@ func (g *Gateway) handleImagesGenerations(w http.ResponseWriter, r *http.Request
 func (g *Gateway) handleAudioSpeech(w http.ResponseWriter, r *http.Request, u *user, grp *group) {
 	sw := &statusTrackingWriter{ResponseWriter: w}
 
-	release, ok := g.acquireBodyAdmission(sw)
-	defer release()
-	if !ok {
-		return
-	}
-	if _, ok = g.admitRequest(sw, u, grp); !ok {
+	if _, ok := g.admitRequest(sw, u, grp); !ok {
 		return
 	}
 
@@ -197,16 +197,14 @@ func (g *Gateway) handleAudioSpeech(w http.ResponseWriter, r *http.Request, u *u
 func (g *Gateway) handleAudioTranscriptions(w http.ResponseWriter, r *http.Request, u *user, grp *group) {
 	sw := &statusTrackingWriter{ResponseWriter: w}
 
-	release, ok := g.acquireBodyAdmission(sw)
-	defer release()
-	if !ok {
-		return
-	}
-	if _, ok = g.admitRequest(sw, u, grp); !ok {
+	if _, ok := g.admitRequest(sw, u, grp); !ok {
 		return
 	}
 
-	body, oversize, err := readCapped(r.Body, maxRequestBytes)
+	body, oversize, admitted, err := g.readAdmittedCapped(sw, r.Body, maxRequestBytes)
+	if !admitted {
+		return
+	}
 	if err != nil {
 		writeOAIError(sw, http.StatusBadRequest, "invalid_request_error", "cannot read request body")
 		return
@@ -279,6 +277,29 @@ func (g *Gateway) handleAudioTranscriptions(w http.ResponseWriter, r *http.Reque
 	if _, err := adapter.audioTranscription(ctx, sw, uploadBody, uploadContentType); err != nil {
 		g.handleAdapterError(sw, err, adapter.name())
 	}
+}
+
+// readAdmittedCapped claims a body-admission slot (acquireBodyAdmission),
+// calls readCapped, and releases the slot before returning — on every
+// path, including a panic unwinding through readCapped itself — used by
+// handleAudioTranscriptions (security review finding 1b, round 3,
+// 2026-08-22). This route never json.Unmarshal's into a map[string]any
+// (its own "decode", extractMultipartModel's bounded scan, runs over
+// bytes already fully read, AFTER this returns and the slot is already
+// free), so the slot only ever needs to be held for the read itself —
+// narrower even than readAndDecodeUnifiedBody/decodeMediaJSONRequest,
+// which both hold it through an actual json.Unmarshal too. admitted
+// reports whether a slot was claimed at all (false means
+// acquireBodyAdmission already wrote its own 503 to sw); body/oversize/
+// err are readCapped's own results, valid only when admitted is true.
+func (g *Gateway) readAdmittedCapped(sw *statusTrackingWriter, r io.Reader, limit int64) (body []byte, oversize, admitted bool, err error) {
+	release, admitted := g.acquireBodyAdmission(sw)
+	defer release()
+	if !admitted {
+		return nil, false, false, nil
+	}
+	body, oversize, err = readCapped(r, limit)
+	return body, oversize, true, err
 }
 
 // readCapped reads up to limit+1 bytes from r, reporting oversize=true

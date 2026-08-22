@@ -63,20 +63,25 @@ type Config struct {
 	Cache              CacheConfig `json:"cache"`
 	PassthroughUnknown bool        `json:"passthroughUnknown,omitempty"`
 	// MaxInFlightBodyRequests caps how many unified and media JSON/
-	// multipart requests (routes_unified.go's runUnified; routes_media.go's
-	// handleImagesGenerations/handleAudioSpeech/handleAudioTranscriptions)
-	// may concurrently hold a decoded request body in memory at once
-	// (security review finding 1b, 2026-08-22) — see
-	// acquireBodyAdmission's own doc comment (routes_unified.go) for the
-	// OOM this bounds. 0 (the default) self-tunes from GOMAXPROCS
-	// (defaultBodyAdmissionCap) rather than adding an operator knob for a
-	// value the runtime can already infer (house rule: prefer self-tuning
-	// over operator knobs where the right value can be inferred; add a
-	// flag only when it genuinely cannot be). A positive value pins an
-	// exact cap instead and always wins over the auto-tuned default
-	// (house rule: an explicit override always wins) — e.g. a deployment
-	// with a known, tighter memory budget than GOMAXPROCS alone would
-	// infer.
+	// multipart requests (routes_unified.go's runUnified via
+	// readAndDecodeUnifiedBody; routes_media.go's decodeMediaJSONRequest/
+	// readAdmittedCapped, used by handleImagesGenerations/
+	// handleAudioSpeech/handleAudioTranscriptions) may concurrently be
+	// INSIDE their own read+decode step at once (security review finding
+	// 1b, 2026-08-22; scope narrowed to read+decode only in round 3 — see
+	// acquireBodyAdmission's own doc comment, routes_unified.go, for why
+	// this is deliberately NOT a cap on total in-flight requests). 0 (the
+	// default) self-tunes from GOMAXPROCS (defaultBodyAdmissionCap) rather
+	// than adding an operator knob for a value the runtime can already
+	// infer (house rule: prefer self-tuning over operator knobs where the
+	// right value can be inferred; add a flag only when it genuinely
+	// cannot be). A positive value pins an exact cap instead and always
+	// wins over the auto-tuned default (house rule: an explicit override
+	// always wins) — e.g. a deployment with a known, tighter memory
+	// budget than GOMAXPROCS alone would infer — but is still clamped to
+	// maxExplicitBodyAdmissionCap (llmgateway.go): "wins" means it
+	// overrides the self-tuned value, not that an operator can silently
+	// disable the bound entirely with an unbounded number.
 	MaxInFlightBodyRequests int `json:"maxInFlightBodyRequests,omitempty"`
 }
 
@@ -321,24 +326,60 @@ func CreateConfig() *Config {
 }
 
 // minBodyAdmissionCap/maxBodyAdmissionCap clamp defaultBodyAdmissionCap's
-// self-tuned result (security review finding 1b, 2026-08-22): the floor
-// keeps a single-vCPU sidecar from self-tuning down to a cap so small it
-// throttles ordinary traffic, and the ceiling keeps a very large host from
-// self-tuning up to a cap so high the semaphore stops bounding anything —
-// each in-flight request can hold tens of MiB (maxUnifiedRequestBytes's
-// own doc comment, routes_unified.go), so even the ceiling still bounds
-// worst-case memory to a fixed, known order of magnitude.
+// self-tuned result (security review finding 1b; numbers revised round
+// 3, 2026-08-22 — see this const block's own history below for why).
+// The floor keeps a single-vCPU sidecar from self-tuning down to a cap so
+// small it throttles ordinary traffic, and the ceiling keeps a very
+// large host from self-tuning up to a cap so high the semaphore stops
+// bounding anything.
+//
+// REVISED (round 3, coordinator ruling — fixes an availability
+// regression the round-2 numbers shipped alongside): round 2 sized these
+// against a "whole request" hold duration (acquireBodyAdmission was held
+// for the entire handler, including the upstream round trip) and a
+// ~170MB-per-slot estimate that bundled the decode, the re-marshal, AND
+// the response buffer together. Measured, zero-config, at round 2's
+// numbers: 400 concurrent chat requests against a 2-vCPU pod (cap 16)
+// saw 220 succeed and 180 get 503 — an LLM completion is I/O-bound for
+// seconds to minutes, so a cap sized for a brief decode became a hard
+// ceiling on TOTAL in-flight requests instead.
+//
+// acquireBodyAdmission's slot is now held ONLY for the read+decode step
+// itself (see its own doc comment, routes_unified.go) — typically
+// single-digit milliseconds for a body under maxUnifiedRequestBytes
+// (4MiB), a reduction of roughly three to four orders of magnitude in
+// HOLD DURATION versus round 2. The relevant per-slot memory figure is
+// also now decode-only, not decode+response: measured at up to ~51.5MB
+// LIVE heap (12.3x) for an adversarial 4MiB body shaped to maximize
+// per-value allocation overhead, with ~189MB TotalAlloc (~45x) of mostly
+// short-lived garbage collected within the same decode
+// (maxUnifiedRequestBytes' own doc comment, routes_unified.go, has the
+// full measurement). At the new ceiling (256), a SUSTAINED worst case —
+// every slot simultaneously decoding the adversarial shape, which the
+// now-brief hold duration makes far less likely to persist than round
+// 2's multi-second window — peaks around 256 × 51.5MB ≈ 13.2GB LIVE
+// heap; the cumulative TotalAlloc figure (256 × 189MB ≈ 48.4GB) is
+// garbage-collection churn, not simultaneously resident memory, and is
+// not the number to size a pod's memory limit against. Both the floor
+// and ceiling were doubled from round 2 (16→32, 128→256) and the
+// per-CPU multiplier tripled (8→24): a raise smaller than the hold-
+// duration reduction warrants, deliberately conservative, since the
+// worst-case LIVE-heap arithmetic above still needs to stay defensible
+// on a modest node.
 const (
-	minBodyAdmissionCap = 16
-	maxBodyAdmissionCap = 128
+	minBodyAdmissionCap = 32
+	maxBodyAdmissionCap = 256
 )
 
 // bodyAdmissionCapPerCPU is defaultBodyAdmissionCap's GOMAXPROCS
-// multiplier: generous headroom for a body-buffering request, which spends
-// most of its lifetime waiting on network I/O (upstream latency) rather
-// than burning CPU, so a cap tied 1:1 to CPU count would leave real
-// concurrency on the table.
-const bodyAdmissionCapPerCPU = 8
+// multiplier (revised round 3 — see minBodyAdmissionCap's own doc
+// comment for the full before/after reasoning): a decode-scoped slot is
+// held for milliseconds, not the seconds-to-minutes an I/O-bound LLM
+// completion takes, so — unlike round 2's comment, which reasoned about
+// upstream-latency headroom for a hold spanning the whole request — this
+// multiplier is sized against CPU throughput for a brief, CPU-bound
+// json.Unmarshal burst, not I/O parking.
+const bodyAdmissionCapPerCPU = 24
 
 // defaultBodyAdmissionCap returns the self-tuned in-flight cap
 // acquireBodyAdmission's semaphore is sized to when Config.
@@ -358,6 +399,18 @@ func defaultBodyAdmissionCap() int {
 	}
 	return n
 }
+
+// maxExplicitBodyAdmissionCap clamps an explicit Config.
+// MaxInFlightBodyRequests override (round 3, 2026-08-22 review — the
+// round-2 version accepted any positive value verbatim, including
+// something like math.MaxInt from a fat-fingered config, which would
+// silently disable the bound entirely by making the semaphore
+// effectively unbounded). The house rule ("explicit override always
+// wins") governs the choice between self-tuning and pinning a value, not
+// whether a pinned value gets any sanity check at all — an operator who
+// genuinely needs more concurrency than this still gets a very high
+// ceiling, just not an unbounded one reachable by typo.
+const maxExplicitBodyAdmissionCap = 10_000
 
 // Gateway is the Traefik middleware handler.
 type Gateway struct {
@@ -453,10 +506,16 @@ func newGateway(ctx context.Context, next http.Handler, config *Config, name str
 	// field's zero value, and every config that predates this field) means
 	// "self-tune", never "cap at zero" — a channel with a zero buffer
 	// would reject every request outright, which is never the intent of
-	// an operator who simply never set this field.
+	// an operator who simply never set this field. An explicit override
+	// is still clamped to maxExplicitBodyAdmissionCap (round 3, 2026-08-22
+	// review) — "wins" means it overrides the self-tuned VALUE, not that
+	// it can disable the bound entirely via an unbounded number.
 	bodyAdmissionCap := defaultBodyAdmissionCap()
 	if config.MaxInFlightBodyRequests > 0 {
 		bodyAdmissionCap = config.MaxInFlightBodyRequests
+		if bodyAdmissionCap > maxExplicitBodyAdmissionCap {
+			bodyAdmissionCap = maxExplicitBodyAdmissionCap
+		}
 	}
 	g.bodyAdmission = make(chan struct{}, bodyAdmissionCap)
 

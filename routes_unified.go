@@ -28,30 +28,49 @@ const maxRequestBytes = 10 << 20
 // maxUnifiedRequestBytes caps a client request body specifically for the
 // unified chat/embeddings routes' own decode into map[string]any
 // (security review finding 1c, 2026-08-22): 4MiB, down from the general
-// maxRequestBytes (10MiB) above. The measured amplification — an
-// encoding/json decode into map[string]any costs roughly 11x the wire
-// body's own bytes in live heap — meant the original 10MiB cap alone let
-// one request materialize ~110MiB just for this decode, before cacheKey's
-// re-marshal, forwardJSON's 32MiB response buffer, and the cache capture
-// writer are even counted (see acquireBodyAdmission's own doc comment,
-// below, for how the semaphore and this cap now work together).
+// maxRequestBytes (10MiB) above.
+//
+// MEASURED AMPLIFICATION (corrected, round 3, 2026-08-22 review — the
+// round-2 doc comment's "~11x" figure was presented as the general case
+// and is not): amplification is SHAPE-DEPENDENT, not a fixed multiplier.
+// A realistic single-inline-base64-image chat payload (the documented
+// case this cap is sized for, below) measures at roughly 1.0x — a large
+// base64 string decodes to one large Go string, no material blow-up.
+// The adversarial shape — a body packed with many small values instead
+// of one large one (e.g. a huge flat array/object of short strings or
+// numbers, each becoming its own heap-allocated map entry/interface
+// value) — is what actually amplifies: measured on a 4MiB adversarial
+// array at 12.3x LIVE heap (~51.5MB resident at the decode's peak) and
+// ~45x cumulative allocation (~189MB TotalAlloc, mostly short-lived
+// garbage the collector reclaims quickly, not simultaneously resident).
+// The bound this cap and acquireBodyAdmission's semaphore actually
+// provide, honestly stated: one held decode's LIVE heap peaks at roughly
+// 51.5MB in the adversarial case (worst case measured, not a
+// theoretical 11x-of-4MiB ~44MiB figure); defaultBodyAdmissionCap's own
+// doc comment (llmgateway.go) does the resulting worst-case-concurrent
+// arithmetic against that real number, not this one's old estimate.
 //
 // 1MiB — the audit's own first suggestion — was evaluated and rejected:
-// this constant's PRIOR doc comment (before this finding) said the
-// original 10MiB was "generous for a chat or embeddings request
-// (including an inline base64 image)", and that is a real, exercised
-// code path, not a hypothetical one — translate_anthropic.go's
-// imageContentPart and translate_gemini.go's own image handling both
-// accept a "data:<type>;base64,<data>" image_url content part inside a
-// chat message, and a single moderately-sized photo commonly exceeds
-// 1MiB once base64-encoded (roughly +33% over its raw bytes; a compressed
+// this constant's PRE-finding-1c doc comment said the original 10MiB was
+// "generous for a chat or embeddings request (including an inline
+// base64 image)", and that is a real, exercised code path, not a
+// hypothetical one — translate_anthropic.go's imageContentPart and
+// translate_gemini.go's own image handling both accept a
+// "data:<type>;base64,<data>" image_url content part inside a chat
+// message, and a single moderately-sized photo commonly exceeds 1MiB
+// once base64-encoded (roughly +33% over its raw bytes; a compressed
 // phone photo alone is often 1-3MB raw). Capping at 1MiB would silently
-// break that documented, tested capability for any real-world image.
+// break that documented, tested capability for any real-world image —
+// and, per the measurement above, that case shows ~1.0x amplification
+// regardless, so the ORIGINAL amplification argument for shrinking this
+// cap never actually applied to it; 1MiB was rejected for breaking a
+// real feature, not because the realistic case was itself dangerous.
 // 4MiB keeps headroom for the single-inline-image case the original
-// comment named, while still cutting the worst-case per-request decode
-// amplification from ~110MiB to ~44MiB — a defensible middle ground, not
-// the audit's suggested number, chosen because the smaller number would
-// have broken a real feature this package ships.
+// comment named, while still bounding the adversarial shape's LIVE-heap
+// footprint to a fixed, known-small amount per held decode — a
+// defensible middle ground, not the audit's suggested number, chosen
+// because the smaller number would have broken a real feature this
+// package ships.
 const maxUnifiedRequestBytes = 4 << 20
 
 // gatewayAliasKey is the request map's internal-convention key carrying
@@ -113,54 +132,66 @@ func (g *Gateway) handleEmbeddings(w http.ResponseWriter, r *http.Request, u *us
 	})
 }
 
-// runUnified is the shared chat/embeddings pipeline: claim a body-admission
-// slot, enforce per-user/per-group/total REQUEST-RATE limits, decode the
-// request, resolve its model, invoke the adapter via call, then account
-// the resulting usage — even when call itself returned an error, so usage
-// captured before a mid-stream failure still gets billed — before
-// translating that error into a response. w is wrapped in its own
-// statusTrackingWriter so a mid-stream adapter error (headers already
-// sent) can be told apart from one that failed before any write. endpoint
-// is cacheEndpointChat or cacheEndpointEmbeddings — one of cacheKey's
-// key-material components (cache.go), so the two routes never collide
-// into one cache entry.
+// runUnified is the shared chat/embeddings pipeline: enforce per-user/
+// per-group/total REQUEST-RATE limits, claim a body-admission slot to
+// decode the request, resolve its model, invoke the adapter via call,
+// then account the resulting usage — even when call itself returned an
+// error, so usage captured before a mid-stream failure still gets billed
+// — before translating that error into a response. w is wrapped in its
+// own statusTrackingWriter so a mid-stream adapter error (headers
+// already sent) can be told apart from one that failed before any
+// write. endpoint is cacheEndpointChat or cacheEndpointEmbeddings — one
+// of cacheKey's key-material components (cache.go), so the two routes
+// never collide into one cache entry.
 //
-// ORDERING (security review finding 1a, 2026-08-22): admission and the
-// rate-limit check both run BEFORE the body is ever read, not after —
-// the previous ordering (decode, resolve model, THEN checkAndCount) meant
-// a caller already over their requestsPerMinute paid the full cost of
-// reading and json-decoding a body that was always going to be discarded.
-// acquireBodyAdmission and admitRequest both need only u/grp, already
-// available as this function's own parameters, so neither has any reason
-// to wait for the body. Model resolution still runs AFTER decode — it
-// genuinely needs the client's requested model id, which only exists once
-// the body is parsed — so its own errors (unknown/denied model) are still
-// reported after a successful admission+rate-check, exactly as before
-// this fix; only the RATE-LIMIT check's position relative to the body
-// moved. writeLimitViolation's own response body/headers are unchanged.
+// ORDERING (security review finding 1a, 2026-08-22): the rate-limit
+// check runs BEFORE the body is ever read, not after — the previous
+// ordering (decode, resolve model, THEN checkAndCount) meant a caller
+// already over their requestsPerMinute paid the full cost of reading and
+// json-decoding a body that was always going to be discarded.
+// admitRequest needs only u/grp, already available as this function's
+// own parameters, so it has no reason to wait for the body. Model
+// resolution still runs AFTER decode — it genuinely needs the client's
+// requested model id, which only exists once the body is parsed — so
+// its own errors (unknown/denied model) are still reported after a
+// successful admission+rate-check, exactly as before this fix; only the
+// RATE-LIMIT check's position relative to the body moved.
+// writeLimitViolation's own response body/headers are unchanged — a
+// 429's body is byte-identical to before this finding.
+//
+// BEHAVIOR CHANGE (documented, not hidden — SHOULD-4, round 3,
+// 2026-08-22 review): moving the rate-limit check ahead of decode has
+// two real, previously-silent side effects for a caller who is BOTH
+// over budget AND sending a request that would otherwise have failed
+// decode/model-resolution:
+//   - A request that would have gotten 400 (invalid JSON, missing
+//     "model") or 404 (unknown model) now gets 429 instead, if the
+//     caller was already over budget — the rate-limit check runs first
+//     and returns before decode/resolution ever gets a chance to run.
+//   - A malformed or unroutable request that would NOT have consumed any
+//     rate-limit budget under the old ordering (decode/resolve failed
+//     before checkAndCount ran) now DOES consume it, since checkAndCount
+//     always runs first regardless of what the body turns out to
+//     contain. A tenant with a buggy client that sends malformed JSON
+//     repeatedly could previously retry indefinitely for free; it now
+//     burns real requestsPerMinute/Day budget on every attempt.
+//
+// Both are consequences of fixing finding 1a's actual bug (an
+// already-over-budget caller paying the read+decode cost) and are
+// considered acceptable — arguably improvements, since a client that
+// cannot even form a valid request is now itself rate-limited rather
+// than getting unlimited free retries — but are called out explicitly
+// here since neither is visible from the diff alone.
 func (g *Gateway) runUnified(w http.ResponseWriter, r *http.Request, u *user, grp *group, endpoint string, call adapterCall) {
 	sw := &statusTrackingWriter{ResponseWriter: w}
-
-	release, ok := g.acquireBodyAdmission(sw)
-	defer release()
-	if !ok {
-		return
-	}
 
 	scopes, ok := g.admitRequest(sw, u, grp)
 	if !ok {
 		return
 	}
 
-	body, err := io.ReadAll(io.LimitReader(r.Body, maxUnifiedRequestBytes))
-	if err != nil {
-		writeOAIError(sw, http.StatusBadRequest, "invalid_request_error", "cannot read request body")
-		return
-	}
-
-	var req map[string]any
-	if err = json.Unmarshal(body, &req); err != nil {
-		writeOAIError(sw, http.StatusBadRequest, "invalid_request_error", "invalid JSON body")
+	body, req, ok := g.readAndDecodeUnifiedBody(sw, r)
+	if !ok {
 		return
 	}
 
@@ -356,6 +387,13 @@ func withTotalScope(scopes []limitScope) []limitScope {
 // second buildLimitScopes/withTotalScope pair. A violation writes its
 // response to sw itself (writeLimitViolation, unchanged body/headers from
 // before this fix) and returns ok=false.
+//
+// Shared verbatim by every unified/media route (runUnified above;
+// handleImagesGenerations/handleAudioSpeech/handleAudioTranscriptions,
+// routes_media.go) — see runUnified's own "BEHAVIOR CHANGE" doc-comment
+// section for the two previously-silent side effects this reordering has
+// for a caller who is both over budget and sending a malformed/
+// unroutable request; they apply identically here.
 func (g *Gateway) admitRequest(sw *statusTrackingWriter, u *user, grp *group) (scopes []limitScope, ok bool) {
 	scopes = withTotalScope(buildLimitScopes(u, grp))
 	if violation := g.limiter.checkAndCount(scopes); violation != nil {
@@ -376,24 +414,69 @@ const bodyAdmissionRetryAfterSeconds = 2
 
 // acquireBodyAdmission non-blockingly claims one of g.bodyAdmission's
 // slots (security review finding 1b, 2026-08-22) — bounding how many
-// unified/media requests may concurrently hold a decoded request body (and
-// every downstream buffer it feeds: cacheKey's re-marshal, forwardJSON's
-// response buffer, the cache capture writer) in memory at once, so an
-// unbounded burst of concurrent requests cannot OOM the whole shared
-// Traefik ingress process this plugin runs inside (package doc,
-// llmgateway.go) merely by arriving faster than any one of them can be
-// rejected. Mirrors limiter.spawnTokens' own non-blocking acquire shape
-// (limits.go) exactly: on exhaustion this NEVER queues or blocks waiting
-// for a slot — a blocking acquire would just replace one unbounded-growth
-// vector (unbounded concurrent decodes) with another (an unbounded pile of
-// goroutines blocked on a channel receive) — it fails immediately instead,
-// writing a 503 with a Retry-After header to sw and returning a no-op
-// release so the caller's own `defer release()` stays valid either way.
+// unified/media requests may concurrently be INSIDE the read+json-decode
+// step (readAndDecodeUnifiedBody, decodeMediaJSONRequest, the readCapped
+// call in handleAudioTranscriptions), which is where the measured
+// amplification actually happens (an encoding/json decode into
+// map[string]any costs up to ~12x the wire body's own bytes in live
+// heap for an adversarial shape — see maxUnifiedRequestBytes' own doc
+// comment for the measured figures), so an unbounded burst of
+// concurrent decodes cannot OOM the whole shared Traefik ingress process
+// this plugin runs inside (package doc, llmgateway.go) merely by
+// arriving faster than any one of them can be rejected.
 //
-// release must be deferred by the caller immediately after this returns,
-// BEFORE checking ok — every code path through the caller, including this
-// function's own 503 branch, must release exactly the number of slots it
-// acquired (zero, on the 503 path, via the no-op release).
+// SCOPE (round 3, 2026-08-22, coordinator ruling — fixes an availability
+// regression the round-2 version shipped): the slot is held ONLY for the
+// read+decode step, never for the rest of the request — model
+// resolution, the cache lookup, the upstream round trip, or streaming
+// the response back to the client. Round 2 acquired the slot at handler
+// entry and released it via a single `defer` spanning the WHOLE handler,
+// which measurably turned this into a hard ceiling on TOTAL concurrent
+// in-flight LLM requests rather than concurrent decodes: an LLM
+// completion is I/O-bound for seconds to minutes, so holding a slot for
+// that whole span meant the self-tuned default (previously GOMAXPROCS *
+// 8) became the gateway's real-world concurrency limit — measured at
+// zero-config, 400 concurrent chat requests: 220 succeeded, 180 got 503,
+// on a cap a 2-vCPU pod would size at 16. A request parked waiting on an
+// upstream response holds no slot now — every caller acquires and
+// releases around ONLY its own read+decode call, not around the whole
+// handler. The upstream request being built, sent, and its response
+// streamed back are unguarded by this semaphore: that path is I/O-bound
+// and does not re-amplify memory the way the decode step does, and the
+// response side already has its own bound (forwardJSON/forwardStream's
+// maxResponseBytes, 32MiB, providers.go — unchanged by this finding).
+// Because the held window shrank from "whole request" (seconds-minutes)
+// to "one decode" (low milliseconds), the default cap below is sized
+// much higher than round 2's — see defaultBodyAdmissionCap's own doc
+// comment for the reasoning and the resulting worst-case bound.
+//
+// Mirrors limiter.spawnTokens' own non-blocking acquire shape
+// (limits.go): on exhaustion this NEVER queues or blocks waiting for a
+// slot — a blocking acquire would just replace one unbounded-growth
+// vector (unbounded concurrent decodes) with another (an unbounded pile
+// of goroutines blocked on a channel receive) — it fails immediately
+// instead, writing a 503 with a Retry-After header to sw and returning a
+// no-op release so the caller's own `defer release()` stays valid
+// either way.
+//
+// release must be deferred by the caller IMMEDIATELY after this
+// returns, BEFORE checking ok, and that defer must be scoped narrowly
+// around the read+decode step alone (see readAndDecodeUnifiedBody/
+// decodeMediaJSONRequest for the pattern) — never around the caller's
+// entire handler. Every code path, including this function's own 503
+// branch, releases exactly the number of slots it acquired (zero, on
+// the 503 path, via the no-op release); a `defer` guarantees this holds
+// even on a panic unwinding through the caller, since Go runs deferred
+// functions during a panic regardless of where recover() (if any) is
+// registered further up the same goroutine's stack.
+//
+// handlePassthrough (routes_passthrough.go) deliberately does NOT
+// acquire a slot at all: it streams the request/response body straight
+// through via io.Copy (proxyUpstream) rather than buffering it into a
+// map[string]any, so there is no decode-amplification event here for
+// this semaphore to bound — the only body-inspection it ever does is
+// peekPassthroughModel's own bounded 64KiB read, an intentional
+// omission, not an oversight.
 func (g *Gateway) acquireBodyAdmission(sw *statusTrackingWriter) (release func(), ok bool) {
 	select {
 	case g.bodyAdmission <- struct{}{}:
@@ -403,6 +486,38 @@ func (g *Gateway) acquireBodyAdmission(sw *statusTrackingWriter) (release func()
 		writeOAIError(sw, http.StatusServiceUnavailable, "server_error", "server is at capacity; try again shortly")
 		return func() {}, false
 	}
+}
+
+// readAndDecodeUnifiedBody claims a body-admission slot (acquireBodyAdmission),
+// reads r's body capped at maxUnifiedRequestBytes, decodes it as a JSON
+// object, and releases the slot before returning — on every path: a
+// successful decode, a read failure, a decode failure, or admission
+// exhaustion itself (security review finding 1b, round 3, 2026-08-22).
+// This is deliberately the ENTIRE scope of what the semaphore guards for
+// the unified routes: by the time this returns, req is fully decoded and
+// nothing further in runUnified re-amplifies memory the way the decode
+// itself does, so model resolution, the cache lookup, and the upstream
+// round trip all run after the slot is already released. A read or
+// decode failure has already written its 400 to sw; ok reports whether
+// the caller may proceed.
+func (g *Gateway) readAndDecodeUnifiedBody(sw *statusTrackingWriter, r *http.Request) (body []byte, req map[string]any, ok bool) {
+	release, admitted := g.acquireBodyAdmission(sw)
+	defer release()
+	if !admitted {
+		return nil, nil, false
+	}
+
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxUnifiedRequestBytes))
+	if err != nil {
+		writeOAIError(sw, http.StatusBadRequest, "invalid_request_error", "cannot read request body")
+		return nil, nil, false
+	}
+
+	if err = json.Unmarshal(body, &req); err != nil {
+		writeOAIError(sw, http.StatusBadRequest, "invalid_request_error", "invalid JSON body")
+		return nil, nil, false
+	}
+	return body, req, true
 }
 
 // unifiedCostMicros resolves the price to charge one request's usage

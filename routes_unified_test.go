@@ -2083,14 +2083,51 @@ func TestDefaultBodyAdmissionCap_ClampedToBounds(t *testing.T) {
 	}
 }
 
-// TestHandleChat_ZeroConfig_BodyAdmissionDoesNotThrottleOrdinaryTraffic is
-// the DEFAULT-PRESERVING gate's own explicit requirement: a config that
-// never sets MaxInFlightBodyRequests must behave exactly as before this
-// finding for ordinary, non-bursty traffic — a modest run of sequential
-// requests must never see a 503 from the new semaphore.
-func TestHandleChat_ZeroConfig_BodyAdmissionDoesNotThrottleOrdinaryTraffic(t *testing.T) {
+// TestHandleChat_ZeroConfig_ConcurrentAboveDefaultCap_NoThrottling_SlotsReleasedBeforeUpstream
+// is the DEFAULT-PRESERVING gate's own explicit requirement, replacing a
+// SEQUENTIAL version that could not actually exercise it (MUST-2, round
+// 3, 2026-08-22 review: the reviewer re-ran the sequential test's exact
+// shape with MaxInFlightBodyRequests=1 and it still passed — a
+// capacity-one semaphore is never contended by requests that arrive one
+// at a time, so it was not evidence the semaphore leaves ordinary
+// traffic unthrottled).
+//
+// This drives n = defaultBodyAdmissionCap()+20 requests genuinely
+// CONCURRENTLY (real goroutines, real network round trips to an
+// httptest.Server upstream — n is deliberately larger than the
+// self-tuned default cap) against an upstream gated to block until every
+// one of them has arrived, and asserts two things:
+//
+//  1. While all n requests are parked waiting on the gated upstream —
+//     more in-flight requests than admission slots exist — the
+//     semaphore (gw.bodyAdmission) holds ZERO slots. This is the
+//     regression's own regression test (MUST-1, round 3): before that
+//     fix, a slot was held for the WHOLE handler including this exact
+//     upstream wait, so n > cap concurrent parked requests would have
+//     left the semaphore fully occupied (and, with a large enough n
+//     relative to cap, some later arrivals would have found it
+//     exhausted). With the fix, a slot is released the instant
+//     read+decode finishes, strictly before the upstream call ever
+//     starts — by the time a request reaches the gated upstream, it is
+//     provably holding no slot at all.
+//  2. Once every parked request completes, all n get 200 — none was
+//     ever refused with 503 merely because n other requests happened to
+//     be concurrently in flight, which is exactly what "zero-config
+//     ordinary traffic is not throttled" has to mean on an I/O-bound
+//     gateway where many requests are routinely in flight for seconds
+//     at a time.
+func TestHandleChat_ZeroConfig_ConcurrentAboveDefaultCap_NoThrottling_SlotsReleasedBeforeUpstream(t *testing.T) {
 	const respBody = `{"id":"c1","choices":[{"message":{"role":"assistant","content":"hi"}}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`
+
+	// gate blocks every upstream response until the test explicitly
+	// closes it — simulating an LLM completion parked on a slow
+	// upstream for a while, the exact scenario the MUST-1 regression
+	// measured (a real completion is I/O-bound for seconds to minutes).
+	gate := make(chan struct{})
+	var arrived sync.WaitGroup
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		arrived.Done() // this request's admission slot is already released by now — see below
+		<-gate
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(respBody))
@@ -2110,14 +2147,61 @@ func TestHandleChat_ZeroConfig_BodyAdmissionDoesNotThrottleOrdinaryTraffic(t *te
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
+	gw, ok := h.(*Gateway)
+	if !ok {
+		t.Fatal("handler is not *Gateway")
+	}
 
-	for i := 0; i < 20; i++ {
-		body := map[string]any{"model": "gpt-test", "messages": []any{}}
-		req := newUnifiedRequest(t, http.MethodPost, "/v1/chat/completions", "sk-alice", body)
-		rec := httptest.NewRecorder()
-		h.ServeHTTP(rec, req)
-		if rec.Code != http.StatusOK {
-			t.Fatalf("request %d: status = %d, want 200, body=%s", i, rec.Code, rec.Body.String())
+	n := cap(gw.bodyAdmission) + 20
+	arrived.Add(n)
+
+	statuses := make([]int, n)
+	var wg sync.WaitGroup
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		go func(i int) {
+			defer wg.Done()
+			body := map[string]any{"model": "gpt-test", "messages": []any{}}
+			req := newUnifiedRequest(t, http.MethodPost, "/v1/chat/completions", "sk-alice", body)
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			statuses[i] = rec.Code
+		}(i)
+	}
+
+	// Blocks until every one of the n requests has reached the gated
+	// upstream — which, by this call chain's own synchronous ordering
+	// (runUnified -> readAndDecodeUnifiedBody's deferred release ->
+	// registry.resolve -> the adapter's own client.Do), can only happen
+	// AFTER that request's admission slot has already been released.
+	// Bounded by a timeout, not a bare Wait(): if the regression this
+	// test guards against reappeared, fewer than n requests would ever
+	// reach the upstream at all (the rest would be refused with an
+	// immediate 503 — acquireBodyAdmission never blocks, see its own doc
+	// comment — and never call arrived.Done()), which would hang a bare
+	// Wait() forever instead of failing the test.
+	arrivedCh := make(chan struct{})
+	go func() {
+		arrived.Wait()
+		close(arrivedCh)
+	}()
+	select {
+	case <-arrivedCh:
+	case <-time.After(10 * time.Second):
+		close(gate) // unstick any goroutine that did make it through, so the test can still finish reporting statuses
+		t.Fatal("timed out waiting for all n requests to reach the gated upstream — some are likely being refused with 503 before ever reaching it, which is the regression this test guards against")
+	}
+
+	if held := len(gw.bodyAdmission); held != 0 {
+		t.Errorf("body-admission slots held while %d requests (cap=%d) are parked in the upstream = %d, want 0 — a request parked past decode must never still hold a slot", n, cap(gw.bodyAdmission), held)
+	}
+
+	close(gate)
+	wg.Wait()
+
+	for i, status := range statuses {
+		if status != http.StatusOK {
+			t.Errorf("request %d: status = %d, want 200 (cap=%d, n=%d concurrent) — ordinary traffic must never see 503 from the body-admission semaphore merely for being concurrent", i, status, cap(gw.bodyAdmission), n)
 		}
 	}
 }
