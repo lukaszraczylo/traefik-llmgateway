@@ -346,6 +346,21 @@ func run() error {
 	}))
 	defer brkUpstream.Close()
 
+	// metricsProbeTrickyUserNameJSON: a user name containing a double
+	// quote, a backslash, and a newline — auth.go's buildEntry validates
+	// a name as non-empty only, never restricted to a URL-path-segment
+	// character set (see its own doc comment), so this is a real,
+	// legal config, not a contrived one. json.Marshal, not hand-built
+	// string concatenation, produces the correctly JSON-escaped literal
+	// to splice into attemptAccountingOverride below — this is JSON
+	// escaping for the CONFIG document, a separate concern from the
+	// Prometheus label escaping exerciseMetricsRoute actually verifies
+	// in the RENDERED /metrics body.
+	trickyNameJSON, err := json.Marshal(metricsProbeTrickyUserName)
+	if err != nil {
+		return fmt.Errorf("marshal metrics escaping probe user name: %w", err)
+	}
+
 	attemptAccountingOverride := `{"breaker":{"failureThreshold":2,"openDuration":"3s","maxOpenDuration":"6s"},` +
 		`"providers":{"openai":{"type":"openai","baseUrl":"` + upstream.URL + `","apiKey":"sk-up","models":["` + testDataWantModel + `","` + builtinLookupModelID + `"]},` +
 		`"brk":{"type":"openai","baseUrl":"` + brkUpstream.URL + `","apiKey":"sk-up","discovery":true,"discoveryInterval":"1ms"},"` +
@@ -379,7 +394,13 @@ func run() error {
 		// CIDR-bypass path is reachable with a plain httptest.NewRequest
 		// carrying no explicit RemoteAddr override.
 		`"metrics":{"enabled":true,"allowedCIDRs":["` + metricsProbeAllowedCIDR + `"],"modelLabel":true},` +
-		`"admin":{"enabled":true},"users":{"inline":[{"name":"tester","group":"default","apiKey":"` + testDataUserAPIKey + `"},{"name":"admin1","group":"default","apiKey":"` + attemptAccountingAdminAPIKey + `","admin":true}]}}`
+		// The third inline user (metricsProbeTrickyUserName) exists
+		// purely so exerciseMetricsRoute can prove the escaping path
+		// under the interpreter — it makes no requests of its own, but
+		// still renders a real (zero-traffic) llmgateway_requests_total
+		// series, since writeUsageMetrics (metrics.go) lists every
+		// active user regardless of traffic.
+		`"admin":{"enabled":true},"users":{"inline":[{"name":"tester","group":"default","apiKey":"` + testDataUserAPIKey + `"},{"name":"admin1","group":"default","apiKey":"` + attemptAccountingAdminAPIKey + `","admin":true},{"name":` + string(trickyNameJSON) + `,"group":"default","apiKey":"sk-tricky"}]}}`
 	if err = json.Unmarshal([]byte(attemptAccountingOverride), cfgVal.Interface()); err != nil {
 		return fmt.Errorf("decode attempt-accounting harness override into the interpreted Config: %w", err)
 	}
@@ -467,6 +488,17 @@ const metricsProbeAllowedCIDR = "192.0.2.0/24"
 // metricsProbeAllowedCIDR (TEST-NET-3, RFC 5737) — exerciseMetricsRoute's
 // own proof that the allowlist is not simply matching everything.
 const metricsProbeOutsideAddr = "203.0.113.9:5555"
+
+// metricsProbeTrickyUserName is a configured user name containing a
+// double quote, a backslash, and a newline — the exact character set
+// escapeLabelValue (metrics.go) exists to handle, driven under the REAL
+// interpreter (review fix, adversarial verification 2026-08-23): the
+// compiled test suite already proves escaping correct
+// (TestMetrics_LabelValuesWithSpecialChars_Escaped,
+// TestEscapeLabelValue_InvalidUTF8_Injective), but this codebase's own
+// history is that a compiled pass has repeatedly said nothing about the
+// interpreted shape.
+const metricsProbeTrickyUserName = "weird\"user\\name\nwith-newline"
 
 // mcpProbeOversizeBytes is how much filler mcpProbeUpstream writes: over
 // mcpBackendCallResponseMaxBytes (maxRequestBytes, 10MiB) so the response
@@ -709,16 +741,29 @@ func exerciseMetricsRoute(handler http.Handler) error {
 		return fmt.Errorf("GET /metrics (admin key): Content-Type = %q, want a text/plain prefix", ct)
 	}
 	body := rec.Body.String()
+	// metricsProbeEscapedTrickyName is escapeLabelValue's OWN expected
+	// output for metricsProbeTrickyUserName — a raw Go string literal
+	// (backticks: every backslash below is a literal backslash
+	// character, not a Go escape), computed by hand from the format
+	// rule (\\ -> \\\\, " -> \\", newline -> \\n) rather than by calling
+	// the function itself, so this assertion cannot pass merely because
+	// the interpreted and this harness's own understanding of the rule
+	// happen to agree by construction.
+	const metricsProbeEscapedTrickyName = `weird\"user\\name\nwith-newline`
 	for _, want := range []string{
 		"# TYPE llmgateway_requests_total counter",
 		"# TYPE llmgateway_provider_healthy gauge",
 		`llmgateway_provider_attempts_total{provider="openai"}`,
 		"# TYPE llmgateway_provider_model_attempts_total counter",
 		`llmgateway_provider_model_attempts_total{provider="openai",model="` + testDataWantModel + `"}`,
+		`llmgateway_requests_total{scope_kind="user",scope_id="` + metricsProbeEscapedTrickyName + `"}`,
 	} {
 		if !strings.Contains(body, want) {
 			return fmt.Errorf("GET /metrics (admin key): body missing %q — interpreted rendering diverged from the compiled shape; body=%s", want, body)
 		}
+	}
+	if strings.Contains(body, metricsProbeTrickyUserName) {
+		return fmt.Errorf("GET /metrics (admin key): body contains the RAW, unescaped tricky user name — escapeLabelValue did not run interpreted; body=%s", body)
 	}
 
 	allowlistedReq := httptest.NewRequest(http.MethodGet, "/metrics", nil) // default RemoteAddr, inside metricsProbeAllowedCIDR
