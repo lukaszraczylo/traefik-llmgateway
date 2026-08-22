@@ -50,6 +50,22 @@ const defaultBreakerOpenDuration = time.Minute
 // MaxOpenDuration is left empty.
 const defaultBreakerMaxOpenDuration = 30 * time.Minute
 
+// maxBreakerOpenDuration bounds BreakerConfig.MaxOpenDuration — the same
+// ceiling-on-a-config-value precedent maxBreakerFailureThreshold already
+// sets above, applied here because openBreakerLocked's backoff doubling
+// has no overflow guard of its own: it relies on breakerOpenMax staying
+// small enough that doubling a value already at or below it can never
+// approach time.Duration's int64-nanosecond range. A pathological operator
+// value with no ceiling (adversarial-review finding, round 2) would let
+// repeated doublings wrap negative after ~28 probes, silently DISABLING
+// backoff (a negative openUntil is always in the past). 24 hours is
+// already an extremely generous cap — far longer than any deployment
+// should ever want a single provider re-probed — and doubling twice from
+// it (worst case before the cap check fires) lands nowhere near int64
+// overflow, so the ceiling alone is the fix; openBreakerLocked itself
+// needs no separate runtime guard.
+const maxBreakerOpenDuration = 24 * time.Hour
+
 // errModelUnknown is returned by modelRegistry.resolve when id does not
 // match any provider's known model set (explicit config plus the last
 // successful discovery fetch) — 404 semantics for the caller.
@@ -223,14 +239,22 @@ func (st *providerState) setDiscoveredContext(m map[string]int) {
 // second one. The caller must pair a true result with a later finishRefresh
 // call.
 //
-// A closed breaker (feat/provider-health) behaves EXACTLY as before this
-// feature existed: now far enough past lastRefresh (or this is the first
-// refresh) is the only gate — a provider that never fails never touches the
-// breaker branch below at all. An open breaker replaces that interval gate
-// with its own backoff window: refresh stays blocked until now reaches
-// openUntil, regardless of interval, and reaching it starts exactly one
-// half-open probe (state moves to halfOpen here, before the caller's fetch
-// even runs) rather than resuming normal per-interval refreshing outright —
+// The interval gate (now far enough past lastRefresh, or this is the first
+// refresh) applies UNCONDITIONALLY, closed or open alike — this is the
+// fix for the adversarial-review blocker (round 2): an EARLIER version of
+// this method let an open breaker's own backoff window (openUntil) REPLACE
+// the interval gate rather than add to it, and since
+// defaultBreakerMaxOpenDuration (30m) is shorter than defaultDiscoveryInterval
+// (1h), that let a permanently broken provider get probed roughly TWICE as
+// often as before this feature existed — the exact opposite of "back off".
+// Backoff can only ever make retries LESS frequent than the plain interval,
+// never more: a closed breaker is gated by interval alone (exactly as
+// before this feature existed — a provider that never fails never touches
+// the breaker branch below at all); an open breaker is additionally gated
+// by openUntil, so whichever of the two — interval or backoff — is
+// currently longer wins. Reaching both starts exactly one half-open probe
+// (state moves to halfOpen here, before the caller's fetch even runs)
+// rather than resuming normal per-interval refreshing outright —
 // recordHealthLocked decides whether that probe closes the breaker or
 // reopens it with a longer backoff.
 func (st *providerState) tryBeginRefresh(now time.Time) bool {
@@ -239,16 +263,14 @@ func (st *providerState) tryBeginRefresh(now time.Time) bool {
 	if st.inFlight {
 		return false
 	}
+	if now.Sub(st.lastRefresh) < st.interval {
+		return false
+	}
 	if st.health == breakerOpen {
 		if now.Before(st.openUntil) {
 			return false
 		}
 		st.health = breakerHalfOpen
-		st.inFlight = true
-		return true
-	}
-	if now.Sub(st.lastRefresh) < st.interval {
-		return false
 	}
 	st.inFlight = true
 	return true
@@ -286,17 +308,48 @@ func (st *providerState) finishRefresh(now time.Time, ids []string, err error) {
 // provider-health) from one finished refresh attempt's outcome. Caller must
 // already hold st.mu.
 //
-// failed reuses limits.go's existing recordProviderAttempt classification —
-// isTransient(resp, err) with a nil *http.Response (a discovery fetch has no
-// response to inspect on a transport-level failure, unlike a proxied
-// request) plus isDeadlineExceeded(err) — rather than inventing a second
-// one, per this feature's own design mandate. Net effect: any non-nil error
-// except a caller-canceled context counts against the provider, the same
-// line recordProviderAttempt already draws for request-path attempts.
+// context.Canceled is NEUTRAL — checked first, before any classification —
+// per adversarial-review ruling (round 2): a canceled discovery fetch
+// reflects the CALLER walking away (plugin shutdown, an outer context
+// canceled upstream), not the provider's fault. It must not count as a
+// FAILURE (would wrongly trip an otherwise-healthy provider's breaker on a
+// well-timed shutdown) and — the sharper bug an earlier version of this
+// method had — must not count as a SUCCESS either: treating it as success
+// would CLOSE an already-open breaker and wipe its backoff/counters purely
+// because a half-open probe got interrupted before it could complete,
+// reporting a still-broken provider as healthy again. Every field this
+// method could touch is left exactly as it was; only lastRefresh/lastErr
+// (finishRefresh, above, unconditionally) and inFlight change. If health
+// is still halfOpen afterward, the NEXT real attempt (admitted immediately
+// — see tryBeginRefresh's own doc comment: a halfOpen provider is not
+// gated by openUntil at all, only by the plain interval) re-decides the
+// breaker through this same function, so a canceled probe simply delays
+// the decision by one cycle rather than making a wrong one now.
+//
+// failed classifies every OTHER error explicitly for provider health,
+// deliberately NOT reusing isTransient's retry-shaped semantics (retry.go)
+// wholesale — an earlier version of this function did, and adversarial
+// review found the gap: isTransient returns false for errRequestBuildFailed
+// (retrying a malformed request build within the SAME attempt would never
+// help, correct for RETRY purposes), so a provider whose baseURL is
+// malformed — nothing validates it at construction — built errRequestBuildFailed
+// on every single discovery cycle forever, and the old code routed that
+// straight to closeBreakerLocked, wiping state every time: the breaker
+// could never open despite continuous, permanent failure. For HEALTH
+// purposes there is no such nuance to preserve: any non-nil, non-canceled
+// error means this discovery attempt did not succeed, full stop.
 //
 // While closed, breakerThreshold consecutive failures open the breaker at
 // its base backoff (breakerOpenBase); any success resets the counter to
-// zero. While halfOpen (the only other state finishRefresh can observe —
+// zero. breakerThreshold <= 0 (unreachable through newModelRegistry, which
+// always resolves it to >= 1 via validateBreakerConfig, but reachable from
+// a providerState assembled directly — every test in this file does that)
+// disables the breaker entirely rather than tripping on the very first
+// failure with a zero backoff: this is what makes providerState's own
+// documented "zero value behaves exactly as before" claim (its own doc
+// comment, above) actually true, not just aspirational.
+//
+// While halfOpen (the only other state finishRefresh can observe —
 // tryBeginRefresh never starts a refresh from open without first moving to
 // halfOpen), a successful probe closes the breaker outright; a failed one
 // reopens it with a DOUBLED backoff, capped at breakerOpenMax — the
@@ -304,7 +357,10 @@ func (st *providerState) finishRefresh(now time.Time, ids []string, err error) {
 // xiaomi's ongoing 401s) from being re-probed every single interval
 // forever.
 func (st *providerState) recordHealthLocked(now time.Time, err error) {
-	failed := isTransient(nil, err) || isDeadlineExceeded(err)
+	if errors.Is(err, context.Canceled) {
+		return
+	}
+	failed := err != nil
 	if st.health == breakerHalfOpen {
 		if failed {
 			st.openBreakerLocked(now, true)
@@ -315,6 +371,9 @@ func (st *providerState) recordHealthLocked(now time.Time, err error) {
 	}
 	if !failed {
 		st.closeBreakerLocked()
+		return
+	}
+	if st.breakerThreshold <= 0 {
 		return
 	}
 	st.consecutiveFailures++
@@ -355,10 +414,12 @@ func (st *providerState) openBreakerLocked(now time.Time, escalate bool) {
 	st.openUntil = now.Add(st.backoff)
 }
 
-// usable reports whether st's discovery circuit breaker currently permits
-// routing to this provider — see modelRegistry.providerUsable's doc comment
-// for the full contract this backs.
-func (st *providerState) usable() bool {
+// discoveryHealthy reports whether st's DISCOVERY circuit breaker is
+// currently closed or half-open (not open) — see modelRegistry.
+// discoveryHealthy's doc comment for the full contract this backs, in
+// particular the scope limitation its name is deliberately chosen to
+// signal: this reflects the discovery endpoint only.
+func (st *providerState) discoveryHealthy() bool {
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	return st.health != breakerOpen
@@ -533,6 +594,12 @@ func validateBreakerConfig(bc BreakerConfig) (breakerConfig, error) {
 		if d <= 0 {
 			return breakerConfig{}, fmt.Errorf("llmgateway: breaker.maxOpenDuration must be positive, got %q", bc.MaxOpenDuration)
 		}
+		// Ceiling (adversarial-review finding, round 2): see
+		// maxBreakerOpenDuration's own doc comment for why an unbounded
+		// value here is an overflow risk, not merely an odd config choice.
+		if d > maxBreakerOpenDuration {
+			return breakerConfig{}, fmt.Errorf("llmgateway: breaker.maxOpenDuration must be at most %s, got %q", maxBreakerOpenDuration, bc.MaxOpenDuration)
+		}
 		openMax = d
 	}
 
@@ -704,17 +771,29 @@ func (m *modelRegistry) now() time.Time {
 	return m.nowFn()
 }
 
-// providerUsable reports whether name's discovery circuit breaker
-// currently permits routing to it (feat/provider-health's queryable
-// health signal — the predicate feat/failover consults before sending a
-// request to a provider). false only while the breaker is OPEN: an
-// unconfigured provider name, one with discovery disabled (it has no
-// health signal to trip the breaker with, so it stays closed forever),
-// and one whose breaker is closed OR half-open all report true — a
-// half-open provider is actively being re-probed by the next discovery
-// cycle and must stay routable, per this feature's own "a provider that
-// recovers must never stay dead" requirement; only an OPEN breaker, still
-// backing off, is unusable.
+// discoveryHealthy reports whether name's DISCOVERY circuit breaker is
+// currently closed or half-open (feat/provider-health's queryable health
+// signal). false only while the breaker is OPEN: an unconfigured provider
+// name, one with discovery disabled (it has no health signal to trip the
+// breaker with, so it stays closed forever), and one whose breaker is
+// closed OR half-open all report true — a half-open provider is actively
+// being re-probed by the next discovery cycle and must stay routable, per
+// this feature's own "a provider that recovers must never stay dead"
+// requirement; only an OPEN breaker, still backing off, reports false.
+//
+// SCOPE, per adversarial-review ruling (round 2) — read this before wiring
+// it into any routing decision: this reflects the DISCOVERY endpoint
+// (/v1/models-equivalent) ONLY. It is driven exclusively by
+// finishRefresh's own outcomes and knows nothing about
+// /v1/chat/completions or any other request-path traffic. A provider
+// whose discovery listing 401s or 404s while its actual completion
+// endpoint serves requests perfectly fine — common behind a proxy that
+// exposes chat but not model listing — reports false here despite being
+// entirely usable for real traffic. feat/failover MUST NOT treat a false
+// result here as a sole reason to refuse routing; request-path health is
+// a SEPARATE signal, fed by limiter.recordProviderAttempt (limits.go),
+// deliberately kept apart so discovery outages and request-path outages
+// are never conflated under one name.
 //
 // This is a single mutex-guarded read of state finishRefresh/
 // tryBeginRefresh already maintain — no round trip, no store lookup — per
@@ -722,12 +801,12 @@ func (m *modelRegistry) now() time.Time {
 // rather than a correctness guarantee. Three pods learning independently
 // (each with its own view of a provider's health) is accepted and
 // intended, not a bug.
-func (m *modelRegistry) providerUsable(name string) bool {
+func (m *modelRegistry) discoveryHealthy(name string) bool {
 	st, ok := m.states[name]
 	if !ok {
 		return true
 	}
-	return st.usable()
+	return st.discoveryHealthy()
 }
 
 // finishRefresh records the outcome of a refresh attempt (st.finishRefresh)
