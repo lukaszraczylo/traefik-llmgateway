@@ -1998,34 +1998,39 @@ func TestAdminTargets_AccessListsMatchEnforcement_AndCountersReflectTraffic(t *t
 // --- default-preserving: the live cluster's real shape (security audit, 2026-08-22) ---
 
 // TestDefaultPreserving_LiveClusterShape_LoadsAndServesIdentically models
-// the live production shape this round's five fixes must not break
-// (project brief): 5 "friend" users plus 4 "home" users (steve-cw and
-// kevinsandom are named live users; the rest are representative — real
-// names this test has no visibility into, which is exactly why finding
-// 5's fix stops short of restricting the name charset, see buildEntry's
-// own doc comment, auth.go) and 11 MCP servers. A2A agents are out of
-// scope here: none of this round's five findings touch mcp_a2a.go or any
-// A2A-specific code path, so there is no mechanism by which they could
-// regress agent handling.
+// the live production shape this round's fixes must not break (project
+// brief): 5 "friend" users plus 4 "home" users (steve-cw and kevinsandom
+// are named live users; the rest are representative — real names this
+// test has no visibility into, which is exactly why finding 5's fix stops
+// short of restricting the name charset, see buildEntry's own doc
+// comment, auth.go) and 11 MCP servers. A2A agents are out of scope here:
+// none of this round's fixes touch mcp_a2a.go or any A2A-specific code
+// path, so there is no mechanism by which they could regress agent
+// handling.
 //
 // It proves construction succeeds unchanged (finding 5's new empty/
-// duplicate-name checks accept every one of these real names), a normal
-// federated tools/list call from an ordinary user still succeeds under a
-// realistic per-minute limit (finding 1b's per-backend weighting does not
-// spuriously throttle ordinary usage — 11 servers is comfortably under a
-// 60/min budget), and the admin dashboard's usage poll still returns
-// exactly one row per user and per group in a single store round trip
-// (finding 4's chunking is a no-op at 10 users, well under
-// adminUsageChunkScopes).
+// duplicate-name checks accept every one of these real names), a
+// friends-group user's configured requests-per-minute budget still buys
+// EXACTLY that many tools/list calls against all 11 servers — not
+// budget/11 — regressing security review round 2's critical finding 3
+// (weighting tools/list by backend count was reverted specifically
+// because it was not default-preserving at this exact shape: both live
+// groups have an empty MCP allow-list, i.e. all 11 servers, so a naive
+// per-backend weight would have silently cut every configured
+// requests-per-minute budget by ~11x here), and the admin dashboard's
+// usage poll still returns exactly one row per user and per group in a
+// single store round trip (finding 4's chunking is a no-op at 10 users,
+// well under adminUsageChunkScopes).
 func TestDefaultPreserving_LiveClusterShape_LoadsAndServesIdentically(t *testing.T) {
 	friendNames := []string{"steve-cw", "kevinsandom", "friend3", "friend4", "friend5"}
 	homeNames := []string{"home1", "home2", "home3", "home4"}
+	const friendsRPM = 60
 
 	cfg := CreateConfig()
 	cfg.Providers = map[string]*ProviderConfig{"openai": {Type: "openai", APIKey: "k"}}
 	cfg.Admin = &AdminConfig{Enabled: true}
 	cfg.Groups = map[string]*GroupConfig{
-		"friends": {Limits: &LimitsConfig{RequestsPerMinute: 60}},
+		"friends": {Limits: &LimitsConfig{RequestsPerMinute: friendsRPM}},
 		"home":    {Limits: &LimitsConfig{RequestsPerMinute: 120}},
 	}
 
@@ -2049,10 +2054,16 @@ func TestDefaultPreserving_LiveClusterShape_LoadsAndServesIdentically(t *testing
 		t.Fatalf("New: want the realistic live-cluster config to load unchanged, got error: %v", err)
 	}
 
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, newFederatedRequest(t, "sk-steve-cw", jsonrpcRequest{JSONRPC: jsonrpcVersion, Method: "tools/list", ID: json.RawMessage("1")}))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("tools/list status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	// Drives friendsRPM calls, not just one (security review round 2:
+	// a single-call assertion cannot distinguish "budget buys N calls"
+	// from "budget buys N/11 calls" — exactly the blind spot that let the
+	// weighted-charge regression ship undetected).
+	for i := 1; i <= friendsRPM; i++ {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, newFederatedRequest(t, "sk-steve-cw", jsonrpcRequest{JSONRPC: jsonrpcVersion, Method: "tools/list", ID: json.RawMessage(fmt.Sprintf("%d", i))}))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("tools/list call %d/%d status = %d, want 200 (budget must buy all %d calls against 11 servers), body=%s", i, friendsRPM, rec.Code, friendsRPM, rec.Body.String())
+		}
 	}
 
 	usageReq := httptest.NewRequest("GET", adminUsagePath, nil)

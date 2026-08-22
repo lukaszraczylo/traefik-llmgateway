@@ -1081,39 +1081,14 @@ func buildBudgetProbes(scopes []limitScope, now time.Time) (probes []budgetProbe
 // call completes, one request may still push a scope over its budget — an
 // accepted trade-off, unchanged from before this round.
 func (l *limiter) checkAndCount(scopes []limitScope) *limitViolation {
-	return l.checkAndCountWeighted(scopes, 1)
-}
-
-// checkAndCountWeighted is checkAndCount generalized to charge `weight`
-// requests against every scope's requests-per-minute/requests-per-day
-// counters instead of exactly one (security audit finding 1b, 2026-08-22):
-// a route whose single incoming client request causes this gateway to
-// issue `weight` outbound backend calls — today, only the federated MCP
-// tools/list fan-out (mcp_federation.go's handleMCPFederated, weight =
-// len(allowedMCPServerNames(grp))) — must charge its real cost, not
-// undercount a fan-out as a single request. weight<=0 is treated as 1
-// (never zero-cost, never negative); checkAndCount(scopes) is exactly
-// checkAndCountWeighted(scopes, 1), so every other call site's behavior is
-// completely unchanged by this method existing. Semantics beyond the
-// weighted delta are identical to checkAndCount's own doc comment in
-// every other respect: one storeIncrAndGetMulti round trip, requests-
-// per-minute/requests-per-day compared against the just-incremented
-// (now weighted) count, token/cost budgets read and compared unweighted
-// (a fan-out has no tokens or USD cost of its own — those probes come
-// from buildBudgetProbes, untouched by weight), violation precedence
-// unchanged.
-func (l *limiter) checkAndCountWeighted(scopes []limitScope, weight int64) *limitViolation {
-	if weight <= 0 {
-		weight = 1
-	}
 	now := l.now()
 
 	entries := make([]counterIncr, 0, len(scopes)*checkAndCountKeysPerScope)
 	for _, sc := range scopes {
 		entries = append(entries,
-			newCounterIncr(sc.kind, sc.id, metricReq, windowMin, now, weight, minWindowTTL),
-			newCounterIncr(sc.kind, sc.id, metricReq, windowDay, now, weight, dayWindowTTL),
-			newCounterIncr(sc.kind, sc.id, metricReq, windowHour, now, weight, hourWindowTTL),
+			newCounterIncr(sc.kind, sc.id, metricReq, windowMin, now, 1, minWindowTTL),
+			newCounterIncr(sc.kind, sc.id, metricReq, windowDay, now, 1, dayWindowTTL),
+			newCounterIncr(sc.kind, sc.id, metricReq, windowHour, now, 1, hourWindowTTL),
 		)
 	}
 	probes, reads := buildBudgetProbes(scopes, now)

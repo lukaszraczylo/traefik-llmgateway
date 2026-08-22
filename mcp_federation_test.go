@@ -1031,7 +1031,7 @@ func TestMcpBackendCall_HandshakeFallbackTrigger(t *testing.T) {
 				t.Fatal("handler is not *Gateway")
 			}
 
-			_, _ = gw.mcpBackendCall(context.Background(), srv.URL, "tools/list", struct{}{})
+			_, _ = gw.mcpBackendCall(context.Background(), srv.URL, "tools/list", struct{}{}, mcpBackendResponseMaxBytes)
 
 			gotCalls := callCount.Load()
 			if tc.wantHandshake && gotCalls < 2 {
@@ -1060,9 +1060,131 @@ func TestMcpBackendCall_NetworkFailure_NeverAttemptsHandshake(t *testing.T) {
 		t.Fatal("handler is not *Gateway")
 	}
 
-	_, err = gw.mcpBackendCall(context.Background(), "http://127.0.0.1:1", "tools/list", struct{}{})
+	_, err = gw.mcpBackendCall(context.Background(), "http://127.0.0.1:1", "tools/list", struct{}{}, mcpBackendResponseMaxBytes)
 	if err == nil {
 		t.Fatal("want an error (nothing listening on 127.0.0.1:1)")
+	}
+}
+
+// --- security review round 2, important finding 4: dual response caps ---
+
+// TestMcpBackendCall_ResponseExceedsCap_ReturnsDistinctTooLargeError is a
+// fast, small-scale unit test of doBackendJSONRPC's own maxBytes
+// mechanism, using an artificially tiny cap so the test needs no
+// multi-megabyte payload: a backend response over the cap must be
+// reported with mcpResponseTooLargeMarker in its message —
+// distinguishable via strings.Contains from an ordinary network/parse
+// failure — never silently truncated into a confusing parse error.
+func TestMcpBackendCall_ResponseExceedsCap_ReturnsDistinctTooLargeError(t *testing.T) {
+	const tinyCap = 64
+	big := strings.Repeat("x", tinyCap*4) // well past tinyCap once JSON-encoded
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req jsonrpcRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		result, _ := json.Marshal(map[string]string{"data": big})
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(jsonrpcResponse{ID: req.ID, Result: result})
+	}))
+	defer srv.Close()
+
+	cfg := newFederationTestConfig(srv.URL, "http://beta.invalid", false)
+	h, err := New(context.Background(), http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	gw, ok := h.(*Gateway)
+	if !ok {
+		t.Fatal("handler is not *Gateway")
+	}
+
+	_, err = gw.mcpBackendCall(context.Background(), srv.URL, "tools/list", struct{}{}, tinyCap)
+	if err == nil {
+		t.Fatal("want an error for a response exceeding the cap")
+	}
+	if !strings.Contains(err.Error(), mcpResponseTooLargeMarker) {
+		t.Errorf("err = %v, want it to contain %q", err, mcpResponseTooLargeMarker)
+	}
+}
+
+// TestMcpBackendCall_ResponseAtOrUnderCap_Succeeds proves the cap+1 read
+// technique does not false-positive: a response exactly AT the cap must
+// still succeed, not be mistaken for oversized.
+func TestMcpBackendCall_ResponseAtOrUnderCap_Succeeds(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req jsonrpcRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		result, _ := json.Marshal(map[string]bool{"ok": true})
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(jsonrpcResponse{ID: req.ID, Result: result})
+	}))
+	defer srv.Close()
+
+	cfg := newFederationTestConfig(srv.URL, "http://beta.invalid", false)
+	h, err := New(context.Background(), http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	gw, ok := h.(*Gateway)
+	if !ok {
+		t.Fatal("handler is not *Gateway")
+	}
+
+	// A generous cap comfortably above this tiny response — must succeed
+	// cleanly, not be flagged as too-large.
+	resp, err := gw.mcpBackendCall(context.Background(), srv.URL, "tools/list", struct{}{}, 4096)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.Error != nil {
+		t.Fatalf("resp.Error = %+v, want nil", resp.Error)
+	}
+}
+
+// TestHandleMCPFederated_ToolsCall_ResponseBetween4And10MiB_Succeeds is
+// the end-to-end regression for important finding 4: a real tool result
+// between mcpBackendResponseMaxBytes (4MiB, the fan-out-only cap) and
+// mcpBackendCallResponseMaxBytes (10MiB, tools/call's own cap) — legal
+// under the pre-finding-1c budget, and a realistic size for an image or
+// extracted-document tool result — must succeed on the tools/call path,
+// proving that path was never shrunk to the fan-out's smaller cap.
+func TestHandleMCPFederated_ToolsCall_ResponseBetween4And10MiB_Succeeds(t *testing.T) {
+	const payloadBytes = 6 << 20 // 6MiB: over the 4MiB fan-out cap, under the 10MiB tools/call cap
+	big := strings.Repeat("y", payloadBytes)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req jsonrpcRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if req.Method == "tools/call" {
+			result, _ := json.Marshal(map[string]string{"data": big})
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(jsonrpcResponse{ID: req.ID, Result: result})
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(jsonrpcResponse{ID: req.ID, Result: json.RawMessage(`{}`)})
+	}))
+	defer srv.Close()
+
+	cfg := newFederationTestConfig(srv.URL, "http://beta.invalid", false)
+	h, err := New(context.Background(), http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, newFederatedRequest(t, "sk-alice", jsonrpcRequest{
+		JSONRPC: jsonrpcVersion, Method: "tools/call", ID: json.RawMessage("1"),
+		Params: json.RawMessage(`{"name":"alpha_lookup"}`),
+	}))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	var got jsonrpcResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Error != nil {
+		t.Fatalf("error = %+v, want nil (a 6MiB result must succeed on the tools/call path)", got.Error)
 	}
 }
 
@@ -1391,100 +1513,96 @@ func betaHost(rawURL string) (string, error) {
 	return strings.TrimPrefix(rawURL, prefix), nil
 }
 
-// --- security audit finding 1b: tools/list weighted by backend count ---
+// --- security review round 2, critical finding 3: tools/list is NOT weighted ---
 
-// TestHandleMCPFederated_ToolsList_WeightedByBackendCount_RejectsWhenOverBudget
-// proves a tools/list call charges checkAndCount len(allowedMCPServerNames)
-// requests, not one: with 3 configured (and unrestricted) servers and a
-// requests-per-minute budget of 2, the very FIRST tools/list call must be
-// rejected outright — and, because checkAndCountWeighted runs and fails
-// BEFORE the fan-out ever starts, none of the three servers may be
-// contacted at all.
-func TestHandleMCPFederated_ToolsList_WeightedByBackendCount_RejectsWhenOverBudget(t *testing.T) {
-	alpha := newMockJSONRPCServer(t, nil)
-	beta := newMockJSONRPCServer(t, nil)
-	gamma := newMockJSONRPCServer(t, nil)
-	cfg := newFederationTestConfig(alpha.srv.URL, beta.srv.URL, false)
-	cfg.MCPServers["gamma"] = &TargetConfig{URL: gamma.srv.URL}
-	cfg.Groups["default"].Limits = &LimitsConfig{RequestsPerMinute: 2}
+// TestHandleMCPFederated_ToolsList_NotWeightedByBackendCount_BudgetBuysNCalls
+// is the regression for security review round 2's critical finding 3:
+// weighting checkAndCount by the number of allowed MCP servers (security
+// audit finding 1b's original fix) was not default-preserving — on a
+// config where the MCP allow-list is unrestricted (every group on the
+// live fleet), it silently turned a configured requests-per-minute budget
+// into budget/serverCount successful tools/list calls, with NO config
+// change on the operator's part (11 servers, requests-per-minute: 60 ->
+// only 5 calls/minute actually succeeded; examples/kubernetes.yaml's
+// shipped requests-per-minute: 10 would 429 the very FIRST call ever
+// made). With numServers (11, matching the live fleet) configured and a
+// requests-per-minute budget of exactly rpmBudget, all rpmBudget calls
+// must succeed and the next one must be rejected — proving the charge is
+// exactly 1 per call, regardless of how many backends that call fans out
+// to.
+func TestHandleMCPFederated_ToolsList_NotWeightedByBackendCount_BudgetBuysNCalls(t *testing.T) {
+	const numServers = 11 // matches the live fleet's own MCP server count
+	const rpmBudget = 5
+
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{"openai": {Type: "openai", APIKey: "k"}}
+	cfg.MCPServers = make(map[string]*TargetConfig, numServers)
+	for i := 0; i < numServers; i++ {
+		srv := newMockJSONRPCServer(t, []mcpTool{{Name: "lookup"}})
+		cfg.MCPServers[fmt.Sprintf("srv%d", i)] = &TargetConfig{URL: srv.srv.URL}
+	}
+	cfg.Groups = map[string]*GroupConfig{"default": {Limits: &LimitsConfig{RequestsPerMinute: rpmBudget}}}
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{{Name: "alice", Group: "default", APIKey: "sk-alice"}}}
 
 	h, err := New(context.Background(), http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), cfg, "llmgw")
 	if err != nil {
 		t.Fatalf("New: %v", err)
+	}
+
+	for i := 1; i <= rpmBudget; i++ {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, newFederatedRequest(t, "sk-alice", jsonrpcRequest{JSONRPC: jsonrpcVersion, Method: "tools/list", ID: json.RawMessage(fmt.Sprintf("%d", i))}))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("call %d/%d status = %d, want 200 (budget must buy exactly rpmBudget calls, not rpmBudget/numServers), body=%s", i, rpmBudget, rec.Code, rec.Body.String())
+		}
+	}
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, newFederatedRequest(t, "sk-alice", jsonrpcRequest{JSONRPC: jsonrpcVersion, Method: "tools/list", ID: json.RawMessage(`"over"`)}))
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("call %d status = %d, want 429 (budget exhausted), body=%s", rpmBudget+1, rec.Code, rec.Body.String())
+	}
+}
+
+// TestHandleMCPFederated_ToolsList_AmplificationVisibleAtTargetScopeOnly
+// proves the fan-out's real per-server cost is still fully visible to an
+// operator without silently consuming tenant quota (security review round
+// 2, 2026-08-22, critical finding 3's own ruling): after ONE tools/list
+// call against 2 servers, the user's own requests-per-minute counter
+// reads exactly 1 (never weighted), while EACH server's own "mcp"
+// target-scope counter (countTargetRequests, limits.go) reads exactly 1
+// — the real amplification, attributed where an operator can see it.
+func TestHandleMCPFederated_ToolsList_AmplificationVisibleAtTargetScopeOnly(t *testing.T) {
+	alpha := newMockJSONRPCServer(t, []mcpTool{{Name: "lookup"}})
+	beta := newMockJSONRPCServer(t, []mcpTool{{Name: "search"}})
+	cfg := newFederationTestConfig(alpha.srv.URL, beta.srv.URL, false)
+	h, err := New(context.Background(), http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	gw, ok := h.(*Gateway)
+	if !ok {
+		t.Fatal("handler is not *Gateway")
 	}
 
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, newFederatedRequest(t, "sk-alice", jsonrpcRequest{JSONRPC: jsonrpcVersion, Method: "tools/list", ID: json.RawMessage("1")}))
-	if rec.Code != http.StatusTooManyRequests {
-		t.Fatalf("status = %d, want 429 (weight=3 > limit=2), body=%s", rec.Code, rec.Body.String())
-	}
-	for name, srv := range map[string]*mockJSONRPCServer{"alpha": alpha, "beta": beta, "gamma": gamma} {
-		if srv.called.Load() != 0 {
-			t.Errorf("server %q was contacted %d times, want 0 (rejected before fan-out)", name, srv.called.Load())
-		}
-	}
-}
-
-// TestHandleMCPFederated_ToolsList_WeightedByBackendCount_AccumulatesAcrossCalls
-// proves the weighted charge actually accumulates against the same
-// requests-per-minute window: with 3 servers and a budget of 5, the first
-// tools/list call (weight 3) succeeds, and the second (weight 3 more,
-// total 6 > 5) is rejected.
-func TestHandleMCPFederated_ToolsList_WeightedByBackendCount_AccumulatesAcrossCalls(t *testing.T) {
-	alpha := newMockJSONRPCServer(t, []mcpTool{{Name: "lookup"}})
-	beta := newMockJSONRPCServer(t, []mcpTool{{Name: "search"}})
-	gamma := newMockJSONRPCServer(t, []mcpTool{{Name: "fetch"}})
-	cfg := newFederationTestConfig(alpha.srv.URL, beta.srv.URL, false)
-	cfg.MCPServers["gamma"] = &TargetConfig{URL: gamma.srv.URL}
-	cfg.Groups["default"].Limits = &LimitsConfig{RequestsPerMinute: 5}
-
-	h, err := New(context.Background(), http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), cfg, "llmgw")
-	if err != nil {
-		t.Fatalf("New: %v", err)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
 	}
 
-	rec1 := httptest.NewRecorder()
-	h.ServeHTTP(rec1, newFederatedRequest(t, "sk-alice", jsonrpcRequest{JSONRPC: jsonrpcVersion, Method: "tools/list", ID: json.RawMessage("1")}))
-	if rec1.Code != http.StatusOK {
-		t.Fatalf("first call status = %d, want 200, body=%s", rec1.Code, rec1.Body.String())
+	now := time.Now()
+	userReq, ok := gw.limiter.getCounter("user", "alice", metricReq, windowDay, now)
+	if !ok || userReq != 1 {
+		t.Errorf("user req:day counter = %d (ok=%v), want exactly 1 (never weighted by backend count)", userReq, ok)
 	}
-
-	rec2 := httptest.NewRecorder()
-	h.ServeHTTP(rec2, newFederatedRequest(t, "sk-alice", jsonrpcRequest{JSONRPC: jsonrpcVersion, Method: "tools/list", ID: json.RawMessage("2")}))
-	if rec2.Code != http.StatusTooManyRequests {
-		t.Fatalf("second call status = %d, want 429 (3+3=6 > limit=5), body=%s", rec2.Code, rec2.Body.String())
+	alphaReq, ok := gw.limiter.getCounter(targetKindMCP, "alpha", metricReq, windowDay, now)
+	if !ok || alphaReq != 1 {
+		t.Errorf("mcp/alpha req:day counter = %d (ok=%v), want 1", alphaReq, ok)
 	}
-}
-
-// TestHandleMCPFederated_ToolsCall_WeightStaysOne_EvenWithManyServersConfigured
-// proves tools/call — which only ever resolves to ONE backend — never
-// inherits tools/list's per-backend weighting: with 3 servers configured
-// and a requests-per-minute budget of 2, two sequential tools/call
-// requests must both succeed (weight 1 each, total 2, at the limit), where
-// the equivalent tools/list weighting (3 each) would already have
-// rejected the first one.
-func TestHandleMCPFederated_ToolsCall_WeightStaysOne_EvenWithManyServersConfigured(t *testing.T) {
-	alpha := newMockJSONRPCServer(t, nil)
-	beta := newMockJSONRPCServer(t, nil)
-	gamma := newMockJSONRPCServer(t, nil)
-	cfg := newFederationTestConfig(alpha.srv.URL, beta.srv.URL, false)
-	cfg.MCPServers["gamma"] = &TargetConfig{URL: gamma.srv.URL}
-	cfg.Groups["default"].Limits = &LimitsConfig{RequestsPerMinute: 2}
-
-	h, err := New(context.Background(), http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), cfg, "llmgw")
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-
-	for i := 1; i <= 2; i++ {
-		rec := httptest.NewRecorder()
-		h.ServeHTTP(rec, newFederatedRequest(t, "sk-alice", jsonrpcRequest{
-			JSONRPC: jsonrpcVersion, Method: "tools/call", ID: json.RawMessage(fmt.Sprintf("%d", i)),
-			Params: json.RawMessage(`{"name":"alpha_lookup"}`),
-		}))
-		if rec.Code != http.StatusOK {
-			t.Fatalf("call %d status = %d, want 200 (tools/call weight must stay 1), body=%s", i, rec.Code, rec.Body.String())
-		}
+	betaReq, ok := gw.limiter.getCounter(targetKindMCP, "beta", metricReq, windowDay, now)
+	if !ok || betaReq != 1 {
+		t.Errorf("mcp/beta req:day counter = %d (ok=%v), want 1", betaReq, ok)
 	}
 }
 
