@@ -251,6 +251,56 @@ func TestHandleTargetProxy_ClientAPIKeyHeaderStripped_NoUpstreamInjection(t *tes
 	}
 }
 
+// TestHandleTargetProxy_DangerousHeadersStripped is the MCP/A2A-target
+// half of the security+performance audit's (2026-08-22) additive header
+// strip — proxyUpstream applies dangerousClientHeaders/
+// dangerousClientHeaderPrefixes on BOTH proxy paths, so an MCP target
+// must never see a client-spoofed identity/forwarding header, exactly
+// like a native passthrough provider.
+func TestHandleTargetProxy_DangerousHeadersStripped(t *testing.T) {
+	var got http.Header
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Clone()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{"openai": {Type: "openai", APIKey: "k"}}
+	cfg.MCPServers = map[string]*TargetConfig{"alpha": {URL: srv.URL}}
+	cfg.Groups = map[string]*GroupConfig{"default": {}}
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{{Name: "alice", Group: "default", APIKey: "sk-alice"}}}
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/mcp/alpha/tools/list", nil)
+	req.Header.Set("Authorization", "Bearer sk-alice")
+	req.Header.Set("Forwarded", "for=203.0.113.1")
+	req.Header.Set("X-Forwarded-For", "203.0.113.1")
+	req.Header.Set("X-Auth-Request-Email", "spoofed@example.com")
+	req.Header.Set("X-Remote-User", "spoofed-admin")
+	req.Header.Set("X-Remote-Groups", "admin")
+	req.Header.Set("Cookie", "session=stolen")
+	req.Header.Set("X-Client-Custom", "keep-me")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	for _, hdr := range []string{"Forwarded", "X-Forwarded-For", "X-Auth-Request-Email", "X-Remote-User", "X-Remote-Groups", "Cookie"} {
+		if v := got.Get(hdr); v != "" {
+			t.Errorf("upstream MCP target saw %s = %q, want stripped", hdr, v)
+		}
+	}
+	if got.Get("X-Client-Custom") != "keep-me" {
+		t.Error("upstream did not see ordinary header X-Client-Custom — strip must not be a full allowlist inversion")
+	}
+}
+
 // --- SSE-safe streaming through the target proxy ---
 
 func TestHandleTargetProxy_SSE_FlushesIncrementally(t *testing.T) {

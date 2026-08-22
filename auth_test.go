@@ -302,6 +302,29 @@ func TestGroup_AllowsModel_EmptyListAllowsAnything(t *testing.T) {
 	}
 }
 
+// TestGroup_AllowsPassthroughPath_EmptyListAllowsAll pins the zero-config
+// default for GroupConfig.PassthroughPaths (security+performance audit,
+// 2026-08-22): a group with no PassthroughPaths configured — every group
+// that existed before this field did — must keep reaching every native
+// passthrough path, exactly like allowsProvider/allowsModel/allowsMCP/
+// allowsAgent's own empty-means-all defaults.
+func TestGroup_AllowsPassthroughPath_EmptyListAllowsAll(t *testing.T) {
+	grp := &group{name: "eng"}
+	if !grp.allowsPassthroughPath("v1/files") {
+		t.Fatal("empty passthroughPaths list should allow all")
+	}
+}
+
+func TestGroup_AllowsPassthroughPath_Glob(t *testing.T) {
+	grp := &group{name: "eng", passthroughPaths: []string{"v1/chat/completions"}}
+	if !grp.allowsPassthroughPath("v1/chat/completions") {
+		t.Error("want exact match")
+	}
+	if grp.allowsPassthroughPath("v1/files") {
+		t.Error("want no match for a path outside the allowlist")
+	}
+}
+
 func TestAuthStore_ReplaceFileUsers_AddsAndSwapsUsers(t *testing.T) {
 	a, err := newAuthStore(testAuthCfg()) // inline user "a" / sk-secret in group eng
 	if err != nil {

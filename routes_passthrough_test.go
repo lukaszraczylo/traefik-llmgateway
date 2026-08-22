@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -985,5 +986,422 @@ func TestHandlePassthrough_ContextDeadlineExceeded_RecordsProviderFailure(t *tes
 	fails, _ := gw.limiter.getCounter(kindProvider, "openai", metricProvFail, windowDay, now)
 	if fails != 1 {
 		t.Errorf("provider fails/day = %d, want 1 — a real context-deadline timeout must count as a provider-health failure (SHOULD-1)", fails)
+	}
+}
+
+// --- security+performance audit, 2026-08-22: model enforcement, per-
+// provider toggle, per-group path allowlist, dangerous-header stripping ---
+
+// errReadCloser is an io.ReadCloser whose Read always fails, used to
+// exercise peekPassthroughModel's own body-read-failure path.
+type errReadCloser struct{ err error }
+
+func (e errReadCloser) Read([]byte) (int, error) { return 0, e.err }
+func (e errReadCloser) Close() error             { return nil }
+
+// TestHandlePassthrough_ModelAllowed_Proxied proves a passthrough JSON
+// body whose "model" field matches the group's model glob is proxied
+// normally.
+func TestHandlePassthrough_ModelAllowed_Proxied(t *testing.T) {
+	var upstreamCalled bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalled = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{"openai": {Type: "openai", BaseURL: srv.URL, APIKey: "sk-up"}}
+	cfg.Groups = map[string]*GroupConfig{"default": {Models: []string{"gpt-allowed"}}}
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{{Name: "alice", Group: "default", APIKey: "sk-alice"}}}
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/openai/v1/native-endpoint", strings.NewReader(`{"model":"gpt-allowed"}`))
+	req.Header.Set("Authorization", "Bearer sk-alice")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	if !upstreamCalled {
+		t.Error("upstream must be called for an allowed model")
+	}
+}
+
+// TestHandlePassthrough_ModelDenied_Returns403 closes the cheap-to-
+// expensive-model bypass: a passthrough JSON body naming a model the
+// group's glob does not match must never reach the upstream.
+func TestHandlePassthrough_ModelDenied_Returns403(t *testing.T) {
+	var upstreamCalled bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalled = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{"openai": {Type: "openai", BaseURL: srv.URL, APIKey: "sk-up"}}
+	cfg.Groups = map[string]*GroupConfig{"default": {Models: []string{"gpt-allowed"}}}
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{{Name: "alice", Group: "default", APIKey: "sk-alice"}}}
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/openai/v1/fine-tuning/jobs", strings.NewReader(`{"model":"gpt-expensive"}`))
+	req.Header.Set("Authorization", "Bearer sk-alice")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403, body=%s", rec.Code, rec.Body.String())
+	}
+	if upstreamCalled {
+		t.Error("upstream must never be called for a denied model")
+	}
+}
+
+// TestHandlePassthrough_ModelAllowed_ProviderPrefixedForm proves model
+// enforcement checks both the bare model id and the "provider/model" form
+// — the identical dual-candidate matcher the unified route's own
+// resolveAgainst applies (registry.go) — so a group glob written against
+// the prefixed form still authorizes a native passthrough request naming
+// the bare upstream id.
+func TestHandlePassthrough_ModelAllowed_ProviderPrefixedForm(t *testing.T) {
+	var upstreamCalled bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalled = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{"openai": {Type: "openai", BaseURL: srv.URL, APIKey: "sk-up"}}
+	cfg.Groups = map[string]*GroupConfig{"default": {Models: []string{"openai/gpt-x"}}}
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{{Name: "alice", Group: "default", APIKey: "sk-alice"}}}
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/openai/v1/native-endpoint", strings.NewReader(`{"model":"gpt-x"}`))
+	req.Header.Set("Authorization", "Bearer sk-alice")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	if !upstreamCalled {
+		t.Error("upstream must be called: the group's provider-prefixed glob authorizes the bare upstream id")
+	}
+}
+
+// TestHandlePassthrough_NoInspectableModel_FallsBackToProviderOnly covers
+// every "no inspectable model" shape handlePassthrough's own doc comment
+// documents: a non-JSON Content-Type (a multipart upload — parakeet-mlx's
+// transcription passthrough shape). Even though the group's Models glob
+// would deny the literal string used here if it were checked, the request
+// must still succeed — falling back to provider-only authorization,
+// unchanged from before model enforcement existed.
+func TestHandlePassthrough_NoInspectableModel_FallsBackToProviderOnly(t *testing.T) {
+	var upstreamCalled bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalled = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{"openai": {Type: "openai", BaseURL: srv.URL, APIKey: "sk-up"}}
+	cfg.Groups = map[string]*GroupConfig{"default": {Models: []string{"gpt-allowed"}}}
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{{Name: "alice", Group: "default", APIKey: "sk-alice"}}}
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/openai/v1/audio/transcriptions", strings.NewReader("--boundary\r\nfake multipart body\r\n--boundary--"))
+	req.Header.Set("Authorization", "Bearer sk-alice")
+	req.Header.Set("Content-Type", "multipart/form-data; boundary=boundary")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (falls back to provider-only auth), body=%s", rec.Code, rec.Body.String())
+	}
+	if !upstreamCalled {
+		t.Error("upstream must be called: a non-JSON body has no inspectable model, so model enforcement must not block it")
+	}
+}
+
+// TestHandlePassthrough_ModelBodyReadFailure_Returns400 covers
+// peekPassthroughModel's own body-read-failure path, distinct from a body
+// that merely fails to decode as JSON (which falls back to provider-only,
+// not an error).
+func TestHandlePassthrough_ModelBodyReadFailure_Returns400(t *testing.T) {
+	var upstreamCalled bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalled = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{"openai": {Type: "openai", BaseURL: srv.URL, APIKey: "sk-up"}}
+	cfg.Groups = map[string]*GroupConfig{"default": {}}
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{{Name: "alice", Group: "default", APIKey: "sk-alice"}}}
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/openai/v1/native-endpoint", nil)
+	req.Body = errReadCloser{err: errors.New("boom: connection reset")}
+	req.Header.Set("Authorization", "Bearer sk-alice")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400, body=%s", rec.Code, rec.Body.String())
+	}
+	if upstreamCalled {
+		t.Error("upstream must never be called when the request body cannot be read")
+	}
+}
+
+// TestHandlePassthrough_ProviderPassthroughDisabled_Returns404 is the
+// per-provider toggle's off case: ProviderConfig.Passthrough=false makes
+// the native passthrough route behave exactly like an unconfigured
+// provider — the ordinary unknown-route 404, without even reaching auth
+// (no Authorization header is sent here, mirroring
+// TestServeHTTP_UnknownProviderPrefix_Returns404's own proof style).
+func TestHandlePassthrough_ProviderPassthroughDisabled_Returns404(t *testing.T) {
+	var upstreamCalled bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalled = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	disabled := false
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{
+		"openai": {Type: "openai", BaseURL: srv.URL, APIKey: "sk-up", Passthrough: &disabled},
+	}
+	cfg.Groups = map[string]*GroupConfig{"default": {}}
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{{Name: "alice", Group: "default", APIKey: "sk-alice"}}}
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/openai/v1/chat/completions", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404, body=%s", rec.Code, rec.Body.String())
+	}
+	if upstreamCalled {
+		t.Error("upstream must never be called when the provider's passthrough is disabled")
+	}
+}
+
+// TestHandlePassthrough_ProviderPassthroughExplicitTrue_StillEnabled
+// proves Passthrough=true (not just the nil default) keeps native
+// passthrough reachable — the toggle's other explicit value, not only its
+// absence.
+func TestHandlePassthrough_ProviderPassthroughExplicitTrue_StillEnabled(t *testing.T) {
+	enabled := true
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{
+		"openai": {Type: "openai", BaseURL: srv.URL, APIKey: "sk-up", Passthrough: &enabled},
+	}
+	cfg.Groups = map[string]*GroupConfig{"default": {}}
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{{Name: "alice", Group: "default", APIKey: "sk-alice"}}}
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/openai/v1/thing", nil)
+	req.Header.Set("Authorization", "Bearer sk-alice")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestHandlePassthrough_PassthroughPaths_Restrictive proves a non-empty
+// GroupConfig.PassthroughPaths restricts which rest path the group may
+// address, while still allowing the listed one.
+func TestHandlePassthrough_PassthroughPaths_Restrictive(t *testing.T) {
+	var gotPaths []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPaths = append(gotPaths, r.URL.Path)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{"openai": {Type: "openai", BaseURL: srv.URL, APIKey: "sk-up"}}
+	cfg.Groups = map[string]*GroupConfig{"default": {PassthroughPaths: []string{"v1/chat/completions"}}}
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{{Name: "alice", Group: "default", APIKey: "sk-alice"}}}
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	deniedReq := httptest.NewRequest(http.MethodGet, "/openai/v1/files", nil)
+	deniedReq.Header.Set("Authorization", "Bearer sk-alice")
+	deniedRec := httptest.NewRecorder()
+	h.ServeHTTP(deniedRec, deniedReq)
+	if deniedRec.Code != http.StatusForbidden {
+		t.Fatalf("status for v1/files = %d, want 403, body=%s", deniedRec.Code, deniedRec.Body.String())
+	}
+
+	allowedReq := httptest.NewRequest(http.MethodGet, "/openai/v1/chat/completions", nil)
+	allowedReq.Header.Set("Authorization", "Bearer sk-alice")
+	allowedRec := httptest.NewRecorder()
+	h.ServeHTTP(allowedRec, allowedReq)
+	if allowedRec.Code != http.StatusOK {
+		t.Fatalf("status for v1/chat/completions = %d, want 200, body=%s", allowedRec.Code, allowedRec.Body.String())
+	}
+
+	if len(gotPaths) != 1 || gotPaths[0] != "/v1/chat/completions" {
+		t.Errorf("upstream paths reached = %v, want exactly one call for the allowlisted path", gotPaths)
+	}
+}
+
+// TestHandlePassthrough_DangerousHeadersStripped proves every
+// client-supplied identity/forwarding header, plus the provider-billing-
+// retargeting headers, are stripped before the request reaches the
+// upstream provider — additive to the existing hop-by-hop/gateway-
+// credential/Accept-Encoding strips.
+func TestHandlePassthrough_DangerousHeadersStripped(t *testing.T) {
+	var got http.Header
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Clone()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{"openai": {Type: "openai", BaseURL: srv.URL, APIKey: "sk-up"}}
+	cfg.Groups = map[string]*GroupConfig{"default": {}}
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{{Name: "alice", Group: "default", APIKey: "sk-alice"}}}
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/openai/v1/thing", nil)
+	req.Header.Set("Authorization", "Bearer sk-alice")
+	req.Header.Set("Forwarded", `for=203.0.113.1`)
+	req.Header.Set("X-Forwarded-For", "203.0.113.1")
+	req.Header.Set("X-Forwarded-User", "spoofed-admin")
+	req.Header.Set("X-Auth-Request-Email", "spoofed@example.com")
+	req.Header.Set("X-Remote-User", "spoofed-admin")
+	req.Header.Set("X-Remote-Groups", "admin")
+	req.Header.Set("Cookie", "session=stolen")
+	req.Header.Set("OpenAI-Organization", "org-not-mine")
+	req.Header.Set("OpenAI-Project", "proj-not-mine")
+	req.Header.Set("Anthropic-Beta", "some-beta-flag")
+	req.Header.Set("X-Client-Custom", "keep-me")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	for _, hdr := range []string{
+		"Forwarded", "X-Forwarded-For", "X-Forwarded-User", "X-Auth-Request-Email",
+		"X-Remote-User", "X-Remote-Groups", "Cookie",
+		"Openai-Organization", "Openai-Project", "Anthropic-Beta",
+	} {
+		if v := got.Get(hdr); v != "" {
+			t.Errorf("upstream saw %s = %q, want stripped", hdr, v)
+		}
+	}
+	if got.Get("X-Client-Custom") != "keep-me" {
+		t.Error("upstream did not see ordinary header X-Client-Custom — strip must not be a full allowlist inversion")
+	}
+}
+
+// TestHandlePassthrough_ZeroConfig_NewFieldsUnset_BehavesIdenticallyToBefore
+// is the GATE's own explicit requirement: a config setting NONE of this
+// round's new fields (ProviderConfig.Passthrough, GroupConfig.
+// PassthroughPaths) — every config that existed before this round — must
+// behave exactly as it did before: the request is proxied, the client's
+// gateway key is swapped for the provider's own, and the body reaches the
+// upstream unmodified. Mirrors TestHandlePassthrough_
+// ClientKeySwappedForProviderKey's own config shape deliberately, to
+// pin the same outcome this round must not have changed.
+func TestHandlePassthrough_ZeroConfig_NewFieldsUnset_BehavesIdenticallyToBefore(t *testing.T) {
+	var gotAuth string
+	var gotBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		gotBody, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("upstream-ok"))
+	}))
+	defer srv.Close()
+
+	// Deliberately no Passthrough, no PassthroughPaths, no Models
+	// restriction anywhere in this config.
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{
+		"openai": {Type: "openai", BaseURL: srv.URL, APIKey: "sk-provider-real"},
+	}
+	cfg.Groups = map[string]*GroupConfig{"default": {}}
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{{Name: "alice", Group: "default", APIKey: "sk-alice"}}}
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/openai/v1/anything/at/all", strings.NewReader(`{"foo":"bar"}`))
+	req.Header.Set("Authorization", "Bearer sk-alice")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	if rec.Body.String() != "upstream-ok" {
+		t.Errorf("body = %q, want verbatim upstream body", rec.Body.String())
+	}
+	if gotAuth != "Bearer sk-provider-real" {
+		t.Errorf("Authorization = %q, want the provider's own key injected, unchanged from before this round", gotAuth)
+	}
+	if string(gotBody) != `{"foo":"bar"}` {
+		t.Errorf("upstream body = %q, want the client body preserved unchanged", gotBody)
 	}
 }

@@ -386,6 +386,24 @@ func validateMetadataPath(providerName, metadataPath string) error {
 	return nil
 }
 
+// providerPassthroughEnabled reports whether providerName's native
+// passthrough route is reachable (security+performance audit,
+// 2026-08-22): true when ProviderConfig.Passthrough is nil (the default)
+// or explicitly true; false only when an operator set it to false.
+// cfg.Providers[providerName] is assumed to already be a known key —
+// ServeHTTP's own passthrough route gate (llmgateway.go) checks
+// g.adapters[providerName] first, and buildAdapters guarantees adapters
+// and cfg.Providers share the same key set — but a missing key still
+// defaults to true here rather than panicking, matching every other
+// nil-means-default helper in this package.
+func providerPassthroughEnabled(cfg *Config, providerName string) bool {
+	pc, ok := cfg.Providers[providerName]
+	if !ok || pc.Passthrough == nil {
+		return true
+	}
+	return *pc.Passthrough
+}
+
 // buildAdapters resolves cfg.Providers into a map of providerAdapter keyed
 // by provider name. Every provider name is validated (validateConfigName)
 // and every ProviderConfig value must be non-nil before anything else runs,

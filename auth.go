@@ -25,27 +25,15 @@ type user struct {
 // group describes a group's access rules and default limits. Empty
 // providers, models, mcpServers, or agents means all are allowed.
 type group struct {
-	limits *LimitsConfig
-	// cache is GroupConfig.Cache carried through unchanged: nil inherits
-	// the global cache.enabled setting, non-nil overrides it for this
-	// group's requests. Resolved by groupCacheEnabled (cache.go).
-	cache      *bool
-	name       string
-	providers  []string
-	models     []string
-	mcpServers []string
-	agents     []string
-	// cacheTTL is GroupConfig.CacheTTL parsed and validated at construction
-	// (newAuthStore below): 0 inherits the global responseCache's TTL
-	// (effectiveTTL, cache.go); a positive value sets the TTL written
-	// when THIS group's own request populates a cache entry. It is not a
-	// per-group scope — cache entries are shared across every group that
-	// can reach the model (groupCacheEnabled, cache.go), so a positive
-	// cacheTTL only ever controls a write's TTL, never which group can
-	// later read the entry. GroupConfig.CacheTTL == "" is the only input
-	// that produces 0 here — every other value either becomes a positive
-	// duration or fails newAuthStore as a constructor error.
-	cacheTTL time.Duration
+	limits           *LimitsConfig
+	cache            *bool
+	name             string
+	providers        []string
+	models           []string
+	mcpServers       []string
+	agents           []string
+	passthroughPaths []string
+	cacheTTL         time.Duration
 }
 
 // allowsProvider reports whether name matches one of the group's provider
@@ -80,6 +68,17 @@ func (grp *group) allowsMCP(name string) bool {
 // patterns. An empty pattern list allows every agent.
 func (grp *group) allowsAgent(name string) bool {
 	return matchesGlob(grp.agents, name)
+}
+
+// allowsPassthroughPath reports whether rest — the path segment after the
+// provider name in a native passthrough request (passthroughRoute's own
+// "rest", routes_passthrough.go) — matches one of the group's
+// PassthroughPaths glob patterns (security+performance audit,
+// 2026-08-22). An empty pattern list allows every path, the same
+// fail-open default every other allowsX method on group already applies
+// (matchesGlob's own empty-means-all contract) — do not invert it.
+func (grp *group) allowsPassthroughPath(rest string) bool {
+	return matchesGlob(grp.passthroughPaths, rest)
 }
 
 // cloneStringSlice returns an independent copy of s, preserving nil (a nil
@@ -188,14 +187,15 @@ func newAuthStore(cfg *Config) (*authStore, error) {
 			return nil, err
 		}
 		a.groups[name] = &group{
-			limits:     gc.Limits,
-			cache:      gc.Cache,
-			cacheTTL:   cacheTTL,
-			name:       name,
-			providers:  gc.Providers,
-			models:     gc.Models,
-			mcpServers: gc.MCPServers,
-			agents:     gc.Agents,
+			limits:           gc.Limits,
+			cache:            gc.Cache,
+			cacheTTL:         cacheTTL,
+			name:             name,
+			providers:        gc.Providers,
+			models:           gc.Models,
+			mcpServers:       gc.MCPServers,
+			agents:           gc.Agents,
+			passthroughPaths: gc.PassthroughPaths,
 		}
 	}
 

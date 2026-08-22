@@ -6,6 +6,39 @@ import (
 	"testing"
 )
 
+// TestProviderPassthroughEnabled is the security+performance audit
+// (2026-08-22) table for ProviderConfig.Passthrough's default: nil (the
+// zero value — every provider configured before this field existed)
+// means enabled, matching prior behavior exactly; only an explicit false
+// disables it.
+func TestProviderPassthroughEnabled(t *testing.T) {
+	trueVal, falseVal := true, false
+	cases := []struct {
+		pc   *ProviderConfig
+		name string
+		want bool
+	}{
+		{name: "nil field defaults to enabled", pc: &ProviderConfig{Type: "openai"}, want: true},
+		{name: "explicit true stays enabled", pc: &ProviderConfig{Type: "openai", Passthrough: &trueVal}, want: true},
+		{name: "explicit false disables", pc: &ProviderConfig{Type: "openai", Passthrough: &falseVal}, want: false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			cfg := &Config{Providers: map[string]*ProviderConfig{"openai": c.pc}}
+			if got := providerPassthroughEnabled(cfg, "openai"); got != c.want {
+				t.Errorf("providerPassthroughEnabled = %v, want %v", got, c.want)
+			}
+		})
+	}
+
+	t.Run("unknown provider name defaults to enabled", func(t *testing.T) {
+		cfg := &Config{Providers: map[string]*ProviderConfig{}}
+		if !providerPassthroughEnabled(cfg, "notconfigured") {
+			t.Error("want true for a provider name absent from cfg.Providers")
+		}
+	})
+}
+
 // TestAttemptRecorderFromContext_RoundTrip proves withAttemptRecorder/
 // attemptRecorderFromContext round-trip a non-nil recorder, and that the
 // SAME func value comes back out (asserted indirectly here, by observing

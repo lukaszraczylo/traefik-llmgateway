@@ -65,6 +65,75 @@ var clientNegotiationHeaders = map[string]bool{
 	"Accept-Encoding": true,
 }
 
+// dangerousClientHeaders lists exact-match client-supplied headers
+// stripped from the outgoing request on BOTH proxy paths (native provider
+// passthrough and the MCP/A2A target proxy) — additive to
+// hopByHopHeaders/gatewayCredentialHeaders/clientNegotiationHeaders,
+// never a full allowlist inversion (security+performance audit,
+// 2026-08-22). Each of these conveys a caller's identity, or a downstream
+// auth-proxy's own asserted identity for THIS gateway's inbound edge, and
+// has no legitimate client-to-LLM/MCP use once it reaches an upstream
+// provider or an in-cluster MCP server/A2A agent: handleTargetProxy's own
+// doc comment (mcp_a2a.go) already documents that a target trusts the
+// gateway's network position, not a caller-supplied identity header —
+// forwarding one of these would let a tenant impersonate a different
+// identity to that target instead of relying on auth.identify, which has
+// already established who the caller is.
+var dangerousClientHeaders = map[string]bool{
+	"Forwarded":       true,
+	"X-Remote-User":   true,
+	"X-Remote-Groups": true,
+	"Cookie":          true,
+}
+
+// dangerousClientHeaderPrefixes lists header-name PREFIXES (canonical
+// textproto casing — net/http's own canonicalization, matching
+// copyHeadersExcept's doc comment) stripped alongside
+// dangerousClientHeaders on both proxy paths: every X-Forwarded-*
+// (X-Forwarded-For, X-Forwarded-Host, X-Forwarded-User, ...) and X-Auth-*
+// (X-Auth-Request-Email, X-Auth-Request-User, ...) header a client sends
+// — the convention an in-cluster auth proxy (e.g. oauth2-proxy) uses to
+// assert identity to whatever it fronts. A tenant must never spoof that
+// convention simply by setting the header on their own request to this
+// gateway.
+var dangerousClientHeaderPrefixes = []string{"X-Forwarded-", "X-Auth-"}
+
+// providerCredentialRetargetHeaders are additionally stripped from the
+// outgoing request on the NATIVE PROVIDER PASSTHROUGH path only (passed as
+// proxyUpstream's extraStrip; the MCP/A2A target proxy passes nil, since
+// it never carries a provider credential to retarget in the first place):
+// a tenant must not be able to redirect the operator's own upstream
+// billing/attribution away from what the adapter configured, by simply
+// setting these on their own request. anthropic-beta is included even
+// though it also carries genuine opt-in feature flags (e.g. prompt
+// caching) — an operator who wants to offer those through native
+// passthrough sets them on the provider's own adapter/config surface, not
+// by trusting an arbitrary client-supplied value straight onto the
+// operator's own key (security+performance audit, 2026-08-22).
+var providerCredentialRetargetHeaders = map[string]bool{
+	"Openai-Organization": true,
+	"Openai-Project":      true,
+	"Anthropic-Beta":      true,
+}
+
+// stripHeaderPrefixes deletes every header in h whose canonical name
+// starts with one of prefixes — the prefix-matching half of the
+// dangerous-header strip copyHeadersExcept's own exact-match excepts
+// cannot express (security+performance audit, 2026-08-22): every
+// X-Forwarded-* and X-Auth-* header a client sends, regardless of its
+// exact suffix. Deleting the currently-visited (or a not-yet-visited) key
+// from a map mid-range is well-defined in Go and safe here.
+func stripHeaderPrefixes(h http.Header, prefixes []string) {
+	for k := range h {
+		for _, prefix := range prefixes {
+			if strings.HasPrefix(k, prefix) {
+				h.Del(k)
+				break
+			}
+		}
+	}
+}
+
 // copyHeadersExcept copies every header in src to dst, skipping any key
 // present in any of excepts. Header keys from both an *http.Request
 // parsed off the wire and an *http.Response parsed by the client's
@@ -230,6 +299,40 @@ func extractPassthroughUsage(typeName, providerName string, body []byte) (usage,
 	}
 }
 
+// peekPassthroughModel best-effort reads a passthrough request's JSON body
+// far enough to extract its top-level "model" field, restoring r.Body
+// afterward — a fresh reader over the exact bytes read — so proxyUpstream
+// can still forward the request to the upstream unchanged (security+
+// performance audit, 2026-08-22). hasModel is false, with no error, for
+// every shape handlePassthrough's own doc comment documents as "no
+// inspectable model, fall back to provider-only auth": a non-JSON
+// Content-Type (Gemini's URL-embedded model; a multipart audio/image
+// upload — parakeet-mlx's transcription passthrough is exactly this
+// shape, and this check skips reading its body entirely, at no cost), a
+// body that fails to decode as JSON, or JSON with no non-empty top-level
+// "model" string. err is non-nil only for an actual body-read failure
+// (client disconnect, deadline) — the caller maps that to the same 400
+// runUnified's own body-read failure uses (routes_unified.go), rather
+// than silently treating an unreadable body as "provider-only, proceed".
+func peekPassthroughModel(r *http.Request) (model string, hasModel bool, err error) {
+	if r.Body == nil || !strings.Contains(strings.ToLower(r.Header.Get("Content-Type")), "application/json") {
+		return "", false, nil
+	}
+	body, readErr := io.ReadAll(io.LimitReader(r.Body, maxPassthroughBytes))
+	if readErr != nil {
+		return "", false, readErr
+	}
+	r.Body = io.NopCloser(bytes.NewReader(body))
+
+	var payload struct {
+		Model string `json:"model"`
+	}
+	if json.Unmarshal(body, &payload) != nil || payload.Model == "" {
+		return "", false, nil
+	}
+	return payload.Model, true, nil
+}
+
 // handlePassthrough implements the native provider passthrough route:
 // "/{providerName}/{rest...}" reverse-proxies rest, verbatim, to
 // providerName's configured upstream, with the client's gateway
@@ -239,20 +342,64 @@ func extractPassthroughUsage(typeName, providerName string, body []byte) (usage,
 // in the gateway's own error envelope the way the unified routes wrap a
 // providerHTTPError.
 //
-// Checks run in this order: group authorization (403) before capability
-// checks (Upgrade→501, path validity→400) before rate limits (429/503) —
-// a caller who cannot use providerName at all learns that first, rather
-// than learning something about how they tried to use it.
+// Checks run in this order: group authorization — provider (403), model
+// when the body carries one (403), path allowlist (403) — before
+// capability checks (Upgrade→501, path validity→400) before rate limits
+// (429/503) — a caller who cannot use providerName/model/path at all
+// learns that first, rather than learning something about how they tried
+// to use it. The provider-level Passthrough toggle (ProviderConfig,
+// llmgateway.go) is checked earlier still, by ServeHTTP's own route gate
+// — a disabled provider never reaches this function at all, reported as
+// the ordinary unknown-route 404 instead.
+//
+// MODEL ENFORCEMENT (security+performance audit, 2026-08-22): when the
+// request body is JSON and carries a non-empty top-level "model" field
+// (peekPassthroughModel), it is checked against grp.allowsModel — both
+// the bare form and the "providerName/model" form, the identical
+// dual-candidate matcher the unified route's own resolveAgainst applies
+// (registry.go) — before proxying, closing the bypass where a tenant
+// scoped to one cheap model could otherwise reach the SAME provider's
+// entire native API (fine-tuning, files, batches, ...) on the operator's
+// key merely by asking natively instead of through /v1/chat/completions.
+// A body with no inspectable model (Gemini's URL-embedded model id, a
+// multipart upload, a non-JSON body) falls back to provider-only
+// authorization, unchanged from before this round — this is a strict
+// narrowing of what a passthrough request may address, never a new way
+// to allow one a plain grp.allowsProvider check would have refused.
+//
+// PATH ALLOWLIST (same audit): GroupConfig.PassthroughPaths, when
+// non-empty, additionally restricts which rest path this group's
+// passthrough requests may address (grp.allowsPassthroughPath). Empty
+// (the default, matchesGlob's own empty-means-all contract) allows every
+// path, exactly as before this field existed.
 //
 // For a Gemini provider, rest is appended to base() exactly as the client
 // sent it: there is no model extraction or URL rewriting here, so a
 // Gemini passthrough client must address it with Gemini's own native URL
 // structure, including its "/v1beta/models/{model}:generateContent"
 // paths — injectAuth still sets the same x-goog-api-key header it sets
-// for every other Gemini request.
+// for every other Gemini request. Gemini's model id lives in that URL
+// path, not the JSON body, so peekPassthroughModel never finds one for a
+// Gemini request — a Gemini passthrough client is always authorized
+// provider-only, exactly as it was before model enforcement existed.
 func (g *Gateway) handlePassthrough(w http.ResponseWriter, r *http.Request, u *user, grp *group, providerName, rest string) {
 	if !grp.allowsProvider(providerName) {
 		writeOAIError(w, http.StatusForbidden, "invalid_request_error", "provider access denied")
+		return
+	}
+
+	model, hasModel, err := peekPassthroughModel(r)
+	if err != nil {
+		writeOAIError(w, http.StatusBadRequest, "invalid_request_error", "cannot read request body")
+		return
+	}
+	if hasModel && !grp.allowsModel(model) && !grp.allowsModel(providerName+"/"+model) {
+		writeOAIError(w, http.StatusForbidden, "invalid_request_error", "model access denied")
+		return
+	}
+
+	if !grp.allowsPassthroughPath(rest) {
+		writeOAIError(w, http.StatusForbidden, "invalid_request_error", "path access denied")
 		return
 	}
 
@@ -290,7 +437,7 @@ func (g *Gateway) handlePassthrough(w http.ResponseWriter, r *http.Request, u *u
 		g.limiter.recordProviderAttempt(providerName, "", resp, attemptErr)
 	}))
 
-	result, ok := g.proxyUpstream(w, r, upstreamURL, adapter.httpClient(), adapter.injectAuth, true, "passthrough (provider "+providerName+")")
+	result, ok := g.proxyUpstream(w, r, upstreamURL, adapter.httpClient(), adapter.injectAuth, providerCredentialRetargetHeaders, true, "passthrough (provider "+providerName+")")
 	if !ok || !result.isJSON {
 		// A build/connection/copy failure already wrote its own response
 		// (or, for a canceled client context, wrote nothing at all — see
@@ -334,7 +481,16 @@ type proxyResult struct {
 // credential (gatewayCredentialHeaders) are stripped from the outgoing
 // request, and Accept-Encoding (clientNegotiationHeaders) besides, so
 // Transport can negotiate and transparently decompress compression
-// itself. injectAuth, when non-nil, is called on the built request before
+// itself — plus, additively (security+performance audit, 2026-08-22),
+// every client-supplied identity/forwarding header (dangerousClientHeaders,
+// dangerousClientHeaderPrefixes: Forwarded, X-Forwarded-*, X-Auth-*,
+// X-Remote-User, X-Remote-Groups, Cookie) on BOTH callers, and every
+// header in extraStrip on top of that — handlePassthrough passes
+// providerCredentialRetargetHeaders (OpenAI-Organization, OpenAI-Project,
+// anthropic-beta: a tenant must not retarget the operator's own upstream
+// billing/attribution), handleTargetProxy passes nil, since an MCP/A2A
+// target never carries a provider credential to retarget in the first
+// place. injectAuth, when non-nil, is called on the built request before
 // it is sent — handlePassthrough passes its adapter's injectAuth to swap
 // the client's key for the provider's own; handleTargetProxy passes nil,
 // since an MCP server or A2A agent is an in-cluster target that receives
@@ -355,7 +511,7 @@ type proxyResult struct {
 // passes false, since target-proxy accounting never goes past the
 // request-count checkAndCount already ran before calling in, and teeing a
 // response nobody will ever read back would only cost memory for nothing.
-func (g *Gateway) proxyUpstream(w http.ResponseWriter, r *http.Request, upstreamURL string, client *http.Client, injectAuth func(*http.Request), accountJSON bool, logPrefix string) (result proxyResult, ok bool) {
+func (g *Gateway) proxyUpstream(w http.ResponseWriter, r *http.Request, upstreamURL string, client *http.Client, injectAuth func(*http.Request), extraStrip map[string]bool, accountJSON bool, logPrefix string) (result proxyResult, ok bool) {
 	bodyReader := io.LimitReader(r.Body, maxPassthroughBytes)
 	// gosec G704 (SSRF via taint analysis) flags upstreamURL as
 	// request-derived: it is, by design — this is a reverse proxy, and its
@@ -387,7 +543,8 @@ func (g *Gateway) proxyUpstream(w http.ResponseWriter, r *http.Request, upstream
 		// bodyReader above may not actually deliver.
 		upstreamReq.ContentLength = -1
 	}
-	copyHeadersExcept(upstreamReq.Header, r.Header, hopByHopHeaders, gatewayCredentialHeaders, clientNegotiationHeaders)
+	copyHeadersExcept(upstreamReq.Header, r.Header, hopByHopHeaders, gatewayCredentialHeaders, clientNegotiationHeaders, dangerousClientHeaders, extraStrip)
+	stripHeaderPrefixes(upstreamReq.Header, dangerousClientHeaderPrefixes)
 	if injectAuth != nil {
 		injectAuth(upstreamReq)
 	}
