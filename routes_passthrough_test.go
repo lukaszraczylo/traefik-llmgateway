@@ -180,7 +180,7 @@ func TestScanTopLevelModel(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			gotModel, gotFound := scanTopLevelModel([]byte(tt.head))
+			gotModel, gotFound, _ := scanTopLevelModel([]byte(tt.head))
 			if gotFound != tt.wantFound {
 				t.Errorf("found = %v, want %v", gotFound, tt.wantFound)
 			}
@@ -1420,7 +1420,17 @@ func TestHandlePassthrough_BodyIntegrity_ByteIdentical_LargeBody(t *testing.T) {
 
 	cfg := CreateConfig()
 	cfg.Providers = map[string]*ProviderConfig{"openai": {Type: "openai", BaseURL: srv.URL, APIKey: "sk-up"}}
-	cfg.Groups = map[string]*GroupConfig{"default": {Models: []string{"gpt-allowed"}}}
+	// Deliberately UNRESTRICTED (no Models list): this test's own purpose is
+	// byte-for-byte forwarding integrity for a large body, independent of
+	// model enforcement — a RESTRICTED group's own behavior for a body
+	// this large is covered separately (round-3 fix, security review
+	// 2026-08-22: TestHandlePassthrough_PaddedDuplicateModelBeyondPeekWindow_Returns403
+	// and TestHandlePassthrough_RestrictedGroup_LargeBodyNeverClosesWindow_Returns403
+	// below), and now deliberately DENIES a body this large that never
+	// closes within the peek window — the opposite of what this test
+	// checks. Using an unrestricted group here keeps this test's own
+	// single concern (byte integrity) unaffected by that unrelated fix.
+	cfg.Groups = map[string]*GroupConfig{"default": {}}
 	cfg.Users = &UsersConfig{Inline: []*UserConfig{{Name: "alice", Group: "default", APIKey: "sk-alice"}}}
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
 	h, err := New(context.Background(), next, cfg, "llmgw")
@@ -1719,27 +1729,189 @@ func TestHandlePassthrough_ZeroConfig_NewFieldsUnset_BehavesIdenticallyToBefore(
 // instead, matching extractMultipartModel's errDuplicateModelField rule.
 func TestScanTopLevelModel_DuplicateModelKeyFailsClosed(t *testing.T) {
 	cases := []struct {
-		name      string
-		body      string
-		wantModel string
-		wantFound bool
+		name       string
+		body       string
+		wantModel  string
+		wantFound  bool
+		wantClosed bool
 	}{
-		{"single model", `{"model":"allowed","messages":[]}`, "allowed", true},
-		{"model after other keys", `{"stream":true,"model":"allowed"}`, "allowed", true},
-		{"model found then body truncated", `{"model":"allowed","messages":[{"role":"user"`, "allowed", true},
-		{"duplicate model", `{"model":"allowed","model":"expensive","messages":[]}`, "", false},
-		{"duplicate across a nested object", `{"model":"allowed","opts":{"a":1},"model":"expensive"}`, "", false},
-		{"duplicate with identical values", `{"model":"same","model":"same"}`, "", false},
-		{"no model", `{"messages":[]}`, "", false},
-		{"nested model only", `{"opts":{"model":"x"}}`, "", false},
+		{"single model", `{"model":"allowed","messages":[]}`, "allowed", true, true},
+		{"model after other keys", `{"stream":true,"model":"allowed"}`, "allowed", true, true},
+		{"model found then body truncated", `{"model":"allowed","messages":[{"role":"user"`, "allowed", true, false},
+		{"duplicate model", `{"model":"allowed","model":"expensive","messages":[]}`, "", false, false},
+		{"duplicate across a nested object", `{"model":"allowed","opts":{"a":1},"model":"expensive"}`, "", false, false},
+		{"duplicate with identical values", `{"model":"same","model":"same"}`, "", false, false},
+		{"no model", `{"messages":[]}`, "", false, true},
+		{"nested model only", `{"opts":{"model":"x"}}`, "", false, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			gotModel, gotFound := scanTopLevelModel([]byte(tc.body))
-			if gotModel != tc.wantModel || gotFound != tc.wantFound {
-				t.Fatalf("scanTopLevelModel(%s) = (%q, %v), want (%q, %v)",
-					tc.body, gotModel, gotFound, tc.wantModel, tc.wantFound)
+			gotModel, gotFound, gotClosed := scanTopLevelModel([]byte(tc.body))
+			if gotModel != tc.wantModel || gotFound != tc.wantFound || gotClosed != tc.wantClosed {
+				t.Fatalf("scanTopLevelModel(%s) = (%q, %v, %v), want (%q, %v, %v)",
+					tc.body, gotModel, gotFound, gotClosed, tc.wantModel, tc.wantFound, tc.wantClosed)
 			}
 		})
+	}
+}
+
+// TestScanTopLevelModel_ClosedTracksWindowTruncation is the round-3
+// regression test (coordinator ruling, 2026-08-22): closed must be false
+// whenever the scanned window ends before the top-level object's closing
+// '}' is actually consumed — even when a valid "model" was already found —
+// and true whenever it genuinely was.
+func TestScanTopLevelModel_ClosedTracksWindowTruncation(t *testing.T) {
+	cases := []struct {
+		name       string
+		body       string
+		wantClosed bool
+	}{
+		{"cut mid-string value of a later key", `{"model":"cheap","padding":"AAAA`, false},
+		{"cut exactly after a complete key:value pair, no closing brace", `{"model":"cheap","padding":"x"`, false},
+		{"cut inside a nested array", `{"model":"cheap","messages":[{"role":"user"`, false},
+		{"complete, closes properly", `{"model":"cheap","messages":[]}`, true},
+		{"complete with trailing whitespace inside cap", `{"model":"cheap"}   `, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, _, gotClosed := scanTopLevelModel([]byte(tc.body))
+			if gotClosed != tc.wantClosed {
+				t.Errorf("scanTopLevelModel(%s) closed = %v, want %v", tc.body, gotClosed, tc.wantClosed)
+			}
+		})
+	}
+}
+
+// --- security review finding 2, round 3, 2026-08-22: padded-duplicate
+// model beyond the peek window ---
+
+// TestHandlePassthrough_PaddedDuplicateModelBeyondPeekWindow_Returns403
+// is the coordinator's own demonstrated exploit: a restricted group's
+// glob authorizes "cheap" but not "expensive"; the body's SECOND "model"
+// key sits past maxModelPeekBytes, hidden behind padding the peek never
+// reaches. Round 2 alone (fail-closed only on a duplicate WITHIN the
+// window) let this straight through, reporting "cheap" and forwarding
+// the whole body — where every mainstream upstream JSON parser resolves
+// duplicate keys last-wins and would have executed "expensive". This
+// must now be denied with 403 before the upstream is ever called.
+func TestHandlePassthrough_PaddedDuplicateModelBeyondPeekWindow_Returns403(t *testing.T) {
+	var upstreamCalled bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalled = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{"openai": {Type: "openai", BaseURL: srv.URL, APIKey: "sk-up"}}
+	cfg.Groups = map[string]*GroupConfig{"default": {Models: []string{"cheap"}}}
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{{Name: "alice", Group: "default", APIKey: "sk-alice"}}}
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	padding := strings.Repeat("A", maxModelPeekBytes) // pushes the second "model" key past the peek window
+	body := `{"model":"cheap","padding":"` + padding + `","model":"expensive"}`
+
+	req := httptest.NewRequest(http.MethodPost, "/openai/v1/native-endpoint", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer sk-alice")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 (a duplicate model beyond the peek window must fail closed), body=%s", rec.Code, rec.Body.String())
+	}
+	if upstreamCalled {
+		t.Error("upstream must never be called: the padded-duplicate exploit must be denied before forwarding")
+	}
+}
+
+// TestHandlePassthrough_RestrictedGroup_LargeBodyNeverClosesWindow_Returns403
+// covers the general (non-duplicate) case the coordinator ruling actually
+// implements: ANY restricted-group body that never closes its top-level
+// object within maxModelPeekBytes is denied, not just one carrying a
+// provably duplicate key — because a later duplicate cannot be ruled out
+// either way once the window is exhausted mid-object.
+func TestHandlePassthrough_RestrictedGroup_LargeBodyNeverClosesWindow_Returns403(t *testing.T) {
+	var upstreamCalled bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalled = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{"openai": {Type: "openai", BaseURL: srv.URL, APIKey: "sk-up"}}
+	cfg.Groups = map[string]*GroupConfig{"default": {Models: []string{"gpt-allowed"}}}
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{{Name: "alice", Group: "default", APIKey: "sk-alice"}}}
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	padding := strings.Repeat("x", maxModelPeekBytes*2) // single, genuine "model" — but far past the peek window
+	body := `{"model":"gpt-allowed","padding":"` + padding + `"}`
+
+	req := httptest.NewRequest(http.MethodPost, "/openai/v1/native-endpoint", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer sk-alice")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 (fail closed: the object never closes within the peek window, so a later duplicate cannot be ruled out), body=%s", rec.Code, rec.Body.String())
+	}
+	if upstreamCalled {
+		t.Error("upstream must never be called for a restricted group whose body exceeds the peek window without closing")
+	}
+}
+
+// TestHandlePassthrough_UnrestrictedGroup_PaddedDuplicateModel_NeverPeeked
+// is the GATE's own explicit requirement: an UNRESTRICTED group
+// (grp.hasModelRestriction() false) must be COMPLETELY unaffected by
+// this fix — the exact padded-duplicate body from the exploit test above
+// must still be forwarded untouched, because peekPassthroughModel is
+// never even called for such a group (unchanged since round 2).
+func TestHandlePassthrough_UnrestrictedGroup_PaddedDuplicateModel_NeverPeeked(t *testing.T) {
+	var upstreamCalled bool
+	var gotBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalled = true
+		gotBody, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{"openai": {Type: "openai", BaseURL: srv.URL, APIKey: "sk-up"}}
+	cfg.Groups = map[string]*GroupConfig{"default": {}} // no Models restriction
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{{Name: "alice", Group: "default", APIKey: "sk-alice"}}}
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	padding := strings.Repeat("A", maxModelPeekBytes)
+	body := `{"model":"cheap","padding":"` + padding + `","model":"expensive"}`
+
+	req := httptest.NewRequest(http.MethodPost, "/openai/v1/native-endpoint", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer sk-alice")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 — an unrestricted group must never be affected by model-peek fixes, body=%s", rec.Code, rec.Body.String())
+	}
+	if !upstreamCalled {
+		t.Error("upstream must be called: an unrestricted group never peeks the body at all")
+	}
+	if string(gotBody) != body {
+		t.Error("upstream body must be forwarded byte-for-byte unchanged for an unrestricted group")
 	}
 }

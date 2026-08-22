@@ -390,34 +390,59 @@ func extractPassthroughUsage(typeName, providerName string, body []byte) (usage,
 // Unmarshal requires a complete, valid document — it would reject a
 // legitimately-truncated-but-found "model" as if it were malformed JSON.
 //
+// truncated is the round-3 fix (coordinator ruling, 2026-08-22): it is
+// true exactly when BOTH (a) the read hit the maxModelPeekBytes cap
+// itself — io.ReadFull returned n == len(head) with no error, meaning
+// unread bytes genuinely remain on r.Body beyond what was scanned — AND
+// (b) scanTopLevelModel could not confirm the top-level JSON object
+// actually closed within that window. Only that combination means a
+// LATER "model" key could exist past the peek and this function cannot
+// rule it out; a body that is merely shorter than the window and
+// happens to be malformed (never closes, but nothing more of it exists
+// either) is NOT truncated — there is no hidden byte range to distrust,
+// and returning found=false there already denies via the caller's
+// existing "model could not be determined" branch. See handlePassthrough's
+// own doc comment for what a caller does with truncated=true: DENY,
+// fail-closed, regardless of what model/hasModel came back, because a
+// found model under truncation cannot be trusted — RFC 8259 permits
+// duplicate keys and every mainstream JSON parser an upstream might use
+// resolves them last-wins, so a second "model" sitting just past
+// maxModelPeekBytes would authorize against the first and execute the
+// second: `{"model":"cheap", <64KiB of padding>, "model":"expensive"}`.
+//
 // err is non-nil only for a genuine body-read failure (client disconnect,
 // deadline) distinct from merely reaching the end of a body shorter than
 // the peek window — the caller maps err to the same 400 runUnified's own
 // body-read failure uses (routes_unified.go).
-func peekPassthroughModel(r *http.Request) (model string, hasModel bool, err error) {
+func peekPassthroughModel(r *http.Request) (model string, hasModel, truncated bool, err error) {
 	if r.Body == nil || isPassthroughBinaryContentType(r.Header.Get("Content-Type")) {
-		return "", false, nil
+		return "", false, false, nil
 	}
 
 	head := make([]byte, maxModelPeekBytes)
 	n, readErr := io.ReadFull(r.Body, head)
+	capped := false
 	switch readErr { //nolint:errorlint // io.ReadFull returns these sentinels bare, never wrapped — see its own doc comment
 	case nil:
 		// Read exactly maxModelPeekBytes: the body has at least that much
-		// left unread on r.Body, restored below via io.MultiReader.
+		// left unread on r.Body, restored below via io.MultiReader — a
+		// LATER "model" key beyond this window cannot be ruled out unless
+		// scanTopLevelModel confirms the object closed within it.
+		capped = true
 	case io.EOF, io.ErrUnexpectedEOF:
 		// Body was shorter than the peek window (io.EOF: empty; io.
 		// ErrUnexpectedEOF: 0 < n < len(head)) — head[:n] IS the whole
 		// body; r.Body is now exhausted, so appending it below is a
-		// harmless immediate EOF.
+		// harmless immediate EOF. No bytes exist beyond what was scanned,
+		// so "truncated" (in the hidden-duplicate sense) cannot apply.
 	default:
-		return "", false, readErr
+		return "", false, false, readErr
 	}
 	head = head[:n]
 	r.Body = io.NopCloser(io.MultiReader(bytes.NewReader(head), r.Body))
 
-	model, hasModel = scanTopLevelModel(head)
-	return model, hasModel, nil
+	model, hasModel, closed := scanTopLevelModel(head)
+	return model, hasModel, capped && !closed, nil
 }
 
 // scanTopLevelModel walks head — a bounded, possibly-truncated PREFIX of
@@ -432,28 +457,45 @@ func peekPassthroughModel(r *http.Request) (model string, hasModel bool, err err
 // not an error — for anything else: head is not a JSON object at all,
 // "model" never appears among its top-level keys before head runs out,
 // or "model" is present but its value is not a string.
-func scanTopLevelModel(head []byte) (model string, found bool) {
+//
+// closed reports whether this walk actually confirmed the top-level
+// object's closing '}' within head — round-3 fix (coordinator ruling,
+// 2026-08-22): every early-return branch below (a token error, a
+// non-string key, a duplicate "model", a nested value that never
+// finishes) sets closed=false, and the ONLY way to reach closed=true is
+// to fall all the way through the main loop and then successfully
+// consume a literal '}' token afterward. dec.More() alone cannot make
+// this distinction — its own doc comment says it "reports whether there
+// is another element", but internally it treats "the next byte is the
+// closing delimiter" and "the underlying reader ran out of bytes mid-
+// object" identically (both make its own peek fail and it just returns
+// false either way) — so this function does its own explicit
+// closing-token check rather than trusting a loop-exited-via-More()
+// alone. peekPassthroughModel combines closed with its own knowledge of
+// whether the read actually hit the byte cap (there is more of r.Body
+// left unread) to decide whether a "found" model can be trusted.
+func scanTopLevelModel(head []byte) (model string, found, closed bool) {
 	seenModel := false
 	dec := json.NewDecoder(bytes.NewReader(head))
 	tok, err := dec.Token()
 	if err != nil {
-		return "", false
+		return "", false, false
 	}
 	if d, ok := tok.(json.Delim); !ok || d != '{' {
-		return "", false
+		return "", false, false
 	}
 	for dec.More() {
-		keyTok, err := dec.Token()
-		if err != nil {
-			return model, found
+		keyTok, keyErr := dec.Token()
+		if keyErr != nil {
+			return model, found, false
 		}
 		key, ok := keyTok.(string)
 		if !ok {
-			return model, found // malformed: expected an object key
+			return model, found, false // malformed: expected an object key
 		}
-		valTok, err := dec.Token()
-		if err != nil {
-			return model, found
+		valTok, valErr := dec.Token()
+		if valErr != nil {
+			return model, found, false
 		}
 		if key == "model" {
 			// A DUPLICATE top-level "model" fails closed, matching
@@ -469,7 +511,7 @@ func scanTopLevelModel(head []byte) (model string, found bool) {
 			// resolvable here without rewriting the client's bytes, so the
 			// only safe answer is to refuse to answer.
 			if seenModel {
-				return "", false
+				return "", false, false
 			}
 			seenModel = true
 			if s, isStr := valTok.(string); isStr && s != "" {
@@ -479,14 +521,27 @@ func scanTopLevelModel(head []byte) (model string, found bool) {
 			continue
 		}
 		if d, ok := valTok.(json.Delim); ok && (d == '{' || d == '[') {
-			if err := skipJSONValue(dec); err != nil {
-				return model, found
+			if skipErr := skipJSONValue(dec); skipErr != nil {
+				return model, found, false
 			}
 		}
 		// Otherwise valTok was a scalar (string/float64/bool/nil) other
 		// than "model" — nothing further to do; loop to the next key.
 	}
-	return model, found
+	// dec.More() returned false above: either the object legitimately
+	// closed, or the decoder simply ran out of bytes searching for the
+	// next token — see this function's own doc comment for why More()
+	// cannot tell those apart. Explicitly consume the closing '}' to find
+	// out which; only a real, present '}' confirms the object closed
+	// within head.
+	closeTok, err := dec.Token()
+	if err != nil {
+		return model, found, false
+	}
+	if d, ok := closeTok.(json.Delim); !ok || d != '}' {
+		return model, found, false
+	}
+	return model, found, true
 }
 
 // skipJSONValue consumes the remainder of a nested JSON array/object
@@ -587,6 +642,25 @@ func (g *Gateway) allowsPassthroughModel(grp *group, providerName, model string)
 // the Gemini-passthrough interaction this creates (its model id lives in
 // the URL, never the body) and the operator-facing contract.
 //
+// PADDED-DUPLICATE MODEL (round 3, 2026-08-22, coordinator ruling — closes
+// the round-2 fix's own residual gap): round 2 made a duplicate top-level
+// "model" WITHIN the peek window fail closed (scanTopLevelModel), but a
+// client can still pad the body so a second "model" key sits just PAST
+// maxModelPeekBytes: `{"model":"cheap", <64KiB padding>,
+// "model":"expensive"}` — the peek reports "cheap" (the only one it saw),
+// the body is forwarded byte-for-byte, and the upstream (last-wins on
+// every mainstream JSON parser) executes "expensive". Fixed the same way:
+// peekPassthroughModel now also reports truncated=true whenever the read
+// hit the byte cap AND the scanned window never confirmed the top-level
+// object actually closed — meaning a later duplicate cannot be ruled
+// out — and this function denies (403, a message distinct from "model
+// could not be determined") BEFORE even looking at hasModel/model in that
+// case. This only ever applies to a restricted group whose body was
+// large enough to hit maxModelPeekBytes in the first place; an
+// unrestricted group never calls peekPassthroughModel at all (unchanged
+// from round 2), and the unified /v1/* route remains the supported path
+// for a legitimately large restricted-group request.
+//
 // PATH ALLOWLIST (same review): GroupConfig.PassthroughPaths, when
 // non-empty, additionally restricts which rest path this group's
 // passthrough requests may address (grp.allowsPassthroughPath). Empty
@@ -608,9 +682,20 @@ func (g *Gateway) handlePassthrough(w http.ResponseWriter, r *http.Request, u *u
 	}
 
 	if grp.hasModelRestriction() {
-		model, hasModel, err := peekPassthroughModel(r)
+		model, hasModel, truncated, err := peekPassthroughModel(r)
 		if err != nil {
 			writeOAIError(w, http.StatusBadRequest, "invalid_request_error", "cannot read request body")
+			return
+		}
+		// Checked BEFORE hasModel (round-3 coordinator ruling, 2026-08-22):
+		// a truncated peek means a "model" found within the window cannot
+		// be trusted — a duplicate top-level "model" beyond
+		// maxModelPeekBytes may still exist and would win upstream
+		// (last-wins parsing) — so this must fail closed regardless of
+		// whatever hasModel/model peekPassthroughModel also returned. See
+		// peekPassthroughModel's own doc comment for the full mechanism.
+		if truncated {
+			writeOAIError(w, http.StatusForbidden, "invalid_request_error", "request body exceeds the model-enforcement window; a top-level model field beyond it cannot be safely authorized")
 			return
 		}
 		if !hasModel {
