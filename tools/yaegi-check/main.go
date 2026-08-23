@@ -164,6 +164,26 @@ const (
 	hungBodyUpstreamSleep          = 600 * time.Millisecond
 )
 
+// provenanceEstProviderName/provenanceEstProviderModel back
+// exerciseUsageProvenance (feat: expose token-accounting provenance): a
+// provider whose upstream answers 200 with NO "usage" field at all —
+// decodes to chatUsagePayload's zero value (provider_openai.go's
+// forwardJSON), the exact shape runUnified's own estimation fallback
+// (routes_unified.go) classifies as "estimated" — proving the
+// substitution math (ceil(len(body)/4)) and the new
+// llmgateway_usage_provenance_requests_total/-_tokens_total families
+// (metrics.go) all run correctly under the REAL interpreter, not merely
+// compiled. "reported" is already exercised, under the interpreter, by
+// exerciseAttemptAccounting's own real, usage-bearing "openai" traffic
+// above — no separate fixture needed for that provenance here.
+const (
+	provenanceEstProviderName = "provenance-est"
+	// provenanceEstProviderModel: same reasoning as timeoutProviderModel's
+	// own doc comment above — must not collide with testDataWantModel or
+	// any other probe's model id.
+	provenanceEstProviderModel = "gpt-provenance-est-test"
+)
+
 // excludedTopLevelDirs lists repo-root directories the GOPATH copy must
 // never include: build tooling, integration fixtures, planning docs and
 // VCS metadata have nothing to do with the plugin package Yaegi imports.
@@ -348,6 +368,18 @@ func run() error {
 	}))
 	defer hungBodyUpstream.Close()
 
+	// provenanceEstUpstream backs exerciseUsageProvenance (feat: expose
+	// token-accounting provenance): answers 200 with NO "usage" field at
+	// all — see provenanceEstProviderName's own const block doc comment
+	// for why this is the exact shape runUnified's estimation fallback
+	// classifies as "estimated".
+	provenanceEstUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"id":"c-prov","object":"chat.completion","model":"` + provenanceEstProviderModel + `","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}]}`))
+	}))
+	defer provenanceEstUpstream.Close()
+
 	// mcpProbeUpstream answers federation's outbound tools/call with a
 	// body deliberately larger than mcpBackendCallResponseMaxBytes, so
 	// exerciseHandler's POST /mcp probe below drives doBackendJSONRPC's
@@ -492,6 +524,9 @@ func run() error {
 		// comment above for why this provider exists alongside
 		// timeoutProviderName.
 		`"` + hungBodyProviderName + `":{"type":"openai","baseUrl":"` + hungBodyUpstream.URL + `","apiKey":"sk-up","requestTimeout":"` + hungBodyProviderRequestTimeout + `","models":["` + hungBodyProviderModel + `"]},` +
+		// provenanceEstProviderName (feat: expose token-accounting
+		// provenance) — see its own const block doc comment above.
+		`"` + provenanceEstProviderName + `":{"type":"openai","baseUrl":"` + provenanceEstUpstream.URL + `","apiKey":"sk-up","models":["` + provenanceEstProviderModel + `"]},` +
 		// "anthropic" backs the /v1/messages passthrough probes
 		// (exerciseMessagesRoute, below): a real anthropic-type provider,
 		// interpreted end to end through
@@ -591,14 +626,21 @@ func run() error {
 		return err
 	}
 	// exerciseLatencyMetrics (feat: instrument upstream latency) runs
-	// LAST, for the same reason exerciseMetricsRoute itself used to be
-	// last: it reads the exact same /metrics endpoint and must not race
-	// or perturb anything exerciseBreaker/exerciseMetricsRoute still care
-	// about. It relies on exerciseHandler's own exerciseAttemptAccounting
-	// sub-probe (already run, above) having driven a real, non-streaming
-	// POST /v1/chat/completions against the "openai" provider — see its
-	// own doc comment.
-	return exerciseLatencyMetrics(handler)
+	// after exerciseMetricsRoute, for the same reason exerciseMetricsRoute
+	// itself used to be last: it reads the exact same /metrics endpoint
+	// and must not race or perturb anything exerciseBreaker/
+	// exerciseMetricsRoute still care about. It relies on exerciseHandler's
+	// own exerciseAttemptAccounting sub-probe (already run, above) having
+	// driven a real, non-streaming POST /v1/chat/completions against the
+	// "openai" provider — see its own doc comment.
+	if err := exerciseLatencyMetrics(handler); err != nil {
+		return err
+	}
+	// exerciseUsageProvenance (feat: expose token-accounting provenance)
+	// runs LAST, for the identical reason: it reads /metrics and GET
+	// /admin/api/overview one more time and must not perturb any counter
+	// an earlier probe already asserted on.
+	return exerciseUsageProvenance(handler)
 }
 
 // builtinLookupModelID is a real, stable entry in the generated
@@ -1032,6 +1074,154 @@ func exerciseLatencyMetrics(handler http.Handler) error {
 	}
 
 	fmt.Println("yaegi-check: upstream-latency histograms parsed by a real Prometheus TextParser; buckets cumulative, strictly ascending, +Inf-terminated, sample_count consistent")
+	return nil
+}
+
+// exerciseUsageProvenance proves the usage-provenance metric surface
+// (feat: expose token-accounting provenance, metrics.go's
+// provenanceStore/writeProvenanceMetrics, admin.go's
+// buildAdminProvenanceViews) renders correctly under the REAL
+// interpreter — not merely that a compiled `go test` accepts the same
+// bytes, this package's own doc comment's exact concern.
+//
+// Drives one real, non-streaming POST /v1/chat/completions against
+// provenanceEstProviderName, whose upstream (provenanceEstUpstream, run())
+// answers 200 with no "usage" field at all — the exact shape
+// runUnified's estimation fallback (routes_unified.go) classifies as
+// "estimated". "reported" is not driven fresh here: exerciseHandler's own
+// exerciseAttemptAccounting sub-probe (already run, above) already drove
+// a real, usage-bearing POST /v1/chat/completions against "openai",
+// which is reported provenance by construction — reusing that traffic
+// instead of a third fixture, mirroring exerciseLatencyMetrics' own
+// "no new traffic" reasoning for its own duration-histogram assertion.
+func exerciseUsageProvenance(handler http.Handler) error {
+	chatReq := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(
+		`{"model":"`+provenanceEstProviderName+`/`+provenanceEstProviderModel+`","messages":[{"role":"user","content":"hi"}]}`,
+	))
+	chatReq.Header.Set("Authorization", "Bearer "+testDataUserAPIKey)
+	chatReq.Header.Set("Content-Type", "application/json")
+	chatRec := httptest.NewRecorder()
+	handler.ServeHTTP(chatRec, chatReq)
+	if chatRec.Code != http.StatusOK {
+		return fmt.Errorf("POST /v1/chat/completions (usage-provenance harness): status = %d, want 200, body=%s", chatRec.Code, chatRec.Body.String())
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	req.RemoteAddr = metricsProbeOutsideAddr
+	req.Header.Set("Authorization", "Bearer "+attemptAccountingAdminAPIKey)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		return fmt.Errorf("GET /metrics (usage-provenance probe): status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+
+	parser := expfmt.NewTextParser(model.LegacyValidation)
+	families, err := parser.TextToMetricFamilies(strings.NewReader(rec.Body.String()))
+	if err != nil {
+		return fmt.Errorf("GET /metrics: a real Prometheus TextParser rejected the interpreted rendering: %w (body=%s)", err, rec.Body.String())
+	}
+
+	requestsFamily, ok := families["llmgateway_usage_provenance_requests_total"]
+	if !ok {
+		return fmt.Errorf("GET /metrics: no llmgateway_usage_provenance_requests_total family in the parsed output (body=%s)", rec.Body.String())
+	}
+	if requestsFamily.GetType() != dto.MetricType_COUNTER {
+		return fmt.Errorf("llmgateway_usage_provenance_requests_total type = %s, want COUNTER", requestsFamily.GetType())
+	}
+	tokensFamily, ok := families["llmgateway_usage_provenance_tokens_total"]
+	if !ok {
+		return fmt.Errorf("GET /metrics: no llmgateway_usage_provenance_tokens_total family in the parsed output (body=%s)", rec.Body.String())
+	}
+	if tokensFamily.GetType() != dto.MetricType_COUNTER {
+		return fmt.Errorf("llmgateway_usage_provenance_tokens_total type = %s, want COUNTER", tokensFamily.GetType())
+	}
+
+	findSample := func(fam *dto.MetricFamily, provider, provenance string) *dto.Metric {
+		for _, m := range fam.GetMetric() {
+			var p, k string
+			for _, lp := range m.GetLabel() {
+				switch lp.GetName() {
+				case "provider":
+					p = lp.GetValue()
+				case "provenance":
+					k = lp.GetValue()
+				}
+			}
+			if p == provider && k == provenance {
+				return m
+			}
+		}
+		return nil
+	}
+
+	estReq := findSample(requestsFamily, provenanceEstProviderName, "estimated")
+	if estReq == nil {
+		return fmt.Errorf(`GET /metrics: no llmgateway_usage_provenance_requests_total{provider=%q,provenance="estimated"} sample found (body=%s)`, provenanceEstProviderName, rec.Body.String())
+	}
+	if estReq.GetCounter().GetValue() != 1 {
+		return fmt.Errorf(`llmgateway_usage_provenance_requests_total{provider=%q,provenance="estimated"} = %v, want 1`, provenanceEstProviderName, estReq.GetCounter().GetValue())
+	}
+	estTok := findSample(tokensFamily, provenanceEstProviderName, "estimated")
+	if estTok == nil {
+		return fmt.Errorf(`GET /metrics: no llmgateway_usage_provenance_tokens_total{provider=%q,provenance="estimated"} sample found (body=%s)`, provenanceEstProviderName, rec.Body.String())
+	}
+	if estTok.GetCounter().GetValue() <= 0 {
+		return fmt.Errorf(`llmgateway_usage_provenance_tokens_total{provider=%q,provenance="estimated"} = %v, want > 0 (estimated substitutes a nonzero prompt count)`, provenanceEstProviderName, estTok.GetCounter().GetValue())
+	}
+
+	reportedReq := findSample(requestsFamily, "openai", "reported")
+	if reportedReq == nil {
+		return fmt.Errorf(`GET /metrics: no llmgateway_usage_provenance_requests_total{provider="openai",provenance="reported"} sample found (body=%s) — exerciseAttemptAccounting's own earlier real, usage-bearing traffic must have been classified "reported"`, rec.Body.String())
+	}
+	if reportedReq.GetCounter().GetValue() < 1 {
+		return fmt.Errorf(`llmgateway_usage_provenance_requests_total{provider="openai",provenance="reported"} = %v, want >= 1`, reportedReq.GetCounter().GetValue())
+	}
+
+	// GET /admin/api/overview: proves admin.go's buildAdminProvenanceViews
+	// wiring also runs correctly interpreted, decoded generically (this
+	// harness module is compiled, not interpreted; adminOverviewResponse/
+	// adminProviderView are unexported — see readProviderAttemptCounters'
+	// own doc comment for why a generic decode is simpler here than
+	// exporting test-only types across that boundary).
+	adminReq := httptest.NewRequest(http.MethodGet, "/admin/api/overview", nil)
+	adminReq.Header.Set("Authorization", "Bearer "+attemptAccountingAdminAPIKey)
+	adminRec := httptest.NewRecorder()
+	handler.ServeHTTP(adminRec, adminReq)
+	if adminRec.Code != http.StatusOK {
+		return fmt.Errorf("GET /admin/api/overview (usage-provenance probe): status = %d, want 200, body=%s", adminRec.Code, adminRec.Body.String())
+	}
+	var overview map[string]any
+	if err := json.Unmarshal(adminRec.Body.Bytes(), &overview); err != nil {
+		return fmt.Errorf("decode GET /admin/api/overview body: %w", err)
+	}
+	providers, _ := overview["providers"].([]any)
+	var provenanceEstProvider map[string]any
+	for _, p := range providers {
+		pm, ok := p.(map[string]any)
+		if !ok {
+			continue
+		}
+		if pm["name"] == provenanceEstProviderName {
+			provenanceEstProvider = pm
+			break
+		}
+	}
+	if provenanceEstProvider == nil {
+		return fmt.Errorf("GET /admin/api/overview: no provider entry named %q (body=%s)", provenanceEstProviderName, adminRec.Body.String())
+	}
+	provenanceField, _ := provenanceEstProvider["provenance"].(map[string]any)
+	estimatedEntry, _ := provenanceField["estimated"].(map[string]any)
+	if estimatedEntry == nil {
+		return fmt.Errorf(`GET /admin/api/overview: provider %q has no provenance.estimated entry: %+v`, provenanceEstProviderName, provenanceField)
+	}
+	if reqs, _ := estimatedEntry["requests"].(float64); reqs != 1 {
+		return fmt.Errorf("GET /admin/api/overview: provider %q provenance.estimated.requests = %v, want 1", provenanceEstProviderName, estimatedEntry["requests"])
+	}
+	if _, hasReported := provenanceField["reported"]; hasReported {
+		return fmt.Errorf(`GET /admin/api/overview: provider %q provenance has a "reported" key, want it excluded from this compact admin summary: %+v`, provenanceEstProviderName, provenanceField)
+	}
+
+	fmt.Println("yaegi-check: usage-provenance metrics (llmgateway_usage_provenance_requests_total/-_tokens_total) and admin overview parsed by a real Prometheus TextParser/JSON decoder; estimated and reported provenances both present and distinct")
 	return nil
 }
 
