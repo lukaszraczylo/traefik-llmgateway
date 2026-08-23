@@ -222,7 +222,7 @@ func (g *Gateway) callAnthropicMessagesPassthrough(ctx context.Context, w http.R
 	// documented, not incidental.
 	adapter.injectAuth(&http.Request{Header: hdr})
 
-	resp, err := upstreamJSON(ctx, adapter.httpClient(), http.MethodPost, adapter.base()+anthropicMessagesPath, hdr, req, retry)
+	resp, err := upstreamJSON(ctx, adapter.httpClient(), http.MethodPost, adapter.base()+anthropicMessagesPath, hdr, req, retry, adapter.requestTimeout(), adapter.name())
 	if err != nil {
 		return usage{}, err
 	}

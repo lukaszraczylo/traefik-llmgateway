@@ -11,6 +11,7 @@ import (
 	"os"
 	"runtime"
 	"sync"
+	"time"
 
 	telemetry "github.com/lukaszraczylo/oss-telemetry"
 )
@@ -24,27 +25,7 @@ import (
 // original doc comment) — see providerState's own doc comment (registry.go)
 // for the general pointer-first/scalar-last convention this follows.
 type Config struct {
-	Redis *RedisConfig `json:"redis,omitempty"`
-	// Admin gates the read-only admin dashboard (spec §4, v0.2): nil or
-	// Admin.Enabled false means the /admin* routes are not registered at
-	// all — ServeHTTP falls through to its existing 404/passthroughUnknown
-	// handling for those paths, preserving v0.1 behavior exactly.
-	Admin      *AdminConfig             `json:"admin,omitempty"`
-	Pricing    map[string]*ModelPricing `json:"pricing,omitempty"`
-	MCPServers map[string]*TargetConfig `json:"mcpServers,omitempty"`
-	Agents     map[string]*AgentConfig  `json:"agents,omitempty"`
-	Users      *UsersConfig             `json:"users,omitempty"`
-	Groups     map[string]*GroupConfig  `json:"groups,omitempty"`
-	// ModelAliases maps an operator-defined alias id to a target model id
-	// (spec §5, v0.2) — e.g. {"aliased/coding": "anthropic/claude-sonnet-4-5"}.
-	// An exact alias match wins resolution before any other rule
-	// (modelRegistry.resolve, registry.go); the target then resolves
-	// through the normal rules. nil/omitted preserves v0.1 behavior
-	// exactly: resolve never consults an empty alias map, so no existing
-	// model id's resolution changes. Validated at construction
-	// (validateModelAliases, registry.go).
-	ModelAliases map[string]string          `json:"modelAliases,omitempty"`
-	Providers    map[string]*ProviderConfig `json:"providers,omitempty"`
+	Providers map[string]*ProviderConfig `json:"providers,omitempty"`
 	// ModelMeta declares per-model metadata overrides (feature v0.23):
 	// context window size and per-token cost, keyed by an exact
 	// "provider/model" id or a bare model id (applying wherever that bare
@@ -58,7 +39,43 @@ type Config struct {
 	// prior behavior exactly: every model's metadata falls through to
 	// discovery/builtin/absent, same as before this feature existed.
 	// Validated at construction (validateModelMeta, modelmeta.go).
-	ModelMeta map[string]*ModelMetaConfig `json:"modelMeta,omitempty"`
+	ModelMeta  map[string]*ModelMetaConfig `json:"modelMeta,omitempty"`
+	Pricing    map[string]*ModelPricing    `json:"pricing,omitempty"`
+	MCPServers map[string]*TargetConfig    `json:"mcpServers,omitempty"`
+	Agents     map[string]*AgentConfig     `json:"agents,omitempty"`
+	Users      *UsersConfig                `json:"users,omitempty"`
+	// Admin gates the read-only admin dashboard (spec §4, v0.2): nil or
+	// Admin.Enabled false means the /admin* routes are not registered at
+	// all — ServeHTTP falls through to its existing 404/passthroughUnknown
+	// handling for those paths, preserving v0.1 behavior exactly.
+	Admin  *AdminConfig            `json:"admin,omitempty"`
+	Groups map[string]*GroupConfig `json:"groups,omitempty"`
+	Redis  *RedisConfig            `json:"redis,omitempty"`
+	// ModelAliases maps an operator-defined alias id to a target model id
+	// (spec §5, v0.2) — e.g. {"aliased/coding": "anthropic/claude-sonnet-4-5"}.
+	// An exact alias match wins resolution before any other rule
+	// (modelRegistry.resolve, registry.go); the target then resolves
+	// through the normal rules. nil/omitted preserves v0.1 behavior
+	// exactly: resolve never consults an empty alias map, so no existing
+	// model id's resolution changes. Validated at construction
+	// (validateModelAliases, registry.go).
+	ModelAliases map[string]string `json:"modelAliases,omitempty"`
+	// RequestTimeout is the progress-based upstream request timeout
+	// (feature: request timeout) applied to every provider adapter call
+	// and to the MCP/A2A target proxy, unless a provider sets its own
+	// ProviderConfig.RequestTimeout override. A Go duration string (e.g.
+	// "5m", "90s"), parsed and validated by resolveRequestTimeout
+	// (timeout.go). Empty (the default) resolves to defaultRequestTimeout,
+	// five minutes — a deliberate behavior change for every deployment,
+	// not an invisible bug fix: before this field existed, an upstream
+	// provider that accepted a connection and then hung could hang the
+	// gateway request forever (see defaultRequestTimeout's own doc
+	// comment, and README.md's "Request timeout" section). A non-empty
+	// value that fails to parse, or parses to a duration <= 0, is a
+	// construction error — zero or negative never means "no timeout" here,
+	// since that would silently reintroduce the exact hang this feature
+	// fixes.
+	RequestTimeout string `json:"requestTimeout,omitempty"`
 	// Breaker configures the discovery circuit breaker (feat/provider-
 	// health): how many consecutive discovery-refresh failures open a
 	// provider's breaker, and how long it then backs off before probing
@@ -132,6 +149,14 @@ type ProviderConfig struct {
 	BaseURL           string `json:"baseUrl,omitempty"`
 	APIKey            string `json:"apiKey"`
 	DiscoveryInterval string `json:"discoveryInterval,omitempty"`
+	// RequestTimeout overrides the global Config.RequestTimeout for this
+	// provider alone — an explicit per-provider override always wins over
+	// the global default (house rule). Same Go-duration-string form,
+	// same validation (resolveRequestTimeout, timeout.go): empty inherits
+	// the global (or its own default of five minutes when the global is
+	// also unset); a non-empty value that fails to parse, or parses to a
+	// duration <= 0, is a construction error naming this provider.
+	RequestTimeout string `json:"requestTimeout,omitempty"`
 	// MetadataPath is an optional second discovery endpoint (feature
 	// v0.23), fetched alongside the provider's normal listModels call
 	// when set: a path such as "/api/v0/models" (LM Studio's own,
@@ -526,6 +551,13 @@ type Gateway struct {
 	// contract.
 	bodyAdmission chan struct{}
 	name          string
+	// targetTimeout is targetClient's own resolved request timeout —
+	// Config.RequestTimeout only; an MCP/A2A target has no per-target
+	// override the way a provider does. proxyUpstream's own callers
+	// (mcp_a2a.go's handleTargetProxy) pass this through so its
+	// idle-progress body watchdog (timeout.go) matches the
+	// ResponseHeaderTimeout already set on targetClient's Transport.
+	targetTimeout time.Duration
 }
 
 // telemetryStartupOnce keeps the anonymous "plugin loaded" ping to one per
@@ -685,7 +717,21 @@ func newGateway(ctx context.Context, next http.Handler, config *Config, name str
 		return nil, err
 	}
 	g.adapters = adapters
-	g.targetClient = newAdapterHTTPClient()
+
+	// targetTimeout: the global default only (resolveRequestTimeout,
+	// timeout.go) — an MCP/A2A target has no per-target override the way a
+	// provider does (ProviderConfig.RequestTimeout). Resolved again here,
+	// separately from buildAdapters' own identical call, rather than
+	// widening buildAdapters' return signature to hand the value back:
+	// buildAdapters(cfg *Config) (map[string]providerAdapter, error) is
+	// called directly by several existing tests, and parsing the same
+	// short duration string twice at construction time is cheap.
+	targetTimeout, err := resolveRequestTimeout(config.RequestTimeout, "requestTimeout")
+	if err != nil {
+		return nil, err
+	}
+	g.targetTimeout = targetTimeout
+	g.targetClient = newAdapterHTTPClient(targetTimeout)
 
 	registry, err := newModelRegistry(adapters, config, g.errorf)
 	if err != nil {

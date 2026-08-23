@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
+	"time"
 )
 
 // Provider type identifiers, matched against ProviderConfig.Type.
@@ -159,16 +160,35 @@ type providerAdapter interface {
 	// request. Named httpClient rather than client to avoid colliding with
 	// every implementation's own "client" struct field of the same name.
 	httpClient() *http.Client
+	// requestTimeout returns this adapter's resolved per-request timeout
+	// (Config.RequestTimeout or ProviderConfig.RequestTimeout,
+	// resolveProviderTimeout in timeout.go) — the idle-progress bound every
+	// upstream call through this adapter's shared client is held to.
+	// Exposed on the interface so a caller outside this file (native
+	// passthrough, routes_passthrough.go's handlePassthrough) can apply the
+	// identical watchdog proxyUpstream needs to its own resp.Body read,
+	// instead of the timeout only ever protecting upstreamJSON/
+	// upstreamRawBytes' own callers.
+	requestTimeout() time.Duration
 }
 
 // newAdapterHTTPClient returns an *http.Client for a provider adapter to
-// hold and reuse across every request it makes: no client-level timeout,
-// since a streaming chat completion can legitimately run for minutes and
-// callers bound requests with a context deadline instead, and a Transport
-// cloned from http.DefaultTransport with a larger per-host idle connection
-// pool, since every request from one adapter targets the same upstream
-// host.
-func newAdapterHTTPClient() *http.Client {
+// hold and reuse across every request it makes: no CLIENT-level timeout
+// (Client.Timeout is deliberately left unset), since that would bound the
+// whole request including body read — killing exactly the long streams
+// this gateway must preserve (a 20-minute generation that keeps producing
+// tokens must complete) — and a Transport cloned from http.DefaultTransport
+// with a larger per-host idle connection pool, since every request from
+// one adapter targets the same upstream host.
+//
+// timeout sets Transport.ResponseHeaderTimeout: the first of this
+// feature's two mechanisms — it bounds only the wait for a response's
+// headers, never the body, so it is safe for streaming. The second
+// mechanism, bounding idle time WITHIN the body (a provider that sends
+// headers and then stalls), is watchdogBody (timeout.go), applied by each
+// caller of upstreamBytes/proxyUpstream to the *http.Response.Body this
+// client's Do returns — Transport has no equivalent field for that half.
+func newAdapterHTTPClient(timeout time.Duration) *http.Client {
 	tr, ok := http.DefaultTransport.(*http.Transport)
 	if ok {
 		tr = tr.Clone()
@@ -181,6 +201,7 @@ func newAdapterHTTPClient() *http.Client {
 		tr = &http.Transport{}
 	}
 	tr.MaxIdleConnsPerHost = adapterIdleConnsPerHost
+	tr.ResponseHeaderTimeout = timeout
 	return &http.Client{Transport: tr}
 }
 
@@ -239,6 +260,12 @@ func attemptRecorderFromContext(ctx context.Context) attemptRecorder {
 // listModels) have nothing to write through and every current caller
 // checks resp.StatusCode itself.
 //
+// timeout and providerName (an adapter's own resolved requestTimeout()/
+// name()) arm the idle-progress watchdog upstreamBytes wraps resp.Body
+// in, once a response is actually obtained — see watchdogBody's own doc
+// comment, timeout.go, for the mechanism and why it, not
+// http.Client.Timeout, is what bounds a stalled body.
+//
 // policy (retry.go) wraps the whole request-and-receive-status exchange:
 // a nil policy, or a disabled one, makes exactly one attempt (v0.1
 // behavior, byte-identical). Every caller of upstreamJSON — chatCompletion,
@@ -250,7 +277,7 @@ func attemptRecorderFromContext(ctx context.Context) attemptRecorder {
 // already returned its final, retried-or-not response, so a stream that
 // dies while forwardStream is mid-flight never re-enters this function
 // and is therefore never retried.
-func upstreamJSON(ctx context.Context, client *http.Client, method, url string, hdr http.Header, body any, policy *retryPolicy) (*http.Response, error) {
+func upstreamJSON(ctx context.Context, client *http.Client, method, url string, hdr http.Header, body any, policy *retryPolicy, timeout time.Duration, providerName string) (*http.Response, error) {
 	var bodyBytes []byte
 	if body != nil {
 		b, err := json.Marshal(body)
@@ -259,7 +286,7 @@ func upstreamJSON(ctx context.Context, client *http.Client, method, url string, 
 		}
 		bodyBytes = b
 	}
-	return upstreamBytes(ctx, client, method, url, hdr, bodyBytes, policy)
+	return upstreamBytes(ctx, client, method, url, hdr, bodyBytes, policy, timeout, providerName)
 }
 
 // upstreamRawBytes is upstreamJSON's counterpart for a body the caller has
@@ -271,8 +298,8 @@ func upstreamJSON(ctx context.Context, client *http.Client, method, url string, 
 // multipart payload upstreamJSON's json.Marshal would corrupt outright.
 // Shares upstreamBytes with upstreamJSON, so both get the identical
 // retry/zero-bytes-reached invariant documented on upstreamJSON.
-func upstreamRawBytes(ctx context.Context, client *http.Client, method, url string, hdr http.Header, body []byte, policy *retryPolicy) (*http.Response, error) {
-	return upstreamBytes(ctx, client, method, url, hdr, body, policy)
+func upstreamRawBytes(ctx context.Context, client *http.Client, method, url string, hdr http.Header, body []byte, policy *retryPolicy, timeout time.Duration, providerName string) (*http.Response, error) {
+	return upstreamBytes(ctx, client, method, url, hdr, body, policy, timeout, providerName)
 }
 
 // upstreamBytes is the shared request-build-and-send core behind both
@@ -282,12 +309,22 @@ func upstreamRawBytes(ctx context.Context, client *http.Client, method, url stri
 // request body unchanged, and Content-Type defaults to
 // "application/json" only when bodyBytes is non-nil and hdr set none of
 // its own.
-func upstreamBytes(ctx context.Context, client *http.Client, method, url string, hdr http.Header, bodyBytes []byte, policy *retryPolicy) (*http.Response, error) {
+func upstreamBytes(ctx context.Context, client *http.Client, method, url string, hdr http.Header, bodyBytes []byte, policy *retryPolicy, timeout time.Duration, providerName string) (*http.Response, error) {
 	call := func() (*http.Response, error) {
 		var r io.Reader
 		if bodyBytes != nil {
 			r = bytes.NewReader(bodyBytes)
 		}
+
+		// reqCtx/cancel bound this attempt's response body to timeout via
+		// watchdogBody (timeout.go), derived fresh per attempt so a retried
+		// request gets its own full timeout window rather than inheriting
+		// an already-ticking one. cancel is released either by
+		// watchdogBody (once resp.Body exists — see its own Close/fire) or
+		// directly below, on a build/send failure that never produced a
+		// body to wrap.
+		reqCtx, cancel := context.WithCancel(ctx)
+
 		// gosec G704 (SSRF via taint analysis) flags url below: every call
 		// site builds it from an operator-configured value —
 		// adapter.baseURL (ProviderConfig.BaseURL, or defaultBaseURLByType
@@ -299,8 +336,9 @@ func upstreamBytes(ctx context.Context, client *http.Client, method, url string,
 		// proxyUpstream for the one adapter call path where a request-
 		// derived path segment genuinely reaches the outgoing URL, and its
 		// own comment for why that case is safe.
-		req, err := http.NewRequestWithContext(ctx, method, url, r) //nolint:gosec // operator-configured host; see comment above
+		req, err := http.NewRequestWithContext(reqCtx, method, url, r) //nolint:gosec // operator-configured host; see comment above
 		if err != nil {
+			cancel()
 			return nil, fmt.Errorf("%w: %w: build request: %w", errUpstream, errRequestBuildFailed, err)
 		}
 		for k, vs := range hdr {
@@ -314,8 +352,10 @@ func upstreamBytes(ctx context.Context, client *http.Client, method, url string,
 
 		resp, err := client.Do(req) //nolint:bodyclose,gosec // caller closes resp.Body; upstreamBytes hands the response, not its lifecycle, back — same operator-configured URL as above
 		if err != nil {
+			cancel()
 			return nil, fmt.Errorf("%w: %w", errUpstream, err)
 		}
+		resp.Body = newWatchdogBody(resp.Body, cancel, timeout, providerName)
 		return resp, nil
 	}
 
@@ -432,6 +472,18 @@ func buildAdapters(cfg *Config) (map[string]providerAdapter, error) {
 		return nil, err
 	}
 
+	// globalTimeout is resolved once, up front, so a malformed
+	// Config.RequestTimeout fails construction even for a deployment where
+	// every provider happens to set its own ProviderConfig.RequestTimeout
+	// override — resolveProviderTimeout's own doc comment (timeout.go).
+	// timeoutErr, not err (govet shadow): a second err reused across this
+	// function's top-level scope made every err re-declared inside the
+	// provider loop below read as a suspicious shadow.
+	globalTimeout, timeoutErr := resolveRequestTimeout(cfg.RequestTimeout, "requestTimeout")
+	if timeoutErr != nil {
+		return nil, timeoutErr
+	}
+
 	adapters := make(map[string]providerAdapter, len(cfg.Providers))
 	for name, pc := range cfg.Providers {
 		if pc == nil {
@@ -454,11 +506,31 @@ func buildAdapters(cfg *Config) (map[string]providerAdapter, error) {
 			return nil, err
 		}
 
+		// timeoutErr, not err (govet shadow — see globalTimeout's identical
+		// note above): this loop already declares its own err via
+		// apiKey, err := resolveSecret above; reusing it here for a second,
+		// later purpose is what made validateMetadataPath's unrelated
+		// if err := ...; err != nil read as a suspicious shadow of it.
+		timeout, timeoutErr := resolveProviderTimeout(name, pc.RequestTimeout, globalTimeout)
+		if timeoutErr != nil {
+			return nil, timeoutErr
+		}
+
 		switch pc.Type {
 		case providerTypeOpenAI:
 			a := newOpenAIAdapter(name, base, apiKey)
 			a.retry = policy
 			a.metadataPath = pc.MetadataPath
+			// timeout/client are re-resolved here rather than left at the
+			// bare constructor's defaultRequestTimeout default (mirroring
+			// how a.retry/a.metadataPath are also only ever set to their
+			// real, config-derived values here, not by newOpenAIAdapter
+			// itself) — client is rebuilt, not mutated in place, since
+			// Transport.ResponseHeaderTimeout is set once at construction
+			// (newAdapterHTTPClient, above) and every adapter's Transport
+			// is otherwise identical.
+			a.timeout = timeout
+			a.client = newAdapterHTTPClient(timeout)
 			adapters[name] = a
 		case providerTypeAnthropic:
 			a, err := newAnthropicAdapter(name, base, apiKey)
@@ -466,6 +538,8 @@ func buildAdapters(cfg *Config) (map[string]providerAdapter, error) {
 				return nil, err
 			}
 			a.retry = policy
+			a.timeout = timeout
+			a.client = newAdapterHTTPClient(timeout)
 			adapters[name] = a
 		case providerTypeGemini:
 			g, err := newGeminiAdapter(name, base, apiKey)
@@ -473,6 +547,8 @@ func buildAdapters(cfg *Config) (map[string]providerAdapter, error) {
 				return nil, err
 			}
 			g.retry = policy
+			g.timeout = timeout
+			g.client = newAdapterHTTPClient(timeout)
 			adapters[name] = g
 		default:
 			return nil, fmt.Errorf("llmgateway: provider %q: unknown type %q", name, pc.Type)

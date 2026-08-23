@@ -52,7 +52,8 @@ func (f *fakeAdapter) listModels(ctx context.Context) ([]string, error) {
 	}
 	return f.listModelsFn(ctx)
 }
-func (f *fakeAdapter) httpClient() *http.Client { return nil }
+func (f *fakeAdapter) httpClient() *http.Client      { return nil }
+func (f *fakeAdapter) requestTimeout() time.Duration { return defaultRequestTimeout }
 
 // recordingLog is a thread-safe log func for tests, capturing formatted
 // lines instead of writing to stderr.

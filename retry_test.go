@@ -616,7 +616,7 @@ func TestUpstreamJSON_RequestBuildFailure_NotRetried(t *testing.T) {
 		return true
 	}}
 	client := &http.Client{}
-	_, err := upstreamJSON(context.Background(), client, "IN VALID", "http://127.0.0.1:1/x", nil, nil, p)
+	_, err := upstreamJSON(context.Background(), client, "IN VALID", "http://127.0.0.1:1/x", nil, nil, p, defaultRequestTimeout, "p1")
 	if err == nil {
 		t.Fatal("upstreamJSON: want an error for an invalid method, got nil")
 	}
