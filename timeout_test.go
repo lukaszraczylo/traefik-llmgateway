@@ -577,7 +577,18 @@ func TestWatchdogBody_NoBlockingGoroutineLeak_AcrossManyRequests(t *testing.T) {
 	}))
 	defer fastSrv.Close()
 
-	hangSrv, release := newStallingServer(nil)
+	// prewrite sends headers before stalling: a "never sends headers" hang
+	// is caught by Transport.ResponseHeaderTimeout, in a *http.Client.Do
+	// error, and never even constructs a watchdogBody — this test is
+	// specifically about the WATCHDOG's own goroutine, so its hang must
+	// stall AFTER headers, the same shape as the mid-body-stall tests
+	// above, to actually invoke fire() on every one of the iterations
+	// below.
+	hangSrv, release := newStallingServer(func(w http.ResponseWriter) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
+	})
 
 	runtime.GC()
 	baseline := runtime.NumGoroutine()
