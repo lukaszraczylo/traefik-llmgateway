@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 )
 
 // openaiAdapter is the providerAdapter for provider type "openai": OpenAI
@@ -29,18 +30,32 @@ type openaiAdapter struct {
 	// newOpenAIAdapter call site (every test, and any caller that never
 	// sets this) keeps behaving exactly as before this feature existed.
 	metadataPath string
+	// timeout is this adapter's resolved per-request timeout
+	// (resolveProviderTimeout, timeout.go) — UNLIKE retry above, it is NOT
+	// left at its zero value by a bare newOpenAIAdapter call: a
+	// zero-duration timeout would make watchdogBody's watchdog fire
+	// immediately (time.AfterFunc(0, ...) runs at the next scheduler
+	// tick), the opposite of "no timeout configured". newOpenAIAdapter
+	// sets it to defaultRequestTimeout; buildAdapters (providers.go)
+	// overwrites it with the real, config-resolved value for production
+	// use, the same way it overwrites retry/metadataPath above.
+	timeout time.Duration
 }
 
 // newOpenAIAdapter returns an openaiAdapter for provider name, with base as
 // its already-defaulted, trailing-slash-trimmed base URL and apiKey as
 // already resolved by resolveSecret (empty means keyless). It builds one
-// shared *http.Client, reused for every request this adapter makes.
+// shared *http.Client, reused for every request this adapter makes, with
+// its Transport.ResponseHeaderTimeout set to defaultRequestTimeout — see
+// the timeout field's own doc comment for why this constructor cannot
+// leave timeout at its zero value the way it leaves retry at nil.
 func newOpenAIAdapter(name, base, apiKey string) *openaiAdapter {
 	return &openaiAdapter{
 		adapterName: name,
 		baseURL:     base,
 		apiKey:      apiKey,
-		client:      newAdapterHTTPClient(),
+		client:      newAdapterHTTPClient(defaultRequestTimeout),
+		timeout:     defaultRequestTimeout,
 	}
 }
 
@@ -55,6 +70,9 @@ func (a *openaiAdapter) base() string { return a.baseURL }
 
 // httpClient implements providerAdapter.
 func (a *openaiAdapter) httpClient() *http.Client { return a.client }
+
+// requestTimeout implements providerAdapter.
+func (a *openaiAdapter) requestTimeout() time.Duration { return a.timeout }
 
 // injectAuth implements providerAdapter: OpenAI's bearer-token scheme. A
 // no-op when a.apiKey is empty, per the keyless-upstream ruling — a request
@@ -143,7 +161,7 @@ func (a *openaiAdapter) chatCompletion(ctx context.Context, w http.ResponseWrite
 		hdr.Set("Accept", "text/event-stream")
 	}
 
-	resp, err := upstreamJSON(ctx, a.client, http.MethodPost, a.baseURL+"/v1/chat/completions", hdr, req, a.retry)
+	resp, err := upstreamJSON(ctx, a.client, http.MethodPost, a.baseURL+"/v1/chat/completions", hdr, req, a.retry, a.timeout, a.adapterName)
 	if err != nil {
 		return usage{}, err
 	}
@@ -168,7 +186,7 @@ func (a *openaiAdapter) chatCompletion(ctx context.Context, w http.ResponseWrite
 // non-streaming path.
 func (a *openaiAdapter) embeddings(ctx context.Context, w http.ResponseWriter, req map[string]any) (usage, error) {
 	delete(req, gatewayAliasKey) // see chatCompletion's identical delete for why
-	resp, err := upstreamJSON(ctx, a.client, http.MethodPost, a.baseURL+"/v1/embeddings", a.requestHeaders(true), req, a.retry)
+	resp, err := upstreamJSON(ctx, a.client, http.MethodPost, a.baseURL+"/v1/embeddings", a.requestHeaders(true), req, a.retry, a.timeout, a.adapterName)
 	if err != nil {
 		return usage{}, err
 	}
@@ -277,7 +295,7 @@ func (a *openaiAdapter) imagesGeneration(ctx context.Context, w http.ResponseWri
 	// it — the same defensive posture chatCompletion/embeddings already
 	// take.
 	delete(req, gatewayAliasKey)
-	resp, err := upstreamJSON(ctx, a.client, http.MethodPost, a.baseURL+"/v1/images/generations", a.requestHeaders(true), req, a.retry)
+	resp, err := upstreamJSON(ctx, a.client, http.MethodPost, a.baseURL+"/v1/images/generations", a.requestHeaders(true), req, a.retry, a.timeout, a.adapterName)
 	if err != nil {
 		return usage{}, err
 	}
@@ -303,7 +321,7 @@ func (a *openaiAdapter) audioSpeech(ctx context.Context, w http.ResponseWriter, 
 	if contentType != "" {
 		hdr.Set("Content-Type", contentType)
 	}
-	resp, err := upstreamRawBytes(ctx, a.client, http.MethodPost, a.baseURL+"/v1/audio/speech", hdr, body, a.retry)
+	resp, err := upstreamRawBytes(ctx, a.client, http.MethodPost, a.baseURL+"/v1/audio/speech", hdr, body, a.retry, a.timeout, a.adapterName)
 	if err != nil {
 		return usage{}, err
 	}
@@ -340,7 +358,7 @@ func (a *openaiAdapter) audioTranscription(ctx context.Context, w http.ResponseW
 	if contentType != "" {
 		hdr.Set("Content-Type", contentType)
 	}
-	resp, err := upstreamRawBytes(ctx, a.client, http.MethodPost, a.baseURL+"/v1/audio/transcriptions", hdr, body, a.retry)
+	resp, err := upstreamRawBytes(ctx, a.client, http.MethodPost, a.baseURL+"/v1/audio/transcriptions", hdr, body, a.retry, a.timeout, a.adapterName)
 	if err != nil {
 		return usage{}, err
 	}
@@ -381,7 +399,7 @@ type modelsPayload struct {
 
 // listModels implements providerAdapter.
 func (a *openaiAdapter) listModels(ctx context.Context) ([]string, error) {
-	resp, err := upstreamJSON(ctx, a.client, http.MethodGet, a.baseURL+"/v1/models", a.requestHeaders(false), nil, a.retry)
+	resp, err := upstreamJSON(ctx, a.client, http.MethodGet, a.baseURL+"/v1/models", a.requestHeaders(false), nil, a.retry, a.timeout, a.adapterName)
 	if err != nil {
 		return nil, err
 	}
@@ -444,7 +462,7 @@ func (a *openaiAdapter) fetchModelMetadata(ctx context.Context) (map[string]int,
 		return nil, nil
 	}
 
-	resp, err := upstreamJSON(ctx, a.client, http.MethodGet, a.baseURL+a.metadataPath, a.requestHeaders(false), nil, a.retry)
+	resp, err := upstreamJSON(ctx, a.client, http.MethodGet, a.baseURL+a.metadataPath, a.requestHeaders(false), nil, a.retry, a.timeout, a.adapterName)
 	if err != nil {
 		return nil, err
 	}

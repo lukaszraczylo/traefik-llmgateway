@@ -12,6 +12,7 @@ import (
 	"os"
 	"runtime"
 	"sync"
+	"time"
 
 	telemetry "github.com/lukaszraczylo/oss-telemetry"
 )
@@ -82,8 +83,24 @@ type Config struct {
 	// FailoverConfig's own doc comment (failover.go) for the full
 	// contract; a struct value, not a pointer, for the same
 	// zero-means-default reason as Breaker/Retry/Cache below.
-	Failover FailoverConfig `json:"failover"`
-	Breaker  BreakerConfig  `json:"breaker"`
+	// RequestTimeout is the progress-based upstream request timeout
+	// (feature: request timeout) applied to every provider adapter call
+	// and to the MCP/A2A target proxy, unless a provider sets its own
+	// ProviderConfig.RequestTimeout override. A Go duration string (e.g.
+	// "5m", "90s"), parsed and validated by resolveRequestTimeout
+	// (timeout.go). Empty (the default) resolves to defaultRequestTimeout,
+	// five minutes — a deliberate behavior change for every deployment,
+	// not an invisible bug fix: before this field existed, an upstream
+	// provider that accepted a connection and then hung could hang the
+	// gateway request forever (see defaultRequestTimeout's own doc
+	// comment, and README.md's "Request timeout" section). A non-empty
+	// value that fails to parse, or parses to a duration <= 0, is a
+	// construction error — zero or negative never means "no timeout" here,
+	// since that would silently reintroduce the exact hang this feature
+	// fixes.
+	RequestTimeout string         `json:"requestTimeout,omitempty"`
+	Failover       FailoverConfig `json:"failover"`
+	Breaker        BreakerConfig  `json:"breaker"`
 	// Retry is a struct value, not a pointer, because its own Enabled
 	// field is the on/off signal (unlike Redis/Users, where the block's
 	// mere presence is the signal) — so its tag omits "omitempty":
@@ -145,6 +162,14 @@ type ProviderConfig struct {
 	BaseURL           string `json:"baseUrl,omitempty"`
 	APIKey            string `json:"apiKey"`
 	DiscoveryInterval string `json:"discoveryInterval,omitempty"`
+	// RequestTimeout overrides the global Config.RequestTimeout for this
+	// provider alone — an explicit per-provider override always wins over
+	// the global default (house rule). Same Go-duration-string form,
+	// same validation (resolveRequestTimeout, timeout.go): empty inherits
+	// the global (or its own default of five minutes when the global is
+	// also unset); a non-empty value that fails to parse, or parses to a
+	// duration <= 0, is a construction error naming this provider.
+	RequestTimeout string `json:"requestTimeout,omitempty"`
 	// MetadataPath is an optional second discovery endpoint (feature
 	// v0.23), fetched alongside the provider's normal listModels call
 	// when set: a path such as "/api/v0/models" (LM Studio's own,
@@ -565,6 +590,13 @@ type Gateway struct {
 	// on a fresh Gateway always logs. Deliberately does NOT gate the 404
 	// loud-log line (operator ruling: that one must always log).
 	failoverLogGate logGate
+	// targetTimeout is targetClient's own resolved request timeout —
+	// Config.RequestTimeout only; an MCP/A2A target has no per-target
+	// override the way a provider does. proxyUpstream's own callers
+	// (mcp_a2a.go's handleTargetProxy) pass this through so its
+	// idle-progress body watchdog (timeout.go) matches the
+	// ResponseHeaderTimeout already set on targetClient's Transport.
+	targetTimeout time.Duration
 	// failover is Config.Failover, validated and resolved once by
 	// newGateway (validateFailoverConfig, failover.go).
 	failover failoverConfig
@@ -748,7 +780,21 @@ func newGateway(ctx context.Context, next http.Handler, config *Config, name str
 		return nil, err
 	}
 	g.adapters = adapters
-	g.targetClient = newAdapterHTTPClient()
+
+	// targetTimeout: the global default only (resolveRequestTimeout,
+	// timeout.go) — an MCP/A2A target has no per-target override the way a
+	// provider does (ProviderConfig.RequestTimeout). Resolved again here,
+	// separately from buildAdapters' own identical call, rather than
+	// widening buildAdapters' return signature to hand the value back:
+	// buildAdapters(cfg *Config) (map[string]providerAdapter, error) is
+	// called directly by several existing tests, and parsing the same
+	// short duration string twice at construction time is cheap.
+	targetTimeout, err := resolveRequestTimeout(config.RequestTimeout, "requestTimeout")
+	if err != nil {
+		return nil, err
+	}
+	g.targetTimeout = targetTimeout
+	g.targetClient = newAdapterHTTPClient(targetTimeout)
 
 	registry, err := newModelRegistry(adapters, config, g.errorf)
 	if err != nil {

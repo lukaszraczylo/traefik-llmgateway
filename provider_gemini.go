@@ -23,6 +23,12 @@ type geminiAdapter struct {
 	adapterName string
 	baseURL     string
 	apiKey      string
+	// timeout is this adapter's resolved per-request timeout —
+	// resolveProviderTimeout, timeout.go; see openaiAdapter.timeout's own
+	// doc comment (provider_openai.go) for why this is set to
+	// defaultRequestTimeout at construction rather than left at its zero
+	// value the way retry is.
+	timeout time.Duration
 }
 
 // newGeminiAdapter returns a geminiAdapter for provider name, with base as
@@ -38,7 +44,8 @@ func newGeminiAdapter(name, base, apiKey string) (*geminiAdapter, error) {
 		adapterName: name,
 		baseURL:     base,
 		apiKey:      apiKey,
-		client:      newAdapterHTTPClient(),
+		client:      newAdapterHTTPClient(defaultRequestTimeout),
+		timeout:     defaultRequestTimeout,
 	}, nil
 }
 
@@ -53,6 +60,9 @@ func (a *geminiAdapter) base() string { return a.baseURL }
 
 // httpClient implements providerAdapter.
 func (a *geminiAdapter) httpClient() *http.Client { return a.client }
+
+// requestTimeout implements providerAdapter.
+func (a *geminiAdapter) requestTimeout() time.Duration { return a.timeout }
 
 // injectAuth implements providerAdapter: Gemini's x-goog-api-key header
 // scheme. Never a no-op — the constructor already rejected an empty apiKey.
@@ -125,7 +135,7 @@ func (a *geminiAdapter) chatCompletion(ctx context.Context, w http.ResponseWrite
 		endpoint = a.baseURL + geminiAPIPrefix + escapedModel + ":streamGenerateContent?alt=sse"
 	}
 
-	resp, err := upstreamJSON(ctx, a.client, http.MethodPost, endpoint, hdr, body, a.retry)
+	resp, err := upstreamJSON(ctx, a.client, http.MethodPost, endpoint, hdr, body, a.retry, a.timeout, a.adapterName)
 	if err != nil {
 		return usage{}, err
 	}
@@ -234,7 +244,7 @@ func (a *geminiAdapter) embeddings(ctx context.Context, w http.ResponseWriter, r
 		endpoint = a.baseURL + geminiAPIPrefix + escapedModel + ":batchEmbedContents"
 	}
 
-	resp, err := upstreamJSON(ctx, a.client, http.MethodPost, endpoint, a.requestHeaders(true), body, a.retry)
+	resp, err := upstreamJSON(ctx, a.client, http.MethodPost, endpoint, a.requestHeaders(true), body, a.retry, a.timeout, a.adapterName)
 	if err != nil {
 		return usage{}, err
 	}
@@ -286,7 +296,7 @@ func (a *geminiAdapter) imagesGeneration(ctx context.Context, w http.ResponseWri
 	escapedModel := url.PathEscape(model)
 	endpoint := a.baseURL + geminiAPIPrefix + escapedModel + ":predict"
 
-	resp, err := upstreamJSON(ctx, a.client, http.MethodPost, endpoint, a.requestHeaders(true), body, a.retry)
+	resp, err := upstreamJSON(ctx, a.client, http.MethodPost, endpoint, a.requestHeaders(true), body, a.retry, a.timeout, a.adapterName)
 	if err != nil {
 		return usage{}, err
 	}
@@ -345,7 +355,7 @@ type geminiModelsListPayload struct {
 // model ids, matching the shape openai-type and anthropic-type adapters
 // both return.
 func (a *geminiAdapter) listModels(ctx context.Context) ([]string, error) {
-	resp, err := upstreamJSON(ctx, a.client, http.MethodGet, a.baseURL+"/v1beta/models", a.requestHeaders(false), nil, a.retry)
+	resp, err := upstreamJSON(ctx, a.client, http.MethodGet, a.baseURL+"/v1beta/models", a.requestHeaders(false), nil, a.retry, a.timeout, a.adapterName)
 	if err != nil {
 		return nil, err
 	}

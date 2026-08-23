@@ -194,6 +194,7 @@ config accepts them as YAML, which decodes to the same JSON shape.
 | `redis` | `RedisConfig` | — | Distributed limit-counter backend. Omitted means in-process counters only (per-replica, approximate across multiple Traefik instances). |
 | `retry` | `RetryConfig` | `{}` (disabled) | Same-provider retry for transient upstream failures — see [Retry](#retry). Omitted or `enabled: false` means no retry: every request makes exactly one upstream attempt, byte-identical to a gateway built before this field existed. |
 | `failover` | `FailoverConfig` | `{}` (disabled) | Cross-provider failover for a bare model id more than one configured provider serves — see [Failover](#failover). Omitted or `enabled: false` means no failover, byte-identical to a gateway built before this field existed. `enabled: true` opts in; a deployment with no overlapping providers behaves exactly as before regardless of this setting either way. |
+| `requestTimeout` | `string` (Go duration) | `5m` | Progress-based upstream request timeout, applied to every provider adapter call, native passthrough, and the MCP/A2A target proxy — see [Request timeout](#request-timeout). **Behavior change for every deployment**: before this field existed, no timeout was set at all, so a provider that accepted a connection and then went silent hung the request forever. A provider's own `requestTimeout` (`ProviderConfig`) overrides this. Empty means the default; a value that fails to parse, or parses to zero or a negative duration, is a construction error. |
 | `cache` | `CacheConfig` | `{}` (disabled) | Opt-in Redis-backed response cache for unified non-streaming chat/embeddings — see [Caching](#caching). Omitted or `enabled: false` means no caching, byte-identical to a gateway built before this field existed. |
 | `breaker` | `BreakerConfig` | `{}` (every default) | Per-provider discovery circuit breaker — see [Provider health (discovery circuit breaker)](#provider-health-discovery-circuit-breaker). Every field is individually zero-means-default; a provider whose discovery never fails is unaffected regardless of what this block contains. |
 | `admin` | `*AdminConfig` | `nil` (disabled) | Read-only admin dashboard — see [Admin](#admin). `nil` or `enabled: false` means the `/admin*` routes are not registered at all. |
@@ -234,6 +235,7 @@ also a construction error, never a panic (`providers.go`, `mcp_a2a.go`,
 | `discovery` | `bool` | `false` | Pull the provider's own model-listing endpoint at startup and on `discoveryInterval`. A discovery failure is logged and non-fatal; construction still succeeds on `models` alone. |
 | `metadataPath` | `string` | `""` (no metadata capture) | Only read by `openai`-type providers. A second endpoint, fetched alongside `discovery`, that reports per-model context length — for example `/api/v0/models` on an LM Studio server. Must start with `/` when set (checked at construction). See [Model metadata](#model-metadata). |
 | `passthrough` | `*bool` | `nil` (enabled) | `nil` or `true`: this provider's native passthrough route (`/{name}/...`) stays reachable, unchanged from before this field existed. `false`: the route is disabled — `ServeHTTP` treats it exactly like an unconfigured provider name, falling through to the ordinary unknown-route 404 without even reaching authentication. Does not affect the MCP/A2A target proxy, which has its own routing prefix. |
+| `requestTimeout` | `string` (Go duration) | Inherits the top-level `requestTimeout` (`5m` if that is also unset) | Overrides the global request timeout for this provider alone, including its native passthrough route — see [Request timeout](#request-timeout). An explicit override always wins over the global default. Empty inherits; a value that fails to parse, or parses to zero or a negative duration, is a construction error. |
 
 ### `GroupConfig`
 
@@ -969,6 +971,93 @@ never a second candidate to try.
   a pre-existing property of the plugin's HTTP client, not specific to
   failover, and applies to every route, not only this one; it is not
   addressed in this change.
+
+## Request timeout
+
+Every provider adapter call and every native passthrough
+(`/{provider}/...`) request is bounded by a progress-based timeout:
+aborted once this gateway observes no upstream read progress for the
+configured duration, never simply because elapsed time crossed a fixed
+deadline. The MCP/A2A target proxy (`/mcp/{name}/...`, `/a2a/{name}/...`)
+shares the identical mechanism. The federated `/mcp` endpoint
+(`mcp_federation.go`) does **not** — see the "Federated MCP" note below.
+
+**Behavior change for every deployment, not an invisible bug fix.** Before
+this feature, an adapter's `*http.Client` set no timeout of any kind: a
+provider that accepted the connection and then went silent — sent no
+headers, or sent headers and then stalled mid-body — hung the gateway
+request forever. Default, when neither `requestTimeout` field is set:
+**five minutes**.
+
+- **Two mechanisms, one config value**: time to the first response header
+  (`Transport.ResponseHeaderTimeout`), and idle time WITHIN the response
+  body once headers arrive. The second is what catches a provider that
+  answers promptly and then stalls mid-stream or mid-JSON-body —
+  `ResponseHeaderTimeout` alone only bounds the wait for headers.
+- **Progress-based, not total-duration.** A streaming response resets the
+  idle timer on every chunk it forwards, so a long generation that keeps
+  producing tokens completes even if the whole exchange runs for 20
+  minutes — a total-duration cap was deliberately rejected for exactly
+  this reason. Non-streaming responses share the identical mechanism: a
+  large or slow-but-progressing body is unaffected; only a body that goes
+  quiet for the full timeout is aborted.
+- **What "progress" means, precisely.** The idle timer resets on bytes
+  read from the *decoded* body — after `net/http`'s own transparent gzip
+  decompression, when the upstream used it. A gzip'd response whose
+  compressed bytes keep arriving on the wire but whose deflate stream
+  yields no decompressed output for the whole timeout window is still
+  aborted: this gateway has no visibility into wire-level progress
+  without a transport or connection wrapper, which is disproportionate at
+  the five-minute default. In the same vein, a streaming forwarder reads
+  one chunk from the upstream, writes it to the client, then reads again
+  — the write is not itself watched, so time spent blocked writing to a
+  slow or stalled client counts against the SAME idle window as a silent
+  upstream. Aborting in that case is still the right call (holding an
+  upstream connection open indefinitely for a stalled client is its own
+  problem), but the failure is not always the provider's fault even
+  though the request is attributed to one for accounting purposes.
+- **Never retried.** A `ResponseHeaderTimeout` failure surfaces as a
+  `context.DeadlineExceeded`-shaped error, which [Retry](#retry)'s own
+  transient classification explicitly excludes. A mid-body watchdog
+  timeout happens after the retry mechanism has already returned its
+  response to the caller, so it is never in a position to be retried
+  either way. Not retrying a hang is the intended behavior — retrying a
+  provider that just proved it cannot make progress would only waste the
+  same amount of time again.
+- **Scope and override**: `requestTimeout` (top level) sets the global
+  default. A provider's own `requestTimeout` overrides it — an explicit
+  override always wins. Native passthrough for a provider uses that same
+  provider's resolved value, so a client hitting `/{provider}/...` gets
+  the identical bound as a request through `/v1/chat/completions`. The
+  MCP/A2A target proxy has no per-target override; it always uses the
+  global default.
+- **Config form and validation**: a Go duration string (`"5m"`, `"90s"`),
+  matching `retry.backoff`/`cache.ttl`'s own convention. Empty means the
+  default. A value that fails to parse, or parses to zero or a negative
+  duration, is a construction error — unlike `cache.ttl`, zero/negative is
+  never accepted here as "no timeout": that would silently reintroduce the
+  exact hang this feature fixes.
+- **Classification**: a timeout firing is always logged and reported to
+  the client as an upstream failure (`502`, `server_error`), naming
+  whichever provider or target the request was addressed to, and is never
+  classified as a client disconnect (`context.Canceled`) — the two stay
+  distinguishable in every log line. The log wording says "upstream
+  progress stalled", not "provider timed out": for the reason described
+  above (a slow client can trip the same watchdog a slow provider does),
+  the message reports what was observed without asserting which side
+  caused it.
+
+**Federated MCP (`POST /mcp`) is bounded differently, not left unbounded.**
+`mcp_federation.go`'s two direct upstream calls
+(`doBackendJSONRPC`/`mcpBackendCloseSession`) are not wrapped by the
+idle-progress watchdog described above — a federated backend that sends
+headers and then stalls mid-body is not caught by it. They are not
+unbounded either: both still run through `g.targetClient`, so
+`Transport.ResponseHeaderTimeout` (the global `requestTimeout`) still
+bounds the wait for headers, and each call additionally runs under its
+own fixed `context.WithTimeout` — 20s for `tools/list`, 120s for
+`tools/call`, 5s for the best-effort session-close DELETE. A worst-case
+stall there is bounded at whichever of those applies, not indefinite.
 
 ## Caching
 

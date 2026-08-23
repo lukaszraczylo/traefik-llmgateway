@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 )
 
 // maxPassthroughBytes caps a client passthrough request body: 32MiB,
@@ -862,7 +863,7 @@ func (g *Gateway) handlePassthrough(w http.ResponseWriter, r *http.Request, u *u
 		g.limiter.recordProviderAttempt(providerName, "", resp, attemptErr)
 	}))
 
-	result, ok := g.proxyUpstream(w, r, upstreamURL, adapter.httpClient(), adapter.injectAuth, providerCredentialRetargetHeaders, true, "passthrough (provider "+providerName+")")
+	result, ok := g.proxyUpstream(w, r, upstreamURL, adapter.httpClient(), adapter.injectAuth, providerCredentialRetargetHeaders, true, "passthrough (provider "+providerName+")", adapter.requestTimeout())
 	if !ok || !result.isJSON {
 		// A build/connection/copy failure already wrote its own response
 		// (or, for a canceled client context, wrote nothing at all — see
@@ -952,7 +953,16 @@ type proxyResult struct {
 // passes false, since target-proxy accounting never goes past the
 // request-count checkAndCount already ran before calling in, and teeing a
 // response nobody will ever read back would only cost memory for nothing.
-func (g *Gateway) proxyUpstream(w http.ResponseWriter, r *http.Request, upstreamURL string, client *http.Client, injectAuth func(*http.Request), extraStrip map[string]bool, accountJSON bool, logPrefix string) (result proxyResult, ok bool) {
+//
+// timeout (feature: request timeout) arms an idle-progress watchdog
+// (watchdogBody, timeout.go) around resp.Body: handlePassthrough passes
+// its adapter's own requestTimeout(), handleTargetProxy passes
+// g.targetTimeout (mcp_a2a.go) — both share the SAME defect this feature
+// fixes (client, above, built via newAdapterHTTPClient, previously had no
+// timeout at all), so both are covered the same way. The Transport-level
+// half (ResponseHeaderTimeout) is already set on client itself and needs
+// no separate wiring here.
+func (g *Gateway) proxyUpstream(w http.ResponseWriter, r *http.Request, upstreamURL string, client *http.Client, injectAuth func(*http.Request), extraStrip map[string]bool, accountJSON bool, logPrefix string, timeout time.Duration) (result proxyResult, ok bool) {
 	bodyReader := io.LimitReader(r.Body, maxPassthroughBytes)
 	// gosec G704 (SSRF via taint analysis) flags upstreamURL as
 	// request-derived: it is, by design — this is a reverse proxy, and its
@@ -971,8 +981,15 @@ func (g *Gateway) proxyUpstream(w http.ResponseWriter, r *http.Request, upstream
 	// a client cannot smuggle an encoded "/" (%2f) past this gateway's own
 	// routing only to have a permissive upstream reinterpret it as a real
 	// separator.
-	upstreamReq, err := http.NewRequestWithContext(r.Context(), r.Method, upstreamURL, bodyReader) //nolint:gosec // operator-fixed host, rest is traversal-checked and forwarded escaped; see comment above
+	// reqCtx/cancel bound the response body to timeout via watchdogBody
+	// (timeout.go), the same idle-progress mechanism upstreamBytes
+	// (providers.go) applies to every provider-adapter call — cancel is
+	// released either by watchdogBody (once resp.Body exists) or directly
+	// below, on a build/send failure that never produced a body to wrap.
+	reqCtx, cancel := context.WithCancel(r.Context())
+	upstreamReq, err := http.NewRequestWithContext(reqCtx, r.Method, upstreamURL, bodyReader) //nolint:gosec // operator-fixed host, rest is traversal-checked and forwarded escaped; see comment above
 	if err != nil {
+		cancel()
 		g.errorf("%s: build upstream request: %v", logPrefix, err)
 		writeOAIError(w, http.StatusBadGateway, "server_error", "upstream connection error")
 		return proxyResult{}, false
@@ -997,11 +1014,17 @@ func (g *Gateway) proxyUpstream(w http.ResponseWriter, r *http.Request, upstream
 	// carries a recorder (attemptRecorderFromContext, providers.go) —
 	// handleTargetProxy (mcp_a2a.go), this function's other caller, never
 	// wraps r's context this way, so an MCP/A2A target proxy attempt is
-	// correctly never accounted as provider traffic.
-	if rec := attemptRecorderFromContext(r.Context()); rec != nil {
+	// correctly never accounted as provider traffic. rec is kept in scope
+	// (not just checked inline) so the watchdogBody below can reuse it
+	// too — a mid-body stall must reach the SAME provider-health
+	// accounting a build/send failure already does (coordinator
+	// adversarial review, 2026-08-23, finding F4).
+	rec := attemptRecorderFromContext(r.Context())
+	if rec != nil {
 		rec(resp, err)
 	}
 	if err != nil {
+		cancel()
 		if errors.Is(err, context.Canceled) {
 			g.logf("%s: client canceled request: %v", logPrefix, err)
 			return proxyResult{}, false
@@ -1010,6 +1033,11 @@ func (g *Gateway) proxyUpstream(w http.ResponseWriter, r *http.Request, upstream
 		writeOAIError(w, http.StatusBadGateway, "server_error", "upstream connection error")
 		return proxyResult{}, false
 	}
+	// logPrefix, not a hardcoded "provider %q": handleTargetProxy's own
+	// calls here (mcp_a2a.go) pass "mcp target (name ...)"/"a2a target
+	// (name ...)" — an MCP/A2A target is not a provider, and the watchdog
+	// error text must not claim it is (finding F9).
+	resp.Body = newWatchdogBody(resp.Body, cancel, timeout, logPrefix, rec)
 	defer resp.Body.Close() //nolint:errcheck // read-side close; nothing actionable on failure
 
 	copyHeadersExcept(w.Header(), resp.Header, hopByHopHeaders, dangerousResponseHeaders)
@@ -1031,6 +1059,17 @@ func (g *Gateway) proxyUpstream(w http.ResponseWriter, r *http.Request, upstream
 	}
 
 	if _, err := io.Copy(fw, reader); err != nil {
+		// errors.Is(err, context.Canceled) here means the CLIENT went away
+		// mid-copy — reader wraps resp.Body, which is now a watchdogBody
+		// (above): its own Read never lets a timeout error wrap
+		// context.Canceled (watchdogBody's own doc comment, timeout.go),
+		// so this check still correctly separates a genuine client
+		// disconnect from this gateway's own idle-progress watchdog firing
+		// — the latter falls through to the errorf below, unchanged.
+		if errors.Is(err, context.Canceled) {
+			g.logf("%s: client canceled request: %v", logPrefix, err)
+			return proxyResult{isJSON: isJSON, tee: tee}, false
+		}
 		g.errorf("%s: stream response body: %v", logPrefix, err)
 		return proxyResult{isJSON: isJSON, tee: tee}, false
 	}

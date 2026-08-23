@@ -29,6 +29,12 @@ type anthropicAdapter struct {
 	adapterName string
 	baseURL     string
 	apiKey      string
+	// timeout is this adapter's resolved per-request timeout —
+	// resolveProviderTimeout, timeout.go; see openaiAdapter.timeout's own
+	// doc comment (provider_openai.go) for why this is set to
+	// defaultRequestTimeout at construction rather than left at its zero
+	// value the way retry is.
+	timeout time.Duration
 }
 
 // newAnthropicAdapter returns an anthropicAdapter for provider name, with
@@ -45,7 +51,8 @@ func newAnthropicAdapter(name, base, apiKey string) (*anthropicAdapter, error) {
 		adapterName: name,
 		baseURL:     base,
 		apiKey:      apiKey,
-		client:      newAdapterHTTPClient(),
+		client:      newAdapterHTTPClient(defaultRequestTimeout),
+		timeout:     defaultRequestTimeout,
 	}, nil
 }
 
@@ -60,6 +67,9 @@ func (a *anthropicAdapter) base() string { return a.baseURL }
 
 // httpClient implements providerAdapter.
 func (a *anthropicAdapter) httpClient() *http.Client { return a.client }
+
+// requestTimeout implements providerAdapter.
+func (a *anthropicAdapter) requestTimeout() time.Duration { return a.timeout }
 
 // injectAuth implements providerAdapter: Anthropic's x-api-key scheme,
 // plus the anthropic-version header every request must carry. Unlike
@@ -112,7 +122,7 @@ func (a *anthropicAdapter) chatCompletion(ctx context.Context, w http.ResponseWr
 		hdr.Set("Accept", "text/event-stream")
 	}
 
-	resp, err := upstreamJSON(ctx, a.client, http.MethodPost, a.baseURL+anthropicMessagesPath, hdr, body, a.retry)
+	resp, err := upstreamJSON(ctx, a.client, http.MethodPost, a.baseURL+anthropicMessagesPath, hdr, body, a.retry, a.timeout, a.adapterName)
 	if err != nil {
 		return usage{}, err
 	}
@@ -226,7 +236,7 @@ func (a *anthropicAdapter) audioTranscription(_ context.Context, _ http.Response
 // falls back to a provider's explicitly configured models on error rather
 // than this adapter guessing at a fallback itself.
 func (a *anthropicAdapter) listModels(ctx context.Context) ([]string, error) {
-	resp, err := upstreamJSON(ctx, a.client, http.MethodGet, a.baseURL+anthropicModelsPath, a.requestHeaders(false), nil, a.retry)
+	resp, err := upstreamJSON(ctx, a.client, http.MethodGet, a.baseURL+anthropicModelsPath, a.requestHeaders(false), nil, a.retry, a.timeout, a.adapterName)
 	if err != nil {
 		return nil, err
 	}
