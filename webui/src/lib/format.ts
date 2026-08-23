@@ -147,6 +147,21 @@ export function formatModelCostHover(inputUsd: number, outputUsd: number): strin
   return `in ${formatUsdPerMTok(inputUsd)} / out ${formatUsdPerMTok(outputUsd)} per MTok`
 }
 
+/**
+ * formatLatencyMs renders a millisecond average (admin.go's
+ * adminLatencyView.avgTtfbMs/avgDurationMs — feat: latency panel) as a
+ * compact duration: plain milliseconds below 1000 ("120ms"), one-decimal
+ * seconds at or above it ("1.2s"). These values are already averages
+ * (sum/count from the in-process latency accumulator), so rounding here
+ * carries none of formatCompactCount's boundary-crossing honesty concern
+ * above — there is no discrete threshold a caller could misread as
+ * crossed, just a plain rounded reading.
+ */
+export function formatLatencyMs(ms: number): string {
+  if (ms < 1000) return `${Math.round(ms)}ms`
+  return `${(ms / 1000).toFixed(1)}s`
+}
+
 /** formatAgo renders an ISO timestamp as "(Ns ago)", or "" for the unset zero-time sentinel. */
 export function formatAgo(iso: string | undefined): string {
   if (!iso || iso === ZERO_TIME) return ''
