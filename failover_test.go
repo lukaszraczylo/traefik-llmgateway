@@ -767,6 +767,54 @@ func TestHandleChat_Failover_FallsThroughAndServes(t *testing.T) {
 	}
 }
 
+// TestHandleChat_Failover_404LogLine_NeverRateLimited is the direct
+// regression test for adversarial-review round 2, finding 5: nothing
+// pinned the ruling that the 404 loud-log line is exempt from
+// failoverLogGate — every OTHER test only ever drives one 404 event
+// against a freshly constructed Gateway, whose gate's first call always
+// logs regardless of whether it is rate-limited, so a version that
+// wrapped the 404 line in failoverLogGate.shouldLog would still pass
+// every one of them. Three providers here all serve the SAME bare model
+// id and the first TWO both 404, so this drives two 404-failover events
+// through the SAME Gateway (and so the SAME failoverLogGate instance)
+// within milliseconds of each other — well inside the gate's own 30s
+// window — and asserts BOTH loud lines appear.
+func TestHandleChat_Failover_404LogLine_NeverRateLimited(t *testing.T) {
+	alphaSrv := jsonServer(http.StatusNotFound, `{"error":{"message":"not found","type":"invalid_request_error"}}`)
+	defer alphaSrv.Close()
+	betaSrv := jsonServer(http.StatusNotFound, `{"error":{"message":"not found","type":"invalid_request_error"}}`)
+	defer betaSrv.Close()
+	gammaSrv := jsonServer(http.StatusOK, successRespBody)
+	defer gammaSrv.Close()
+
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{
+		"alpha": {Type: "openai", BaseURL: alphaSrv.URL, APIKey: "k", Models: []string{"shared"}},
+		"beta":  {Type: "openai", BaseURL: betaSrv.URL, APIKey: "k", Models: []string{"shared"}},
+		"gamma": {Type: "openai", BaseURL: gammaSrv.URL, APIKey: "k", Models: []string{"shared"}},
+	}
+	cfg.Groups = map[string]*GroupConfig{"default": {}}
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{{Name: "alice", Group: "default", APIKey: "sk-alice", Limits: &LimitsConfig{}}}}
+	yes := true
+	cfg.Failover = FailoverConfig{Enabled: &yes}
+	next := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	require.NoError(t, err)
+
+	origStderr := captureStderrStart()
+	body := map[string]any{"model": "shared", "messages": []any{map[string]any{"role": "user", "content": "hi"}}}
+	req := newUnifiedRequest(t, http.MethodPost, "/v1/chat/completions", "sk-alice", body)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	logOutput := captureStderrStop(origStderr)
+
+	require.Equal(t, http.StatusOK, rec.Code, "body=%s", rec.Body.String())
+	alphaLine := `provider "alpha" returned 404`
+	betaLine := `provider "beta" returned 404`
+	assert.Contains(t, logOutput, alphaLine, "alpha's own 404 must log, unsuppressed")
+	assert.Contains(t, logOutput, betaLine, "beta's own 404 must ALSO log, not suppressed by the generic failing-over rate limit even though it fired milliseconds after alpha's")
+}
+
 // TestHandleChat_Failover_400_DoesNotFallThrough is the regression test
 // for the brief's one hard exception: a malformed request must never
 // retry against a second provider. Would FAIL if failoverEligible treated
@@ -1376,6 +1424,82 @@ func TestHandleChat_Failover_F2_StaleSSEHeadersDoNotSurviveToPlainResponse(t *te
 	assert.Empty(t, rec.Header().Get("X-Accel-Buffering"), "alpha's staged SSE header must never survive into beta's plain JSON response")
 }
 
+// TestHandleChat_Failover_DefaultPath_PreservesPreexistingResponseHeaders is
+// the direct regression test for adversarial-review round 2's MUST-FIX
+// finding: the round-1 F2 header clear ran unconditionally, including on
+// i == 0 — the ONLY iteration the default, failover-disabled path ever
+// reaches — deleting response headers a DIFFERENT, earlier Traefik
+// middleware had already staged on the shared ResponseWriter before this
+// plugin ever ran (CORS, HSTS, request-id, ...), contradicting this
+// package's own "byte-identical to a gateway built before this field
+// existed" claim. Covers both a cache miss (the real upstream call path)
+// and a cache hit (the round-1 harness found headers survived a hit but
+// were dropped on a miss on the SAME endpoint for the SAME client).
+func TestHandleChat_Failover_DefaultPath_PreservesPreexistingResponseHeaders(t *testing.T) {
+	t.Run("cache miss", func(t *testing.T) {
+		srv := jsonServer(http.StatusOK, successRespBody)
+		defer srv.Close()
+		cfg := CreateConfig()
+		cfg.Providers = map[string]*ProviderConfig{
+			"openai": {Type: "openai", BaseURL: srv.URL, APIKey: "k", Models: []string{"gpt-test"}},
+		}
+		cfg.Groups = map[string]*GroupConfig{"default": {}}
+		cfg.Users = &UsersConfig{Inline: []*UserConfig{{Name: "alice", Group: "default", APIKey: "sk-alice", Limits: &LimitsConfig{}}}}
+		next := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})
+		h, err := New(context.Background(), next, cfg, "llmgw")
+		require.NoError(t, err)
+
+		body := map[string]any{"model": "gpt-test", "messages": []any{map[string]any{"role": "user", "content": "hi"}}}
+		req := newUnifiedRequest(t, http.MethodPost, "/v1/chat/completions", "sk-alice", body)
+		rec := httptest.NewRecorder()
+		// Simulates an EARLIER Traefik middleware in the chain (CORS,
+		// HSTS, request-id, ...) that already staged headers on the
+		// SAME underlying ResponseWriter before this plugin ever ran.
+		rec.Header().Set("Access-Control-Allow-Origin", "*")
+		rec.Header().Set("X-Preexisting-Mw", "keepme")
+		h.ServeHTTP(rec, req)
+
+		require.Equal(t, http.StatusOK, rec.Code, "body=%s", rec.Body.String())
+		assert.Equal(t, "*", rec.Header().Get("Access-Control-Allow-Origin"), "a header staged by an earlier middleware must survive the default (single-candidate) path")
+		assert.Equal(t, "keepme", rec.Header().Get("X-Preexisting-Mw"))
+	})
+
+	t.Run("cache hit", func(t *testing.T) {
+		srv := jsonServer(http.StatusOK, successRespBody)
+		defer srv.Close()
+		redisLn := newBehavioralRedisServer(t)
+		cfg := CreateConfig()
+		cfg.Providers = map[string]*ProviderConfig{
+			"openai": {Type: "openai", BaseURL: srv.URL, APIKey: "k", Models: []string{"gpt-test"}},
+		}
+		cfg.Groups = map[string]*GroupConfig{"default": {}}
+		cfg.Users = &UsersConfig{Inline: []*UserConfig{{Name: "alice", Group: "default", APIKey: "sk-alice", Limits: &LimitsConfig{}}}}
+		cfg.Redis = &RedisConfig{Address: redisLn.Addr().String()}
+		cfg.Cache = CacheConfig{Enabled: true, TTL: "1m", MaxBodyBytes: 1 << 20}
+		next := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})
+		h, err := New(context.Background(), next, cfg, "llmgw")
+		require.NoError(t, err)
+
+		body := map[string]any{"model": "gpt-test", "messages": []any{map[string]any{"role": "user", "content": "hi"}}}
+		req1 := newUnifiedRequest(t, http.MethodPost, "/v1/chat/completions", "sk-alice", body)
+		rec1 := httptest.NewRecorder()
+		h.ServeHTTP(rec1, req1)
+		require.Equal(t, http.StatusOK, rec1.Code)
+		require.Equal(t, "miss", rec1.Header().Get("X-Llmgw-Cache"))
+
+		req2 := newUnifiedRequest(t, http.MethodPost, "/v1/chat/completions", "sk-alice", body)
+		rec2 := httptest.NewRecorder()
+		rec2.Header().Set("Access-Control-Allow-Origin", "*")
+		rec2.Header().Set("X-Preexisting-Mw", "keepme")
+		h.ServeHTTP(rec2, req2)
+
+		require.Equal(t, http.StatusOK, rec2.Code)
+		require.Equal(t, "hit", rec2.Header().Get("X-Llmgw-Cache"))
+		assert.Equal(t, "*", rec2.Header().Get("Access-Control-Allow-Origin"), "a header staged by an earlier middleware must survive a cache hit too")
+		assert.Equal(t, "keepme", rec2.Header().Get("X-Preexisting-Mw"))
+	})
+}
+
 // TestHandleChat_Failover_F3_401IsAFailure_OpensRequestHealthBreaker is the
 // direct regression test for adversarial-review finding F3: a provider
 // answering 401 to every request (a dead API key — exactly the "masking
@@ -1504,6 +1628,16 @@ func TestHandleChat_Failover_F6_RetryAttemptsDoNotOpenBreakerOnOneRequest(t *tes
 // hit again on that second request — proving cache lookups run for
 // every candidate BEFORE any of them is attempted, not interleaved with
 // each candidate's own turn.
+// TestHandleChat_Failover_F7_CachedFailoverResponse_NeverHitsDeadPrimary is
+// the regression test for the ORIGINAL F7 complaint, fixed the way the
+// coordinator ruled it must be (adversarial-review round 2): health, not
+// an all-candidates cache pre-pass, is what keeps a genuinely dead
+// primary from being hit again. alpha fails enough consecutive REAL
+// requests to trip its own request-health breaker (requestHealthTracker,
+// failover.go) — each one also falling over to beta, whose successful
+// response gets cached after the very first request — and only THEN,
+// once alpha is excluded from the candidate list entirely, does a
+// further request reach beta's cache without alpha being dialed again.
 func TestHandleChat_Failover_F7_CachedFailoverResponse_NeverHitsDeadPrimary(t *testing.T) {
 	var alphaCalls, betaCalls int64
 	alphaSrv := countingServer(http.StatusInternalServerError, `{"error":{"message":"down","type":"server_error"}}`, &alphaCalls)
@@ -1521,21 +1655,81 @@ func TestHandleChat_Failover_F7_CachedFailoverResponse_NeverHitsDeadPrimary(t *t
 	require.NoError(t, err)
 
 	reqBody := map[string]any{"model": "shared", "messages": []any{map[string]any{"role": "user", "content": "hi"}}}
-	req1 := newUnifiedRequest(t, http.MethodPost, "/v1/chat/completions", "sk-alice", reqBody)
-	rec1 := httptest.NewRecorder()
-	h.ServeHTTP(rec1, req1)
-	require.Equal(t, http.StatusOK, rec1.Code)
-	require.Equal(t, int64(1), atomic.LoadInt64(&alphaCalls))
-	require.Equal(t, int64(1), atomic.LoadInt64(&betaCalls))
 
-	req2 := newUnifiedRequest(t, http.MethodPost, "/v1/chat/completions", "sk-alice", reqBody)
-	rec2 := httptest.NewRecorder()
-	h.ServeHTTP(rec2, req2)
+	// Drive enough requests to trip alpha's OWN request-health breaker.
+	// beta's response is cached after the first of these, so alphaCalls
+	// keeps climbing (alpha itself is still healthy enough to be tried
+	// every time) while betaCalls stops climbing once its cache entry
+	// exists.
+	for i := 0; i < requestBreakerFailureThreshold; i++ {
+		req := newUnifiedRequest(t, http.MethodPost, "/v1/chat/completions", "sk-alice", reqBody)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		require.Equal(t, http.StatusOK, rec.Code)
+	}
+	require.Equal(t, int64(requestBreakerFailureThreshold), atomic.LoadInt64(&alphaCalls))
+	require.Equal(t, int64(1), atomic.LoadInt64(&betaCalls), "beta's own cache entry must absorb every request after the first")
 
-	assert.Equal(t, http.StatusOK, rec2.Code)
-	assert.Equal(t, "hit", rec2.Header().Get("X-Llmgw-Cache"))
-	assert.Equal(t, int64(1), atomic.LoadInt64(&alphaCalls), "alpha's dead backend must NOT be hit again just to discover beta's cache entry")
+	// One more request: alpha is now request-unhealthy and must be
+	// excluded from the candidate list entirely — it must not be dialed
+	// a further time just to discover beta's cache entry.
+	req := newUnifiedRequest(t, http.MethodPost, "/v1/chat/completions", "sk-alice", reqBody)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "hit", rec.Header().Get("X-Llmgw-Cache"))
+	assert.Equal(t, int64(requestBreakerFailureThreshold), atomic.LoadInt64(&alphaCalls), "alpha must not be dialed again once it is request-unhealthy")
 	assert.Equal(t, int64(1), atomic.LoadInt64(&betaCalls))
+}
+
+// TestHandleChat_Failover_HealthyPrimaryNeverServedFromAnotherCandidatesCache
+// is the direct regression test for adversarial-review round 2, finding
+// 2: the round-1 F7 pre-pass checked every candidate's cache before
+// attempting any of them, which silently substituted a DIFFERENT
+// candidate's cached response while the actual primary was perfectly
+// healthy — proven: alpha healthy and serving a distinct body, never
+// called, the client instead got beta's stale cached body with
+// X-Llmgw-Cache: hit and no "failing over" log line at all. beta's cache
+// entry here is planted directly (simulating a real entry left over
+// from an EARLIER, unrelated failover event, now stale) while alpha has
+// never failed — a fresh request must reach alpha for real.
+func TestHandleChat_Failover_HealthyPrimaryNeverServedFromAnotherCandidatesCache(t *testing.T) {
+	const alphaRespBody = `{"id":"chatcmpl-alpha","object":"chat.completion","model":"shared","choices":[{"index":0,"message":{"role":"assistant","content":"from alpha"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`
+
+	var alphaCalls, betaCalls int64
+	alphaSrv := countingServer(http.StatusOK, alphaRespBody, &alphaCalls)
+	defer alphaSrv.Close()
+	betaSrv := countingServer(http.StatusOK, successRespBody, &betaCalls)
+	defer betaSrv.Close()
+
+	redisLn := newBehavioralRedisServer(t)
+	cfg := twoProviderFailoverConfig(alphaSrv, betaSrv)
+	cfg.Redis = &RedisConfig{Address: redisLn.Addr().String()}
+	cfg.Cache = CacheConfig{Enabled: true, TTL: "1m", MaxBodyBytes: 1 << 20}
+
+	next := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	require.NoError(t, err)
+	gw, ok := h.(*Gateway)
+	require.True(t, ok)
+
+	reqBody := map[string]any{"model": "shared", "messages": []any{map[string]any{"role": "user", "content": "hi"}}}
+	hashed := map[string]any{"model": "shared", "messages": reqBody["messages"]}
+	betaKey := cacheKey("beta", "shared", "shared", cacheEndpointChat, hashed)
+	gw.cache.store(betaKey, http.StatusOK, "application/json", []byte(successRespBody), time.Minute)
+
+	origStderr := captureStderrStart()
+	req := newUnifiedRequest(t, http.MethodPost, "/v1/chat/completions", "sk-alice", reqBody)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	logOutput := captureStderrStop(origStderr)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, alphaRespBody, rec.Body.String(), "a healthy primary's OWN real response must be served, never another candidate's unrelated cache entry")
+	assert.Equal(t, int64(1), atomic.LoadInt64(&alphaCalls), "alpha must actually be dialed")
+	assert.Equal(t, int64(0), atomic.LoadInt64(&betaCalls))
+	assert.NotContains(t, logOutput, "failing over", "no failover happened, so no failover log line may appear")
 }
 
 // TestHandleChat_Failover_SingleProvider_UpstreamError_BehavesExactlyAsBefore
@@ -1610,6 +1804,48 @@ func TestHandleChat_Failover_DefaultConfig_ByteIdenticalToPreFailover(t *testing
 	assert.Equal(t, int64(0), atomic.LoadInt64(&betaCalls), "beta must never be called when failover was never opted into")
 }
 
+// TestHandleChat_Failover_DisabledPath_NeverTouchesRequestHealthTracker is
+// the direct regression test for adversarial-review round 2, finding 3:
+// on the disabled path (single candidate, the common case for most
+// deployments) g.failoverHealth.record was still called unconditionally,
+// taking requestHealthTracker's tracker-wide mutex (stateFor's t.mu) on
+// EVERY metered request even though that state is never READ on this
+// path at all (orderedFailoverCandidates' own early return never calls
+// healthy() when disabled) — dead work plus a new global contention
+// point. Proven the only way observable from outside the package: the
+// tracker's internal per-provider state must never even be CREATED for
+// a provider whose every request goes through the disabled path,
+// including one that fails.
+func TestHandleChat_Failover_DisabledPath_NeverTouchesRequestHealthTracker(t *testing.T) {
+	srv := jsonServer(http.StatusInternalServerError, `{"error":{"message":"down","type":"server_error"}}`)
+	defer srv.Close()
+
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{
+		"openai": {Type: "openai", BaseURL: srv.URL, APIKey: "k", Models: []string{"gpt-test"}},
+	}
+	cfg.Groups = map[string]*GroupConfig{"default": {}}
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{{Name: "alice", Group: "default", APIKey: "sk-alice", Limits: &LimitsConfig{}}}}
+	// cfg.Failover left at its zero value: disabled, the common case.
+
+	next := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	require.NoError(t, err)
+	gw, ok := h.(*Gateway)
+	require.True(t, ok)
+
+	body := map[string]any{"model": "gpt-test", "messages": []any{}}
+	req := newUnifiedRequest(t, http.MethodPost, "/v1/chat/completions", "sk-alice", body)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusInternalServerError, rec.Code)
+
+	gw.failoverHealth.mu.Lock()
+	stateCount := len(gw.failoverHealth.states)
+	gw.failoverHealth.mu.Unlock()
+	assert.Equal(t, 0, stateCount, "the disabled path must never record into requestHealthTracker at all, even for a failing provider")
+}
+
 // TestHandleChat_Failover_ExplicitlyDisabled_5xxNeverFallsThrough proves
 // the on/off switch actually gates the behavior end to end.
 func TestHandleChat_Failover_ExplicitlyDisabled_5xxNeverFallsThrough(t *testing.T) {
@@ -1660,6 +1896,12 @@ func TestHandleChat_Failover_ContextDeadlineExceeded_RecordsRequestHealthFailure
 	}
 	cfg.Groups = map[string]*GroupConfig{"default": {}}
 	cfg.Users = &UsersConfig{Inline: []*UserConfig{{Name: "alice", Group: "default", APIKey: "sk-alice", Limits: &LimitsConfig{}}}}
+	// Explicitly opt in: request-health is only ever recorded while
+	// failover is enabled (adversarial-review round 2, finding 3 — it
+	// is never READ on the disabled path, so recording it there was
+	// dead work and a needless global-mutex hit on every request).
+	yes := true
+	cfg.Failover = FailoverConfig{Enabled: &yes}
 	next := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})
 	h, err := New(context.Background(), next, cfg, "llmgw")
 	require.NoError(t, err)

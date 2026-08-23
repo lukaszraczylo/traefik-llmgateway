@@ -899,6 +899,18 @@ never a second candidate to try.
   known-zero price, are treated as equal and allowed. There is no config
   flag for this — it applies unconditionally whenever failover is
   enabled.
+- **The cost guard cannot see `modelMeta`'s `free: true`.** It resolves
+  pricing only through `pricing` and the built-in table — the same
+  source `unifiedCostMicros` actually bills against — deliberately never
+  through `modelMeta` (see [Model metadata](#model-metadata) /
+  `ModelMetaConfig`), since `modelMeta` drives GET `/v1/models` display
+  only and never affects billing. A model declared free the `modelMeta`
+  way is therefore treated as unknown-priced by the cost guard and loses
+  redundancy: it is skipped as a failover candidate whenever the primary
+  has a known price (fail-safe, and logged like any other cost skip).
+  Declare the price through `pricing` (e.g. `{"inputPerM": 0,
+  "outputPerM": 0}`) if you want a genuinely free model to remain
+  eligible as a cheaper failover candidate.
 - **Never mid-stream**: failover only happens while nothing has reached
   the client yet. Once the first byte of a response is written, status
   and body are committed and the request is never retried elsewhere.
@@ -920,9 +932,17 @@ never a second candidate to try.
   actually made it.
 - **Caching**: a cacheable response produced by a failover provider is
   stored under that provider's own cache key, never the first candidate's.
-  Every candidate's cache entry is checked before any of them is actually
-  attempted, so a cached response from a failover provider is served
-  without a wasted round trip to a still-broken primary.
+  Each candidate's own cache entry is checked immediately before that
+  candidate's own attempt, in try order — never for every candidate up
+  front. Checking every candidate's cache before any of them was
+  attempted was tried and reverted: it silently served a DIFFERENT
+  candidate's cached response even while the actual primary was
+  perfectly healthy, which is failover with no failure. The
+  request-path health signal above is what actually keeps a genuinely
+  dead primary from being dialed again — once it is marked unhealthy it
+  is excluded from the candidate list entirely, so a later request
+  reaches the next candidate's cache without the dead one ever being
+  attempted.
 - **Configurable**: `failover.maxAttempts` caps how many different
   providers one request will try in total, primary included (default 3,
   maximum 10) — distinct from `retry.attempts`, which retries the SAME

@@ -336,27 +336,6 @@ func (g *Gateway) runMeteredCall(sw *statusTrackingWriter, r *http.Request, scop
 		pristineReq["model"] = candidates[0].upstreamModel
 	}
 
-	// F7 fix (adversarial-review): check EVERY candidate's cache entry
-	// before attempting ANY of them, so a cached failover response never
-	// costs a real round trip to a dead primary just because normal
-	// ordering tries that primary first — the lookup used to sit inside
-	// each candidate's own turn, after every EARLIER candidate's real
-	// upstream call had already failed.
-	if cacheable {
-		for _, cand := range candidates {
-			key := cacheKey(cand.providerName, cand.upstreamModel, requestedModel, endpoint, pristineReq)
-			if cached, hit := g.cache.lookup(key); hit {
-				sw.Header().Set("X-Llmgw-Cache", "hit")
-				if cached.ContentType != "" {
-					sw.Header().Set("Content-Type", cached.ContentType)
-				}
-				sw.WriteHeader(cached.Status)
-				_, _ = sw.Write(cached.Body)
-				return
-			}
-		}
-	}
-
 	var lastErr error
 	var lastProviderName string
 	for i, cand := range candidates {
@@ -400,22 +379,29 @@ func (g *Gateway) runMeteredCall(sw *statusTrackingWriter, r *http.Request, scop
 				}
 				g.warnf("%s: failing over from provider %q to %q for model %q%s", logPrefix, candidates[i-1].providerName, cand.providerName, requestedModel, suffix)
 			}
-		}
 
-		// F2 fix (adversarial-review): clear every header a PRIOR
-		// candidate's own writer may have staged on sw.Header() without
-		// committing it — newSSEWriter (sse.go) sets Content-Type: text/
-		// event-stream, Cache-Control: no-cache, and X-Accel-Buffering:
-		// no the moment a streaming attempt starts, before any byte is
-		// written. If that candidate then fails before writing (still
-		// safe to fail over, THE HARD CONSTRAINT below), those staged
-		// headers must not survive into a plain-JSON response from the
-		// next candidate. Safe to clear unconditionally: this loop only
-		// ever reaches a new iteration while sw.wroteHeader is false, so
-		// nothing committed is ever at risk of being wiped.
-		hdr := sw.Header()
-		for k := range hdr {
-			hdr.Del(k)
+			// F2 fix, correctly scoped (adversarial-review round 2 — the
+			// round-1 version cleared unconditionally, including i == 0,
+			// which deleted response headers a DIFFERENT, earlier Traefik
+			// middleware had already staged before this plugin ever ran
+			// (CORS, HSTS, request-id, ...) on the default, non-failover
+			// path — proven by differential harness, and it contradicted
+			// this package's own "byte-identical to a gateway built
+			// before this field existed" claim. Only i > 0 needs this at
+			// all: newSSEWriter (sse.go) sets Content-Type: text/event-
+			// stream, Cache-Control: no-cache, and X-Accel-Buffering: no
+			// the moment a streaming attempt starts, before any byte is
+			// written, and if THAT PRIOR candidate then failed before
+			// writing (still safe to fail over, THE HARD CONSTRAINT
+			// below), those staged headers must not survive into a
+			// plain-JSON response from THIS candidate. Safe to clear
+			// unconditionally once i > 0: this loop only ever reaches a
+			// new iteration while sw.wroteHeader is false, so nothing
+			// committed is ever at risk of being wiped.
+			hdr := sw.Header()
+			for k := range hdr {
+				hdr.Del(k)
+			}
 		}
 
 		// attemptReq is a FRESH top-level copy of pristineReq for every
@@ -432,17 +418,40 @@ func (g *Gateway) runMeteredCall(sw *statusTrackingWriter, r *http.Request, scop
 		}
 		attemptReq[gatewayAliasKey] = requestedModel
 
-		// cacheKeyStr is still computed per candidate — cache
-		// correctness (brief): a response produced by a failover
-		// provider must be stored under THAT provider's own key, never
-		// the first candidate's. Computed from pristineReq (matching the
-		// pre-pass above exactly): gatewayAliasKey is a purely internal
-		// echo-back mechanism cacheKey does not itself strip (its own
-		// doc comment, cache.go), so hashing attemptReq instead would
-		// add noise no two requests would otherwise disagree on.
+		// Cache lookup for THIS candidate, immediately before its own
+		// attempt (adversarial-review round 2 ruling — supersedes the
+		// round-1 "check every candidate's cache up front" pre-pass,
+		// which silently substituted ANOTHER candidate's cached response
+		// while the actual primary was perfectly healthy: proven —
+		// alpha healthy and serving a distinct body, never called, the
+		// client instead got beta's cached body with no failure and no
+		// "failing over" log line, i.e. failover with no failure. Health
+		// (F3/F6, this file/failover.go) is the correct mechanism for
+		// "do not call a dead primary": once a genuinely broken
+		// candidate is marked request-unhealthy it is excluded from the
+		// candidate list entirely (orderedFailoverCandidates,
+		// failover.go), so the NEXT candidate's cache is still reached
+		// on a later request without ever dialing the dead one — the
+		// pre-pass solved that problem by accident, with the side
+		// effect of mis-serving healthy traffic from an unrelated
+		// candidate's cache. cacheKeyStr is computed from pristineReq,
+		// BEFORE gatewayAliasKey was injected above would have mattered
+		// — gatewayAliasKey is a purely internal echo-back mechanism
+		// cacheKey does not itself strip (its own doc comment,
+		// cache.go), so hashing attemptReq instead would add noise no
+		// two requests would otherwise disagree on.
 		var cacheKeyStr string
 		if cacheable {
 			cacheKeyStr = cacheKey(cand.providerName, cand.upstreamModel, requestedModel, endpoint, pristineReq)
+			if cached, hit := g.cache.lookup(cacheKeyStr); hit {
+				sw.Header().Set("X-Llmgw-Cache", "hit")
+				if cached.ContentType != "" {
+					sw.Header().Set("Content-Type", cached.ContentType)
+				}
+				sw.WriteHeader(cached.Status)
+				_, _ = sw.Write(cached.Body)
+				return
+			}
 			// Set before call() below writes anything — headers must
 			// precede the body a miss is about to produce (spec §2). A
 			// later iteration's own miss overwrites this harmlessly: it
@@ -494,8 +503,16 @@ func (g *Gateway) runMeteredCall(sw *statusTrackingWriter, r *http.Request, scop
 		// (everything except HTTP 400 is a failure) is reused directly,
 		// not limiter's narrower isTransient/isDeadlineExceeded one, so
 		// a provider answering 401/403/404 to every request is
-		// eventually routed around instead of retried forever.
-		g.failoverHealth.record(providerName, !failoverEligible(callErr))
+		// eventually routed around instead of retried forever. Guarded
+		// by g.failover.enabled (adversarial-review round 2, finding 3):
+		// this state is never READ on the disabled path
+		// (orderedFailoverCandidates' own early return never calls
+		// healthy()), so recording it there was dead work plus a new
+		// global-mutex contention point (requestHealthTracker.stateFor's
+		// own t.mu) on EVERY metered request, disabled or not.
+		if g.failover.enabled {
+			g.failoverHealth.record(providerName, !failoverEligible(callErr))
+		}
 
 		// Usage is accounted before the error branch below runs, not
 		// after: every adapter that can fail mid-stream (forwardStream
