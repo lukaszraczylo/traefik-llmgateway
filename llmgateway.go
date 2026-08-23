@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"runtime"
@@ -29,7 +30,13 @@ type Config struct {
 	// Admin.Enabled false means the /admin* routes are not registered at
 	// all — ServeHTTP falls through to its existing 404/passthroughUnknown
 	// handling for those paths, preserving v0.1 behavior exactly.
-	Admin      *AdminConfig             `json:"admin,omitempty"`
+	Admin *AdminConfig `json:"admin,omitempty"`
+	// Metrics gates the Prometheus text-exposition endpoint (default
+	// path /metrics, configurable — see MetricsConfig, metrics.go). nil
+	// or Metrics.Enabled false means the route is not registered at
+	// all, the identical nil-disables convention Admin above already
+	// uses.
+	Metrics    *MetricsConfig           `json:"metrics,omitempty"`
 	Pricing    map[string]*ModelPricing `json:"pricing,omitempty"`
 	MCPServers map[string]*TargetConfig `json:"mcpServers,omitempty"`
 	Agents     map[string]*AgentConfig  `json:"agents,omitempty"`
@@ -544,7 +551,12 @@ type Gateway struct {
 	// degrades to "failover never skips a candidate for request health"
 	// rather than a nil-pointer panic.
 	failoverHealth *requestHealthTracker
-	name           string
+	// metricsNets is Config.Metrics.AllowedCIDRs, parsed once at
+	// construction (parseMetricsCIDRs, metrics.go) so the request path
+	// never re-parses a CIDR string per scrape. nil when Metrics is
+	// unconfigured or carries no AllowedCIDRs entries.
+	metricsNets []*net.IPNet
+	name        string
 	// failoverLogGate rate-limits runMeteredCall's generic "failing over"
 	// log line (routes_unified.go) to once per storeErrorLogEvery
 	// (adversarial-review fix, F10) — reuses auth.go's own logGate type,
@@ -674,6 +686,16 @@ func newGateway(ctx context.Context, next http.Handler, config *Config, name str
 	}
 	g.failover = failoverCfg
 	g.failoverHealth = newRequestHealthTracker()
+
+	// A malformed Config.Metrics.AllowedCIDRs entry is a constructor
+	// error (validate-at-construction), not a silently-ignored allowlist
+	// entry an operator would only discover was never applied by testing
+	// it — parseMetricsCIDRs' own doc comment (metrics.go).
+	metricsNets, err := parseMetricsCIDRs(config.Metrics)
+	if err != nil {
+		return nil, err
+	}
+	g.metricsNets = metricsNets
 
 	// bodyAdmissionCap: an explicit MaxInFlightBodyRequests always wins
 	// over the self-tuned default (house rule: explicit override always
@@ -849,7 +871,14 @@ func attachUsersFile(auth *authStore, path string, log gatewayLogger) error {
 func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	sw := &statusTrackingWriter{ResponseWriter: w}
 	defer recoverPanic(sw, g)
-	g.auth.maybeReload()
+	// pruneRejectionsAfterReload only runs when maybeReload just performed
+	// a REAL reload (users_file.go's own doc comment explains why it must
+	// never run on every request) — a deleted file-sourced user must not
+	// keep exporting llmgateway_rate_limit_rejections_total forever
+	// (metrics.go).
+	if g.auth.maybeReload() {
+		g.pruneRejectionsAfterReload()
+	}
 	g.registry.maybeRefresh(r.Context())
 
 	if r.Method == http.MethodGet && r.URL.Path == "/v1/models" {
@@ -916,6 +945,14 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// path — no special-casing needed for the disabled case.
 	if adminEnabled(g.cfg) && r.Method == http.MethodGet && isAdminPath(r.URL.Path) {
 		g.handleAdmin(sw, r)
+		return
+	}
+
+	// Metrics route (metrics.go): matched only when metricsEnabled — a
+	// nil or disabled Config.Metrics means the configured path is not
+	// registered at all, mirroring the admin route's own gate above.
+	if metricsEnabled(g.cfg) && r.Method == http.MethodGet && r.URL.Path == metricsPath(g.cfg) {
+		g.handleMetrics(sw, r)
 		return
 	}
 

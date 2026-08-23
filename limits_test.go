@@ -2180,14 +2180,107 @@ func TestProviderUsage_EmptyScopes_ReturnsEmptyWithoutTouchingStore(t *testing.T
 
 // TestProviderUsage_StoreDown_ReturnsZeroCounters mirrors targetUsage's
 // own fail-closed contract: a store error with failOpen=false must report
-// every scope's counters as zero, not partial or stale values.
+// every scope's counters as zero, not partial or stale values, AND must
+// set storeDown (review fix, adversarial verification 2026-08-23): a
+// caller that cannot tell a real zero from a failed read would otherwise
+// fabricate a counter-reset spike in metrics.go's rendering.
 func TestProviderUsage_StoreDown_ReturnsZeroCounters(t *testing.T) {
 	l := newLimiter(alwaysErrStore{}, false)
 	got := l.providerUsage([]limitScope{{kind: kindProvider, id: "openai"}})
 	if len(got) != 1 {
 		t.Fatalf("len(got) = %d, want 1", len(got))
 	}
-	if got[0] != (providerCounters{}) {
-		t.Errorf("counters = %+v, want the zero value on a storeDown read", got[0])
+	if !got[0].storeDown {
+		t.Errorf("counters = %+v, want storeDown true on a failed-closed read", got[0])
+	}
+	if got[0] != (providerCounters{storeDown: true}) {
+		t.Errorf("counters = %+v, want every non-storeDown field at its zero value", got[0])
+	}
+}
+
+// --- rejectionCounter: bounding, rotation, pruning (review fixes, adversarial verification 2026-08-23) ---
+
+// TestRejectionCounter_BoundsMemoryViaRotation mirrors
+// TestAuthFailureTracker_BoundsMemoryViaRotation (auth_test.go) exactly:
+// filling current past rejectionCounterMapCap distinct scopes must
+// trigger an O(1) generation rotation, not unbounded growth — a
+// deployment that renames or churns users over a long process lifetime
+// must never grow this map (and the resulting Prometheus series count)
+// without bound.
+func TestRejectionCounter_BoundsMemoryViaRotation(t *testing.T) {
+	var c rejectionCounter
+	for i := 0; i < rejectionCounterMapCap+10; i++ {
+		c.increment("user", fmt.Sprintf("user-%d", i))
+	}
+
+	c.mu.Lock()
+	total := len(c.current) + len(c.previous)
+	currentLen := len(c.current)
+	c.mu.Unlock()
+	if total > 2*rejectionCounterMapCap {
+		t.Errorf("tracked entries = %d, want <= %d (2x cap)", total, 2*rejectionCounterMapCap)
+	}
+	if currentLen > rejectionCounterMapCap {
+		t.Errorf("current generation = %d entries, want <= %d", currentLen, rejectionCounterMapCap)
+	}
+}
+
+// TestRejectionCounter_Increment_AccumulatesPerScope proves the ordinary
+// path: repeated increments for the same (kind, id) accumulate in one
+// series rather than creating a new one each time.
+func TestRejectionCounter_Increment_AccumulatesPerScope(t *testing.T) {
+	var c rejectionCounter
+	c.increment("user", "alice")
+	c.increment("user", "alice")
+	c.increment("user", "bob")
+
+	snaps := c.snapshot()
+	got := map[rejectionScope]int64{}
+	for _, s := range snaps {
+		got[rejectionScope{kind: s.kind, id: s.id}] = s.count
+	}
+	if got[rejectionScope{kind: "user", id: "alice"}] != 2 {
+		t.Errorf("alice count = %d, want 2", got[rejectionScope{kind: "user", id: "alice"}])
+	}
+	if got[rejectionScope{kind: "user", id: "bob"}] != 1 {
+		t.Errorf("bob count = %d, want 1", got[rejectionScope{kind: "user", id: "bob"}])
+	}
+}
+
+// TestLimiter_PruneRejections_RemovesDeletedUserScope is the mutation-
+// proofing test for pruneRejections/pruneUserScopes: a user's rejection
+// series must disappear once that user is no longer in keep (the shape
+// a real file-sourced hot-reload produces, via Gateway.
+// pruneRejectionsAfterReload, metrics.go), while an unrelated user's
+// series, and every non-"user" scope kind (group, the synthetic total
+// and store_down entries), must survive untouched.
+func TestLimiter_PruneRejections_RemovesDeletedUserScope(t *testing.T) {
+	l := newLimiter(nil, true)
+	l.rejections.increment("user", "alice")
+	l.rejections.increment("user", "bob")
+	l.rejections.increment("group", "agroup")
+	l.rejections.increment(totalScopeKind, totalScopeID)
+	l.rejections.increment(rejectionScopeStoreDown, rejectionScopeStoreDown)
+
+	l.pruneRejections(map[string]bool{"bob": true}) // alice was removed from the users file; bob stays
+
+	byKey := map[rejectionScope]bool{}
+	for _, s := range l.rejectionSnapshot() {
+		byKey[rejectionScope{kind: s.kind, id: s.id}] = true
+	}
+	if byKey[rejectionScope{kind: "user", id: "alice"}] {
+		t.Error("alice's user-scope rejection entry survived pruning, want it removed")
+	}
+	if !byKey[rejectionScope{kind: "user", id: "bob"}] {
+		t.Error("bob's user-scope rejection entry was pruned, want it kept (bob is still a known user)")
+	}
+	if !byKey[rejectionScope{kind: "group", id: "agroup"}] {
+		t.Error("group-scope entry was pruned — pruning must only ever touch \"user\"-kind scopes")
+	}
+	if !byKey[rejectionScope{kind: totalScopeKind, id: totalScopeID}] {
+		t.Error("the synthetic total-scope entry was pruned — pruning must only ever touch \"user\"-kind scopes")
+	}
+	if !byKey[rejectionScope{kind: rejectionScopeStoreDown, id: rejectionScopeStoreDown}] {
+		t.Error("the synthetic store_down entry was pruned — pruning must only ever touch \"user\"-kind scopes")
 	}
 }

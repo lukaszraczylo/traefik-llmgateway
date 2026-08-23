@@ -28,3 +28,10 @@ testData:
       - name: tester
         group: default
         apiKey: test-user-key
+  # Prometheus text-exposition endpoint — see README.md#metrics. No
+  # allowedCIDRs here deliberately: this is the catalog-facing smoke-test
+  # config, and README.md#metrics has the full CIDR-sizing guidance
+  # (narrowest block only, never a whole RFC1918 range) that a
+  # copy-pasted example here would risk skipping past.
+  metrics:
+    enabled: true
