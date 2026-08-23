@@ -1406,9 +1406,26 @@ plugin's config.
   - `llmgateway_provider_healthy{provider}` — `1`/`0` gauge from the
     discovery circuit breaker (`healthState` in the admin API); see
     [Provider health](#provider-health-discovery-circuit-breaker).
+  - `llmgateway_limit_store_up` — `1`/`0` gauge for this replica's own
+    connection to the configured limit store (Redis); absent entirely
+    when no store is configured. Every store-backed family above simply
+    goes silent, scope by scope, for whatever it cannot currently read —
+    the honest choice for those families, but on its own that gives a
+    store outage no independent signal on this endpoint (with
+    `redis.failOpen: false` and a store flapping faster than its 5s fail
+    latch, every store-backed family can be absent scrape after scrape
+    with nothing else here saying why). This gauge is that signal.
   - `llmgateway_rate_limit_rejections_total{scope_kind,scope_id}` — how
     many requests a rate or budget limit actually refused, by scope. This
     one has no equivalent in the admin JSON API: nothing else tracks it.
+    It does **not** reset only on process restart: a scope's own count
+    also resets to `0` when that user is removed via a hot-reloaded users
+    file, and **every** tracked scope resets together, in one bulk cliff,
+    the instant more than 2000 distinct scopes have ever been seen in
+    this process's lifetime (a bounded-memory safeguard, not a graceful
+    per-scope decay). A value that unexpectedly drops is one of these
+    events, not a scrape anomaly — see the live `# HELP` line for the
+    exact current threshold.
 
 - **Aggregation across replicas — read this before wiring an alert**: with
   `redis` configured, **every replica reads the SAME shared counters**
@@ -1425,7 +1442,7 @@ plugin's config.
   identical families become genuinely **per-replica** instead — each
   replica counts only the traffic it personally handled — and `sum()`
   becomes the correct aggregation instead. This flips on that one config
-  bit; know which one you are running before wiring an alert. Two
+  bit; know which one you are running before wiring an alert. Three
   families do **not** follow this rule:
   - `llmgateway_rate_limit_rejections_total` lives only in each replica's
     own process memory, **never** in Redis, regardless of the `redis`
@@ -1437,24 +1454,41 @@ plugin's config.
     possible; if you must aggregate, `min()` surfaces "at least one
     replica sees this provider as unhealthy" — `sum()` is meaningless for
     a 0/1 gauge.
+  - `llmgateway_limit_store_up` reflects each replica's own, locally
+    -discovered connection health to the configured store — it cannot
+    itself be read from the store it describes, so it is inherently
+    per-replica too. Same guidance as `llmgateway_provider_healthy`:
+    prefer per-instance, `min()` if you must aggregate.
 
 - **Labels are escaped**: a label value that is user- or
   upstream-controlled (a user/group name, a model id) is escaped for
-  backslash, double quote, and newline, byte-for-byte — the exact rule
-  the text-exposition format requires. This matters more than it looks:
-  Prometheus reports an unparseable scrape as the **whole target being
-  down**, not as one bad line, so a single unescaped quote in a model id
-  would otherwise take the entire endpoint offline from Prometheus's point
-  of view, not just that one series.
+  backslash, double quote, and newline — the exact rule the
+  text-exposition format requires. This matters more than it looks: an
+  unescaped quote or newline breaks the exposition format's own lexical
+  structure (an unterminated quoted string), and Prometheus reports an
+  unparseable scrape as the **whole target being down**, not as one bad
+  line — so a single unescaped quote in a model id would otherwise take
+  the entire endpoint offline from Prometheus's point of view, not just
+  that one series. A raw, invalid UTF-8 byte is escaped too, as a
+  deterministic `\xHH` marker rather than passed through unchanged: an
+  invalid-UTF-8 label value is independently fatal to a real Prometheus
+  scrape (measured against `promparse.go`), so the escaping keeps every
+  distinct input distinguishable (no two different names collapse onto
+  one series) while guaranteeing the output stays valid UTF-8 either way.
 
 - **A store outage never fabricates a zero**: if the configured Redis is
-  unreachable and `redis.failOpen` is `false`, an affected scope's
-  request/token/cost/provider counters are **skipped entirely** for that
-  scrape rather than reported as `0` — a temporary gap in the series is
-  the honest signal; a fabricated `0` would read to Prometheus as a
-  counter reset followed by a phantom spike the instant the store
-  recovers. `llmgateway_provider_healthy` is unaffected either way — it
-  never reads from the store.
+  unreachable, an affected scope's request/token/cost/provider counters
+  are **skipped entirely** for that scrape rather than reported as `0` —
+  a temporary gap in the series is the honest signal; a fabricated `0`
+  would read to Prometheus as a counter reset followed by a phantom spike
+  the instant the store recovers. This holds regardless of
+  `redis.failOpen`: with `failOpen: false` (or unset) the request itself
+  is refused during the outage, and with `failOpen: true` (the default)
+  requests keep flowing against the in-process fallback, but `/metrics`
+  still treats the affected scopes as unreadable rather than presenting
+  the fallback's own, non-authoritative zero as real gateway-wide usage.
+  `llmgateway_provider_healthy` is unaffected either way — it never reads
+  from the store.
 
 ## MCP and A2A
 
@@ -1586,6 +1620,11 @@ plugin's config.
   envelope. A successful attempt logs the resolved user's name and the
   route. Neither line ever includes the presented API key — only the
   identity it resolved to, never the key material itself.
+- **`GET /metrics` (see [Metrics](#metrics)) exposes per-user and
+  per-group cost and usage data**, the identical sensitivity as the admin
+  dashboard's JSON API, so it is gated the same way: an admin bearer
+  token by default, with an optional, narrowly-scoped `allowedCIDRs`
+  bypass for a co-located scraper — never leave it reachable with neither.
 
 ## Anonymous usage reporting
 
@@ -1741,8 +1780,11 @@ struct — every field in that example round-trips through `New()`
 cleanly), a dummy backing `Deployment`/`Service` (Traefik requires a real
 router backend even though this middleware never actually reaches it —
 see [Quickstart](#quickstart)), an `IngressRoute` wiring it all to a
-host, and a Traefik Helm values snippet for loading the plugin and
-wiring provider keys in from Secrets via environment variables.
+host, a second, Host-free `IngressRoute` plus a `VMServiceScrape` for
+scraping [`/metrics`](#metrics) (a `ServiceMonitor` works the same way on
+a Prometheus-operator cluster — only the CRD kind differs), and a Traefik
+Helm values snippet for loading the plugin and wiring provider keys in
+from Secrets via environment variables.
 
 The short version:
 
@@ -1758,6 +1800,11 @@ The short version:
 - Point `redis.address` at your cluster's existing Redis/Valkey/Dragonfly
   rather than standing up a dedicated instance for this plugin — the
   distributed limiter is a client, not a datastore.
+- [`/metrics`](#metrics) is served by Traefik itself, not by any backend
+  Service, so scraping it needs its own Host-free route (see the example
+  manifest's own comment on this — a Host-restricted router alone 404s an
+  in-cluster scrape) and its own CIDR/admin-key auth — never point a
+  scraper at it without one or the other configured.
 
 ### Config hot-reload
 

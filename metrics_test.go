@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 // newMetricsTestConfig builds a Config with Metrics enabled at the default
@@ -386,7 +387,12 @@ func TestMetrics_OutputParsesAsValidExposition(t *testing.T) {
 	cfg.Metrics.ModelLabel = true
 	cfg.Providers["openai"].BaseURL = srv.URL
 	cfg.Users.Inline[0].Limits = &LimitsConfig{RequestsPerMinute: 1}
-	h, _ := newMetricsGatewayHandle(t, cfg)
+	h, gw := newMetricsGatewayHandle(t, cfg)
+	// A configured (if in-process) store, so llmgateway_limit_store_up
+	// (item 7) also has a sample to check structure against below —
+	// newMemoryStore behaves identically to the fallback it stands in
+	// for, so this changes nothing else about this test's traffic.
+	gw.limiter.store = newMemoryStore()
 
 	body := map[string]any{"model": "gpt-test", "messages": []any{map[string]any{"role": "user", "content": "hi"}}}
 	// First request: admitted, and succeeds against the local httptest
@@ -462,6 +468,7 @@ func TestMetrics_OutputParsesAsValidExposition(t *testing.T) {
 		"llmgateway_provider_model_attempts_total",
 		"llmgateway_provider_model_failures_total",
 		"llmgateway_rate_limit_rejections_total",
+		"llmgateway_limit_store_up",
 	}
 	for _, name := range wantFamilies {
 		if _, ok := types[name]; !ok {
@@ -487,12 +494,20 @@ func TestEscapeLabelValue(t *testing.T) {
 		{"backslash_then_quote", `\"`, `\\\"`},
 		{"all_three", "a\"b\\c\nd", `a\"b\\c\nd`},
 		// Invalid UTF-8 bytes (0x80/0x81 are bare continuation bytes,
-		// never valid as the START of any UTF-8 sequence) must pass
-		// through UNCHANGED, byte-for-byte — see
-		// TestEscapeLabelValue_InvalidUTF8_Injective below for why this
-		// matters beyond just "does not crash".
-		{"invalid_utf8_lone_0x80", "u\x80", "u\x80"},
-		{"invalid_utf8_lone_0x81", "u\x81", "u\x81"},
+		// never valid as the START of any UTF-8 sequence) must become a
+		// deterministic, recoverable \xHH marker — see
+		// TestEscapeLabelValue_InvalidUTF8_InjectiveAndValidUTF8 below for
+		// why this is the only choice satisfying both required
+		// properties (injective, and always valid UTF-8 out).
+		{"invalid_utf8_lone_0x80", "u\x80", `u\x80`},
+		{"invalid_utf8_lone_0x81", "u\x81", `u\x81`},
+		// A literal, user-typed "\x80" (five ordinary ASCII characters,
+		// not a raw invalid byte) must render distinguishably from the
+		// marker above: its own backslash gets doubled like any other,
+		// producing \\x80 (six characters) rather than colliding with
+		// the four-character \x80 marker an actual invalid byte 0x80
+		// produces.
+		{"literal_backslash_x80_text", `\x80`, `\\x80`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -504,27 +519,71 @@ func TestEscapeLabelValue(t *testing.T) {
 	}
 }
 
-// TestEscapeLabelValue_InvalidUTF8_Injective is the mutation-proofing
-// test for the byte-oriented rewrite (review fix, adversarial
-// verification 2026-08-23): a rune-oriented `for _, r := range s`
-// implementation decodes invalid UTF-8 to U+FFFD, which makes escaping
-// NOT injective — "u\x80" and "u\x81" are two distinct, real inputs
-// (auth.go's buildEntry validates a user name as non-empty only, never
-// restricted to valid UTF-8) that would both render as "u�" under
-// that approach, colliding two distinct scope_id label values onto one
-// series — confirmed against a real Prometheus scrape parser: a
-// duplicate series, and the whole scrape target reported DOWN. The
-// byte-oriented implementation must keep every input byte-for-byte
-// distinguishable.
-func TestEscapeLabelValue_InvalidUTF8_Injective(t *testing.T) {
+// TestEscapeLabelValue_InvalidUTF8_InjectiveAndValidUTF8 is the
+// mutation-proofing test for the two-round rewrite (review fixes,
+// adversarial verification 2026-08-23, round 2 correcting round 1):
+//
+//   - Round 1 fixed a rune-oriented `for _, r := range s` implementation,
+//     which decodes invalid UTF-8 to U+FFFD and is therefore NOT
+//     injective: "u\x80" and "u\x81" both render as "u�", colliding two
+//     distinct scope_id values onto one series (a duplicate series).
+//   - Round 1's own fix (copying an invalid byte through raw) achieved
+//     injectivity but broke the OTHER required property: the OUTPUT is
+//     then itself invalid UTF-8. Measured against prometheus/prometheus's
+//     real scrape parser (promparse.go) this round: that is FATAL — the
+//     scrape errors out entirely (target reported DOWN), which is worse
+//     than a duplicate series (measured non-fatal against scrape.go:
+//     dropped, target stays up). Round 1's own doc comment asserted the
+//     opposite — that a duplicate series is what takes a target down —
+//     which was the wrong premise, corrected here.
+//
+// This test pins both properties at once, since a fix for either one
+// alone (as both prior rounds separately proved) is not sufficient.
+func TestEscapeLabelValue_InvalidUTF8_InjectiveAndValidUTF8(t *testing.T) {
 	t.Parallel()
 	a := escapeLabelValue("u\x80")
 	b := escapeLabelValue("u\x81")
 	if a == b {
-		t.Fatalf("escapeLabelValue(%q) == escapeLabelValue(%q) == %q — two distinct inputs collided onto one label value", "u\x80", "u\x81", a)
+		t.Fatalf("escapeLabelValue(%q) == escapeLabelValue(%q) == %q — two distinct inputs collided onto one label value (not injective)", "u\x80", "u\x81", a)
 	}
-	if strings.Contains(a, "�") || strings.Contains(b, "�") {
-		t.Errorf("escaped output contains U+FFFD (replacement character) — the rune-decoding bug this test guards against: a=%q b=%q", a, b)
+	if !utf8.ValidString(a) {
+		t.Errorf("escapeLabelValue(%q) = %q is not valid UTF-8 — fatal to a real Prometheus scrape (promparse.go), not merely a duplicate series", "u\x80", a)
+	}
+	if !utf8.ValidString(b) {
+		t.Errorf("escapeLabelValue(%q) = %q is not valid UTF-8 — fatal to a real Prometheus scrape (promparse.go), not merely a duplicate series", "u\x81", b)
+	}
+}
+
+// TestEscapeLabelValue_Exhaustive1And2Byte_InjectiveAndValidUTF8 proves
+// both required properties by construction rather than by spot-check,
+// over every possible 1-byte string (256) and every possible 2-byte
+// string (65,536) — valid UTF-8, invalid UTF-8, and every ASCII special
+// character alike — all checked against ONE shared map, so a collision
+// BETWEEN a 1-byte and a 2-byte input (the escaped output is not
+// length-preserving, so this is not automatically ruled out just
+// because the inputs differ in length) would be caught too, not only a
+// same-length collision. Fast enough (well under a second) to run on
+// every test invocation, not just as a one-off manual verification.
+func TestEscapeLabelValue_Exhaustive1And2Byte_InjectiveAndValidUTF8(t *testing.T) {
+	t.Parallel()
+	seen := make(map[string]string, 256+65536)
+	check := func(in string) {
+		out := escapeLabelValue(in)
+		if !utf8.ValidString(out) {
+			t.Fatalf("escapeLabelValue(%q) = %q is not valid UTF-8", in, out)
+		}
+		if prior, ok := seen[out]; ok && prior != in {
+			t.Fatalf("collision: escapeLabelValue(%q) and escapeLabelValue(%q) both produced %q", prior, in, out)
+		}
+		seen[out] = in
+	}
+	for b := 0; b < 256; b++ {
+		check(string([]byte{byte(b)}))
+	}
+	for a := 0; a < 256; a++ {
+		for b := 0; b < 256; b++ {
+			check(string([]byte{byte(a), byte(b)}))
+		}
 	}
 }
 
@@ -759,13 +818,26 @@ func TestMetrics_ProviderHealthy_ReflectsOpenBreaker(t *testing.T) {
 // proofing test for every `if su.storeDown { continue }` /
 // `if mc.storeDown { continue }` guard in metrics.go: deleting any of
 // them makes this test fail. Forces the SAME limiter every family in
-// this file reads from into a fail-closed store outage (alwaysErrStore,
-// failOpen=false — routes_unified_test.go's own stub), then asserts
-// every store-backed family emits NO samples at all rather than a
-// fabricated 0 (review fix, adversarial verification 2026-08-23:
-// without the guards, a Redis blip reads as a hard 0 mid-outage, then
-// jumps back to the real total on recovery — Prometheus treats that as
-// a counter reset followed by a spurious full-total "increase").
+// this file reads from into a store outage — a real, configured store
+// (alwaysErrStore, routes_unified_test.go's own stub) that errors on
+// every call — then asserts every store-backed family emits NO samples
+// at all rather than a fabricated 0 (review fix, adversarial
+// verification 2026-08-23: without the guards, a Redis blip reads as a
+// hard 0 mid-outage, then jumps back to the real total on recovery —
+// Prometheus treats that as a counter reset followed by a spurious
+// full-total "increase").
+//
+// Deliberately does NOT touch gw.limiter.failOpen (round 2, adversarial
+// verification 2026-08-23): newConfiguredLimiter (llmgateway.go)
+// defaults it to true, and a round-1 version of this test hand-set it
+// to false, which meant the suite only ever exercised the fail-CLOSED
+// path — the one case where storeGetMulti's own ok=false already made
+// the bug impossible to miss. The actual production default (failOpen
+// true) silently read zeros from the empty in-process fallback and
+// reported ok=true, bypassing every storeDown guard in this file
+// entirely; that is the path this test now pins, matching
+// limiter.configuredStoreDown's own doc comment (limits.go).
+//
 // llmgateway_provider_healthy is deliberately excluded from the "must be
 // absent" list: it comes from the in-process discovery breaker, never
 // the counterStore, so a store outage must NOT affect it — asserted
@@ -777,8 +849,13 @@ func TestMetrics_StoreDown_SkipsRatherThanFabricatesZero(t *testing.T) {
 	cfg.Users.Inline[0].Limits = &LimitsConfig{RequestsPerDay: 100}
 	h, gw := newMetricsGatewayHandle(t, cfg)
 
+	// Simulates "Redis was configured and reachable, then broke" without
+	// standing up a real broken Redis connection: gw.limiter.store starts
+	// nil (no cfg.Redis in newMetricsTestConfig) and is forced non-nil
+	// here, exactly mirroring TestLimiterCurrentUsage_StoreDown's own
+	// direct-field-injection style (admin_test.go). failOpen is left
+	// untouched at its true default.
 	gw.limiter.store = alwaysErrStore{}
-	gw.limiter.failOpen = false
 
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, metricsRequest(http.MethodGet, metricsPathDefault, "sk-admin1"))
@@ -814,6 +891,50 @@ func TestMetrics_StoreDown_SkipsRatherThanFabricatesZero(t *testing.T) {
 	if !providerHealthyPresent {
 		t.Error("llmgateway_provider_healthy missing — this family reads in-process breaker state, not the store, and must still render during a store outage")
 	}
+
+	// llmgateway_limit_store_up (item 7, adversarial verification
+	// 2026-08-23) is the one signal that IS supposed to go to 0 here —
+	// it exists specifically to explain why every family above just
+	// went silent.
+	assertSample(t, samples, "llmgateway_limit_store_up", nil, "0")
+}
+
+// --- store health gauge ---
+
+// TestMetrics_LimitStoreUp_AbsentWhenNoStoreConfigured proves the gauge
+// is not emitted at all for a fallback-only deployment (no cfg.Redis) —
+// there is no store health to report there.
+func TestMetrics_LimitStoreUp_AbsentWhenNoStoreConfigured(t *testing.T) {
+	t.Parallel()
+	cfg := newMetricsTestConfig() // no cfg.Redis
+	h, _ := newMetricsGatewayHandle(t, cfg)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, metricsRequest(http.MethodGet, metricsPathDefault, "sk-admin1"))
+	if strings.Contains(rec.Body.String(), "llmgateway_limit_store_up") {
+		t.Error("llmgateway_limit_store_up present with no store configured, want absent entirely")
+	}
+}
+
+// TestMetrics_LimitStoreUp_ReflectsHealthyStore proves the gauge reads 1
+// for a configured, currently-healthy store — newMemoryStore, not
+// alwaysErrStore, standing in for "a real store that is up": it
+// implements counterStore and never errors, so l.store is non-nil
+// (configured) while l.storeLatched() stays false (never failed).
+func TestMetrics_LimitStoreUp_ReflectsHealthyStore(t *testing.T) {
+	t.Parallel()
+	cfg := newMetricsTestConfig()
+	h, gw := newMetricsGatewayHandle(t, cfg)
+
+	gw.limiter.store = newMemoryStore()
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, metricsRequest(http.MethodGet, metricsPathDefault, "sk-admin1"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	_, samples := parsePrometheusText(t, rec.Body.Bytes())
+	assertSample(t, samples, "llmgateway_limit_store_up", nil, "1")
 }
 
 // --- rate-limit rejections ---
@@ -928,6 +1049,48 @@ func TestMetrics_PruneRejectionsAfterReload_EndToEnd(t *testing.T) {
 		if s.name == "llmgateway_rate_limit_rejections_total" && s.labels["scope_id"] == "alice" {
 			t.Errorf("alice's rejection series is still present after being removed from the users file and reloaded: %+v", s)
 		}
+	}
+}
+
+// TestServeHTTP_PruneRejectionsOnlyAfterRealReload is the mutation-
+// proofing counterpart to TestMetrics_PruneRejectionsAfterReload_
+// EndToEnd above: that test proves pruning DOES happen on a real
+// reload; this one proves it does NOT happen otherwise (review fix,
+// adversarial verification 2026-08-23 — replacing `if g.auth.
+// maybeReload() { g.pruneRejectionsAfterReload() }` in ServeHTTP
+// (llmgateway.go) with two unconditional statements survived the whole
+// suite until this test existed).
+//
+// newMetricsTestConfig configures no Users.File at all, so authStore.
+// maybeReload's very first check (usersFile == nil) makes it return
+// false on every one of the 200 requests below — a real reload never
+// happens. Seeds a rejection entry for "ghost", a name that is not any
+// currently active user: pruneRejectionsAfterReload would delete it
+// (it is not in authStore's own snapshot) the instant it ever ran, so
+// its survival after 200 ordinary requests is the pinned guarantee.
+func TestServeHTTP_PruneRejectionsOnlyAfterRealReload(t *testing.T) {
+	t.Parallel()
+	cfg := newMetricsTestConfig()
+	h, gw := newMetricsGatewayHandle(t, cfg)
+
+	gw.limiter.rejections.increment("user", "ghost")
+
+	for i := 0; i < 200; i++ {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, metricsRequest(http.MethodGet, metricsPathDefault, "sk-admin1"))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("request %d: status = %d, want 200", i, rec.Code)
+		}
+	}
+
+	var found bool
+	for _, s := range gw.limiter.rejectionSnapshot() {
+		if s.kind == "user" && s.id == "ghost" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error(`the "ghost" rejection entry was pruned despite no real reload ever happening — pruneRejectionsAfterReload must run only when authStore.maybeReload reports a real reload, never unconditionally on every request`)
 	}
 }
 

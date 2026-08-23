@@ -871,6 +871,29 @@ func (l *limiter) storeLatched() bool {
 	return !l.lastStoreFailure.IsZero() && l.now().Sub(l.lastStoreFailure) < storeDownLatchFor
 }
 
+// configuredStoreDown reports whether l has a configured store that is
+// currently within its failure latch (storeLatched) — meaning any read
+// made right now is served from the in-process fallback, never the
+// real, shared store, REGARDLESS of what storeGetMulti's own ok return
+// says. l.store == nil (no store configured at all — a fallback-only
+// deployment) always reports false: there, the fallback IS the source
+// of truth by design, nothing has degraded.
+//
+// This exists because storeGetMulti's ok=true does not distinguish "the
+// store answered for real" from "the store is down, failOpen fell back
+// to the empty in-process fallback, which answered with zeros" — and
+// failOpen defaults to true (newConfiguredLimiter, llmgateway.go). A
+// caller that only checks ok, as currentUsage/providerUsage's callers
+// used to, reports a fail-OPEN store outage as confirmed real usage:
+// exactly the fabricated-counter-reset bug metrics.go's storeDown skip
+// was built to prevent, except on the DEFAULT config, where it was
+// never actually reachable (review fix, adversarial verification
+// 2026-08-23) — see currentUsage/providerUsage's own doc comments for
+// where this is now checked.
+func (l *limiter) configuredStoreDown() bool {
+	return l.store != nil && l.storeLatched()
+}
+
 // recordStoreFailure logs err (rate-limited, see logStoreError) and opens
 // the store-down latch: every storeIncrBy/storeGet call for the next
 // storeDownLatchFor skips the network call and applies the fail-open/
@@ -1819,7 +1842,10 @@ func (l *limiter) providerUsage(scopes []limitScope) []providerCounters {
 	}
 
 	vals, ok := l.storeGetMulti(allKeys)
-	if !ok || len(vals) != len(allKeys) {
+	// configuredStoreDown catches the fail-open case ok alone misses
+	// (review fix, adversarial verification 2026-08-23) — see
+	// currentUsage's identical check and its own doc comment for why.
+	if !ok || len(vals) != len(allKeys) || l.configuredStoreDown() {
 		for i := range out {
 			out[i] = providerCounters{storeDown: true}
 		}
@@ -1906,6 +1932,14 @@ func usageWindowKeys(sc limitScope, now time.Time) []string {
 // every enforcement read already does, and it is read-only: unlike
 // checkAndCount, it never increments anything.
 //
+// storeDown is also set when configuredStoreDown reports the store
+// currently latched (review fix, adversarial verification 2026-08-23):
+// with failOpen true (the default), storeGetMulti's own ok stays true
+// on a store outage — it silently reads the in-process fallback instead
+// — so ok alone is not enough to tell a real reading apart from a
+// fail-open one served from an empty fallback. Checked in addition to,
+// never instead of, storeGetMulti's own ok/length checks below.
+//
 // ONE storeGetMulti call for the whole scopes slice (v0.2 final review
 // wave, 2026-08-20; supersedes the "one call per scope" amendment this
 // comment previously described, 2026-08-20 review): every scope's keys
@@ -1947,7 +1981,7 @@ func (l *limiter) currentUsage(scopes []limitScope) []scopeUsage {
 	// guarded defensively so a future or test-only store's short slice
 	// reports every scope storeDown instead of panicking on an
 	// out-of-range index below (review sweep, 2026-08-20).
-	if !ok || len(vals) != len(allKeys) {
+	if !ok || len(vals) != len(allKeys) || l.configuredStoreDown() {
 		for i, sc := range scopes {
 			out[i] = scopeUsage{kind: sc.kind, id: sc.id, storeDown: true}
 		}

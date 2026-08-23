@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"sort"
 	"strconv"
+	"strings"
+	"unicode/utf8"
 )
 
 // MetricsConfig configures the Prometheus text-exposition endpoint
@@ -178,41 +180,94 @@ func (g *Gateway) serveMetrics(w http.ResponseWriter) {
 // double quote becomes \", and newline becomes \n — the exact rule the
 // format requires. An unescaped quote or embedded newline in a label
 // value (a user or group name, a model id, an operator picks these) would
-// otherwise emit an unparseable exposition document — and Prometheus
-// reports an unparseable scrape as the WHOLE target being DOWN, not as
-// one bad line, so this is a correctness requirement, not a formatting
-// nicety.
+// otherwise emit an unparseable exposition document, which is fatal to a
+// real scrape — see the CORRECTNESS section below for exactly how, and
+// for a claim this comment previously made that turned out to be wrong.
 //
-// This walks s BYTE by byte and classifies each one independently, never
-// a sequential find-and-replace pass: replacing quotes first and
-// backslashes second (or vice versa) would double-escape a backslash
-// this function itself just inserted — a real, classic bug class for
-// this exact kind of escaping. A single forward pass has no such
-// ordering hazard.
+// Two independent correctness properties, both required, are in tension
+// here and this function's whole shape exists to satisfy both at once:
 //
-// Byte-oriented, deliberately NOT `for _, r := range s` (review fix,
-// adversarial verification 2026-08-23): ranging over a string decodes
-// UTF-8 and substitutes U+FFFD for every invalid byte, which makes the
-// function NOT injective — two distinct configured names that both
-// contain invalid UTF-8 (a byte sequence auth.go's buildEntry never
-// rejects; it validates non-empty only, see its own doc comment) can
-// decode to the identical U+FFFD run and render as the SAME escaped
-// label value. Two scope_id values colliding onto one series is a
-// duplicate-series scrape failure — confirmed against a real Prometheus
-// scrape parser: the whole target reports DOWN, and promtool alone will
-// not catch it, since expfmt silently dedupes. Escaping byte-for-byte
-// passes every raw byte through unchanged except the three ASCII
-// characters requiring escaping ('\\', '"', '\n') — none of which can
-// ever appear as a UTF-8 continuation byte (continuation bytes are
-// always >= 0x80), so this never misinterprets a multi-byte sequence's
-// internal bytes as one of these three, and every distinct input byte
-// string still maps to a distinct output. It also avoids WriteRune's
-// per-rune decode cost on a large value.
+//  1. INJECTIVE: two distinct inputs must never produce the same escaped
+//     output. A collision means two distinct scope_id/model/provider
+//     values render as the identical label value — a duplicate series.
+//  2. VALID UTF-8 OUT: the output must always be valid UTF-8, regardless
+//     of whether s is.
+//
+// CORRECTNESS (review fixes, adversarial verification 2026-08-23, two
+// rounds): round 1 walked s byte-by-byte and copied every non-special
+// byte through verbatim, including an invalid one — injective (property
+// 1 held), but an invalid byte copied through means the OUTPUT can itself
+// be invalid UTF-8, which fails property 2. Measured this round against
+// prometheus/prometheus's real scrape path (promparse.go): an invalid-
+// UTF-8 label value is FATAL — the parser errors, the scrape loop breaks,
+// and Prometheus marks the target up=0 (DOWN). That is a strictly worse
+// failure than the one round 1 was fixing: the doc comment at the time
+// claimed a duplicate series is ALSO fatal ("the whole target reports
+// DOWN"); measured properly this round against scrape.go, that claim was
+// wrong — checkAddError treats a duplicate sample as non-fatal (returns
+// false, nil), bumps a counter, and the scrape still succeeds with
+// up=1. So the ORIGINAL rune-based version (pre-round-1) was lossy but
+// safe: colliding invalid-UTF-8 inputs onto one U+FFFD-bearing series
+// dropped data but never took the target down. Round 1's byte-oriented
+// version was lossless but unsafe: correct in the one dimension it
+// measured, worse in the one it did not.
+//
+// This version keeps both: valid runes (including a genuine, already-
+// valid 3-byte-encoded U+FFFD that was actually present in s) pass
+// through unchanged via utf8.DecodeRuneInString, which reports both the
+// rune and how many bytes it consumed; only a TRULY undecodable single
+// byte (RuneError with a reported width of 1 — DecodeRuneInString's own
+// documented signal that byte could not start any valid encoding, as
+// opposed to width 3 for a real U+FFFD) is replaced with \xHH, HH being
+// that byte's own hex value — recoverable, so distinct invalid bytes can
+// never collide, and it can never appear from the normal escape path
+// either: every literal backslash in s is ASCII and therefore always
+// decodes as its own valid 1-byte rune, which the switch below always
+// doubles to \\ — a lone, undoubled backslash in the output can
+// therefore only ever be this marker, never user-typed text. Reachability
+// caveat: no live config path is known to reach the invalid-UTF-8 branch
+// today (encoding/json, which every user/group name currently decodes
+// through, coerces invalid UTF-8 to U+FFFD before this function ever
+// sees it) — this is closing a latent gap, not a currently-exploitable
+// one, but the SAME property (injective, always-valid-UTF-8 output) is
+// what a future caller — an upstream-reported model id read some other
+// way, say — would need without re-deriving this reasoning.
+//
+// Fast path (item 5, adversarial verification round 2, benchmarked):
+// nearly every real user/group/model name needs none of the above — no
+// backslash/quote/newline, already valid UTF-8 (true of every Go string
+// literal and every encoding/json-decoded value by construction) — so
+// skip the walk and its allocation entirely when s is already its own
+// answer. Benchmarked over 7 representative values: the byte-oriented
+// slow path alone cost 318.8 ns/op, 560 B/op, 14 allocs/op (worse than
+// the original rune-based version's 344.7 ns, 120 B, 7 allocs on
+// allocations specifically, from bytes.Buffer.String() copying where
+// strings.Builder.String() does not — fixed below by switching to
+// strings.Builder too); the fast path measures 84.4 ns/op, 0 B, 0
+// allocs/op. At 1,000 configured users that is the difference between
+// roughly 20,000 allocations and 800 KB of garbage per scrape, inside
+// the shared Traefik process, and zero.
 func escapeLabelValue(s string) string {
-	var b bytes.Buffer
+	if !strings.ContainsAny(s, "\\\"\n") && utf8.ValidString(s) {
+		return s
+	}
+
+	var b strings.Builder
 	b.Grow(len(s))
-	for i := 0; i < len(s); i++ {
-		switch c := s[i]; c {
+	for i := 0; i < len(s); {
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if r == utf8.RuneError && size == 1 {
+			// A genuinely undecodable byte — see this function's own
+			// CORRECTNESS section above for why \xHH, not � and not
+			// a raw copy, is the only choice that keeps both required
+			// properties.
+			b.WriteString(`\x`)
+			b.WriteByte(hexDigit(s[i] >> 4))
+			b.WriteByte(hexDigit(s[i] & 0x0f))
+			i++
+			continue
+		}
+		switch r {
 		case '\\':
 			b.WriteString(`\\`)
 		case '"':
@@ -220,10 +275,25 @@ func escapeLabelValue(s string) string {
 		case '\n':
 			b.WriteString(`\n`)
 		default:
-			b.WriteByte(c)
+			// A valid rune, 1-4 bytes: none of the three special ASCII
+			// characters above can appear as any byte of a valid
+			// multi-byte encoding (every byte of one is >= 0x80), so a
+			// verbatim copy of s[i:i+size] can never hide an unescaped
+			// backslash/quote/newline inside it.
+			b.WriteString(s[i : i+size])
 		}
+		i += size
 	}
 	return b.String()
+}
+
+// hexDigit returns the lowercase hex digit for the low nibble of n
+// (0x0-0xf) — escapeLabelValue's own \xHH marker for an undecodable
+// byte, written without fmt.Sprintf to keep that (already-rare) branch
+// allocation-free too.
+func hexDigit(n byte) byte {
+	const digits = "0123456789abcdef"
+	return digits[n&0x0f]
 }
 
 // metricLabel is one label name/value pair a metricWriter sample carries.
@@ -323,6 +393,14 @@ const aggregationNotePerProcess = " AGGREGATION ACROSS REPLICAS: this counter li
 // instant (e.g. one mid-backoff, one already recovered).
 const aggregationNoteProviderHealthy = " AGGREGATION ACROSS REPLICAS: each replica runs its own discovery circuit breaker in-process, never shared via Redis, so this can legitimately differ per replica. Read it per-instance where possible; if you must aggregate, use min() to surface \"at least one replica sees this provider as unhealthy\" — sum() is meaningless for a 0/1 gauge."
 
+// aggregationNoteStoreHealth is appended to llmgateway_limit_store_up's
+// HELP text: whether THIS replica's own connection to the configured
+// limit store is currently healthy is, by definition, discovered
+// locally (limiter.storeLatched, limits.go) — it cannot itself be read
+// from the store being described, so — like provider health above —
+// it is inherently per-replica, never shared via Redis.
+const aggregationNoteStoreHealth = " AGGREGATION ACROSS REPLICAS: each replica discovers its own connection health to the configured store independently — this cannot itself be read from the store being described — so it can legitimately differ per replica. Read it per-instance where possible; if you must aggregate, use min() to surface \"at least one replica currently sees the store as down\" — sum() is meaningless for a 0/1 gauge."
+
 // renderMetrics builds the full Prometheus text-exposition document for
 // GET <metrics path>. Every read below goes through the SAME batched,
 // chunked accessors GET /admin/api/overview and GET /admin/api/usage
@@ -338,6 +416,7 @@ func (g *Gateway) renderMetrics() []byte {
 	g.writeUsageMetrics(&m)
 	g.writeProviderMetrics(&m)
 	g.writeRejectionMetrics(&m)
+	g.writeStoreHealthMetrics(&m)
 	return m.buf.Bytes()
 }
 
@@ -556,11 +635,47 @@ func (g *Gateway) writeRejectionMetrics(m *metricWriter) {
 	})
 
 	m.family("llmgateway_rate_limit_rejections_total", "counter",
-		"Total requests refused by a rate or budget limit since process start, by scope. Unlike the request/token/cost counters above, this is a process-lifetime counter, not UTC-day-windowed — it resets only on restart."+aggregationNotePerProcess)
+		fmt.Sprintf(
+			"Total requests refused by a rate or budget limit since process start, by scope. Unlike the request/token/cost counters above, this is a process-lifetime counter, not UTC-day-windowed, but it does NOT reset only on restart: a scope's own count resets to 0 when that user is removed via a hot-reloaded users file, and every tracked scope resets together, in one bulk cliff (not a graceful per-scope decay), the instant more than %d distinct scopes have ever been seen — a value that drops is one of these events, not a scrape anomaly.",
+			rejectionCounterMapCap,
+		)+aggregationNotePerProcess)
 	for _, s := range snaps {
 		m.sampleInt("llmgateway_rate_limit_rejections_total",
 			[]metricLabel{{"scope_kind", s.kind}, {"scope_id", s.id}}, s.count)
 	}
+}
+
+// writeStoreHealthMetrics emits llmgateway_limit_store_up (item 7,
+// adversarial verification 2026-08-23): every store-backed family above
+// simply goes silent for the scopes it cannot read during an outage
+// (writeUsageMetrics/writeProviderMetrics's own storeDown skip) — the
+// honest choice for THOSE families (see their own doc comments), but it
+// means a store outage has NO signal of its own on this endpoint: with
+// failOpen false and a store flapping faster than the fail latch
+// (storeDownLatchFor, limits.go), every store-backed family can simply
+// be ABSENT, scrape after scrape, with nothing on /metrics itself
+// saying why — an operator needs live traffic AND a fail-closed config
+// to even notice. This gauge exists to be the "why are my other
+// families missing" signal on its own, independent of traffic volume or
+// failOpen.
+//
+// Absent entirely when no limit store is configured at all (a fallback-
+// only deployment, limiter.redisStatus' own "configured" return) —
+// there is no store health to report there; the fallback is always
+// "up" by definition, a trivial, uninteresting reading not worth a
+// series.
+func (g *Gateway) writeStoreHealthMetrics(m *metricWriter) {
+	configured, _, _ := g.limiter.redisStatus()
+	if !configured {
+		return
+	}
+	up := int64(1)
+	if g.limiter.configuredStoreDown() {
+		up = 0
+	}
+	m.family("llmgateway_limit_store_up", "gauge",
+		"1 when this replica's own connection to the configured limit store (Redis) is currently healthy, 0 when it is latched down after a recent failure (limiter.storeLatched, limits.go). A store-backed family (llmgateway_requests_total and the rest) going silent for one or more scrapes in a row, with this gauge at 0, is the store outage those families' own storeDown skip is deliberately quiet about."+aggregationNoteStoreHealth)
+	m.sampleInt("llmgateway_limit_store_up", nil, up)
 }
 
 // pruneRejectionsAfterReload evicts every "user"-kind rejection scope
