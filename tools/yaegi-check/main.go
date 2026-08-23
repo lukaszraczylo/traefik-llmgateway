@@ -106,6 +106,39 @@ const (
 	yaegiMetaContextTokens = "128000"
 )
 
+// timeoutProviderName/timeoutProviderModel/timeoutProviderRequestTimeout/
+// timeoutUpstreamSleep/timeoutProbeMaxWait back exerciseRequestTimeout
+// (feature: request timeout): a provider whose own ProviderConfig.
+// RequestTimeout ("80ms") is far shorter than timeoutUpstream's
+// deliberate 600ms silence before it ever writes a byte. Distinct from
+// slowProviderName/slowRequestDeadline above (SHOULD-A): that probe
+// proves a CLIENT-set context deadline is classified correctly;
+// timeoutProviderName proves the GATEWAY'S OWN adapter-level timeout
+// (newAdapterHTTPClient's Transport.ResponseHeaderTimeout, providers.go;
+// watchdogBody, timeout.go) aborts a hang under a request that sets NO
+// deadline of its own — the shape of a real, unbounded production
+// client — interpreted, not merely compiled.
+const (
+	timeoutProviderName = "hungtimeout"
+	// timeoutProviderModel is deliberately NOT "gpt-test"
+	// (testDataWantModel): a bare model id shared across providers
+	// resolves to exactly one winner (modelRegistry's own bare-id rule),
+	// and reusing testDataWantModel here made "hungtimeout" win it
+	// instead of "openai" — silently hijacking exerciseAttemptAccounting's
+	// own bare-"gpt-test" request onto this hung provider and failing
+	// that unrelated probe. A unique id keeps this provider's own model
+	// space from ever colliding with another probe's.
+	timeoutProviderModel          = "gpt-timeout-test"
+	timeoutProviderRequestTimeout = "80ms"
+	timeoutUpstreamSleep          = 600 * time.Millisecond
+	// timeoutProbeMaxWait bounds exerciseRequestTimeout's own assertion:
+	// generous relative to timeoutProviderRequestTimeout (80ms), but far
+	// under timeoutUpstreamSleep (600ms) — a pass proves the request was
+	// aborted BY the timeout feature, not by timeoutUpstream eventually
+	// answering on its own.
+	timeoutProbeMaxWait = 3 * time.Second
+)
+
 // excludedTopLevelDirs lists repo-root directories the GOPATH copy must
 // never include: build tooling, integration fixtures, planning docs and
 // VCS metadata have nothing to do with the plugin package Yaegi imports.
@@ -260,6 +293,18 @@ func run() error {
 	}))
 	defer slowUpstream.Close()
 
+	// timeoutUpstream writes nothing at all for timeoutUpstreamSleep,
+	// well past timeoutProviderName's own 80ms ProviderConfig.
+	// RequestTimeout (attemptAccountingOverride below) — see the
+	// timeoutProviderName const block's own doc comment for why this
+	// probe exists alongside slowUpstream.
+	timeoutUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(timeoutUpstreamSleep)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"c4","object":"chat.completion","model":"gpt-test","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`))
+	}))
+	defer timeoutUpstream.Close()
+
 	// mcpProbeUpstream answers federation's outbound tools/call with a
 	// body deliberately larger than mcpBackendCallResponseMaxBytes, so
 	// exerciseHandler's POST /mcp probe below drives doBackendJSONRPC's
@@ -350,6 +395,10 @@ func run() error {
 		`"providers":{"openai":{"type":"openai","baseUrl":"` + upstream.URL + `","apiKey":"sk-up","models":["` + testDataWantModel + `","` + builtinLookupModelID + `"]},` +
 		`"brk":{"type":"openai","baseUrl":"` + brkUpstream.URL + `","apiKey":"sk-up","discovery":true,"discoveryInterval":"1ms"},"` +
 		slowProviderName + `":{"type":"openai","baseUrl":"` + slowUpstream.URL + `","apiKey":"sk-up","models":["` + slowProviderModel + `"]},` +
+		// timeoutProviderName (feature: request timeout) — see its own
+		// const block doc comment above for why this provider exists
+		// alongside slowProviderName.
+		`"` + timeoutProviderName + `":{"type":"openai","baseUrl":"` + timeoutUpstream.URL + `","apiKey":"sk-up","requestTimeout":"` + timeoutProviderRequestTimeout + `","models":["` + timeoutProviderModel + `"]},` +
 		// "anthropic" backs the /v1/messages passthrough probes
 		// (exerciseMessagesRoute, below): a real anthropic-type provider,
 		// interpreted end to end through
@@ -702,6 +751,10 @@ func exerciseHandler(handler http.Handler, builtinContextTokens int) error {
 		return err
 	}
 
+	if err := exerciseRequestTimeout(handler); err != nil {
+		return err
+	}
+
 	if err := exerciseFederatedTooLarge(handler); err != nil {
 		return err
 	}
@@ -1009,6 +1062,51 @@ func exerciseFederatedTooLarge(handler http.Handler) error {
 	}
 	if resp.Error.Message != mcpTooLargeWantMessage {
 		return fmt.Errorf("POST /mcp tools/call error message = %q, want %q — errors.Is(err, errMCPResponseTooLarge) did not match under the interpreter (mcp_federation.go)", resp.Error.Message, mcpTooLargeWantMessage)
+	}
+	return nil
+}
+
+// exerciseRequestTimeout proves the request-timeout feature aborts a
+// hung provider under the REAL interpreter, not merely in compiled
+// tests: timeoutProviderName's own ProviderConfig.RequestTimeout ("80ms")
+// is far shorter than timeoutUpstream's deliberate 600ms silence, and the
+// request below carries NO client-side deadline of its own — unlike
+// exerciseAttemptAccounting's slowProviderName probe (SHOULD-A), which
+// proves a CLIENT-set context deadline classifies correctly, this proves
+// the GATEWAY'S OWN adapter-level timeout aborts a hang no caller ever
+// bounded, exactly the shape of a real, unbounded production client.
+// A pass here means newAdapterHTTPClient's Transport.
+// ResponseHeaderTimeout (providers.go) and watchdogBody's construction
+// (timeout.go — context.WithCancel, time.AfterFunc, sync/atomic's
+// function API) all compile and run correctly interpreted; a failure
+// (a status other than 502, or an elapsed time anywhere near
+// timeoutUpstreamSleep) would mean this feature works compiled but not
+// under Yaegi, the exact class of divergence this harness exists to
+// catch.
+//
+// MUTATION VERIFIED: temporarily removing
+// `tr.ResponseHeaderTimeout = timeout` from newAdapterHTTPClient
+// (providers.go) made `make yaegi-check` fail here with "status = 200,
+// want 502" — timeoutUpstream's 600ms sleep let the request succeed
+// instead of aborting at timeoutProviderRequestTimeout (80ms), proving
+// this probe genuinely exercises the interpreted mechanism rather than
+// passing regardless. Reverted before committing.
+func exerciseRequestTimeout(handler http.Handler) error {
+	body := `{"model":"` + timeoutProviderName + `/` + timeoutProviderModel + `","messages":[{"role":"user","content":"hi"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+testDataUserAPIKey)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	start := time.Now()
+	handler.ServeHTTP(rec, req)
+	elapsed := time.Since(start)
+
+	if elapsed > timeoutProbeMaxWait {
+		return fmt.Errorf("POST /v1/chat/completions (hung provider %q) took %s, want well under %s — a hung provider must be aborted under the interpreter, not merely in compiled tests: %s", timeoutProviderName, elapsed, timeoutProbeMaxWait, rec.Body.String())
+	}
+	if rec.Code != http.StatusBadGateway {
+		return fmt.Errorf("POST /v1/chat/completions (hung provider %q): status = %d, want 502 (upstream connection error, provider-attributed), body=%s", timeoutProviderName, rec.Code, rec.Body.String())
 	}
 	return nil
 }
