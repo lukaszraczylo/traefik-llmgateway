@@ -431,10 +431,13 @@ func (m *metricWriter) histogram(name string, labels []metricLabel, buckets []in
 const aggregationNoteStoreBacked = " AGGREGATION ACROSS REPLICAS: with Redis configured, this value is the gateway-wide total read from shared limit state and is IDENTICAL on every replica's own /metrics response — aggregate with max(), never sum(), or a multi-replica deployment overcounts by the replica count. Without Redis (the in-memory fallback), this SAME family becomes genuinely per-process instead, and sum() becomes the correct aggregation. Know which one you are running."
 
 // aggregationNotePerProcess is appended to llmgateway_rate_limit_
-// rejections_total's HELP text: limiter.rejections (limits.go) is a
-// bare in-process map, never written to or read from Redis regardless
-// of Config.Redis — unlike every store-backed family above, this one
-// never flips, and sum() is always the right cross-replica aggregation.
+// rejections_total's HELP text, and to both usage-provenance counter
+// families' HELP text below (llmgateway_usage_provenance_requests_total/
+// -_tokens_total, feat: expose token-accounting provenance): each is a
+// bare in-process store — limiter.rejections and g.provenance
+// respectively — never written to or read from Redis regardless of
+// Config.Redis. Unlike every store-backed family above, none of these
+// ever flips, and sum() is always the right cross-replica aggregation.
 const aggregationNotePerProcess = " AGGREGATION ACROSS REPLICAS: this counter lives only in this process's memory, never in Redis, regardless of Config.Redis — aggregate with sum(), which is always correct for it, unlike the store-backed families above."
 
 // aggregationNoteProviderHealthy is appended to llmgateway_provider_
@@ -468,6 +471,7 @@ func (g *Gateway) renderMetrics() []byte {
 	g.writeUsageMetrics(&m)
 	g.writeProviderMetrics(&m)
 	g.writeLatencyMetrics(&m)
+	g.writeProvenanceMetrics(&m)
 	g.writeRejectionMetrics(&m)
 	g.writeStoreHealthMetrics(&m)
 	return m.buf.Bytes()
@@ -958,6 +962,164 @@ func (g *Gateway) writeLatencyMetrics(m *metricWriter) {
 		if s.durationCount > 0 {
 			m.histogram("llmgateway_upstream_duration_seconds", labels, s.durationBuckets, s.durationOverflow, s.durationSum)
 		}
+	}
+}
+
+// --- usage provenance (feat: expose token-accounting provenance) ---
+//
+// Token accounting has three provenances (usage.estimated's own doc
+// comment, limits.go), and before this section nothing on any read
+// surface distinguished them: REPORTED (the provider returned real
+// usage — the normal, accurate case), ESTIMATED (a non-streaming
+// response carried none, so prompt is substituted with
+// ceil(len(body)/4) and completion is billed as zero — runUnified's own
+// recording call site, routes_unified.go), and UNBILLED (a streaming
+// response carried none, so the request is counted but zero tokens are
+// billed). This section adds the metric surface only; billing itself is
+// unchanged — see runUnified's own doc comment at its recording call
+// site for the guarantee that no value recorded here ever feeds back
+// into what gets billed.
+//
+// ESTIMATED and UNBILLED are deliberately never merged into one "not
+// reported" signal: estimated substitutes an approximation (a nonzero
+// prompt count is still billed), unbilled charges nothing at all. A
+// provider silently ignoring stream_options.include_usage serves
+// completions entirely free against every configured budget, and that
+// is the one fact this feature exists to make visible — collapsing the
+// two would hide it again.
+
+const (
+	provenanceReported  = "reported"
+	provenanceEstimated = "estimated"
+	provenanceUnbilled  = "unbilled"
+)
+
+// provenanceKey identifies one (provider, provenance) series pair
+// provenanceStore accumulates under. provider is always one of this
+// deployment's configured provider names (config-bounded, never user
+// input, exactly like latencyKey.provider above), and provenance is
+// always one of the three package-level constants above — the total key
+// space is bounded by (configured providers) x 3, so no rotation/cap
+// logic is needed here, unlike rejectionCounter's own user/group-name
+// keys (limits.go), which ARE operator/end-user controlled and can churn
+// without bound.
+type provenanceKey struct {
+	provider   string
+	provenance string
+}
+
+// provenanceCounts is one provenanceKey's accumulated totals: requests
+// (how many accounted candidate outcomes were recorded under this
+// provenance) and tokens (their summed result.total() — the SAME number
+// runUnified already passed to accounting, never a second count),
+// answering the task brief's "what fraction of billed tokens came from
+// real reported usage" question directly: sum(tokens where provenance ==
+// reported) / sum(tokens across every provenance).
+type provenanceCounts struct {
+	requests int64
+	tokens   int64
+}
+
+// provenanceStore is the Gateway's in-process, per-replica usage-
+// provenance accumulator — mirrors latencyStore's own shape and
+// nil-receiver-safe convention above for the identical reason: a Gateway
+// assembled directly as a bare &Gateway{} literal (bypassing newGateway,
+// as a few older tests do) degrades to "no provenance observed" rather
+// than a nil-pointer panic.
+type provenanceStore struct {
+	data map[provenanceKey]*provenanceCounts
+	mu   sync.Mutex
+}
+
+// newProvenanceStore returns an empty, ready-to-use provenanceStore.
+func newProvenanceStore() *provenanceStore {
+	return &provenanceStore{data: make(map[provenanceKey]*provenanceCounts)}
+}
+
+// record accumulates one candidate outcome under (provider, provenance):
+// one request, plus tokens — allocating a fresh provenanceCounts the
+// first time key is seen.
+func (s *provenanceStore) record(provider, provenance string, tokens int64) {
+	if s == nil {
+		return
+	}
+	key := provenanceKey{provider: provider, provenance: provenance}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	c := s.data[key]
+	if c == nil {
+		c = &provenanceCounts{}
+		s.data[key] = c
+	}
+	c.requests++
+	c.tokens += tokens
+}
+
+// provenanceSnapshot is one provenanceKey's fully-copied counts, safe to
+// read after provenanceStore.snapshot returns without holding its lock.
+type provenanceSnapshot struct {
+	key      provenanceKey
+	requests int64
+	tokens   int64
+}
+
+// snapshot returns a fully-copied view of every provenanceKey s
+// currently holds, safe to read without s's lock — writeProvenanceMetrics
+// and buildAdminProvenanceViews (admin.go) both read through this rather
+// than s.data directly.
+func (s *provenanceStore) snapshot() []provenanceSnapshot {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]provenanceSnapshot, 0, len(s.data))
+	for k, c := range s.data {
+		out = append(out, provenanceSnapshot{key: k, requests: c.requests, tokens: c.tokens})
+	}
+	return out
+}
+
+// recordUsageProvenance accumulates one candidate outcome into
+// g.provenance — runUnified's (routes_unified.go) only write path into
+// it, reached only for a candidate whose own response actually completed
+// (callErr == nil), gated on metricsEnabled exactly like
+// withLatencyRecorder's own wiring (routes_unified.go): a deployment
+// with metrics off calls this exactly zero times.
+func (g *Gateway) recordUsageProvenance(provider, provenance string, tokens int64) {
+	g.provenance.record(provider, provenance, tokens)
+}
+
+// writeProvenanceMetrics emits llmgateway_usage_provenance_requests_total
+// and llmgateway_usage_provenance_tokens_total — this feature's own two
+// counter families. Absent entirely (no # HELP/TYPE lines emitted) when
+// g.provenance has recorded nothing yet, mirroring writeLatencyMetrics'
+// own "no series until the first observation" convention above.
+//
+// snaps is sorted (provider, then provenance) purely for a deterministic
+// scrape body across repeated scrapes of identical state, matching
+// writeLatencyMetrics' own reasoning.
+func (g *Gateway) writeProvenanceMetrics(m *metricWriter) {
+	snaps := g.provenance.snapshot()
+	if len(snaps) == 0 {
+		return
+	}
+	sort.Slice(snaps, func(i, j int) bool {
+		a, b := snaps[i].key, snaps[j].key
+		if a.provider != b.provider {
+			return a.provider < b.provider
+		}
+		return a.provenance < b.provenance
+	})
+
+	m.family("llmgateway_usage_provenance_requests_total", "counter",
+		"Total accounted candidate outcomes (a successful upstream response, callErr == nil, that reached usage accounting in runUnified, routes_unified.go), by provider and provenance. provenance is \"reported\" (the provider returned real usage), \"estimated\" (a non-streaming response carried none, so prompt was substituted with ceil(len(body)/4) and completion billed as zero — usage.estimated, limits.go), or \"unbilled\" (a streaming response carried none, so the request is counted but zero tokens are billed). This family only reports how an already-billed number was arrived at; it never changes what gets billed."+aggregationNotePerProcess)
+	m.family("llmgateway_usage_provenance_tokens_total", "counter",
+		"Total tokens billed under each provenance (the SAME result.total() runUnified already passed to accounting, routes_unified.go — never a second, independent count), by provider and provenance. sum(...{provenance=\"reported\"}) / sum(...) across every provenance is the fraction of billed tokens that came from real provider-reported usage."+aggregationNotePerProcess)
+	for _, s := range snaps {
+		labels := []metricLabel{{"provider", s.key.provider}, {"provenance", s.key.provenance}}
+		m.sampleInt("llmgateway_usage_provenance_requests_total", labels, s.requests)
+		m.sampleInt("llmgateway_usage_provenance_tokens_total", labels, s.tokens)
 	}
 }
 

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -225,6 +226,250 @@ func TestHandleChat_Streaming_FlushesIncrementally(t *testing.T) {
 	}
 	if !strings.Contains(rw.buf.String(), "data: [DONE]") {
 		t.Errorf("body missing terminal [DONE], got %q", rw.buf.String())
+	}
+}
+
+// --- usage provenance (feat: expose token-accounting provenance) ---
+//
+// Token accounting has three provenances (usage.estimated's own doc
+// comment, limits.go): reported (real provider usage), estimated (a
+// non-streaming response with no usage, prompt substituted from body
+// size), and unbilled (a streaming response with no usage, request
+// counted but zero tokens billed). These three tests drive each real
+// HTTP shape through Gateway.ServeHTTP and assert both the provenance
+// classification AND that billing itself is byte-identical to the
+// pre-feature contract — this feature must never change a billed number.
+
+// TestUsageProvenance_ReportedUsage_ClassifiedReported proves the normal,
+// accurate case (a provider that returns real usage) is classified
+// "reported", not merely "not estimated" by omission.
+//
+// MUTATION VERIFIED: changing routes_unified.go's provenance switch
+// default from `provenance := provenanceReported` to `provenance :=
+// provenanceEstimated` made this test fail — the seen provenance became
+// "estimated" instead of "reported". Reverted before committing.
+func TestUsageProvenance_ReportedUsage_ClassifiedReported(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"id":"c1","object":"chat.completion","model":"gpt-test","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5}}`))
+	}))
+	defer srv.Close()
+
+	cfg := CreateConfig()
+	cfg.Metrics = &MetricsConfig{Enabled: true}
+	cfg.Providers = map[string]*ProviderConfig{
+		"openai": {Type: "openai", BaseURL: srv.URL, APIKey: "sk-up", Models: []string{"gpt-test"}},
+	}
+	cfg.Groups = map[string]*GroupConfig{"default": {}}
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{{Name: "alice", Group: "default", APIKey: "sk-alice"}}}
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	gw, ok := h.(*Gateway)
+	if !ok {
+		t.Fatal("handler is not *Gateway")
+	}
+
+	body := map[string]any{"model": "gpt-test", "messages": []any{map[string]any{"role": "user", "content": "hi"}}}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, newUnifiedRequest(t, http.MethodPost, "/v1/chat/completions", "sk-alice", body))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+
+	snaps := gw.provenance.snapshot()
+	if len(snaps) != 1 {
+		t.Fatalf("g.provenance has %d entries, want 1: %+v", len(snaps), snaps)
+	}
+	s := snaps[0]
+	if s.key.provider != "openai" || s.key.provenance != provenanceReported {
+		t.Errorf("provenance key = %+v, want provider=openai provenance=reported", s.key)
+	}
+	if s.requests != 1 {
+		t.Errorf("requests = %d, want 1", s.requests)
+	}
+	if s.tokens != 15 {
+		t.Errorf("tokens = %d, want 15 (10 prompt + 5 completion, the real reported usage)", s.tokens)
+	}
+
+	// Billing itself must be exactly what TestHandleChat_HappyPath_
+	// NonStreaming_AccountsUsage already proves for this identical
+	// response shape — this feature must never change a billed number.
+	tokIn, _ := gw.limiter.getCounter("user", "alice", metricTokIn, windowDay, time.Now())
+	tokOut, _ := gw.limiter.getCounter("user", "alice", metricTokOut, windowDay, time.Now())
+	if tokIn != 10 || tokOut != 5 {
+		t.Errorf("billed tokin/tokout = %d/%d, want 10/5 — provenance recording must never change what gets billed", tokIn, tokOut)
+	}
+}
+
+// TestUsageProvenance_NonStreamingZeroUsage_ClassifiedEstimated proves a
+// non-streaming response that carries no usage at all is classified
+// "estimated", with the SAME prompt-estimate/zero-completion billing
+// routes_unified.go already applied before this feature existed —
+// ceil(request body size / 4) prompt, zero completion.
+//
+// MUTATION VERIFIED: changing the recording switch's `case
+// result.estimated:` guard (routes_unified.go) to `case false:` made
+// this test fail — the seen provenance stayed "reported" instead of
+// becoming "estimated". Reverted before committing.
+func TestUsageProvenance_NonStreamingZeroUsage_ClassifiedEstimated(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		// No "usage" field at all — decodes to chatUsagePayload's zero
+		// value (provider_openai.go's forwardJSON), the identical shape a
+		// provider that omits usage from a non-streaming response sends.
+		_, _ = w.Write([]byte(`{"id":"c1","object":"chat.completion","model":"gpt-test","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}]}`))
+	}))
+	defer srv.Close()
+
+	cfg := CreateConfig()
+	cfg.Metrics = &MetricsConfig{Enabled: true}
+	cfg.Providers = map[string]*ProviderConfig{
+		"openai": {Type: "openai", BaseURL: srv.URL, APIKey: "sk-up", Models: []string{"gpt-test"}},
+	}
+	cfg.Groups = map[string]*GroupConfig{"default": {}}
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{{Name: "alice", Group: "default", APIKey: "sk-alice"}}}
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	gw, ok := h.(*Gateway)
+	if !ok {
+		t.Fatal("handler is not *Gateway")
+	}
+
+	reqBody := map[string]any{"model": "gpt-test", "messages": []any{map[string]any{"role": "user", "content": "hi"}}}
+	// The exact bytes newUnifiedRequest below marshals reqBody into —
+	// routes_unified.go's own estimate is ceil(len(body) / 4) over these
+	// SAME bytes, so this reproduces the source's formula against a
+	// black-box-observable input (the request the test itself sends),
+	// not a re-implementation of internal logic.
+	marshaled, err := json.Marshal(reqBody)
+	if err != nil {
+		t.Fatalf("marshal request body: %v", err)
+	}
+	wantPrompt := int64(math.Ceil(float64(len(marshaled)) / 4))
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, newUnifiedRequest(t, http.MethodPost, "/v1/chat/completions", "sk-alice", reqBody))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+
+	snaps := gw.provenance.snapshot()
+	if len(snaps) != 1 {
+		t.Fatalf("g.provenance has %d entries, want 1: %+v", len(snaps), snaps)
+	}
+	s := snaps[0]
+	if s.key.provider != "openai" || s.key.provenance != provenanceEstimated {
+		t.Errorf("provenance key = %+v, want provider=openai provenance=estimated", s.key)
+	}
+	if s.tokens != wantPrompt {
+		t.Errorf("provenance tokens = %d, want %d (ceil(request body size / 4), the estimate)", s.tokens, wantPrompt)
+	}
+
+	// Billing unchanged from the pre-feature contract: prompt substituted
+	// with the estimate, completion billed as zero.
+	tokIn, _ := gw.limiter.getCounter("user", "alice", metricTokIn, windowDay, time.Now())
+	tokOut, _ := gw.limiter.getCounter("user", "alice", metricTokOut, windowDay, time.Now())
+	if tokIn != wantPrompt {
+		t.Errorf("billed tokin = %d, want %d (ceil(request body size / 4))", tokIn, wantPrompt)
+	}
+	if tokOut != 0 {
+		t.Errorf("billed tokout = %d, want 0 — completion is billed as zero for an estimated response", tokOut)
+	}
+}
+
+// TestUsageProvenance_StreamingZeroUsage_ClassifiedUnbilled_DistinctFromEstimated
+// proves a streaming response that carries no usage at all is classified
+// "unbilled" — DISTINCT from "estimated" (this feature's own
+// correctness requirement: collapsing the two into one "not reported"
+// signal would hide that a provider serving completions entirely free
+// is a materially different failure than an approximated bill) — and
+// that billing stays exactly what routes_unified.go already applied
+// before this feature existed: the request counted, zero tokens billed.
+//
+// MUTATION VERIFIED: changing the recording switch's `case streaming &&
+// result.total() == 0:` guard (routes_unified.go) to `case
+// result.estimated:` (merging unbilled into the estimated branch) made
+// this test fail — the seen provenance became "estimated" instead of
+// "unbilled", and the distinctness assertion below failed too. Reverted
+// before committing.
+func TestUsageProvenance_StreamingZeroUsage_ClassifiedUnbilled_DistinctFromEstimated(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		fl, ok := w.(http.Flusher)
+		if !ok {
+			t.Fatal("fake upstream ResponseWriter does not support Flush")
+		}
+		_, _ = w.Write([]byte("data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n"))
+		fl.Flush()
+		// No usage-only chunk — the provider never honored
+		// stream_options.include_usage, the exact shape this feature
+		// exists to surface.
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+		fl.Flush()
+	}))
+	defer srv.Close()
+
+	cfg := CreateConfig()
+	cfg.Metrics = &MetricsConfig{Enabled: true}
+	cfg.Providers = map[string]*ProviderConfig{
+		"openai": {Type: "openai", BaseURL: srv.URL, APIKey: "sk-up", Models: []string{"gpt-test"}},
+	}
+	cfg.Groups = map[string]*GroupConfig{"default": {}}
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{{Name: "alice", Group: "default", APIKey: "sk-alice"}}}
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	gw, ok := h.(*Gateway)
+	if !ok {
+		t.Fatal("handler is not *Gateway")
+	}
+
+	body := map[string]any{"model": "gpt-test", "stream": true, "messages": []any{map[string]any{"role": "user", "content": "hi"}}}
+	rw := newRecordingWriter()
+	h.ServeHTTP(rw, newUnifiedRequest(t, http.MethodPost, "/v1/chat/completions", "sk-alice", body))
+	if rw.status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rw.status)
+	}
+
+	snaps := gw.provenance.snapshot()
+	if len(snaps) != 1 {
+		t.Fatalf("g.provenance has %d entries, want 1: %+v", len(snaps), snaps)
+	}
+	s := snaps[0]
+	if s.key.provider != "openai" || s.key.provenance != provenanceUnbilled {
+		t.Errorf("provenance key = %+v, want provider=openai provenance=unbilled", s.key)
+	}
+	if s.key.provenance == provenanceEstimated {
+		t.Errorf("provenance = estimated, want unbilled — a streaming zero-usage response must never be classified the same as a non-streaming one")
+	}
+	if s.tokens != 0 {
+		t.Errorf("provenance tokens = %d, want 0 — unbilled charges nothing at all", s.tokens)
+	}
+
+	// Billing unchanged from the pre-feature contract: the request is
+	// counted (req/min bumped) but zero tokens are billed.
+	tokIn, _ := gw.limiter.getCounter("user", "alice", metricTokIn, windowDay, time.Now())
+	tokOut, _ := gw.limiter.getCounter("user", "alice", metricTokOut, windowDay, time.Now())
+	if tokIn != 0 || tokOut != 0 {
+		t.Errorf("billed tokin/tokout = %d/%d, want 0/0 — a streaming zero-usage response bills nothing", tokIn, tokOut)
+	}
+	reqCount, ok2 := gw.limiter.getCounter("user", "alice", metricReq, windowMin, time.Now())
+	if !ok2 || reqCount != 1 {
+		t.Errorf("request/min counter = %d (ok=%v), want 1 — the request must still be COUNTED even though zero tokens are billed", reqCount, ok2)
 	}
 }
 
