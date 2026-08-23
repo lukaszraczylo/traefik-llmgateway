@@ -1318,6 +1318,10 @@ func exerciseHandler(handler http.Handler, builtinContextTokens int, failoverBHi
 		return err
 	}
 
+	if err := exerciseFederatedSSENegotiation(handler); err != nil {
+		return err
+	}
+
 	if err := exerciseStampedVersion(handler); err != nil {
 		return err
 	}
@@ -1622,6 +1626,82 @@ func exerciseFederatedTooLarge(handler http.Handler) error {
 	if resp.Error.Message != mcpTooLargeWantMessage {
 		return fmt.Errorf("POST /mcp tools/call error message = %q, want %q — errors.Is(err, errMCPResponseTooLarge) did not match under the interpreter (mcp_federation.go)", resp.Error.Message, mcpTooLargeWantMessage)
 	}
+	return nil
+}
+
+// exerciseFederatedSSENegotiation drives two real POST /mcp "ping" calls
+// against the interpreted handler — one carrying no Accept header
+// (today's plain JSON framing) and one carrying the reported client's
+// exact "Accept: application/json, text/event-stream" header — proving
+// content negotiation (mcpNegotiateFormat, mcpAcceptsSSE) and the SSE
+// branch's reuse of sse.go's newSSEWriter/writeData both run correctly
+// under the REAL interpreter. mcp_federation_sse_test.go already covers
+// this compiled; this harness exists because a compiled pass on this
+// codebase has repeatedly said nothing about the interpreted shape.
+//
+// "ping" is deliberately chosen over tools/list or tools/call: it is
+// answered entirely locally (handleMCPFederated's own doc comment), so
+// this probe needs no additional upstream server and cannot be confused
+// with mcpProbeUpstream's own, deliberately oversized, tools/call-only
+// response above.
+//
+// This is also the first time under this harness that sse.go's
+// newSSEWriter/writeData actually executes interpreted at all. The
+// streaming (chat completions) path is documented as losing its
+// incremental Flush under Yaegi (newSSEWriter's own doc comment,
+// confirmed by Task 15's integration suite) — harmless here, since this
+// is a single-shot envelope that writes once and returns rather than a
+// response that depends on Flush for time-to-first-byte, but it means no
+// existing gate has ever run this writer interpreted before now.
+func exerciseFederatedSSENegotiation(handler http.Handler) error {
+	pingBody := `{"jsonrpc":"2.0","id":1,"method":"ping"}`
+
+	jsonReq := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(pingBody))
+	jsonReq.Header.Set("Authorization", "Bearer "+testDataUserAPIKey)
+	jsonReq.Header.Set("Content-Type", "application/json")
+	jsonRec := httptest.NewRecorder()
+	handler.ServeHTTP(jsonRec, jsonReq)
+	if jsonRec.Code != http.StatusOK {
+		return fmt.Errorf("POST /mcp ping (no Accept header): status = %d, want 200, body=%s", jsonRec.Code, jsonRec.Body.String())
+	}
+	if ct := jsonRec.Header().Get("Content-Type"); ct != "application/json" {
+		return fmt.Errorf("POST /mcp ping (no Accept header): Content-Type = %q, want %q — default framing must not change interpreted", ct, "application/json")
+	}
+
+	sseReq := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(pingBody))
+	sseReq.Header.Set("Authorization", "Bearer "+testDataUserAPIKey)
+	sseReq.Header.Set("Content-Type", "application/json")
+	sseReq.Header.Set("Accept", "application/json, text/event-stream")
+	sseRec := httptest.NewRecorder()
+	handler.ServeHTTP(sseRec, sseReq)
+	if sseRec.Code != http.StatusOK {
+		return fmt.Errorf("POST /mcp ping (Accept: text/event-stream): status = %d, want 200, body=%s", sseRec.Code, sseRec.Body.String())
+	}
+	if ct := sseRec.Header().Get("Content-Type"); ct != "text/event-stream" {
+		return fmt.Errorf("POST /mcp ping (Accept: text/event-stream): Content-Type = %q, want %q — SSE negotiation did not run interpreted", ct, "text/event-stream")
+	}
+
+	body := sseRec.Body.String()
+	if !strings.HasPrefix(body, "data: ") {
+		return fmt.Errorf("POST /mcp ping (Accept: text/event-stream): body does not start with \"data: \": %q", body)
+	}
+	if !strings.HasSuffix(body, "\n\n") {
+		return fmt.Errorf("POST /mcp ping (Accept: text/event-stream): body does not end with the SSE blank-line terminator — the exact missing-terminator defect class this negotiation was added to fix: %q", body)
+	}
+
+	dataLine := strings.TrimSuffix(strings.TrimPrefix(body, "data: "), "\n\n")
+	var resp struct {
+		Result map[string]any  `json:"result"`
+		ID     json.RawMessage `json:"id"`
+	}
+	if err := json.Unmarshal([]byte(dataLine), &resp); err != nil {
+		return fmt.Errorf("POST /mcp ping (Accept: text/event-stream): data line is not valid JSON-RPC: %w (line=%q)", err, dataLine)
+	}
+	if string(resp.ID) != "1" {
+		return fmt.Errorf("POST /mcp ping (Accept: text/event-stream): id = %s, want the client's own id 1 echoed back", resp.ID)
+	}
+
+	fmt.Println("yaegi-check: federated MCP content negotiation served both JSON and SSE framing correctly, interpreted")
 	return nil
 }
 
