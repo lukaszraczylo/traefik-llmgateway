@@ -631,6 +631,78 @@ func TestAdminOverview_LatencySummary_AvgReflectsSeededObservations(t *testing.T
 	}
 }
 
+// TestAdminOverview_ProvenanceSummary_ExcludesReportedIncludesEstimatedAndUnbilled
+// proves buildAdminProvenanceViews' own filtering (admin.go, feat:
+// expose token-accounting provenance): "reported" observations never
+// surface on this compact admin summary (the operator already sees
+// AttemptsDay/FailuresDay for the healthy default), while "estimated"
+// and "unbilled" both do, as DISTINCT keys — never merged.
+//
+// MUTATION VERIFIED: removing the `if s.key.provenance ==
+// provenanceReported { continue }` guard from buildAdminProvenanceViews
+// (admin.go) made this test fail — zeta.Provenance gained a leaked
+// "reported" entry (Requests=1, Tokens=15) that must never appear here.
+// Reverted before committing.
+func TestAdminOverview_ProvenanceSummary_ExcludesReportedIncludesEstimatedAndUnbilled(t *testing.T) {
+	t.Parallel()
+	cfg := newAdminTestConfig()
+	h, gw := newAdminGatewayHandle(t, cfg)
+
+	// zeta: one reported observation (must never surface below) and one
+	// estimated observation.
+	gw.provenance.record("zeta", provenanceReported, 15)
+	gw.provenance.record("zeta", provenanceEstimated, 7)
+
+	// alpha: two unbilled observations, seeded separately to prove
+	// requests accumulates across calls rather than overwriting.
+	gw.provenance.record("alpha", provenanceUnbilled, 0)
+	gw.provenance.record("alpha", provenanceUnbilled, 0)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, adminRequest(http.MethodGet, adminOverviewPath, "sk-admin1"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	var got adminOverviewResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	var zeta, alpha *adminProviderView
+	for i := range got.Providers {
+		switch got.Providers[i].Name {
+		case "zeta":
+			zeta = &got.Providers[i]
+		case "alpha":
+			alpha = &got.Providers[i]
+		}
+	}
+	if zeta == nil || alpha == nil {
+		t.Fatalf("providers = %+v, want entries named zeta and alpha", got.Providers)
+	}
+
+	if _, ok := zeta.Provenance[provenanceReported]; ok {
+		t.Errorf(`zeta.Provenance has a %q entry: %+v — "reported" must never surface on this compact admin summary`, provenanceReported, zeta.Provenance)
+	}
+	est, ok := zeta.Provenance[provenanceEstimated]
+	if !ok {
+		t.Fatalf("zeta.Provenance missing %q entry: %+v", provenanceEstimated, zeta.Provenance)
+	}
+	if est.Requests != 1 || est.Tokens != 7 {
+		t.Errorf("zeta estimated = %+v, want {Requests:1 Tokens:7}", est)
+	}
+
+	unb, ok := alpha.Provenance[provenanceUnbilled]
+	if !ok {
+		t.Fatalf("alpha.Provenance missing %q entry: %+v", provenanceUnbilled, alpha.Provenance)
+	}
+	if unb.Requests != 2 || unb.Tokens != 0 {
+		t.Errorf("alpha unbilled = %+v, want {Requests:2 Tokens:0}", unb)
+	}
+	if _, ok := alpha.Provenance[provenanceEstimated]; ok {
+		t.Errorf(`alpha.Provenance has a %q entry despite only unbilled observations being seeded: %+v — estimated and unbilled must never conflate`, provenanceEstimated, alpha.Provenance)
+	}
+}
+
 // --- usage: math against seeded counters ---
 
 func TestAdminUsage_MathAgainstSeededCounters(t *testing.T) {
