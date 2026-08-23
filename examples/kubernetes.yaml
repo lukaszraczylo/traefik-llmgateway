@@ -211,6 +211,48 @@ spec:
           port: 80
 
 ---
+# A SEPARATE, Host-free IngressRoute for the metrics scrape (review fix,
+# adversarial verification 2026-08-23): Traefik evaluates a router's
+# match rule BEFORE any middleware runs, and the ONLY router above
+# requires Host(`llm.example.com`). A VMServiceScrape/ServiceMonitor (below)
+# reaches this Service through its cluster-internal DNS name or the pod
+# IP directly, so the scrape request's Host header is never
+# llm.example.com — it never matches that rule, the llmgateway
+# middleware (and therefore /metrics itself) never runs, and the scrape
+# 404s. PathPrefix, not Host, is deliberate here: this router exists
+# specifically so an in-cluster scraper, addressing this Service by
+# whatever internal name/IP it resolves to, still reaches the metrics
+# route regardless of Host. /metrics is already gated by its own auth
+# inside the plugin (an admin key, or metrics.allowedCIDRs — see
+# ../README.md#metrics), so this being reachable without a Host match is
+# not a second, unguarded door — but if your own Traefik instance fronts
+# other Host-restricted routers on the SAME entryPoint, this route is
+# reachable via any of THEIR hostnames too, not only in-cluster; narrow
+# entryPoints below to an internal-only one, or add your own Host()
+# match for your cluster's internal DNS name, if that reachability is
+# broader than you want. The alternative the review that flagged this
+# also named — keeping one Host-scoped router and instead using
+# VMServiceScrape's own relabelConfigs to rewrite __address__ to
+# llm.example.com before the request is sent — works too; this file uses
+# the simpler of the two.
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: llmgateway-metrics
+  namespace: traefik
+spec:
+  entryPoints:
+    - websecure
+  routes:
+    - match: PathPrefix(`/metrics`)
+      kind: Rule
+      middlewares:
+        - name: llmgateway
+      services:
+        - name: llmgateway-dummy-backend
+          port: 80
+
+---
 # Scraping /metrics (../README.md#metrics): this cluster runs
 # VictoriaMetrics, not Prometheus, so the CRD is VMServiceScrape
 # (victoriametrics/operator), not a Prometheus-operator ServiceMonitor —
@@ -222,7 +264,9 @@ spec:
 # IMPORTANT: /metrics is served by TRAEFIK ITSELF, not by
 # llmgateway-dummy-backend above — this middleware intercepts the path
 # before any backend service is ever reached (same as every other route
-# this plugin owns). Point this scrape at YOUR Traefik installation's own
+# this plugin owns), which is exactly why the Host-free IngressRoute
+# above exists: without it this scrape 404s before the middleware ever
+# sees the request. Point this scrape at YOUR Traefik installation's own
 # Service (commonly named "traefik" — verify against your own Helm
 # release), never at a backend service this file defines. Adjust
 # selector/namespaceSelector/port to match your Traefik Service's real
