@@ -505,8 +505,26 @@ func TestModelRegistry_MaybeRefresh_Throttled_OnePerInterval(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newModelRegistry: %v", err)
 	}
-	now := time.Now()
-	reg.nowFn = func() time.Time { return now }
+	// clockMu guards clock: reg.nowFn runs on maybeRefresh's own
+	// background refresh goroutine (registry.go), concurrently with this
+	// test's own goroutine advancing the clock below a few lines down. A
+	// plain `now` variable closed over by both was a genuine data race
+	// (coordinator adversarial review, 2026-08-23) — the 10ms sleep below
+	// gave the background goroutine a chance to finish reading it first,
+	// but that is a race won by scheduling luck, not a happens-before
+	// guarantee, and -race caught it in roughly 14% of full-suite runs.
+	var clockMu sync.Mutex
+	clock := time.Now()
+	reg.nowFn = func() time.Time {
+		clockMu.Lock()
+		defer clockMu.Unlock()
+		return clock
+	}
+	advanceClock := func(d time.Duration) {
+		clockMu.Lock()
+		clock = clock.Add(d)
+		clockMu.Unlock()
+	}
 
 	reg.maybeRefresh(context.Background())
 	waitUntil(t, time.Second, func() bool { return atomic.LoadInt32(&calls) == 1 })
@@ -518,7 +536,7 @@ func TestModelRegistry_MaybeRefresh_Throttled_OnePerInterval(t *testing.T) {
 		t.Errorf("listModels called %d times within one interval, want 1", got)
 	}
 
-	now = now.Add(2 * time.Hour) // past the interval: next entry should refetch
+	advanceClock(2 * time.Hour) // past the interval: next entry should refetch
 	reg.maybeRefresh(context.Background())
 	waitUntil(t, time.Second, func() bool { return atomic.LoadInt32(&calls) == 2 })
 }

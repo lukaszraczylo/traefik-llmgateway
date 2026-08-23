@@ -310,6 +310,17 @@ func upstreamRawBytes(ctx context.Context, client *http.Client, method, url stri
 // "application/json" only when bodyBytes is non-nil and hdr set none of
 // its own.
 func upstreamBytes(ctx context.Context, client *http.Client, method, url string, hdr http.Header, bodyBytes []byte, policy *retryPolicy, timeout time.Duration, providerName string) (*http.Response, error) {
+	// rec is looked up once, outside the retry loop's call closure: every
+	// attempt shares the identical ctx, so the recorder (nil when no
+	// caller ever wired one via withAttemptRecorder) is the same across
+	// attempts. watchdogBody uses it too (coordinator adversarial review,
+	// 2026-08-23, finding F4): retryPolicy.do's own rec(resp, err) call
+	// (retry.go) already ran, at header-arrival time, before any byte of
+	// the body was read — a mid-body stall was otherwise invisible to
+	// provider-health accounting, since nothing else ever called rec
+	// again for that attempt.
+	rec := attemptRecorderFromContext(ctx)
+
 	call := func() (*http.Response, error) {
 		var r io.Reader
 		if bodyBytes != nil {
@@ -355,7 +366,7 @@ func upstreamBytes(ctx context.Context, client *http.Client, method, url string,
 			cancel()
 			return nil, fmt.Errorf("%w: %w", errUpstream, err)
 		}
-		resp.Body = newWatchdogBody(resp.Body, cancel, timeout, providerName)
+		resp.Body = newWatchdogBody(resp.Body, cancel, timeout, fmt.Sprintf("provider %q", providerName), rec)
 		return resp, nil
 	}
 

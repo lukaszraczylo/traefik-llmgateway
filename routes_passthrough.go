@@ -1014,8 +1014,13 @@ func (g *Gateway) proxyUpstream(w http.ResponseWriter, r *http.Request, upstream
 	// carries a recorder (attemptRecorderFromContext, providers.go) —
 	// handleTargetProxy (mcp_a2a.go), this function's other caller, never
 	// wraps r's context this way, so an MCP/A2A target proxy attempt is
-	// correctly never accounted as provider traffic.
-	if rec := attemptRecorderFromContext(r.Context()); rec != nil {
+	// correctly never accounted as provider traffic. rec is kept in scope
+	// (not just checked inline) so the watchdogBody below can reuse it
+	// too — a mid-body stall must reach the SAME provider-health
+	// accounting a build/send failure already does (coordinator
+	// adversarial review, 2026-08-23, finding F4).
+	rec := attemptRecorderFromContext(r.Context())
+	if rec != nil {
 		rec(resp, err)
 	}
 	if err != nil {
@@ -1028,7 +1033,11 @@ func (g *Gateway) proxyUpstream(w http.ResponseWriter, r *http.Request, upstream
 		writeOAIError(w, http.StatusBadGateway, "server_error", "upstream connection error")
 		return proxyResult{}, false
 	}
-	resp.Body = newWatchdogBody(resp.Body, cancel, timeout, logPrefix)
+	// logPrefix, not a hardcoded "provider %q": handleTargetProxy's own
+	// calls here (mcp_a2a.go) pass "mcp target (name ...)"/"a2a target
+	// (name ...)" — an MCP/A2A target is not a provider, and the watchdog
+	// error text must not claim it is (finding F9).
+	resp.Body = newWatchdogBody(resp.Body, cancel, timeout, logPrefix, rec)
 	defer resp.Body.Close() //nolint:errcheck // read-side close; nothing actionable on failure
 
 	copyHeadersExcept(w.Header(), resp.Header, hopByHopHeaders, dangerousResponseHeaders)

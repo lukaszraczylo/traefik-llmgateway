@@ -9,6 +9,8 @@ import (
 	"net/http/httptest"
 	"runtime"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -521,18 +523,25 @@ func (f *fakeReadCloser) Close() error {
 // (timeout.go) made this test fail — timedOut read back as 1 after the
 // sleep, since the un-stopped timer still fired on schedule. Reverted
 // before committing.
+//
+// wb.timedOut is read via atomic.LoadInt32 below, not a bare field read
+// (coordinator adversarial review, 2026-08-23, finding F9): every other
+// access in timeout.go itself is atomic, so a bare read here was a
+// latent -race report waiting on a scheduling difference, even though
+// Close's own Stop happens-before makes this specific read safe in
+// practice.
 func TestWatchdogBody_Close_StopsTimer_FireNeverRuns(t *testing.T) {
 	const timeout = 30 * time.Millisecond
 	frc := newFakeReadCloser()
 	ctx, cancel := context.WithCancel(context.Background())
-	wb := newWatchdogBody(frc, cancel, timeout, "p1")
+	wb := newWatchdogBody(frc, cancel, timeout, "p1", nil)
 
 	if err := wb.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
 	time.Sleep(3 * timeout) // well past when an un-stopped timer would fire
 
-	if got := wb.timedOut; got != 0 {
+	if got := atomic.LoadInt32(&wb.timedOut); got != 0 {
 		t.Errorf("wb.timedOut = %d after Close, want 0 — the timer must not fire once stopped", got)
 	}
 	select {
@@ -701,5 +710,177 @@ func TestNewGateway_TargetTimeout_ResolvedFromConfig(t *testing.T) {
 	}
 	if tr.ResponseHeaderTimeout != 90*time.Second {
 		t.Errorf("targetClient Transport.ResponseHeaderTimeout = %v, want 90s", tr.ResponseHeaderTimeout)
+	}
+}
+
+// TestChatCompletion_Stream_StallsMidBody_RecordsProviderFailure proves
+// finding F4 (coordinator adversarial review, 2026-08-23): a mid-body
+// watchdog timeout must reach provider-health accounting through the
+// SAME attemptRecorder mechanism retryPolicy.do already uses at
+// header-arrival time. Before this fix, limiter.recordProviderAttempt was
+// only ever invoked once per request — at header time — so a provider
+// that reliably stalls mid-body looked 100% successful to any consumer
+// of those counters (the discovery breaker, cross-provider failover)
+// forever: attempts=1 failures=0, identical to a real success.
+//
+// MUTATION VERIFIED: removing the `if wb.onTimeout != nil { ... }` block
+// from watchdogBody.fire (timeout.go) made this test fail — the spy
+// recorder was invoked exactly once (the header-time success), never a
+// second time recording the failure. Reverted before committing.
+func TestChatCompletion_Stream_StallsMidBody_RecordsProviderFailure(t *testing.T) {
+	const timeout = 60 * time.Millisecond
+	srv, release := newStallingServer(func(w http.ResponseWriter) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
+	})
+	defer release()
+
+	a := newTimeoutTestAdapter(srv.URL, timeout)
+
+	type recorded struct {
+		resp *http.Response
+		err  error
+	}
+	var mu sync.Mutex
+	var calls []recorded
+	rec := attemptRecorder(func(resp *http.Response, err error) {
+		mu.Lock()
+		calls = append(calls, recorded{resp, err})
+		mu.Unlock()
+	})
+	ctx := withAttemptRecorder(context.Background(), rec)
+
+	rw := httptest.NewRecorder()
+	if _, err := a.chatCompletion(ctx, rw, map[string]any{"model": "gpt-5", "messages": []any{}, "stream": true}); err == nil {
+		t.Fatal("chatCompletion: want an error for a stream that stalls mid-body, got nil")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(calls) != 2 {
+		t.Fatalf("attemptRecorder invoked %d times, want 2 (header-time success, then watchdog-fire failure): %+v", len(calls), calls)
+	}
+	if calls[0].err != nil {
+		t.Errorf("first call err = %v, want nil (the header-arrival attempt succeeded)", calls[0].err)
+	}
+	if calls[1].resp != nil {
+		t.Errorf("second call resp = %v, want nil", calls[1].resp)
+	}
+	if !errors.Is(calls[1].err, errProviderTimeout) {
+		t.Errorf("second call err = %v, want errors.Is(err, errProviderTimeout)", calls[1].err)
+	}
+}
+
+// zeroByteReadCloser always returns (0, nil) — a legal io.Reader response
+// that delivers no bytes without signaling an error or EOF — until
+// Close, which switches it to (0, io.EOF). Used by
+// TestWatchdogBody_ZeroByteRead_DoesNotResetTimer (finding F6) to prove a
+// Read that "succeeds" but delivers nothing does not keep the watchdog
+// alive.
+type zeroByteReadCloser struct {
+	closed chan struct{}
+}
+
+func newZeroByteReadCloser() *zeroByteReadCloser {
+	return &zeroByteReadCloser{closed: make(chan struct{})}
+}
+
+func (z *zeroByteReadCloser) Read([]byte) (int, error) {
+	select {
+	case <-z.closed:
+		return 0, io.EOF
+	default:
+		return 0, nil
+	}
+}
+
+func (z *zeroByteReadCloser) Close() error {
+	select {
+	case <-z.closed:
+	default:
+		close(z.closed)
+	}
+	return nil
+}
+
+// TestWatchdogBody_ZeroByteRead_DoesNotResetTimer proves finding F6
+// (coordinator adversarial review, 2026-08-23): watchdogBody.Read
+// resetting on every err == nil read, regardless of n, let a reader that
+// keeps returning (0, nil) hold the watchdog open forever — the
+// coordinator's own probe measured this surviving past 20x the
+// configured timeout across 1044 reads. Not reachable from net/http
+// against a non-empty buffer today, but exactly the naive-watchdog hole
+// this feature exists to close, so it is fixed and pinned regardless.
+//
+// This checks wb.timedOut directly rather than expecting wb.Read to
+// surface an error: zeroByteReadCloser never inspects the watchdog's
+// canceled context (unlike a real net.Conn, whose blocked Read a
+// cancellation actually unblocks with an error), so it would return
+// (0, nil) forever either way — the property under test is whether the
+// watchdog's internal deadline advances, not what Read eventually
+// returns.
+//
+// MUTATION VERIFIED: reverting watchdogBody.Read's `if n > 0 { ... }`
+// guard (timeout.go) to an unconditional `wb.timer.Reset(wb.timeout)`
+// made this test fail — timedOut stayed 0 for the full 10-timeout poll
+// window, since every (0, nil) read kept re-arming the timer. Reverted
+// before committing.
+func TestWatchdogBody_ZeroByteRead_DoesNotResetTimer(t *testing.T) {
+	const timeout = 20 * time.Millisecond
+	zrc := newZeroByteReadCloser()
+	defer zrc.Close()
+	_, cancel := context.WithCancel(context.Background())
+	wb := newWatchdogBody(zrc, cancel, timeout, "p1", nil)
+	defer wb.Close()
+
+	buf := make([]byte, 16)
+	deadline := time.Now().Add(10 * timeout)
+	for time.Now().Before(deadline) && atomic.LoadInt32(&wb.timedOut) == 0 {
+		n, _ := wb.Read(buf) // always (0, nil) from this fixture, until Close
+		if n != 0 {
+			t.Fatalf("Read returned n=%d, want 0 (fixture bug)", n)
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	if got := atomic.LoadInt32(&wb.timedOut); got != 1 {
+		t.Fatalf("wb.timedOut = %d after %s of continuous (0, nil) reads (timeout=%s), want 1 — a Read returning (0, nil) must not keep resetting the watchdog", got, 10*timeout, timeout)
+	}
+}
+
+// TestWatchdogBody_TimeoutError_UsesCallerLabel_NotHardcodedProvider
+// proves finding F9 (coordinator adversarial review, 2026-08-23):
+// proxyUpstream (routes_passthrough.go) previously passed logPrefix as a
+// bare "providerName" argument that watchdogBody wrapped in a hardcoded
+// `provider %q` — producing a timeout error reading `provider
+// "mcp target (name foo)"` for an MCP/A2A target proxy request, which is
+// not a provider at all. watchdogBody now takes an already-formatted
+// label from the caller and uses it verbatim.
+//
+// MUTATION VERIFIED: changing watchdogBody.timeoutError's format string
+// back to `"%w: provider %q: no upstream progress for %s"` (timeout.go)
+// made this test fail both assertions — the caller's label no longer
+// appeared verbatim, and the hardcoded "provider \"mcp target" prefix
+// reappeared. Reverted before committing.
+func TestWatchdogBody_TimeoutError_UsesCallerLabel_NotHardcodedProvider(t *testing.T) {
+	const timeout = 20 * time.Millisecond
+	const label = `mcp target (name "foo")`
+	frc := newFakeReadCloser()
+	_, cancel := context.WithCancel(context.Background())
+	wb := newWatchdogBody(frc, cancel, timeout, label, nil)
+	defer wb.Close()
+
+	time.Sleep(3 * timeout) // let the watchdog fire
+	close(frc.unblock)      // simulate the underlying connection erroring out once canceled
+	_, err := wb.Read(make([]byte, 16))
+	if err == nil {
+		t.Fatal("Read: want an error once the watchdog has fired, got nil")
+	}
+	if !strings.Contains(err.Error(), label) {
+		t.Errorf("err = %v, want it to contain the caller's own label (%q) verbatim", err, label)
+	}
+	if strings.Contains(err.Error(), `provider "mcp target`) {
+		t.Errorf(`err = %v, must not wrap the label in a hardcoded "provider %%q" — an MCP/A2A target is not a provider`, err)
 	}
 }
