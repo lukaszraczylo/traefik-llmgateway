@@ -58,6 +58,26 @@ export interface AdminLatencyView {
   count?: number
 }
 
+/**
+ * One provider's one non-reported provenance kind's compact usage-
+ * accounting summary (admin.go: adminProvenanceView — feat: expose
+ * token-accounting provenance). "estimated" means a non-streaming
+ * response carried no usage from the provider, so prompt was substituted
+ * with an estimate (ceil(request body length / 4)) and completion billed
+ * as zero. "unbilled" means a streaming response carried no usage, so
+ * the request was counted but zero tokens were billed — a provider
+ * silently ignoring stream_options.include_usage serves that completion
+ * entirely free against every budget. Billing itself is unaffected by
+ * this data; it only reports how an already-billed number was arrived
+ * at. requests/tokens are never fabricated zeros: this view only ever
+ * exists (see AdminProviderView.provenance) for a kind that was actually
+ * observed at least once.
+ */
+export interface AdminProvenanceView {
+  requests: number
+  tokens: number
+}
+
 export interface AdminProviderView {
   name: string
   type: string
@@ -142,6 +162,22 @@ export interface AdminProviderView {
    * together or present either one as a bare, unlabeled "latency".
    */
   latency?: Partial<Record<'streaming' | 'non-streaming', AdminLatencyView>>
+  /**
+   * provenance summarizes non-reported usage accounting for this
+   * provider (admin.go: adminProviderView.Provenance — feat: expose
+   * token-accounting provenance), keyed by provenance kind: 'estimated'
+   * or 'unbilled' only — 'reported' (the default, healthy case) is never
+   * a key here, see AdminProvenanceView's own doc comment for why.
+   * Undefined entirely for a provider with no estimated/unbilled outcome
+   * yet, or a deployment with metrics collection gated off — mirroring
+   * latency's identical "undefined, never an empty object" convention
+   * above.
+   *
+   * PER-REPLICA, IN-PROCESS: sourced from the same in-process accumulator
+   * as latency above — see that field's own caveat, which applies here
+   * unchanged.
+   */
+  provenance?: Partial<Record<'estimated' | 'unbilled', AdminProvenanceView>>
 }
 
 export interface AdminRedisView {

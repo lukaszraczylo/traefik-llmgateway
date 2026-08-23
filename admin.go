@@ -303,9 +303,20 @@ type adminProviderView struct {
 	// declared after the scalar block as costing extra GC pointer-scan
 	// bytes. See timeout.go's watchdogBody for the identical convention.
 	Latency map[string]adminLatencyView `json:"latency,omitempty"`
-	Type    string                      `json:"type"`
-	BaseURL string                      `json:"baseUrl"`
-	LastErr string                      `json:"lastErr,omitempty"`
+	// Provenance summarizes non-reported usage accounting for this
+	// provider (feat: expose token-accounting provenance) — keyed by
+	// provenance kind, "estimated" or "unbilled" only (see
+	// adminProvenanceView's own doc comment for why "reported" is never a
+	// key here). Sourced from the SAME in-process g.provenance
+	// accumulator /metrics reads (metrics.go). nil (omitted) for a
+	// provider with no estimated/unbilled outcome yet, or for a
+	// deployment with metrics collection gated off entirely — mirroring
+	// Latency's identical "nil means no observations yet" convention
+	// immediately above.
+	Provenance map[string]adminProvenanceView `json:"provenance,omitempty"`
+	Type       string                         `json:"type"`
+	BaseURL    string                         `json:"baseUrl"`
+	LastErr    string                         `json:"lastErr,omitempty"`
 	// HealthState is this provider's discovery circuit breaker state
 	// (feat/provider-health): "closed" (normal), "open" (backing off
 	// after repeated discovery failures — maybeRefresh skips it until
@@ -413,6 +424,48 @@ func buildAdminLatencyViews(snaps []latencySnapshot) map[string]map[string]admin
 			out[s.key.provider] = make(map[string]adminLatencyView)
 		}
 		out[s.key.provider][streamKey] = v
+	}
+	return out
+}
+
+// adminProvenanceView is one provider's one non-reported provenance
+// kind's compact usage-accounting summary (feat: expose token-accounting
+// provenance) — adminProviderView.Provenance's value type, keyed by
+// provenance kind ("estimated" or "unbilled" — provenanceEstimated/
+// provenanceUnbilled, metrics.go) in adminProviderView.Provenance's outer
+// map. "reported" is deliberately never a key here: it is the default,
+// healthy case AttemptsDay/FailuresDay above already partially describe,
+// and duplicating its own count would not answer any operator question
+// this compact surface (buildAdminLatencyViews' own "compact, no
+// per-model breakdown" ruling, GET /admin/api/overview's ~113KB/5s-poll
+// budget) is not already better placed to answer — the full reported/
+// estimated/unbilled breakdown, by request AND by token, lives on
+// /metrics (llmgateway_usage_provenance_requests_total/-_tokens_total)
+// for an operator who wants the precise fraction.
+type adminProvenanceView struct {
+	Requests int64 `json:"requests"`
+	Tokens   int64 `json:"tokens"`
+}
+
+// buildAdminProvenanceViews groups snaps (g.provenance.snapshot(),
+// metrics.go) by provider, discarding the "reported" provenance entirely
+// (adminProvenanceView's own doc comment) — mirroring
+// buildAdminLatencyViews' identical "compact, provider-keyed outer map"
+// shape immediately above. A provider with no estimated/unbilled
+// observations at all is simply absent from the outer map, so
+// adminOverviewResponse's own lookup (buildAdminOverview, below) yields
+// nil for it — adminProviderView.Provenance's own documented "nil means
+// no estimated/unbilled accounting yet".
+func buildAdminProvenanceViews(snaps []provenanceSnapshot) map[string]map[string]adminProvenanceView {
+	out := make(map[string]map[string]adminProvenanceView)
+	for _, s := range snaps {
+		if s.key.provenance == provenanceReported {
+			continue
+		}
+		if out[s.key.provider] == nil {
+			out[s.key.provider] = make(map[string]adminProvenanceView)
+		}
+		out[s.key.provider][s.key.provenance] = adminProvenanceView{Requests: s.requests, Tokens: s.tokens}
 	}
 	return out
 }
@@ -559,6 +612,10 @@ func (g *Gateway) buildAdminOverview() adminOverviewResponse {
 	// for the whole response, mirroring providerUsage's own one-batched-
 	// read-for-every-provider shape above, not a per-provider read.
 	latencyViews := buildAdminLatencyViews(g.latency.snapshot())
+	// feat: expose token-accounting provenance — one g.provenance.
+	// snapshot() call for the whole response, mirroring g.latency.
+	// snapshot()'s own one-batched-read-for-every-provider shape above.
+	provenanceViews := buildAdminProvenanceViews(g.provenance.snapshot())
 
 	providers := make([]adminProviderView, len(snaps))
 	mi := 0
@@ -593,6 +650,7 @@ func (g *Gateway) buildAdminOverview() adminOverviewResponse {
 			ModelRates:       modelRates,
 			ModelMeta:        modelMeta,
 			Latency:          latencyViews[s.name],
+			Provenance:       provenanceViews[s.name],
 		}
 	}
 

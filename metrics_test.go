@@ -493,6 +493,8 @@ func TestMetrics_OutputParsesAsValidExposition(t *testing.T) {
 		"llmgateway_limit_store_up",
 		"llmgateway_upstream_ttfb_seconds",
 		"llmgateway_upstream_duration_seconds",
+		"llmgateway_usage_provenance_requests_total",
+		"llmgateway_usage_provenance_tokens_total",
 	}
 	for _, name := range wantFamilies {
 		if _, ok := types[name]; !ok {
@@ -1331,6 +1333,123 @@ func TestMetrics_LatencyHistogram_StreamingAndNonStreaming_DistinctLabelSets(t *
 	}
 	if !sawStreamFalse {
 		t.Error(`no llmgateway_upstream_duration_seconds_count{provider="openai",stream="false"} sample — the non-streaming request must land in the stream="false" label set`)
+	}
+}
+
+// --- usage provenance (feat: expose token-accounting provenance) ---
+
+// TestMetrics_UsageProvenance_EstimatedAndUnbilled_DistinctSeries proves
+// this feature's central correctness requirement end to end, through the
+// real /metrics exposition: a non-streaming zero-usage response
+// (estimated) and a streaming zero-usage response (unbilled) against the
+// SAME provider render as two DISTINCT series, never merged into one
+// "not reported" signal. Distinct provider names would make this trivial
+// (two unrelated series); using the identical provider for both is the
+// stronger proof — the two provenances would collide into a single
+// series if the recording code ever conflated them, exactly the
+// regression this test exists to catch.
+//
+// MUTATION VERIFIED: changing routes_unified.go's recording switch case
+// `case streaming && result.total() == 0:` to `case result.estimated:`
+// (merging the unbilled classification into the estimated one) made this
+// test fail: the "unbilled" series vanished from /metrics entirely and
+// the "estimated" series' requests count doubled to 2, proving this test
+// actually catches the two provenances collapsing into one — the exact
+// regression this feature exists to prevent. Reverted before committing.
+func TestMetrics_UsageProvenance_EstimatedAndUnbilled_DistinctSeries(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if streaming, _ := body["stream"].(bool); streaming {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			fl := w.(http.Flusher)
+			_, _ = fmt.Fprint(w, "data: {\"id\":\"c\",\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n")
+			fl.Flush()
+			_, _ = fmt.Fprint(w, "data: [DONE]\n\n") // no usage chunk: unbilled
+			fl.Flush()
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		// No "usage" field at all: estimated.
+		_, _ = w.Write([]byte(`{"id":"c1","object":"chat.completion","model":"gpt-test","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}]}`))
+	}))
+	defer srv.Close()
+
+	cfg := newMetricsTestConfig()
+	cfg.Providers["openai"].BaseURL = srv.URL
+	h, _ := newMetricsGatewayHandle(t, cfg)
+
+	nonStreamBody := map[string]any{"model": "gpt-test", "messages": []any{map[string]any{"role": "user", "content": "hi"}}}
+	streamBody := map[string]any{"model": "gpt-test", "stream": true, "messages": []any{map[string]any{"role": "user", "content": "hi"}}}
+
+	rec1 := httptest.NewRecorder()
+	h.ServeHTTP(rec1, newUnifiedRequest(t, http.MethodPost, "/v1/chat/completions", "sk-alice", nonStreamBody))
+	if rec1.Code != http.StatusOK {
+		t.Fatalf("non-streaming request status = %d, want 200, body=%s", rec1.Code, rec1.Body.String())
+	}
+	rec2 := httptest.NewRecorder()
+	h.ServeHTTP(rec2, newUnifiedRequest(t, http.MethodPost, "/v1/chat/completions", "sk-alice", streamBody))
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("streaming request status = %d, want 200, body=%s", rec2.Code, rec2.Body.String())
+	}
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, metricsRequest(http.MethodGet, metricsPathDefault, "sk-admin1"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /metrics status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	_, samples := parsePrometheusText(t, rec.Body.Bytes())
+
+	var estimatedReq, unbilledReq *promSample
+	for i := range samples {
+		s := &samples[i]
+		if s.name != "llmgateway_usage_provenance_requests_total" || s.labels["provider"] != "openai" {
+			continue
+		}
+		switch s.labels["provenance"] {
+		case provenanceEstimated:
+			estimatedReq = s
+		case provenanceUnbilled:
+			unbilledReq = s
+		}
+	}
+	if estimatedReq == nil {
+		t.Fatal(`no llmgateway_usage_provenance_requests_total{provider="openai",provenance="estimated"} sample — the non-streaming zero-usage request must land under "estimated"`)
+	}
+	if unbilledReq == nil {
+		t.Fatal(`no llmgateway_usage_provenance_requests_total{provider="openai",provenance="unbilled"} sample — the streaming zero-usage request must land under "unbilled", DISTINCT from "estimated"`)
+	}
+	if estimatedReq.value != "1" {
+		t.Errorf(`estimated requests = %s, want 1`, estimatedReq.value)
+	}
+	if unbilledReq.value != "1" {
+		t.Errorf(`unbilled requests = %s, want 1`, unbilledReq.value)
+	}
+
+	var estimatedTok, unbilledTok *promSample
+	for i := range samples {
+		s := &samples[i]
+		if s.name != "llmgateway_usage_provenance_tokens_total" || s.labels["provider"] != "openai" {
+			continue
+		}
+		switch s.labels["provenance"] {
+		case provenanceEstimated:
+			estimatedTok = s
+		case provenanceUnbilled:
+			unbilledTok = s
+		}
+	}
+	if estimatedTok == nil || unbilledTok == nil {
+		t.Fatalf("llmgateway_usage_provenance_tokens_total missing estimated/unbilled series: estimated=%v unbilled=%v", estimatedTok, unbilledTok)
+	}
+	if estimatedTok.value == "0" {
+		t.Error(`estimated tokens = 0, want > 0 — estimated substitutes a nonzero prompt count, unlike unbilled`)
+	}
+	if unbilledTok.value != "0" {
+		t.Errorf(`unbilled tokens = %s, want 0 — unbilled charges nothing at all, unlike estimated`, unbilledTok.value)
 	}
 }
 

@@ -597,7 +597,17 @@ type Gateway struct {
 	// identical "safe even off a bare &Gateway{} literal" convention
 	// above.
 	latency *latencyStore
-	name    string
+	// provenance is the in-process usage-accounting-provenance accumulator
+	// (feat: expose token-accounting provenance, metrics.go's
+	// provenanceStore) — recordUsageProvenance's only write target, and
+	// writeProvenanceMetrics/buildAdminProvenanceViews' (admin.go) own
+	// read source. Always constructed, here, by newGateway, even when
+	// Config.Metrics is nil or disabled, mirroring g.latency's own
+	// identical "always-present, usually-empty, nil-receiver-safe"
+	// convention immediately above — see that field's own doc comment for
+	// the full reasoning, which applies here unchanged.
+	provenance *provenanceStore
+	name       string
 	// failoverLogGate rate-limits runMeteredCall's generic "failing over"
 	// log line (routes_unified.go) to once per storeErrorLogEvery
 	// (adversarial-review fix, F10) — reuses auth.go's own logGate type,
@@ -744,6 +754,10 @@ func newGateway(ctx context.Context, next http.Handler, config *Config, name str
 	// comment above for why an always-present, usually-empty store is the
 	// right default rather than a conditional nil.
 	g.latency = newLatencyStore()
+	// feat: expose token-accounting provenance — always constructed, here,
+	// regardless of whether Config.Metrics is nil/disabled, mirroring
+	// g.latency's own identical "always-present" ruling immediately above.
+	g.provenance = newProvenanceStore()
 
 	// A malformed Config.Metrics.AllowedCIDRs entry is a constructor
 	// error (validate-at-construction), not a silently-ignored allowlist

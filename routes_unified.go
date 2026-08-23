@@ -555,6 +555,34 @@ func (g *Gateway) runMeteredCall(sw *statusTrackingWriter, r *http.Request, scop
 			g.logf("%s: usage for model %q logged as estimated (%d prompt tokens derived from request body size, not the provider's reported usage)", logPrefix, cand.canonical, result.prompt)
 		}
 
+		// Usage provenance (feat: expose token-accounting provenance),
+		// recorded ONLY for a candidate whose own response actually
+		// completed (callErr == nil): a candidate that failed over never
+		// bills more than a zero-total no-op (this function's own doc
+		// comment above), and counting THAT as "unbilled" would drown the
+		// one signal this feature exists to surface — a provider silently
+		// serving completions free against every budget — in ordinary
+		// failover noise. "unbilled" is re-derived from streaming &&
+		// result.total() == 0 rather than a separate flag carried out of
+		// the block above: result.prompt/result.estimated are only ever
+		// mutated by that block's non-streaming branch, so this condition
+		// is true here if and only if the streaming branch above ran.
+		// Gated on metricsEnabled exactly like withLatencyRecorder's own
+		// wiring above, so a deployment with metrics off pays nothing
+		// extra here. Observation only: nothing recorded here feeds back
+		// into result or the account call above, both of which already
+		// ran — see g.recordUsageProvenance's own doc comment (metrics.go).
+		if callErr == nil && metricsEnabled(g.cfg) {
+			provenance := provenanceReported
+			switch {
+			case result.estimated:
+				provenance = provenanceEstimated
+			case streaming && result.total() == 0:
+				provenance = provenanceUnbilled
+			}
+			g.recordUsageProvenance(providerName, provenance, result.total())
+		}
+
 		// A miss stores the response after everything above has already
 		// run — accounting must never be skipped or delayed waiting on a
 		// cache write. Only a genuine upstream 200 is stored (spec §2's
