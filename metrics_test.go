@@ -2,6 +2,9 @@ package traefikllmgateway
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -430,12 +433,31 @@ func TestMetrics_OutputParsesAsValidExposition(t *testing.T) {
 		if !validMetricName(s.name) {
 			t.Errorf("metric name %q does not match [a-zA-Z_:][a-zA-Z0-9_:]*", s.name)
 		}
-		kind, ok := types[s.name]
+		// familyName strips a histogram's own _bucket/_sum/_count sample
+		// suffix before the # TYPE lookup: a real Prometheus exposition
+		// document carries exactly ONE "# TYPE <base> histogram" line per
+		// family (metricWriter.family, metrics.go's histogram method),
+		// covering all three suffixed sample names — that is the format's
+		// actual rule (promparse.go's own histogram handling), not a gap
+		// in this test. Every non-histogram family's sample name already
+		// equals its own base name, so this is a no-op for them.
+		familyName := s.name
+		for _, suffix := range []string{"_bucket", "_sum", "_count"} {
+			if trimmed, ok := strings.CutSuffix(s.name, suffix); ok {
+				if k, ok := types[trimmed]; ok && k == "histogram" {
+					familyName = trimmed
+				}
+			}
+		}
+		kind, ok := types[familyName]
 		if !ok {
 			t.Errorf("sample %q has no # TYPE line", s.name)
 		}
 		if kind == "counter" && !strings.HasSuffix(s.name, "_total") {
 			t.Errorf("counter %q does not end in _total", s.name)
+		}
+		if kind == "histogram" && s.name != familyName+"_bucket" && s.name != familyName+"_sum" && s.name != familyName+"_count" {
+			t.Errorf("histogram sample %q does not end in _bucket/_sum/_count", s.name)
 		}
 
 		labelKeys := make([]string, 0, len(s.labels))
@@ -469,6 +491,8 @@ func TestMetrics_OutputParsesAsValidExposition(t *testing.T) {
 		"llmgateway_provider_model_failures_total",
 		"llmgateway_rate_limit_rejections_total",
 		"llmgateway_limit_store_up",
+		"llmgateway_upstream_ttfb_seconds",
+		"llmgateway_upstream_duration_seconds",
 	}
 	for _, name := range wantFamilies {
 		if _, ok := types[name]; !ok {
@@ -1119,5 +1143,235 @@ func TestMetrics_BudgetConsumedRatio_ReflectsUsageVsLimit(t *testing.T) {
 		if s.name == "llmgateway_budget_consumed_ratio" && s.labels["scope_kind"] == totalScopeKind {
 			t.Errorf("unexpected budget ratio sample for the unlimited total scope: %+v", s)
 		}
+	}
+}
+
+// --- upstream latency (feat: instrument upstream latency) ---
+
+// TestMetrics_LatencyHistogram_BucketsCumulativeOrdered_PlusInfPresent_SumCountConsistent
+// is the exposition-format correctness test the task brief calls out by
+// name: a malformed histogram does not drop one metric, it fails the
+// whole scrape and the target reports DOWN — so this parses the real
+// rendered document (not a golden string) and checks the format's own
+// required shape by hand: buckets present for every configured bound
+// plus +Inf, strictly ascending `le`, cumulative (non-decreasing)
+// counts, +Inf last, and `_count` exactly equal to the final cumulative
+// bucket.
+//
+// Observations are seeded directly via gw.recordLatency (bypassing
+// watchdogBody's own real-clock capture, already covered by
+// latency_test.go's TestWatchdogBody_ArmLatency_TTFBAtFirstRead_
+// NotConstructionOrClose) so each one lands in a KNOWN bucket
+// deterministically, including one past every configured bound (the
+// overflow/+Inf case) — a real network delay could not reliably hit
+// that case without an unreasonably slow test.
+//
+// MUTATION VERIFIED: changing metricWriter.histogram (metrics.go) to
+// emit the DENSE per-bucket count directly (dropping the running
+// `cumulative +=` accumulation, i.e. `m.sampleInt(name+"_bucket",
+// bucketLabels, buckets[i])` instead of `cumulative`) made this test
+// fail: consecutive bucket values were no longer non-decreasing (a
+// dense count can drop back to 0 after a nonzero one), failing the
+// "must be cumulative" assertion below. Reverted before committing.
+func TestMetrics_LatencyHistogram_BucketsCumulativeOrdered_PlusInfPresent_SumCountConsistent(t *testing.T) {
+	t.Parallel()
+	cfg := newMetricsTestConfig()
+	h, gw := newMetricsGatewayHandle(t, cfg)
+
+	durations := []time.Duration{
+		50 * time.Millisecond,  // <= 0.1 bucket
+		400 * time.Millisecond, // <= 0.5 bucket
+		3 * time.Second,        // <= 5 bucket
+		20 * time.Second,       // <= 30 bucket
+		1000 * time.Second,     // past every bound: overflow / +Inf
+	}
+	for _, d := range durations {
+		gw.recordLatency("openai", "", latencySample{duration: d, ttfb: d / 10, hasTTFB: true, streaming: false})
+	}
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, metricsRequest(http.MethodGet, metricsPathDefault, "sk-admin1"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	_, samples := parsePrometheusText(t, rec.Body.Bytes())
+
+	type bucketLine struct {
+		le    float64
+		value int64
+	}
+	var buckets []bucketLine
+	var sumVal, countVal string
+	for _, s := range samples {
+		if s.labels["provider"] != "openai" || s.labels["stream"] != "false" {
+			continue
+		}
+		switch s.name {
+		case "llmgateway_upstream_duration_seconds_bucket":
+			le := math.Inf(1)
+			if s.labels["le"] != "+Inf" {
+				var err error
+				le, err = strconv.ParseFloat(s.labels["le"], 64)
+				if err != nil {
+					t.Fatalf("le=%q does not parse: %v", s.labels["le"], err)
+				}
+			}
+			v, err := strconv.ParseInt(s.value, 10, 64)
+			if err != nil {
+				t.Fatalf("bucket value %q does not parse: %v", s.value, err)
+			}
+			buckets = append(buckets, bucketLine{le: le, value: v})
+		case "llmgateway_upstream_duration_seconds_sum":
+			sumVal = s.value
+		case "llmgateway_upstream_duration_seconds_count":
+			countVal = s.value
+		}
+	}
+
+	if len(buckets) != len(latencyBucketBounds)+1 {
+		t.Fatalf("got %d bucket lines, want %d (%d configured bounds + Inf)", len(buckets), len(latencyBucketBounds)+1, len(latencyBucketBounds))
+	}
+	for i := 1; i < len(buckets); i++ {
+		if buckets[i].le <= buckets[i-1].le {
+			t.Errorf("bucket %d le=%v is not strictly greater than bucket %d le=%v — buckets must be strictly ascending", i, buckets[i].le, i-1, buckets[i-1].le)
+		}
+		if buckets[i].value < buckets[i-1].value {
+			t.Errorf("bucket %d value=%d < bucket %d value=%d — buckets must be cumulative (non-decreasing)", i, buckets[i].value, i-1, buckets[i-1].value)
+		}
+	}
+	if !math.IsInf(buckets[len(buckets)-1].le, 1) {
+		t.Errorf("last bucket le=%v, want +Inf", buckets[len(buckets)-1].le)
+	}
+	if sumVal == "" {
+		t.Fatal("no _sum sample found for this label set")
+	}
+	if countVal == "" {
+		t.Fatal("no _count sample found for this label set")
+	}
+	wantCount := int64(len(durations))
+	if buckets[len(buckets)-1].value != wantCount {
+		t.Errorf("final cumulative (+Inf) bucket = %d, want %d (one per seeded observation, including the overflow one)", buckets[len(buckets)-1].value, wantCount)
+	}
+	if countVal != strconv.FormatInt(buckets[len(buckets)-1].value, 10) {
+		t.Errorf("_count = %s, want %d — must exactly equal the final +Inf cumulative bucket, never drift from it", countVal, buckets[len(buckets)-1].value)
+	}
+}
+
+// TestMetrics_LatencyHistogram_StreamingAndNonStreaming_DistinctLabelSets
+// drives one streaming and one non-streaming request through the real
+// unified route (not a direct seed) and asserts both land in distinct
+// stream="true"/stream="false" series for the same provider — proving
+// the end-to-end wiring (isEventStreamResponse's derivation at
+// newWatchdogBody's call sites, through to recordLatency's dual key)
+// actually separates them, not just that the renderer could in
+// principle.
+//
+// MUTATION VERIFIED: hardcoding isEventStreamResponse (timeout.go) to
+// always return false made this test fail — no
+// llmgateway_upstream_duration_seconds_count{...,stream="true"} sample
+// was ever emitted, since every response (including the real SSE one)
+// was misclassified as non-streaming. Reverted before committing.
+func TestMetrics_LatencyHistogram_StreamingAndNonStreaming_DistinctLabelSets(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if streaming, _ := body["stream"].(bool); streaming {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			fl := w.(http.Flusher)
+			_, _ = fmt.Fprint(w, "data: {\"id\":\"c\",\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n")
+			fl.Flush()
+			_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
+			fl.Flush()
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"id":"c1","object":"chat.completion","model":"gpt-test","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`))
+	}))
+	defer srv.Close()
+
+	cfg := newMetricsTestConfig()
+	cfg.Providers["openai"].BaseURL = srv.URL
+	h, _ := newMetricsGatewayHandle(t, cfg)
+
+	nonStreamBody := map[string]any{"model": "gpt-test", "messages": []any{map[string]any{"role": "user", "content": "hi"}}}
+	streamBody := map[string]any{"model": "gpt-test", "stream": true, "messages": []any{map[string]any{"role": "user", "content": "hi"}}}
+
+	rec1 := httptest.NewRecorder()
+	h.ServeHTTP(rec1, newUnifiedRequest(t, http.MethodPost, "/v1/chat/completions", "sk-alice", nonStreamBody))
+	if rec1.Code != http.StatusOK {
+		t.Fatalf("non-streaming request status = %d, want 200, body=%s", rec1.Code, rec1.Body.String())
+	}
+	rec2 := httptest.NewRecorder()
+	h.ServeHTTP(rec2, newUnifiedRequest(t, http.MethodPost, "/v1/chat/completions", "sk-alice", streamBody))
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("streaming request status = %d, want 200, body=%s", rec2.Code, rec2.Body.String())
+	}
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, metricsRequest(http.MethodGet, metricsPathDefault, "sk-admin1"))
+	_, samples := parsePrometheusText(t, rec.Body.Bytes())
+
+	var sawStreamTrue, sawStreamFalse bool
+	for _, s := range samples {
+		if s.name != "llmgateway_upstream_duration_seconds_count" || s.labels["provider"] != "openai" {
+			continue
+		}
+		switch s.labels["stream"] {
+		case "true":
+			sawStreamTrue = true
+		case "false":
+			sawStreamFalse = true
+		}
+	}
+	if !sawStreamTrue {
+		t.Error(`no llmgateway_upstream_duration_seconds_count{provider="openai",stream="true"} sample — the streaming request must land in the stream="true" label set`)
+	}
+	if !sawStreamFalse {
+		t.Error(`no llmgateway_upstream_duration_seconds_count{provider="openai",stream="false"} sample — the non-streaming request must land in the stream="false" label set`)
+	}
+}
+
+// TestRecordLatency_MetricsDisabled_NoObservationCollected proves the
+// "no collection cost, no series emitted" requirement at the
+// Gateway/collection level (not merely "the renderer skips an empty
+// store", which would be true even if collection were silently still
+// happening): with Config.Metrics.Enabled false, driving a real,
+// successful request through the unified route must leave g.latency
+// completely empty — every withLatencyRecorder call site
+// (routes_unified.go, routes_media.go, routes_passthrough.go) gates its
+// own wiring on metricsEnabled(g.cfg), so no latencyRecorder is ever
+// looked up from context in the first place, and armLatency is never
+// called at all.
+//
+// MUTATION VERIFIED: removing the `if metricsEnabled(g.cfg)` guard
+// around runUnified's own withLatencyRecorder wiring (routes_unified.go)
+// made this test fail — gw.latency.snapshot() returned 1 entry instead
+// of 0. Reverted before committing.
+func TestRecordLatency_MetricsDisabled_NoObservationCollected(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"id":"c1","object":"chat.completion","model":"gpt-test","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`))
+	}))
+	defer srv.Close()
+
+	cfg := newMetricsTestConfig()
+	cfg.Metrics.Enabled = false // metrics collection disabled, but Metrics itself stays non-nil
+	cfg.Providers["openai"].BaseURL = srv.URL
+	h, gw := newMetricsGatewayHandle(t, cfg)
+
+	body := map[string]any{"model": "gpt-test", "messages": []any{map[string]any{"role": "user", "content": "hi"}}}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, newUnifiedRequest(t, http.MethodPost, "/v1/chat/completions", "sk-alice", body))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+
+	if snaps := gw.latency.snapshot(); len(snaps) != 0 {
+		t.Errorf("g.latency has %d entries after a request with metrics disabled, want 0 — no latency observation should ever be collected when metrics is off", len(snaps))
 	}
 }

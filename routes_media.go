@@ -119,6 +119,13 @@ func (g *Gateway) handleImagesGenerations(w http.ResponseWriter, r *http.Request
 	ctx := withAttemptRecorder(r.Context(), func(resp *http.Response, attemptErr error) {
 		g.limiter.recordProviderAttempt(adapter.name(), upstreamModel, resp, attemptErr)
 	})
+	// feat: instrument upstream latency — gated on metricsEnabled, same
+	// reasoning as runUnified's identical wiring (routes_unified.go).
+	if metricsEnabled(g.cfg) {
+		ctx = withLatencyRecorder(ctx, func(sample latencySample) {
+			g.recordLatency(adapter.name(), upstreamModel, sample)
+		})
+	}
 	if _, err := adapter.imagesGeneration(ctx, sw, req); err != nil {
 		g.handleAdapterError(sw, err, adapter.name())
 	}
@@ -177,6 +184,13 @@ func (g *Gateway) handleAudioSpeech(w http.ResponseWriter, r *http.Request, u *u
 	ctx := withAttemptRecorder(r.Context(), func(resp *http.Response, attemptErr error) {
 		g.limiter.recordProviderAttempt(adapter.name(), upstreamModel, resp, attemptErr)
 	})
+	// feat: instrument upstream latency — gated on metricsEnabled, same
+	// reasoning as runUnified's identical wiring (routes_unified.go).
+	if metricsEnabled(g.cfg) {
+		ctx = withLatencyRecorder(ctx, func(sample latencySample) {
+			g.recordLatency(adapter.name(), upstreamModel, sample)
+		})
+	}
 	if _, err := adapter.audioSpeech(ctx, sw, body, "application/json"); err != nil {
 		g.handleAdapterError(sw, err, adapter.name())
 	}
@@ -274,6 +288,13 @@ func (g *Gateway) handleAudioTranscriptions(w http.ResponseWriter, r *http.Reque
 	ctx := withAttemptRecorder(r.Context(), func(resp *http.Response, attemptErr error) {
 		g.limiter.recordProviderAttempt(adapter.name(), upstreamModel, resp, attemptErr)
 	})
+	// feat: instrument upstream latency — gated on metricsEnabled, same
+	// reasoning as runUnified's identical wiring (routes_unified.go).
+	if metricsEnabled(g.cfg) {
+		ctx = withLatencyRecorder(ctx, func(sample latencySample) {
+			g.recordLatency(adapter.name(), upstreamModel, sample)
+		})
+	}
 	if _, err := adapter.audioTranscription(ctx, sw, uploadBody, uploadContentType); err != nil {
 		g.handleAdapterError(sw, err, adapter.name())
 	}

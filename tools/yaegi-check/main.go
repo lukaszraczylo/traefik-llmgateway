@@ -37,6 +37,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -48,6 +49,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	dto "github.com/prometheus/client_model/go"
+	"github.com/prometheus/common/expfmt"
+	"github.com/prometheus/common/model"
 	"github.com/traefik/yaegi/interp"
 	"github.com/traefik/yaegi/stdlib"
 )
@@ -576,14 +580,25 @@ func run() error {
 	if err := exerciseBreaker(handler, brkModelsHits, brkHealthy); err != nil {
 		return err
 	}
-	// exerciseMetricsRoute runs LAST, after exerciseBreaker has already
-	// settled: GET /metrics runs registry.maybeRefresh like every other
-	// route (ServeHTTP's own unconditional call at entry), and
-	// exerciseBreaker's own hit-counting is timing-sensitive against the
-	// "brk" provider specifically — probing metrics first could perturb
-	// the very discovery-attempt counts that test samples. Ordering the
-	// metrics probe after avoids any such interaction.
-	return exerciseMetricsRoute(handler)
+	// exerciseMetricsRoute runs after exerciseBreaker has already settled:
+	// GET /metrics runs registry.maybeRefresh like every other route
+	// (ServeHTTP's own unconditional call at entry), and exerciseBreaker's
+	// own hit-counting is timing-sensitive against the "brk" provider
+	// specifically — probing metrics first could perturb the very
+	// discovery-attempt counts that test samples. Ordering the metrics
+	// probe after avoids any such interaction.
+	if err := exerciseMetricsRoute(handler); err != nil {
+		return err
+	}
+	// exerciseLatencyMetrics (feat: instrument upstream latency) runs
+	// LAST, for the same reason exerciseMetricsRoute itself used to be
+	// last: it reads the exact same /metrics endpoint and must not race
+	// or perturb anything exerciseBreaker/exerciseMetricsRoute still care
+	// about. It relies on exerciseHandler's own exerciseAttemptAccounting
+	// sub-probe (already run, above) having driven a real, non-streaming
+	// POST /v1/chat/completions against the "openai" provider — see its
+	// own doc comment.
+	return exerciseLatencyMetrics(handler)
 }
 
 // builtinLookupModelID is a real, stable entry in the generated
@@ -904,6 +919,119 @@ func exerciseMetricsRoute(handler http.Handler) error {
 	}
 
 	fmt.Println("yaegi-check: GET /metrics auth gate and rendering both verified interpreted")
+	return nil
+}
+
+// exerciseLatencyMetrics proves the upstream-latency histograms (feat:
+// instrument upstream latency, task brief) render correctly under the
+// REAL interpreter — not merely that a compiled `go test` accepts the
+// same bytes. This package's own doc comment explains why that
+// distinction matters here specifically: compiled tests have repeatedly
+// passed on this codebase while the interpreted shape failed.
+//
+// No new traffic is driven here: exerciseHandler's own
+// exerciseAttemptAccounting sub-probe (already run, above, as part of
+// the exerciseHandler call in run()) already drove a real, non-streaming
+// POST /v1/chat/completions against the "openai" provider, so
+// llmgateway_upstream_duration_seconds{provider="openai",stream="false"}
+// already carries at least one real, interpreted observation by the
+// time this runs.
+//
+// Unlike exerciseMetricsRoute's own strings.Contains checks, this parses
+// the rendered body with prometheus/common/expfmt's REAL TextParser —
+// the same library a real Prometheus server's scrape loop is built on —
+// instead of this project's own hand-rolled parser (parsePrometheusText,
+// metrics_test.go, used by the compiled suite). A malformed histogram
+// (wrong cumulative order, a missing +Inf bucket, a mismatched
+// sample_count) does not merely fail one assertion below, it fails to
+// PARSE at all — exactly the failure mode that takes a real scrape
+// target DOWN rather than dropping one metric (metricWriter.histogram's
+// own doc comment, metrics.go, has the full account of why that
+// distinction matters).
+func exerciseLatencyMetrics(handler http.Handler) error {
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	req.RemoteAddr = metricsProbeOutsideAddr
+	req.Header.Set("Authorization", "Bearer "+attemptAccountingAdminAPIKey)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		return fmt.Errorf("GET /metrics (latency histogram probe): status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+
+	parser := expfmt.NewTextParser(model.LegacyValidation)
+	families, err := parser.TextToMetricFamilies(strings.NewReader(rec.Body.String()))
+	if err != nil {
+		return fmt.Errorf("GET /metrics: a real Prometheus TextParser rejected the interpreted rendering: %w (body=%s)", err, rec.Body.String())
+	}
+
+	durationFamily, ok := families["llmgateway_upstream_duration_seconds"]
+	if !ok {
+		return fmt.Errorf("GET /metrics: no llmgateway_upstream_duration_seconds family in the parsed output (body=%s)", rec.Body.String())
+	}
+	if durationFamily.GetType() != dto.MetricType_HISTOGRAM {
+		return fmt.Errorf("llmgateway_upstream_duration_seconds type = %s, want HISTOGRAM", durationFamily.GetType())
+	}
+
+	var openaiHist *dto.Histogram
+	for _, m := range durationFamily.GetMetric() {
+		var provider, stream string
+		for _, lp := range m.GetLabel() {
+			switch lp.GetName() {
+			case "provider":
+				provider = lp.GetValue()
+			case "stream":
+				stream = lp.GetValue()
+			}
+		}
+		if provider == "openai" && stream == "false" {
+			openaiHist = m.GetHistogram()
+			break
+		}
+	}
+	if openaiHist == nil {
+		return fmt.Errorf("GET /metrics: no llmgateway_upstream_duration_seconds{provider=\"openai\",stream=\"false\"} series found (body=%s)", rec.Body.String())
+	}
+
+	// Real-parser structural checks, matching the compiled suite's own
+	// TestMetrics_LatencyHistogram_BucketsCumulativeOrdered_
+	// PlusInfPresent_SumCountConsistent (metrics_test.go) — but here,
+	// against dto.Bucket values the REAL parser produced, not this
+	// project's own hand-rolled promSample.
+	buckets := openaiHist.GetBucket()
+	if len(buckets) == 0 {
+		return fmt.Errorf("llmgateway_upstream_duration_seconds{provider=\"openai\",stream=\"false\"}: no buckets parsed")
+	}
+	prevBound := math.Inf(-1)
+	var prevCount uint64
+	for i, b := range buckets {
+		if b.GetUpperBound() <= prevBound {
+			return fmt.Errorf("bucket %d upper_bound=%v is not strictly greater than the previous bucket's %v — buckets must be strictly ascending", i, b.GetUpperBound(), prevBound)
+		}
+		if b.GetCumulativeCount() < prevCount {
+			return fmt.Errorf("bucket %d cumulative_count=%d is less than the previous bucket's %d — buckets must be cumulative (non-decreasing)", i, b.GetCumulativeCount(), prevCount)
+		}
+		prevBound = b.GetUpperBound()
+		prevCount = b.GetCumulativeCount()
+	}
+	if !math.IsInf(buckets[len(buckets)-1].GetUpperBound(), 1) {
+		return fmt.Errorf("last bucket upper_bound = %v, want +Inf", buckets[len(buckets)-1].GetUpperBound())
+	}
+	if openaiHist.GetSampleCount() != prevCount {
+		return fmt.Errorf("sample_count = %d, want %d — must exactly equal the final +Inf cumulative bucket", openaiHist.GetSampleCount(), prevCount)
+	}
+	if openaiHist.GetSampleCount() == 0 {
+		return fmt.Errorf("sample_count = 0, want at least 1 (exerciseAttemptAccounting already drove one real, non-streaming chat completion against \"openai\")")
+	}
+
+	ttfbFamily, ok := families["llmgateway_upstream_ttfb_seconds"]
+	if !ok {
+		return fmt.Errorf("GET /metrics: no llmgateway_upstream_ttfb_seconds family in the parsed output (body=%s)", rec.Body.String())
+	}
+	if ttfbFamily.GetType() != dto.MetricType_HISTOGRAM {
+		return fmt.Errorf("llmgateway_upstream_ttfb_seconds type = %s, want HISTOGRAM", ttfbFamily.GetType())
+	}
+
+	fmt.Println("yaegi-check: upstream-latency histograms parsed by a real Prometheus TextParser; buckets cumulative, strictly ascending, +Inf-terminated, sample_count consistent")
 	return nil
 }
 

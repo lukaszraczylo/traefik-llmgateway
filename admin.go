@@ -286,9 +286,26 @@ type adminProviderView struct {
 	// marshals as "{}" for a provider with no known models yet, not
 	// omitted.
 	ModelRates map[string]adminModelRateView `json:"modelRates"`
-	Type       string                        `json:"type"`
-	BaseURL    string                        `json:"baseUrl"`
-	LastErr    string                        `json:"lastErr,omitempty"`
+	// Latency is a compact per-stream ("streaming"/"non-streaming")
+	// average TTFB/duration summary for this provider (feat: instrument
+	// upstream latency), sourced from the SAME in-process g.latency
+	// accumulator /metrics reads (metrics.go). Averages only — never a
+	// full histogram or a per-model breakdown — to keep this already-
+	// ~113KB, 5s-polled response from growing meaningfully; see
+	// buildAdminLatencyViews' own doc comment. nil (omitted) for a
+	// provider with no observations yet, or for a deployment with metrics
+	// collection gated off entirely. Grouped here with the other map
+	// fields above, not declared near AttemptsDay/ModelCount below,
+	// because it is a pointer-shaped field (a map header) and this
+	// struct's fields are ordered pointer-shaped-first, then plain
+	// scalars (int64/int/bool) last — fieldalignment (govet, enabled via
+	// this repo's global golangci-lint config) flags a pointer field
+	// declared after the scalar block as costing extra GC pointer-scan
+	// bytes. See timeout.go's watchdogBody for the identical convention.
+	Latency map[string]adminLatencyView `json:"latency,omitempty"`
+	Type    string                      `json:"type"`
+	BaseURL string                      `json:"baseUrl"`
+	LastErr string                      `json:"lastErr,omitempty"`
 	// HealthState is this provider's discovery circuit breaker state
 	// (feat/provider-health): "closed" (normal), "open" (backing off
 	// after repeated discovery failures — maybeRefresh skips it until
@@ -345,6 +362,59 @@ type adminProviderView struct {
 type adminModelRateView struct {
 	AttemptsDay int64 `json:"attemptsDay"`
 	FailuresDay int64 `json:"failuresDay"`
+}
+
+// adminLatencyView is one provider's one stream-state's compact latency
+// summary (feat: instrument upstream latency) — adminProviderView.
+// Latency's value type. Plain averages (sum/count from the same
+// latencySnapshot /metrics reads, metrics.go), never a percentile: no
+// interpolation-correctness question to get wrong, and "compact" (the
+// task brief's own word for this admin surface) rules out shipping a
+// full bucket set here anyway — that detail belongs on /metrics.
+// AvgTTFBMs is 0 (omitted) when no successful read was ever observed
+// for this stream state (latencySnapshot.ttfbCount == 0) — never
+// fabricated from AvgDurationMs, which is a materially different
+// number for a genuine stream (see llmgateway_upstream_ttfb_seconds'
+// own HELP text, metrics.go, for why the two must never be conflated).
+type adminLatencyView struct {
+	AvgTTFBMs     float64 `json:"avgTtfbMs,omitempty"`
+	AvgDurationMs float64 `json:"avgDurationMs,omitempty"`
+	Count         int64   `json:"count,omitempty"`
+}
+
+// buildAdminLatencyViews groups snaps (g.latency.snapshot(), metrics.go)
+// by provider, discarding the opt-in model dimension entirely (task
+// brief: "compact... do not bloat" — GET /admin/api/overview already
+// sits around 113 KB and is polled every 5s; a full per-model latency
+// breakdown belongs on /metrics, not here). The outer map is keyed by
+// provider name, the inner by "streaming"/"non-streaming"; a provider
+// with no observations at all is simply absent from the outer map, so
+// adminOverviewResponse's own lookup (buildAdminOverview, below) yields
+// nil for it — adminProviderView.Latency's own documented "nil means no
+// observations yet".
+func buildAdminLatencyViews(snaps []latencySnapshot) map[string]map[string]adminLatencyView {
+	out := make(map[string]map[string]adminLatencyView)
+	for _, s := range snaps {
+		if s.key.model != "" || s.durationCount == 0 {
+			continue
+		}
+		streamKey := "non-streaming"
+		if s.key.streaming {
+			streamKey = "streaming"
+		}
+		v := adminLatencyView{
+			AvgDurationMs: s.durationSum / float64(s.durationCount) * 1000,
+			Count:         s.durationCount,
+		}
+		if s.ttfbCount > 0 {
+			v.AvgTTFBMs = s.ttfbSum / float64(s.ttfbCount) * 1000
+		}
+		if out[s.key.provider] == nil {
+			out[s.key.provider] = make(map[string]adminLatencyView)
+		}
+		out[s.key.provider][streamKey] = v
+	}
+	return out
 }
 
 // adminModelMetaView is one upstream model's resolved metadata (feature
@@ -485,6 +555,11 @@ func (g *Gateway) buildAdminOverview() adminOverviewResponse {
 	providerLevelCounters := allCounters[:len(snaps)]
 	modelCounters := allCounters[len(snaps):]
 
+	// feat: instrument upstream latency — one g.latency.snapshot() call
+	// for the whole response, mirroring providerUsage's own one-batched-
+	// read-for-every-provider shape above, not a per-provider read.
+	latencyViews := buildAdminLatencyViews(g.latency.snapshot())
+
 	providers := make([]adminProviderView, len(snaps))
 	mi := 0
 	for i, s := range snaps {
@@ -517,6 +592,7 @@ func (g *Gateway) buildAdminOverview() adminOverviewResponse {
 			FailuresMinute:   pc.failuresMinute,
 			ModelRates:       modelRates,
 			ModelMeta:        modelMeta,
+			Latency:          latencyViews[s.name],
 		}
 	}
 

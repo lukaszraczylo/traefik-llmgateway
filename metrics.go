@@ -8,6 +8,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 	"unicode/utf8"
 )
 
@@ -361,6 +363,56 @@ func (m *metricWriter) sampleFloat(name string, labels []metricLabel, v float64)
 	m.sample(name, labels, strconv.FormatFloat(v, 'g', -1, 64))
 }
 
+// histogram writes one Prometheus histogram family's samples for one
+// label set (feat: instrument upstream latency): cumulative `name+
+// "_bucket"` series in ascending `le` order, ending with `le="+Inf"`,
+// followed by `name+"_sum"` then `name+"_count"` — the exact shape a
+// real scrape parser requires (see escapeLabelValue's own doc comment
+// for what getting exposition format wrong costs in general: this is
+// not "one bad metric gets dropped", it is "the whole scrape fails to
+// parse and the target reports DOWN"). Getting a histogram wrong is
+// worse than getting a label escape wrong: a non-cumulative or
+// out-of-order bucket set, or a missing +Inf terminator, are ALSO
+// spec violations a strict parser rejects outright.
+//
+// buckets is DENSE, one entry per latencyBucketBounds index — index i
+// counts every observation in (latencyBucketBounds[i-1],
+// latencyBucketBounds[i]] — converted to the CUMULATIVE form the
+// exposition format requires here, once, at render time
+// (observeLatencyBucket, this file's own accumulation-side counterpart,
+// only ever needs to bump one dense bucket per observation, never
+// rewrite every bucket at or above its own). overflow is the +Inf
+// bucket's own dense count: every observation past the largest
+// configured bound. _count is derived from the SAME cumulative running
+// total the last +Inf bucket line already computed, rather than a
+// separately-tracked counter passed in alongside sum — by construction,
+// these can never diverge from what the bucket lines above them show,
+// closing off exactly the "buckets and _count silently disagree" failure
+// mode a real parser would also reject.
+//
+// labels is never mutated or its backing array reused across calls: a
+// fresh []metricLabel is built per bucket line instead of append(labels,
+// ...), so this is safe regardless of what spare capacity the caller's
+// own labels slice happens to have.
+func (m *metricWriter) histogram(name string, labels []metricLabel, buckets []int64, overflow int64, sum float64) {
+	cumulative := int64(0)
+	for i, bound := range latencyBucketBounds {
+		cumulative += buckets[i]
+		bucketLabels := make([]metricLabel, len(labels)+1)
+		copy(bucketLabels, labels)
+		bucketLabels[len(labels)] = metricLabel{"le", strconv.FormatFloat(bound, 'g', -1, 64)}
+		m.sampleInt(name+"_bucket", bucketLabels, cumulative)
+	}
+	cumulative += overflow
+	infLabels := make([]metricLabel, len(labels)+1)
+	copy(infLabels, labels)
+	infLabels[len(labels)] = metricLabel{"le", "+Inf"}
+	m.sampleInt(name+"_bucket", infLabels, cumulative)
+
+	m.sampleFloat(name+"_sum", labels, sum)
+	m.sampleInt(name+"_count", labels, cumulative)
+}
+
 // aggregationNoteStoreBacked is appended to every store-backed family's
 // HELP text below (item 1, adversarial verification 2026-08-23,
 // reproduced against a 3-replica Traefik deployment): windowKey
@@ -415,6 +467,7 @@ func (g *Gateway) renderMetrics() []byte {
 	var m metricWriter
 	g.writeUsageMetrics(&m)
 	g.writeProviderMetrics(&m)
+	g.writeLatencyMetrics(&m)
 	g.writeRejectionMetrics(&m)
 	g.writeStoreHealthMetrics(&m)
 	return m.buf.Bytes()
@@ -612,6 +665,298 @@ func (g *Gateway) writeProviderMetrics(m *metricWriter) {
 			labels := []metricLabel{{"provider", s.name}, {"model", model}}
 			m.sampleInt("llmgateway_provider_model_attempts_total", labels, mc.attemptsDay)
 			m.sampleInt("llmgateway_provider_model_failures_total", labels, mc.failuresDay)
+		}
+	}
+}
+
+// --- upstream latency (feat: instrument upstream latency) ---
+//
+// The task: "priority-based throttling that engages when providers are
+// under strain" needs real data on what strain looks like first — this
+// section adds the measurement and nothing else. No throttling, no
+// priorities, no control logic reads any of it; it exists purely to be
+// scraped and looked at.
+
+// latencyBucketBounds are the shared histogram bucket upper bounds, in
+// seconds, for both llmgateway_upstream_ttfb_seconds and
+// llmgateway_upstream_duration_seconds below.
+//
+// Bucket choice, reasoned from how upstream LLM latency actually
+// distributes: total upstream duration is roughly TTFB + output_tokens/
+// tokens_per_sec (task brief), so the useful range spans sub-second
+// (a fast TTFB, or a very short completion) through several minutes (a
+// long generation, or a request approaching defaultRequestTimeout,
+// timeout.go — 5 minutes, the point this gateway aborts an idle
+// upstream outright, regardless of Config.RequestTimeout overrides).
+//
+//   - 0.1/0.25/0.5/1s: resolves a fast TTFB and short completions at
+//     useful granularity — most of a healthy provider's TTFB population
+//     lives in this range.
+//   - 2/5/10/15/30/60s: the bulk of real chat completions, where most
+//     observations should land; finer-grained here than at the extremes
+//     because this is where an operator needs to tell "a bit slower"
+//     from "a lot slower".
+//   - 120/300s: brackets defaultRequestTimeout itself (300s = 5
+//     minutes), so mass building up in this range is visibly "close to
+//     where this gateway would abort the request outright", not just
+//     "slow".
+//   - 600s (10 minutes): headroom for a deployment that configures a
+//     longer RequestTimeout override; anything past it falls into the
+//     mandatory +Inf bucket.
+//
+// Both histograms share this one bound set deliberately, not two
+// independently tuned ones: it lets TTFB and duration be read off the
+// same axis on one dashboard, and one set is one less thing to keep in
+// sync as this feature evolves.
+var latencyBucketBounds = []float64{0.1, 0.25, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600}
+
+// aggregationNoteLatency is appended to both upstream-latency histogram
+// families' HELP text: g.latency (latencyStore, below) is in-process
+// only, like limiter.rejections (aggregationNotePerProcess above) —
+// NEVER written to or read from Redis regardless of Config.Redis, unlike
+// the store-backed request/token/cost/provider-attempt families
+// elsewhere in this file, which flip between sum() and max() depending
+// on whether Redis is configured (aggregationNoteStoreBacked's own doc
+// comment). Each replica reports only the upstream traffic it personally
+// handled, so sum() (or, for a real percentile, Prometheus's own
+// histogram_quantile over a sum()-aggregated set) is always the correct
+// cross-replica aggregation here, unconditionally.
+const aggregationNoteLatency = " AGGREGATION ACROSS REPLICAS: this histogram lives only in this process's memory, never in Redis, regardless of Config.Redis — each replica reports only the upstream traffic it personally handled, so aggregate with sum() (histogram_quantile over a sum()-aggregated set, for a real percentile), which is always correct for it, unlike the store-backed families above that flip between sum() and max() depending on whether Redis is configured."
+
+// latencySample is what one completed upstream watchdogBody (timeout.go)
+// hands its latencyRecorder exactly once, from Close: duration always
+// (the whole body's lifetime, start to Close); ttfb only when hasTTFB —
+// a body that never delivered one successful byte (e.g. the watchdog
+// fired before any read succeeded) has nothing meaningful to report
+// there, and must not fabricate a zero. streaming is the distinguishing
+// label the task brief requires, derived once by the caller from the
+// response's own Content-Type (isEventStreamResponse, timeout.go).
+type latencySample struct {
+	duration  time.Duration
+	ttfb      time.Duration
+	hasTTFB   bool
+	streaming bool
+}
+
+// latencyKey identifies one label set's histogram pair within
+// latencyStore: provider and streaming are always populated (the task
+// brief's "always" cardinality); model is empty unless Config.Metrics.
+// ModelLabel opted into the per-model breakdown AND the caller actually
+// knew the upstream model at record time (recordLatency below —
+// native passthrough never does, mirroring recordProviderAttempt's own
+// identical limitation, limits.go).
+type latencyKey struct {
+	provider  string
+	model     string
+	streaming bool
+}
+
+// latencyHistogram accumulates one latencyKey's two histograms (TTFB,
+// duration): DENSE per-bucket occurrence counts (observeLatencyBucket
+// below converts to the exposition format's required CUMULATIVE form
+// only at render time, metricWriter.histogram above), each with its own
+// running sum/count, plus overflow — the +Inf bucket's own dense count,
+// every observation past the largest configured bound.
+type latencyHistogram struct {
+	ttfbBuckets      []int64
+	durationBuckets  []int64
+	ttfbSum          float64
+	durationSum      float64
+	ttfbCount        int64
+	ttfbOverflow     int64
+	durationCount    int64
+	durationOverflow int64
+}
+
+// newLatencyHistogram allocates one latencyHistogram with dense bucket
+// slices sized to latencyBucketBounds, freshly zeroed — called at most
+// once per DISTINCT latencyKey ever observed (latencyStore.record
+// below), never per observation.
+func newLatencyHistogram() *latencyHistogram {
+	return &latencyHistogram{
+		ttfbBuckets:     make([]int64, len(latencyBucketBounds)),
+		durationBuckets: make([]int64, len(latencyBucketBounds)),
+	}
+}
+
+// observeLatencyBucket bumps the correct dense bucket (or overflow, for
+// a value past every configured bound) for one observation, and updates
+// the running sum/count alongside it — shared by latencyHistogram's own
+// two observations (TTFB, duration) so the bucket-selection rule can
+// never drift between them. latencyBucketBounds is ascending, so the
+// first bound the observation is <= is its bucket, matching Prometheus's
+// own "le" (less-than-or-equal) histogram semantics exactly.
+func observeLatencyBucket(buckets []int64, overflow *int64, sum *float64, count *int64, d time.Duration) {
+	v := d.Seconds()
+	*sum += v
+	*count++
+	for i, bound := range latencyBucketBounds {
+		if v <= bound {
+			buckets[i]++
+			return
+		}
+	}
+	*overflow++
+}
+
+// latencyStore is the Gateway's in-process, per-replica upstream-latency
+// accumulator (feat: instrument upstream latency) — see
+// aggregationNoteLatency above for why sum(), never max(), is always the
+// correct cross-replica aggregation for it.
+//
+// Every method is nil-receiver-safe, mirroring requestHealthTracker's
+// own convention (failoverHealth, llmgateway.go): a Gateway assembled
+// directly as a bare &Gateway{} literal (bypassing newGateway, as a few
+// older tests do) degrades to "no latency observed", rather than a
+// nil-pointer panic, even though newGateway itself always constructs a
+// real one.
+type latencyStore struct {
+	// data declared before mu (fieldalignment, govet): a map header is
+	// fully pointer-shaped, while sync.Mutex is a plain int32+uint32 pair
+	// with no pointer at all — grouping the pointer-shaped field first
+	// keeps the GC's pointer-scan span as short as possible, the same
+	// convention Gateway and adminProviderView follow (llmgateway.go,
+	// admin.go).
+	data map[latencyKey]*latencyHistogram
+	mu   sync.Mutex
+}
+
+// newLatencyStore returns an empty, ready-to-use latencyStore.
+func newLatencyStore() *latencyStore {
+	return &latencyStore{data: make(map[latencyKey]*latencyHistogram)}
+}
+
+// record accumulates sample into key's histogram, allocating a fresh
+// latencyHistogram the first time key is seen. Called at most twice per
+// completed upstream body — recordLatency below's own dual-write, once
+// for the always-on provider+streaming key and once more for the opt-in
+// provider+streaming+model key — nowhere near the hot per-Read path
+// watchdogBody.Read/Close themselves stay off (armLatency's and Read's
+// own doc comments, timeout.go, make that constraint explicit): this
+// lock is paid once per REQUEST, never once per chunk of a stream.
+func (s *latencyStore) record(key latencyKey, sample latencySample) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	h := s.data[key]
+	if h == nil {
+		h = newLatencyHistogram()
+		s.data[key] = h
+	}
+	if sample.hasTTFB {
+		observeLatencyBucket(h.ttfbBuckets, &h.ttfbOverflow, &h.ttfbSum, &h.ttfbCount, sample.ttfb)
+	}
+	observeLatencyBucket(h.durationBuckets, &h.durationOverflow, &h.durationSum, &h.durationCount, sample.duration)
+}
+
+// latencySnapshot is one latencyKey's fully-copied histogram state, safe
+// to read after latencyStore.snapshot returns without holding its lock.
+type latencySnapshot struct {
+	key              latencyKey
+	ttfbBuckets      []int64
+	durationBuckets  []int64
+	ttfbSum          float64
+	durationSum      float64
+	ttfbCount        int64
+	ttfbOverflow     int64
+	durationCount    int64
+	durationOverflow int64
+}
+
+// snapshot returns a fully-copied view of every latencyKey s currently
+// holds, safe to read without s's lock — writeLatencyMetrics and
+// buildAdminLatencyViews (admin.go) both read through this rather than
+// s.data directly.
+func (s *latencyStore) snapshot() []latencySnapshot {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]latencySnapshot, 0, len(s.data))
+	for k, h := range s.data {
+		out = append(out, latencySnapshot{
+			key:              k,
+			ttfbBuckets:      append([]int64(nil), h.ttfbBuckets...),
+			durationBuckets:  append([]int64(nil), h.durationBuckets...),
+			ttfbSum:          h.ttfbSum,
+			durationSum:      h.durationSum,
+			ttfbCount:        h.ttfbCount,
+			ttfbOverflow:     h.ttfbOverflow,
+			durationCount:    h.durationCount,
+			durationOverflow: h.durationOverflow,
+		})
+	}
+	return out
+}
+
+// recordLatency accumulates sample into g.latency: always under
+// (provider, streaming) — the always-on dimension the task brief
+// requires — and additionally under (provider, streaming, model) when
+// both Config.Metrics.ModelLabel is enabled and model is known,
+// mirroring limiter.recordProviderAttempt's own dual-write rule (limits.
+// go) for the identical opt-in-cardinality reason.
+//
+// This is the ONLY write path into g.latency, and it is reached only
+// when a latencyRecorder was ever wired onto a request's context in the
+// first place — every withLatencyRecorder call site (routes_unified.go,
+// routes_media.go, routes_passthrough.go) gates that wiring on
+// metricsEnabled(g.cfg) — so a deployment with metrics disabled calls
+// this exactly zero times, and g.latency's map simply never grows.
+func (g *Gateway) recordLatency(provider, model string, sample latencySample) {
+	g.latency.record(latencyKey{provider: provider, streaming: sample.streaming}, sample)
+	if model != "" && g.cfg.Metrics != nil && g.cfg.Metrics.ModelLabel {
+		g.latency.record(latencyKey{provider: provider, streaming: sample.streaming, model: model}, sample)
+	}
+}
+
+// writeLatencyMetrics emits llmgateway_upstream_ttfb_seconds and
+// llmgateway_upstream_duration_seconds — this feature's own two
+// histograms. Absent entirely (no # HELP/TYPE lines even emitted) when
+// g.latency has recorded nothing yet — a fresh process, or a deployment
+// with metrics collection gated off at every wiring site — mirroring how
+// a brand-new histogram with zero observations would look on any real
+// Prometheus exporter too: no series until the first observation, not a
+// family of all-zero ones.
+//
+// snaps is sorted (provider, then streaming, then model) purely for
+// deterministic output across repeated scrapes of identical underlying
+// state — Prometheus does not require sample ordering, but a stable
+// scrape body makes diffing two scrapes by eye meaningful, matching
+// writeRejectionMetrics' own sort.Slice above.
+func (g *Gateway) writeLatencyMetrics(m *metricWriter) {
+	snaps := g.latency.snapshot()
+	if len(snaps) == 0 {
+		return
+	}
+	sort.Slice(snaps, func(i, j int) bool {
+		a, b := snaps[i].key, snaps[j].key
+		if a.provider != b.provider {
+			return a.provider < b.provider
+		}
+		if a.streaming != b.streaming {
+			return !a.streaming // "false" (non-streaming) sorts before "true"
+		}
+		return a.model < b.model
+	})
+
+	m.family("llmgateway_upstream_ttfb_seconds", "histogram",
+		"Time to first successful byte read from an upstream response body, in seconds, measured from just before the request was sent (watchdogBody, timeout.go). Meaningful as a distinct \"how fast did the provider start responding\" signal only for stream=\"true\": a non-streaming provider buffers its whole completion before sending anything, so its own TTFB is approximately equal to its own llmgateway_upstream_duration_seconds and carries the same output-length contamination duration does — always split by the stream label before comparing across requests of different lengths, never averaged across it."+aggregationNoteLatency)
+	m.family("llmgateway_upstream_duration_seconds", "histogram",
+		"Total upstream response body duration, in seconds, from just before the request was sent to the last successful read or Close (watchdogBody, timeout.go) — covers the whole body, not just headers. Roughly TTFB + output_tokens/tokens_per_sec: a long generation legitimately takes longer than a short one on an equally healthy provider, so a raw average across requests of very different output length is not by itself a \"provider degraded\" signal — llmgateway_tokens_total's completion direction (this file) gives the token side of that ratio for the non-streaming population, where duration approximates total generation time."+aggregationNoteLatency)
+
+	for _, s := range snaps {
+		labels := []metricLabel{{"provider", s.key.provider}, {"stream", strconv.FormatBool(s.key.streaming)}}
+		if s.key.model != "" {
+			labels = append(labels, metricLabel{"model", s.key.model})
+		}
+		if s.ttfbCount > 0 {
+			m.histogram("llmgateway_upstream_ttfb_seconds", labels, s.ttfbBuckets, s.ttfbOverflow, s.ttfbSum)
+		}
+		if s.durationCount > 0 {
+			m.histogram("llmgateway_upstream_duration_seconds", labels, s.durationBuckets, s.durationOverflow, s.durationSum)
 		}
 	}
 }

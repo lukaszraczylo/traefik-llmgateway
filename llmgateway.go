@@ -537,24 +537,16 @@ const maxExplicitBodyAdmissionCap = 10_000
 // zero-waste sequence, then hand-applied here so every field keeps its
 // original doc comment) — see providerState's own doc comment
 // (registry.go) for the general convention.
+// Field order below is fieldalignment-derived (govet, enabled via this
+// repo's global golangci-lint config), not declaration-convenience
+// order: pointer-shaped fields (interfaces, pointers, maps, chans,
+// strings, slices) are grouped first, then plain scalars (logGate/
+// failoverConfig/time.Duration) last, so the GC's pointer-scan span
+// stays as short as possible. See adminProviderView's identical
+// convention (admin.go) for the same reasoning spelled out once; this
+// struct is the other place it applies.
 type Gateway struct {
 	next http.Handler
-	// targetClient is the shared, connection-pooled *http.Client the
-	// MCP/A2A target proxy (mcp_a2a.go) issues every upstream request
-	// through — built once via newAdapterHTTPClient, the same constructor
-	// each provider adapter uses for its own client.
-	targetClient *http.Client
-	auth         *authStore
-	limiter      *limiter
-	registry     *modelRegistry
-	adapters     map[string]providerAdapter
-	cfg          *Config
-	// cache is nil whenever response caching is not configured or not
-	// usable (cfg.Cache.Enabled is false, or true with no config.Redis —
-	// see buildResponseCache, cache.go). Every call site checks for nil
-	// before using it, rather than responseCache having its own
-	// always-disabled zero value.
-	cache *responseCache
 	// redisClient is the same instance newGateway hands to both the
 	// limiter's redisStore and the response cache (its own doc comment,
 	// below, explains why it's built once and shared) — kept here too,
@@ -562,13 +554,6 @@ type Gateway struct {
 	// pooled connections through. nil when config.Redis is absent, same
 	// as buildRedisClient's own nil-for-unconfigured contract.
 	redisClient *respClient
-	// bodyAdmission is the buffered-channel semaphore acquireBodyAdmission
-	// (routes_unified.go) claims from and releases: security review
-	// finding 1b, 2026-08-22. Sized once, here, by newGateway (see
-	// defaultBodyAdmissionCap/Config.MaxInFlightBodyRequests) — never
-	// resized afterward, matching a Go channel's own fixed-capacity
-	// contract.
-	bodyAdmission chan struct{}
 	// failoverHealth is feat/failover's own per-pod, in-memory
 	// request-path health signal (failover.go), built once, here, by
 	// newGateway. Every method on it is nil-receiver-safe, so a Gateway
@@ -576,12 +561,43 @@ type Gateway struct {
 	// degrades to "failover never skips a candidate for request health"
 	// rather than a nil-pointer panic.
 	failoverHealth *requestHealthTracker
-	// metricsNets is Config.Metrics.AllowedCIDRs, parsed once at
-	// construction (parseMetricsCIDRs, metrics.go) so the request path
-	// never re-parses a CIDR string per scrape. nil when Metrics is
-	// unconfigured or carries no AllowedCIDRs entries.
-	metricsNets []*net.IPNet
-	name        string
+	limiter        *limiter
+	registry       *modelRegistry
+	adapters       map[string]providerAdapter
+	cfg            *Config
+	auth           *authStore
+	// cache is nil whenever response caching is not configured or not
+	// usable (cfg.Cache.Enabled is false, or true with no config.Redis —
+	// see buildResponseCache, cache.go). Every call site checks for nil
+	// before using it, rather than responseCache having its own
+	// always-disabled zero value.
+	cache *responseCache
+	// bodyAdmission is the buffered-channel semaphore acquireBodyAdmission
+	// (routes_unified.go) claims from and releases: security review
+	// finding 1b, 2026-08-22. Sized once, here, by newGateway (see
+	// defaultBodyAdmissionCap/Config.MaxInFlightBodyRequests) — never
+	// resized afterward, matching a Go channel's own fixed-capacity
+	// contract.
+	bodyAdmission chan struct{}
+	// targetClient is the shared, connection-pooled *http.Client the
+	// MCP/A2A target proxy (mcp_a2a.go) issues every upstream request
+	// through — built once via newAdapterHTTPClient, the same constructor
+	// each provider adapter uses for its own client.
+	targetClient *http.Client
+	// latency is the in-process upstream-latency accumulator (feat:
+	// instrument upstream latency, metrics.go's latencyStore) —
+	// recordLatency's only write target, and writeLatencyMetrics/
+	// buildAdminOverview's (admin.go) own read source. Always
+	// constructed, here, by newGateway, even when Config.Metrics is nil
+	// or disabled: g.latency simply never receives anything to
+	// accumulate in that case (every withLatencyRecorder call site gates
+	// its own wiring on metricsEnabled(g.cfg), not this field's
+	// existence) — every method on it is also nil-receiver-safe
+	// (latencyStore's own doc comment), matching failoverHealth's
+	// identical "safe even off a bare &Gateway{} literal" convention
+	// above.
+	latency *latencyStore
+	name    string
 	// failoverLogGate rate-limits runMeteredCall's generic "failing over"
 	// log line (routes_unified.go) to once per storeErrorLogEvery
 	// (adversarial-review fix, F10) — reuses auth.go's own logGate type,
@@ -590,6 +606,14 @@ type Gateway struct {
 	// on a fresh Gateway always logs. Deliberately does NOT gate the 404
 	// loud-log line (operator ruling: that one must always log).
 	failoverLogGate logGate
+	// metricsNets is Config.Metrics.AllowedCIDRs, parsed once at
+	// construction (parseMetricsCIDRs, metrics.go) so the request path
+	// never re-parses a CIDR string per scrape. nil when Metrics is
+	// unconfigured or carries no AllowedCIDRs entries.
+	metricsNets []*net.IPNet
+	// failover is Config.Failover, validated and resolved once by
+	// newGateway (validateFailoverConfig, failover.go).
+	failover failoverConfig
 	// targetTimeout is targetClient's own resolved request timeout —
 	// Config.RequestTimeout only; an MCP/A2A target has no per-target
 	// override the way a provider does. proxyUpstream's own callers
@@ -597,9 +621,6 @@ type Gateway struct {
 	// idle-progress body watchdog (timeout.go) matches the
 	// ResponseHeaderTimeout already set on targetClient's Transport.
 	targetTimeout time.Duration
-	// failover is Config.Failover, validated and resolved once by
-	// newGateway (validateFailoverConfig, failover.go).
-	failover failoverConfig
 }
 
 // telemetryStartupOnce keeps the anonymous "plugin loaded" ping to one per
@@ -718,6 +739,11 @@ func newGateway(ctx context.Context, next http.Handler, config *Config, name str
 	}
 	g.failover = failoverCfg
 	g.failoverHealth = newRequestHealthTracker()
+	// feat: instrument upstream latency — always constructed, regardless
+	// of whether Config.Metrics is nil/disabled; see g.latency's own doc
+	// comment above for why an always-present, usually-empty store is the
+	// right default rather than a conditional nil.
+	g.latency = newLatencyStore()
 
 	// A malformed Config.Metrics.AllowedCIDRs entry is a constructor
 	// error (validate-at-construction), not a silently-ignored allowlist
