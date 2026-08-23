@@ -5,10 +5,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"math"
 	"net/http"
 	"strconv"
+	"time"
 )
 
 // maxRequestBytes caps a client request body decoded into a
@@ -274,12 +276,31 @@ func (g *Gateway) runUnified(w http.ResponseWriter, r *http.Request, u *user, gr
 // attempt" and "cache under the winning provider's key" actually mean
 // in code, not just in the brief's prose.
 func (g *Gateway) runMeteredCall(sw *statusTrackingWriter, r *http.Request, scopes []limitScope, body []byte, req map[string]any, requestedModel string, grp *group, endpoint, logPrefix string, envelope envelopeWriter, writeUpstream providerUpstreamErrorWriter, call adapterCall) {
-	primary, extra, err := g.registry.resolveWithCandidates(requestedModel, grp)
+	// F9 (adversarial-review, optional perf fix): a disabled deployment
+	// never needs the candidate pool at all — resolvePrimaryOnly skips
+	// failoverCandidates' own provider scan entirely, so a config that
+	// never opted into failover pays nothing extra for a pool it will
+	// never use.
+	var primary resolveCandidate
+	var extra []resolveCandidate
+	var err error
+	if g.failover.enabled {
+		primary, extra, err = g.registry.resolveWithCandidates(requestedModel, grp)
+	} else {
+		primary, err = g.registry.resolvePrimaryOnly(requestedModel, grp)
+	}
 	if err != nil {
 		writeModelResolveErrorEnvelope(sw, err, envelope)
 		return
 	}
+	// Sequence matters (each step's own doc comment explains why):
+	// health/discovery ordering first, so candidates[0] below is the
+	// ACTUAL first-attempted candidate the cost guard compares everyone
+	// else against; cost filtering second; the maxAttempts cap last, so
+	// it never re-admits a candidate the cost guard already removed.
 	candidates := g.orderedFailoverCandidates(primary, extra)
+	candidates = g.filterCandidatesByCost(candidates, requestedModel)
+	candidates = capFailoverCandidates(candidates, g.failover.maxAttempts)
 
 	// cacheable/streaming gate every cache step below on spec §2's scope,
 	// exactly as before this feature: a non-streaming request, with a
@@ -291,44 +312,40 @@ func (g *Gateway) runMeteredCall(sw *statusTrackingWriter, r *http.Request, scop
 	streaming, _ := req["stream"].(bool)
 	cacheable := !streaming && g.cache != nil && groupCacheEnabled(grp)
 
-	for i, cand := range candidates {
-		if i > 0 {
-			// checkAndCount above (admitRequest, this file) already
-			// counted this request exactly once — never double-count: a
-			// failover attempt is a NEW upstream attempt, not a new
-			// logical request, so nothing here calls checkAndCount
-			// again. Per-provider ATTEMPT counters, below, still record
-			// every attempt independently via the freshly-bound
-			// recorder.
-			g.warnf("%s: failing over from provider %q to %q for model %q", logPrefix, candidates[i-1].providerName, cand.providerName, requestedModel)
-		}
+	// pristineReq is the client's own decoded request, snapshotted ONCE,
+	// BEFORE any candidate's adapter ever touches it, with "model"
+	// already rewritten to the upstream id every candidate in this
+	// failover chain shares by construction (failoverCandidates,
+	// failover.go, only ever adds providers serving the IDENTICAL bare
+	// id resolve's primary already resolved to). Every attempt below
+	// builds its OWN fresh top-level copy from this snapshot rather than
+	// reusing or mutating one shared map (adversarial-review fix, F1):
+	// openai-type adapters mutate req in place — chatCompletion forces
+	// stream_options.include_usage=true onto it (provider_openai.go) —
+	// and reusing the same map across attempts let a LATER candidate
+	// read back an EARLIER candidate's own forced injection and
+	// misreport clientAskedUsage=true to a client that never asked for
+	// it, leaking the gateway's own suppressed usage-only SSE chunk.
+	// Proven against a single-provider control; this is what fixes it
+	// for openai, openai-audio, and copilot alike.
+	pristineReq := make(map[string]any, len(req)+1)
+	for k, v := range req {
+		pristineReq[k] = v
+	}
+	if len(candidates) > 0 {
+		pristineReq["model"] = candidates[0].upstreamModel
+	}
 
-		// req["model"] is reset on EVERY iteration: cand.upstreamModel is
-		// the identical string across every candidate in a failover chain
-		// by construction (failoverCandidates, failover.go, only ever
-		// adds providers sharing the SAME bare id resolve's primary
-		// already resolved to), so this is a no-op rewrite on the common
-		// single-candidate path, not new cost.
-		req["model"] = cand.upstreamModel
-
-		// cacheKey is computed fresh per candidate — cache correctness
-		// (brief): a response produced by a failover provider must be
-		// stored under THAT provider's own key, never the first
-		// candidate's. Called here, BEFORE gatewayAliasKey is injected
-		// below, preserving the ordering cacheKey's own doc comment
-		// (cache.go) requires of every caller: gatewayAliasKey is a
-		// purely internal echo-back mechanism cacheKey does not itself
-		// strip, so computing the key after injecting it would hash an
-		// extra, noisy field.
-		var cacheKeyStr string
-		if cacheable {
-			cacheKeyStr = cacheKey(cand.providerName, cand.upstreamModel, requestedModel, endpoint, req)
-			if cached, hit := g.cache.lookup(cacheKeyStr); hit {
-				// A cache hit accounts the request only — checkAndCount
-				// above already counted it — never token/cost, and never
-				// runs the zero-usage estimate branch below: the client
-				// never reached the upstream provider its body size would
-				// be estimating against.
+	// F7 fix (adversarial-review): check EVERY candidate's cache entry
+	// before attempting ANY of them, so a cached failover response never
+	// costs a real round trip to a dead primary just because normal
+	// ordering tries that primary first — the lookup used to sit inside
+	// each candidate's own turn, after every EARLIER candidate's real
+	// upstream call had already failed.
+	if cacheable {
+		for _, cand := range candidates {
+			key := cacheKey(cand.providerName, cand.upstreamModel, requestedModel, endpoint, pristineReq)
+			if cached, hit := g.cache.lookup(key); hit {
 				sw.Header().Set("X-Llmgw-Cache", "hit")
 				if cached.ContentType != "" {
 					sw.Header().Set("Content-Type", cached.ContentType)
@@ -337,6 +354,95 @@ func (g *Gateway) runMeteredCall(sw *statusTrackingWriter, r *http.Request, scop
 				_, _ = sw.Write(cached.Body)
 				return
 			}
+		}
+	}
+
+	var lastErr error
+	var lastProviderName string
+	for i, cand := range candidates {
+		if i > 0 {
+			// F4 fix (adversarial-review): a shared request context an
+			// EARLIER candidate already exhausted must never be
+			// misattributed as THIS candidate's own failure. There is no
+			// per-candidate timeout budget in this architecture (every
+			// candidate shares r's SAME context — see README's own
+			// documented limitation), so once an earlier candidate burns
+			// the deadline, attempting the next one would fail near-
+			// instantly for a reason that has nothing to do with its own
+			// health. Stop here with the LAST REAL error instead of
+			// chasing further doomed candidates and wrongly opening a
+			// perfectly healthy provider's request-health breaker.
+			if r.Context().Err() != nil {
+				g.handleAdapterErrorEnvelope(sw, lastErr, lastProviderName, logPrefix, envelope, writeUpstream)
+				return
+			}
+
+			// checkAndCount above (admitRequest, this file) already
+			// counted this request exactly once — never double-count: a
+			// failover attempt is a NEW upstream attempt, not a new
+			// logical request, so nothing here calls checkAndCount
+			// again. Per-provider ATTEMPT counters, below, still record
+			// every attempt independently via the freshly-bound
+			// recorder.
+			//
+			// Rate-limited (F10 fix, adversarial-review): during a
+			// sustained outage this line would otherwise be one
+			// blocking synchronous stderr write per request on shared
+			// Traefik ingress — the exact failure shouldLogAuthFailure/
+			// logStoreError (auth.go/limits.go) already exist to
+			// prevent elsewhere in this package. The 404 line below is
+			// deliberately NOT gated by this (operator ruling: it must
+			// always log).
+			if log, suppressed := g.failoverLogGate.shouldLog(time.Now()); log {
+				suffix := ""
+				if suppressed > 0 {
+					suffix = fmt.Sprintf(" (%d more failovers suppressed since last log)", suppressed)
+				}
+				g.warnf("%s: failing over from provider %q to %q for model %q%s", logPrefix, candidates[i-1].providerName, cand.providerName, requestedModel, suffix)
+			}
+		}
+
+		// F2 fix (adversarial-review): clear every header a PRIOR
+		// candidate's own writer may have staged on sw.Header() without
+		// committing it — newSSEWriter (sse.go) sets Content-Type: text/
+		// event-stream, Cache-Control: no-cache, and X-Accel-Buffering:
+		// no the moment a streaming attempt starts, before any byte is
+		// written. If that candidate then fails before writing (still
+		// safe to fail over, THE HARD CONSTRAINT below), those staged
+		// headers must not survive into a plain-JSON response from the
+		// next candidate. Safe to clear unconditionally: this loop only
+		// ever reaches a new iteration while sw.wroteHeader is false, so
+		// nothing committed is ever at risk of being wiped.
+		hdr := sw.Header()
+		for k := range hdr {
+			hdr.Del(k)
+		}
+
+		// attemptReq is a FRESH top-level copy of pristineReq for every
+		// candidate (F1 fix, this function's own doc comment above).
+		// gatewayAliasKey is (re-)injected here: every providerAdapter
+		// implementation unconditionally deletes it before it ever
+		// touches the network (its own doc comment, providers.go), so
+		// each fresh copy needs it set again to echo the client's own
+		// requested alias correctly (anthropic/gemini-type adapters read
+		// it to build their own response envelope).
+		attemptReq := make(map[string]any, len(pristineReq)+1)
+		for k, v := range pristineReq {
+			attemptReq[k] = v
+		}
+		attemptReq[gatewayAliasKey] = requestedModel
+
+		// cacheKeyStr is still computed per candidate — cache
+		// correctness (brief): a response produced by a failover
+		// provider must be stored under THAT provider's own key, never
+		// the first candidate's. Computed from pristineReq (matching the
+		// pre-pass above exactly): gatewayAliasKey is a purely internal
+		// echo-back mechanism cacheKey does not itself strip (its own
+		// doc comment, cache.go), so hashing attemptReq instead would
+		// add noise no two requests would otherwise disagree on.
+		var cacheKeyStr string
+		if cacheable {
+			cacheKeyStr = cacheKey(cand.providerName, cand.upstreamModel, requestedModel, endpoint, pristineReq)
 			// Set before call() below writes anything — headers must
 			// precede the body a miss is about to produce (spec §2). A
 			// later iteration's own miss overwrites this harmlessly: it
@@ -346,16 +452,6 @@ func (g *Gateway) runMeteredCall(sw *statusTrackingWriter, r *http.Request, scop
 			// own doc comment).
 			sw.Header().Set("X-Llmgw-Cache", "miss")
 		}
-
-		// gatewayAliasKey is (re-)injected on every iteration, AFTER the
-		// cacheKey computation above: every providerAdapter implementation
-		// unconditionally deletes it before it ever touches the network
-		// (its own doc comment, providers.go) — a failed first attempt
-		// leaves req without it, and the next candidate needs it set
-		// again to echo the client's own requested alias correctly
-		// (anthropic/gemini-type adapters read it to build their own
-		// response envelope).
-		req[gatewayAliasKey] = requestedModel
 
 		// respWriter is sw, wrapped in a capture tee only when this
 		// request is cacheable — cacheCaptureWriter buffers everything
@@ -378,19 +474,28 @@ func (g *Gateway) runMeteredCall(sw *statusTrackingWriter, r *http.Request, scop
 		// misattribute a retried attempt to the first provider"
 		// requirement) — every upstream attempt call() makes, via
 		// upstreamJSON's retryPolicy.do (providers.go), reports through
-		// here. The same closure also feeds g.failoverHealth (failover.go),
-		// feat/failover's own request-path health signal, with the
-		// IDENTICAL isTransient||isDeadlineExceeded classification
-		// limiter.recordProviderAttempt already applies — see
-		// requestHealthTracker.record's own doc comment for why this must
-		// stay the same classification, not a wider one.
+		// here. limiter.recordProviderAttempt keeps its own existing
+		// per-raw-attempt classification unchanged (limits.go); feat/
+		// failover's OWN request-path health gate is recorded separately
+		// below, once per candidate rather than once per raw attempt —
+		// see requestHealthTracker.record's own doc comment (failover.go)
+		// for why (F3/F6 fix, adversarial-review).
 		providerName := cand.providerName
 		upstreamModel := cand.upstreamModel
 		ctx := withAttemptRecorder(r.Context(), func(resp *http.Response, attemptErr error) {
 			g.limiter.recordProviderAttempt(providerName, upstreamModel, resp, attemptErr)
-			g.failoverHealth.record(providerName, !isTransient(resp, attemptErr) && !isDeadlineExceeded(attemptErr))
 		})
-		result, callErr := call(cand.adapter, ctx, respWriter, req)
+		result, callErr := call(cand.adapter, ctx, respWriter, attemptReq)
+
+		// Request-path health, recorded ONCE per candidate per logical
+		// request (F3/F6 fix, adversarial-review) — see
+		// requestHealthTracker.record's own doc comment (failover.go)
+		// for the full ruling: failoverEligible's classification
+		// (everything except HTTP 400 is a failure) is reused directly,
+		// not limiter's narrower isTransient/isDeadlineExceeded one, so
+		// a provider answering 401/403/404 to every request is
+		// eventually routed around instead of retried forever.
+		g.failoverHealth.record(providerName, !failoverEligible(callErr))
 
 		// Usage is accounted before the error branch below runs, not
 		// after: every adapter that can fail mid-stream (forwardStream
@@ -457,6 +562,9 @@ func (g *Gateway) runMeteredCall(sw *statusTrackingWriter, r *http.Request, scop
 			return
 		}
 
+		lastErr = callErr
+		lastProviderName = providerName
+
 		hasNext := i < len(candidates)-1 && failoverEligible(callErr)
 		if hasNext && isProviderNotFoundError(callErr) {
 			// Loud, non-suppressed log line (brief: "Failover after a 404
@@ -465,7 +573,9 @@ func (g *Gateway) runMeteredCall(sw *statusTrackingWriter, r *http.Request, scop
 			// would hide it") — deliberately g.errorf, not g.logf, and
 			// deliberately its own line rather than folded into the
 			// generic "failing over" line above the next iteration
-			// already prints.
+			// already prints, and deliberately NOT gated by
+			// failoverLogGate (operator ruling: this one must always
+			// log).
 			g.errorf("%s: provider %q returned 404 for model %q; failing over to %q — this usually means a real provider/model configuration mistake, not a transient outage", logPrefix, providerName, requestedModel, candidates[i+1].providerName)
 		}
 		if !hasNext {

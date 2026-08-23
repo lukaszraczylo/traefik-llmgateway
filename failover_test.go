@@ -262,6 +262,48 @@ func TestRequestHealthTracker_FailedProbe_ReopensWithDoubledBackoff(t *testing.T
 	assert.True(t, tr.healthy("p"), "must recover once the doubled window has fully elapsed")
 }
 
+// TestRequestHealthTracker_FailureWhileOpenBeforeCooldown_IsANoOp is the
+// direct regression test for adversarial-review finding F5: a failure
+// arriving while the breaker is ALREADY open and its cooldown has not
+// yet elapsed must change nothing — not the backoff, not openUntil. An
+// earlier version fell through to the closed-state consecutiveFailures++
+// branch for this case, which reset backoff to the flat base duration
+// and slid openUntil forward on every such failure, so doubling never
+// actually happened outside the narrow post-cooldown probe path.
+func TestRequestHealthTracker_FailureWhileOpenBeforeCooldown_IsANoOp(t *testing.T) {
+	t.Parallel()
+	tr := newRequestHealthTracker()
+	now := time.Now()
+	tr.nowFn = func() time.Time { return now }
+
+	for i := 0; i < requestBreakerFailureThreshold; i++ {
+		tr.record("p", false)
+	}
+	st := tr.stateFor("p")
+	st.mu.Lock()
+	openUntilAfterTrip := st.openUntil
+	backoffAfterTrip := st.backoff
+	st.mu.Unlock()
+	require.Equal(t, requestBreakerOpenDuration, backoffAfterTrip)
+
+	// Well before the cooldown elapses: several more failures arrive
+	// (e.g. other in-flight requests against the same dead provider).
+	now = now.Add(requestBreakerOpenDuration / 2)
+	for i := 0; i < 5; i++ {
+		require.False(t, tr.healthy("p"))
+		tr.record("p", false)
+	}
+
+	st.mu.Lock()
+	openUntilAfterExtraFailures := st.openUntil
+	backoffAfterExtraFailures := st.backoff
+	failuresAfterExtra := st.consecutiveFailures
+	st.mu.Unlock()
+	assert.Equal(t, openUntilAfterTrip, openUntilAfterExtraFailures, "openUntil must not slide forward from failures arriving before the cooldown elapses")
+	assert.Equal(t, backoffAfterTrip, backoffAfterExtraFailures, "backoff must stay at the base duration, not reset by every failure while already open")
+	assert.Equal(t, requestBreakerFailureThreshold, failuresAfterExtra, "consecutiveFailures must not keep growing once the breaker is already open")
+}
+
 func TestRequestHealthTracker_BackoffCapsAtMax(t *testing.T) {
 	t.Parallel()
 	tr := newRequestHealthTracker()
@@ -364,8 +406,16 @@ func TestValidateFailoverConfig_Defaults(t *testing.T) {
 	t.Parallel()
 	fc, err := validateFailoverConfig(FailoverConfig{})
 	require.NoError(t, err)
-	assert.True(t, fc.enabled, "nil Enabled must default to true — failover is a hot standby with no config change")
+	assert.False(t, fc.enabled, "nil Enabled must default to false — coordinator ruling: new behavior that can change which provider serves a request goes behind a flag defaulting off")
 	assert.Equal(t, defaultFailoverMaxAttempts, fc.maxAttempts)
+}
+
+func TestValidateFailoverConfig_ExplicitEnable(t *testing.T) {
+	t.Parallel()
+	yes := true
+	fc, err := validateFailoverConfig(FailoverConfig{Enabled: &yes})
+	require.NoError(t, err)
+	assert.True(t, fc.enabled)
 }
 
 func TestValidateFailoverConfig_ExplicitDisable(t *testing.T) {
@@ -402,9 +452,10 @@ func testGatewayForCandidates(t *testing.T, providerNames []string, fc failoverC
 		adapters[name] = newFakeAdapter(name)
 		providers[name] = &ProviderConfig{Models: []string{"shared"}}
 	}
-	reg, err := newModelRegistry(adapters, &Config{Providers: providers}, func(string, ...any) {})
+	cfg := &Config{Providers: providers}
+	reg, err := newModelRegistry(adapters, cfg, func(string, ...any) {})
 	require.NoError(t, err)
-	return &Gateway{registry: reg, failoverHealth: newRequestHealthTracker(), failover: fc}
+	return &Gateway{registry: reg, failoverHealth: newRequestHealthTracker(), failover: fc, cfg: cfg, name: "test"}
 }
 
 func candNames(cands []resolveCandidate) []string {
@@ -475,14 +526,127 @@ func TestOrderedFailoverCandidates_DiscoveryUnhealthy_DeprioritizedNotDropped(t 
 	assert.Equal(t, []string{"beta", "alpha"}, candNames(got), "discovery-unhealthy must be deprioritized (moved after), never dropped from the list")
 }
 
-func TestOrderedFailoverCandidates_MaxAttemptsCapsList(t *testing.T) {
+// TestOrderedFailoverCandidates_DoesNotCap proves orderedFailoverCandidates
+// itself no longer applies maxAttempts — capFailoverCandidates does, as the
+// LAST step of runMeteredCall's own sequence, after cost filtering.
+func TestOrderedFailoverCandidates_DoesNotCap(t *testing.T) {
 	t.Parallel()
 	g := testGatewayForCandidates(t, []string{"alpha", "beta", "gamma"}, failoverConfig{enabled: true, maxAttempts: 2})
 	primary := resolveCandidate{providerName: "alpha"}
 	extra := []resolveCandidate{{providerName: "beta"}, {providerName: "gamma"}}
 	got := g.orderedFailoverCandidates(primary, extra)
-	assert.Len(t, got, 2, "maxAttempts must cap the total candidate list, primary included")
-	assert.Equal(t, []string{"alpha", "beta"}, candNames(got))
+	assert.Equal(t, []string{"alpha", "beta", "gamma"}, candNames(got), "orderedFailoverCandidates must return the full health/discovery-ordered list uncapped")
+}
+
+func TestCapFailoverCandidates(t *testing.T) {
+	t.Parallel()
+	all := []resolveCandidate{{providerName: "alpha"}, {providerName: "beta"}, {providerName: "gamma"}}
+
+	got := capFailoverCandidates(all, 2)
+	assert.Equal(t, []string{"alpha", "beta"}, candNames(got), "maxAttempts must cap the total candidate list, primary included")
+
+	got = capFailoverCandidates(all, 10)
+	assert.Len(t, got, 3, "a cap larger than the list must not truncate anything")
+
+	got = capFailoverCandidates(all, 0)
+	assert.Len(t, got, 3, "max <= 0 must be a defensive no-op")
+}
+
+// --- resolveUnifiedPricing / candidateCostAllowed / filterCandidatesByCost ---
+
+func TestResolveUnifiedPricing_CanonicalFirst_ThenBareFallback(t *testing.T) {
+	t.Parallel()
+	overrides := map[string]*ModelPricing{
+		"beta/shared": {InputPerM: 1, OutputPerM: 2},
+		"shared":      {InputPerM: 5, OutputPerM: 6},
+	}
+	p, ok := resolveUnifiedPricing("beta/shared", "shared", overrides)
+	require.True(t, ok)
+	assert.Equal(t, ModelPricing{InputPerM: 1, OutputPerM: 2}, p, "an override keyed on the canonical id must win over the bare fallback — the exact case unifiedCostMicros itself resolves this way")
+}
+
+func TestResolveUnifiedPricing_FallsBackToBare(t *testing.T) {
+	t.Parallel()
+	overrides := map[string]*ModelPricing{"shared": {InputPerM: 5, OutputPerM: 6}}
+	p, ok := resolveUnifiedPricing("beta/shared", "shared", overrides)
+	require.True(t, ok)
+	assert.Equal(t, ModelPricing{InputPerM: 5, OutputPerM: 6}, p)
+}
+
+func TestResolveUnifiedPricing_Unknown(t *testing.T) {
+	t.Parallel()
+	_, ok := resolveUnifiedPricing("beta/shared", "shared", nil)
+	assert.False(t, ok, "neither the canonical nor the bare id has a price — this must never be silently treated as zero")
+}
+
+func TestResolveUnifiedPricing_BuiltinTable(t *testing.T) {
+	t.Parallel()
+	p, ok := resolveUnifiedPricing("openai/gpt-5", "gpt-5", nil)
+	require.True(t, ok, "the built-in pricing table must still resolve with no operator overrides configured")
+	assert.Equal(t, builtinPricing["gpt-5"], p)
+}
+
+// TestCandidateCostAllowed is the direct regression test for the
+// operator's binding ruling: table-driven across every named case,
+// including the two-dimension requirement (cheap on one axis, dear on
+// the other, must still be rejected).
+func TestCandidateCostAllowed(t *testing.T) {
+	t.Parallel()
+	cheap := ModelPricing{InputPerM: 1, OutputPerM: 2}
+	dear := ModelPricing{InputPerM: 3, OutputPerM: 4}
+	mixedCheapInputDearOutput := ModelPricing{InputPerM: 0.5, OutputPerM: 10}
+	zero := ModelPricing{}
+
+	tests := []struct {
+		name                         string
+		primary, candidate           ModelPricing
+		primaryKnown, candidateKnown bool
+		want                         bool
+	}{
+		{name: "both known, candidate strictly cheaper on both", primary: dear, primaryKnown: true, candidate: cheap, candidateKnown: true, want: true},
+		{name: "both known, identical price", primary: cheap, primaryKnown: true, candidate: cheap, candidateKnown: true, want: true},
+		{name: "both known, candidate strictly dearer on both", primary: cheap, primaryKnown: true, candidate: dear, candidateKnown: true, want: false},
+		{name: "both known, cheaper input but dearer output must still reject", primary: cheap, primaryKnown: true, candidate: mixedCheapInputDearOutput, candidateKnown: true, want: false},
+		{name: "both known, dearer input but cheaper output must still reject", primary: mixedCheapInputDearOutput, primaryKnown: true, candidate: cheap, candidateKnown: true, want: false},
+		{name: "primary known, candidate unknown: never allowed", primary: dear, primaryKnown: true, candidate: ModelPricing{}, candidateKnown: false, want: false},
+		{name: "primary known-zero, candidate unknown: never allowed", primary: zero, primaryKnown: true, candidate: ModelPricing{}, candidateKnown: false, want: false},
+		{name: "primary unknown, candidate known non-zero: never allowed", primary: ModelPricing{}, primaryKnown: false, candidate: cheap, candidateKnown: true, want: false},
+		{name: "primary unknown, candidate known but only input non-zero: never allowed", primary: ModelPricing{}, primaryKnown: false, candidate: ModelPricing{InputPerM: 0.01}, candidateKnown: true, want: false},
+		{name: "primary unknown, candidate known-zero: allowed", primary: ModelPricing{}, primaryKnown: false, candidate: zero, candidateKnown: true, want: true},
+		{name: "both unknown: allowed", primary: ModelPricing{}, primaryKnown: false, candidate: ModelPricing{}, candidateKnown: false, want: true},
+		{name: "both known-zero: allowed", primary: zero, primaryKnown: true, candidate: zero, candidateKnown: true, want: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := candidateCostAllowed(tt.primary, tt.primaryKnown, tt.candidate, tt.candidateKnown)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestFilterCandidatesByCost_SkipsPricierKeepsCheaper(t *testing.T) {
+	t.Parallel()
+	g := testGatewayForCandidates(t, []string{"alpha", "beta", "gamma"}, failoverConfig{enabled: true, maxAttempts: 3})
+	g.cfg.Pricing = map[string]*ModelPricing{
+		"alpha/shared": {InputPerM: 2, OutputPerM: 4}, // primary
+		"beta/shared":  {InputPerM: 3, OutputPerM: 4}, // dearer input -> rejected
+		"gamma/shared": {InputPerM: 2, OutputPerM: 4}, // equal -> allowed
+	}
+	candidates := []resolveCandidate{
+		{providerName: "alpha", upstreamModel: "shared", canonical: "alpha/shared"},
+		{providerName: "beta", upstreamModel: "shared", canonical: "beta/shared"},
+		{providerName: "gamma", upstreamModel: "shared", canonical: "gamma/shared"},
+	}
+	got := g.filterCandidatesByCost(candidates, "shared")
+	assert.Equal(t, []string{"alpha", "gamma"}, candNames(got))
+}
+
+func TestFilterCandidatesByCost_FewerThanTwoCandidates_NoOp(t *testing.T) {
+	t.Parallel()
+	g := testGatewayForCandidates(t, []string{"alpha"}, failoverConfig{enabled: true, maxAttempts: 3})
+	candidates := []resolveCandidate{{providerName: "alpha", upstreamModel: "shared", canonical: "alpha/shared"}}
+	got := g.filterCandidatesByCost(candidates, "shared")
+	assert.Equal(t, candidates, got)
 }
 
 // =====================================================================
@@ -504,6 +668,13 @@ func twoProviderFailoverConfig(srvAlpha, srvBeta *httptest.Server) *Config {
 	cfg.Users = &UsersConfig{Inline: []*UserConfig{
 		{Name: "alice", Group: "default", APIKey: "sk-alice", Limits: &LimitsConfig{}},
 	}}
+	// Explicitly opt in: FailoverConfig.Enabled now defaults to false
+	// (coordinator ruling) — every test in this file that exercises actual
+	// failover behavior must opt in on purpose, the same way an operator
+	// would, rather than relying on a default this feature no longer ships
+	// with.
+	yes := true
+	cfg.Failover = FailoverConfig{Enabled: &yes}
 	return cfg
 }
 
@@ -570,6 +741,8 @@ func TestHandleChat_Failover_FallsThroughAndServes(t *testing.T) {
 			}
 			cfg.Groups = map[string]*GroupConfig{"default": {}}
 			cfg.Users = &UsersConfig{Inline: []*UserConfig{{Name: "alice", Group: "default", APIKey: "sk-alice", Limits: &LimitsConfig{}}}}
+			yes := true
+			cfg.Failover = FailoverConfig{Enabled: &yes}
 
 			next := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})
 			h, err := New(context.Background(), next, cfg, "llmgw")
@@ -699,10 +872,17 @@ func TestHandleChat_Failover_RequestUnhealthy_SkippedWithoutBeingCalled(t *testi
 }
 
 // TestHandleChat_Failover_DiscoveryUnhealthy_StillTried proves discovery
-// health is an ordering hint, never a hard skip: a provider whose
-// DISCOVERY breaker is open must still be attempted (and can still serve
-// the response) when it is the only one that actually works. Would FAIL
-// if discoveryHealthy were (mis-)used as a skip gate.
+// health is never a HARD SKIP: a provider whose DISCOVERY breaker is
+// open must still be attempted, and can still serve the response, when
+// beta (the only other candidate) fails. Would FAIL if discoveryHealthy
+// were used to exclude a candidate outright, but does NOT independently
+// prove ordering (deleting the deprioritization partition in
+// orderedFailoverCandidates leaves this test passing too, since beta
+// fails either way and alpha is tried regardless of position) — the
+// ordering claim itself is covered only by
+// TestOrderedFailoverCandidates_DiscoveryUnhealthy_DeprioritizedNotDropped
+// (adversarial-review correction: this comment previously overstated
+// what this test proves).
 func TestHandleChat_Failover_DiscoveryUnhealthy_StillTried(t *testing.T) {
 	alphaSrv := jsonServer(http.StatusOK, successRespBody) // alpha's CHAT endpoint works fine
 	defer alphaSrv.Close()
@@ -727,10 +907,9 @@ func TestHandleChat_Failover_DiscoveryUnhealthy_StillTried(t *testing.T) {
 	st.mu.Unlock()
 	require.False(t, gw.registry.discoveryHealthy("alpha"))
 
-	// beta is healthy by every signal but its own chat endpoint 500s —
-	// ordering puts beta (discovery-healthy) FIRST, so this proves the
-	// request actually reaches alpha SECOND, not that alpha happened to
-	// be tried first anyway.
+	// beta is healthy by every signal but its own chat endpoint 500s, so
+	// the request can only succeed if alpha is tried at some point in
+	// the chain despite its open discovery breaker.
 	body := map[string]any{"model": "shared", "messages": []any{}}
 	req := newUnifiedRequest(t, http.MethodPost, "/v1/chat/completions", "sk-alice", body)
 	rec := httptest.NewRecorder()
@@ -864,11 +1043,507 @@ func TestHandleChat_Failover_CachedUnderWinningProviderKey(t *testing.T) {
 	assert.Equal(t, int64(1), atomic.LoadInt64(&betaCalls), "the second request must hit cache under beta's key, not call beta's backend again")
 }
 
+// --- cost guard (operator ruling): never fail over to a pricier candidate ---
+
+// costGuardConfig builds a two-provider (alpha, beta) config exactly like
+// twoProviderFailoverConfig but WITHOUT setting cfg.Pricing, so each test
+// configures its own overrides for its own case.
+func costGuardConfig(srvAlpha, srvBeta *httptest.Server) *Config {
+	cfg := twoProviderFailoverConfig(srvAlpha, srvBeta)
+	cfg.Providers["alpha"].Models = []string{"shared"}
+	cfg.Providers["beta"].Models = []string{"shared"}
+	return cfg
+}
+
+// driveCostGuardRequest posts one chat-completion request for "shared"
+// through h and returns the recorder and everything logged to stderr
+// while it ran.
+func driveCostGuardRequest(t *testing.T, h http.Handler) (*httptest.ResponseRecorder, string) {
+	t.Helper()
+	origStderr := captureStderrStart()
+	body := map[string]any{"model": "shared", "messages": []any{map[string]any{"role": "user", "content": "hi"}}}
+	req := newUnifiedRequest(t, http.MethodPost, "/v1/chat/completions", "sk-alice", body)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rec, captureStderrStop(origStderr)
+}
+
+// TestHandleChat_Failover_CostGuard_SkipsPricierCandidate is the direct
+// regression test for the operator's requirement: a candidate priced
+// higher than the primary must never serve. Would FAIL if the cost guard
+// were reverted (mutation-tested in this branch's own history).
+func TestHandleChat_Failover_CostGuard_SkipsPricierCandidate(t *testing.T) {
+	var betaCalls int64
+	alphaSrv := jsonServer(http.StatusInternalServerError, `{"error":{"message":"down","type":"server_error"}}`)
+	defer alphaSrv.Close()
+	betaSrv := countingServer(http.StatusOK, successRespBody, &betaCalls)
+	defer betaSrv.Close()
+
+	cfg := costGuardConfig(alphaSrv, betaSrv)
+	cfg.Pricing = map[string]*ModelPricing{
+		"alpha/shared": {InputPerM: 1, OutputPerM: 2},
+		"beta/shared":  {InputPerM: 1, OutputPerM: 3}, // dearer on output only — still must be rejected
+	}
+	next := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	require.NoError(t, err)
+
+	rec, logOutput := driveCostGuardRequest(t, h)
+
+	assert.Equal(t, http.StatusInternalServerError, rec.Code, "beta is dearer, so alpha's own failure must be returned as-is, body=%s", rec.Body.String())
+	assert.Equal(t, int64(0), atomic.LoadInt64(&betaCalls), "beta must never be called once the cost guard rejects it")
+	assert.Contains(t, logOutput, "alpha")
+	assert.Contains(t, logOutput, "beta")
+	assert.Contains(t, logOutput, "shared")
+}
+
+// TestHandleChat_Failover_CostGuard_AllowsCheaperOrEqualCandidate is the
+// mirror positive case: a candidate priced at or below the primary must
+// still serve normally.
+func TestHandleChat_Failover_CostGuard_AllowsCheaperOrEqualCandidate(t *testing.T) {
+	alphaSrv := jsonServer(http.StatusInternalServerError, `{"error":{"message":"down","type":"server_error"}}`)
+	defer alphaSrv.Close()
+	betaSrv := jsonServer(http.StatusOK, successRespBody)
+	defer betaSrv.Close()
+
+	cfg := costGuardConfig(alphaSrv, betaSrv)
+	cfg.Pricing = map[string]*ModelPricing{
+		"alpha/shared": {InputPerM: 2, OutputPerM: 4},
+		"beta/shared":  {InputPerM: 2, OutputPerM: 4}, // exactly equal — allowed
+	}
+	next := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	require.NoError(t, err)
+
+	rec, _ := driveCostGuardRequest(t, h)
+	assert.Equal(t, http.StatusOK, rec.Code, "beta is equally priced, so failover must still serve it, body=%s", rec.Body.String())
+	assert.Equal(t, successRespBody, rec.Body.String())
+}
+
+// TestHandleChat_Failover_CostGuard_PrimaryKnown_CandidateUnknown_Skips
+// covers the operator's first unknown-pricing ruling: primary priced,
+// candidate unpriced — never allowed, since an unknown price cannot be
+// proven not-more-expensive.
+func TestHandleChat_Failover_CostGuard_PrimaryKnown_CandidateUnknown_Skips(t *testing.T) {
+	var betaCalls int64
+	alphaSrv := jsonServer(http.StatusInternalServerError, `{"error":{"message":"down","type":"server_error"}}`)
+	defer alphaSrv.Close()
+	betaSrv := countingServer(http.StatusOK, successRespBody, &betaCalls)
+	defer betaSrv.Close()
+
+	cfg := costGuardConfig(alphaSrv, betaSrv)
+	cfg.Pricing = map[string]*ModelPricing{
+		"alpha/shared": {InputPerM: 1, OutputPerM: 2},
+		// beta has no override, and "shared"/"beta/shared" is not in the
+		// built-in table either — its price is genuinely unknown.
+	}
+	next := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	require.NoError(t, err)
+
+	rec, _ := driveCostGuardRequest(t, h)
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+	assert.Equal(t, int64(0), atomic.LoadInt64(&betaCalls))
+}
+
+// TestHandleChat_Failover_CostGuard_PrimaryUnknown_CandidateKnownNonZero_Skips
+// covers the operator's second unknown-pricing ruling: moving from
+// unbilled to billed is itself a spend increase.
+func TestHandleChat_Failover_CostGuard_PrimaryUnknown_CandidateKnownNonZero_Skips(t *testing.T) {
+	var betaCalls int64
+	alphaSrv := jsonServer(http.StatusInternalServerError, `{"error":{"message":"down","type":"server_error"}}`)
+	defer alphaSrv.Close()
+	betaSrv := countingServer(http.StatusOK, successRespBody, &betaCalls)
+	defer betaSrv.Close()
+
+	cfg := costGuardConfig(alphaSrv, betaSrv)
+	cfg.Pricing = map[string]*ModelPricing{
+		"beta/shared": {InputPerM: 1, OutputPerM: 2}, // alpha has no override at all: unknown
+	}
+	next := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	require.NoError(t, err)
+
+	rec, _ := driveCostGuardRequest(t, h)
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+	assert.Equal(t, int64(0), atomic.LoadInt64(&betaCalls))
+}
+
+// TestHandleChat_Failover_CostGuard_PrimaryUnknown_CandidateKnownZero_Allows
+// covers the ruling's own stated exception: a candidate that is known,
+// explicit free can never be more expensive than an unknown amount.
+func TestHandleChat_Failover_CostGuard_PrimaryUnknown_CandidateKnownZero_Allows(t *testing.T) {
+	alphaSrv := jsonServer(http.StatusInternalServerError, `{"error":{"message":"down","type":"server_error"}}`)
+	defer alphaSrv.Close()
+	betaSrv := jsonServer(http.StatusOK, successRespBody)
+	defer betaSrv.Close()
+
+	cfg := costGuardConfig(alphaSrv, betaSrv)
+	cfg.Pricing = map[string]*ModelPricing{
+		"beta/shared": {InputPerM: 0, OutputPerM: 0}, // explicit, known-zero override
+	}
+	next := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	require.NoError(t, err)
+
+	rec, _ := driveCostGuardRequest(t, h)
+	assert.Equal(t, http.StatusOK, rec.Code, "a known-zero candidate can never be more expensive than an unknown primary, body=%s", rec.Body.String())
+}
+
+// TestHandleChat_Failover_CostGuard_BothUnknown_Allows and
+// TestHandleChat_Failover_CostGuard_BothKnownZero_Allows cover the
+// ruling's "equal, so allowed" cases.
+func TestHandleChat_Failover_CostGuard_BothUnknown_Allows(t *testing.T) {
+	alphaSrv := jsonServer(http.StatusInternalServerError, `{"error":{"message":"down","type":"server_error"}}`)
+	defer alphaSrv.Close()
+	betaSrv := jsonServer(http.StatusOK, successRespBody)
+	defer betaSrv.Close()
+
+	cfg := costGuardConfig(alphaSrv, betaSrv) // no cfg.Pricing at all
+	next := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	require.NoError(t, err)
+
+	rec, _ := driveCostGuardRequest(t, h)
+	assert.Equal(t, http.StatusOK, rec.Code, "both unknown must be treated as equal, body=%s", rec.Body.String())
+}
+
+func TestHandleChat_Failover_CostGuard_BothKnownZero_Allows(t *testing.T) {
+	alphaSrv := jsonServer(http.StatusInternalServerError, `{"error":{"message":"down","type":"server_error"}}`)
+	defer alphaSrv.Close()
+	betaSrv := jsonServer(http.StatusOK, successRespBody)
+	defer betaSrv.Close()
+
+	cfg := costGuardConfig(alphaSrv, betaSrv)
+	cfg.Pricing = map[string]*ModelPricing{
+		"alpha/shared": {InputPerM: 0, OutputPerM: 0},
+		"beta/shared":  {InputPerM: 0, OutputPerM: 0},
+	}
+	next := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	require.NoError(t, err)
+
+	rec, _ := driveCostGuardRequest(t, h)
+	assert.Equal(t, http.StatusOK, rec.Code, "both known-zero must be treated as equal, body=%s", rec.Body.String())
+}
+
+// TestHandleChat_Failover_CostGuard_PerProviderPricingOverride_RealShape is
+// the requested production-shape case: the SAME bare model id
+// (a real, built-in-priced model — "gpt-5") served by two providers,
+// where alpha has NO override (resolves via the built-in table) and beta
+// has an operator-set per-provider override making it dearer on the
+// canonical "beta/gpt-5" key. Proves the guard resolves pricing through
+// the exact canonical-then-bare path unifiedCostMicros itself uses, not
+// a parallel, simplified notion of price — the whole point of ruling 1.
+func TestHandleChat_Failover_CostGuard_PerProviderPricingOverride_RealShape(t *testing.T) {
+	const realModel = "gpt-5"
+	var betaCalls int64
+	alphaSrv := jsonServer(http.StatusInternalServerError, `{"error":{"message":"down","type":"server_error"}}`)
+	defer alphaSrv.Close()
+	betaSrv := countingServer(http.StatusOK, successRespBody, &betaCalls)
+	defer betaSrv.Close()
+
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{
+		"alpha": {Type: "openai", BaseURL: alphaSrv.URL, APIKey: "k", Models: []string{realModel}},
+		"beta":  {Type: "openai", BaseURL: betaSrv.URL, APIKey: "k", Models: []string{realModel}},
+	}
+	cfg.Groups = map[string]*GroupConfig{"default": {}}
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{{Name: "alice", Group: "default", APIKey: "sk-alice", Limits: &LimitsConfig{}}}}
+	yes := true
+	cfg.Failover = FailoverConfig{Enabled: &yes}
+	// Only beta gets a per-provider override — alpha resolves gpt-5's
+	// price from builtinPricing instead, exactly the real production
+	// shape a per-provider Pricing override produces.
+	builtin := builtinPricing[realModel]
+	cfg.Pricing = map[string]*ModelPricing{
+		"beta/" + realModel: {InputPerM: builtin.InputPerM * 10, OutputPerM: builtin.OutputPerM * 10},
+	}
+
+	next := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	require.NoError(t, err)
+
+	origStderr := captureStderrStart()
+	body := map[string]any{"model": realModel, "messages": []any{map[string]any{"role": "user", "content": "hi"}}}
+	req := newUnifiedRequest(t, http.MethodPost, "/v1/chat/completions", "sk-alice", body)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	logOutput := captureStderrStop(origStderr)
+
+	assert.Equal(t, http.StatusInternalServerError, rec.Code, "beta's per-provider override makes it 10x alpha's built-in price, so it must be rejected, body=%s", rec.Body.String())
+	assert.Equal(t, int64(0), atomic.LoadInt64(&betaCalls))
+	assert.Contains(t, logOutput, "alpha")
+	assert.Contains(t, logOutput, "beta")
+	assert.Contains(t, logOutput, realModel)
+}
+
+// --- adversarial-review regressions (F1-F4, F6, F7) ---
+
+// TestHandleChat_Failover_F1_StreamOptionsNotLeakedAcrossCandidates is the
+// direct regression test for adversarial-review finding F1: an
+// openai-type adapter mutates req in place (chatCompletion forces
+// stream_options.include_usage=true onto it BEFORE it ever calls the
+// upstream, provider_openai.go), so reusing one shared req map across
+// candidates let a later candidate read back an earlier candidate's own
+// forced injection and misreport clientAskedUsage=true to a client that
+// never asked for streamed usage — leaking the gateway's own
+// deliberately-suppressed usage-only SSE chunk. alpha fails before ever
+// reaching the network (its own mutation to its OWN req copy still
+// happens first, exactly like the real bug), beta serves a real SSE
+// stream containing a usage-only chunk the client never asked for.
+func TestHandleChat_Failover_F1_StreamOptionsNotLeakedAcrossCandidates(t *testing.T) {
+	const contentChunk = "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"delta\":{\"content\":\"Hi\"}}]}\n\n"
+	const usageOnlyChunk = "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"choices\":[],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":2}}\n\n"
+	const doneMarker = "data: [DONE]\n\n"
+
+	alphaSrv := jsonServer(http.StatusInternalServerError, `{"error":{"message":"down","type":"server_error"}}`)
+	defer alphaSrv.Close()
+	betaSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		fl, ok := w.(http.Flusher)
+		require.True(t, ok)
+		for _, chunk := range []string{contentChunk, usageOnlyChunk, doneMarker} {
+			_, _ = w.Write([]byte(chunk))
+			fl.Flush()
+		}
+	}))
+	defer betaSrv.Close()
+
+	cfg := twoProviderFailoverConfig(alphaSrv, betaSrv)
+	next := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	require.NoError(t, err)
+
+	// The client explicitly does NOT set stream_options at all — it
+	// never asked for usage in the stream.
+	body := map[string]any{"model": "shared", "stream": true, "messages": []any{map[string]any{"role": "user", "content": "hi"}}}
+	req := newUnifiedRequest(t, http.MethodPost, "/v1/chat/completions", "sk-alice", body)
+	rw := newRecordingWriter()
+	h.ServeHTTP(rw, req)
+
+	require.Equal(t, http.StatusOK, rw.status)
+	assert.Contains(t, rw.buf.String(), `"content":"Hi"`, "the real content chunk must still be forwarded")
+	assert.NotContains(t, rw.buf.String(), `"prompt_tokens":5`, "a client that never asked for stream usage must never receive it, even though ALPHA's own (failed, discarded) attempt forced include_usage=true on ITS OWN copy of the request")
+}
+
+// TestHandleChat_Failover_F2_StaleSSEHeadersDoNotSurviveToPlainResponse is
+// the direct regression test for adversarial-review finding F2:
+// newSSEWriter (sse.go) stages Content-Type/Cache-Control/
+// X-Accel-Buffering on sw.Header() the moment a streaming attempt starts,
+// before any byte is written. alpha enters that streaming path (a real
+// 200 + text/event-stream response) but its connection is severed before
+// any complete SSE event is dispatched — an error, satisfying THE HARD
+// CONSTRAINT (nothing was actually WRITTEN to the client) — so failover
+// proceeds to beta, which answers a plain, non-streaming JSON body.
+func TestHandleChat_Failover_F2_StaleSSEHeadersDoNotSurviveToPlainResponse(t *testing.T) {
+	alphaSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		hj, ok := w.(http.Hijacker)
+		require.True(t, ok)
+		conn, _, hjErr := hj.Hijack()
+		if hjErr == nil {
+			// Closing a hijacked chunked-encoding connection with no
+			// terminating chunk produces a genuine "unexpected EOF" on
+			// the client's read side (verified empirically), not a
+			// clean end-of-stream — readSSE returns that as a real
+			// error without ever dispatching an event, so
+			// sw.writeData/sw.WriteHeader is never reached even though
+			// newSSEWriter already staged its three headers.
+			_ = conn.Close()
+		}
+	}))
+	defer alphaSrv.Close()
+	betaSrv := jsonServer(http.StatusOK, successRespBody)
+	defer betaSrv.Close()
+
+	cfg := twoProviderFailoverConfig(alphaSrv, betaSrv)
+	next := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	require.NoError(t, err)
+
+	body := map[string]any{"model": "shared", "stream": true, "messages": []any{map[string]any{"role": "user", "content": "hi"}}}
+	req := newUnifiedRequest(t, http.MethodPost, "/v1/chat/completions", "sk-alice", body)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code, "body=%s", rec.Body.String())
+	assert.Equal(t, successRespBody, rec.Body.String())
+	assert.Equal(t, "application/json", rec.Header().Get("Content-Type"), "beta's own Content-Type must win, not alpha's stale text/event-stream")
+	assert.Empty(t, rec.Header().Get("Cache-Control"), "alpha's staged SSE header must never survive into beta's plain JSON response")
+	assert.Empty(t, rec.Header().Get("X-Accel-Buffering"), "alpha's staged SSE header must never survive into beta's plain JSON response")
+}
+
+// TestHandleChat_Failover_F3_401IsAFailure_OpensRequestHealthBreaker is the
+// direct regression test for adversarial-review finding F3: a provider
+// answering 401 to every request (a dead API key — exactly the "masking
+// a broken provider key" risk this feature exists to reduce) must
+// eventually be skipped, not retried forever. Would FAIL under the
+// reverted isTransient-based classification, since isTransient returns
+// false for any non-429 4xx.
+func TestHandleChat_Failover_F3_401IsAFailure_OpensRequestHealthBreaker(t *testing.T) {
+	var alphaCalls, betaCalls int64
+	alphaSrv := countingServer(http.StatusUnauthorized, `{"error":{"message":"invalid api key","type":"authentication_error"}}`, &alphaCalls)
+	defer alphaSrv.Close()
+	betaSrv := countingServer(http.StatusOK, successRespBody, &betaCalls)
+	defer betaSrv.Close()
+
+	cfg := twoProviderFailoverConfig(alphaSrv, betaSrv)
+	next := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	require.NoError(t, err)
+
+	body := map[string]any{"model": "shared", "messages": []any{}}
+	for i := 0; i < requestBreakerFailureThreshold; i++ {
+		req := newUnifiedRequest(t, http.MethodPost, "/v1/chat/completions", "sk-alice", body)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		require.Equal(t, http.StatusOK, rec.Code, "every one of these must still fail over to beta and succeed")
+	}
+	require.Equal(t, int64(requestBreakerFailureThreshold), atomic.LoadInt64(&alphaCalls))
+
+	req := newUnifiedRequest(t, http.MethodPost, "/v1/chat/completions", "sk-alice", body)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, int64(requestBreakerFailureThreshold), atomic.LoadInt64(&alphaCalls), "alpha must be skipped after 3 consecutive 401s, not called a 4th time")
+	assert.Equal(t, int64(requestBreakerFailureThreshold+1), atomic.LoadInt64(&betaCalls))
+}
+
+// TestHandleChat_Failover_F4_SharedDeadlineExhausted_NeverMisattributedToNextCandidate
+// is the direct regression test for adversarial-review finding F4: alpha
+// burns the ENTIRE shared request context sleeping past its deadline;
+// beta must never be dialed at all (an attempt after the deadline is
+// already spent would fail near-instantly for a reason that has nothing
+// to do with beta's own health), never be recorded as having failed, and
+// the client-facing error must name alpha, not beta.
+func TestHandleChat_Failover_F4_SharedDeadlineExhausted_NeverMisattributedToNextCandidate(t *testing.T) {
+	alphaSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(300 * time.Millisecond) // well past the request's own 50ms deadline below
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(successRespBody))
+	}))
+	defer alphaSrv.Close()
+	var betaCalls int64
+	betaSrv := countingServer(http.StatusOK, successRespBody, &betaCalls)
+	defer betaSrv.Close()
+
+	cfg := twoProviderFailoverConfig(alphaSrv, betaSrv)
+	next := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	require.NoError(t, err)
+	gw, ok := h.(*Gateway)
+	require.True(t, ok)
+	gw.limiter.spawn = func(f func()) { f() }
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"shared","messages":[{"role":"user","content":"hi"}]}`)).WithContext(ctx)
+	req.Header.Set("Authorization", "Bearer sk-alice")
+	req.Header.Set("Content-Type", "application/json")
+
+	origStderr := captureStderrStart()
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	logOutput := captureStderrStop(origStderr)
+
+	assert.Equal(t, int64(0), atomic.LoadInt64(&betaCalls), "beta must never be dialed once the shared deadline is already spent")
+	assert.True(t, gw.failoverHealth.healthy("beta"), "beta must never be marked unhealthy for a timeout that was alpha's own fault")
+
+	now := time.Now()
+	betaAttempts, _ := gw.limiter.getCounter(kindProvider, "beta", metricProvAttempt, windowDay, now)
+	assert.Equal(t, int64(0), betaAttempts, "beta's own dashboard attempt counter must not move either")
+
+	assert.Contains(t, logOutput, "alpha", "the error must name the provider that actually failed")
+}
+
+// TestHandleChat_Failover_F6_RetryAttemptsDoNotOpenBreakerOnOneRequest is
+// the direct regression test for adversarial-review finding F6: with
+// retry.enabled and attempts:3, ONE client request against a
+// permanently-failing provider must count as ONE outcome for the
+// request-health gate, not one per raw retry attempt — otherwise a
+// single request alone could reach requestBreakerFailureThreshold (3)
+// purely from ITS OWN internal retries.
+func TestHandleChat_Failover_F6_RetryAttemptsDoNotOpenBreakerOnOneRequest(t *testing.T) {
+	var alphaCalls int64
+	alphaSrv := countingServer(http.StatusInternalServerError, `{"error":{"message":"down","type":"server_error"}}`, &alphaCalls)
+	defer alphaSrv.Close()
+	betaSrv := jsonServer(http.StatusOK, successRespBody)
+	defer betaSrv.Close()
+
+	cfg := twoProviderFailoverConfig(alphaSrv, betaSrv)
+	cfg.Retry = RetryConfig{Enabled: true, Attempts: 3, Backoff: "1ms"}
+	next := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	require.NoError(t, err)
+	gw, ok := h.(*Gateway)
+	require.True(t, ok)
+
+	body := map[string]any{"model": "shared", "messages": []any{}}
+	req := newUnifiedRequest(t, http.MethodPost, "/v1/chat/completions", "sk-alice", body)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code, "must still fail over to beta after alpha's own retries are exhausted")
+
+	// retry.attempts=3 means 4 raw HTTP attempts against alpha for this
+	// ONE client request (retryPolicy's own doc comment, retry.go).
+	require.Equal(t, int64(4), atomic.LoadInt64(&alphaCalls))
+	// The request-health gate must still read this as exactly ONE
+	// failure, not four — well below requestBreakerFailureThreshold (3).
+	assert.True(t, gw.failoverHealth.healthy("alpha"), "one client request's internal retries must count as one outcome for the request-health gate, not one per raw attempt")
+}
+
+// TestHandleChat_Failover_F7_CachedFailoverResponse_NeverHitsDeadPrimary is
+// the direct regression test for adversarial-review finding F7: even
+// while alpha stays permanently broken, a SECOND identical request must
+// be served from beta's cache entry WITHOUT alpha's dead backend being
+// hit again on that second request — proving cache lookups run for
+// every candidate BEFORE any of them is attempted, not interleaved with
+// each candidate's own turn.
+func TestHandleChat_Failover_F7_CachedFailoverResponse_NeverHitsDeadPrimary(t *testing.T) {
+	var alphaCalls, betaCalls int64
+	alphaSrv := countingServer(http.StatusInternalServerError, `{"error":{"message":"down","type":"server_error"}}`, &alphaCalls)
+	defer alphaSrv.Close()
+	betaSrv := countingServer(http.StatusOK, successRespBody, &betaCalls)
+	defer betaSrv.Close()
+
+	redisLn := newBehavioralRedisServer(t)
+	cfg := twoProviderFailoverConfig(alphaSrv, betaSrv)
+	cfg.Redis = &RedisConfig{Address: redisLn.Addr().String()}
+	cfg.Cache = CacheConfig{Enabled: true, TTL: "1m", MaxBodyBytes: 1 << 20}
+
+	next := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	require.NoError(t, err)
+
+	reqBody := map[string]any{"model": "shared", "messages": []any{map[string]any{"role": "user", "content": "hi"}}}
+	req1 := newUnifiedRequest(t, http.MethodPost, "/v1/chat/completions", "sk-alice", reqBody)
+	rec1 := httptest.NewRecorder()
+	h.ServeHTTP(rec1, req1)
+	require.Equal(t, http.StatusOK, rec1.Code)
+	require.Equal(t, int64(1), atomic.LoadInt64(&alphaCalls))
+	require.Equal(t, int64(1), atomic.LoadInt64(&betaCalls))
+
+	req2 := newUnifiedRequest(t, http.MethodPost, "/v1/chat/completions", "sk-alice", reqBody)
+	rec2 := httptest.NewRecorder()
+	h.ServeHTTP(rec2, req2)
+
+	assert.Equal(t, http.StatusOK, rec2.Code)
+	assert.Equal(t, "hit", rec2.Header().Get("X-Llmgw-Cache"))
+	assert.Equal(t, int64(1), atomic.LoadInt64(&alphaCalls), "alpha's dead backend must NOT be hit again just to discover beta's cache entry")
+	assert.Equal(t, int64(1), atomic.LoadInt64(&betaCalls))
+}
+
 // TestHandleChat_Failover_SingleProvider_UpstreamError_BehavesExactlyAsBefore
 // pins the "single-provider deployment behaves exactly as before"
 // requirement explicitly for this branch, with failover left at its
-// (enabled) default: with no second candidate to try, an upstream error
-// must be returned to the client unchanged, identical to v0.1 behavior.
+// (now disabled) default: with no second candidate to try, an upstream
+// error must be returned to the client unchanged, identical to v0.1
+// behavior, regardless of the enabled switch either way.
 func TestHandleChat_Failover_SingleProvider_UpstreamError_BehavesExactlyAsBefore(t *testing.T) {
 	srv := jsonServer(http.StatusTooManyRequests, `{"error":{"message":"rate limited upstream","type":"rate_limit_error"}}`)
 	defer srv.Close()
@@ -896,6 +1571,43 @@ func TestHandleChat_Failover_SingleProvider_UpstreamError_BehavesExactlyAsBefore
 	}
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
 	assert.Equal(t, "upstream_error", out.Error.Type)
+}
+
+// TestHandleChat_Failover_DefaultConfig_ByteIdenticalToPreFailover is the
+// regression test for the coordinator's default-off ruling: a Config that
+// never mentions "failover" at all — the shape of every config written
+// before this feature existed, and the shape most operators keep using
+// after upgrading without opting in — must behave byte-identically to
+// having no failover code at all. Would FAIL if validateFailoverConfig's
+// default reverted to enabled.
+func TestHandleChat_Failover_DefaultConfig_ByteIdenticalToPreFailover(t *testing.T) {
+	var betaCalls int64
+	alphaSrv := jsonServer(http.StatusInternalServerError, `{"error":{"message":"down","type":"server_error"}}`)
+	defer alphaSrv.Close()
+	betaSrv := countingServer(http.StatusOK, successRespBody, &betaCalls)
+	defer betaSrv.Close()
+
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{
+		"alpha": {Type: "openai", BaseURL: alphaSrv.URL, APIKey: "k", Models: []string{"shared"}},
+		"beta":  {Type: "openai", BaseURL: betaSrv.URL, APIKey: "k", Models: []string{"shared"}},
+	}
+	cfg.Groups = map[string]*GroupConfig{"default": {}}
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{{Name: "alice", Group: "default", APIKey: "sk-alice", Limits: &LimitsConfig{}}}}
+	// cfg.Failover is deliberately left untouched — the zero value, what
+	// every config predating this feature has.
+
+	next := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	require.NoError(t, err)
+
+	body := map[string]any{"model": "shared", "messages": []any{}}
+	req := newUnifiedRequest(t, http.MethodPost, "/v1/chat/completions", "sk-alice", body)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusInternalServerError, rec.Code, "an unconfigured Failover block must leave alpha's own 500 unchanged")
+	assert.Equal(t, int64(0), atomic.LoadInt64(&betaCalls), "beta must never be called when failover was never opted into")
 }
 
 // TestHandleChat_Failover_ExplicitlyDisabled_5xxNeverFallsThrough proves

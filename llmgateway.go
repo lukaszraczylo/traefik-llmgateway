@@ -545,6 +545,14 @@ type Gateway struct {
 	// rather than a nil-pointer panic.
 	failoverHealth *requestHealthTracker
 	name           string
+	// failoverLogGate rate-limits runMeteredCall's generic "failing over"
+	// log line (routes_unified.go) to once per storeErrorLogEvery
+	// (adversarial-review fix, F10) — reuses auth.go's own logGate type,
+	// the identical technique shouldLogAuthFailure/logStoreError already
+	// apply elsewhere in this package. Zero-value-usable: the first call
+	// on a fresh Gateway always logs. Deliberately does NOT gate the 404
+	// loud-log line (operator ruling: that one must always log).
+	failoverLogGate logGate
 	// failover is Config.Failover, validated and resolved once by
 	// newGateway (validateFailoverConfig, failover.go).
 	failover failoverConfig
@@ -657,8 +665,9 @@ func newGateway(ctx context.Context, next http.Handler, config *Config, name str
 	g := &Gateway{next: next, name: name, cfg: config, auth: auth}
 
 	// feat/failover: validated once, here — see FailoverConfig's own doc
-	// comment (failover.go) for the default (enabled) and what "single-
-	// provider deployment behaves exactly as before" means in practice.
+	// comment (failover.go) for the default (disabled, coordinator
+	// ruling) and what "single-provider deployment behaves exactly as
+	// before" means in practice.
 	failoverCfg, err := validateFailoverConfig(config.Failover)
 	if err != nil {
 		return nil, err

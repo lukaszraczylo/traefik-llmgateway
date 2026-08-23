@@ -371,7 +371,12 @@ func run() error {
 	}))
 	defer failoverBUpstream.Close()
 
-	attemptAccountingOverride := `{"breaker":{"failureThreshold":2,"openDuration":"3s","maxOpenDuration":"6s"},` +
+	// failover.enabled must be set explicitly here: FailoverConfig.Enabled
+	// defaults to false (coordinator ruling — a version upgrade with no
+	// config change must preserve prior behavior), so without this the
+	// exerciseFailover probe below would find failover-a's 500 returned
+	// to the client unchanged, never reaching failover-b at all.
+	attemptAccountingOverride := `{"failover":{"enabled":true},"breaker":{"failureThreshold":2,"openDuration":"3s","maxOpenDuration":"6s"},` +
 		`"providers":{"openai":{"type":"openai","baseUrl":"` + upstream.URL + `","apiKey":"sk-up","models":["` + testDataWantModel + `","` + builtinLookupModelID + `"]},` +
 		`"brk":{"type":"openai","baseUrl":"` + brkUpstream.URL + `","apiKey":"sk-up","discovery":true,"discoveryInterval":"1ms"},"` +
 		slowProviderName + `":{"type":"openai","baseUrl":"` + slowUpstream.URL + `","apiKey":"sk-up","models":["` + slowProviderModel + `"]},` +

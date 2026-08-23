@@ -23,6 +23,15 @@ import (
 // metered-call path both /v1/chat/completions and /v1/messages already go
 // through.
 //
+// Off by default (FailoverConfig.Enabled defaults to false — coordinator
+// ruling, overriding this feature's original brief: new behavior that can
+// change which provider serves a request goes behind a flag defaulting
+// off). An operator who opts in also gets a non-optional cost guard
+// (candidateCostAllowed, below): failover never routes to a candidate
+// priced higher than the provider it is failing over from, on either
+// input or output cost per token — there is no config knob to disable
+// just that part.
+//
 // SCOPE: routes_media.go's three media routes (images/generations,
 // audio/speech, audio/transcriptions) are deliberately NOT wired into
 // failover in this change, even though two of the brief's own named
@@ -38,16 +47,17 @@ import (
 // scoped follow-up; see this branch's own report for the explicit
 // call-out.
 
-// FailoverConfig configures feat/failover. Enabled is a *bool, mirroring
-// ProviderConfig.Passthrough's own nil-means-default-true convention
-// (providers.go): nil or true (the default) turns an overlapping
-// multi-provider deployment's already-existing redundancy into a hot
-// standby with NO config change — the entire point of this feature (see
-// this file's own package doc and the brief's "Why" section). Set false
-// to opt out entirely. A single-provider deployment, or one where no two
-// providers ever serve the identical bare model id, behaves exactly as
-// before regardless of this setting: there is never more than one
-// candidate to try (orderedFailoverCandidates' own doc comment).
+// FailoverConfig configures feat/failover. Enabled is a *bool; nil or
+// false (the default) means OFF — coordinator ruling, overriding this
+// feature's original brief: a version upgrade with no config change must
+// preserve prior behavior, and new behavior that can change which
+// provider serves a request (shifting cost attribution, and able to mask
+// a broken provider key behind an apparent success) goes behind a flag
+// that defaults off, not on. Set Enabled: true to opt in. A
+// single-provider deployment, or one where no two providers ever serve
+// the identical bare model id, behaves exactly as before regardless of
+// this setting either way: there is never more than one candidate to try
+// (orderedFailoverCandidates' own doc comment).
 type FailoverConfig struct {
 	Enabled *bool `json:"enabled,omitempty"`
 	// MaxAttempts caps how many DIFFERENT PROVIDERS runMeteredCall tries
@@ -78,9 +88,13 @@ type failoverConfig struct {
 }
 
 // validateFailoverConfig validates fc and returns the resolved
-// failoverConfig newGateway attaches to the Gateway.
+// failoverConfig newGateway attaches to the Gateway. enabled defaults to
+// false (coordinator ruling, FailoverConfig's own doc comment) — every
+// config that predates this field, and every config that never sets
+// failover.enabled at all, keeps behaving exactly as before this feature
+// existed.
 func validateFailoverConfig(fc FailoverConfig) (failoverConfig, error) {
-	enabled := true
+	enabled := false
 	if fc.Enabled != nil {
 		enabled = *fc.Enabled
 	}
@@ -154,6 +168,23 @@ func (m *modelRegistry) resolveWithCandidates(id string, grp *group) (resolveCan
 	return primary, m.failoverCandidates(bareID, primary.providerName, grp), nil
 }
 
+// resolvePrimaryOnly resolves id exactly like resolveWithCandidates'
+// primary return (identical winner, identical error) WITHOUT ever
+// scanning for or building failover candidates — the short-circuit
+// runMeteredCall (routes_unified.go) takes when g.failover.enabled is
+// false, so a deployment that never opted into failover pays no extra
+// cost for a pool it will never use (measured: 74ns/1 alloc versus
+// 521ns/13 allocs at 8 providers x 200 models for the full
+// resolveWithCandidates scan — irrelevant next to a network round trip,
+// but free to avoid).
+func (m *modelRegistry) resolvePrimaryOnly(id string, grp *group) (resolveCandidate, error) {
+	adapter, upstreamModel, canonical, err := m.resolve(id, grp)
+	if err != nil {
+		return resolveCandidate{}, err
+	}
+	return resolveCandidate{adapter: adapter, providerName: adapter.name(), upstreamModel: upstreamModel, canonical: canonical}, nil
+}
+
 // failoverCandidates returns every configured provider other than
 // primaryProvider whose known model set contains bareID and that grp is
 // authorized to use, in modelRegistry.providerNames (sorted) order — the
@@ -220,7 +251,14 @@ func (m *modelRegistry) failoverCandidates(bareID, primaryProvider string, grp *
 //     half-open one (a stable partition, not a full sort — relative
 //     order within each bucket is preserved), never dropped.
 //
-// Finally the list is capped at g.failover.maxAttempts entries.
+// This does NOT apply the cost guard or the maxAttempts cap — see
+// runMeteredCall's own call sequence (routes_unified.go): candidates[0]
+// coming out of THIS function is what filterCandidatesByCost (below)
+// treats as "the primary" for pricing-guard purposes, so cost filtering
+// must run against the health/discovery-ordered result, not the raw
+// resolveWithCandidates order; and the maxAttempts cap runs LAST, after
+// cost filtering, so a cap never re-admits an expensive candidate purely
+// because a cheaper one ahead of it was removed on cost.
 func (g *Gateway) orderedFailoverCandidates(primary resolveCandidate, extra []resolveCandidate) []resolveCandidate {
 	if !g.failover.enabled || len(extra) == 0 {
 		return []resolveCandidate{primary}
@@ -249,12 +287,112 @@ func (g *Gateway) orderedFailoverCandidates(primary resolveCandidate, extra []re
 			deprioritized = append(deprioritized, c)
 		}
 	}
-	ordered = append(ordered, deprioritized...)
+	return append(ordered, deprioritized...)
+}
 
-	if max := g.failover.maxAttempts; max > 0 && len(ordered) > max {
-		ordered = ordered[:max]
+// resolveUnifiedPricing resolves (canonical, bare)'s price using the
+// IDENTICAL resolution unifiedCostMicros itself uses (routes_unified.go):
+// canonical id first, falling back to the bare upstream model id only
+// when canonical has no configured price at all. ok is lookupPricing's
+// own known/unknown distinction (pricing.go) — false means neither id
+// resolved to a price, exactly the case where unifiedCostMicros would
+// warn and bill 0, which candidateCostAllowed (below) must NEVER treat
+// as an actual known-zero price.
+func resolveUnifiedPricing(canonical, bare string, overrides map[string]*ModelPricing) (ModelPricing, bool) {
+	if p, ok := lookupPricing(canonical, overrides); ok {
+		return p, true
 	}
-	return ordered
+	return lookupPricing(bare, overrides)
+}
+
+// candidateCostAllowed reports whether candidate is allowed to serve as a
+// failover destination for primary, per the operator's binding ruling:
+// failover must never route to a candidate more expensive than the
+// provider it is failing over FROM, checked on BOTH the input and the
+// output per-token price — a candidate cheaper on input but dearer on
+// output can still cost more on a completion-heavy request, so a single
+// blended number is not sufficient. This is NOT configurable (ruling:
+// "this behaviour is ON and not optional").
+//
+// Four cases, all by ruling, not inferred:
+//
+//   - both known: allowed only when candidate's input AND output price
+//     are each <= primary's. Equal is allowed either way.
+//   - primary known, candidate UNKNOWN: never allowed — an unknown price
+//     cannot be proven not-more-expensive.
+//   - primary UNKNOWN, candidate known and non-zero: never allowed —
+//     moving from unbilled to billed is itself a spend increase.
+//   - primary UNKNOWN, candidate known and EXACTLY zero (both
+//     dimensions), or both unknown: allowed — they are equal (a known
+//     zero can never be more expensive than an unknown amount, and two
+//     unknowns are trivially equal to each other).
+//
+// Unknown pricing is never treated as zero here, unlike costMicros' own
+// billing behavior (pricing.go) — the gateway RECORDING zero for an
+// unpriced model is an accounting shortcut, not proof the provider
+// invoices zero, and this guard exists specifically to protect real
+// money, not the gateway's own displayed number.
+func candidateCostAllowed(primary ModelPricing, primaryKnown bool, candidate ModelPricing, candidateKnown bool) bool {
+	switch {
+	case primaryKnown && candidateKnown:
+		return candidate.InputPerM <= primary.InputPerM && candidate.OutputPerM <= primary.OutputPerM
+	case primaryKnown && !candidateKnown:
+		return false
+	case !primaryKnown && candidateKnown:
+		return candidate.InputPerM == 0 && candidate.OutputPerM == 0
+	default: // both unknown
+		return true
+	}
+}
+
+// filterCandidatesByCost drops every candidate whose resolved price
+// candidateCostAllowed rejects against candidates[0] — the FIRST
+// candidate actually attempted, never the cheapest in the list, per the
+// operator's own definition of "primary" for this rule. Pricing comes
+// from resolveUnifiedPricing against g.cfg.Pricing, the SAME overrides
+// map unifiedCostMicros itself resolves against, so this compares
+// against what would actually be billed. requestedModel names the
+// client's own request in the log line a skip always produces — an
+// operator-visible g.warnf, unthrottled, naming both providers, the
+// model, and both resolved prices: a silently shortened candidate list
+// would look identical to having no redundancy at all, which the
+// operator must be able to tell apart from a cost-guard skip.
+func (g *Gateway) filterCandidatesByCost(candidates []resolveCandidate, requestedModel string) []resolveCandidate {
+	if len(candidates) < 2 {
+		return candidates
+	}
+	primary := candidates[0]
+	primaryPrice, primaryKnown := resolveUnifiedPricing(primary.canonical, primary.upstreamModel, g.cfg.Pricing)
+
+	out := make([]resolveCandidate, 1, len(candidates))
+	out[0] = primary
+	for _, cand := range candidates[1:] {
+		candPrice, candKnown := resolveUnifiedPricing(cand.canonical, cand.upstreamModel, g.cfg.Pricing)
+		if candidateCostAllowed(primaryPrice, primaryKnown, candPrice, candKnown) {
+			out = append(out, cand)
+			continue
+		}
+		g.warnf("failover: skipping candidate provider %q for model %q: would cost more than primary provider %q (primary input=%.4f/M output=%.4f/M usd known=%v; candidate input=%.4f/M output=%.4f/M usd known=%v)",
+			cand.providerName, requestedModel, primary.providerName,
+			primaryPrice.InputPerM, primaryPrice.OutputPerM, primaryKnown,
+			candPrice.InputPerM, candPrice.OutputPerM, candKnown)
+	}
+	return out
+}
+
+// capFailoverCandidates truncates candidates to at most max entries,
+// applied as the LAST step of runMeteredCall's own candidate-building
+// sequence (routes_unified.go) — after health/discovery ordering and
+// after cost filtering, so the cap can never re-admit a candidate cost
+// filtering already removed, and never discards a cheaper candidate that
+// cost filtering kept purely because a removed, more expensive one used
+// to sit ahead of it in the raw list. max <= 0 is a no-op (defensive;
+// validateFailoverConfig never produces one).
+func capFailoverCandidates(candidates []resolveCandidate, max int) []resolveCandidate {
+	if max > 0 && len(candidates) > max {
+		return candidates[:max]
+	}
+	return candidates
 }
 
 // failoverEligible reports whether callErr — runMeteredCall's own
@@ -360,10 +498,11 @@ type requestHealthState struct {
 // request-path health signal — deliberately separate from registry.go's
 // discovery circuit breaker (modelRegistry.discoveryHealthy's own doc
 // comment forbids widening that one to cover request-path traffic). Fed
-// by the SAME failure classification limiter.recordProviderAttempt uses
-// (isTransient || isDeadlineExceeded — limits.go/retry.go), via record's
-// own callers in routes_unified.go, but keeps its own independent state
-// per provider name.
+// by failoverEligible's own classification (record's own doc comment
+// explains why, not limiter.recordProviderAttempt's narrower isTransient/
+// isDeadlineExceeded one), once per candidate per logical request, via
+// record's own callers in routes_unified.go, but keeps its own
+// independent state per provider name.
 //
 // Every method is nil-receiver-safe (both report "healthy"/no-op on a
 // nil *requestHealthTracker), matching this package's own nil-means-
@@ -397,25 +536,50 @@ func (t *requestHealthTracker) stateFor(provider string) *requestHealthState {
 	return st
 }
 
-// record accounts one upstream request-path attempt's outcome for
-// provider: success=false must be EXACTLY isTransient(resp, err) ||
-// isDeadlineExceeded(err) — the identical classification
-// limiter.recordProviderAttempt applies (limits.go/retry.go) — never a
-// wider one; routes_unified.go's attemptRecorder closure computes it
-// once and feeds both.
+// record accounts ONE LOGICAL REQUEST's outcome for provider — called
+// exactly once per candidate per client request, after call() has
+// already exhausted whatever same-provider retries retryPolicy.do
+// performed internally (routes_unified.go's runMeteredCall), never once
+// per raw upstream attempt. success=false must be
+// !failoverEligible(callErr) (routes_unified.go/failover.go's own
+// classification of the FINAL adapter-level error) — adversarial-review
+// ruling (F3/F6): an EARLIER version fed this from isTransient(resp,
+// err) || isDeadlineExceeded(err), limits.go/retry.go's own
+// retry-shaped classification, once per RAW attempt inside
+// retryPolicy.do. That was wrong on two counts. isTransient treats a
+// non-429 4xx as "the provider answered correctly to a request it did
+// not like" — correct for deciding whether retrying the SAME provider
+// is worth it, wrong for deciding whether the POOL should route around
+// it: a provider whose API key is dead answers 401 to every request and
+// must eventually be skipped, not retried forever, which is exactly the
+// "masking a broken provider key" risk this feature exists to reduce.
+// And recording per raw attempt let ONE client request with
+// retry.enabled (attempts: 3) report FOUR failures against a threshold
+// documented as three REQUESTS. failoverEligible already classifies
+// "everything except HTTP 400" as a failure, matching what this gate
+// needs with no separate function required.
 //
 // requestBreakerFailureThreshold consecutive failures opens the breaker
 // for requestBreakerOpenDuration. While open, healthy (below) reports
 // unhealthy until that window passes; once it has, the NEXT record call
 // for this provider — success or failure — is what healthy already
-// exposed as a post-cooldown probe attempt (probed, below): success
-// closes the breaker outright, failure re-opens it with a doubled
-// backoff (capped at requestBreakerMaxOpenDuration). This is the same
-// probe-then-escalate-or-close shape providerState's discovery breaker
-// uses (registry.go's recordHealthLocked/openBreakerLocked),
-// reimplemented independently rather than shared — the two track
-// different outcome streams, and discoveryHealthy's own doc comment
-// forbids widening it to cover this one.
+// exposed as a post-cooldown probe attempt: success closes the breaker
+// outright, failure re-opens it with a doubled backoff (capped at
+// requestBreakerMaxOpenDuration). This is the same probe-then-escalate-
+// or-close shape providerState's discovery breaker uses (registry.go's
+// recordHealthLocked/openBreakerLocked), reimplemented independently
+// rather than shared — the two track different outcome streams, and
+// discoveryHealthy's own doc comment forbids widening it to cover this
+// one.
+//
+// A failure arriving while ALREADY open and still within its cooldown
+// window is a deliberate no-op (adversarial-review fix, F5): an earlier
+// version fell through to the closed-state consecutiveFailures++ branch
+// for this case too, which reset backoff to the flat base duration and
+// slid openUntil forward on every such failure instead of leaving the
+// existing window alone — doubling never actually happened outside the
+// narrow post-cooldown probe path the doc comment claimed was the only
+// place it did.
 //
 // Deliberately no single-flight guard on the probe window (unlike
 // registry.go's tryBeginRefresh inFlight flag for its own, much lower-
@@ -434,8 +598,6 @@ func (t *requestHealthTracker) record(provider string, success bool) {
 	defer st.mu.Unlock()
 	now := t.nowFn()
 
-	probed := st.open && !now.Before(st.openUntil)
-
 	if success {
 		st.open = false
 		st.consecutiveFailures = 0
@@ -444,7 +606,14 @@ func (t *requestHealthTracker) record(provider string, success bool) {
 		return
 	}
 
-	if probed {
+	// Already open, cooldown not yet elapsed: this failure changes
+	// nothing (F5 fix, above).
+	if st.open && now.Before(st.openUntil) {
+		return
+	}
+
+	if st.open {
+		// Cooldown elapsed: this failure IS the probe outcome. Escalate.
 		if st.backoff <= 0 {
 			st.backoff = requestBreakerOpenDuration
 		} else {
