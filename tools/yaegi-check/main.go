@@ -346,7 +346,37 @@ func run() error {
 	}))
 	defer brkUpstream.Close()
 
-	attemptAccountingOverride := `{"breaker":{"failureThreshold":2,"openDuration":"3s","maxOpenDuration":"6s"},` +
+	// failoverAUpstream/failoverBUpstream back exerciseFailover (feat/
+	// failover, below): two providers configured with the IDENTICAL bare
+	// model id (failoverModelID) — the exact shape registry.go's bareWinner
+	// collision handles, and the shape production logs show for whisper-1/
+	// tts-1/tts-1-hd/the embeddings models across openai/openai-audio/
+	// copilot. A always answers 500; B always answers 200. This proves the
+	// failover candidate loop (runMeteredCall, routes_unified.go) falls
+	// through and serves correctly under the REAL interpreter, not merely
+	// compiled — this package's own doc comment is exactly why that
+	// distinction matters on this codebase.
+	failoverAUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":{"message":"failover-a is down","type":"server_error"}}`))
+	}))
+	defer failoverAUpstream.Close()
+	failoverBHits := new(int64)
+	failoverBUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt64(failoverBHits, 1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"id":"c-failover","object":"chat.completion","model":"` + failoverModelID + `","choices":[{"index":0,"message":{"role":"assistant","content":"served by failover-b"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`))
+	}))
+	defer failoverBUpstream.Close()
+
+	// failover.enabled must be set explicitly here: FailoverConfig.Enabled
+	// defaults to false (coordinator ruling — a version upgrade with no
+	// config change must preserve prior behavior), so without this the
+	// exerciseFailover probe below would find failover-a's 500 returned
+	// to the client unchanged, never reaching failover-b at all.
+	attemptAccountingOverride := `{"failover":{"enabled":true},"breaker":{"failureThreshold":2,"openDuration":"3s","maxOpenDuration":"6s"},` +
 		`"providers":{"openai":{"type":"openai","baseUrl":"` + upstream.URL + `","apiKey":"sk-up","models":["` + testDataWantModel + `","` + builtinLookupModelID + `"]},` +
 		`"brk":{"type":"openai","baseUrl":"` + brkUpstream.URL + `","apiKey":"sk-up","discovery":true,"discoveryInterval":"1ms"},"` +
 		slowProviderName + `":{"type":"openai","baseUrl":"` + slowUpstream.URL + `","apiKey":"sk-up","models":["` + slowProviderModel + `"]},` +
@@ -354,7 +384,9 @@ func run() error {
 		// (exerciseMessagesRoute, below): a real anthropic-type provider,
 		// interpreted end to end through
 		// callAnthropicMessagesPassthrough.
-		`"anthropic":{"type":"anthropic","baseUrl":"` + anthropicProbeUpstream.URL + `","apiKey":"sk-anth","models":["claude-test"]}},` + // #nosec G101 -- test fixture literal, not a real credential
+		`"anthropic":{"type":"anthropic","baseUrl":"` + anthropicProbeUpstream.URL + `","apiKey":"sk-anth","models":["claude-test"]},` + // #nosec G101 -- test fixture literal, not a real credential
+		`"failover-a":{"type":"openai","baseUrl":"` + failoverAUpstream.URL + `","apiKey":"sk-up","models":["` + failoverModelID + `"]},` +
+		`"failover-b":{"type":"openai","baseUrl":"` + failoverBUpstream.URL + `","apiKey":"sk-up","models":["` + failoverModelID + `"]}},` +
 		// modelMeta (feature v0.23): a config-override entry for
 		// testDataWantModel, so exerciseHandler's GET /v1/models
 		// assertion below proves resolveModelMeta's config-override
@@ -405,7 +437,7 @@ func run() error {
 		return fmt.Errorf("%s.New's returned value does not implement http.Handler", pkgName)
 	}
 
-	if err := exerciseHandler(handler, builtinLookupContextTokens); err != nil {
+	if err := exerciseHandler(handler, builtinLookupContextTokens, failoverBHits); err != nil {
 		return err
 	}
 	// exerciseBreaker (feat/provider-health, adversarial-review round 2):
@@ -428,6 +460,11 @@ func run() error {
 // ever come from an interpreted lookup into the real map literal, not
 // the config-override path testDataWantModel already exercises.
 const builtinLookupModelID = "gpt-4o"
+
+// failoverModelID is the bare model id both "failover-a" and "failover-b"
+// (run(), above) are configured with — the run()-owned upstream servers
+// exerciseFailover (below) drives.
+const failoverModelID = "failover-shared"
 
 // mcpProbeServerName is the federated MCP server run() configures against
 // mcpProbeUpstream, and mcpProbeToolName is a tool id carrying its
@@ -634,8 +671,8 @@ func exerciseBreaker(handler http.Handler, hits, healthy *int64) error {
 // for real under Yaegi, not merely that the package's imports resolve.
 // builtinContextTokens is builtinLookupModelID's own real, extracted
 // builtinModelMetaTable value (SHOULD-6) — see that constant's own doc
-// comment.
-func exerciseHandler(handler http.Handler, builtinContextTokens int) error {
+// comment. failoverBHits backs exerciseFailover's own call, below.
+func exerciseHandler(handler http.Handler, builtinContextTokens int, failoverBHits *int64) error {
 	authedReq := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
 	authedReq.Header.Set("Authorization", "Bearer "+testDataUserAPIKey)
 	authedRec := httptest.NewRecorder()
@@ -699,6 +736,10 @@ func exerciseHandler(handler http.Handler, builtinContextTokens int) error {
 	}
 
 	if err := exerciseAttemptAccounting(handler); err != nil {
+		return err
+	}
+
+	if err := exerciseFailover(handler, failoverBHits); err != nil {
 		return err
 	}
 
@@ -1010,6 +1051,38 @@ func exerciseFederatedTooLarge(handler http.Handler) error {
 	if resp.Error.Message != mcpTooLargeWantMessage {
 		return fmt.Errorf("POST /mcp tools/call error message = %q, want %q — errors.Is(err, errMCPResponseTooLarge) did not match under the interpreter (mcp_federation.go)", resp.Error.Message, mcpTooLargeWantMessage)
 	}
+	return nil
+}
+
+// exerciseFailover drives one real POST /v1/chat/completions against the
+// interpreted handler for failoverModelID — a bare model id both
+// "failover-a" (always 500s) and "failover-b" (always 200s) are
+// configured with — proving the failover candidate loop (runMeteredCall,
+// routes_unified.go/failover.go) falls through a genuine provider
+// failure and serves the second provider's response under the REAL
+// interpreter. Compiled tests already prove this (failover_test.go); this
+// harness exists because compiled tests have repeatedly passed on this
+// codebase while the interpreted shape failed (this package's own doc
+// comment).
+func exerciseFailover(handler http.Handler, bHits *int64) error {
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(
+		`{"model":"`+failoverModelID+`","messages":[{"role":"user","content":"hi"}]}`,
+	))
+	req.Header.Set("Authorization", "Bearer "+testDataUserAPIKey)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		return fmt.Errorf("POST /v1/chat/completions (feat/failover harness): status = %d, want 200 (failover-a's 500 must fall through to failover-b), body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "served by failover-b") {
+		return fmt.Errorf("POST /v1/chat/completions (feat/failover harness): body does not contain failover-b's own content, want the SECOND provider's response: %s", rec.Body.String())
+	}
+	if atomic.LoadInt64(bHits) != 1 {
+		return fmt.Errorf("feat/failover harness: failover-b upstream hit count = %d, want exactly 1", atomic.LoadInt64(bHits))
+	}
+	fmt.Println("yaegi-check: failover fell through from failover-a to failover-b and served its response")
 	return nil
 }
 
