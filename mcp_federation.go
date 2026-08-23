@@ -174,38 +174,140 @@ type jsonrpcResponse struct {
 	ID      json.RawMessage `json:"id"`
 }
 
+// mcpResponseFormat is this route's negotiated response framing, decided
+// once per request (mcpNegotiateFormat, called from handleMCPFederated)
+// and threaded explicitly as a parameter through every function that can
+// end in a call to writeJSONRPCEnvelope — handleMCPFederated itself,
+// mcpFederatedInitialize, mcpFederatedToolsList, mcpFederatedToolsCall —
+// down to that one chokepoint. Threaded explicitly, not carried by
+// wrapping w in a ResponseWriter that rewrites Content-Type and reframes
+// bytes after the fact: a wrapper like that has to buffer or intercept
+// every Write to retroactively reshape output it already committed,
+// exactly the kind of implicit, hard-to-test indirection this package
+// avoids elsewhere (see writeJSONRPCEnvelope's own "single chokepoint"
+// shape, which this preserves).
+type mcpResponseFormat int
+
+const (
+	// mcpResponseJSON is today's only framing — a bare JSON document,
+	// Content-Type: application/json — and mcpNegotiateFormat's default
+	// for every request that does not explicitly ask for SSE.
+	mcpResponseJSON mcpResponseFormat = iota
+	// mcpResponseSSE frames the identical JSON-RPC envelope as one
+	// text/event-stream event: a single "data:" line carrying the
+	// compact JSON body, terminated by the blank line the SSE wire
+	// format requires (sseWriter.writeData, sse.go, reused as-is here —
+	// see writeJSONRPCEnvelope's own doc comment for why).
+	mcpResponseSSE
+)
+
+// mcpNegotiateFormat decides handleMCPFederated's response framing from
+// r's own Accept header — the ONLY signal that ever produces
+// mcpResponseSSE. Every other case, including no Accept header at all,
+// "application/json" alone, and "*/*", yields mcpResponseJSON: the
+// byte-identical-to-today default this route must never change unasked.
+//
+// "*/*" is a deliberate part of that default, not an oversight: it
+// states no SPECIFIC preference for either framing, and a caller whose
+// HTTP client stack sets it automatically (a common default for generic
+// tooling that never touches this header by hand) would otherwise see
+// this route's output silently change shape it never asked to change —
+// exactly the regression this negotiation must not cause. Only a caller
+// that names the concrete "text/event-stream" token — the real, reported
+// client's own "Accept: application/json, text/event-stream" — gets the
+// new framing.
+func mcpNegotiateFormat(r *http.Request) mcpResponseFormat {
+	if mcpAcceptsSSE(r) {
+		return mcpResponseSSE
+	}
+	return mcpResponseJSON
+}
+
+// mcpAcceptsSSE reports whether any "Accept" header on r names
+// text/event-stream as an acceptable response media type. Accept is a
+// comma-separated list of media ranges, each optionally followed by
+// ";q=..." or other parameters (RFC 9110 §12.5.1) — this checks every
+// element of every "Accept" header LINE present (net/http folds repeated
+// header instances into one Header entry under the same key, but a
+// client may still send more than one "Accept:" line; Header.Values
+// returns each separately, covering both shapes), stripping parameters
+// and surrounding whitespace before an EXACT, case-insensitive
+// comparison against "text/event-stream" — deliberately never a
+// substring or prefix check, so a near-miss media type like
+// "application/x-text/event-stream-foo" cannot false-positive the way a
+// naive strings.Contains over the whole header would.
+func mcpAcceptsSSE(r *http.Request) bool {
+	for _, header := range r.Header.Values("Accept") {
+		for _, part := range strings.Split(header, ",") {
+			mediaType, _, _ := strings.Cut(part, ";")
+			if strings.EqualFold(strings.TrimSpace(mediaType), "text/event-stream") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // writeJSONRPCEnvelope writes resp as the response body, matching
 // setAdminJSONHeaders' own "declared Content-Type, nothing else asserted"
-// minimalism — a JSON-RPC error is still carried at HTTP 200 (JSON-RPC
-// errors are a payload-level concept, not a transport-level one; every
-// genuinely transport-level failure this route can hit — an unreadable
-// body, an unauthenticated/forbidden caller, a rate limit, a disallowed
-// HTTP method — is handled before this function is ever reached, via the
-// gateway's own writeOAIError/writeLimitViolation envelope, matching
-// every other route in this package).
-func writeJSONRPCEnvelope(w http.ResponseWriter, resp jsonrpcResponse) {
+// minimalism for its default JSON framing — a JSON-RPC error is still
+// carried at HTTP 200 (JSON-RPC errors are a payload-level concept, not a
+// transport-level one; every genuinely transport-level failure this route
+// can hit — an unreadable body, an unauthenticated/forbidden caller, a
+// rate limit, a disallowed HTTP method — is handled before this function
+// is ever reached, via the gateway's own writeOAIError/writeLimitViolation
+// envelope, matching every other route in this package).
+//
+// format (mcpNegotiateFormat's own doc comment) selects between that
+// default JSON framing and mcpResponseSSE: one "data:" line carrying resp
+// as compact JSON, terminated by the blank line the SSE wire format
+// requires. The SSE branch reuses sse.go's newSSEWriter/writeData
+// verbatim rather than a second, hand-rolled encoder — writeData already
+// writes exactly "data: " + b + "\n\n" as one Write call, which both IS
+// the single-shot envelope this route needs and already gets the
+// terminator right, the exact class of bug (a missing blank-line
+// terminator) this negotiation exists to fix elsewhere, not repeat here.
+// Its streaming-oriented extras — writeDone's "[DONE]" sentinel,
+// per-event flushing meant for incremental delivery — are simply unused:
+// this is one event, not a stream, so nothing here ever calls writeDone,
+// and a Flush that is a no-op under Yaegi (newSSEWriter's own doc
+// comment) costs this single-shot response nothing, unlike a real
+// streamed reply that depends on it for time-to-first-byte.
+func writeJSONRPCEnvelope(w http.ResponseWriter, format mcpResponseFormat, resp jsonrpcResponse) {
 	resp.JSONRPC = jsonrpcVersion
+	if format == mcpResponseSSE {
+		sw := newSSEWriter(w) // commits SSE headers unconditionally, before the encode below — same header-then-body order as the JSON branch
+		b, err := json.Marshal(resp)
+		if err != nil {
+			return // headers already committed; nothing useful to do on encode failure
+		}
+		_ = sw.writeData(b) // headers already committed; nothing useful to do on write failure
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resp) // headers already committed; nothing useful to do on encode failure
 }
 
 // writeJSONRPCResult marshals result and writes it as a successful
-// JSON-RPC response under id. A marshal failure (result is not
-// JSON-marshalable — never true for any value this file actually passes,
-// but defensively handled rather than panicking) reports itself as a
-// JSON-RPC internal error instead.
-func writeJSONRPCResult(w http.ResponseWriter, id json.RawMessage, result any) {
+// JSON-RPC response under id, framed per format (mcpNegotiateFormat). A
+// marshal failure (result is not JSON-marshalable — never true for any
+// value this file actually passes, but defensively handled rather than
+// panicking) reports itself as a JSON-RPC internal error instead, in the
+// same negotiated format.
+func writeJSONRPCResult(w http.ResponseWriter, format mcpResponseFormat, id json.RawMessage, result any) {
 	resultBytes, err := json.Marshal(result)
 	if err != nil {
-		writeJSONRPCErrorResponse(w, id, jsonrpcInternalError, "failed to encode result")
+		writeJSONRPCErrorResponse(w, format, id, jsonrpcInternalError, "failed to encode result")
 		return
 	}
-	writeJSONRPCEnvelope(w, jsonrpcResponse{ID: id, Result: resultBytes})
+	writeJSONRPCEnvelope(w, format, jsonrpcResponse{ID: id, Result: resultBytes})
 }
 
-// writeJSONRPCErrorResponse writes a JSON-RPC error response under id.
-func writeJSONRPCErrorResponse(w http.ResponseWriter, id json.RawMessage, code int, message string) {
-	writeJSONRPCEnvelope(w, jsonrpcResponse{ID: id, Error: &jsonrpcError{Code: code, Message: message}})
+// writeJSONRPCErrorResponse writes a JSON-RPC error response under id,
+// framed per format (mcpNegotiateFormat) — a client that asked for SSE
+// gets its error in SSE framing too, never a JSON body it cannot parse.
+func writeJSONRPCErrorResponse(w http.ResponseWriter, format mcpResponseFormat, id json.RawMessage, code int, message string) {
+	writeJSONRPCEnvelope(w, format, jsonrpcResponse{ID: id, Error: &jsonrpcError{Code: code, Message: message}})
 }
 
 // isLegacySSETransportURL reports whether rawURL's path ends in "/sse" —
@@ -326,6 +428,15 @@ func (g *Gateway) handleMCPFederated(w http.ResponseWriter, r *http.Request, u *
 		return
 	}
 
+	// Negotiated once, from the request alone, before the body is even
+	// read: every JSON-RPC-shaped response below — including the parse
+	// error a malformed body itself produces — must honor it
+	// (mcpNegotiateFormat's own doc comment). The transport-level error
+	// paths in this function (writeOAIError, writeLimitViolation) are
+	// deliberately NOT part of this — see writeJSONRPCEnvelope's own doc
+	// comment for why those stay out of scope.
+	format := mcpNegotiateFormat(r)
+
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxRequestBytes))
 	if err != nil {
 		writeOAIError(w, http.StatusBadRequest, "invalid_request_error", "cannot read request body")
@@ -337,7 +448,7 @@ func (g *Gateway) handleMCPFederated(w http.ResponseWriter, r *http.Request, u *
 		// A malformed envelope carries no reliable id at all — JSON-RPC
 		// 2.0 §5.1 requires "id":null for exactly this case, not an
 		// omitted key (jsonrpcResponse.ID's own doc comment).
-		writeJSONRPCErrorResponse(w, json.RawMessage("null"), jsonrpcParseError, "parse error")
+		writeJSONRPCErrorResponse(w, format, json.RawMessage("null"), jsonrpcParseError, "parse error")
 		return
 	}
 
@@ -349,20 +460,23 @@ func (g *Gateway) handleMCPFederated(w http.ResponseWriter, r *http.Request, u *
 
 	switch {
 	case req.Method == "initialize":
-		g.mcpFederatedInitialize(w, req)
+		g.mcpFederatedInitialize(w, format, req)
 	case req.Method == "ping":
-		writeJSONRPCResult(w, req.ID, map[string]any{})
+		writeJSONRPCResult(w, format, req.ID, map[string]any{})
 	case req.Method == "tools/list":
-		g.mcpFederatedToolsList(w, r, req, allowedMCPServerNames(g.cfg, grp))
+		g.mcpFederatedToolsList(w, format, r, req, allowedMCPServerNames(g.cfg, grp))
 	case req.Method == "tools/call":
-		g.mcpFederatedToolsCall(w, r, req, grp)
+		g.mcpFederatedToolsCall(w, format, r, req, grp)
 	case strings.HasPrefix(req.Method, "notifications/"):
 		// A JSON-RPC notification carries no id and gets no response body
 		// by definition; MCP's Streamable HTTP transport answers a
-		// notification POST with 202 Accepted and nothing else.
+		// notification POST with 202 Accepted and nothing else — format
+		// plays no part here, deliberately: there is no body to frame
+		// either way, and wrapping an empty body in an SSE "data:" line
+		// would fabricate content this response was never meant to carry.
 		w.WriteHeader(http.StatusAccepted)
 	default:
-		writeJSONRPCErrorResponse(w, req.ID, jsonrpcMethodNotFound, "method not found: "+req.Method)
+		writeJSONRPCErrorResponse(w, format, req.ID, jsonrpcMethodNotFound, "method not found: "+req.Method)
 	}
 }
 
@@ -414,7 +528,7 @@ var knownMCPProtocolVersions = map[string]bool{
 // capabilities.tools is present (empty object, no sub-fields) to declare
 // tool-calling support without overclaiming listChanged notifications
 // this gateway never sends.
-func (g *Gateway) mcpFederatedInitialize(w http.ResponseWriter, req jsonrpcRequest) {
+func (g *Gateway) mcpFederatedInitialize(w http.ResponseWriter, format mcpResponseFormat, req jsonrpcRequest) {
 	var params mcpInitializeParams
 	_ = json.Unmarshal(req.Params, &params) // best-effort; empty/malformed params falls back to defaultMCPProtocolVersion below
 
@@ -423,7 +537,7 @@ func (g *Gateway) mcpFederatedInitialize(w http.ResponseWriter, req jsonrpcReque
 		protocolVersion = params.ProtocolVersion
 	}
 
-	writeJSONRPCResult(w, req.ID, map[string]any{
+	writeJSONRPCResult(w, format, req.ID, map[string]any{
 		"protocolVersion": protocolVersion,
 		"capabilities": map[string]any{
 			"tools": map[string]any{},
@@ -795,7 +909,7 @@ const mcpFederatedFanoutConcurrency = 8
 // single federated tools/list call can move several targets' own
 // counters, not just one — unlike handleTargetProxy's always-exactly-
 // one-target shape (mcp_a2a.go).
-func (g *Gateway) mcpFederatedToolsList(w http.ResponseWriter, r *http.Request, req jsonrpcRequest, names []string) {
+func (g *Gateway) mcpFederatedToolsList(w http.ResponseWriter, format mcpResponseFormat, r *http.Request, req jsonrpcRequest, names []string) {
 	var (
 		mu     sync.Mutex
 		wg     sync.WaitGroup
@@ -901,12 +1015,12 @@ func (g *Gateway) mcpFederatedToolsList(w http.ResponseWriter, r *http.Request, 
 	// one, not a silently degraded empty success (MF3, review round 2,
 	// 2026-08-21).
 	if len(names) > 0 && len(failed) == len(names) {
-		writeJSONRPCErrorResponse(w, req.ID, jsonrpcInternalError, "no MCP server reachable")
+		writeJSONRPCErrorResponse(w, format, req.ID, jsonrpcInternalError, "no MCP server reachable")
 		return
 	}
 
 	sort.Slice(merged, func(i, j int) bool { return merged[i].Name < merged[j].Name })
-	writeJSONRPCResult(w, req.ID, mcpToolsListResult{Tools: merged})
+	writeJSONRPCResult(w, format, req.ID, mcpToolsListResult{Tools: merged})
 }
 
 // mcpToolCallParams is one "tools/call" request's params: name is the
@@ -956,16 +1070,16 @@ func resolveFederatedTool(fullName string, allowedNames []string) (serverName, t
 // single resolved server, once the call was actually attempted against
 // it — the same "attempted, not necessarily succeeded" accounting
 // mcpFederatedToolsList's own doc comment explains for its own fan-out.
-func (g *Gateway) mcpFederatedToolsCall(w http.ResponseWriter, r *http.Request, req jsonrpcRequest, grp *group) {
+func (g *Gateway) mcpFederatedToolsCall(w http.ResponseWriter, format mcpResponseFormat, r *http.Request, req jsonrpcRequest, grp *group) {
 	var params mcpToolCallParams
 	if err := json.Unmarshal(req.Params, &params); err != nil {
-		writeJSONRPCErrorResponse(w, req.ID, jsonrpcInvalidParams, "invalid params")
+		writeJSONRPCErrorResponse(w, format, req.ID, jsonrpcInvalidParams, "invalid params")
 		return
 	}
 
 	serverName, toolName, ok := resolveFederatedTool(params.Name, allowedMCPServerNames(g.cfg, grp))
 	if !ok {
-		writeJSONRPCErrorResponse(w, req.ID, jsonrpcInvalidParams, "unknown tool: "+params.Name)
+		writeJSONRPCErrorResponse(w, format, req.ID, jsonrpcInvalidParams, "unknown tool: "+params.Name)
 		return
 	}
 
@@ -986,9 +1100,9 @@ func (g *Gateway) mcpFederatedToolsCall(w http.ResponseWriter, r *http.Request, 
 		// then-unparsable body would otherwise produce (security review
 		// round 2, 2026-08-22, important finding 4).
 		if errors.Is(err, errMCPResponseTooLarge) {
-			writeJSONRPCErrorResponse(w, req.ID, jsonrpcInternalError, "response too large")
+			writeJSONRPCErrorResponse(w, format, req.ID, jsonrpcInternalError, "response too large")
 		} else {
-			writeJSONRPCErrorResponse(w, req.ID, jsonrpcInternalError, "upstream error")
+			writeJSONRPCErrorResponse(w, format, req.ID, jsonrpcInternalError, "upstream error")
 		}
 		return
 	}
@@ -1001,9 +1115,9 @@ func (g *Gateway) mcpFederatedToolsCall(w http.ResponseWriter, r *http.Request, 
 	// asked for rather than trusting that invariant silently.
 	if resp.Result == nil && resp.Error == nil {
 		g.logf("federated tools/call: server %q returned a JSON-RPC response with neither result nor error", serverName)
-		writeJSONRPCErrorResponse(w, req.ID, jsonrpcInternalError, "invalid upstream response")
+		writeJSONRPCErrorResponse(w, format, req.ID, jsonrpcInternalError, "invalid upstream response")
 		return
 	}
 
-	writeJSONRPCEnvelope(w, jsonrpcResponse{ID: req.ID, Result: resp.Result, Error: resp.Error})
+	writeJSONRPCEnvelope(w, format, jsonrpcResponse{ID: req.ID, Result: resp.Result, Error: resp.Error})
 }
