@@ -139,6 +139,27 @@ const (
 	timeoutProbeMaxWait = 3 * time.Second
 )
 
+// hungBodyProviderName/hungBodyProviderModel/hungBodyProviderRequestTimeout/
+// hungBodyUpstreamSleep back exerciseRequestTimeoutMidBodyStall (finding
+// F7, coordinator adversarial review, 2026-08-23): timeoutProviderName
+// above never sends headers at all, so it only exercises Transport.
+// ResponseHeaderTimeout — watchdogBody.fire (timeout.go) — the
+// interpreted method value handed to time.AfterFunc, plus sync/atomic's
+// function API and a context.CancelFunc — never runs under that probe.
+// hungBodyUpstream sends headers immediately, then goes silent, so the
+// body-read path (upstreamBytes' watchdogBody wrap, providers.go) is
+// what has to abort it, proving the OTHER half of this feature
+// interpreted.
+const (
+	hungBodyProviderName = "hungbody"
+	// hungBodyProviderModel: same reasoning as timeoutProviderModel's own
+	// doc comment above — must not collide with testDataWantModel or any
+	// other probe's model id.
+	hungBodyProviderModel          = "gpt-bodystall-test"
+	hungBodyProviderRequestTimeout = "80ms"
+	hungBodyUpstreamSleep          = 600 * time.Millisecond
+)
+
 // excludedTopLevelDirs lists repo-root directories the GOPATH copy must
 // never include: build tooling, integration fixtures, planning docs and
 // VCS metadata have nothing to do with the plugin package Yaegi imports.
@@ -305,6 +326,24 @@ func run() error {
 	}))
 	defer timeoutUpstream.Close()
 
+	// hungBodyUpstream sends headers immediately (so ResponseHeaderTimeout
+	// is satisfied and never fires), then goes silent for
+	// hungBodyUpstreamSleep before ever writing a body byte — well past
+	// hungBodyProviderName's own 80ms ProviderConfig.RequestTimeout. See
+	// the hungBodyProviderName const block's own doc comment (finding F7)
+	// for why this probe exists alongside timeoutUpstream, not instead of
+	// it.
+	hungBodyUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		if fl, ok := w.(http.Flusher); ok {
+			fl.Flush()
+		}
+		time.Sleep(hungBodyUpstreamSleep)
+		_, _ = w.Write([]byte(`{"id":"c5","object":"chat.completion","model":"gpt-test","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`))
+	}))
+	defer hungBodyUpstream.Close()
+
 	// mcpProbeUpstream answers federation's outbound tools/call with a
 	// body deliberately larger than mcpBackendCallResponseMaxBytes, so
 	// exerciseHandler's POST /mcp probe below drives doBackendJSONRPC's
@@ -399,6 +438,10 @@ func run() error {
 		// const block doc comment above for why this provider exists
 		// alongside slowProviderName.
 		`"` + timeoutProviderName + `":{"type":"openai","baseUrl":"` + timeoutUpstream.URL + `","apiKey":"sk-up","requestTimeout":"` + timeoutProviderRequestTimeout + `","models":["` + timeoutProviderModel + `"]},` +
+		// hungBodyProviderName (finding F7) — see its own const block doc
+		// comment above for why this provider exists alongside
+		// timeoutProviderName.
+		`"` + hungBodyProviderName + `":{"type":"openai","baseUrl":"` + hungBodyUpstream.URL + `","apiKey":"sk-up","requestTimeout":"` + hungBodyProviderRequestTimeout + `","models":["` + hungBodyProviderModel + `"]},` +
 		// "anthropic" backs the /v1/messages passthrough probes
 		// (exerciseMessagesRoute, below): a real anthropic-type provider,
 		// interpreted end to end through
@@ -755,6 +798,10 @@ func exerciseHandler(handler http.Handler, builtinContextTokens int) error {
 		return err
 	}
 
+	if err := exerciseRequestTimeoutMidBodyStall(handler); err != nil {
+		return err
+	}
+
 	if err := exerciseFederatedTooLarge(handler); err != nil {
 		return err
 	}
@@ -1107,6 +1154,48 @@ func exerciseRequestTimeout(handler http.Handler) error {
 	}
 	if rec.Code != http.StatusBadGateway {
 		return fmt.Errorf("POST /v1/chat/completions (hung provider %q): status = %d, want 502 (upstream connection error, provider-attributed), body=%s", timeoutProviderName, rec.Code, rec.Body.String())
+	}
+	return nil
+}
+
+// exerciseRequestTimeoutMidBodyStall proves the OTHER half of the
+// request-timeout feature aborts under the REAL interpreter (finding F7,
+// coordinator adversarial review, 2026-08-23): exerciseRequestTimeout
+// above drives timeoutProviderName, whose upstream never sends headers
+// at all, so it only exercises Transport.ResponseHeaderTimeout —
+// watchdogBody.fire (timeout.go) never runs under that probe, since the
+// request never gets far enough to construct a watchdogBody in the first
+// place. hungBodyProviderName's upstream sends headers immediately, then
+// stalls, so this drives the idle-progress body watchdog itself:
+// time.AfterFunc handed the interpreted method value wb.fire,
+// context.WithCancel/CancelFunc, and sync/atomic's function API
+// (atomic.StoreInt32/LoadInt32) all have to work correctly interpreted
+// for this to abort rather than hang.
+//
+// MUTATION VERIFIED: temporarily removing the `resp.Body =
+// newWatchdogBody(...)` line from upstreamBytes (providers.go) made
+// exerciseRequestTimeout (the header-timeout probe) still PASS
+// unchanged, while this probe failed with "status = 200, want 502" —
+// hungBodyUpstream's 600ms sleep let the request succeed once nothing
+// guarded the body read. This confirms the two probes exercise genuinely
+// different code paths, and that this one specifically needs
+// watchdogBody to pass. Reverted before committing.
+func exerciseRequestTimeoutMidBodyStall(handler http.Handler) error {
+	body := `{"model":"` + hungBodyProviderName + `/` + hungBodyProviderModel + `","messages":[{"role":"user","content":"hi"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+testDataUserAPIKey)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	start := time.Now()
+	handler.ServeHTTP(rec, req)
+	elapsed := time.Since(start)
+
+	if elapsed > timeoutProbeMaxWait {
+		return fmt.Errorf("POST /v1/chat/completions (mid-body-stall provider %q) took %s, want well under %s — a provider that sends headers then stalls must still be aborted under the interpreter, not merely in compiled tests: %s", hungBodyProviderName, elapsed, timeoutProbeMaxWait, rec.Body.String())
+	}
+	if rec.Code != http.StatusBadGateway {
+		return fmt.Errorf("POST /v1/chat/completions (mid-body-stall provider %q): status = %d, want 502 (upstream connection error, provider-attributed), body=%s", hungBodyProviderName, rec.Code, rec.Body.String())
 	}
 	return nil
 }
