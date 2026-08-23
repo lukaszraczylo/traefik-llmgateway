@@ -21,11 +21,11 @@ import {
   CardTitle,
 } from '@/components/ui/card'
 import { useSearchQuery } from '@/composables/useSearchQuery'
-import { formatAgo, formatContextWindow, formatUntil, refreshDetailLabel, refreshLabel, routableModelId } from '@/lib/format'
+import { formatAgo, formatContextWindow, formatLatencyMs, formatUntil, refreshDetailLabel, refreshLabel, routableModelId } from '@/lib/format'
 import { isModelDegraded } from '@/lib/provider-rate'
 import { type ExpandState, clearExpandOverrides, computeExpandedItems, toggleItemExpand } from '@/lib/search-expand'
 import { useDashboardStore } from '@/stores/dashboard'
-import type { AdminAliasView, AdminModelMetaView, AdminModelRateView, AdminProviderView } from '@/types/api'
+import type { AdminAliasView, AdminLatencyView, AdminModelMetaView, AdminModelRateView, AdminProviderView } from '@/types/api'
 
 // This component backs the "Providers" tab (App.vue) — a UI-label rename
 // only. The data it renders still comes from GET /admin/api/overview
@@ -199,6 +199,58 @@ function healthDetailClass(state: AdminProviderView['healthState']): string {
   return state === 'open' ? 'text-destructive' : 'text-muted-foreground'
 }
 
+// --- upstream latency (feat: instrument upstream latency) ---
+//
+// Beside the discovery-health badge above: no badge at all for a stream
+// state with no observations yet (p.latency undefined, or missing that
+// key) — mirrors healthBadgeVariant/modelIsDegraded's own "nothing to
+// show reads as no badge" convention, so absent data reads as absent,
+// never as a fabricated zero.
+//
+// The two stream states are deliberately labeled and worded differently,
+// never merged into one figure (task brief's own correctness rule):
+// streaming shows avgTtfbMs, the load-sensitive reading, labeled "ttfb";
+// non-streaming shows avgDurationMs labeled "avg" — NEVER "latency" or
+// "ttfb" — because a non-streaming provider buffers its whole completion
+// before sending anything, so its own avgTtfbMs is approximately equal
+// to avgDurationMs and carries the identical output-length contamination
+// a raw total-duration figure always has (a 4000-token answer legitimately
+// takes longer than a 50-token one on an equally healthy provider).
+
+/** streamingLatency/nonStreamingLatency pull p.latency's two known stream-state keys (admin.go's buildAdminLatencyViews emits exactly these two strings) — undefined when that stream state has no observations yet. */
+function streamingLatency(p: AdminProviderView): AdminLatencyView | undefined {
+  return p.latency?.streaming
+}
+function nonStreamingLatency(p: AdminProviderView): AdminLatencyView | undefined {
+  return p.latency?.['non-streaming']
+}
+
+/** latencyObservationCount renders v.count (omitted, per admin.go, when 0) as a singular/plural detail phrase for a badge title, falling back to "no observations counted" for the defensive case of a present view with an absent count (version skew). */
+function latencyObservationCount(v: AdminLatencyView): string {
+  if (v.count === undefined) return 'no observations counted'
+  return `${v.count} ${v.count === 1 ? 'observation' : 'observations'} on this replica`
+}
+
+/**
+ * PER_REPLICA_CAVEAT is appended to every latency badge's title (task
+ * brief's correctness rule 1): this figure comes from the same
+ * in-process accumulator the rate-limit rejection counter reads, never
+ * Redis, so it reflects only whichever of this deployment's several
+ * Traefik replicas answered the current poll — never a fleet-wide
+ * average, and a freshly restarted pod shows a short window.
+ */
+const PER_REPLICA_CAVEAT = 'Per-replica, in-process only — not a fleet-wide average across this deployment’s replicas.'
+
+/** streamingLatencyTitle is the streaming ttfb badge's hover/title detail. */
+function streamingLatencyTitle(v: AdminLatencyView): string {
+  return `Average time to first byte, the load-sensitive reading for streaming traffic. ${latencyObservationCount(v)}. ${PER_REPLICA_CAVEAT}`
+}
+
+/** nonStreamingLatencyTitle is the non-streaming avg-duration badge's hover/title detail — explicit that this is NOT a latency/ttfb reading (correctness rule 2). */
+function nonStreamingLatencyTitle(v: AdminLatencyView): string {
+  return `Average total response time, including generation — not a load-sensitive signal like streaming ttfb, since this provider buffers the whole completion before sending anything. ${latencyObservationCount(v)}. ${PER_REPLICA_CAVEAT}`
+}
+
 // --- model aliases (sortable DataTable, operator directive) ---
 //
 // The alias id gets the ModelChip copy treatment (an alias name IS the
@@ -339,6 +391,33 @@ const aliasEmptyMessage = computed(() =>
                   :title="p.healthState === 'open' ? 'discovery is backing off after repeated failures' : 'a discovery probe is deciding whether to recover'"
                 >
                   {{ healthBadgeLabel(p) }}
+                </Badge>
+                <!--
+                  Upstream latency (feat: instrument upstream latency):
+                  streaming's ttfb is the load-sensitive figure; the
+                  non-streaming badge deliberately says "avg", never
+                  "ttfb"/"latency" — see nonStreamingLatencyTitle's own
+                  doc comment for why that number is not a load signal.
+                  No badge at all for a stream state with no observations
+                  yet, mirroring the health badge's own convention above.
+                -->
+                <Badge
+                  v-if="streamingLatency(p)?.avgTtfbMs !== undefined"
+                  as="span"
+                  variant="outline"
+                  class="font-normal tabular-nums"
+                  :title="streamingLatencyTitle(streamingLatency(p) as AdminLatencyView)"
+                >
+                  streaming ttfb {{ formatLatencyMs(streamingLatency(p)!.avgTtfbMs as number) }}
+                </Badge>
+                <Badge
+                  v-if="nonStreamingLatency(p)?.avgDurationMs !== undefined"
+                  as="span"
+                  variant="outline"
+                  class="font-normal tabular-nums"
+                  :title="nonStreamingLatencyTitle(nonStreamingLatency(p) as AdminLatencyView)"
+                >
+                  non-streaming avg {{ formatLatencyMs(nonStreamingLatency(p)!.avgDurationMs as number) }}
                 </Badge>
                 <FontAwesomeIcon
                   v-if="p.lastErr"

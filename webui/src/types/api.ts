@@ -40,6 +40,24 @@ export interface AdminModelMetaView {
   outputPerMTokUsd?: number
 }
 
+/**
+ * One provider's one stream-state's compact latency summary (admin.go:
+ * adminLatencyView — feat: instrument upstream latency), sourced from the
+ * SAME in-process g.latency accumulator /metrics reads, never Redis —
+ * PER-REPLICA, not fleet-wide (see AdminProviderView.latency's own doc
+ * comment). Every field is optional/undefined, not a plain 0: each is
+ * `omitempty` on the Go side, so undefined means "no observations for
+ * this field", never a fabricated zero. avgTtfbMs in particular must
+ * never be treated as interchangeable with avgDurationMs — see
+ * AdminProviderView.latency's doc comment for why they diverge for
+ * non-streaming traffic.
+ */
+export interface AdminLatencyView {
+  avgTtfbMs?: number
+  avgDurationMs?: number
+  count?: number
+}
+
 export interface AdminProviderView {
   name: string
   type: string
@@ -96,6 +114,34 @@ export interface AdminProviderView {
   failuresMinute: number
   /** Per-model breakdown of the counters above, keyed by upstream model id — always present (possibly empty), never omitted. */
   modelRates: Record<string, AdminModelRateView>
+  /**
+   * latency is this provider's compact per-stream average TTFB/duration
+   * summary (admin.go: adminProviderView.Latency — feat: instrument
+   * upstream latency), keyed by "streaming"/"non-streaming" — the same
+   * two string keys buildAdminLatencyViews (admin.go) emits, mirrored
+   * here as a literal union rather than a bare Record<string, ...> so a
+   * caller cannot accidentally index a third, nonexistent stream state.
+   * Undefined entirely for a provider with no observations yet, or a
+   * deployment with metrics collection gated off — undefined, never an
+   * empty object, so "no data" is never confused with "data says zero".
+   *
+   * PER-REPLICA, IN-PROCESS: sourced from the same in-process
+   * accumulator the rate-limit rejection counters read, never Redis.
+   * This deployment runs multiple Traefik replicas, so any single poll
+   * reflects only whichever replica answered it, and a freshly restarted
+   * pod shows a short observation window — never render this as if it
+   * were a fleet-wide average.
+   *
+   * STREAMING VS NON-STREAMING ARE NOT COMPARABLE: avgTtfbMs is the
+   * load-sensitive figure, and only for stream === 'streaming' — a
+   * non-streaming provider buffers its whole completion before sending
+   * anything, so its own avgTtfbMs is approximately equal to its own
+   * avgDurationMs and carries the identical output-length contamination
+   * (a long completion legitimately takes longer than a short one on an
+   * equally healthy provider). Never average the two stream states
+   * together or present either one as a bare, unlabeled "latency".
+   */
+  latency?: Partial<Record<'streaming' | 'non-streaming', AdminLatencyView>>
 }
 
 export interface AdminRedisView {

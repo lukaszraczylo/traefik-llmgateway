@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { formatCompactCount, formatContextWindow, formatModelCostHover, formatUntil, refreshDetailLabel, refreshLabel } from './format'
+import { formatCompactCount, formatContextWindow, formatLatencyMs, formatModelCostHover, formatUntil, refreshDetailLabel, refreshLabel } from './format'
 
 const ZERO_TIME = '0001-01-01T00:00:00Z'
 
@@ -162,5 +162,24 @@ describe('formatCompactCount', () => {
 
   it('preserves the sign for a negative count (defensive — counts are never negative in practice)', () => {
     expect(formatCompactCount(-15_000_000)).toBe('-15M')
+  })
+})
+
+// Latency panel (feat: instrument upstream latency, webui surface):
+// avgTtfbMs/avgDurationMs arrive from admin.go as plain millisecond
+// floats. formatLatencyMs is deliberately a plain rounding, not a
+// floor-not-round boundary rule like formatCompactCount above — these are
+// averages with no discrete threshold a reader could misinterpret as
+// crossed.
+describe('formatLatencyMs', () => {
+  it.each([
+    { ms: 0, want: '0ms' },
+    { ms: 42.7, want: '43ms' }, // sub-1000ms rounds to the nearest ms
+    { ms: 999.4, want: '999ms' }, // just under the 1000ms/1s boundary
+    { ms: 1000, want: '1.0s' }, // the boundary itself switches to seconds
+    { ms: 1234, want: '1.2s' },
+    { ms: 12_345, want: '12.3s' },
+  ])('formatLatencyMs($ms) = $want', ({ ms, want }) => {
+    expect(formatLatencyMs(ms)).toBe(want)
   })
 })
