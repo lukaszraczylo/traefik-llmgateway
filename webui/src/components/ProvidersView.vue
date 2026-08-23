@@ -25,7 +25,7 @@ import { formatAgo, formatContextWindow, formatLatencyMs, formatUntil, refreshDe
 import { isModelDegraded } from '@/lib/provider-rate'
 import { type ExpandState, clearExpandOverrides, computeExpandedItems, toggleItemExpand } from '@/lib/search-expand'
 import { useDashboardStore } from '@/stores/dashboard'
-import type { AdminAliasView, AdminLatencyView, AdminModelMetaView, AdminModelRateView, AdminProviderView } from '@/types/api'
+import type { AdminAliasView, AdminLatencyView, AdminModelMetaView, AdminModelRateView, AdminProvenanceView, AdminProviderView } from '@/types/api'
 
 // This component backs the "Providers" tab (App.vue) — a UI-label rename
 // only. The data it renders still comes from GET /admin/api/overview
@@ -251,6 +251,40 @@ function nonStreamingLatencyTitle(v: AdminLatencyView): string {
   return `Average total response time, including generation — not a load-sensitive signal like streaming ttfb, since this provider buffers the whole completion before sending anything. ${latencyObservationCount(v)}. ${PER_REPLICA_CAVEAT}`
 }
 
+// --- usage provenance (feat: expose token-accounting provenance) ---
+//
+// Token accounting has three provenances (see AdminProvenanceView's own
+// doc comment): reported (the healthy default — no badge, mirroring the
+// health/latency badges' own "nothing to show reads as no badge"
+// convention), estimated (a non-streaming response carried no usage, so
+// prompt was substituted from request body size), and unbilled (a
+// streaming response carried no usage, so the request was counted but
+// zero tokens were billed — a provider potentially serving completions
+// entirely free against every budget). estimated/unbilled are two
+// DISTINCT badges, never merged into one "not reported" indicator —
+// collapsing them would hide exactly the fact this feature exists to
+// surface (task brief's own correctness rule).
+
+/** estimatedProvenance/unbilledProvenance pull p.provenance's two known kind keys (admin.go's buildAdminProvenanceViews emits only these two strings, never "reported") — undefined when that kind has no observations yet. */
+function estimatedProvenance(p: AdminProviderView): AdminProvenanceView | undefined {
+  return p.provenance?.estimated
+}
+function unbilledProvenance(p: AdminProviderView): AdminProvenanceView | undefined {
+  return p.provenance?.unbilled
+}
+
+/** estimatedProvenanceTitle is the estimated-accounting badge's hover/title detail. */
+function estimatedProvenanceTitle(v: AdminProvenanceView): string {
+  const plural = v.requests === 1 ? '' : 's'
+  return `${v.requests} non-streaming response${plural} carried no usage from the provider — prompt tokens were estimated from request body size instead (${v.tokens} tokens billed from the estimate), completion billed as zero. ${PER_REPLICA_CAVEAT}`
+}
+
+/** unbilledProvenanceTitle is the unbilled-accounting badge's hover/title detail — explicit about the budget-exposure implication (task brief's own framing). */
+function unbilledProvenanceTitle(v: AdminProvenanceView): string {
+  const plural = v.requests === 1 ? '' : 's'
+  return `${v.requests} streaming response${plural} carried no usage from the provider — the request was counted but zero tokens were billed. If this keeps happening, this provider may be serving completions entirely free against every budget. ${PER_REPLICA_CAVEAT}`
+}
+
 // --- model aliases (sortable DataTable, operator directive) ---
 //
 // The alias id gets the ModelChip copy treatment (an alias name IS the
@@ -418,6 +452,33 @@ const aliasEmptyMessage = computed(() =>
                   :title="nonStreamingLatencyTitle(nonStreamingLatency(p) as AdminLatencyView)"
                 >
                   non-streaming avg {{ formatLatencyMs(nonStreamingLatency(p)!.avgDurationMs as number) }}
+                </Badge>
+                <!--
+                  Usage provenance (feat: expose token-accounting
+                  provenance): no badge at all for a kind with no
+                  observations yet, mirroring the health/latency badges'
+                  own convention above. estimated and unbilled are two
+                  distinct badges — never merged (correctness rule, task
+                  brief) — since one substitutes an approximation and the
+                  other bills nothing at all.
+                -->
+                <Badge
+                  v-if="estimatedProvenance(p)"
+                  as="span"
+                  variant="secondary"
+                  class="font-normal tabular-nums"
+                  :title="estimatedProvenanceTitle(estimatedProvenance(p) as AdminProvenanceView)"
+                >
+                  estimated {{ estimatedProvenance(p)!.requests }}
+                </Badge>
+                <Badge
+                  v-if="unbilledProvenance(p)"
+                  as="span"
+                  variant="destructive"
+                  class="font-normal tabular-nums"
+                  :title="unbilledProvenanceTitle(unbilledProvenance(p) as AdminProvenanceView)"
+                >
+                  unbilled {{ unbilledProvenance(p)!.requests }}
                 </Badge>
                 <FontAwesomeIcon
                   v-if="p.lastErr"
