@@ -850,9 +850,13 @@ request.
 
 ## Request timeout
 
-Every upstream request this gateway makes — provider adapter calls, native
-passthrough (`/{provider}/...`), and the MCP/A2A target proxy — is bounded
-by a progress-based timeout: silence ends a request, never elapsed time.
+Every provider adapter call and every native passthrough
+(`/{provider}/...`) request is bounded by a progress-based timeout:
+aborted once this gateway observes no upstream read progress for the
+configured duration, never simply because elapsed time crossed a fixed
+deadline. The MCP/A2A target proxy (`/mcp/{name}/...`, `/a2a/{name}/...`)
+shares the identical mechanism. The federated `/mcp` endpoint
+(`mcp_federation.go`) does **not** — see the "Federated MCP" note below.
 
 **Behavior change for every deployment, not an invisible bug fix.** Before
 this feature, an adapter's `*http.Client` set no timeout of any kind: a
@@ -873,6 +877,29 @@ request forever. Default, when neither `requestTimeout` field is set:
   this reason. Non-streaming responses share the identical mechanism: a
   large or slow-but-progressing body is unaffected; only a body that goes
   quiet for the full timeout is aborted.
+- **What "progress" means, precisely.** The idle timer resets on bytes
+  read from the *decoded* body — after `net/http`'s own transparent gzip
+  decompression, when the upstream used it. A gzip'd response whose
+  compressed bytes keep arriving on the wire but whose deflate stream
+  yields no decompressed output for the whole timeout window is still
+  aborted: this gateway has no visibility into wire-level progress
+  without a transport or connection wrapper, which is disproportionate at
+  the five-minute default. In the same vein, a streaming forwarder reads
+  one chunk from the upstream, writes it to the client, then reads again
+  — the write is not itself watched, so time spent blocked writing to a
+  slow or stalled client counts against the SAME idle window as a silent
+  upstream. Aborting in that case is still the right call (holding an
+  upstream connection open indefinitely for a stalled client is its own
+  problem), but the failure is not always the provider's fault even
+  though the request is attributed to one for accounting purposes.
+- **Never retried.** A `ResponseHeaderTimeout` failure surfaces as a
+  `context.DeadlineExceeded`-shaped error, which [Retry](#retry)'s own
+  transient classification explicitly excludes. A mid-body watchdog
+  timeout happens after the retry mechanism has already returned its
+  response to the caller, so it is never in a position to be retried
+  either way. Not retrying a hang is the intended behavior — retrying a
+  provider that just proved it cannot make progress would only waste the
+  same amount of time again.
 - **Scope and override**: `requestTimeout` (top level) sets the global
   default. A provider's own `requestTimeout` overrides it — an explicit
   override always wins. Native passthrough for a provider uses that same
@@ -887,9 +914,26 @@ request forever. Default, when neither `requestTimeout` field is set:
   never accepted here as "no timeout": that would silently reintroduce the
   exact hang this feature fixes.
 - **Classification**: a timeout firing is always logged and reported to
-  the client as a provider failure (`502`, `server_error`), naming the
-  provider, and is never classified as a client disconnect
-  (`context.Canceled`) — the two stay distinguishable in every log line.
+  the client as an upstream failure (`502`, `server_error`), naming
+  whichever provider or target the request was addressed to, and is never
+  classified as a client disconnect (`context.Canceled`) — the two stay
+  distinguishable in every log line. The log wording says "upstream
+  progress stalled", not "provider timed out": for the reason described
+  above (a slow client can trip the same watchdog a slow provider does),
+  the message reports what was observed without asserting which side
+  caused it.
+
+**Federated MCP (`POST /mcp`) is bounded differently, not left unbounded.**
+`mcp_federation.go`'s two direct upstream calls
+(`doBackendJSONRPC`/`mcpBackendCloseSession`) are not wrapped by the
+idle-progress watchdog described above — a federated backend that sends
+headers and then stalls mid-body is not caught by it. They are not
+unbounded either: both still run through `g.targetClient`, so
+`Transport.ResponseHeaderTimeout` (the global `requestTimeout`) still
+bounds the wait for headers, and each call additionally runs under its
+own fixed `context.WithTimeout` — 20s for `tools/list`, 120s for
+`tools/call`, 5s for the best-effort session-close DELETE. A worst-case
+stall there is bounded at whichever of those applies, not indefinite.
 
 ## Caching
 
