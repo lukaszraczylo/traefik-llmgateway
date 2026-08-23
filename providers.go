@@ -249,6 +249,73 @@ func attemptRecorderFromContext(ctx context.Context) attemptRecorder {
 	return rec
 }
 
+// latencyRecorder is invoked exactly once per completed upstream body —
+// from watchdogBody.Close (timeout.go), never per Read — with the
+// latencySample (metrics.go) that body's own watchdog measured: time to
+// first byte, total duration, and whether the response was a stream
+// (feat: instrument upstream latency, observation-only per the task
+// brief — no throttling or control logic reads this).
+//
+// Threaded via context exactly like attemptRecorder above, for the same
+// reason: upstreamBytes/proxyUpstream have no other way to reach
+// Gateway-level state (g.latency, metrics.go). A call site that never
+// wires one via withLatencyRecorder gets nil back from
+// latencyRecorderFromContext, so registry.go's discovery listModels
+// calls and the MCP/A2A target proxy (handleTargetProxy, mcp_a2a.go —
+// neither ever wraps its context this way, mirroring
+// withAttemptRecorder's own identical exclusion) never observe latency
+// either — this feature accounts the same traffic Feature A does, not a
+// byte more.
+type latencyRecorder func(sample latencySample)
+
+// latencyRecorderCtxKey is the unexported context.Value key
+// withLatencyRecorder/latencyRecorderFromContext share — its own type,
+// never a string, so no other package's context.WithValue call can
+// collide with it, mirroring attemptRecorderCtxKey above.
+//
+// Deliberately NOT a bare `struct{}` like attemptRecorderCtxKey (yaegi-
+// check finding, this feature): under the REAL Yaegi interpreter, two
+// DISTINCT zero-sized struct types used as `any`-typed context.WithValue
+// keys compare EQUAL to each other via `==` — an interpreter-only
+// divergence from compiled Go's own interface-equality semantics, where
+// two values of different concrete types are never equal regardless of
+// value. With attemptRecorderCtxKey ALSO a bare struct{}, a context
+// carrying both (routes_unified.go's withAttemptRecorder then
+// withLatencyRecorder) let ctx.Value(attemptRecorderCtxKey{}) wrongly
+// match the LATER latencyRecorderCtxKey{} entry instead, silently
+// returning nil once type-asserted to attemptRecorder — retryPolicy.do
+// (retry.go) then never called rec(resp, err) at all, and
+// limiter.recordProviderAttempt (Feature A) went permanently dark for
+// every metered request, with no error anywhere: exerciseAttemptAccounting
+// (tools/yaegi-check/main.go) is what caught it — a compiled `go test`
+// run never sees this divergence, since compiled Go's interface equality
+// is correct. The `_ byte` field costs nothing at runtime and makes this
+// type's size differ from attemptRecorderCtxKey's, which is enough to
+// keep the two apart under the interpreter too.
+type latencyRecorderCtxKey struct{ _ byte }
+
+// withLatencyRecorder returns a context carrying rec. A nil rec (the
+// common case: metrics.go's own callers only ever pass a non-nil one
+// when metricsEnabled(g.cfg) was true at the point of the call) returns
+// ctx unchanged, so a caller may call this unconditionally, exactly
+// mirroring withAttemptRecorder's own nil handling above.
+func withLatencyRecorder(ctx context.Context, rec latencyRecorder) context.Context {
+	if rec == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, latencyRecorderCtxKey{}, rec)
+}
+
+// latencyRecorderFromContext returns the latencyRecorder ctx carries via
+// withLatencyRecorder, or nil when none was set — the common case for
+// any call path this feature does not account, or for any deployment
+// with metrics collection disabled (see latencyRecorder's own doc
+// comment).
+func latencyRecorderFromContext(ctx context.Context) latencyRecorder {
+	rec, _ := ctx.Value(latencyRecorderCtxKey{}).(latencyRecorder)
+	return rec
+}
+
 // upstreamJSON issues an HTTP request to url: body, when non-nil, is
 // marshaled as the JSON request body; hdr's values are added to the
 // request (a caller builds this from its adapter's auth and content-type
@@ -320,6 +387,15 @@ func upstreamBytes(ctx context.Context, client *http.Client, method, url string,
 	// provider-health accounting, since nothing else ever called rec
 	// again for that attempt.
 	rec := attemptRecorderFromContext(ctx)
+	// latRec: same one-lookup-outside-the-retry-loop shape as rec above,
+	// and the same reasoning applies — every attempt shares ctx, so a
+	// latencyRecorder wired via withLatencyRecorder (nil when metrics
+	// collection is disabled, latencyRecorder's own doc comment) is
+	// identical across attempts. A retried request still gets its own
+	// independent latency observation per attempt (below, start is
+	// captured fresh inside the closure), matching how watchdogBody
+	// itself is rebuilt fresh per attempt.
+	latRec := latencyRecorderFromContext(ctx)
 
 	call := func() (*http.Response, error) {
 		var r io.Reader
@@ -361,12 +437,28 @@ func upstreamBytes(ctx context.Context, client *http.Client, method, url string,
 			req.Header.Set("Content-Type", "application/json")
 		}
 
+		// start: captured just before the request is actually sent, so a
+		// non-nil latRec's eventual sample (armLatency below) measures from
+		// here — matching the task brief's own "from just before the
+		// upstream request is sent" definition, not from whatever moment
+		// newWatchdogBody happens to run at (which is already after
+		// headers arrived).
+		start := time.Now()
 		resp, err := client.Do(req) //nolint:bodyclose,gosec // caller closes resp.Body; upstreamBytes hands the response, not its lifecycle, back — same operator-configured URL as above
 		if err != nil {
 			cancel()
 			return nil, fmt.Errorf("%w: %w", errUpstream, err)
 		}
-		resp.Body = newWatchdogBody(resp.Body, cancel, timeout, fmt.Sprintf("provider %q", providerName), rec)
+		wb := newWatchdogBody(resp.Body, cancel, timeout, fmt.Sprintf("provider %q", providerName), rec)
+		if latRec != nil {
+			// streaming: derived from resp's own Content-Type, the SAME
+			// convention each adapter's forwardStream/forwardJSON split
+			// already applies (isEventStreamResponse, timeout.go) — decided
+			// here because it is already knowable, ahead of whichever of
+			// those two the caller picks moments from now.
+			wb.armLatency(start, isEventStreamResponse(resp), latRec)
+		}
+		resp.Body = wb
 		return resp, nil
 	}
 

@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
+	"strings"
 	"sync/atomic"
 	"time"
 )
@@ -148,14 +150,37 @@ func resolveProviderTimeout(providerName, providerRaw string, globalTimeout time
 // timedOut is accessed via sync/atomic's function API (atomic.StoreInt32/
 // LoadInt32), not the newer atomic.Bool type, per this plugin's
 // yaegi-interpreted-stdlib guardrail.
+//
+// onLatency/latencyStart/ttfb/streaming/ttfbRecorded/latencyRecorded
+// (feat: instrument upstream latency, task brief) are this same
+// watchdogBody's SECOND, independent observation: onLatency stays nil
+// unless armLatency (below) is called with a non-nil recorder, and every
+// access to the group below is gated on that one nil check first — a
+// disabled deployment (or any caller that never observes latency at
+// all, e.g. registry.go's discovery calls) pays one pointer comparison
+// per Read and nothing else. See armLatency's own doc comment for why
+// this is a separate method rather than additional newWatchdogBody
+// parameters, and Read/Close below for where each field is written.
 type watchdogBody struct {
-	rc        io.ReadCloser
-	cancel    context.CancelFunc
-	timer     *time.Timer
-	onTimeout attemptRecorder
-	label     string
-	timeout   time.Duration
-	timedOut  int32
+	// latencyStart is declared first (fieldalignment, govet — enabled via
+	// this repo's global golangci-lint config): time.Time embeds a
+	// *time.Location, making it pointer-shaped, and every pointer-shaped
+	// field in this struct is grouped at the front, then plain scalars
+	// (time.Duration/int32/bool) last — see adminProviderView's identical
+	// convention (admin.go) for the same reasoning spelled out once.
+	latencyStart    time.Time
+	rc              io.ReadCloser
+	cancel          context.CancelFunc
+	timer           *time.Timer
+	onTimeout       attemptRecorder
+	onLatency       latencyRecorder
+	label           string
+	timeout         time.Duration
+	ttfb            time.Duration
+	timedOut        int32
+	ttfbRecorded    int32
+	latencyRecorded int32
+	streaming       bool
 }
 
 // newWatchdogBody returns a watchdogBody wrapping rc, arming its watchdog
@@ -179,6 +204,54 @@ func newWatchdogBody(rc io.ReadCloser, cancel context.CancelFunc, timeout time.D
 	wb := &watchdogBody{rc: rc, cancel: cancel, timeout: timeout, label: label, onTimeout: onTimeout}
 	wb.timer = time.AfterFunc(timeout, wb.fire)
 	return wb
+}
+
+// armLatency wires wb to observe upstream latency (feat: instrument
+// upstream latency, task brief): rec is invoked exactly once, from
+// Close below, with the latencySample (metrics.go) this watchdogBody
+// measured. rec == nil disables all of it — Read/Close each take a
+// single, cost-free nil check on wb.onLatency and do nothing further,
+// so calling armLatency at all (even with rec nil) adds no measurable
+// cost, and a caller may call it unconditionally.
+//
+// This is a separate method, not additional newWatchdogBody parameters:
+// newWatchdogBody's existing signature and behavior are pinned by
+// timeout_test.go's direct, positional 5-argument calls, which must
+// keep passing unchanged (task constraint) — changing that signature
+// would have broken every one of them for no benefit, since every real
+// call site (providers.go, routes_passthrough.go) already holds a
+// *watchdogBody reference to call this on immediately afterward.
+//
+// start is the moment just BEFORE the request was sent (the caller's
+// own time.Now(), captured ahead of client.Do) — deliberately earlier
+// than "now" here: newWatchdogBody itself only ever runs once the
+// response's headers have already arrived, so using the caller's
+// earlier timestamp is what makes both TTFB and total duration include
+// the network round trip for headers too, matching the task brief's own
+// definition ("from just before the upstream request is sent").
+//
+// streaming labels the eventual sample: the caller derives it from the
+// response's own Content-Type via isEventStreamResponse (below) —
+// deliberately not from the client's requested "stream" flag alone,
+// since a provider that ignores it and answers with one buffered JSON
+// body is, for latency purposes, indistinguishable from a genuinely
+// non-streaming call: its TTFB IS its own total duration either way.
+func (wb *watchdogBody) armLatency(start time.Time, streaming bool, rec latencyRecorder) {
+	wb.onLatency = rec
+	wb.latencyStart = start
+	wb.streaming = streaming
+}
+
+// isEventStreamResponse reports whether resp's Content-Type indicates a
+// text/event-stream body — the SAME convention each provider adapter's
+// own forwardStream/forwardJSON split already applies (provider_openai.
+// go, provider_anthropic.go, provider_gemini.go), duplicated here rather
+// than imported from any one adapter file: newWatchdogBody has two call
+// sites (providers.go, routes_passthrough.go), and routes_passthrough.go
+// (native passthrough, the MCP/A2A target proxy) has no adapter-specific
+// streaming decision of its own to share this with.
+func isEventStreamResponse(resp *http.Response) bool {
+	return strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "text/event-stream")
 }
 
 // fire runs once, in its own goroutine (time.AfterFunc's own contract —
@@ -227,8 +300,32 @@ func (wb *watchdogBody) timeoutError() error {
 // actually produced. Any other error — a real client disconnect, a clean
 // EOF, a genuine network failure that has nothing to do with this
 // watchdog — passes through unchanged.
+//
+// The TTFB-capture block below (feat: instrument upstream latency) is
+// purely additive and never changes what this method returns or the
+// timer-reset logic's own behavior — it is checked FIRST, ahead of the
+// `if err != nil` branch, and deliberately does NOT require err == nil
+// the way the timer-reset block below still does: io.Reader's contract
+// explicitly permits a reader to return its final data together with
+// io.EOF in the SAME call (io.Reader's own doc: "an instance ... may
+// return either err == EOF or err == nil"), and Go's real net/http body
+// reader does exactly that for a small, fully-buffered response —
+// measured directly against a real httptest server here, not assumed:
+// a ~200-byte JSON completion arrives as ONE Read call reporting
+// (n=200, err=io.EOF) together. Gating the capture on err == nil (as
+// timer-reset still correctly does, per finding F6 below) would then
+// skip it for every such response — the common case for a typical,
+// fully-buffered non-streaming completion — leaving hasTTFB false for
+// most real traffic. Checking `n > 0` alone, before the error branch,
+// fixes that without touching the timer-reset semantics those tests
+// pin: a self-contained top-of-function check that only ever WRITES
+// wb.ttfb/wb.ttfbRecorded, never wb.timer or any error path.
 func (wb *watchdogBody) Read(p []byte) (int, error) {
 	n, err := wb.rc.Read(p)
+	if n > 0 && wb.onLatency != nil && atomic.LoadInt32(&wb.ttfbRecorded) == 0 {
+		wb.ttfb = time.Since(wb.latencyStart)
+		atomic.StoreInt32(&wb.ttfbRecorded, 1)
+	}
 	if err != nil {
 		if atomic.LoadInt32(&wb.timedOut) == 1 {
 			return n, wb.timeoutError()
@@ -248,8 +345,32 @@ func (wb *watchdogBody) Read(p []byte) (int, error) {
 // gave up early, or because the watchdog itself already fired — instead
 // of being left to be reclaimed only once its parent context ends. Then
 // closes the wrapped body.
+//
+// The `if wb.onLatency != nil` block below (feat: instrument upstream
+// latency) is purely additive, runs after the pre-existing timer.Stop/
+// cancel/rc.Close sequence above is already decided, and never changes
+// this method's return value: it reports exactly one latencySample
+// (metrics.go) — duration always (time.Since(wb.latencyStart), this
+// body's whole lifetime), ttfb only when a successful read actually
+// happened first (hasTTFB, guarded by ttfbRecorded — Read's own doc
+// comment above). latencyRecorded is a CompareAndSwap, not a plain
+// check, so a caller that closes this watchdogBody more than once (not
+// expected by any current call site, but not this method's job to
+// forbid either) still reports the sample exactly once rather than
+// double-counting it.
 func (wb *watchdogBody) Close() error {
 	wb.timer.Stop()
 	wb.cancel()
+	if wb.onLatency != nil && atomic.CompareAndSwapInt32(&wb.latencyRecorded, 0, 1) {
+		sample := latencySample{
+			duration:  time.Since(wb.latencyStart),
+			streaming: wb.streaming,
+		}
+		if atomic.LoadInt32(&wb.ttfbRecorded) == 1 {
+			sample.ttfb = wb.ttfb
+			sample.hasTTFB = true
+		}
+		wb.onLatency(sample)
+	}
 	return wb.rc.Close()
 }

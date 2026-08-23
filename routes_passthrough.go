@@ -862,6 +862,16 @@ func (g *Gateway) handlePassthrough(w http.ResponseWriter, r *http.Request, u *u
 	r = r.WithContext(withAttemptRecorder(r.Context(), func(resp *http.Response, attemptErr error) {
 		g.limiter.recordProviderAttempt(providerName, "", resp, attemptErr)
 	}))
+	// feat: instrument upstream latency — gated on metricsEnabled, same
+	// reasoning as runUnified's identical wiring (routes_unified.go). No
+	// model here either, for the identical reason the attemptRecorder
+	// above passes "": the upstream model lives in the response body,
+	// read only after this attempt already resolved (comment above).
+	if metricsEnabled(g.cfg) {
+		r = r.WithContext(withLatencyRecorder(r.Context(), func(sample latencySample) {
+			g.recordLatency(providerName, "", sample)
+		}))
+	}
 
 	result, ok := g.proxyUpstream(w, r, upstreamURL, adapter.httpClient(), adapter.injectAuth, providerCredentialRetargetHeaders, true, "passthrough (provider "+providerName+")", adapter.requestTimeout())
 	if !ok || !result.isJSON {
@@ -1007,6 +1017,12 @@ func (g *Gateway) proxyUpstream(w http.ResponseWriter, r *http.Request, upstream
 		injectAuth(upstreamReq)
 	}
 
+	// start: captured just before the request is actually sent, matching
+	// upstreamBytes' own identical capture (providers.go) — see
+	// watchdogBody.armLatency's doc comment (timeout.go) for why this,
+	// not whatever moment newWatchdogBody itself runs at, is what "just
+	// before the upstream request is sent" (task brief) means here.
+	start := time.Now()
 	resp, err := client.Do(upstreamReq) //nolint:gosec // same upstreamReq built above; operator-fixed host, traversal-checked, see its construction comment
 	// Feature A (v0.22): proxyUpstream makes exactly one attempt (no
 	// retry.go policy wraps this path), so this fires once per call,
@@ -1020,6 +1036,13 @@ func (g *Gateway) proxyUpstream(w http.ResponseWriter, r *http.Request, upstream
 	// accounting a build/send failure already does (coordinator
 	// adversarial review, 2026-08-23, finding F4).
 	rec := attemptRecorderFromContext(r.Context())
+	// latRec: nil for the MCP/A2A target proxy (handleTargetProxy,
+	// mcp_a2a.go, never wraps r's context this way — the SAME exclusion
+	// rec's own doc comment above already documents for attemptRecorder),
+	// non-nil for native passthrough whenever metrics collection is
+	// enabled (handlePassthrough's own withLatencyRecorder wiring, above
+	// in this file).
+	latRec := latencyRecorderFromContext(r.Context())
 	if rec != nil {
 		rec(resp, err)
 	}
@@ -1037,7 +1060,11 @@ func (g *Gateway) proxyUpstream(w http.ResponseWriter, r *http.Request, upstream
 	// calls here (mcp_a2a.go) pass "mcp target (name ...)"/"a2a target
 	// (name ...)" — an MCP/A2A target is not a provider, and the watchdog
 	// error text must not claim it is (finding F9).
-	resp.Body = newWatchdogBody(resp.Body, cancel, timeout, logPrefix, rec)
+	wb := newWatchdogBody(resp.Body, cancel, timeout, logPrefix, rec)
+	if latRec != nil {
+		wb.armLatency(start, isEventStreamResponse(resp), latRec)
+	}
+	resp.Body = wb
 	defer resp.Body.Close() //nolint:errcheck // read-side close; nothing actionable on failure
 
 	copyHeadersExcept(w.Header(), resp.Header, hopByHopHeaders, dangerousResponseHeaders)

@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -548,6 +549,85 @@ func TestAdminOverview_ProviderRates_EndToEndAfterTraffic(t *testing.T) {
 	}
 	if mr.AttemptsDay != 2 || mr.FailuresDay != 1 {
 		t.Errorf("model attempts/failures = %d/%d, want 2/1", mr.AttemptsDay, mr.FailuresDay)
+	}
+}
+
+// TestAdminOverview_LatencySummary_AvgReflectsSeededObservations proves
+// buildAdminLatencyViews' own math (admin.go, feat: instrument upstream
+// latency): plain averages (sum/count), split by stream state, and that
+// the opt-in per-model dimension never leaks into this compact admin
+// surface (the task brief's own "compact... do not bloat" requirement).
+//
+// alpha's observation is seeded directly via gw.latency.record under a
+// MODEL-keyed latencyKey only — bypassing recordLatency's own
+// dual-write (which always also writes the bare provider+stream key,
+// tested separately by metrics_test.go's TestMetrics_ModelLabel_*
+// family) — specifically so no base (model="") entry exists for
+// alpha's "streaming" state at all. That isolates buildAdminLatencyViews'
+// own model-exclusion filter: if it ever stopped skipping model-keyed
+// entries, THIS is the one that would leak through as a phantom row,
+// since there is no correctly-shaped base entry that could coincidentally
+// produce the same numbers instead (unlike a same-provider dual-write,
+// where the base and model entries are byte-identical and an overwrite
+// would go unnoticed).
+//
+// MUTATION VERIFIED: removing the `if s.key.model != "" ... continue`
+// guard from buildAdminLatencyViews (admin.go) made this test fail —
+// alpha.Latency gained a "streaming" entry (Count=1, AvgDurationMs=5000)
+// that must never exist, since alpha never received any base-key
+// observation. Reverted before committing.
+func TestAdminOverview_LatencySummary_AvgReflectsSeededObservations(t *testing.T) {
+	t.Parallel()
+	cfg := newAdminTestConfig()
+	h, gw := newAdminGatewayHandle(t, cfg)
+
+	// zeta, non-streaming: two base-key observations, 100ms and 300ms —
+	// average 200ms.
+	gw.recordLatency("zeta", "", latencySample{duration: 100 * time.Millisecond, ttfb: 100 * time.Millisecond, hasTTFB: true, streaming: false})
+	gw.recordLatency("zeta", "", latencySample{duration: 300 * time.Millisecond, ttfb: 300 * time.Millisecond, hasTTFB: true, streaming: false})
+
+	// alpha, streaming: model-keyed only (see doc comment above).
+	gw.latency.record(latencyKey{provider: "alpha", streaming: true, model: "a-model-1"},
+		latencySample{duration: 5 * time.Second, ttfb: time.Second, hasTTFB: true, streaming: true})
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, adminRequest(http.MethodGet, adminOverviewPath, "sk-admin1"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	var got adminOverviewResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	var zeta, alpha *adminProviderView
+	for i := range got.Providers {
+		switch got.Providers[i].Name {
+		case "zeta":
+			zeta = &got.Providers[i]
+		case "alpha":
+			alpha = &got.Providers[i]
+		}
+	}
+	if zeta == nil || alpha == nil {
+		t.Fatalf("providers = %+v, want entries named zeta and alpha", got.Providers)
+	}
+
+	nonStream, ok := zeta.Latency["non-streaming"]
+	if !ok {
+		t.Fatalf("zeta.Latency missing \"non-streaming\" entry: %+v", zeta.Latency)
+	}
+	if nonStream.Count != 2 {
+		t.Errorf("non-streaming Count = %d, want 2", nonStream.Count)
+	}
+	if math.Abs(nonStream.AvgDurationMs-200) > 0.01 {
+		t.Errorf("non-streaming AvgDurationMs = %v, want 200 ((100+300)/2)", nonStream.AvgDurationMs)
+	}
+	if math.Abs(nonStream.AvgTTFBMs-200) > 0.01 {
+		t.Errorf("non-streaming AvgTTFBMs = %v, want 200", nonStream.AvgTTFBMs)
+	}
+
+	if _, ok := alpha.Latency["streaming"]; ok {
+		t.Errorf(`alpha.Latency has a "streaming" entry despite the only observation being model-keyed (never a base provider+stream one): %+v — the opt-in per-model dimension must never leak into this compact admin summary`, alpha.Latency)
 	}
 }
 

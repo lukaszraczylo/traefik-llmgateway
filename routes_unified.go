@@ -494,6 +494,15 @@ func (g *Gateway) runMeteredCall(sw *statusTrackingWriter, r *http.Request, scop
 		ctx := withAttemptRecorder(r.Context(), func(resp *http.Response, attemptErr error) {
 			g.limiter.recordProviderAttempt(providerName, upstreamModel, resp, attemptErr)
 		})
+		// feat: instrument upstream latency — gated on metricsEnabled so a
+		// deployment with metrics off wires nothing here at all (not even
+		// the closure allocation), one level up from watchdogBody's own
+		// per-Read nil check (timeout.go).
+		if metricsEnabled(g.cfg) {
+			ctx = withLatencyRecorder(ctx, func(sample latencySample) {
+				g.recordLatency(providerName, upstreamModel, sample)
+			})
+		}
 		result, callErr := call(cand.adapter, ctx, respWriter, attemptReq)
 
 		// Request-path health, recorded ONCE per candidate per logical
