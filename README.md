@@ -230,9 +230,9 @@ also a construction error, never a panic (`providers.go`, `mcp_a2a.go`,
 | `type` | `string` | — | Required: `openai`, `anthropic`, or `gemini`. `openai` also serves any OpenAI-wire-compatible provider (Grok, DeepSeek, a local vLLM/Ollama gateway, ...) via `baseUrl`. |
 | `baseUrl` | `string` | Per type: `https://api.openai.com`, `https://api.anthropic.com`, `https://generativelanguage.googleapis.com` | Trailing slash trimmed. |
 | `apiKey` | `string` | — | Secret form: literal, `env:VAR`, or `file:/path` — see [Secret forms](#secret-forms). An `openai`-type provider resolving to an empty key is a valid **keyless** upstream (no `Authorization` header sent) — useful for a local model server with no auth. `anthropic` and `gemini` reject an empty resolved key at construction. |
-| `discoveryInterval` | `string` (Go duration) | `1h` | Only meaningful when `discovery: true`. Invalid duration string is a construction error. |
+| `discoveryInterval` | `string` (Go duration) | `1h` | Minimum time between discovery refreshes for this provider. Only meaningful when `discovery: true`. Refresh is checked on incoming requests, not by a background timer, so this is a floor rather than a schedule — see [Model routing](#model-routing). Invalid duration string is a construction error. |
 | `models` | `[]string` | `[]` | Explicit model ids this provider serves. Combined with any discovered ids. |
-| `discovery` | `bool` | `false` | Pull the provider's own model-listing endpoint at startup and on `discoveryInterval`. A discovery failure is logged and non-fatal; construction still succeeds on `models` alone. |
+| `discovery` | `bool` | `false` | Pull the provider's own model-listing endpoint at startup, then no more often than `discoveryInterval` when requests arrive. A discovery failure is logged and non-fatal; construction still succeeds on `models` alone. |
 | `metadataPath` | `string` | `""` (no metadata capture) | Only read by `openai`-type providers. A second endpoint, fetched alongside `discovery`, that reports per-model context length — for example `/api/v0/models` on an LM Studio server. Must start with `/` when set (checked at construction). See [Model metadata](#model-metadata). |
 | `passthrough` | `*bool` | `nil` (enabled) | `nil` or `true`: this provider's native passthrough route (`/{name}/...`) stays reachable, unchanged from before this field existed. `false`: the route is disabled — `ServeHTTP` treats it exactly like an unconfigured provider name, falling through to the ordinary unknown-route 404 without even reaching authentication. Does not affect the MCP/A2A target proxy, which has its own routing prefix. |
 | `requestTimeout` | `string` (Go duration) | Inherits the top-level `requestTimeout` (`5m` if that is also unset) | Overrides the global request timeout for this provider alone, including its native passthrough route — see [Request timeout](#request-timeout). An explicit override always wins over the global default. Empty inherits; a value that fails to parse, or parses to zero or a negative duration, is a construction error. |
@@ -445,10 +445,31 @@ kept — a bad edit to the file never breaks already-authenticated traffic.
 - **Discovery**: `GET {baseUrl}/v1/models` for an `openai`-type provider,
   `GET {baseUrl}/v1/models` for `anthropic`, `GET {baseUrl}/v1beta/models`
   for `gemini`. Runs once at plugin construction (bounded to 5s per
-  provider) and again on `discoveryInterval` in the background. A failed
+  provider), then again no more often than `discoveryInterval`. A failed
   refresh is logged and keeps the provider's last-known discovered set —
   **stale-while-error**, never an empty list just because one refresh
   attempt failed.
+
+  **Refresh is request-driven, not a background timer.** The plugin runs
+  inside Traefik's own process, so it deliberately starts no periodic
+  ticker of its own: the interval is checked on each incoming request
+  (`ServeHTTP`), and a refresh is spawned only when it has elapsed. Three
+  consequences worth knowing:
+
+  - **An idle gateway never refreshes.** With no traffic at all, the
+    discovered set stays as it was, indefinitely.
+  - **A new model upstream takes up to `discoveryInterval` to appear** —
+    an hour by default. Lower `discoveryInterval` on the providers whose
+    catalogues actually change if you want it sooner; it costs one extra
+    model-listing call per provider per interval.
+  - **There is no manual refresh trigger.** The admin API is read-only
+    (`overview`, `targets`, `usage`, `usage/history`); restarting the
+    plugin is the only way to force discovery immediately.
+
+  This is why `GET /v1/models` can lag a provider that just published a
+  model, and it is behaviour, not a fault. Discovery health itself is
+  visible per provider in the admin dashboard and as
+  `llmgateway_provider_healthy` on `/metrics`.
 
 ## Model aliases
 
