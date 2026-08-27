@@ -351,6 +351,128 @@ func TestModelRegistry_Resolve_ProviderPrefixed_AlwaysReachesLosingProvider(t *t
 	}
 }
 
+// --- resolve: GROUP-AWARE collision precedence (2026-08-27 fix) ---
+
+// TestModelRegistry_Resolve_BareIDCollision_GroupAwareWinner is the exact
+// production repro from the bug report: "alpha" and "zeta" both serve
+// "shared". alpha sorts first, so bareWinner used to pick it globally
+// regardless of the caller — a group authorized ONLY for zeta got
+// errModelDenied for a model it was actually entitled to use, purely
+// because alpha (a provider the group cannot even see) happened to sort
+// earlier. The fix restricts bareWinner's candidate search to providers
+// grp.allowsProvider admits, falling back to the global winner only when
+// none of them qualify.
+// Mutation that must make this test fail: revert bareWinner to its
+// pre-fix, group-blind body (`for _, name := range m.providerNames { if
+// m.states[name].hasModel(id) { return name, true } }`, ignoring grp
+// entirely) — resolve then picks "alpha", grp.allowsProvider("alpha") is
+// false, and this returns errModelDenied instead of serving zeta. Verified:
+// applying that exact revert turns this failure red (errModelDenied, want
+// nil) before restoring the fix.
+func TestModelRegistry_Resolve_BareIDCollision_GroupAwareWinner(t *testing.T) {
+	t.Parallel()
+	adapters := map[string]providerAdapter{
+		"alpha": newFakeAdapter("alpha"),
+		"zeta":  newFakeAdapter("zeta"),
+	}
+	cfg := &Config{Providers: map[string]*ProviderConfig{
+		"alpha": {Models: []string{"shared"}},
+		"zeta":  {Models: []string{"shared"}},
+	}}
+	reg, err := newModelRegistry(adapters, cfg, func(string, ...any) {})
+	if err != nil {
+		t.Fatalf("newModelRegistry: %v", err)
+	}
+
+	grp := &group{name: "friends", providers: []string{"zeta"}}
+	adapter, upstreamModel, canonical, err := reg.resolve("shared", grp)
+	if err != nil {
+		t.Fatalf("resolve: %v, want success (zeta serves \"shared\" and this group may use zeta)", err)
+	}
+	if adapter != adapters["zeta"] {
+		t.Errorf("adapter = %v, want zeta", adapter)
+	}
+	if upstreamModel != "shared" {
+		t.Errorf("upstreamModel = %q, want %q", upstreamModel, "shared")
+	}
+	if canonical != "zeta/shared" {
+		t.Errorf("canonical = %q, want %q", canonical, "zeta/shared")
+	}
+}
+
+// TestModelRegistry_Resolve_BareIDCollision_BothAllowed_MatchesGlobalWinner
+// is the required non-regression: a group explicitly authorized for BOTH
+// colliding providers must resolve to the exact same provider it did
+// before this fix — the sorted-first one, "alpha" — with no behavior
+// change at all for a caller who could already reach today's global
+// winner.
+// Mutation that must make this test fail: reverse bareWinner's provider
+// iteration order (`for i := len(m.providerNames) - 1; i >= 0; i--`) —
+// this group can reach both providers, so the now-sorted-last provider
+// "zeta" would win instead of "alpha". Verified: applying that reversal
+// turns this failure red (adapter = zeta, want alpha) before restoring
+// the fix.
+func TestModelRegistry_Resolve_BareIDCollision_BothAllowed_MatchesGlobalWinner(t *testing.T) {
+	t.Parallel()
+	adapters := map[string]providerAdapter{
+		"alpha": newFakeAdapter("alpha"),
+		"zeta":  newFakeAdapter("zeta"),
+	}
+	cfg := &Config{Providers: map[string]*ProviderConfig{
+		"alpha": {Models: []string{"shared"}},
+		"zeta":  {Models: []string{"shared"}},
+	}}
+	reg, err := newModelRegistry(adapters, cfg, func(string, ...any) {})
+	if err != nil {
+		t.Fatalf("newModelRegistry: %v", err)
+	}
+
+	grp := &group{name: "both", providers: []string{"alpha", "zeta"}}
+	adapter, _, canonical, err := reg.resolve("shared", grp)
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if adapter != adapters["alpha"] {
+		t.Errorf("adapter = %v, want alpha (sorted-first, unchanged from today)", adapter)
+	}
+	if canonical != "alpha/shared" {
+		t.Errorf("canonical = %q, want %q", canonical, "alpha/shared")
+	}
+}
+
+// TestModelRegistry_Resolve_BareIDCollision_NeitherAllowed_SameDenialAsToday
+// covers the other required non-regression: a group authorized for
+// NEITHER colliding provider must still get errModelDenied — the same
+// sentinel a known-but-unauthorized model returns today — never the wrong
+// errModelUnknown a "no owner found" result would produce.
+// Mutation that must make this test fail: make bareWinner return ("",
+// false) when grp allows none of id's owners, instead of falling back to
+// the global sorted-first owner — resolve's `if !ok { return ...,
+// errModelUnknown }` branch then fires, and this test's errModelDenied
+// assertion fails against the wrong sentinel. Verified: that change turns
+// this failure red (err = errModelUnknown, want errModelDenied) before
+// restoring the fallback.
+func TestModelRegistry_Resolve_BareIDCollision_NeitherAllowed_SameDenialAsToday(t *testing.T) {
+	t.Parallel()
+	adapters := map[string]providerAdapter{
+		"alpha": newFakeAdapter("alpha"),
+		"zeta":  newFakeAdapter("zeta"),
+	}
+	cfg := &Config{Providers: map[string]*ProviderConfig{
+		"alpha": {Models: []string{"shared"}},
+		"zeta":  {Models: []string{"shared"}},
+	}}
+	reg, err := newModelRegistry(adapters, cfg, func(string, ...any) {})
+	if err != nil {
+		t.Fatalf("newModelRegistry: %v", err)
+	}
+
+	grp := &group{name: "outsiders", providers: []string{"unrelated"}}
+	if _, _, _, err := reg.resolve("shared", grp); err != errModelDenied {
+		t.Errorf("err = %v, want errModelDenied", err)
+	}
+}
+
 // --- newModelRegistry construction ---
 
 func TestNewModelRegistry_InvalidDiscoveryInterval_ReturnsConstructorError(t *testing.T) {
@@ -869,7 +991,18 @@ func TestModelRegistry_ListFor_Collision_LogsWarningOnceRegardlessOfCallCount(t 
 	}
 }
 
-func TestModelRegistry_ListFor_Collision_LosingProviderStillReachableViaPrefixedForm(t *testing.T) {
+// TestModelRegistry_ListFor_Collision_SingleVisibleProviderGetsBareID is
+// the group-aware listing fix (2026-08-27): "alpha" and "beta" both serve
+// "shared", but a group that may only reach "beta" sees no reason to know
+// "alpha" exists at all. Before the fix, listFor always computed the bare
+// id's owner from the GLOBAL sorted-first provider ("alpha" here) and
+// only fell back to a "provider/id"-prefixed entry for a group that could
+// not use it — so this exact group saw "beta/shared", a prefix that
+// disambiguates against a provider it can never see in the first place.
+// Mutation that must make this test fail: revert listFor's winner
+// selection to the unconditional `winner := provs[0]` global choice (this
+// commit's registry.go diff) — the entry becomes "beta/shared" again.
+func TestModelRegistry_ListFor_Collision_SingleVisibleProviderGetsBareID(t *testing.T) {
 	t.Parallel()
 	adapters := map[string]providerAdapter{
 		"beta":  newFakeAdapter("beta"),
@@ -889,8 +1022,65 @@ func TestModelRegistry_ListFor_Collision_LosingProviderStillReachableViaPrefixed
 	if len(got) != 1 {
 		t.Fatalf("listFor = %v, want exactly 1 entry", got)
 	}
-	if got[0]["id"] != "beta/shared" || got[0]["owned_by"] != "beta" {
-		t.Errorf("entry = %v, want {id:beta/shared, owned_by:beta}", got[0])
+	if got[0]["id"] != "shared" || got[0]["owned_by"] != "beta" {
+		t.Errorf("entry = %v, want {id:shared, owned_by:beta} (bare, not prefixed)", got[0])
+	}
+}
+
+// TestModelRegistry_ListFor_Collision_TwoVisibleProvidersKeepBothPrefixedForms
+// covers the OTHER half of the same fix: when a group can see two or more
+// of an id's owning providers, the collision is real FROM THAT GROUP'S OWN
+// VIEW, so both "provider/id" forms stay listed (letting the group reach
+// either explicitly) alongside a bare-id entry attributed to whichever of
+// the group's own visible providers sorts first — "alpha" is configured
+// but invisible to this group entirely and must not appear anywhere in the
+// output, including as the bare id's owner.
+// Mutation that must make this test fail: change listFor's prefixed-form
+// gate back to the global `len(provs) < 2` (this commit's registry.go
+// diff) — with alpha invisible but still counted, the gate does not
+// change here (provs already has 2 entries either way), so instead mutate
+// the winner used for the bare entry back to the unconditional
+// `provs[0]` — the bare entry's owned_by becomes "alpha", a provider this
+// group is never authorized to reach.
+func TestModelRegistry_ListFor_Collision_TwoVisibleProvidersKeepBothPrefixedForms(t *testing.T) {
+	t.Parallel()
+	adapters := map[string]providerAdapter{
+		"gamma": newFakeAdapter("gamma"),
+		"beta":  newFakeAdapter("beta"),
+		"alpha": newFakeAdapter("alpha"),
+	}
+	cfg := &Config{Providers: map[string]*ProviderConfig{
+		"gamma": {Models: []string{"shared"}},
+		"beta":  {Models: []string{"shared"}},
+		"alpha": {Models: []string{"shared"}},
+	}}
+	reg, err := newModelRegistry(adapters, cfg, func(string, ...any) {})
+	if err != nil {
+		t.Fatalf("newModelRegistry: %v", err)
+	}
+
+	// alpha sorts first globally but is invisible to this group.
+	grp := &group{name: "beta-and-gamma", providers: []string{"beta", "gamma"}}
+	got := reg.listFor(grp)
+
+	byID := make(map[string]map[string]any, len(got))
+	for _, entry := range got {
+		byID[entry["id"].(string)] = entry
+	}
+	if len(got) != 3 {
+		t.Fatalf("listFor = %v, want exactly 3 entries (bare + 2 prefixed)", got)
+	}
+	if entry, ok := byID["shared"]; !ok || entry["owned_by"] != "beta" {
+		t.Errorf("bare entry = %v, want owned_by beta (sorted-first of the group's OWN visible providers)", entry)
+	}
+	if entry, ok := byID["beta/shared"]; !ok || entry["owned_by"] != "beta" {
+		t.Errorf("beta/shared entry = %v, want owned_by beta", entry)
+	}
+	if entry, ok := byID["gamma/shared"]; !ok || entry["owned_by"] != "gamma" {
+		t.Errorf("gamma/shared entry = %v, want owned_by gamma", entry)
+	}
+	if _, ok := byID["alpha/shared"]; ok {
+		t.Errorf("listFor = %v, must never list alpha/shared: alpha is invisible to this group", got)
 	}
 }
 
@@ -1270,6 +1460,52 @@ func TestModelRegistry_Resolve_Alias_BareTarget_ResolvesViaCollisionWinner(t *te
 	}
 	if canonical != "alpha/shared" {
 		t.Errorf("canonical = %q, want %q", canonical, "alpha/shared")
+	}
+}
+
+// TestModelRegistry_Resolve_Alias_BareTarget_GroupAwareWinner is the alias
+// path's counterpart to TestModelRegistry_Resolve_BareIDCollision_
+// GroupAwareWinner (2026-08-27 fix): resolveAliasTarget's own bareWinner
+// call must apply the identical group-aware collision rule the direct
+// bare-id path does, not the pre-fix, group-blind one — the brief
+// explicitly calls out this call site since it is easy to fix bareWinner
+// itself and forget one of its two callers.
+// Mutation that must make this test fail: hardcode resolveAliasTarget's
+// `m.bareWinner(target, grp)` call to pass `&group{}` (allow-all) instead
+// of the real grp — resolveAliasTarget would then always prefer "alpha"
+// (the global winner) regardless of what this group may use, and this
+// test's zeta assertion fails. Verified: that change turns this failure
+// red (adapter = alpha, want zeta; also errModelDenied surfaces once
+// resolveAgainst's own provider check runs against alpha) before
+// restoring the real grp parameter.
+func TestModelRegistry_Resolve_Alias_BareTarget_GroupAwareWinner(t *testing.T) {
+	t.Parallel()
+	adapters := map[string]providerAdapter{
+		"alpha": newFakeAdapter("alpha"),
+		"zeta":  newFakeAdapter("zeta"),
+	}
+	cfg := &Config{
+		Providers: map[string]*ProviderConfig{
+			"alpha": {Models: []string{"shared"}},
+			"zeta":  {Models: []string{"shared"}},
+		},
+		ModelAliases: map[string]string{"aliased/x": "shared"},
+	}
+	reg, err := newModelRegistry(adapters, cfg, func(string, ...any) {})
+	if err != nil {
+		t.Fatalf("newModelRegistry: %v", err)
+	}
+
+	grp := &group{name: "friends", providers: []string{"zeta"}}
+	adapter, _, canonical, err := reg.resolve("aliased/x", grp)
+	if err != nil {
+		t.Fatalf("resolve: %v, want success via the alias's group-visible target provider", err)
+	}
+	if adapter != adapters["zeta"] {
+		t.Errorf("adapter = %v, want zeta", adapter)
+	}
+	if canonical != "zeta/shared" {
+		t.Errorf("canonical = %q, want %q", canonical, "zeta/shared")
 	}
 }
 

@@ -1089,14 +1089,39 @@ func (m *modelRegistry) splitConfiguredProvider(id string) (providerName, rest s
 
 // bareWinner returns the provider that owns bare id when more than one
 // provider's known model set contains it: the first, in sorted
-// provider-name order (ruling (g)).
-func (m *modelRegistry) bareWinner(id string) (string, bool) {
+// provider-name order, among providers grp is authorized to use (ruling
+// (g), revised 2026-08-27 — bareWinner used to ignore grp entirely and
+// always return the GLOBAL sorted-first owning provider, so a caller was
+// denied a model they were actually entitled to whenever some OTHER,
+// group-invisible provider happened to sort earlier and also served that
+// id). grp.allowsModel is NOT consulted here — only allowsProvider; model-
+// level authorization still happens once, in resolveAgainst, against
+// whichever provider this returns.
+//
+// When grp allows none of id's owning providers, this still returns the
+// GLOBAL sorted-first owner with ok true, exactly as the pre-fix version
+// always did, rather than reporting "not found": id is still a genuinely
+// known model, just not one this group may reach, and the caller
+// (resolveAgainst) must see it as known-but-denied (errModelDenied) —
+// the same outcome grp got before this fix — not the wrong
+// errModelUnknown a "no visible owner" result would produce.
+//
+// Single pass, same O(providerNames) bound as before: the fallback and the
+// grp-preferred search share one loop instead of two.
+func (m *modelRegistry) bareWinner(id string, grp *group) (string, bool) {
+	fallback, fallbackOK := "", false
 	for _, name := range m.providerNames {
-		if m.states[name].hasModel(id) {
+		if !m.states[name].hasModel(id) {
+			continue
+		}
+		if !fallbackOK {
+			fallback, fallbackOK = name, true
+		}
+		if grp.allowsProvider(name) {
 			return name, true
 		}
 	}
-	return "", false
+	return fallback, fallbackOK
 }
 
 // resolve maps a client-requested model id to the adapter that serves it.
@@ -1119,9 +1144,12 @@ func (m *modelRegistry) bareWinner(id string) (string, bool) {
 //
 // id in "provider/model" form (ruling (a): only when "provider" names a
 // configured provider) resolves directly against that provider. Any other
-// id is a bare id, resolved against the first configured provider (sorted
-// name order) whose known model set contains it — ruling (g)'s collision
-// rule. Either way, authorization requires both grp.allowsModel and
+// id is a bare id, resolved against the first provider — in sorted name
+// order, among providers grp is authorized to use, falling back to the
+// global sorted-first owner only when grp is authorized for none of them
+// (bareWinner's own doc comment) — whose known model set contains it,
+// ruling (g)'s collision rule as revised 2026-08-27 for group-awareness.
+// Either way, authorization requires both grp.allowsModel and
 // grp.allowsProvider for the resolved provider (ruling (c)); a model that
 // exists but fails authorization returns errModelDenied, distinct from
 // errModelUnknown for a model no configured provider knows at all.
@@ -1132,8 +1160,14 @@ func (m *modelRegistry) resolve(id string, grp *group) (providerAdapter, string,
 		// alias would otherwise pay it just to decide not to log again.
 		// Once warned, this collapses to one cheap mutex-guarded map
 		// lookup per request instead.
+		//
+		// grp is passed through here too even though this call only uses
+		// the boolean "does id collide at all" — bareWinner's ok result is
+		// group-independent (it falls back to the global owner rather than
+		// reporting not-found when grp allows none of them), so this stays
+		// the same collision signal it always was.
 		if !m.aliasShadowWarned(id) {
-			if _, discoveredCollision := m.bareWinner(id); discoveredCollision {
+			if _, discoveredCollision := m.bareWinner(id, grp); discoveredCollision {
 				m.warnAliasShadowsDiscoveredOnce(id)
 			}
 		}
@@ -1142,7 +1176,7 @@ func (m *modelRegistry) resolve(id string, grp *group) (providerAdapter, string,
 	if providerName, rest, ok := m.splitConfiguredProvider(id); ok {
 		return m.resolveAgainst(providerName, rest, id, "", grp, errModelUnknown)
 	}
-	providerName, ok := m.bareWinner(id)
+	providerName, ok := m.bareWinner(id, grp)
 	if !ok {
 		return nil, "", "", errModelUnknown
 	}
@@ -1190,7 +1224,7 @@ func (m *modelRegistry) resolveAliasTarget(alias, target string, grp *group) (pr
 	if providerName, rest, ok := m.splitConfiguredProvider(target); ok {
 		return m.resolveAgainst(providerName, rest, target, alias, grp, notFound)
 	}
-	providerName, ok := m.bareWinner(target)
+	providerName, ok := m.bareWinner(target, grp)
 	if !ok {
 		return nil, "", "", notFound
 	}
@@ -1297,6 +1331,24 @@ func (m *modelRegistry) resolveAgainst(providerName, upstreamModel, requestedID,
 // warnCollisionOnce logs, at most once per colliding bare id for this
 // registry's lifetime, that provs (sorted) all provide id and winner owns
 // its bare form.
+//
+// Decision (2026-08-27, group-aware bare-winner fix): stays keyed on the
+// GLOBAL owner set and the global sorted-first winner, not narrowed per
+// calling group, even though bareWinner (above) now prefers a
+// group-visible owner over this global one when resolving an actual
+// request. A provider collision on one model id is a fact about the
+// fleet's configuration — two providers were pointed at the same upstream
+// model — true and worth an operator's attention regardless of which
+// group's request happens to trigger listFor first. Narrowing this to
+// what one group can see would either (a) log the same underlying
+// collision repeatedly, once per differently-scoped group, forcing an
+// operator to de-duplicate by hand, or (b) suppress it entirely for any
+// collision no single group can see both sides of, hiding a real
+// configuration duplicate from the operator who needs to see it to fix
+// it (rename one provider's model, or accept the collision knowingly).
+// The log message is worded below to say winner is only the global
+// default, since a given group's own request may now resolve to a
+// different provider than winner.
 func (m *modelRegistry) warnCollisionOnce(id, winner string, provs []string) {
 	m.warnedMu.Lock()
 	defer m.warnedMu.Unlock()
@@ -1304,7 +1356,7 @@ func (m *modelRegistry) warnCollisionOnce(id, winner string, provs []string) {
 		return
 	}
 	m.warned[id] = true
-	m.warnf(fmt.Sprintf("model registry: model id %q is provided by multiple providers %v; %q wins the bare id", id, provs, winner))
+	m.warnf(fmt.Sprintf("model registry: model id %q is provided by multiple providers %v; %q is the global bare-id winner (a caller's group may instead be routed to whichever of these providers it is authorized to use)", id, provs, winner))
 }
 
 // warnf writes msg through the warn field, falling back to log when no
@@ -1378,13 +1430,19 @@ func (m *modelRegistry) modelsJSON(grp *group) []byte {
 
 // listFor returns grp's visible model catalog as OpenAI-compatible model
 // objects ({"id","object":"model","owned_by"}), sorted by id. A bare id
-// owned by only one provider is listed once, bare. A bare id owned by more
-// than one provider (ruling (g)/(h)) is listed once bare — under its
-// collision winner — plus once more per owning provider in "provider/id"
+// owned by only one provider grp can see is listed once, bare. A bare id
+// owned by more than one provider grp can see (ruling (g)/(h), revised
+// 2026-08-27 for group-awareness) is listed once bare — under the
+// sorted-first of THOSE group-visible owners, not the global sorted-first
+// owner — plus once more per group-visible owning provider in "provider/id"
 // form, so every provider's copy stays reachable through explicit
-// addressing even when it lost the bare-id collision. Each listed entry is
-// independently filtered by grp.allowsModel and grp.allowsProvider for the
-// provider it names.
+// addressing even when it lost the bare-id collision. A provider grp
+// cannot use is never a candidate for the bare id and never gets a
+// "provider/id" entry either: a prefix that only disambiguates against an
+// invisible provider is noise, not information, to this group. Each listed
+// entry is independently filtered by grp.allowsModel; grp.allowsProvider
+// filtering happens once, up front, when the group-visible owner subset is
+// built, rather than per candidate entry.
 func (m *modelRegistry) listFor(grp *group) []map[string]any {
 	owners := make(map[string][]string)
 	for _, name := range m.providerNames {
@@ -1402,22 +1460,44 @@ func (m *modelRegistry) listFor(grp *group) []map[string]any {
 	// from the listing entirely (neither the real entry nor the alias
 	// appeared), even though resolve still serves it through the alias.
 	listed := make(map[string]bool, len(owners))
+	visible := make([]string, 0, 4) // reused per id; provs is at most len(m.providerNames) long
 	for id, provs := range owners {
-		winner := provs[0]
-		if grp.allowsModel(id) && grp.allowsProvider(winner) {
-			out = append(out, modelObject(id, winner, m.resolveMetaFor(winner, id)))
+		// warnCollisionOnce stays keyed on the GLOBAL owner set, not grp's
+		// view of it (decision, see registry.go's collision-logging note
+		// below resolveAgainst): a config collision is a fact about the
+		// fleet, true regardless of which group happens to list models
+		// first, and operators need one stable signal to act on rather
+		// than a different, group-shaped warning per requester.
+		if len(provs) >= 2 {
+			m.warnCollisionOnce(id, provs[0], provs)
+		}
+
+		visible = visible[:0]
+		for _, p := range provs {
+			if grp.allowsProvider(p) {
+				visible = append(visible, p) // provs is sorted, so visible stays sorted too
+			}
+		}
+		if len(visible) == 0 {
+			continue // grp cannot reach any provider serving id at all
+		}
+
+		groupWinner := visible[0]
+		if grp.allowsModel(id) {
+			out = append(out, modelObject(id, groupWinner, m.resolveMetaFor(groupWinner, id)))
 			listed[id] = true
 		}
-		if len(provs) < 2 {
-			continue
+		if len(visible) < 2 {
+			continue // only one provider serving id is visible to grp: no disambiguating prefix to add
 		}
-		m.warnCollisionOnce(id, winner, provs)
-		for _, p := range provs {
+		for _, p := range visible {
 			pid := p + "/" + id
 			// allowsModel does no prefix-stripping (auth.go): check both the
 			// prefixed form and its bare suffix, same as resolveAgainst does
-			// for the equivalent client request.
-			if (grp.allowsModel(pid) || grp.allowsModel(id)) && grp.allowsProvider(p) {
+			// for the equivalent client request. allowsProvider(p) is already
+			// established by p's membership in visible, so it is not
+			// re-checked per candidate here.
+			if grp.allowsModel(pid) || grp.allowsModel(id) {
 				out = append(out, modelObject(pid, p, m.resolveMetaFor(p, id)))
 				listed[pid] = true
 			}

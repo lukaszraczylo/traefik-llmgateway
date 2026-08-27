@@ -491,6 +491,32 @@ func run() error {
 	}))
 	defer failoverBUpstream.Close()
 
+	// bareWinnerAUpstream/bareWinnerBUpstream back exerciseBareWinnerGroupAware
+	// (fix/group-aware-bare-winner, 2026-08-27): two providers configured
+	// with the IDENTICAL bare model id (bareWinnerModelID) — the same
+	// collision shape failoverAUpstream/failoverBUpstream above drive, but
+	// exercising the bareWinner AUTHORIZATION fix, not failover. A must
+	// NEVER be hit: bareWinnerGroupName can only use "bare-winner-b", so a
+	// correct group-aware bareWinner never even considers "bare-winner-a"
+	// as a candidate for this group's request, unlike a failover fall-
+	// through (which WOULD hit A first). bareWinnerAHits catches a
+	// regression back to the pre-fix, group-blind selection, which would
+	// route here and get an error response instead of the expected 200.
+	bareWinnerAHits := new(int64)
+	bareWinnerAUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt64(bareWinnerAHits, 1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":{"message":"bare-winner-a must never be reached by bareWinnerGroupName","type":"server_error"}}`))
+	}))
+	defer bareWinnerAUpstream.Close()
+	bareWinnerBUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"id":"c-bare-winner","object":"chat.completion","model":"` + bareWinnerModelID + `","choices":[{"index":0,"message":{"role":"assistant","content":"served by bare-winner-b"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`))
+	}))
+	defer bareWinnerBUpstream.Close()
+
 	// failover.enabled must be set explicitly here: FailoverConfig.Enabled
 	// defaults to false (coordinator ruling — a version upgrade with no
 	// config change must preserve prior behavior), so without this the
@@ -533,7 +559,19 @@ func run() error {
 		// callAnthropicMessagesPassthrough.
 		`"anthropic":{"type":"anthropic","baseUrl":"` + anthropicProbeUpstream.URL + `","apiKey":"sk-anth","models":["claude-test"]},` + // #nosec G101 -- test fixture literal, not a real credential
 		`"failover-a":{"type":"openai","baseUrl":"` + failoverAUpstream.URL + `","apiKey":"sk-up","models":["` + failoverModelID + `"]},` +
-		`"failover-b":{"type":"openai","baseUrl":"` + failoverBUpstream.URL + `","apiKey":"sk-up","models":["` + failoverModelID + `"]}},` +
+		`"failover-b":{"type":"openai","baseUrl":"` + failoverBUpstream.URL + `","apiKey":"sk-up","models":["` + failoverModelID + `"]},` +
+		// bareWinnerModelID's own const doc comment (above) has the full
+		// account of why "bare-winner-a"/"bare-winner-b" exist alongside
+		// failover-a/failover-b: same collision shape, different fix under
+		// test.
+		`"bare-winner-a":{"type":"openai","baseUrl":"` + bareWinnerAUpstream.URL + `","apiKey":"sk-up","models":["` + bareWinnerModelID + `"]},` +
+		`"bare-winner-b":{"type":"openai","baseUrl":"` + bareWinnerBUpstream.URL + `","apiKey":"sk-up","models":["` + bareWinnerModelID + `"]}},` +
+		// groups: ADDS bareWinnerGroupName to the map Unmarshal already
+		// populated from .traefik.yml's own testData.groups.default — map
+		// keys merge (run()'s own doc comment, above, on why "brk" and the
+		// other new provider keys above are additive rather than
+		// replacing), so "default" (providers: [], allow-all) is untouched.
+		`"groups":{"` + bareWinnerGroupName + `":{"providers":["bare-winner-b"]}},` +
 		// modelMeta (feature v0.23): a config-override entry for
 		// testDataWantModel, so exerciseHandler's GET /v1/models
 		// assertion below proves resolveModelMeta's config-override
@@ -564,7 +602,12 @@ func run() error {
 		// still renders a real (zero-traffic) llmgateway_requests_total
 		// series, since writeUsageMetrics (metrics.go) lists every
 		// active user regardless of traffic.
-		`"admin":{"enabled":true},"users":{"inline":[{"name":"tester","group":"default","apiKey":"` + testDataUserAPIKey + `"},{"name":"admin1","group":"default","apiKey":"` + attemptAccountingAdminAPIKey + `","admin":true},{"name":` + string(trickyNameJSON) + `,"group":"default","apiKey":"sk-tricky"}]}}`
+		//
+		// The fourth inline user (bareWinnerFriendAPIKey) is
+		// exerciseBareWinnerGroupAware's own — group bareWinnerGroupName,
+		// authorized for "bare-winner-b" only (the "groups" override
+		// above).
+		`"admin":{"enabled":true},"users":{"inline":[{"name":"tester","group":"default","apiKey":"` + testDataUserAPIKey + `"},{"name":"admin1","group":"default","apiKey":"` + attemptAccountingAdminAPIKey + `","admin":true},{"name":` + string(trickyNameJSON) + `,"group":"default","apiKey":"sk-tricky"},{"name":"bare-winner-friend","group":"` + bareWinnerGroupName + `","apiKey":"` + bareWinnerFriendAPIKey + `"}]}}`
 	if err = json.Unmarshal([]byte(attemptAccountingOverride), cfgVal.Interface()); err != nil {
 		return fmt.Errorf("decode attempt-accounting harness override into the interpreted Config: %w", err)
 	}
@@ -600,6 +643,16 @@ func run() error {
 	}
 
 	if err := exerciseHandler(handler, builtinLookupContextTokens, failoverBHits); err != nil {
+		return err
+	}
+	// exerciseBareWinnerGroupAware (fix/group-aware-bare-winner,
+	// 2026-08-27) runs right after exerciseHandler and before
+	// exerciseBreaker: it drives its own, freshly named providers and
+	// model id (bareWinnerModelID's own doc comment above), so it cannot
+	// perturb exerciseBreaker's "brk"-specific hit counting or any later
+	// probe's /metrics assertions, which are all keyed to OTHER provider/
+	// model names.
+	if err := exerciseBareWinnerGroupAware(handler, bareWinnerAHits); err != nil {
 		return err
 	}
 	// exerciseBreaker (feat/provider-health, adversarial-review round 2):
@@ -655,6 +708,31 @@ const builtinLookupModelID = "gpt-4o"
 // (run(), above) are configured with — the run()-owned upstream servers
 // exerciseFailover (below) drives.
 const failoverModelID = "failover-shared"
+
+// bareWinnerModelID is the bare model id both "bare-winner-a" and
+// "bare-winner-b" (run(), above) are configured with — deliberately the
+// identical collision SHAPE as failoverModelID above, but exercising
+// registry.go's bareWinner AUTHORIZATION fix (2026-08-27) rather than
+// failover: bareWinnerGroupName (below) is authorized for "bare-winner-b"
+// only, yet "bare-winner-a" sorts first alphabetically. Before the fix,
+// bareWinner always returned the GLOBAL sorted-first owner regardless of
+// the caller, so this exact group got errModelDenied for a model it was
+// actually entitled to use — the production repro this whole fix exists
+// for (uni/macstudio serving text-embedding-multilingual-e5-base, the
+// "friends" group entitled to uni but denied because macstudio sorts
+// first). exerciseBareWinnerGroupAware (below) proves the fix resolves
+// and serves under the REAL interpreter, not merely compiled.
+const bareWinnerModelID = "bare-winner-shared"
+
+// bareWinnerGroupName is the group exerciseBareWinnerGroupAware
+// authenticates as: authorized for "bare-winner-b" only (run()'s "groups"
+// override), never "bare-winner-a" — see bareWinnerModelID's own doc
+// comment for why that specific asymmetry is the point.
+const bareWinnerGroupName = "bare-winner-friends"
+
+// bareWinnerFriendAPIKey authenticates bareWinnerGroupName's one inline
+// user (run()'s "users" override).
+const bareWinnerFriendAPIKey = "sk-bare-winner-friend" // #nosec G101 -- test fixture literal, not a real credential
 
 // mcpProbeServerName is the federated MCP server run() configures against
 // mcpProbeUpstream, and mcpProbeToolName is a tool id carrying its
@@ -1734,6 +1812,89 @@ func exerciseFailover(handler http.Handler, bHits *int64) error {
 		return fmt.Errorf("feat/failover harness: failover-b upstream hit count = %d, want exactly 1", atomic.LoadInt64(bHits))
 	}
 	fmt.Println("yaegi-check: failover fell through from failover-a to failover-b and served its response")
+	return nil
+}
+
+// exerciseBareWinnerGroupAware proves registry.go's group-aware bareWinner
+// fix (2026-08-27) under the REAL interpreter: "bare-winner-a" and
+// "bare-winner-b" both serve bareWinnerModelID; bareWinnerGroupName may
+// use "bare-winner-b" only, yet "bare-winner-a" sorts first
+// alphabetically. Before the fix, resolve's bareWinner call always
+// returned the GLOBAL sorted-first owner regardless of the caller's
+// group, so this exact request got errModelDenied for a model the group
+// was actually entitled to use — this is the production repro the fix
+// exists for (bug report: "friends" group entitled to "uni", denied a
+// bare id because "macstudio" sorts first and also serves it).
+//
+// Unlike exerciseFailover (immediately above, same colliding-bare-id
+// shape): a correct group-aware bareWinner never even CONSIDERS
+// "bare-winner-a" as a candidate for this group's request — it is not a
+// failover fall-through after a failed attempt. aHits staying at 0 proves
+// that: a pre-fix, group-blind bareWinner would route here first, and
+// "bare-winner-a"'s upstream (run(), above) answers 500 with a body
+// naming the exact wrong outcome, so a regression is unambiguous either
+// way (aHits != 0, or a non-200 status, or the wrong response body).
+//
+// MUTATION VERIFIED: temporarily reverting bareWinner (registry.go) to
+// its pre-fix, group-blind body (ignore grp entirely, always return the
+// first provider in m.providerNames whose known model set contains id)
+// made this fail with "status = 403" (errModelDenied) — bareWinnerGroupName
+// cannot use "bare-winner-a", the pre-fix global winner. Reverted before
+// committing.
+func exerciseBareWinnerGroupAware(handler http.Handler, aHits *int64) error {
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(
+		`{"model":"`+bareWinnerModelID+`","messages":[{"role":"user","content":"hi"}]}`,
+	))
+	req.Header.Set("Authorization", "Bearer "+bareWinnerFriendAPIKey)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		return fmt.Errorf("POST /v1/chat/completions (fix/group-aware-bare-winner harness): status = %d, want 200 (%s is entitled to \"bare-winner-b\", which serves the bare id), body=%s", rec.Code, bareWinnerGroupName, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "served by bare-winner-b") {
+		return fmt.Errorf("POST /v1/chat/completions (fix/group-aware-bare-winner harness): body does not contain bare-winner-b's own content, want the group-visible provider's response: %s", rec.Body.String())
+	}
+	if got := atomic.LoadInt64(aHits); got != 0 {
+		return fmt.Errorf("fix/group-aware-bare-winner harness: bare-winner-a upstream hit count = %d, want exactly 0 (%s can never reach bare-winner-a)", got, bareWinnerGroupName)
+	}
+
+	// GET /v1/models, same group: listFor's own half of the fix
+	// (registry.go) — the bare id must be attributed to "bare-winner-b"
+	// (the group's own visible winner), and "bare-winner-a" must never
+	// appear anywhere in this group's catalog, bare or prefixed.
+	listReq := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	listReq.Header.Set("Authorization", "Bearer "+bareWinnerFriendAPIKey)
+	listRec := httptest.NewRecorder()
+	handler.ServeHTTP(listRec, listReq)
+	if listRec.Code != http.StatusOK {
+		return fmt.Errorf("GET /v1/models (fix/group-aware-bare-winner harness): status = %d, want 200, body=%s", listRec.Code, listRec.Body.String())
+	}
+	if strings.Contains(listRec.Body.String(), "bare-winner-a") {
+		return fmt.Errorf("GET /v1/models (fix/group-aware-bare-winner harness): body names bare-winner-a, want it invisible to %s entirely: %s", bareWinnerGroupName, listRec.Body.String())
+	}
+	var listBody struct {
+		Data []map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal(listRec.Body.Bytes(), &listBody); err != nil {
+		return fmt.Errorf("decode GET /v1/models body (fix/group-aware-bare-winner harness): %w (body=%s)", err, listRec.Body.String())
+	}
+	found := false
+	for _, entry := range listBody.Data {
+		if entry["id"] != bareWinnerModelID {
+			continue
+		}
+		found = true
+		if entry["owned_by"] != "bare-winner-b" {
+			return fmt.Errorf("GET /v1/models entry %v: owned_by = %v, want %q (this group's own visible winner)", entry, entry["owned_by"], "bare-winner-b")
+		}
+	}
+	if !found {
+		return fmt.Errorf("GET /v1/models body has no bare entry for %q: %s", bareWinnerModelID, listRec.Body.String())
+	}
+
+	fmt.Println("yaegi-check: group-aware bareWinner resolved and listed bare-winner-shared via bare-winner-b, never touching bare-winner-a")
 	return nil
 }
 
