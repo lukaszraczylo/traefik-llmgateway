@@ -550,7 +550,7 @@ func (g *Gateway) runMeteredCall(sw *statusTrackingWriter, r *http.Request, scop
 				result.estimated = true
 			}
 		}
-		g.limiter.account(scopes, result, unifiedCostMicros(cand.canonical, cand.upstreamModel, result, g.cfg.Pricing))
+		g.limiter.account(withModelScope(scopes, cand.canonical), result, unifiedCostMicros(cand.canonical, cand.upstreamModel, result, g.cfg.Pricing))
 		if result.estimated {
 			g.logf("%s: usage for model %q logged as estimated (%d prompt tokens derived from request body size, not the provider's reported usage)", logPrefix, cand.canonical, result.prompt)
 		}

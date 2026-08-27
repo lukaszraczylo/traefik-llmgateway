@@ -6,11 +6,11 @@ import { Bar } from 'vue-chartjs'
 import '@/lib/chart-setup'
 import { useThemeColors } from '@/composables/useThemeColors'
 import { formatBucketLabel, formatCompactCount, formatExactInt } from '@/lib/format'
-import type { ChartTab } from '@/stores/history'
+import type { TimeSeriesTab } from '@/stores/history'
 import type { HistoryMetric, HistoryWindow, UsageHistoryPoint } from '@/types/api'
 
 const props = defineProps<{
-  tab: ChartTab
+  tab: TimeSeriesTab
   window: HistoryWindow
   seriesByMetric: Partial<Record<HistoryMetric, UsageHistoryPoint[]>>
 }>()
@@ -18,7 +18,7 @@ const props = defineProps<{
 const { foreground, mutedForeground, border } = useThemeColors()
 
 /** One dataset spec per tab: which metric(s), its label, and its token color. */
-const DATASET_SPECS: Record<ChartTab, { metric: HistoryMetric; label: string; color: string }[]> = {
+const DATASET_SPECS: Record<TimeSeriesTab, { metric: HistoryMetric; label: string; color: string }[]> = {
   requests: [{ metric: 'req', label: 'Requests', color: '--chart-requests' }],
   tokens: [
     { metric: 'tokin', label: 'Tokens in', color: '--chart-tokens-in' },

@@ -281,6 +281,34 @@ export interface UsageHistoryResponse {
   points: UsageHistoryPoint[]
 }
 
+/**
+ * One ranked model in GET /admin/api/usage/models (admin.go:
+ * adminUsageModelEntryView). `id` is the canonical "provider/model" — the
+ * provider that actually SERVED the traffic, which is why a failover
+ * target and its primary appear as two separate rows.
+ */
+export interface AdminUsageModelEntry {
+  id: string
+  value: number
+}
+
+/**
+ * GET /admin/api/usage/models (admin.go: adminUsageModelsResponse) — the
+ * model ranking behind the Charts view's "Models" tab, and the source of
+ * the scope picker's model list.
+ *
+ * ONLY MODELS WITH NON-ZERO USAGE ARE RETURNED (server-side, by operator
+ * requirement): the catalog runs to hundreds of models, so neither the
+ * ranking nor the picker may pad itself with idle ones. An empty `models`
+ * array therefore means "nothing used in this window", never "no models
+ * configured" — and a failed store read is a 503, never an empty array.
+ */
+export interface AdminUsageModelsResponse {
+  metric: string
+  window: string
+  models: AdminUsageModelEntry[]
+}
+
 /** One MCP-server or agent target's current-window request counters (admin.go: adminTargetCountersView) — requests only, no tokens or cost. */
 export interface AdminTargetCountersView {
   requestsPerMinute: number

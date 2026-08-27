@@ -2237,3 +2237,202 @@ func TestDefaultPreserving_LiveClusterShape_LoadsAndServesIdentically(t *testing
 		t.Errorf("admin usage groups = %d, want 2", len(usage.Groups))
 	}
 }
+
+// --- usage/models: the Charts view's model ranking ---
+
+// seedModelCounter seeds one kindModel counter for the ranking tests.
+func seedModelCounter(gw *Gateway, id, metric, window string, now time.Time, n int64) {
+	gw.limiter.incrCounter(kindModel, id, metric, window, now, n, dayWindowTTL)
+}
+
+// TestAdminUsageModels_RanksNonZeroOnly is the operator requirement in one
+// test: a catalog model with no traffic must not appear at all (the real
+// catalog runs to hundreds), and what does appear is ordered by value,
+// descending.
+func TestAdminUsageModels_RanksNonZeroOnly(t *testing.T) {
+	t.Parallel()
+	cfg := newAdminTestConfig()
+	h, gw := newAdminGatewayHandle(t, cfg)
+
+	fixedNow := time.Date(2026, 8, 20, 12, 30, 0, 0, time.UTC)
+	gw.limiter.nowFn = func() time.Time { return fixedNow }
+
+	// alpha/a-model-2 is deliberately left at zero.
+	seedModelCounter(gw, "alpha/a-model-1", metricCost, windowDay, fixedNow, 900)
+	seedModelCounter(gw, "zeta/z-model", metricCost, windowDay, fixedNow, 4_100)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, adminRequest(http.MethodGet, adminUsageModelsPath+"?metric=cost&window=day", "sk-admin1"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+
+	var got adminUsageModelsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(got.Models) != 2 {
+		t.Fatalf("models = %+v, want exactly the 2 non-zero entries", got.Models)
+	}
+	if got.Models[0].ID != "zeta/z-model" || got.Models[0].Value != 4_100 {
+		t.Errorf("models[0] = %+v, want zeta/z-model at 4100 (highest first)", got.Models[0])
+	}
+	if got.Models[1].ID != "alpha/a-model-1" || got.Models[1].Value != 900 {
+		t.Errorf("models[1] = %+v, want alpha/a-model-1 at 900", got.Models[1])
+	}
+	for _, m := range got.Models {
+		if m.ID == "alpha/a-model-2" {
+			t.Errorf("zero-usage model alpha/a-model-2 must not be listed: %+v", got.Models)
+		}
+	}
+}
+
+// TestAdminUsageModels_TieBreaksOnIDAscending pins the stability rule: two
+// models on the same value must not reshuffle between polls.
+func TestAdminUsageModels_TieBreaksOnIDAscending(t *testing.T) {
+	t.Parallel()
+	cfg := newAdminTestConfig()
+	h, gw := newAdminGatewayHandle(t, cfg)
+
+	fixedNow := time.Date(2026, 8, 20, 12, 30, 0, 0, time.UTC)
+	gw.limiter.nowFn = func() time.Time { return fixedNow }
+
+	seedModelCounter(gw, "zeta/z-model", metricReq, windowDay, fixedNow, 7)
+	seedModelCounter(gw, "alpha/a-model-1", metricReq, windowDay, fixedNow, 7)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, adminRequest(http.MethodGet, adminUsageModelsPath+"?metric=req&window=day", "sk-admin1"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	var got adminUsageModelsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(got.Models) != 2 || got.Models[0].ID != "alpha/a-model-1" || got.Models[1].ID != "zeta/z-model" {
+		t.Errorf("models = %+v, want equal values ordered by id ascending", got.Models)
+	}
+}
+
+// TestAdminUsageModels_Limit checks the limit truncates AFTER ranking, so
+// a limit of 1 returns the single busiest model, not an arbitrary one.
+func TestAdminUsageModels_Limit(t *testing.T) {
+	t.Parallel()
+	cfg := newAdminTestConfig()
+	h, gw := newAdminGatewayHandle(t, cfg)
+
+	fixedNow := time.Date(2026, 8, 20, 12, 30, 0, 0, time.UTC)
+	gw.limiter.nowFn = func() time.Time { return fixedNow }
+
+	seedModelCounter(gw, "alpha/a-model-1", metricCost, windowDay, fixedNow, 10)
+	seedModelCounter(gw, "zeta/z-model", metricCost, windowDay, fixedNow, 99)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, adminRequest(http.MethodGet, adminUsageModelsPath+"?metric=cost&window=day&limit=1", "sk-admin1"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	var got adminUsageModelsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(got.Models) != 1 || got.Models[0].ID != "zeta/z-model" {
+		t.Errorf("models = %+v, want only the busiest model", got.Models)
+	}
+}
+
+// TestAdminUsageModels_ValidatesParameters covers every 400 path.
+func TestAdminUsageModels_ValidatesParameters(t *testing.T) {
+	t.Parallel()
+	cfg := newAdminTestConfig()
+	h, _ := newAdminGatewayHandle(t, cfg)
+
+	for _, tc := range []struct{ name, query string }{
+		{"unknown metric", "?metric=nope&window=day"},
+		{"missing metric", "?window=day"},
+		{"unknown window", "?metric=cost&window=decade"},
+		{"missing window", "?metric=cost"},
+		{"limit zero", "?metric=cost&window=day&limit=0"},
+		{"limit negative", "?metric=cost&window=day&limit=-3"},
+		{"limit over max", "?metric=cost&window=day&limit=101"},
+		{"limit not a number", "?metric=cost&window=day&limit=lots"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, adminRequest(http.MethodGet, adminUsageModelsPath+tc.query, "sk-admin1"))
+			if rec.Code != http.StatusBadRequest {
+				t.Errorf("status = %d, want 400, body=%s", rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+// TestAdminUsageModels_StoreDownIs503 pins the rule the whole feature rests
+// on: an unreachable store must never render as "no model was used".
+func TestAdminUsageModels_StoreDownIs503(t *testing.T) {
+	t.Parallel()
+	cfg := newAdminTestConfig()
+	h, gw := newAdminGatewayHandle(t, cfg)
+	gw.limiter = newLimiter(alwaysErrStore{}, false)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, adminRequest(http.MethodGet, adminUsageModelsPath+"?metric=cost&window=day", "sk-admin1"))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503, body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// --- usage/history: the model scope ---
+
+// TestAdminUsageHistory_ModelScope drives a model through the SAME history
+// endpoint the user/group scopes use, which is the point of keying model
+// usage as an ordinary scope kind.
+func TestAdminUsageHistory_ModelScope(t *testing.T) {
+	t.Parallel()
+	cfg := newAdminTestConfig()
+	h, gw := newAdminGatewayHandle(t, cfg)
+
+	fixedNow := time.Date(2026, 8, 20, 12, 30, 0, 0, time.UTC)
+	gw.limiter.nowFn = func() time.Time { return fixedNow }
+	gw.limiter.incrCounter(kindModel, "alpha/a-model-1", metricCost, windowDay, fixedNow, 1_234, dayWindowTTL)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, adminRequest(http.MethodGet,
+		adminUsageHistoryPath+"?scope=model:alpha/a-model-1&metric=cost&window=day&span=1", "sk-admin1"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	var got usageHistoryResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(got.Points) != 1 || got.Points[0].Value != 1_234 {
+		t.Errorf("points = %+v, want the seeded 1234", got.Points)
+	}
+}
+
+// TestAdminUsageHistory_UnknownModelIs404 keeps the model scope honest: an
+// id outside the live catalog is not a silently-empty series.
+func TestAdminUsageHistory_UnknownModelIs404(t *testing.T) {
+	t.Parallel()
+	cfg := newAdminTestConfig()
+	h, _ := newAdminGatewayHandle(t, cfg)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, adminRequest(http.MethodGet,
+		adminUsageHistoryPath+"?scope=model:alpha/no-such-model&metric=cost&window=day&span=1", "sk-admin1"))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404, body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestParseHistoryScope_ModelIDKeepsLaterSeparators guards the id shapes a
+// real catalog contains: a "/" always, and sometimes a ":" (an upstream
+// ":free" suffix). Only the FIRST colon separates kind from id.
+func TestParseHistoryScope_ModelIDKeepsLaterSeparators(t *testing.T) {
+	t.Parallel()
+	kind, id, ok := parseHistoryScope("model:openrouter/some-model:free")
+	if !ok || kind != kindModel || id != "openrouter/some-model:free" {
+		t.Errorf("parseHistoryScope = (%q, %q, %v), want the full model id preserved", kind, id, ok)
+	}
+}

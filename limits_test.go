@@ -2284,3 +2284,111 @@ func TestLimiter_PruneRejections_RemovesDeletedUserScope(t *testing.T) {
 		t.Error("the synthetic store_down entry was pruned — pruning must only ever touch \"user\"-kind scopes")
 	}
 }
+
+// --- kindModel scope: per-model usage accounting ---
+
+// readCounter reads one counter's current-bucket value directly, for tests
+// asserting exactly what account wrote.
+func readCounter(t *testing.T, l *limiter, kind, id, metric, window string, now time.Time) int64 {
+	t.Helper()
+	vals, ok := l.storeGetMulti([]string{windowKey(kind, id, metric, window, now)})
+	require.True(t, ok, "storeGetMulti")
+	require.Len(t, vals, 1)
+	return vals[0]
+}
+
+// TestAccount_ModelScopeWritesRequestsAndUsage pins the one behaviour that
+// separates a kindModel scope from every other kind inside account: it
+// carries its own request counter, because checkAndCount never counted one
+// for it at admission (the serving model is only known post-response).
+// A user scope in the SAME call must still get no req from account.
+func TestAccount_ModelScopeWritesRequestsAndUsage(t *testing.T) {
+	now := time.Date(2026, 8, 20, 10, 0, 30, 0, time.UTC)
+	l := newLimiter(nil, true)
+	l.nowFn = func() time.Time { return now }
+
+	scopes := []limitScope{
+		{kind: "user", id: "alice"},
+		{kind: kindModel, id: "uni/qwen3.8-flash-next"},
+	}
+	l.account(scopes, usage{prompt: 40, completion: 10}, 2_500_000)
+
+	// The model scope gets req at all three chart windows.
+	for _, w := range []string{windowHour, windowDay, windowMonth} {
+		got := readCounter(t, l, kindModel, "uni/qwen3.8-flash-next", metricReq, w, now)
+		assert.Equal(t, int64(1), got, "model req at %s", w)
+	}
+	// ...and the usage metrics, same as any other scope.
+	assert.Equal(t, int64(40), readCounter(t, l, kindModel, "uni/qwen3.8-flash-next", metricTokIn, windowDay, now))
+	assert.Equal(t, int64(10), readCounter(t, l, kindModel, "uni/qwen3.8-flash-next", metricTokOut, windowDay, now))
+	assert.Equal(t, int64(2_500_000), readCounter(t, l, kindModel, "uni/qwen3.8-flash-next", metricCost, windowDay, now))
+
+	// The user scope must NOT gain a req from account — checkAndCount owns
+	// that at admission, and double-counting it here would inflate every
+	// existing per-user request figure.
+	assert.Equal(t, int64(0), readCounter(t, l, "user", "alice", metricReq, windowDay, now),
+		"account must not write req for a non-model scope")
+}
+
+// TestAccount_ModelScopeRequestCountedWithZeroUsage covers the case a
+// token/cost-gated write would miss: an upstream that reports no usage at
+// all still served a request, so the model's request counter must move.
+func TestAccount_ModelScopeRequestCountedWithZeroUsage(t *testing.T) {
+	now := time.Date(2026, 8, 20, 10, 0, 30, 0, time.UTC)
+	l := newLimiter(nil, true)
+	l.nowFn = func() time.Time { return now }
+
+	l.account([]limitScope{{kind: kindModel, id: "p/m"}}, usage{}, 0)
+
+	assert.Equal(t, int64(1), readCounter(t, l, kindModel, "p/m", metricReq, windowDay, now))
+	assert.Equal(t, int64(0), readCounter(t, l, kindModel, "p/m", metricTokIn, windowDay, now))
+}
+
+// TestWithModelScope covers the helper's add/skip decisions and, in the
+// last subtest, the aliasing hazard it exists to avoid.
+func TestWithModelScope(t *testing.T) {
+	base := []limitScope{{kind: "user", id: "u"}}
+
+	t.Run("adds the model scope", func(t *testing.T) {
+		got := withModelScope(base, "uni/m")
+		require.Len(t, got, 2)
+		assert.Equal(t, kindModel, got[1].kind)
+		assert.Equal(t, "uni/m", got[1].id)
+	})
+
+	t.Run("skips an unattributable canonical", func(t *testing.T) {
+		for _, canonical := range []string{"", "provider/", "/"} {
+			got := withModelScope(base, canonical)
+			assert.Len(t, got, 1, "canonical %q must add no scope", canonical)
+		}
+	})
+
+	t.Run("does not alias the caller's backing array", func(t *testing.T) {
+		// A slice with spare capacity is the dangerous shape: a plain
+		// append would write into the caller's own array.
+		shared := make([]limitScope, 1, 4)
+		shared[0] = limitScope{kind: "user", id: "u"}
+		a := withModelScope(shared, "p/one")
+		b := withModelScope(shared, "p/two")
+		assert.Equal(t, "p/one", a[1].id, "second call must not overwrite the first result")
+		assert.Equal(t, "p/two", b[1].id)
+	})
+}
+
+// TestModelTotals covers positional results, the non-existent-counter zero,
+// and the empty-input short circuit.
+func TestModelTotals(t *testing.T) {
+	now := time.Date(2026, 8, 20, 10, 0, 30, 0, time.UTC)
+	l := newLimiter(nil, true)
+	l.nowFn = func() time.Time { return now }
+
+	l.incrCounter(kindModel, "b/two", metricCost, windowDay, now, 500, dayWindowTTL)
+
+	got, ok := l.modelTotals([]string{"a/one", "b/two", "c/three"}, metricCost, windowDay)
+	require.True(t, ok)
+	assert.Equal(t, []int64{0, 500, 0}, got, "results must be positional, zero for an unused model")
+
+	empty, ok := l.modelTotals(nil, metricCost, windowDay)
+	assert.True(t, ok, "an empty id list is not a failed read")
+	assert.Empty(t, empty)
+}

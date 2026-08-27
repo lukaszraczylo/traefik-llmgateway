@@ -40,6 +40,7 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -693,7 +694,15 @@ func run() error {
 	// runs LAST, for the identical reason: it reads /metrics and GET
 	// /admin/api/overview one more time and must not perturb any counter
 	// an earlier probe already asserted on.
-	return exerciseUsageProvenance(handler)
+	if err := exerciseUsageProvenance(handler); err != nil {
+		return err
+	}
+	// exerciseModelUsageRanking (feat: per-model usage statistics) runs
+	// after everything above: it only READS admin endpoints plus one more
+	// chat completion of its own, and asserts on a kindModel counter no
+	// earlier probe touches, so it can neither perturb nor be perturbed by
+	// the provider-level counters they assert on.
+	return exerciseModelUsageRanking(handler)
 }
 
 // builtinLookupModelID is a real, stable entry in the generated
@@ -2414,4 +2423,138 @@ func parseScalar(s string) any {
 		return f
 	}
 	return s
+}
+
+// modelUsageCanonicalID is the kindModel scope id exerciseModelUsageRanking
+// expects its own chat completion to be attributed to: the canonical
+// "provider/model" of the bare testDataWantModel's winning provider
+// ("openai" — the same attribution exerciseAttemptAccounting already
+// relies on).
+const modelUsageCanonicalID = "openai/" + testDataWantModel
+
+// exerciseModelUsageRanking drives the per-model usage feature end to end
+// under the INTERPRETER (feat: per-model usage statistics): one real chat
+// completion, then GET /admin/api/usage/models for the ranking and GET
+// /admin/api/usage/history for that same model's own series.
+//
+// Why this needs an interpreted probe at all, when compiled tests already
+// cover the same code: the feature adds a scope kind resolved POST-response
+// (limits.go's withModelScope/kindModel), reached through a sort.Slice
+// closure and a generic JSON encode of a newly declared struct type. Every
+// one of those is a construct this repo has previously seen diverge under
+// Yaegi — a compiled pass proves nothing about the interpreter, which is
+// the whole premise of this harness.
+func exerciseModelUsageRanking(handler http.Handler) error {
+	chatReq := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(
+		`{"model":"`+testDataWantModel+`","messages":[{"role":"user","content":"hi"}]}`,
+	))
+	chatReq.Header.Set("Authorization", "Bearer "+testDataUserAPIKey)
+	chatReq.Header.Set("Content-Type", "application/json")
+	chatRec := httptest.NewRecorder()
+	handler.ServeHTTP(chatRec, chatReq)
+	if chatRec.Code != http.StatusOK {
+		return fmt.Errorf("POST /v1/chat/completions (model-usage harness): status = %d, want 200, body=%s", chatRec.Code, chatRec.Body.String())
+	}
+
+	models, err := pollModelRanking(handler)
+	if err != nil {
+		return err
+	}
+
+	// The ranking must contain the model that just served, and EVERY entry
+	// must be non-zero — the operator requirement the server-side filter
+	// exists for. A zero here would mean the filter did not run under the
+	// interpreter even though it does when compiled.
+	var found bool
+	for _, raw := range models {
+		entry, ok := raw.(map[string]any)
+		if !ok {
+			return fmt.Errorf("GET /admin/api/usage/models: entry is not an object: %v", raw)
+		}
+		id, _ := entry["id"].(string)
+		value, _ := entry["value"].(float64)
+		if value == 0 {
+			return fmt.Errorf("GET /admin/api/usage/models listed %q at value 0 — only non-zero models may be returned", id)
+		}
+		if id == modelUsageCanonicalID {
+			found = true
+		}
+	}
+	if !found {
+		return fmt.Errorf("GET /admin/api/usage/models did not list %q after a served request: %v", modelUsageCanonicalID, models)
+	}
+
+	// The same model must also be reachable as an ordinary history scope —
+	// the point of keying model usage as a scope kind rather than a
+	// bespoke counter.
+	histReq := httptest.NewRequest(http.MethodGet,
+		"/admin/api/usage/history?scope=model:"+url.QueryEscape(modelUsageCanonicalID)+"&metric=req&window=day&span=1", nil)
+	histReq.Header.Set("Authorization", "Bearer "+attemptAccountingAdminAPIKey)
+	histRec := httptest.NewRecorder()
+	handler.ServeHTTP(histRec, histReq)
+	if histRec.Code != http.StatusOK {
+		return fmt.Errorf("GET /admin/api/usage/history for scope model:%s: status = %d, want 200, body=%s",
+			modelUsageCanonicalID, histRec.Code, histRec.Body.String())
+	}
+	var hist map[string]any
+	if err := json.Unmarshal(histRec.Body.Bytes(), &hist); err != nil {
+		return fmt.Errorf("decode model history body: %w", err)
+	}
+	points, ok := hist["points"].([]any)
+	if !ok || len(points) != 1 {
+		return fmt.Errorf("model history points = %v, want exactly 1 bucket: %s", hist["points"], histRec.Body.String())
+	}
+	point, ok := points[0].(map[string]any)
+	if !ok {
+		return fmt.Errorf("model history point is not an object: %v", points[0])
+	}
+	if value, _ := point["value"].(float64); value < 1 {
+		return fmt.Errorf("model history value = %v, want at least 1 request attributed to %q", point["value"], modelUsageCanonicalID)
+	}
+
+	// An id outside the catalog must 404 rather than answer an empty
+	// series — the guard that keeps a mistyped or retired model from
+	// looking like a model with no traffic.
+	unknownReq := httptest.NewRequest(http.MethodGet,
+		"/admin/api/usage/history?scope=model:openai/no-such-model&metric=req&window=day&span=1", nil)
+	unknownReq.Header.Set("Authorization", "Bearer "+attemptAccountingAdminAPIKey)
+	unknownRec := httptest.NewRecorder()
+	handler.ServeHTTP(unknownRec, unknownReq)
+	if unknownRec.Code != http.StatusNotFound {
+		return fmt.Errorf("GET /admin/api/usage/history for an uncatalogued model: status = %d, want 404, body=%s",
+			unknownRec.Code, unknownRec.Body.String())
+	}
+
+	fmt.Println("yaegi-check: per-model usage ranking and model-scoped history served under the interpreter; only non-zero models listed, uncatalogued model 404s")
+	return nil
+}
+
+// pollModelRanking reads GET /admin/api/usage/models until it reports at
+// least one model or a 2s budget elapses. The poll mirrors
+// pollProviderAttemptCounters' own rationale: interpreted code driving the
+// request runs slower than compiled code, so a single immediate read can
+// outrun the accounting write the preceding request triggered.
+func pollModelRanking(handler http.Handler) ([]any, error) {
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		req := httptest.NewRequest(http.MethodGet, "/admin/api/usage/models?metric=req&window=day", nil)
+		req.Header.Set("Authorization", "Bearer "+attemptAccountingAdminAPIKey)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			return nil, fmt.Errorf("GET /admin/api/usage/models: status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+		}
+		var body map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			return nil, fmt.Errorf("decode GET /admin/api/usage/models body: %w", err)
+		}
+		models, ok := body["models"].([]any)
+		if !ok {
+			return nil, fmt.Errorf("admin usage/models body has no models array: %s", rec.Body.String())
+		}
+		if len(models) > 0 || time.Now().After(deadline) {
+			return models, nil
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }

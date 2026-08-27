@@ -895,8 +895,12 @@ func (g *Gateway) handlePassthrough(w http.ResponseWriter, r *http.Request, u *u
 	if unmarshalErr != nil {
 		g.logf("passthrough: response body did not decode as JSON for usage accounting (provider %q): %v", providerName, unmarshalErr)
 	}
-	cost := unifiedCostMicros(providerName+"/"+respModel, respModel, respUsage, g.cfg.Pricing)
-	g.limiter.account(scopes, respUsage, cost)
+	canonical := providerName + "/" + respModel
+	cost := unifiedCostMicros(canonical, respModel, respUsage, g.cfg.Pricing)
+	// withModelScope drops the model scope when respModel is empty (the
+	// upstream reported no model id), so a passthrough reply the gateway
+	// cannot attribute still accounts to user/group/total as before.
+	g.limiter.account(withModelScope(scopes, canonical), respUsage, cost)
 }
 
 // proxyResult is what proxyUpstream reports back to its caller once it has

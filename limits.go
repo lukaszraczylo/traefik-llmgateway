@@ -1367,8 +1367,24 @@ func requestLimitViolation(sc limitScope, name string, limit, count int64, windo
 func (l *limiter) account(scopes []limitScope, u usage, costMicros int64) {
 	now := l.now()
 
-	entries := make([]counterIncr, 0, len(scopes)*9)
+	entries := make([]counterIncr, 0, len(scopes)*12)
 	for _, sc := range scopes {
+		// A kindModel scope is the one scope kind checkAndCount never
+		// sees: it is resolved post-response, because only then is the
+		// SERVING model known (failover can move a request to another
+		// provider after admission). So its request counter is written
+		// here rather than at admission, in this same batch — no extra
+		// round trip, and no double count, since admission never wrote
+		// one for this kind. Unconditional, unlike the three metrics
+		// below: a served request counts even when the upstream reports
+		// no usage at all.
+		if sc.kind == kindModel {
+			entries = append(entries,
+				newCounterIncr(sc.kind, sc.id, metricReq, windowHour, now, 1, hourWindowTTL),
+				newCounterIncr(sc.kind, sc.id, metricReq, windowDay, now, 1, dayWindowTTL),
+				newCounterIncr(sc.kind, sc.id, metricReq, windowMonth, now, 1, monthWindowTTL),
+			)
+		}
 		if u.prompt != 0 {
 			entries = append(entries,
 				newCounterIncr(sc.kind, sc.id, metricTokIn, windowHour, now, u.prompt, hourWindowTTL),
@@ -1540,6 +1556,46 @@ const (
 	kindProvider      = "prov"
 	kindProviderModel = "provmodel"
 )
+
+// kindModel is the limitScope.kind (and admin-API scope-kind) string a
+// SERVED model's usage counters use — requests, tokens and cost, the same
+// four metrics a user or group scope accumulates, so the Charts view can
+// render a model with the very same history endpoint and chart component.
+//
+// Distinct from kindProviderModel above, and deliberately so: that kind
+// counts upstream ATTEMPTS and FAILURES (an availability signal, day
+// window only), whereas this one counts delivered usage. A request that
+// fails over from one provider to another increments attempt counters on
+// both and usage counters only on the one that actually served it.
+//
+// Its id is the canonical "provider/model" (providerModelScopeID's own
+// convention), never the bare model id: two providers can serve the same
+// bare id at different prices, and the operator question this feature
+// answers ("which model is costing me, and on whose backend") needs the
+// serving provider kept in the key. windowKey embeds kind, so a model
+// scope can never collide with a user, group, provider or target scope.
+const kindModel = "model"
+
+// withModelScope returns scopes plus a kindModel scope for canonical, the
+// "provider/model" id that actually SERVED the request. It copies rather
+// than appending in place: the caller's slice is the same one
+// admitRequest already passed to checkAndCount, and growing it through a
+// shared backing array would be a data race waiting to happen.
+//
+// canonical is returned unchanged (no model scope added) when it names no
+// model — empty, or a bare "provider/" with nothing after the separator.
+// That is the passthrough path's real case: extractPassthroughUsage can
+// only report a model id when the upstream's own response body carries
+// one, and attributing usage to a "provider/" bucket would invent a model
+// that does not exist rather than admit the gap.
+func withModelScope(scopes []limitScope, canonical string) []limitScope {
+	if canonical == "" || canonical[len(canonical)-1] == '/' {
+		return scopes
+	}
+	out := make([]limitScope, len(scopes), len(scopes)+1)
+	copy(out, scopes)
+	return append(out, limitScope{kind: kindModel, id: canonical})
+}
 
 // metricProvAttempt and metricProvFail are the counter metric names
 // recordProviderAttempt writes (Feature A, v0.22): every upstream attempt
@@ -2009,6 +2065,33 @@ func (l *limiter) currentUsage(scopes []limitScope) []scopeUsage {
 type historyPoint struct {
 	bucket string
 	value  int64
+}
+
+// modelTotals reads ONE counter per id — metric at window's CURRENT bucket
+// — in a single storeGetMulti, returning values positionally (result[i] is
+// ids[i]'s total). It backs GET /admin/api/usage/models, whose ranking
+// needs a single comparable number per model rather than history's whole
+// span: reading a span of buckets per model would multiply an already
+// catalog-sized read (one key per configured model) by the span.
+//
+// ok is false when the store read fails, exactly as history does, so the
+// caller answers 503 rather than presenting an all-zero ranking as though
+// no model had been used. An empty ids slice is not a store read at all:
+// it returns an empty result and ok, never a round trip.
+func (l *limiter) modelTotals(ids []string, metric, window string) ([]int64, bool) {
+	if len(ids) == 0 {
+		return nil, true
+	}
+	now := l.now()
+	keys := make([]string, len(ids))
+	for i, id := range ids {
+		keys[i] = windowKey(kindModel, id, metric, window, now)
+	}
+	vals, ok := l.storeGetMulti(keys)
+	if !ok || len(vals) != len(keys) {
+		return nil, false
+	}
+	return vals, true
 }
 
 // historyStepBack returns the instant window's bucket was current i steps

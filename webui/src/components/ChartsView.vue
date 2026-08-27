@@ -11,11 +11,19 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import ModelUsageChart from '@/components/ModelUsageChart.vue'
 import UsageChart from '@/components/UsageChart.vue'
 import { useSearchQuery } from '@/composables/useSearchQuery'
 import { groupMatches, userMatches } from '@/lib/usage-search'
 import { useDashboardStore } from '@/stores/dashboard'
-import { type ChartTab, useHistoryStore, WINDOW_LABEL } from '@/stores/history'
+import {
+  type ChartTab,
+  MODEL_METRIC_LABEL,
+  type ModelMetric,
+  type TimeSeriesTab,
+  useHistoryStore,
+  WINDOW_LABEL,
+} from '@/stores/history'
 import type { HistoryWindow } from '@/types/api'
 
 const dashboard = useDashboardStore()
@@ -44,10 +52,41 @@ const scopeOptions = computed(() => {
         !hasScopeQuery.value || groupMatches(g, allUsers, normalizedScopeQuery.value) || `group:${g.id}` === history.scope,
     )
     .map((g) => ({ value: `group:${g.id}`, label: g.id }))
-  return [{ value: 'total', label: 'Total (all traffic)' }, ...groups, ...users]
+  // Models come from the ranking endpoint, which returns only models with
+  // non-zero traffic (operator requirement: the catalog is hundreds of
+  // models, so the picker must never list idle ones). Matched on the plain
+  // id rather than through lib/usage-search's helpers — those match a
+  // user's or group's own shape, and a model entry has neither.
+  const models = (history.modelOptions ?? [])
+    .filter(
+      (m) =>
+        !hasScopeQuery.value ||
+        m.id.toLowerCase().includes(normalizedScopeQuery.value) ||
+        `model:${m.id}` === history.scope,
+    )
+    .map((m) => ({ value: `model:${m.id}`, label: m.id }))
+  // A model already being charted stays in the list even once it drops out
+  // of modelOptions entirely — which happens the moment it goes idle for
+  // the selected window, since that list is non-zero-only. Without this,
+  // the watch below would read it as a vanished scope and force-switch the
+  // reader to "total" mid-look, for the ordinary reason that a model
+  // simply stopped receiving traffic.
+  if (history.scope.startsWith('model:') && !models.some((m) => m.value === history.scope)) {
+    models.push({ value: history.scope, label: history.scope.slice('model:'.length) })
+  }
+  return [{ value: 'total', label: 'Total (all traffic)' }, ...groups, ...users, ...models]
 })
 
 const windows: HistoryWindow[] = ['hour', 'day', 'month']
+const modelMetrics: ModelMetric[] = ['cost', 'req', 'tokin', 'tokout']
+
+/**
+ * UsageChart only ever renders on a time-series tab (the template's v-else
+ * below), but a `v-else` narrows nothing for the type checker — this does.
+ * The 'requests' stand-in is never displayed: it is the value handed over
+ * on the one tab where the component is not rendered at all.
+ */
+const timeSeriesTab = computed<TimeSeriesTab>(() => (history.tab === 'models' ? 'requests' : history.tab))
 
 function onTabChange(value: string | number): void {
   history.setTab(value as ChartTab)
@@ -55,9 +94,12 @@ function onTabChange(value: string | number): void {
 function onScopeChange(value: unknown): void {
   if (typeof value === 'string') history.setScope(value)
 }
+function onModelMetricChange(value: unknown): void {
+  if (typeof value === 'string') history.setModelMetric(value as ModelMetric)
+}
 
 onMounted(() => {
-  void history.fetchSeries()
+  void history.refresh()
   history.startAutoRefresh()
 })
 onUnmounted(() => {
@@ -79,9 +121,24 @@ watch(scopeOptions, (options) => {
     <CardHeader class="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
       <CardTitle>Usage charts</CardTitle>
       <div class="flex flex-wrap items-center gap-3">
-        <SearchInput v-model="scopeQuery" placeholder="Filter users or groups" class="w-56" />
+        <SearchInput v-model="scopeQuery" placeholder="Filter users, groups or models" class="w-56" />
 
-        <Select :model-value="history.scope" @update:model-value="onScopeChange">
+        <Select
+          v-if="history.tab === 'models'"
+          :model-value="history.modelMetric"
+          @update:model-value="onModelMetricChange"
+        >
+          <SelectTrigger class="w-40" aria-label="Rank models by">
+            <SelectValue placeholder="Rank by" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem v-for="m in modelMetrics" :key="m" :value="m">
+              {{ MODEL_METRIC_LABEL[m] }}
+            </SelectItem>
+          </SelectContent>
+        </Select>
+
+        <Select v-else :model-value="history.scope" @update:model-value="onScopeChange">
           <SelectTrigger class="w-56">
             <SelectValue placeholder="Scope" />
           </SelectTrigger>
@@ -105,11 +162,20 @@ watch(scopeOptions, (options) => {
           <TabsTrigger value="requests">Requests</TabsTrigger>
           <TabsTrigger value="tokens">Tokens</TabsTrigger>
           <TabsTrigger value="cost">Cost</TabsTrigger>
+          <TabsTrigger value="models">Models</TabsTrigger>
         </TabsList>
       </Tabs>
 
       <p v-if="history.error" class="text-sm text-destructive">{{ history.error }}</p>
-      <UsageChart :tab="history.tab" :window="history.window" :series-by-metric="history.seriesByMetric" />
+      <template v-if="history.tab === 'models'">
+        <p class="text-sm text-muted-foreground">
+          Models with usage in the selected window, ranked by
+          {{ MODEL_METRIC_LABEL[history.modelMetric].toLowerCase() }}. Each row is the provider that served the
+          traffic, so a model reached through more than one provider appears once per provider.
+        </p>
+        <ModelUsageChart :metric="history.modelMetric" :models="history.modelRanking" />
+      </template>
+      <UsageChart v-else :tab="timeSeriesTab" :window="history.window" :series-by-metric="history.seriesByMetric" />
     </CardContent>
   </Card>
 </template>

@@ -23,6 +23,7 @@ const (
 	adminOverviewPath     = "/admin/api/overview"
 	adminUsagePath        = "/admin/api/usage"
 	adminUsageHistoryPath = "/admin/api/usage/history"
+	adminUsageModelsPath  = "/admin/api/usage/models"
 	adminTargetsPath      = "/admin/api/targets"
 )
 
@@ -69,7 +70,7 @@ func adminEnabled(cfg *Config) bool {
 // of the /admin/api/* JSON routes.
 func isAdminPath(path string) bool {
 	if path == adminPagePath || path == adminOverviewPath || path == adminUsagePath ||
-		path == adminUsageHistoryPath || path == adminTargetsPath {
+		path == adminUsageHistoryPath || path == adminUsageModelsPath || path == adminTargetsPath {
 		return true
 	}
 	return strings.HasPrefix(path, adminAssetsPathPrefix)
@@ -142,6 +143,8 @@ func (g *Gateway) handleAdminAPI(sw *statusTrackingWriter, r *http.Request) {
 		g.serveAdminUsage(sw)
 	case adminUsageHistoryPath:
 		g.serveAdminUsageHistory(sw, r)
+	case adminUsageModelsPath:
+		g.serveAdminUsageModels(sw, r)
 	case adminTargetsPath:
 		g.serveAdminTargets(sw)
 	}
@@ -928,10 +931,14 @@ func validHistoryWindow(window string) bool {
 }
 
 // parseHistoryScope parses GET /admin/api/usage/history's "scope" query
-// parameter: "user:{id}", "group:{id}", or the literal "total". ok is
-// false for anything else, including a bare "total:{id}" form — the total
-// scope carries no id component of its own, it is always totalScopeID
-// (limits.go).
+// parameter: "user:{id}", "group:{id}", "model:{provider}/{model}", or the
+// literal "total". ok is false for anything else, including a bare
+// "total:{id}" form — the total scope carries no id component of its own,
+// it is always totalScopeID (limits.go).
+//
+// strings.Cut splits on the FIRST colon only, so a model id that itself
+// contains one (an ":free"-suffixed upstream id, for instance) survives
+// intact in the returned id.
 func parseHistoryScope(raw string) (kind, id string, ok bool) {
 	if raw == totalScopeKind {
 		return totalScopeKind, totalScopeID, true
@@ -940,7 +947,7 @@ func parseHistoryScope(raw string) (kind, id string, ok bool) {
 	if !found || i == "" {
 		return "", "", false
 	}
-	if k != "user" && k != "group" {
+	if k != "user" && k != "group" && k != kindModel {
 		return "", "", false
 	}
 	return k, i, true
@@ -963,14 +970,31 @@ func parseHistorySpan(raw, window string) (span int, ok bool) {
 	return n, true
 }
 
-// scopeExists reports whether kind/id names a currently active user or a
-// configured group — GET /admin/api/usage/history's 404 check for an
-// unknown scope id. authStore.snapshot's own listing is the same
-// membership buildAdminUsage already trusts for "every currently active
-// user and every configured group"; kind is assumed already restricted to
-// "user" or "group" by parseHistoryScope (the total scope's id is never
-// checked against it — totalScopeID always exists).
+// scopeExists reports whether kind/id names a currently active user, a
+// configured group, or a currently catalogued (provider, model) pair —
+// GET /admin/api/usage/history's 404 check for an unknown scope id.
+// authStore.snapshot's own listing is the same membership buildAdminUsage
+// already trusts for "every currently active user and every configured
+// group"; kind is assumed already restricted to "user", "group" or
+// kindModel by parseHistoryScope (the total scope's id is never checked
+// against it — totalScopeID always exists).
+//
+// A kindModel id is checked against the live registry, so a model that
+// accumulated usage and was later dropped from the catalog answers 404
+// rather than a series nothing can reach through the UI. That matches
+// buildAdminUsageModels, which enumerates the same catalog: the picker
+// never offers an id this check would then reject.
 func (g *Gateway) scopeExists(kind, id string) bool {
+	if kind == kindModel {
+		for _, s := range g.registry.snapshot() {
+			for _, model := range s.models {
+				if providerModelScopeID(s.name, model) == id {
+					return true
+				}
+			}
+		}
+		return false
+	}
 	users, groups := g.auth.snapshot()
 	switch kind {
 	case "user":
@@ -1063,6 +1087,129 @@ func (g *Gateway) serveAdminUsageHistory(sw *statusTrackingWriter, r *http.Reque
 
 	setAdminJSONHeaders(sw)
 	_ = json.NewEncoder(sw).Encode(usageHistoryResponse{Scope: rawScope, Metric: metric, Window: window, Points: view})
+}
+
+// usageModelsDefaultLimit and usageModelsMaxLimit bound GET
+// /admin/api/usage/models' "limit" parameter — how many ranked models the
+// response carries at most. The default is what the Charts view's own
+// ranking renders without asking for a limit at all.
+const (
+	usageModelsDefaultLimit = 20
+	usageModelsMaxLimit     = 100
+)
+
+// parseUsageModelsLimit parses GET /admin/api/usage/models' "limit" query
+// parameter: empty means usageModelsDefaultLimit, otherwise an integer
+// between 1 and usageModelsMaxLimit inclusive. ok is false for anything
+// else, mirroring parseHistorySpan's own validate-before-reading shape.
+func parseUsageModelsLimit(raw string) (limit int, ok bool) {
+	if raw == "" {
+		return usageModelsDefaultLimit, true
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < 1 || n > usageModelsMaxLimit {
+		return 0, false
+	}
+	return n, true
+}
+
+// catalogModelScopeIDs returns every catalogued (provider, model) pair's
+// canonical kindModel scope id, in the registry snapshot's own order. It
+// is the enumeration GET /admin/api/usage/models ranks over, and the same
+// one scopeExists validates a model scope against, so the two can never
+// disagree about which model ids exist.
+func (g *Gateway) catalogModelScopeIDs() []string {
+	snaps := g.registry.snapshot()
+	ids := make([]string, 0, len(snaps))
+	for _, s := range snaps {
+		for _, model := range s.models {
+			ids = append(ids, providerModelScopeID(s.name, model))
+		}
+	}
+	return ids
+}
+
+// adminUsageModelEntryView is one ranked model in GET
+// /admin/api/usage/models: its canonical "provider/model" id and its
+// total for the requested metric over the requested window's CURRENT
+// bucket.
+type adminUsageModelEntryView struct {
+	ID    string `json:"id"`
+	Value int64  `json:"value"`
+}
+
+// adminUsageModelsResponse is GET /admin/api/usage/models' body.
+type adminUsageModelsResponse struct {
+	Metric string                     `json:"metric"`
+	Window string                     `json:"window"`
+	Models []adminUsageModelEntryView `json:"models"`
+}
+
+// serveAdminUsageModels writes GET /admin/api/usage/models' ranking of the
+// most-used models for one metric/window (the Charts view's "Models"
+// tab): "metric"=req|tokin|tokout|cost, "window"=hour|day|month, optional
+// "limit"=N (default and max per the constants above). Every parameter is
+// validated before the store is touched — 400 for an unrecognized metric
+// or window, or an out-of-range limit.
+//
+// ONLY NON-ZERO models are returned, by explicit operator requirement: the
+// catalog runs to hundreds of models and a ranking padded with zeroes is
+// unreadable. The filter also keeps the response small even though the
+// READ is catalog-sized — one counter per configured model in a single
+// storeGetMulti (limiter.modelTotals), which is the same
+// one-batched-read-per-poll shape serveAdminOverview already uses for
+// per-provider counters.
+//
+// Ties break on the id, ascending, so a ranking of equal values is stable
+// across polls rather than reshuffling under the reader. A storeDown read
+// answers 503, never a silently-empty ranking — the same rule
+// serveAdminUsageHistory applies, and for the same reason: "the store was
+// unreachable" must never render as "no model was used".
+func (g *Gateway) serveAdminUsageModels(sw *statusTrackingWriter, r *http.Request) {
+	q := r.URL.Query()
+
+	metric := q.Get("metric")
+	if !validHistoryMetric(metric) {
+		writeOAIError(sw, http.StatusBadRequest, "invalid_request_error", "unknown metric")
+		return
+	}
+	window := q.Get("window")
+	if !validHistoryWindow(window) {
+		writeOAIError(sw, http.StatusBadRequest, "invalid_request_error", "unknown window")
+		return
+	}
+	limit, ok := parseUsageModelsLimit(q.Get("limit"))
+	if !ok {
+		writeOAIError(sw, http.StatusBadRequest, "invalid_request_error", "invalid limit")
+		return
+	}
+
+	ids := g.catalogModelScopeIDs()
+	totals, storeOK := g.limiter.modelTotals(ids, metric, window)
+	if !storeOK {
+		writeOAIError(sw, http.StatusServiceUnavailable, "server_error", "usage history store unavailable")
+		return
+	}
+
+	models := make([]adminUsageModelEntryView, 0, len(ids))
+	for i, id := range ids {
+		if totals[i] == 0 {
+			continue
+		}
+		models = append(models, adminUsageModelEntryView{ID: id, Value: totals[i]})
+	}
+	sort.Slice(models, func(i, j int) bool {
+		if models[i].Value != models[j].Value {
+			return models[i].Value > models[j].Value
+		}
+		return models[i].ID < models[j].ID
+	})
+	if len(models) > limit {
+		models = models[:limit]
+	}
+
+	setAdminJSONHeaders(sw)
+	_ = json.NewEncoder(sw).Encode(adminUsageModelsResponse{Metric: metric, Window: window, Models: models})
 }
 
 // adminTargetCountersView is one target's current-window request counters

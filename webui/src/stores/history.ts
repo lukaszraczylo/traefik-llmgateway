@@ -2,10 +2,61 @@ import { defineStore } from 'pinia'
 
 import { AdminApiError, adminFetch } from '@/lib/api'
 import { useAuthStore } from '@/stores/auth'
-import type { HistoryMetric, HistoryWindow, UsageHistoryPoint, UsageHistoryResponse } from '@/types/api'
+import type {
+  AdminUsageModelEntry,
+  AdminUsageModelsResponse,
+  HistoryMetric,
+  HistoryWindow,
+  UsageHistoryPoint,
+  UsageHistoryResponse,
+} from '@/types/api'
 
-/** The three chart tabs the Charts view offers — see metricsForTab below. */
-export type ChartTab = 'requests' | 'tokens' | 'cost'
+/**
+ * The chart tabs the Charts view offers. The first three are metrics over
+ * time (see metricsForTab below); "models" is the odd one out — a ranking
+ * across models for a single point in time, with its own metric picked
+ * separately (modelMetric below), because "which model" is the dimension
+ * that tab varies rather than the metric.
+ */
+export type ChartTab = 'requests' | 'tokens' | 'cost' | 'models'
+
+/**
+ * The tabs that render a time series — every ChartTab except the ranking.
+ * UsageChart is typed on this rather than on ChartTab so that adding
+ * another ranking-style tab is a compile error there, not a chart with a
+ * silently missing dataset spec.
+ */
+export type TimeSeriesTab = Exclude<ChartTab, 'models'>
+
+/**
+ * The metrics the Models ranking can rank by. Deliberately a single
+ * metric, unlike the stacked "tokens" time-series tab: a bar's LENGTH in a
+ * ranking is the comparison being made, so splitting it across two stacked
+ * series would make two models with different in/out mixes visually
+ * incomparable.
+ */
+export type ModelMetric = 'req' | 'tokin' | 'tokout' | 'cost'
+
+/** MODEL_METRIC_LABEL is the ranking metric picker's display text. */
+export const MODEL_METRIC_LABEL: Record<ModelMetric, string> = {
+  cost: 'Cost',
+  req: 'Requests',
+  tokin: 'Tokens in',
+  tokout: 'Tokens out',
+}
+
+/**
+ * How many ranked models the Models tab requests. Matches the server's own
+ * default (admin.go: usageModelsDefaultLimit) and stays well under its max.
+ */
+const MODEL_RANKING_LIMIT = 20
+
+/**
+ * How many models the SCOPE PICKER offers. Higher than the ranking's own
+ * limit — the picker is a lookup, not a top-N — and capped at the server's
+ * maximum (admin.go: usageModelsMaxLimit).
+ */
+const MODEL_OPTIONS_LIMIT = 100
 
 /**
  * How often the current selection refetches while the Charts view is open.
@@ -47,6 +98,10 @@ export function metricsForTab(tab: ChartTab): HistoryMetric[] {
       return ['tokin', 'tokout']
     case 'cost':
       return ['cost']
+    case 'models':
+      // The Models tab reads the ranking endpoint, not the history one —
+      // it needs no time series, so it asks for no metric here.
+      return []
   }
 }
 
@@ -63,7 +118,13 @@ export const useHistoryStore = defineStore('history', {
     scope: 'total',
     window: 'hour' as HistoryWindow,
     tab: 'requests' as ChartTab,
+    /** Which metric the Models ranking ranks by — independent of `tab`. */
+    modelMetric: 'cost' as ModelMetric,
     seriesByMetric: {} as Partial<Record<HistoryMetric, UsageHistoryPoint[]>>,
+    /** The current Models-tab ranking. Empty means "nothing used in this window". */
+    modelRanking: [] as AdminUsageModelEntry[],
+    /** Models with non-zero traffic, for the scope picker's model entries. */
+    modelOptions: [] as AdminUsageModelEntry[],
     loading: false,
     error: '',
     timer: undefined as ReturnType<typeof setInterval> | undefined,
@@ -72,17 +133,31 @@ export const useHistoryStore = defineStore('history', {
     setScope(scope: string): void {
       if (scope === this.scope) return
       this.scope = scope
-      void this.fetchSeries()
+      void this.refresh()
     },
     setWindow(window: HistoryWindow): void {
       if (window === this.window) return
       this.window = window
-      void this.fetchSeries()
+      void this.refresh()
     },
     setTab(tab: ChartTab): void {
       if (tab === this.tab) return
       this.tab = tab
-      void this.fetchSeries()
+      void this.refresh()
+    },
+    setModelMetric(metric: ModelMetric): void {
+      if (metric === this.modelMetric) return
+      this.modelMetric = metric
+      void this.refresh()
+    },
+    /**
+     * refresh fetches whatever the CURRENT selection needs: the ranking on
+     * the Models tab, a time series otherwise. The scope picker's model
+     * list is refreshed alongside either, so a model that has just started
+     * receiving traffic becomes selectable without a page reload.
+     */
+    async refresh(): Promise<void> {
+      await Promise.all([this.tab === 'models' ? this.fetchModelRanking() : this.fetchSeries(), this.fetchModelOptions()])
     },
     async fetchSeries(): Promise<void> {
       const auth = useAuthStore()
@@ -113,9 +188,49 @@ export const useHistoryStore = defineStore('history', {
         this.loading = false
       }
     },
+    async fetchModelRanking(): Promise<void> {
+      const auth = useAuthStore()
+      if (!auth.isAuthenticated) return
+      this.loading = true
+      try {
+        const res = await adminFetch<AdminUsageModelsResponse>(
+          `/admin/api/usage/models?metric=${this.modelMetric}&window=${this.window}&limit=${MODEL_RANKING_LIMIT}`,
+        )
+        this.modelRanking = res.models
+        this.error = ''
+      } catch (err) {
+        if (err instanceof AdminApiError && (err.status === 401 || err.status === 403)) {
+          return
+        }
+        this.error = err instanceof Error ? err.message : String(err)
+      } finally {
+        this.loading = false
+      }
+    },
+    /**
+     * fetchModelOptions loads the picker's model list: models with at least
+     * one REQUEST in the current window. Requests, not the ranking's own
+     * metric, deliberately — a model can serve traffic while reporting no
+     * tokens and costing nothing, and such a model must still be
+     * selectable. A failure here is swallowed rather than surfaced: it
+     * degrades the picker, and must not replace a rendered chart's own
+     * error (or clear it) on a background refresh.
+     */
+    async fetchModelOptions(): Promise<void> {
+      const auth = useAuthStore()
+      if (!auth.isAuthenticated) return
+      try {
+        const res = await adminFetch<AdminUsageModelsResponse>(
+          `/admin/api/usage/models?metric=req&window=${this.window}&limit=${MODEL_OPTIONS_LIMIT}`,
+        )
+        this.modelOptions = res.models
+      } catch {
+        // Intentionally ignored — see the doc comment above.
+      }
+    },
     startAutoRefresh(): void {
       if (this.timer !== undefined) return
-      this.timer = setInterval(() => void this.fetchSeries(), REFRESH_MS)
+      this.timer = setInterval(() => void this.refresh(), REFRESH_MS)
     },
     stopAutoRefresh(): void {
       if (this.timer === undefined) return

@@ -1475,9 +1475,10 @@ or in CI.
   poll both every 5 seconds while open.
 - **`GET /admin/api/usage/history`** returns a bucketed series for one
   scope/metric/window — the data source for the dashboard's Charts view
-  (per-user/per-group/total, stacked tokens-in/tokens-out, with a
-  24h/30d/12mo window switcher). Query parameters:
-  - `scope`: `user:{id}`, `group:{id}`, or the literal `total`.
+  (per-user/per-group/per-model/total, stacked tokens-in/tokens-out, with
+  a 24h/30d/12mo window switcher). Query parameters:
+  - `scope`: `user:{id}`, `group:{id}`, `model:{provider}/{model}`, or the
+    literal `total`.
   - `metric`: `req`, `tokin`, `tokout`, or `cost`.
   - `window`: `hour`, `day`, or `month`.
   - `span` (optional): number of buckets, oldest-first, inclusive of the
@@ -1486,12 +1487,37 @@ or in CI.
     value is a `400`.
 
   An unrecognized `scope`/`metric`/`window`, or an out-of-range `span`,
-  is `400`; a `user`/`group` id that names no configured entity is `404`;
-  the configured store being unreachable is `503` (a chart must never
-  read an outage as "zero usage"). Response shape:
+  is `400`; a `user`/`group` id that names no configured entity — or a
+  `model` id outside the live catalog — is `404`; the configured store
+  being unreachable is `503` (a chart must never read an outage as "zero
+  usage"). Response shape:
   `{"scope","metric","window","points":[{"bucket":"2026082114","value":123},...]}`.
   The Charts view fetches this once per selection change, plus a 30s
   auto-refresh of the current selection.
+- **`GET /admin/api/usage/models`** ranks models by usage — the data
+  source for the Charts view's "Models" tab, and for the model entries in
+  its scope picker. Query parameters:
+  - `metric`: `req`, `tokin`, `tokout`, or `cost`.
+  - `window`: `hour`, `day`, or `month`. The ranking reads that window's
+    CURRENT bucket, not a span of them.
+  - `limit` (optional): 1-100, default 20.
+
+  Response shape: `{"metric","window","models":[{"id":"uni/qwen3-next","value":4100},...]}`,
+  sorted by `value` descending, ties broken on `id` ascending so a ranking
+  stays stable between polls. **Only models with non-zero usage are
+  returned** — a catalog runs to hundreds of models, so an empty `models`
+  array means "nothing used in this window", never "nothing configured".
+  Validation mirrors `usage/history`: a bad `metric`/`window`/`limit` is
+  `400`, an unreachable store is `503`.
+
+  Each `id` is the canonical `provider/model` of the provider that
+  actually **served** the request, so a request that failed over is
+  attributed to the provider that answered it, and one bare model id
+  reachable through two providers ranks as two separate rows. Per-model
+  counters are written after the response (that is the first point at
+  which the serving model is known), which is also why a passthrough reply
+  whose upstream reports no model id is counted for its user, group and
+  total but for no model.
 - **`GET /admin/api/targets`** returns every configured MCP server and
   agent for the dashboard's "MCP & Agents" tab:
   `{"mcpServers":[...],"agents":[...]}`, each entry
@@ -1512,7 +1538,7 @@ or in CI.
   API keys (not even digests), provider keys, the Redis password, or
   users-file path contents — every secret-bearing field is redacted from
   every response.
-- **Admin traffic is never counted**: none of the four `/admin/api/*`
+- **Admin traffic is never counted**: none of the five `/admin/api/*`
   JSON routes call `checkAndCount` — admin polling never moves any
   user's or group's `requestsPerMinute`/`requestsPerDay` counters, and
   usage statistics reflect real LLM traffic only (operator directive: an
