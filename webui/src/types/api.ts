@@ -317,6 +317,43 @@ export interface AdminTargetCountersView {
 }
 
 /**
+ * One configured MCP server's or A2A agent's current health, matching the
+ * GET /admin/api/targets `health` object the Go side builds against
+ * (feat/target-health). Two independent sources feed `state`, never
+ * conflated: 'traffic' is PASSIVE — recorded from the target's own real
+ * proxied/federated request traffic as it happens, no extra requests
+ * sent; 'probe' is the gateway's own lazy health check, triggered
+ * opportunistically by an operator hitting /metrics, /admin, or a listing
+ * endpoint (never a background poller). `state` is 'unhealthy' once at
+ * least the configured `failureThreshold` consecutive failures have been
+ * observed (whether or not this target has ever succeeded), 'healthy'
+ * once it has succeeded at least once and stays below that threshold, and
+ * 'unknown' otherwise. `consecutiveFailures` is always present.
+ *
+ * 'unknown' reads two different ways server-side, and only ONE of them
+ * omits the rest of this object (F4, feat/target-health review):
+ *  - never observed by either source at all: every other field is
+ *    omitted — there is truly nothing to report.
+ *  - observed, but never once succeeded, still below `failureThreshold`:
+ *    every other field is PRESENT — `lastCheck`/`lastError`/`latencyMs`/
+ *    `source` all carry a real observation, this target simply has not
+ *    answered successfully yet. Do not treat 'unknown' as "no data" for
+ *    this case; check whether `lastCheck` is set instead.
+ *
+ * `lastError` is additionally omitted whenever it is empty (a healthy
+ * target has nothing to show), and `latencyMs`/`source` are omitted only
+ * when genuinely not known (the never-observed case above).
+ */
+export interface AdminTargetHealthView {
+  state: 'healthy' | 'unhealthy' | 'unknown'
+  lastCheck?: string
+  lastError?: string
+  consecutiveFailures: number
+  latencyMs?: number
+  source?: 'probe' | 'traffic'
+}
+
+/**
  * One configured MCP server's or A2A agent's row in GET /admin/api/targets
  * (admin.go: adminTargetView). Access is the group names actually allowed
  * to reach this target, computed server-side via the same matching authz
@@ -329,6 +366,8 @@ export interface AdminTargetView {
   url: string
   access?: string[]
   counters: AdminTargetCountersView
+  /** See AdminTargetHealthView's own doc comment (feat/target-health) — always present, unlike access above. */
+  health: AdminTargetHealthView
 }
 
 /** GET /admin/api/targets (admin.go: adminTargetsResponse). */

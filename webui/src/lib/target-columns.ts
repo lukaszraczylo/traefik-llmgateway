@@ -3,7 +3,8 @@ import { h } from 'vue'
 
 import CompactNumber from '@/components/CompactNumber.vue'
 import { Badge } from '@/components/ui/badge'
-import type { AdminTargetView } from '@/types/api'
+import { formatElapsedAgo, formatLatencyMs } from '@/lib/format'
+import type { AdminTargetHealthView, AdminTargetView } from '@/types/api'
 
 /**
  * numericColumn builds one right-aligned, sortable request-counter
@@ -27,16 +28,91 @@ function numericColumn(id: string, header: string, read: (t: AdminTargetView) =>
   }
 }
 
+// --- target health (feat/target-health) ---
+//
+// Mirrors ProvidersView.vue's own healthBadgeVariant/healthBadgeLabel
+// convention for the discovery circuit breaker: a Badge only for the two
+// states worth flagging (unhealthy, unknown); the common healthy case
+// renders no badge at all, just muted inline text — the same "nothing to
+// show reads as no badge" idiom every health/rate indicator in this panel
+// already follows (see AdminTargetHealthView's own doc comment, api.ts,
+// for what each field means).
+
+const UNKNOWN_HEALTH_TITLE = 'not observed yet — no traffic and probes disabled or not yet run'
+
+/** unhealthyLabel keeps the Badge's own visible text short — "unhealthy (Ns ago)" when lastCheck is known, plain "unhealthy" otherwise (defensive: a version-skewed server response omitting lastCheck on an unhealthy row). */
+function unhealthyLabel(health: AdminTargetHealthView): string {
+  const ago = formatElapsedAgo(health.lastCheck)
+  return ago ? `unhealthy (${ago})` : 'unhealthy'
+}
+
+/** unhealthyTitle carries the detail the short label leaves out — consecutiveFailures, source, and lastError (when present) — e.g. "3 consecutive failures via probe: connection refused". */
+function unhealthyTitle(health: AdminTargetHealthView): string {
+  const failWord = health.consecutiveFailures === 1 ? 'failure' : 'failures'
+  const sourcePart = health.source ? ` via ${health.source}` : ''
+  const base = `${health.consecutiveFailures} consecutive ${failWord}${sourcePart}`
+  return health.lastError ? `${base}: ${health.lastError}` : base
+}
+
+/** healthyTitle is the muted "healthy" text's hover detail — "Ns ago via probe/traffic" — omitting whichever half (relative time, source) the response does not carry. */
+function healthyTitle(health: AdminTargetHealthView): string {
+  const ago = formatElapsedAgo(health.lastCheck)
+  if (!ago) return health.source ? `via ${health.source}` : ''
+  return health.source ? `${ago} via ${health.source}` : ago
+}
+
+/**
+ * unknownTitle renders the "unknown" badge's hover detail. F4
+ * (feat/target-health) reads "unknown" two different ways — see
+ * AdminTargetHealthView's own doc comment (types/api.ts): never observed
+ * at all, which gets the generic UNKNOWN_HEALTH_TITLE, or observed but
+ * never yet succeeded (still below failureThreshold), which carries real
+ * failure detail (consecutiveFailures/source/lastError) even though the
+ * label stays "unknown" — this surfaces that detail instead of the
+ * generic message, mirroring unhealthyTitle's own conditional shape.
+ */
+function unknownTitle(health: AdminTargetHealthView): string {
+  if (health.consecutiveFailures <= 0 && !health.lastError) return UNKNOWN_HEALTH_TITLE
+  const failWord = health.consecutiveFailures === 1 ? 'failure' : 'failures'
+  const sourcePart = health.source ? ` via ${health.source}` : ''
+  const base = `${health.consecutiveFailures} ${failWord} so far${sourcePart}`
+  return health.lastError ? `${base}: ${health.lastError}` : base
+}
+
+/**
+ * healthCell renders one row's health column: destructive Badge for
+ * unhealthy, muted plain text (plus " · " and formatLatencyMs when
+ * latencyMs is known) for the explicit healthy case, and an outline
+ * "unknown" Badge as the FALLBACK for everything else — not the reverse
+ * — so a state value this webui build does not recognize renders as
+ * "unknown" rather than silently reading as healthy.
+ */
+function healthCell(health: AdminTargetHealthView) {
+  if (health.state === 'unhealthy') {
+    return h(
+      Badge,
+      { as: 'span', variant: 'destructive', class: 'font-normal', title: unhealthyTitle(health) },
+      () => unhealthyLabel(health),
+    )
+  }
+  if (health.state === 'healthy') {
+    const latencyPart = health.latencyMs !== undefined ? ` · ${formatLatencyMs(health.latencyMs)}` : ''
+    return h('span', { class: 'text-muted-foreground', title: healthyTitle(health) }, `healthy${latencyPart}`)
+  }
+  return h(Badge, { as: 'span', variant: 'outline', class: 'font-normal', title: unknownTitle(health) }, () => 'unknown')
+}
+
 /**
  * targetColumns builds the shared TanStack `ColumnDef` set both the MCP
  * servers and the Agents DataTable in TargetsView.vue use (admin.go:
  * adminTargetView — the two tables share one identical row shape). name is
  * plain text (not the ModelChip copy treatment — a target name is not a
  * routable model id); url is muted and truncated with a title attribute
- * for the full value; access renders as a Badge per allowed group, or a
- * muted "All groups" when unrestricted — the exact idiom UsageView.vue's
- * own group Access block already established (Providers/Models/MCP
- * servers/Agents dt/dd pairs there).
+ * for the full value; health is the Badge/muted-text pair healthCell above
+ * builds (feat/target-health); access renders as a Badge per allowed
+ * group, or a muted "All groups" when unrestricted — the exact idiom
+ * UsageView.vue's own group Access block already established (Providers/
+ * Models/MCP servers/Agents dt/dd pairs there).
  */
 export function targetColumns(): ColumnDef<AdminTargetView, unknown>[] {
   return [
@@ -56,6 +132,17 @@ export function targetColumns(): ColumnDef<AdminTargetView, unknown>[] {
           { class: 'block max-w-xs truncate text-muted-foreground', title: row.original.url },
           row.original.url,
         ),
+    },
+    {
+      id: 'health',
+      header: 'Health',
+      // No natural sort order across three semantic states (healthy/
+      // unhealthy/unknown) — plain alphabetical would put "healthy" and
+      // "unhealthy" beside each other for the wrong reason. Same call the
+      // access column below makes for its own non-primitive shape.
+      enableSorting: false,
+      accessorFn: (t) => t.health.state,
+      cell: ({ row }) => healthCell(row.original.health),
     },
     {
       id: 'access',
