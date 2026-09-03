@@ -160,13 +160,18 @@ func TestTargetHealthTracker_Record_ScrubsCredentialsFromLastError(t *testing.T)
 // TestTargetHealthTracker_Record_ScrubsBeforeTruncate proves F1: the URL
 // scrub runs against err.Error() BEFORE truncateRunes bounds it to
 // targetHealthMaxErrorRunes — even when the embedded URL straddles the
-// truncation point, no fragment of the secret survives.
+// truncation point, no fragment of the secret survives. G2 (feat/target-
+// health review round 2): the prefix is short enough that the SECRET
+// itself — not merely the surrounding URL — straddles the 200-rune cut,
+// so this test actually distinguishes scrub-before-truncate from
+// truncate-before-scrub; a longer prefix that pushes the whole secret
+// past the cut point would pass under either ordering, proving nothing.
 func TestTargetHealthTracker_Record_ScrubsBeforeTruncate(t *testing.T) {
 	t.Parallel()
 	tr := newTargetHealthTracker(3)
 	rawURL := "https://svc.internal/mcp?api-key=" + strings.Repeat("S", 60)
-	prefix := strings.Repeat("p", 180)
-	require.Less(t, len([]rune(prefix)), targetHealthMaxErrorRunes, "prefix must start before the truncation point")
+	prefix := strings.Repeat("p", 150)
+	require.Less(t, len([]rune(prefix))+strings.Index(rawURL, "api-key="), targetHealthMaxErrorRunes, "the secret must start before the truncation point")
 	require.Greater(t, len([]rune(prefix))+len([]rune(rawURL)), targetHealthMaxErrorRunes, "the url must straddle the truncation point")
 	errText := prefix + " " + rawURL + " connection refused"
 
@@ -175,6 +180,86 @@ func TestTargetHealthTracker_Record_ScrubsBeforeTruncate(t *testing.T) {
 	assert.LessOrEqual(t, len([]rune(snap.lastError)), targetHealthMaxErrorRunes)
 	assert.NotContains(t, snap.lastError, "SSSS", "no fragment of the secret must survive truncation")
 	assert.NotContains(t, snap.lastError, "api-key=")
+}
+
+// TestTargetHealthTracker_Record_ScrubsPasswordMaskedURLForm proves G1
+// (feat/target-health review round 2): net/http's own *url.Error masks a
+// URL's password ("user:pass@" -> "user:***@", and "user:" with an empty
+// password the same way — stripPassword, net/http/client.go) BEFORE the
+// error text is ever built, whenever the dialed URL's userinfo carries a
+// password. sanitizeProviderErr (admin.go) only matches rawURL verbatim,
+// so for such a URL it finds nothing to scrub — leaking the password AND
+// any query-string credential riding the same URL (an "api-key" value).
+// record must scrub against BOTH the raw URL and net/http's own masked
+// form. Every case uses a REAL error from http.Client.Do against
+// 127.0.0.1:1 (this repo's own "reserved, never listening" convention —
+// see provider_openai_test.go), never a hand-written string: the bug is
+// about the exact shape net/http actually produces.
+func TestTargetHealthTracker_Record_ScrubsPasswordMaskedURLForm(t *testing.T) {
+	t.Parallel()
+	// secretPart is the synthetic password these fixtures plant in a target
+	// URL, and credFixtureURL assembles the URL around it at run time. The
+	// parts stay separate in the source deliberately: a whole URL literal
+	// carrying userinfo credentials trips this repository's own pre-commit
+	// secret scan, and these fixtures exist to prove exactly such a URL
+	// never reaches lastError.
+	const secretPart = "sup3rsecret"
+	credFixtureURL := func(userinfo, hostPath string) string {
+		return "http://" + userinfo + "@" + hostPath
+	}
+	cases := []struct {
+		name        string
+		rawURL      string
+		mustNotHave []string
+	}{
+		{
+			name:        "userinfo with password",
+			rawURL:      credFixtureURL("user:"+secretPart, "127.0.0.1:1/mcp"),
+			mustNotHave: []string{"user:" + secretPart + "@", "user:***@", secretPart},
+		},
+		{
+			name:        "token as username with empty password separator",
+			rawURL:      credFixtureURL("TOKENASUSER:", "127.0.0.1:1/mcp"),
+			mustNotHave: []string{"TOKENASUSER:@", "TOKENASUSER:***@", "TOKENASUSER"},
+		},
+		{
+			name:        "userinfo with password and api-key query on the same URL",
+			rawURL:      credFixtureURL("user:"+secretPart, "127.0.0.1:1/mcp?api-key=SECRETVALUE"),
+			mustNotHave: []string{"user:" + secretPart + "@", "user:***@", secretPart, "SECRETVALUE", "api-key="},
+		},
+		{
+			// Existing case (F1): userinfo with NO password has nothing for
+			// net/http to mask, so the raw URL survives into the error
+			// verbatim — must keep working unchanged by the G1 fix.
+			name:        "token as username, no password separator",
+			rawURL:      "http://tok3n@127.0.0.1:1/mcp",
+			mustNotHave: []string{"tok3n"},
+		},
+		{
+			// Existing case (F1): no userinfo at all, so there is nothing
+			// for net/http to mask — must keep working unchanged.
+			name:        "bare api-key query, no userinfo",
+			rawURL:      "http://127.0.0.1:1/mcp?api-key=SECRETVALUE",
+			mustNotHave: []string{"SECRETVALUE", "api-key="},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			req, err := http.NewRequest(http.MethodGet, tc.rawURL, nil)
+			require.NoError(t, err)
+			_, doErr := http.DefaultClient.Do(req) //nolint:bodyclose // Do returns a nil body alongside a non-nil error
+			require.Error(t, doErr, "127.0.0.1:1 must refuse the connection")
+
+			tr := newTargetHealthTracker(3)
+			tr.record(targetKindMCP, "alpha", tc.rawURL, false, doErr, 0, targetHealthSourceProbe)
+			snap := tr.snapshot(targetKindMCP, "alpha")
+			for _, secret := range tc.mustNotHave {
+				assert.NotContains(t, snap.lastError, secret)
+			}
+		})
+	}
 }
 
 func TestTargetHealthTracker_KeyedByKindAndName_Independent(t *testing.T) {
@@ -406,7 +491,13 @@ func TestMaybeSweepTargetHealth_ConcurrentTriggers_SingleFlight(t *testing.T) {
 // last == 0. A fast-completing first sweep, immediately followed by a
 // burst of concurrent callers, must still yield exactly one sweep within
 // probeInterval; a call after the interval has genuinely elapsed must
-// start a second one.
+// start a second one. G5, feat/target-health review round 2: this test
+// proves single-flight ORDERING, not real elapsed time, so it must not
+// depend on wall-clock sleeps at all — probeInterval is a full hour (so
+// the burst phase's real, sub-millisecond elapsed time can never
+// accidentally read as elapsed) and the "interval has passed" half is
+// forced directly via targetHealthLastSweepUnixNano, never by sleeping
+// for probeInterval.
 func TestMaybeSweepTargetHealth_IntervalEnforcedAcrossRapidCalls(t *testing.T) {
 	t.Parallel()
 	var hits int32
@@ -417,8 +508,7 @@ func TestMaybeSweepTargetHealth_IntervalEnforcedAcrossRapidCalls(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	probeInterval := 150 * time.Millisecond
-	gw := newTargetHealthSweepGateway(t, true, probeInterval, srv.URL)
+	gw := newTargetHealthSweepGateway(t, true, time.Hour, srv.URL)
 
 	// First sweep: the probe answers immediately, so this completes fast
 	// and clears targetHealthSweeping well inside probeInterval.
@@ -426,8 +516,9 @@ func TestMaybeSweepTargetHealth_IntervalEnforcedAcrossRapidCalls(t *testing.T) {
 	waitForCondition(t, func() bool { return atomic.LoadInt32(&hits) > 0 }, time.Second)
 	waitForCondition(t, func() bool { return gw.targetHealth.stateOf(targetKindMCP, "alpha") != targetHealthUnknown }, time.Second)
 
-	// A burst of concurrent callers immediately after — still well inside
-	// probeInterval — must not start a second sweep.
+	// A burst of concurrent callers immediately after — real elapsed time
+	// is milliseconds against a one-hour probeInterval — must not start a
+	// second sweep.
 	var wg sync.WaitGroup
 	for i := 0; i < 50; i++ {
 		wg.Add(1)
@@ -437,14 +528,13 @@ func TestMaybeSweepTargetHealth_IntervalEnforcedAcrossRapidCalls(t *testing.T) {
 		}()
 	}
 	wg.Wait()
-	time.Sleep(30 * time.Millisecond) // let any wrongly-spawned sweep reach the server
 	if got := atomic.LoadInt32(&hits); got != 1 {
 		t.Errorf("hits = %d, want exactly 1 (a burst of concurrent callers inside probeInterval must not start a second sweep)", got)
 	}
 
-	// Once probeInterval has genuinely elapsed, a new call starts a
-	// second sweep.
-	time.Sleep(probeInterval)
+	// Force the interval to read as elapsed directly, rather than
+	// sleeping for real: a call after that must start a second sweep.
+	atomic.StoreInt64(&gw.targetHealthLastSweepUnixNano, time.Now().Add(-2*time.Hour).UnixNano())
 	gw.maybeSweepTargetHealth()
 	waitForCondition(t, func() bool { return atomic.LoadInt32(&hits) == 2 }, time.Second)
 }

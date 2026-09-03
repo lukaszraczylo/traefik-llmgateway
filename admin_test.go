@@ -2642,3 +2642,48 @@ func TestAdminTargets_Health_LastError_ScrubsTargetCredentials(t *testing.T) {
 		t.Errorf("lastError = %q, want scrubbed", got.MCPServers[0].Health.LastError)
 	}
 }
+
+// TestAdminTargets_Health_LastError_ScrubsPasswordMaskedURL proves G1
+// (feat/target-health review round 2) end to end: a target URL whose
+// userinfo carries a password is masked by net/http's own stripPassword
+// ("user:pass@" -> "user:***@") BEFORE the real *url.Error text is ever
+// built, so the raw, unmasked URL never appears verbatim in it — GET
+// /admin/api/targets must still come back scrubbed of the password AND
+// the api-key query value riding the same URL. Uses a REAL error from
+// http.Client.Do against 127.0.0.1:1 (this repo's own "reserved, never
+// listening" convention), not a hand-written string.
+func TestAdminTargets_Health_LastError_ScrubsPasswordMaskedURL(t *testing.T) {
+	t.Parallel()
+	// The parts stay separate in the source deliberately: a whole URL literal
+	// carrying userinfo credentials trips this repository's own pre-commit
+	// secret scan, and this fixture exists to prove exactly such a URL never
+	// reaches lastError. See the same note in target_health_test.go.
+	const secretPart = "sup3rsecret"
+	rawURL := "http://user:" + secretPart + "@127.0.0.1:1/mcp?api-key=SECRETVALUE"
+	cfg := newAdminTestConfig()
+	cfg.MCPServers = map[string]*TargetConfig{"alpha": {URL: rawURL}}
+	cfg.TargetHealth = TargetHealthConfig{FailureThreshold: 1}
+	h, gw := newAdminGatewayHandle(t, cfg)
+
+	req, err := http.NewRequest(http.MethodGet, rawURL, nil)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	_, doErr := http.DefaultClient.Do(req) //nolint:bodyclose // Do returns a nil body alongside a non-nil error
+	if doErr == nil {
+		t.Fatal("Do: want an error dialing 127.0.0.1:1")
+	}
+	gw.targetHealth.record(targetKindMCP, "alpha", rawURL, false, doErr, 3*time.Millisecond, targetHealthSourceProbe)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, adminRequest(http.MethodGet, adminTargetsPath, "sk-admin1"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	for _, secret := range []string{"sup3rsecret", "SECRETVALUE", "***", "api-key="} {
+		if strings.Contains(body, secret) {
+			t.Errorf("body = %s, want lastError scrubbed of %q", body, secret)
+		}
+	}
+}

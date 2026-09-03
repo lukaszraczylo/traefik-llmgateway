@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -142,21 +144,24 @@ func newTargetHealthTracker(threshold int) *targetHealthTracker {
 // record accounts one observation (a real proxied request, or an active
 // probe) for (kind, name): success resets consecutiveFailures to 0 and
 // clears lastError; failure increments consecutiveFailures and stores
-// err's message, truncated to targetHealthMaxErrorRunes (err may be nil
-// even on failure — a caller with no Go error to attach, e.g. a bad
-// HTTP status alone, still leaves lastError at whatever it previously
-// held rather than clearing it, since there IS a new failure to report).
+// err's message, truncated to targetHealthMaxErrorRunes. Every caller
+// today (probeMCPTarget/probeAgentTarget/recordTargetProxyHealth, below;
+// mcpFederatedToolsList/mcpFederatedToolsCall, mcp_federation.go) always
+// passes a non-nil err alongside ok=false — a failure with no Go error to
+// attach is not a shape this tracker currently has to handle.
 // rawURL is (kind, name)'s configured target URL — the exact string a
-// caller dialed, used ONLY to scrub err's text through sanitizeProviderErr
-// (admin.go) before it is stored: a Go *url.Error embeds the dialed URL
-// verbatim, so an operator-configured target URL carrying credentials
-// (an "api-key" query parameter, userinfo) would otherwise leak through
-// GET /admin/api/targets' lastError field the same way an unsanitized
-// provider error once could (F1, feat/target-health review). The scrub
-// runs BEFORE truncateRunes, not after: truncating first could cut a long
-// embedded URL in half, leaving sanitizeProviderErr's exact-substring
-// match unable to find it and a fragment of the credential in the
-// truncated result. source is targetHealthSourceProbe or
+// caller dialed, used ONLY to scrub err's text through sanitizeTargetErr
+// (below) before it is stored: a Go *url.Error embeds the dialed URL —
+// verbatim, OR with its password masked by net/http's own stripPassword
+// when one is present — so an operator-configured target URL carrying
+// credentials (an "api-key" query parameter, userinfo) would otherwise
+// leak through GET /admin/api/targets' lastError field the same way an
+// unsanitized provider error once could (F1, feat/target-health review;
+// G1, review round 2, for the password-masked form). The scrub runs
+// BEFORE truncateRunes, not after: truncating first could cut a long
+// embedded URL in half, leaving the scrub's exact-substring match unable
+// to find it and a fragment of the credential in the truncated result.
+// source is targetHealthSourceProbe or
 // targetHealthSourceTraffic — whichever mechanism produced this
 // observation.
 func (t *targetHealthTracker) record(kind, name, rawURL string, ok bool, err error, latency time.Duration, source string) {
@@ -182,8 +187,38 @@ func (t *targetHealthTracker) record(kind, name, rawURL string, ok bool, err err
 	}
 	e.consecutiveFailures++
 	if err != nil {
-		e.lastError = truncateRunes(sanitizeProviderErr(err.Error(), rawURL), targetHealthMaxErrorRunes)
+		e.lastError = truncateRunes(sanitizeTargetErr(err.Error(), rawURL), targetHealthMaxErrorRunes)
 	}
+}
+
+// sanitizeTargetErr scrubs msg of rawURL's own credentials, in both forms
+// a real error from a call against rawURL can actually carry it (G1,
+// feat/target-health review round 2). Go's net/http builds a *url.Error
+// via its own unexported stripPassword (net/http/client.go) whenever the
+// dialed URL's userinfo carries a password: it rewrites "user:pass@" (and
+// a token-as-username-with-no-password, "token:@") to "user:***@" IN THE
+// URL BEFORE the error string is ever built — so for such a URL, msg
+// never contains rawURL verbatim, and a plain sanitizeProviderErr(msg,
+// rawURL) call (admin.go) — which only matches rawURL verbatim — finds
+// nothing to scrub, leaking the password and any query-string credential
+// riding the same URL (an "api-key" value) straight through. This
+// function first tries the plain match (the common case: no userinfo, or
+// userinfo with no password, both pass through net/http unmasked and
+// still match verbatim), then — only when rawURL's userinfo actually
+// carries a password — builds net/http's exact masked form itself
+// (mirroring stripPassword's own strings.Replace call precisely) and
+// scrubs against that too.
+func sanitizeTargetErr(msg, rawURL string) string {
+	msg = sanitizeProviderErr(msg, rawURL)
+	u, parseErr := url.Parse(rawURL)
+	if parseErr != nil || u.User == nil {
+		return msg
+	}
+	if _, hasPassword := u.User.Password(); !hasPassword {
+		return msg
+	}
+	masked := strings.Replace(u.String(), u.User.String()+"@", u.User.Username()+":***@", 1)
+	return sanitizeProviderErr(msg, masked)
 }
 
 // stateOf reports (kind, name)'s current targetHealthState — see this
