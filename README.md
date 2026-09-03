@@ -1898,11 +1898,14 @@ plugin's config.
     only when the outbound call itself fails (`err != nil` from the
     backend call) — a JSON-RPC-level `error` in the backend's own
     response still counts as reachable, since the server answered. A
-    context-caused failure (the caller canceling, or the shared fan-out
-    deadline expiring) records nothing at all, the same client-cancel
-    rule the per-server proxy above applies; a genuinely hung server is
-    still caught by the active probe sweep or its own per-server proxy
-    health.
+    context-caused failure is split two ways: the caller hanging up
+    (`context.Canceled`) records nothing, the same client-cancel rule the
+    per-server proxy above applies, but a server this gateway actually
+    dialed that never answers before the shared fan-out budget expires
+    (`context.DeadlineExceeded`) records a real failure — it had a chance
+    to answer and did not. A server still waiting for a free fan-out slot
+    when that same budget expires — never dialed at all — records
+    nothing, since this gateway never gave it the chance.
   - **Active probes are opt-in** (`targetHealth.enabled: true`) and lazy:
     no timer, no background goroutine running on its own. A probe sweep
     is triggered by `/metrics`, `GET /admin/api/targets`, `GET
@@ -1929,8 +1932,7 @@ plugin's config.
     whether or not the target has ever succeeded). A target with one or
     two recent failures after a success still reads `"healthy"` until the
     threshold is actually crossed.
-  - **`"unknown"` reads three ways**, all sharing one JSON `state`
-    value:
+  - **`"unknown"` reads two ways**, both sharing one JSON `state` value:
     1. never observed at all — no probe or passive traffic has reached
        this target yet. `GET /admin/api/targets` omits every health field
        but `state`/`consecutiveFailures` for this case.
@@ -1941,9 +1943,10 @@ plugin's config.
        has never seen answer is not `"healthy"` either. Every other
        health field is still present here, since there is a real
        observation to show.
-    3. either way, `llmgateway_target_healthy` emits no sample while
-       `state` is `"unknown"` — a gap in the series is honest, a
-       fabricated `1` is not.
+
+    Either way, `llmgateway_target_healthy` emits no sample while `state`
+    is `"unknown"` — a gap in the series is honest, a fabricated `1` is
+    not.
 
 ## Security notes
 

@@ -858,10 +858,12 @@ func TestHandleMCPFederated_ToolsCall_SlowBackend_BoundedByRequestContext(t *tes
 	t.Cleanup(func() { close(block) })
 
 	cfg := newFederationTestConfig(srv.URL, "http://beta.invalid", true)
+	cfg.TargetHealth = TargetHealthConfig{FailureThreshold: 1}
 	h, err := New(context.Background(), http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), cfg, "llmgw")
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
+	gw := h.(*Gateway)
 
 	callParams, _ := json.Marshal(mcpToolCallParams{Name: "alpha_lookup"})
 	req := newFederatedRequest(t, "sk-alice", jsonrpcRequest{JSONRPC: jsonrpcVersion, Method: "tools/call", ID: json.RawMessage("1"), Params: callParams})
@@ -883,6 +885,12 @@ func TestHandleMCPFederated_ToolsCall_SlowBackend_BoundedByRequestContext(t *tes
 	}
 	if got.Error == nil || got.Error.Code != jsonrpcInternalError {
 		t.Errorf("error = %+v, want internal error (the resolved server timed out)", got.Error)
+	}
+	// G4, feat/target-health review round 2: tools/call always actually
+	// dials its one resolved server (no semaphore to wait behind), so
+	// this shared-budget expiry must record a failure, not nothing.
+	if state := gw.targetHealth.stateOf(targetKindMCP, "alpha"); state != targetHealthUnhealthy {
+		t.Errorf("alpha state = %q, want unhealthy (dialed and never answered within the request's own budget)", state)
 	}
 }
 
@@ -2057,28 +2065,72 @@ func TestHandleMCPFederated_ToolsList_ClientCanceled_RecordsNothing(t *testing.T
 	}
 }
 
-// TestHandleMCPFederated_ToolsList_SharedDeadlineExpiry_RecordsNothing
-// proves F2's second case: when the fan-out's own shared context expires
-// (toolsListBackendTimeout, or here the incoming request's own shorter
-// deadline — see TestHandleMCPFederated_ToolsList_SlowBackend_BoundedByRequestContext's
-// own doc comment for why that stands in for the real 20s budget), a
-// server still parked behind the fan-out semaphore — never actually
-// dialed — must not be recorded as a failure either. mcpBackendCall
-// returns the identical context.DeadlineExceeded whether a server was
-// slow or never contacted at all, so this case is handled by the same
-// guard as the client-cancel case above, not by tracking who was dialed.
-func TestHandleMCPFederated_ToolsList_SharedDeadlineExpiry_RecordsNothing(t *testing.T) {
+// TestHandleMCPFederated_ToolsList_HungDialedServer_RecordsFailure proves
+// G4 (feat/target-health review round 2): a server that WAS actually
+// dialed and never answers before the fan-out's own shared budget
+// expires (toolsListBackendTimeout, or here the incoming request's own
+// shorter deadline — see
+// TestHandleMCPFederated_ToolsList_SlowBackend_BoundedByRequestContext's
+// own doc comment for why that stands in for the real 20s budget) must
+// still record a failure, not nothing. F2's original guard
+// blanket-suppressed context.DeadlineExceeded too, which meant a
+// genuinely hung server read "unknown" forever under federation-only
+// traffic whenever targetHealth.enabled defaults false — the
+// over-suppression this fix removes.
+func TestHandleMCPFederated_ToolsList_HungDialedServer_RecordsFailure(t *testing.T) {
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-release
+	}))
+	t.Cleanup(srv.Close)
+	t.Cleanup(func() { close(release) })
+
+	cfg := newFederationTestConfig(srv.URL, "http://beta.invalid", true)
+	cfg.TargetHealth = TargetHealthConfig{FailureThreshold: 1}
+	h, err := New(context.Background(), http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	gw := h.(*Gateway)
+
+	req := newFederatedRequest(t, "sk-alice", jsonrpcRequest{JSONRPC: jsonrpcVersion, Method: "tools/list", ID: json.RawMessage("1")})
+	shortCtx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	req = req.WithContext(shortCtx)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if got := gw.targetHealth.stateOf(targetKindMCP, "alpha"); got != targetHealthUnhealthy {
+		t.Errorf("alpha state = %q, want unhealthy (dialed and never answered within the fan-out budget)", got)
+	}
+}
+
+// TestHandleMCPFederated_ToolsList_NeverDialedSemaphoreStarved_RecordsNothing
+// proves G4's other half: a server still parked behind the fan-out
+// semaphore when the shared deadline fires — never actually dialed —
+// must still record nothing, unlike a server that WAS dialed (the test
+// above). One more server than the fan-out semaphore has slots for
+// (mcpFederatedFanoutConcurrency) guarantees at least one is never
+// dialed; draining exactly mcpFederatedFanoutConcurrency sends on
+// reached first proves which servers WERE actually dialed before any
+// assertion runs, rather than assuming which specific names win the
+// race. snapshot's own "observed" field (target_health.go), not stateOf,
+// is what actually distinguishes "recorded a failure, still below
+// failureThreshold" from "never recorded at all" — both read state
+// targetHealthUnknown (F4), so FailureThreshold: 1 below also makes a
+// dialed server's single failure visible as targetHealthUnhealthy
+// through stateOf too, for a belt-and-suspenders check.
+func TestHandleMCPFederated_ToolsList_NeverDialedSemaphoreStarved_RecordsNothing(t *testing.T) {
+	reached := make(chan struct{}, mcpFederatedFanoutConcurrency)
 	block := make(chan struct{})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reached <- struct{}{}
 		<-block
 	}))
 	t.Cleanup(srv.Close)
 	t.Cleanup(func() { close(block) })
 
-	// One more server than the fan-out semaphore has slots for
-	// (mcpFederatedFanoutConcurrency) guarantees at least one is still
-	// parked on the semaphore, never dialed, when the shared deadline
-	// fires.
 	names := make([]string, 0, mcpFederatedFanoutConcurrency+1)
 	mcpServers := make(map[string]*TargetConfig, mcpFederatedFanoutConcurrency+1)
 	for i := 0; i < mcpFederatedFanoutConcurrency+1; i++ {
@@ -2092,6 +2144,7 @@ func TestHandleMCPFederated_ToolsList_SharedDeadlineExpiry_RecordsNothing(t *tes
 	cfg.MCPServers = mcpServers
 	cfg.Groups = map[string]*GroupConfig{"default": {}}
 	cfg.Users = &UsersConfig{Inline: []*UserConfig{{Name: "alice", Group: "default", APIKey: "sk-alice"}}}
+	cfg.TargetHealth = TargetHealthConfig{FailureThreshold: 1}
 
 	h, err := New(context.Background(), http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), cfg, "llmgw")
 	if err != nil {
@@ -2100,17 +2153,39 @@ func TestHandleMCPFederated_ToolsList_SharedDeadlineExpiry_RecordsNothing(t *tes
 	gw := h.(*Gateway)
 
 	req := newFederatedRequest(t, "sk-alice", jsonrpcRequest{JSONRPC: jsonrpcVersion, Method: "tools/list", ID: json.RawMessage("1")})
-	shortCtx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	shortCtx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
 	defer cancel()
 	req = req.WithContext(shortCtx)
 
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
+	done := make(chan struct{})
+	go func() {
+		h.ServeHTTP(rec, req)
+		close(done)
+	}()
 
+	for i := 0; i < mcpFederatedFanoutConcurrency; i++ {
+		<-reached
+	}
+	<-done
+
+	dialed, neverDialed := 0, 0
 	for _, name := range names {
-		if got := gw.targetHealth.stateOf(targetKindMCP, name); got != targetHealthUnknown {
-			t.Errorf("mcp/%s state = %q, want unknown (a shared fan-out deadline expiry must record nothing)", name, got)
+		snap := gw.targetHealth.snapshot(targetKindMCP, name)
+		if snap.observed {
+			dialed++
+			if snap.state != targetHealthUnhealthy {
+				t.Errorf("mcp/%s state = %q, want unhealthy (dialed and never answered)", name, snap.state)
+			}
+			continue
 		}
+		neverDialed++
+	}
+	if dialed != mcpFederatedFanoutConcurrency {
+		t.Errorf("dialed = %d, want %d (exactly one server must never have been dialed)", dialed, mcpFederatedFanoutConcurrency)
+	}
+	if neverDialed != 1 {
+		t.Errorf("neverDialed = %d, want exactly 1", neverDialed)
 	}
 }
 
