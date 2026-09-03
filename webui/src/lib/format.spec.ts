@@ -1,8 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { formatCompactCount, formatContextWindow, formatElapsedAgo, formatLatencyMs, formatModelCostHover, formatUntil, refreshDetailLabel, refreshLabel } from './format'
-
-const ZERO_TIME = '0001-01-01T00:00:00Z'
+import { formatCompactCount, formatContextWindow, formatElapsedAgo, formatLatencyMs, formatModelCostHover, formatUntil, refreshDetailLabel, refreshLabel, ZERO_TIME } from './format'
 
 describe('refreshLabel', () => {
   it('reads "discovery off" when discovery is disabled, regardless of lastRefresh', () => {

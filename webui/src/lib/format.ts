@@ -1,6 +1,7 @@
 import type { HistoryWindow, LimitsConfig } from '@/types/api'
 
-const ZERO_TIME = '0001-01-01T00:00:00Z'
+/** ZERO_TIME is Go's zero time.Time value in its default JSON (RFC 3339) encoding — the unset-timestamp sentinel every admin API "never happened yet" field marshals as, and every formatter/test below treats as absent. */
+export const ZERO_TIME = '0001-01-01T00:00:00Z'
 
 /**
  * routableModelId joins a provider name and one of its own model ids into
