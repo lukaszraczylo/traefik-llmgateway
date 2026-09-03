@@ -404,6 +404,17 @@ func run() error {
 		_, _ = w.Write([]byte(`"}]}}`))
 	}))
 	defer mcpProbeUpstream.Close()
+	// targetHealthDownUpstream is opened only to capture a real, unique
+	// "http://127.0.0.1:PORT" URL, then immediately closed — feat/
+	// target-health's own exerciseTargetHealth (below) drives real 502s
+	// through this dead target's per-server proxy path
+	// (/mcp/target-health-down/...) to prove the interpreted tracker
+	// flips it to "unhealthy" after targetHealthFailureThreshold
+	// consecutive failures, without disturbing mcpProbeUpstream's own
+	// (successful, federation-routed) traffic above.
+	targetHealthDownUpstream := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	targetHealthDownURL := targetHealthDownUpstream.URL
+	targetHealthDownUpstream.Close()
 	// anthropicProbeUpstream answers an Anthropic Messages API call with a
 	// real Anthropic-shaped body, so the /v1/messages passthrough branch
 	// (callAnthropicMessagesPassthrough) runs interpreted. A body
@@ -587,7 +598,16 @@ func run() error {
 		// runs correctly under Yaegi too, not just the config-override
 		// one testDataWantModel already exercises.
 		`"modelMeta":{"` + testDataWantModel + `":{"contextTokens":` + yaegiMetaContextTokens + `,"inputCostPerMTokMicroUsd":1250000,"outputCostPerMTokMicroUsd":10000000}},` +
-		`"mcpServers":{"` + mcpProbeServerName + `":{"url":"` + mcpProbeUpstream.URL + `"}},` +
+		`"mcpServers":{"` + mcpProbeServerName + `":{"url":"` + mcpProbeUpstream.URL + `"},"` + targetHealthDownServerName + `":{"url":"` + targetHealthDownURL + `"}},` +
+		// targetHealth (feat/target-health): enabled with a short
+		// probeInterval so a future active-probe assertion could run
+		// quickly if this harness ever adds one — exerciseTargetHealth
+		// (below) currently exercises the passive-recording and
+		// admin/metrics-exposure paths only, driven by real traffic
+		// (exerciseFederatedTooLarge's own federated call, and
+		// exerciseTargetHealth's own direct proxy calls against
+		// targetHealthDownServerName), never the active sweep itself.
+		`"targetHealth":{"enabled":true,"probeInterval":"10s"},` +
 		// metrics (Prometheus text-exposition endpoint): enabled with
 		// modelLabel on, so exerciseMetricsRoute below exercises the
 		// opt-in per-(provider,model) breakdown under the interpreter
@@ -644,6 +664,17 @@ func run() error {
 	}
 
 	if err := exerciseHandler(handler, builtinLookupContextTokens, failoverBHits); err != nil {
+		return err
+	}
+	// exerciseTargetHealth (feat/target-health) runs right after
+	// exerciseHandler: its own part (a) reads the passive-recording
+	// side effect of exerciseFederatedTooLarge's federated tools/call,
+	// already driven above as one of exerciseHandler's own sub-probes,
+	// so it must not run before that attempt has happened. Its part (b)
+	// drives its own, independent target (targetHealthDownServerName),
+	// so it cannot perturb any later probe's own counters or /metrics
+	// assertions.
+	if err := exerciseTargetHealth(handler); err != nil {
 		return err
 	}
 	// exerciseBareWinnerGroupAware (fix/group-aware-bare-winner,
@@ -751,6 +782,20 @@ const bareWinnerFriendAPIKey = "sk-bare-winner-friend" // #nosec G101 -- test fi
 const (
 	mcpProbeServerName = "probe"
 	mcpProbeToolName   = mcpProbeServerName + "_big"
+)
+
+// targetHealthDownServerName is the second MCP server run() configures,
+// against targetHealthDownUpstream — a URL nothing listens on, opened
+// then immediately closed (feat/target-health, exerciseTargetHealth,
+// below). targetHealthFailureThreshold mirrors the plugin's own
+// defaultTargetHealthFailureThreshold (target_health.go): this harness
+// module cannot import that unexported constant across the Yaegi
+// reflection boundary, so it is copied here, the same independent-
+// literal approach every other harness constant mirroring plugin
+// internals already takes in this file (e.g. testDataWantModel).
+const (
+	targetHealthDownServerName   = "target-health-down"
+	targetHealthFailureThreshold = 3
 )
 
 // metricsProbeAllowedCIDR is the CIDR block attemptAccountingOverride's
@@ -1713,6 +1758,118 @@ func exerciseFederatedTooLarge(handler http.Handler) error {
 	if resp.Error.Message != mcpTooLargeWantMessage {
 		return fmt.Errorf("POST /mcp tools/call error message = %q, want %q — errors.Is(err, errMCPResponseTooLarge) did not match under the interpreter (mcp_federation.go)", resp.Error.Message, mcpTooLargeWantMessage)
 	}
+	return nil
+}
+
+// targetHealthProbeView is a shape-tolerant decode of one adminTargetView
+// entry's own "health" object (admin.go's adminTargetHealthView) —
+// this harness module cannot import the plugin's unexported type across
+// the Yaegi reflection boundary (New is resolved and called by
+// reflection, not a normal Go import — this whole file's own doc
+// comment explains why), so it decodes the JSON shape independently, the
+// same approach readHealth/readProviderAttemptCounters already take for
+// other admin responses.
+type targetHealthProbeView struct {
+	State  string `json:"state"`
+	Source string `json:"source"`
+}
+
+// readTargetHealth returns name's own "health" object from GET
+// /admin/api/targets, searching both mcpServers and agents (mcpProbeServerName
+// and targetHealthDownServerName are both MCP servers, but this checks
+// both arrays so a future agent-shaped call site can reuse it unchanged).
+func readTargetHealth(handler http.Handler, name string) (targetHealthProbeView, error) {
+	req := httptest.NewRequest(http.MethodGet, "/admin/api/targets", nil)
+	req.Header.Set("Authorization", "Bearer "+attemptAccountingAdminAPIKey)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		return targetHealthProbeView{}, fmt.Errorf("GET /admin/api/targets: status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		MCPServers []struct {
+			Name   string                `json:"name"`
+			Health targetHealthProbeView `json:"health"`
+		} `json:"mcpServers"`
+		Agents []struct {
+			Name   string                `json:"name"`
+			Health targetHealthProbeView `json:"health"`
+		} `json:"agents"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		return targetHealthProbeView{}, fmt.Errorf("decode GET /admin/api/targets body: %w (body=%s)", err, rec.Body.String())
+	}
+	for _, s := range body.MCPServers {
+		if s.Name == name {
+			return s.Health, nil
+		}
+	}
+	for _, a := range body.Agents {
+		if a.Name == name {
+			return a.Health, nil
+		}
+	}
+	return targetHealthProbeView{}, fmt.Errorf("target %q not in GET /admin/api/targets: %s", name, rec.Body.String())
+}
+
+// exerciseTargetHealth proves feat/target-health end to end under the
+// REAL interpreter. Part (a): mcpProbeServerName already received one
+// real federated tools/call attempt via exerciseFederatedTooLarge,
+// above — its oversized response trips errMCPResponseTooLarge, a
+// transport-level failure from doBackendJSONRPC's own perspective
+// (mcp_federation.go), which mcpFederatedToolsCall records as a
+// target-health failure. One failure stays well under
+// targetHealthFailureThreshold, so the target still reads "healthy" —
+// target_health.go's own doc comment explains why 1-2 recent failures
+// short of the threshold stay healthy. Part (b): drives
+// targetHealthFailureThreshold consecutive failures through the direct
+// per-server proxy path (/mcp/{name}/..., handleTargetProxy) against
+// targetHealthDownServerName's dead upstream, then asserts the SAME
+// tracker flips that target to "unhealthy" on both GET
+// /admin/api/targets and llmgateway_target_healthy on /metrics.
+func exerciseTargetHealth(handler http.Handler) error {
+	probeHealth, err := readTargetHealth(handler, mcpProbeServerName)
+	if err != nil {
+		return err
+	}
+	if probeHealth.State != "healthy" {
+		return fmt.Errorf("TARGETHEALTH-1: GET /admin/api/targets: %q health.state = %q, want healthy (after one federated tools/call attempt, below threshold): %+v", mcpProbeServerName, probeHealth.State, probeHealth)
+	}
+	if probeHealth.Source != "traffic" {
+		return fmt.Errorf("TARGETHEALTH-2: GET /admin/api/targets: %q health.source = %q, want %q", mcpProbeServerName, probeHealth.Source, "traffic")
+	}
+
+	for i := 0; i < targetHealthFailureThreshold; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/mcp/"+targetHealthDownServerName+"/tools/list", nil)
+		req.Header.Set("Authorization", "Bearer "+testDataUserAPIKey)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusBadGateway {
+			return fmt.Errorf("TARGETHEALTH-3: GET /mcp/%s/tools/list attempt %d: status = %d, want 502 (dead upstream), body=%s", targetHealthDownServerName, i, rec.Code, rec.Body.String())
+		}
+	}
+
+	downHealth, err := readTargetHealth(handler, targetHealthDownServerName)
+	if err != nil {
+		return err
+	}
+	if downHealth.State != "unhealthy" {
+		return fmt.Errorf("TARGETHEALTH-4: GET /admin/api/targets: %q health.state = %q, want unhealthy after %d consecutive failures: %+v", targetHealthDownServerName, downHealth.State, targetHealthFailureThreshold, downHealth)
+	}
+
+	metricsReq := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	metricsReq.Header.Set("Authorization", "Bearer "+attemptAccountingAdminAPIKey)
+	metricsRec := httptest.NewRecorder()
+	handler.ServeHTTP(metricsRec, metricsReq)
+	if metricsRec.Code != http.StatusOK {
+		return fmt.Errorf("GET /metrics: status = %d, want 200, body=%s", metricsRec.Code, metricsRec.Body.String())
+	}
+	wantSample := `llmgateway_target_healthy{kind="mcp",target="` + targetHealthDownServerName + `"} 0`
+	if !strings.Contains(metricsRec.Body.String(), wantSample) {
+		return fmt.Errorf("TARGETHEALTH-5: GET /metrics missing %q — interpreted target-health metric diverged from the compiled shape; body=%s", wantSample, metricsRec.Body.String())
+	}
+
+	fmt.Println("yaegi-check: target health tracked and exposed correctly interpreted (admin API + /metrics)")
 	return nil
 }
 
