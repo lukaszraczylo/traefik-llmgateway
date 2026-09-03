@@ -111,6 +111,13 @@ type Config struct {
 	// Cache is a struct value, not a pointer, for the same reason as Retry
 	// above: its own Enabled field is the on/off signal.
 	Cache CacheConfig `json:"cache"`
+	// TargetHealth configures feat/target-health's opt-in active probe
+	// sweep for MCP servers and A2A agents — see TargetHealthConfig's own
+	// doc comment. A struct value, not a pointer, for the same
+	// zero-means-default reason as Breaker above: passive recording and
+	// exposure (GET /admin/api/targets, llmgateway_target_healthy) stay
+	// on unconditionally regardless of this block's presence.
+	TargetHealth TargetHealthConfig `json:"targetHealth"`
 	// MaxInFlightBodyRequests caps how many unified and media JSON/
 	// multipart requests (routes_unified.go's runUnified via
 	// readAndDecodeUnifiedBody; routes_media.go's decodeMediaJSONRequest/
@@ -362,6 +369,39 @@ type BreakerConfig struct {
 	FailureThreshold int `json:"failureThreshold,omitempty"`
 }
 
+// TargetHealthConfig configures feat/target-health's OPT-IN active probe
+// sweep for MCP servers and A2A agents (target_health.go). Passive
+// recording from real request traffic, and exposure via GET
+// /admin/api/targets and the llmgateway_target_healthy gauge, are ALWAYS
+// on regardless of this block's presence — Enabled here gates ONLY the
+// background probe sweep (maybeSweepTargetHealth, target_health.go). The
+// zero value (Enabled: false) preserves prior behavior exactly: a
+// deployment that predates this feature, or one that never configures
+// this block, sends no active probe traffic to any MCP server or agent.
+// Field order (string before the two scalars) is fieldalignment-
+// sensitive, the same convention BreakerConfig's own doc comment above
+// explains.
+type TargetHealthConfig struct {
+	// ProbeInterval is the minimum time between sweeps (a Go duration
+	// string, e.g. "60s"). Empty (the default) uses
+	// defaultTargetHealthProbeInterval (target_health.go). Must be
+	// between minTargetHealthProbeInterval (10s) and
+	// maxTargetHealthProbeInterval (1h) when set, or construction fails.
+	ProbeInterval string `json:"probeInterval,omitempty"`
+	// FailureThreshold is how many CONSECUTIVE failed observations
+	// (probe or traffic) mark a target unhealthy — see
+	// targetHealthTracker's own doc comment (target_health.go) for the
+	// exact state rule. 0 (the default) uses
+	// defaultTargetHealthFailureThreshold (3). Must be between 1 and 100,
+	// or construction fails.
+	FailureThreshold int `json:"failureThreshold,omitempty"`
+	// Enabled opts into the active probe sweep. false (the default)
+	// means no MCP server or A2A agent is ever proactively contacted for
+	// health purposes — passive recording from real proxied traffic
+	// still runs either way.
+	Enabled bool `json:"enabled,omitempty"`
+}
+
 // AdminConfig configures the read-only admin dashboard (spec §4, v0.2).
 // The zero value (Enabled: false) disables it, preserving v0.1 behavior
 // exactly: no /admin* route is registered, so those paths fall through
@@ -546,7 +586,34 @@ const maxExplicitBodyAdmissionCap = 10_000
 // convention (admin.go) for the same reasoning spelled out once; this
 // struct is the other place it applies.
 type Gateway struct {
-	next http.Handler
+	// targetHealthLastSweepUnixNano MUST stay the first field (F7,
+	// feat/target-health review). It backs maybeSweepTargetHealth's
+	// single-flight gate (target_health.go) and is read/written only via
+	// sync/atomic's 64-bit functions (atomic.LoadInt64/StoreInt64) — the
+	// sync/atomic package documents that "on ARM, x86-32, and 32-bit
+	// MIPS, it is the caller's responsibility to arrange for 64-bit
+	// alignment of 64-bit words accessed atomically," and guarantees
+	// that alignment only for "the first word in an allocated struct,
+	// array, or slice." Traefik ships armv7 and 386 builds alongside
+	// amd64/arm64, so this is not a hypothetical: any field placed
+	// ahead of this one could silently misalign it on those platforms.
+	// Every field below is ordered by golangci-lint's fieldalignment
+	// linter (pointer-containing fields grouped first, for GC scan
+	// efficiency, then the rest) — this one field is the sole, deliberate
+	// exception. Total struct size stays 264 bytes either way
+	// (unsafe.Sizeof(Gateway{}), verified before and after this field was
+	// pinned first), so the exception costs no padding. It does cost
+	// fieldalignment's separate pointer-bytes hint: `fieldalignment
+	// ./...` reports "Gateway has 192 leading bytes of pointer data but
+	// optimal value is 184" with this field first, against a clean
+	// report at the commit before it moved. Moving targetHealthSweeping
+	// (below) to sit directly after this field, to try to close that
+	// gap, was tried and makes the report worse, not better (200 vs
+	// 184), so targetHealthSweeping stays with the rest of the plain
+	// scalars. The 8-byte pointer-bytes gap is accepted deliberately:
+	// the atomic-alignment requirement below wins over the linter hint.
+	targetHealthLastSweepUnixNano int64
+	next                          http.Handler
 	// redisClient is the same instance newGateway hands to both the
 	// limiter's redisStore and the response cache (its own doc comment,
 	// below, explains why it's built once and shared) — kept here too,
@@ -561,24 +628,38 @@ type Gateway struct {
 	// degrades to "failover never skips a candidate for request health"
 	// rather than a nil-pointer panic.
 	failoverHealth *requestHealthTracker
-	limiter        *limiter
-	registry       *modelRegistry
-	adapters       map[string]providerAdapter
-	cfg            *Config
-	auth           *authStore
+	// targetHealth is feat/target-health's own per-pod, in-memory health
+	// tracker for MCP servers and A2A agents (target_health.go) — always
+	// constructed, here, regardless of Config.TargetHealth.Enabled:
+	// passive recording (handleTargetProxy, mcp_a2a.go;
+	// mcpFederatedToolsList/mcpFederatedToolsCall, mcp_federation.go) and
+	// exposure (GET /admin/api/targets, llmgateway_target_healthy) both
+	// stay on unconditionally, mirroring g.latency/g.provenance's own
+	// "always-present, usually-empty, nil-receiver-safe" convention
+	// below. Enabled gates only maybeSweepTargetHealth's own active
+	// probe sweep.
+	targetHealth *targetHealthTracker
+	limiter      *limiter
+	registry     *modelRegistry
+	adapters     map[string]providerAdapter
+	cfg          *Config
+	auth         *authStore
+	// provenance is the in-process usage-accounting-provenance accumulator
+	// (feat: expose token-accounting provenance, metrics.go's
+	// provenanceStore) — recordUsageProvenance's only write target, and
+	// writeProvenanceMetrics/buildAdminProvenanceViews' (admin.go) own
+	// read source. Always constructed, here, by newGateway, even when
+	// Config.Metrics is nil or disabled, mirroring g.latency's own
+	// identical "always-present, usually-empty, nil-receiver-safe"
+	// convention immediately below — see that field's own doc comment for
+	// the full reasoning, which applies here unchanged.
+	provenance *provenanceStore
 	// cache is nil whenever response caching is not configured or not
 	// usable (cfg.Cache.Enabled is false, or true with no config.Redis —
 	// see buildResponseCache, cache.go). Every call site checks for nil
 	// before using it, rather than responseCache having its own
 	// always-disabled zero value.
 	cache *responseCache
-	// bodyAdmission is the buffered-channel semaphore acquireBodyAdmission
-	// (routes_unified.go) claims from and releases: security review
-	// finding 1b, 2026-08-22. Sized once, here, by newGateway (see
-	// defaultBodyAdmissionCap/Config.MaxInFlightBodyRequests) — never
-	// resized afterward, matching a Go channel's own fixed-capacity
-	// contract.
-	bodyAdmission chan struct{}
 	// targetClient is the shared, connection-pooled *http.Client the
 	// MCP/A2A target proxy (mcp_a2a.go) issues every upstream request
 	// through — built once via newAdapterHTTPClient, the same constructor
@@ -597,17 +678,14 @@ type Gateway struct {
 	// identical "safe even off a bare &Gateway{} literal" convention
 	// above.
 	latency *latencyStore
-	// provenance is the in-process usage-accounting-provenance accumulator
-	// (feat: expose token-accounting provenance, metrics.go's
-	// provenanceStore) — recordUsageProvenance's only write target, and
-	// writeProvenanceMetrics/buildAdminProvenanceViews' (admin.go) own
-	// read source. Always constructed, here, by newGateway, even when
-	// Config.Metrics is nil or disabled, mirroring g.latency's own
-	// identical "always-present, usually-empty, nil-receiver-safe"
-	// convention immediately above — see that field's own doc comment for
-	// the full reasoning, which applies here unchanged.
-	provenance *provenanceStore
-	name       string
+	// bodyAdmission is the buffered-channel semaphore acquireBodyAdmission
+	// (routes_unified.go) claims from and releases: security review
+	// finding 1b, 2026-08-22. Sized once, here, by newGateway (see
+	// defaultBodyAdmissionCap/Config.MaxInFlightBodyRequests) — never
+	// resized afterward, matching a Go channel's own fixed-capacity
+	// contract.
+	bodyAdmission chan struct{}
+	name          string
 	// failoverLogGate rate-limits runMeteredCall's generic "failing over"
 	// log line (routes_unified.go) to once per storeErrorLogEvery
 	// (adversarial-review fix, F10) — reuses auth.go's own logGate type,
@@ -621,6 +699,10 @@ type Gateway struct {
 	// never re-parses a CIDR string per scrape. nil when Metrics is
 	// unconfigured or carries no AllowedCIDRs entries.
 	metricsNets []*net.IPNet
+	// targetHealthCfg is Config.TargetHealth, validated and resolved once
+	// by validateTargetHealthConfig (target_health.go) — maybeSweepTargetHealth
+	// reads probeInterval/enabled from this, never the raw Config.
+	targetHealthCfg targetHealthConfig
 	// failover is Config.Failover, validated and resolved once by
 	// newGateway (validateFailoverConfig, failover.go).
 	failover failoverConfig
@@ -631,6 +713,17 @@ type Gateway struct {
 	// idle-progress body watchdog (timeout.go) matches the
 	// ResponseHeaderTimeout already set on targetClient's Transport.
 	targetTimeout time.Duration
+	// targetHealthSweeping is maybeSweepTargetHealth's own single-flight
+	// CAS flag (target_health.go) — its sibling, the UnixNano timestamp
+	// this same gate reads, is targetHealthLastSweepUnixNano, kept as
+	// this struct's FIRST field instead (see that field's own doc
+	// comment, top of this struct, for why). Both are atomic rather than
+	// mutex-guarded, since every caller (serveMetrics, serveAdminTargets,
+	// handleMCPServers, handleAgents) reaches maybeSweepTargetHealth on a
+	// live request path and must never block behind a lock another such
+	// call already holds. A plain int32 needs no special alignment
+	// treatment the way its int64 sibling does.
+	targetHealthSweeping int32
 }
 
 // telemetryStartupOnce keeps the anonymous "plugin loaded" ping to one per
@@ -749,6 +842,18 @@ func newGateway(ctx context.Context, next http.Handler, config *Config, name str
 	}
 	g.failover = failoverCfg
 	g.failoverHealth = newRequestHealthTracker()
+
+	// feat/target-health: validated once, here — passive recording and
+	// exposure stay always-on regardless of this block; Enabled gates
+	// only maybeSweepTargetHealth's own active probe sweep
+	// (target_health.go).
+	targetHealthCfg, err := validateTargetHealthConfig(config.TargetHealth)
+	if err != nil {
+		return nil, err
+	}
+	g.targetHealthCfg = targetHealthCfg
+	g.targetHealth = newTargetHealthTracker(targetHealthCfg.failureThreshold)
+
 	// feat: instrument upstream latency — always constructed, regardless
 	// of whether Config.Metrics is nil/disabled; see g.latency's own doc
 	// comment above for why an always-present, usually-empty store is the

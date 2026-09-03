@@ -1,8 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { formatCompactCount, formatContextWindow, formatLatencyMs, formatModelCostHover, formatUntil, refreshDetailLabel, refreshLabel } from './format'
-
-const ZERO_TIME = '0001-01-01T00:00:00Z'
+import { formatCompactCount, formatContextWindow, formatElapsedAgo, formatLatencyMs, formatModelCostHover, formatUntil, refreshDetailLabel, refreshLabel, ZERO_TIME } from './format'
 
 describe('refreshLabel', () => {
   it('reads "discovery off" when discovery is disabled, regardless of lastRefresh', () => {
@@ -181,5 +179,48 @@ describe('formatLatencyMs', () => {
     { ms: 12_345, want: '12.3s' },
   ])('formatLatencyMs($ms) = $want', ({ ms, want }) => {
     expect(formatLatencyMs(ms)).toBe(want)
+  })
+})
+
+// Target health (feat/target-health): formatElapsedAgo is formatAgo's bare
+// "Ns ago" counterpart — no parentheses — so a caller can compose it into
+// either "unhealthy (Ns ago)" or "Ns ago via probe" without stripping
+// punctuation back out. The explicit `now` parameter keeps every case
+// below exact instead of racing Date.now() between computing the fixture
+// and asserting on it.
+describe('formatElapsedAgo', () => {
+  const now = new Date('2026-09-03T12:00:00Z').getTime()
+
+  it('renders "" for the unset zero-time sentinel', () => {
+    expect(formatElapsedAgo(ZERO_TIME, now)).toBe('')
+  })
+
+  it('renders "" for undefined', () => {
+    expect(formatElapsedAgo(undefined, now)).toBe('')
+  })
+
+  it('renders "" for an unparseable timestamp', () => {
+    expect(formatElapsedAgo('not-a-date', now)).toBe('')
+  })
+
+  it('renders "0s ago" for a timestamp equal to now', () => {
+    expect(formatElapsedAgo(new Date(now).toISOString(), now)).toBe('0s ago')
+  })
+
+  it('renders "Ns ago" for a timestamp seconds in the past', () => {
+    expect(formatElapsedAgo(new Date(now - 42_000).toISOString(), now)).toBe('42s ago')
+  })
+
+  it('renders whole elapsed seconds for a timestamp minutes in the past — no unit beyond seconds', () => {
+    expect(formatElapsedAgo(new Date(now - 90_000).toISOString(), now)).toBe('90s ago')
+  })
+
+  it('floors a future timestamp at 0s rather than showing a negative countdown (defensive — a clock-skewed lastCheck)', () => {
+    expect(formatElapsedAgo(new Date(now + 5_000).toISOString(), now)).toBe('0s ago')
+  })
+
+  it('defaults `now` to Date.now() when omitted', () => {
+    const iso = new Date(Date.now() - 5_000).toISOString()
+    expect(formatElapsedAgo(iso)).toMatch(/^\d+s ago$/)
   })
 })

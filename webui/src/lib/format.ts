@@ -1,6 +1,7 @@
 import type { HistoryWindow, LimitsConfig } from '@/types/api'
 
-const ZERO_TIME = '0001-01-01T00:00:00Z'
+/** ZERO_TIME is Go's zero time.Time value in its default JSON (RFC 3339) encoding — the unset-timestamp sentinel every admin API "never happened yet" field marshals as, and every formatter/test below treats as absent. */
+export const ZERO_TIME = '0001-01-01T00:00:00Z'
 
 /**
  * routableModelId joins a provider name and one of its own model ids into
@@ -162,13 +163,42 @@ export function formatLatencyMs(ms: number): string {
   return `${(ms / 1000).toFixed(1)}s`
 }
 
+/**
+ * elapsedSecondsSince computes whole seconds between `iso` and `now`, or
+ * null for the unset zero-time sentinel or an unparseable value — the
+ * shared guard formatAgo and formatElapsedAgo below both build on, so
+ * neither duplicates the sentinel/NaN check.
+ */
+function elapsedSecondsSince(iso: string | undefined, now: number): number | null {
+  if (!iso || iso === ZERO_TIME) return null
+  const then = new Date(iso).getTime()
+  if (Number.isNaN(then)) return null
+  return Math.max(0, Math.round((now - then) / 1000))
+}
+
 /** formatAgo renders an ISO timestamp as "(Ns ago)", or "" for the unset zero-time sentinel. */
 export function formatAgo(iso: string | undefined): string {
-  if (!iso || iso === ZERO_TIME) return ''
-  const then = new Date(iso).getTime()
-  if (Number.isNaN(then)) return ''
-  const secs = Math.max(0, Math.round((Date.now() - then) / 1000))
-  return ` (${secs}s ago)`
+  const secs = elapsedSecondsSince(iso, Date.now())
+  return secs === null ? '' : ` (${secs}s ago)`
+}
+
+/**
+ * formatElapsedAgo renders elapsed time since an ISO timestamp as a bare
+ * "Ns ago" string — no surrounding parentheses, unlike formatAgo above
+ * (every existing formatAgo caller depends on its own " (Ns ago)" shape
+ * unchanged, so that convention stays untouched here). Target health
+ * badges (AdminTargetHealthView, TargetsView's health column — feat/
+ * target-health) are the only caller today: a target's `lastCheck` needs
+ * this bare form both standalone ("unhealthy (Ns ago)", parenthesized by
+ * the caller) and inline ("Ns ago via probe"). The optional `now`
+ * parameter (default Date.now()) makes the elapsed-time math
+ * deterministic under test. "" for the unset zero-time sentinel or an
+ * unparseable timestamp, mirroring formatAgo's own "nothing to show"
+ * convention.
+ */
+export function formatElapsedAgo(iso: string | undefined, now = Date.now()): string {
+  const secs = elapsedSecondsSince(iso, now)
+  return secs === null ? '' : `${secs}s ago`
 }
 
 /**

@@ -970,11 +970,55 @@ func (g *Gateway) mcpFederatedToolsList(w http.ResponseWriter, format mcpRespons
 				}
 			}()
 
-			sem <- struct{}{}
+			// G4, feat/target-health review round 2: acquiring the
+			// semaphore via select, not a bare blocking send, lets a
+			// server still parked here when fanoutCtx expires return
+			// WITHOUT ever calling mcpBackendCall — it was never dialed,
+			// so it has nothing to say about that server's own health
+			// (below). Without this, a bare `sem <- struct{}{}` still
+			// unblocks once fanoutCtx dies (an earlier holder's own call
+			// fails fast against the already-expired context and frees
+			// its slot), but by then mcpBackendCall would be called with
+			// a context that is already done — indistinguishable from a
+			// server that WAS dialed and genuinely timed out, which is
+			// exactly the over-suppression this fix removes.
+			select {
+			case sem <- struct{}{}:
+			case <-fanoutCtx.Done():
+				mu.Lock()
+				failed = append(failed, name)
+				mu.Unlock()
+				return
+			}
 			defer func() { <-sem }()
 
 			targetURL := g.cfg.MCPServers[name].URL
+			// feat/target-health: passive recording (target_health.go) —
+			// err != nil is a failure; a JSON-RPC-level resp.Error is NOT
+			// (the server answered, it just reported its own error). The
+			// record call right below already covers both: it reads ok
+			// from err == nil alone, so a non-nil resp.Error alongside a
+			// nil err still records success here — the failed-list
+			// append further down (used only for the merged tools/list
+			// result and the loud-failure short-circuit) is a separate
+			// concern and never touches targetHealth itself.
+			probeStart := time.Now()
 			resp, err := g.mcpBackendCall(fanoutCtx, targetURL, "tools/list", struct{}{}, mcpBackendResponseMaxBytes)
+			// G4: this goroutine WON the select above, so it was actually
+			// dialed — only a client hang-up (context.Canceled,
+			// propagating from r.Context() into fanoutCtx) says nothing
+			// about this server's own health, mirroring
+			// recordTargetProxyHealth's identical client-cancel rule
+			// (target_health.go). context.DeadlineExceeded here means the
+			// shared toolsListBackendTimeout fired while THIS dialed
+			// server was still in flight — it did not answer within the
+			// fan-out's own budget, which is a real failure worth
+			// recording, not a client artifact (F2 over-suppressed this
+			// case; a genuinely hung server used to read "unknown"
+			// forever under federation-only traffic).
+			if err == nil || !errors.Is(err, context.Canceled) {
+				g.targetHealth.record(targetKindMCP, name, targetURL, err == nil, err, time.Since(probeStart), targetHealthSourceTraffic)
+			}
 
 			mu.Lock()
 			defer mu.Unlock()
@@ -1091,7 +1135,23 @@ func (g *Gateway) mcpFederatedToolsCall(w http.ResponseWriter, format mcpRespons
 	// important finding 4): tools/call always resolves to exactly ONE
 	// backend, so the fan-out memory-amplification argument does not
 	// apply here — see mcpBackendCallResponseMaxBytes' own doc comment.
+	// feat/target-health: passive recording (target_health.go) — measured
+	// around the whole outbound call, same rule as tools/list's own fan-
+	// out above: err != nil is a failure, a JSON-RPC-level resp.Error is
+	// not.
+	probeStart := time.Now()
 	resp, err := g.mcpBackendCall(ctx, targetURL, "tools/call", mcpToolCallParams{Name: toolName, Arguments: params.Arguments}, mcpBackendCallResponseMaxBytes)
+	// G4: same dialed-server rule as mcpFederatedToolsList's own fan-out,
+	// above — ctx here derives from r.Context() too, so a client cancel
+	// (context.Canceled) must record nothing. Unlike the fan-out,
+	// tools/call has no semaphore to wait behind: the call above is
+	// always actually dialed, so context.DeadlineExceeded here means
+	// THIS server did not answer within toolsCallBackendTimeout — a real
+	// failure worth recording, not a client artifact (F2 over-suppressed
+	// this case).
+	if err == nil || !errors.Is(err, context.Canceled) {
+		g.targetHealth.record(targetKindMCP, serverName, targetURL, err == nil, err, time.Since(probeStart), targetHealthSourceTraffic)
+	}
 	g.limiter.countTargetRequest(targetKindMCP, serverName)
 	if err != nil {
 		g.logf("federated tools/call: server %q: %v", serverName, err)

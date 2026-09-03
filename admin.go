@@ -1235,11 +1235,64 @@ type adminTargetCountersView struct {
 // convention (adminUsageEntryView) — rather than always listing every
 // group name, which would grow with the group catalog for no reason once
 // nothing is actually restricted.
+//
+// Health is feat/target-health's own readout (targetHealthView, below).
+// Field order (Health first, the struct-typed field, then the strings/
+// slice, then Counters last) is fieldalignment-sensitive, derived
+// against a scratch copy the same way this package's other structs
+// already document (Config's own doc comment, llmgateway.go).
 type adminTargetView struct {
+	Health   adminTargetHealthView   `json:"health"`
 	Name     string                  `json:"name"`
 	URL      string                  `json:"url"`
 	Access   []string                `json:"access,omitempty"`
 	Counters adminTargetCountersView `json:"counters"`
+}
+
+// adminTargetHealthView is one target's feat/target-health readout in
+// GET /admin/api/targets — the exact JSON contract the webui's MCP &
+// Agents panel codes against. State and ConsecutiveFailures are always
+// present. State "unknown" (targetHealthUnknown) covers two different
+// situations (F4, feat/target-health review) — see that constant's own
+// doc comment — and this view tells them apart by whether the tracker
+// has ever observed the target at all, NOT by State alone:
+//   - never observed: every other field is omitted, since none of them
+//     carry a meaningful value yet.
+//   - observed, but never once succeeded (still below
+//     targetHealth.failureThreshold): every field below is still
+//     present, exactly as for "healthy"/"unhealthy" — there IS a real
+//     lastCheck/lastError/source/latencyMs to show, the tracker simply
+//     has not seen this target succeed yet.
+//
+// LatencyMs is a pointer so a genuine 0ms observation still serializes
+// as "latencyMs":0 rather than being indistinguishable from "omitted".
+// Field order is fieldalignment-derived, the same convention
+// adminTargetView's own doc comment above explains.
+type adminTargetHealthView struct {
+	LatencyMs           *int64            `json:"latencyMs,omitempty"`
+	State               targetHealthState `json:"state"`
+	LastCheck           string            `json:"lastCheck,omitempty"`
+	LastError           string            `json:"lastError,omitempty"`
+	Source              string            `json:"source,omitempty"`
+	ConsecutiveFailures int               `json:"consecutiveFailures"`
+}
+
+// targetHealthView converts one targetHealthTracker.snapshot result
+// (target_health.go) into its JSON view. Whether to omit the non-always-
+// present fields is decided by snap.observed, NOT snap.state ==
+// targetHealthUnknown (adminTargetHealthView's own doc comment explains
+// why those are different questions since F4).
+func targetHealthView(snap targetHealthSnapshot) adminTargetHealthView {
+	view := adminTargetHealthView{State: snap.state, ConsecutiveFailures: snap.consecutiveFailures}
+	if !snap.observed {
+		return view
+	}
+	view.LastCheck = snap.lastCheck.UTC().Format(time.RFC3339)
+	view.LastError = snap.lastError
+	view.Source = snap.source
+	ms := snap.latency.Milliseconds()
+	view.LatencyMs = &ms
+	return view
 }
 
 // adminTargetsResponse is the full body of GET /admin/api/targets (Feature
@@ -1339,6 +1392,7 @@ func (g *Gateway) buildAdminTargets() adminTargetsResponse {
 	mcpServers := make([]adminTargetView, len(mcpNames))
 	for i, name := range mcpNames {
 		mcpServers[i] = adminTargetView{
+			Health:   targetHealthView(g.targetHealth.snapshot(targetKindMCP, name)),
 			Name:     name,
 			URL:      sanitizeBaseURL(g.cfg.MCPServers[name].URL),
 			Access:   adminTargetAccess(groupSummaries, func(gs groupSummary) []string { return gs.mcpServers }, name),
@@ -1348,6 +1402,7 @@ func (g *Gateway) buildAdminTargets() adminTargetsResponse {
 	agents := make([]adminTargetView, len(agentNames))
 	for i, name := range agentNames {
 		agents[i] = adminTargetView{
+			Health:   targetHealthView(g.targetHealth.snapshot(targetKindAgent, name)),
 			Name:     name,
 			URL:      sanitizeBaseURL(g.cfg.Agents[name].URL),
 			Access:   adminTargetAccess(groupSummaries, func(gs groupSummary) []string { return gs.agents }, name),
@@ -1360,6 +1415,7 @@ func (g *Gateway) buildAdminTargets() adminTargetsResponse {
 
 // serveAdminTargets writes buildAdminTargets's result as JSON.
 func (g *Gateway) serveAdminTargets(w http.ResponseWriter) {
+	g.maybeSweepTargetHealth()
 	setAdminJSONHeaders(w)
 	_ = json.NewEncoder(w).Encode(g.buildAdminTargets())
 }
