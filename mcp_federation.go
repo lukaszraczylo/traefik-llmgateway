@@ -980,7 +980,7 @@ func (g *Gateway) mcpFederatedToolsList(w http.ResponseWriter, format mcpRespons
 			// it is recorded separately, below, once the shape is known.
 			probeStart := time.Now()
 			resp, err := g.mcpBackendCall(fanoutCtx, targetURL, "tools/list", struct{}{}, mcpBackendResponseMaxBytes)
-			g.targetHealth.record(targetKindMCP, name, err == nil, err, time.Since(probeStart), targetHealthSourceTraffic)
+			g.targetHealth.record(targetKindMCP, name, targetURL, err == nil, err, time.Since(probeStart), targetHealthSourceTraffic)
 
 			mu.Lock()
 			defer mu.Unlock()
@@ -1103,7 +1103,7 @@ func (g *Gateway) mcpFederatedToolsCall(w http.ResponseWriter, format mcpRespons
 	// not.
 	probeStart := time.Now()
 	resp, err := g.mcpBackendCall(ctx, targetURL, "tools/call", mcpToolCallParams{Name: toolName, Arguments: params.Arguments}, mcpBackendCallResponseMaxBytes)
-	g.targetHealth.record(targetKindMCP, serverName, err == nil, err, time.Since(probeStart), targetHealthSourceTraffic)
+	g.targetHealth.record(targetKindMCP, serverName, targetURL, err == nil, err, time.Since(probeStart), targetHealthSourceTraffic)
 	g.limiter.countTargetRequest(targetKindMCP, serverName)
 	if err != nil {
 		g.logf("federated tools/call: server %q: %v", serverName, err)

@@ -32,11 +32,22 @@ import (
 type targetHealthState string
 
 const (
-	// targetHealthUnknown: the tracker has never recorded an observation
-	// (probe or traffic) for this (kind, name) — a target configured but
-	// never yet reached.
+	// targetHealthUnknown covers two distinct situations (F4,
+	// feat/target-health review), both read the SAME state on purpose —
+	// neither has ever demonstrated the target actually works:
+	//  1. never observed at all — the tracker has no entry for this
+	//     (kind, name) yet, a target configured but never yet reached.
+	//  2. observed, but never once succeeded — every observation so far
+	//     is a failure, and consecutiveFailures has not yet reached
+	//     failureThreshold. Reading "healthy" here (the pre-F4 behavior)
+	//     would be a false claim from a target this tracker has never
+	//     actually seen answer; reading "unhealthy" before the threshold
+	//     is reached would discard the threshold's own protection
+	//     against a single transient first failure. See
+	//     targetHealthSnapshot.observed for how the admin view (admin.go)
+	//     tells these two apart despite sharing this one state.
 	targetHealthUnknown targetHealthState = "unknown"
-	// targetHealthHealthy: recorded at least once, and consecutiveFailures
+	// targetHealthHealthy: succeeded at least once, and consecutiveFailures
 	// has not yet reached failureThreshold. This DELIBERATELY includes a
 	// target whose most recent single observation was itself a failure:
 	// 1 or 2 recent failures after a success still read "healthy" until
@@ -47,7 +58,10 @@ const (
 	// state machine of its own (see this file's own package doc comment
 	// for why).
 	targetHealthHealthy targetHealthState = "healthy"
-	// targetHealthUnhealthy: consecutiveFailures >= failureThreshold.
+	// targetHealthUnhealthy: consecutiveFailures >= failureThreshold,
+	// regardless of whether the target has ever succeeded — the
+	// threshold gate always takes priority over the never-succeeded
+	// check above.
 	targetHealthUnhealthy targetHealthState = "unhealthy"
 )
 
@@ -85,7 +99,11 @@ type targetHealthEntry struct {
 	source              string
 	latency             time.Duration
 	consecutiveFailures int
-	lastOK              bool
+	// everOK is set true the first time record observes a success for
+	// this entry, and never cleared afterward — stateForLocked's F4
+	// "never succeeded yet reads unknown, not healthy" rule reads this,
+	// not consecutiveFailures alone.
+	everOK bool
 }
 
 // targetHealthTracker is feat/target-health's own per-pod, in-memory
@@ -128,9 +146,20 @@ func newTargetHealthTracker(threshold int) *targetHealthTracker {
 // even on failure — a caller with no Go error to attach, e.g. a bad
 // HTTP status alone, still leaves lastError at whatever it previously
 // held rather than clearing it, since there IS a new failure to report).
-// source is targetHealthSourceProbe or targetHealthSourceTraffic —
-// whichever mechanism produced this observation.
-func (t *targetHealthTracker) record(kind, name string, ok bool, err error, latency time.Duration, source string) {
+// rawURL is (kind, name)'s configured target URL — the exact string a
+// caller dialed, used ONLY to scrub err's text through sanitizeProviderErr
+// (admin.go) before it is stored: a Go *url.Error embeds the dialed URL
+// verbatim, so an operator-configured target URL carrying credentials
+// (an "api-key" query parameter, userinfo) would otherwise leak through
+// GET /admin/api/targets' lastError field the same way an unsanitized
+// provider error once could (F1, feat/target-health review). The scrub
+// runs BEFORE truncateRunes, not after: truncating first could cut a long
+// embedded URL in half, leaving sanitizeProviderErr's exact-substring
+// match unable to find it and a fragment of the credential in the
+// truncated result. source is targetHealthSourceProbe or
+// targetHealthSourceTraffic — whichever mechanism produced this
+// observation.
+func (t *targetHealthTracker) record(kind, name, rawURL string, ok bool, err error, latency time.Duration, source string) {
 	if t == nil || name == "" {
 		return
 	}
@@ -143,17 +172,17 @@ func (t *targetHealthTracker) record(kind, name string, ok bool, err error, late
 		t.entries[key] = e
 	}
 	e.lastCheck = t.nowFn()
-	e.lastOK = ok
 	e.latency = latency
 	e.source = source
 	if ok {
+		e.everOK = true
 		e.consecutiveFailures = 0
 		e.lastError = ""
 		return
 	}
 	e.consecutiveFailures++
 	if err != nil {
-		e.lastError = truncateRunes(err.Error(), targetHealthMaxErrorRunes)
+		e.lastError = truncateRunes(sanitizeProviderErr(err.Error(), rawURL), targetHealthMaxErrorRunes)
 	}
 }
 
@@ -173,10 +202,18 @@ func (t *targetHealthTracker) stateOf(kind, name string) targetHealthState {
 }
 
 // stateForLocked derives e's targetHealthState. Caller must hold t.mu.
-// Split out of stateOf/snapshot so both apply the identical rule.
+// Split out of stateOf/snapshot so both apply the identical rule. The
+// threshold check runs first and always wins (F4): a target that has
+// failed failureThreshold times straight reads unhealthy whether or not
+// it has ever succeeded. Below threshold, a target that has never once
+// succeeded reads unknown rather than healthy — see targetHealthUnknown's
+// own doc comment for why.
 func (t *targetHealthTracker) stateForLocked(e *targetHealthEntry) targetHealthState {
 	if e.consecutiveFailures >= t.failureThreshold {
 		return targetHealthUnhealthy
+	}
+	if !e.everOK {
+		return targetHealthUnknown
 	}
 	return targetHealthHealthy
 }
@@ -191,13 +228,21 @@ type targetHealthSnapshot struct {
 	source              string
 	latency             time.Duration
 	consecutiveFailures int
+	// observed is true iff this tracker holds an entry for (kind, name)
+	// — i.e. record has been called at least once, regardless of
+	// success or failure. F4, feat/target-health review: state alone
+	// cannot tell apart targetHealthUnknown's two cases (never observed
+	// vs. observed-but-never-succeeded), so targetHealthView (admin.go)
+	// reads this field, not state, to decide whether to omit
+	// lastCheck/lastError/source/latencyMs — omit only while !observed.
+	observed bool
 }
 
 // snapshot returns a copy of (kind, name)'s current health state —
 // buildAdminTargets (admin.go) and writeTargetMetrics (metrics.go) both
 // read through this, once per configured target, rather than exposing
 // t.entries directly. A target this tracker has never observed returns
-// a zero-valued snapshot with state targetHealthUnknown.
+// a zero-valued, !observed snapshot with state targetHealthUnknown.
 func (t *targetHealthTracker) snapshot(kind, name string) targetHealthSnapshot {
 	if t == nil {
 		return targetHealthSnapshot{state: targetHealthUnknown}
@@ -209,6 +254,7 @@ func (t *targetHealthTracker) snapshot(kind, name string) targetHealthSnapshot {
 		return targetHealthSnapshot{state: targetHealthUnknown}
 	}
 	return targetHealthSnapshot{
+		observed:            true,
 		state:               t.stateForLocked(e),
 		lastCheck:           e.lastCheck,
 		lastError:           e.lastError,
@@ -321,24 +367,47 @@ func targetHealthProbeTimeout(requestTimeout time.Duration) time.Duration {
 // caller reaches this on a live request path and must never block
 // behind a lock another such call already holds) — a CAS that fails
 // means either a sweep is already in flight, in which case returning is
-// exactly right regardless of how long ago it started, or another
-// goroutine just won the race to start this interval's sweep, in which
-// case returning is exactly right too. The interval check above the CAS
-// is a cheap early-out only; the CAS itself is what actually enforces
-// "at most one sweep in flight, and at most one starts per interval".
+// exactly right, or another goroutine just won the race to start this
+// interval's sweep, in which case returning is exactly right too. The
+// CAS alone enforces only single-flight — "at most one sweep in flight
+// at a time" — NOT the probe interval: the interval load above it and
+// the CAS are not atomic with each other, so a caller whose own interval
+// read predates an entirely separate sweep's full start-and-finish could
+// still win the CAS once that sweep clears the flag (worst at startup,
+// when every caller's first read sees last == 0). F3, feat/target-health
+// review: re-check the interval AFTER winning the CAS, against
+// whatever targetHealthLastSweepUnixNano holds now — set by the sweep
+// that raced ahead, if any — and back out without spawning when that
+// sweep already started within the interval.
 func (g *Gateway) maybeSweepTargetHealth() {
 	if !g.targetHealthCfg.enabled {
 		return
 	}
-	last := atomic.LoadInt64(&g.targetHealthLastSweepUnixNano)
-	if last != 0 && time.Duration(time.Now().UnixNano()-last) < g.targetHealthCfg.probeInterval {
+	if !targetHealthIntervalElapsed(atomic.LoadInt64(&g.targetHealthLastSweepUnixNano), g.targetHealthCfg.probeInterval) {
 		return
 	}
 	if !atomic.CompareAndSwapInt32(&g.targetHealthSweeping, 0, 1) {
 		return
 	}
-	atomic.StoreInt64(&g.targetHealthLastSweepUnixNano, time.Now().UnixNano())
+	now := time.Now().UnixNano()
+	if !targetHealthIntervalElapsed(atomic.LoadInt64(&g.targetHealthLastSweepUnixNano), g.targetHealthCfg.probeInterval) {
+		// Lost the race: some other sweep already started (and, since
+		// the flag was 0 again for this CAS to succeed, already
+		// finished) within the interval while this call was still
+		// working from its own, now-stale, interval read above.
+		atomic.StoreInt32(&g.targetHealthSweeping, 0)
+		return
+	}
+	atomic.StoreInt64(&g.targetHealthLastSweepUnixNano, now)
 	go g.sweepTargetHealth() //nolint:gosec // G118: self-terminating, bounded by mcpFederatedFanoutConcurrency*targetHealthMaxProbeTimeout worst case, and always clears targetHealthSweeping on return (including on panic) — see maybeRefresh's identical reasoning, registry.go, for why this plugin accepts a bounded, self-terminating background goroutine despite having no Close hook to await it
+}
+
+// targetHealthIntervalElapsed reports whether probeInterval has passed
+// since lastSweepUnixNano (0 meaning "never swept", which always counts
+// as elapsed) — the exact rule maybeSweepTargetHealth applies both above
+// and, again, under the CAS.
+func targetHealthIntervalElapsed(lastSweepUnixNano int64, probeInterval time.Duration) bool {
+	return lastSweepUnixNano == 0 || time.Duration(time.Now().UnixNano()-lastSweepUnixNano) >= probeInterval
 }
 
 // sweepTargetHealth performs one active probe sweep: every configured
@@ -416,7 +485,7 @@ func (g *Gateway) probeMCPTarget(name, rawURL string, timeout time.Duration) {
 		ctx, cancel := context.WithTimeout(context.Background(), timeout)
 		ok, err := g.probeLegacySSE(ctx, rawURL)
 		cancel()
-		g.targetHealth.record(targetKindMCP, name, ok, err, time.Since(start), targetHealthSourceProbe)
+		g.targetHealth.record(targetKindMCP, name, rawURL, ok, err, time.Since(start), targetHealthSourceProbe)
 		return
 	}
 
@@ -429,7 +498,7 @@ func (g *Gateway) probeMCPTarget(name, rawURL string, timeout time.Duration) {
 		g.mcpBackendCloseSession(closeCtx, rawURL, sessionID)
 		closeCancel()
 	}
-	g.targetHealth.record(targetKindMCP, name, ok, err, time.Since(start), targetHealthSourceProbe)
+	g.targetHealth.record(targetKindMCP, name, rawURL, ok, err, time.Since(start), targetHealthSourceProbe)
 }
 
 // probeLegacySSE probes a legacy HTTP+SSE-transport MCP server (URL path
@@ -473,12 +542,12 @@ func (g *Gateway) probeAgentTarget(name, baseURL, cardPath string, timeout time.
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+cardPath, nil) //nolint:gosec // operator-configured target URL, validated at construction (validateTargetURLs, mcp_a2a.go)
 	if err != nil {
-		g.targetHealth.record(targetKindAgent, name, false, err, time.Since(start), targetHealthSourceProbe)
+		g.targetHealth.record(targetKindAgent, name, baseURL, false, err, time.Since(start), targetHealthSourceProbe)
 		return
 	}
 	resp, err := g.targetClient.Do(req)
 	if err != nil {
-		g.targetHealth.record(targetKindAgent, name, false, err, time.Since(start), targetHealthSourceProbe)
+		g.targetHealth.record(targetKindAgent, name, baseURL, false, err, time.Since(start), targetHealthSourceProbe)
 		return
 	}
 	_ = resp.Body.Close() //nolint:errcheck // read-side close; nothing actionable on failure
@@ -487,7 +556,7 @@ func (g *Gateway) probeAgentTarget(name, baseURL, cardPath string, timeout time.
 	if !ok {
 		probeErr = fmt.Errorf("agent probe: upstream returned HTTP %d", resp.StatusCode)
 	}
-	g.targetHealth.record(targetKindAgent, name, ok, probeErr, time.Since(start), targetHealthSourceProbe)
+	g.targetHealth.record(targetKindAgent, name, baseURL, ok, probeErr, time.Since(start), targetHealthSourceProbe)
 }
 
 // --- passive recording: handleTargetProxy (mcp_a2a.go) ---
@@ -500,7 +569,7 @@ func (g *Gateway) probeAgentTarget(name, baseURL, cardPath string, timeout time.
 // since a 4xx still proves the target itself answered. A client cancel
 // (result.clientCanceled) records nothing at all: a caller hanging up
 // says nothing about the target's own health.
-func (g *Gateway) recordTargetProxyHealth(kind, name string, result proxyResult, ok bool, latency time.Duration) {
+func (g *Gateway) recordTargetProxyHealth(kind, name, rawURL string, result proxyResult, ok bool, latency time.Duration) {
 	if result.clientCanceled {
 		return
 	}
@@ -509,7 +578,7 @@ func (g *Gateway) recordTargetProxyHealth(kind, name string, result proxyResult,
 	if failed {
 		err = targetProxyHealthError(ok, result.status)
 	}
-	g.targetHealth.record(kind, name, !failed, err, latency, targetHealthSourceTraffic)
+	g.targetHealth.record(kind, name, rawURL, !failed, err, latency, targetHealthSourceTraffic)
 }
 
 // targetProxyHealthError builds a short, bounded description for a

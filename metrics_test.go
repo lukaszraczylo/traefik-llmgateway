@@ -1533,8 +1533,8 @@ func TestMetrics_TargetHealthy_ReflectsRecordedState(t *testing.T) {
 	cfg.TargetHealth = TargetHealthConfig{FailureThreshold: 1}
 	h, gw := newMetricsGatewayHandle(t, cfg)
 
-	gw.targetHealth.record(targetKindMCP, "alpha", true, nil, time.Millisecond, targetHealthSourceTraffic)
-	gw.targetHealth.record(targetKindAgent, "bot1", false, errors.New("boom"), time.Millisecond, targetHealthSourceProbe)
+	gw.targetHealth.record(targetKindMCP, "alpha", "", true, nil, time.Millisecond, targetHealthSourceTraffic)
+	gw.targetHealth.record(targetKindAgent, "bot1", "", false, errors.New("boom"), time.Millisecond, targetHealthSourceProbe)
 
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, metricsRequest(http.MethodGet, metricsPathDefault, "sk-admin1"))
@@ -1558,7 +1558,7 @@ func TestMetrics_TargetHealthy_UnaffectedByStoreOutage(t *testing.T) {
 	cfg := newMetricsTestConfig()
 	cfg.MCPServers = map[string]*TargetConfig{"alpha": {URL: "http://mcp-alpha.internal"}}
 	h, gw := newMetricsGatewayHandle(t, cfg)
-	gw.targetHealth.record(targetKindMCP, "alpha", true, nil, time.Millisecond, targetHealthSourceTraffic)
+	gw.targetHealth.record(targetKindMCP, "alpha", "", true, nil, time.Millisecond, targetHealthSourceTraffic)
 	gw.limiter.store = alwaysErrStore{}
 
 	rec := httptest.NewRecorder()

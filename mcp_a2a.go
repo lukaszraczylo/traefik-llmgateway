@@ -226,7 +226,7 @@ func (g *Gateway) handleTargetProxy(w http.ResponseWriter, r *http.Request, u *u
 	// success/failure rule.
 	start := time.Now()
 	result, ok := g.proxyUpstream(w, r, upstreamURL, g.targetClient, nil, nil, false, kind+" target (name "+name+")", g.targetTimeout)
-	g.recordTargetProxyHealth(kind, name, result, ok, time.Since(start))
+	g.recordTargetProxyHealth(kind, name, targetURL, result, ok, time.Since(start))
 }
 
 // validateTargetURLs checks every configured MCP-server and agent entry at

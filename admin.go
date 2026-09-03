@@ -1252,11 +1252,20 @@ type adminTargetView struct {
 // adminTargetHealthView is one target's feat/target-health readout in
 // GET /admin/api/targets — the exact JSON contract the webui's MCP &
 // Agents panel codes against. State and ConsecutiveFailures are always
-// present; every other field is omitted while State is
-// targetHealthUnknown (this tracker has never observed the target),
-// since none of them carry a meaningful value yet. LatencyMs is a
-// pointer so a genuine 0ms observation still serializes as
-// "latencyMs":0 rather than being indistinguishable from "omitted".
+// present. State "unknown" (targetHealthUnknown) covers two different
+// situations (F4, feat/target-health review) — see that constant's own
+// doc comment — and this view tells them apart by whether the tracker
+// has ever observed the target at all, NOT by State alone:
+//   - never observed: every other field is omitted, since none of them
+//     carry a meaningful value yet.
+//   - observed, but never once succeeded (still below
+//     targetHealth.failureThreshold): every field below is still
+//     present, exactly as for "healthy"/"unhealthy" — there IS a real
+//     lastCheck/lastError/source/latencyMs to show, the tracker simply
+//     has not seen this target succeed yet.
+//
+// LatencyMs is a pointer so a genuine 0ms observation still serializes
+// as "latencyMs":0 rather than being indistinguishable from "omitted".
 // Field order is fieldalignment-derived, the same convention
 // adminTargetView's own doc comment above explains.
 type adminTargetHealthView struct {
@@ -1269,10 +1278,13 @@ type adminTargetHealthView struct {
 }
 
 // targetHealthView converts one targetHealthTracker.snapshot result
-// (target_health.go) into its JSON view.
+// (target_health.go) into its JSON view. Whether to omit the non-always-
+// present fields is decided by snap.observed, NOT snap.state ==
+// targetHealthUnknown (adminTargetHealthView's own doc comment explains
+// why those are different questions since F4).
 func targetHealthView(snap targetHealthSnapshot) adminTargetHealthView {
 	view := adminTargetHealthView{State: snap.state, ConsecutiveFailures: snap.consecutiveFailures}
-	if snap.state == targetHealthUnknown {
+	if !snap.observed {
 		return view
 	}
 	view.LastCheck = snap.lastCheck.UTC().Format(time.RFC3339)
