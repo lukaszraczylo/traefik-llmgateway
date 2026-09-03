@@ -592,6 +592,64 @@ func TestOpenAIAdapter_FetchModelMetadata(t *testing.T) {
 		}
 	})
 
+	t.Run("vLLM shaped fixture: reads max_model_len", func(t *testing.T) {
+		var gotPath string
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			gotPath = r.URL.Path
+			w.Header().Set("Content-Type", "application/json")
+			// Verified against vLLM 0.28 (2026-09): it reports max_model_len and
+			// neither LM Studio field, so before this dialect was read a
+			// vLLM-backed provider needed every context pinned by hand.
+			_, _ = w.Write([]byte(`{"data":[
+				{"id":"deepseek-v4-flash-vision-exp","object":"model","max_model_len":1048576},
+				{"id":"text-embedding-qwen3-0.6b","object":"model","max_model_len":8192},
+				{"id":"no-context-at-all","object":"model"}
+			]}`))
+		}))
+		defer srv.Close()
+
+		a := newOpenAIAdapter("gx10", srv.URL, "")
+		a.metadataPath = "/v1/models"
+		got, err := a.fetchModelMetadata(context.Background())
+		if err != nil {
+			t.Fatalf("fetchModelMetadata: %v", err)
+		}
+		if gotPath != "/v1/models" {
+			t.Errorf("request path = %q, want /v1/models", gotPath)
+		}
+
+		want := map[string]int{
+			"deepseek-v4-flash-vision-exp": 1048576,
+			"text-embedding-qwen3-0.6b":    8192,
+			// "no-context-at-all" omitted: it declares no window in either dialect.
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("got %#v, want %#v", got, want)
+		}
+	})
+
+	t.Run("LM Studio fields win over max_model_len when an upstream reports both", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"data":[
+				{"id":"both-max","max_context_length":262144,"max_model_len":999},
+				{"id":"loaded-still-wins","max_context_length":262144,"loaded_context_length":4096,"max_model_len":999}
+			]}`))
+		}))
+		defer srv.Close()
+
+		a := newOpenAIAdapter("mixed", srv.URL, "")
+		a.metadataPath = "/api/v0/models"
+		got, err := a.fetchModelMetadata(context.Background())
+		if err != nil {
+			t.Fatalf("fetchModelMetadata: %v", err)
+		}
+		want := map[string]int{"both-max": 262144, "loaded-still-wins": 4096}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("got %#v, want %#v", got, want)
+		}
+	})
+
 	t.Run("non-2xx response is an error, not a captured empty map", func(t *testing.T) {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusInternalServerError)

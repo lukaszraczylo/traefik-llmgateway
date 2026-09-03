@@ -426,20 +426,30 @@ func (a *openaiAdapter) listModels(ctx context.Context) ([]string, error) {
 	return ids, nil
 }
 
-// lmStudioModelsPayload is the wire shape of LM Studio's own, native
-// models endpoint (ProviderConfig.MetadataPath — a real deployment sets
-// it to "/api/v0/models"), verified live against a running LM Studio
-// instance (2026-08): {"data":[{"id":...,"max_context_length":262144,
-// "loaded_context_length":4096}, ...]}. Distinct from modelsPayload
-// above, which is OpenAI's own /v1/models shape (LM Studio also serves
-// that, unchanged, but it carries no per-model context metadata) — this
-// is LM Studio's separate, additional endpoint this feature (v0.23)
-// opts into reading.
-type lmStudioModelsPayload struct {
+// modelMetadataPayload is the wire shape read from
+// ProviderConfig.MetadataPath. It carries two upstream dialects, because
+// the runtimes that report per-model context do not agree on a field
+// name:
+//
+//   - LM Studio's own native endpoint (a real deployment sets
+//     MetadataPath to "/api/v0/models"), verified live against a running
+//     instance (2026-08): {"data":[{"id":...,"max_context_length":262144,
+//     "loaded_context_length":4096}, ...]}.
+//   - vLLM's OpenAI-compatible /v1/models, verified live against vLLM
+//     0.28 (2026-09): {"data":[{"id":...,"max_model_len":8192, ...}]}.
+//     vLLM reports neither LM Studio field, so before max_model_len was
+//     read here a vLLM-backed provider had to have every model's context
+//     pinned by hand in modelMeta, and any model rename or window change
+//     silently served a stale number.
+//
+// Distinct from modelsPayload above, which is the same /v1/models
+// endpoint decoded for ids alone.
+type modelMetadataPayload struct {
 	Data []struct {
 		ID                  string `json:"id"`
 		MaxContextLength    int    `json:"max_context_length"`
 		LoadedContextLength int    `json:"loaded_context_length"`
+		MaxModelLen         int    `json:"max_model_len"`
 	} `json:"data"`
 }
 
@@ -449,7 +459,8 @@ type lmStudioModelsPayload struct {
 // It prefers loaded_context_length when the upstream reports one greater
 // than zero — the context actually usable right now, which a runtime can
 // configure smaller than the model's own maximum under VRAM-constrained
-// settings — and falls back to max_context_length otherwise. a.
+// settings — and otherwise takes the widest declared window, which is
+// max_context_length on LM Studio and max_model_len on vLLM. a.
 // metadataPath left empty (the default; every provider except an
 // operator's opt-in) is a fast no-op: (nil, nil), never an error, so
 // registry.go's captureModelMetadata can invoke this unconditionally on
@@ -477,14 +488,23 @@ func (a *openaiAdapter) fetchModelMetadata(ctx context.Context) (map[string]int,
 		return nil, fmt.Errorf("%w: read metadata response body: %w", errUpstream, err)
 	}
 
-	var payload lmStudioModelsPayload
+	var payload modelMetadataPayload
 	if err := json.Unmarshal(body, &payload); err != nil {
 		return nil, fmt.Errorf("%w: decode metadata response: %w", errUpstream, err)
 	}
 
 	out := make(map[string]int, len(payload.Data))
 	for _, d := range payload.Data {
+		// Widest declared window first, by dialect: LM Studio's
+		// max_context_length, else vLLM's max_model_len. An upstream
+		// reports one or the other, never both.
 		ctxLen := d.MaxContextLength
+		if ctxLen == 0 {
+			ctxLen = d.MaxModelLen
+		}
+		// loaded_context_length still wins where it is reported: it is the
+		// context actually usable right now, which a runtime can configure
+		// smaller than the model's own maximum.
 		if d.LoadedContextLength > 0 {
 			ctxLen = d.LoadedContextLength
 		}
