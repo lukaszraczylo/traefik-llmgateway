@@ -600,10 +600,18 @@ type Gateway struct {
 	// Every field below is ordered by golangci-lint's fieldalignment
 	// linter (pointer-containing fields grouped first, for GC scan
 	// efficiency, then the rest) — this one field is the sole, deliberate
-	// exception, verified with `fieldalignment ./...` to add no
-	// additional padding: an 8-byte int64 transitions cleanly into the
-	// 8-byte-aligned pointer block that follows on every architecture
-	// this plugin targets.
+	// exception. Total struct size stays 264 bytes either way
+	// (unsafe.Sizeof(Gateway{}), verified before and after this field was
+	// pinned first), so the exception costs no padding. It does cost
+	// fieldalignment's separate pointer-bytes hint: `fieldalignment
+	// ./...` reports "Gateway has 192 leading bytes of pointer data but
+	// optimal value is 184" with this field first, against a clean
+	// report at the commit before it moved. Moving targetHealthSweeping
+	// (below) to sit directly after this field, to try to close that
+	// gap, was tried and makes the report worse, not better (200 vs
+	// 184), so targetHealthSweeping stays with the rest of the plain
+	// scalars. The 8-byte pointer-bytes gap is accepted deliberately:
+	// the atomic-alignment requirement below wins over the linter hint.
 	targetHealthLastSweepUnixNano int64
 	next                          http.Handler
 	// redisClient is the same instance newGateway hands to both the
