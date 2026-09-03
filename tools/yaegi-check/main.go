@@ -415,6 +415,20 @@ func run() error {
 	targetHealthDownUpstream := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	targetHealthDownURL := targetHealthDownUpstream.URL
 	targetHealthDownUpstream.Close()
+	// targetHealthProbeOnlyUpstream answers any JSON-RPC call — in
+	// practice only ever "initialize", from the active probe sweep
+	// (target_health.go's probeMCPTarget) — with a small, valid result
+	// well under mcpBackendResponseMaxBytes (4MiB), so the probe's
+	// handshake genuinely SUCCEEDS. targetHealthProbeOnlyServerName's own
+	// doc comment explains why this server backs a dedicated,
+	// never-proxied target rather than reusing mcpProbeUpstream (whose
+	// 11MiB body exceeds every response-size cap this plugin enforces,
+	// probe included, so it can only ever record a failure).
+	targetHealthProbeOnlyUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":"federated","result":{"protocolVersion":"2025-11-25","capabilities":{}}}`))
+	}))
+	defer targetHealthProbeOnlyUpstream.Close()
 	// anthropicProbeUpstream answers an Anthropic Messages API call with a
 	// real Anthropic-shaped body, so the /v1/messages passthrough branch
 	// (callAnthropicMessagesPassthrough) runs interpreted. A body
@@ -598,16 +612,19 @@ func run() error {
 		// runs correctly under Yaegi too, not just the config-override
 		// one testDataWantModel already exercises.
 		`"modelMeta":{"` + testDataWantModel + `":{"contextTokens":` + yaegiMetaContextTokens + `,"inputCostPerMTokMicroUsd":1250000,"outputCostPerMTokMicroUsd":10000000}},` +
-		`"mcpServers":{"` + mcpProbeServerName + `":{"url":"` + mcpProbeUpstream.URL + `"},"` + targetHealthDownServerName + `":{"url":"` + targetHealthDownURL + `"}},` +
-		// targetHealth (feat/target-health): enabled with a short
-		// probeInterval so a future active-probe assertion could run
-		// quickly if this harness ever adds one — exerciseTargetHealth
-		// (below) currently exercises the passive-recording and
-		// admin/metrics-exposure paths only, driven by real traffic
-		// (exerciseFederatedTooLarge's own federated call, and
-		// exerciseTargetHealth's own direct proxy calls against
-		// targetHealthDownServerName), never the active sweep itself.
-		`"targetHealth":{"enabled":true,"probeInterval":"10s"},` +
+		`"mcpServers":{"` + mcpProbeServerName + `":{"url":"` + mcpProbeUpstream.URL + `"},"` + targetHealthDownServerName + `":{"url":"` + targetHealthDownURL + `"},"` + targetHealthProbeOnlyServerName + `":{"url":"` + targetHealthProbeOnlyUpstream.URL + `"}},` +
+		// targetHealth (feat/target-health): enabled. probeInterval is
+		// deliberately well ABOVE the floor (10s): exerciseTargetHealthProbeWarmup
+		// (below) spends this gateway's ONE sweep for the whole
+		// probeInterval window right after construction, before any other
+		// exercise runs, specifically so no LATER exercise's own GET
+		// /admin/api/targets, /metrics, /v1/mcp/servers, or /v1/agents
+		// call can trigger a second sweep mid-run and race a passive-
+		// traffic assertion (F5, feat/target-health review — see
+		// exerciseTargetHealth's own doc comment for the exact race this
+		// avoids). "60s" comfortably outlasts this whole harness's
+		// real-world runtime.
+		`"targetHealth":{"enabled":true,"probeInterval":"60s"},` +
 		// metrics (Prometheus text-exposition endpoint): enabled with
 		// modelLabel on, so exerciseMetricsRoute below exercises the
 		// opt-in per-(provider,model) breakdown under the interpreter
@@ -661,6 +678,15 @@ func run() error {
 	handler, ok := handlerVal.Interface().(http.Handler)
 	if !ok {
 		return fmt.Errorf("%s.New's returned value does not implement http.Handler", pkgName)
+	}
+
+	// exerciseTargetHealthProbeWarmup (feat/target-health, F5 review) runs
+	// FIRST, before exerciseHandler and everything after it: its own doc
+	// comment explains why this ordering is what makes every later
+	// target-health assertion in this harness deterministic rather than
+	// racing the active probe sweep under Yaegi's interpreter overhead.
+	if err := exerciseTargetHealthProbeWarmup(handler); err != nil {
+		return err
 	}
 
 	if err := exerciseHandler(handler, builtinLookupContextTokens, failoverBHits); err != nil {
@@ -797,6 +823,18 @@ const (
 	targetHealthDownServerName   = "target-health-down"
 	targetHealthFailureThreshold = 3
 )
+
+// targetHealthProbeOnlyServerName is a THIRD MCP server run() configures,
+// against targetHealthProbeOnlyUpstream — a real, always-answering
+// upstream this harness never proxies traffic through (no per-server
+// proxy call, no federated tools/list or tools/call ever names it): its
+// health entry can only ever be written by the ACTIVE PROBE sweep
+// (target_health.go's probeMCPTarget), never by passive traffic. F5,
+// feat/target-health review: exerciseTargetHealthProbeWarmup (below)
+// uses this determinism to assert source == "probe" without racing
+// anything, and to prove the interpreted initialize/close handshake path
+// itself, not just "some sweep ran".
+const targetHealthProbeOnlyServerName = "target-health-probe-only"
 
 // metricsProbeAllowedCIDR is the CIDR block attemptAccountingOverride's
 // own metrics.allowedCIDRs names — see that literal's own comment for why
@@ -1774,6 +1812,28 @@ type targetHealthProbeView struct {
 	Source string `json:"source"`
 }
 
+// pollTargetHealth drives GET /admin/api/targets against handler
+// repeatedly until name's health satisfies want, or a 5s budget elapses,
+// then returns its final reading either way — mirrors
+// pollProviderAttemptCounters's identical poll-with-deadline shape
+// (below), applied here to feat/target-health's own async sweep
+// (maybeSweepTargetHealth spawns the actual probing goroutine and
+// returns immediately, target_health.go's own doc comment) instead of
+// limiter.spawn's async counter write.
+func pollTargetHealth(handler http.Handler, name string, want func(targetHealthProbeView) bool) (targetHealthProbeView, error) {
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		health, err := readTargetHealth(handler, name)
+		if err != nil {
+			return targetHealthProbeView{}, err
+		}
+		if want(health) || time.Now().After(deadline) {
+			return health, nil
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 // readTargetHealth returns name's own "health" object from GET
 // /admin/api/targets, searching both mcpServers and agents (mcpProbeServerName
 // and targetHealthDownServerName are both MCP servers, but this checks
@@ -1812,28 +1872,94 @@ func readTargetHealth(handler http.Handler, name string) (targetHealthProbeView,
 	return targetHealthProbeView{}, fmt.Errorf("target %q not in GET /admin/api/targets: %s", name, rec.Body.String())
 }
 
-// exerciseTargetHealth proves feat/target-health end to end under the
-// REAL interpreter. Part (a): mcpProbeServerName already received one
-// real federated tools/call attempt via exerciseFederatedTooLarge,
-// above — its oversized response trips errMCPResponseTooLarge, a
-// transport-level failure from doBackendJSONRPC's own perspective
+// exerciseTargetHealthProbeWarmup proves feat/target-health's ACTIVE
+// PROBE sweep end to end under the REAL interpreter, and — just as
+// important — makes every LATER target-health assertion in this harness
+// deterministic. Called from run() BEFORE exerciseHandler, i.e. before
+// any other route this harness hits: GET /admin/api/targets is the
+// first-ever sweep-capable route (maybeSweepTargetHealth's own doc
+// comment, target_health.go, lists the four: serveMetrics,
+// serveAdminTargets, handleMCPServers, handleAgents) this handler sees,
+// so it deterministically owns the ONE sweep this gateway's
+// probeInterval (configured to "60s", well above this harness's
+// real-world runtime) allows for the rest of the run.
+//
+// This matters because targetHealthProbeOnlyServerName's own record() is
+// not the only one a sweep touches — EVERY configured MCP server and
+// agent gets probed in the same sweep (sweepTargetHealth's own doc
+// comment), mcpProbeServerName included. Spending that one sweep here,
+// before exerciseFederatedTooLarge ever drives mcpProbeServerName's real
+// traffic observation, guarantees the traffic observation is the LAST
+// write to that entry for the remainder of the run — no later
+// admin/metrics/listing route can trigger a second sweep to race it
+// (F5, feat/target-health review: this is what closes the race that
+// used to make TARGETHEALTH-2, below, racy under Yaegi's interpreter
+// overhead).
+//
+// targetHealthProbeOnlyServerName is dedicated to this assertion
+// specifically because it is NEVER proxied or federated through by any
+// other exercise in this harness — its health entry can only ever be
+// written by the probe, so source == "probe" here is not just likely,
+// it is the only value possible. Polling (pollTargetHealth) rather than
+// asserting on a single read: the sweep itself still runs on its own
+// spawned goroutine even though this call triggered it.
+func exerciseTargetHealthProbeWarmup(handler http.Handler) error {
+	health, err := pollTargetHealth(handler, targetHealthProbeOnlyServerName, func(h targetHealthProbeView) bool {
+		return h.State != "unknown"
+	})
+	if err != nil {
+		return err
+	}
+	if health.Source != "probe" {
+		return fmt.Errorf("TARGETHEALTH-PROBE-1: GET /admin/api/targets: %q health.source = %q, want %q (only the active probe ever touches this target)", targetHealthProbeOnlyServerName, health.Source, "probe")
+	}
+	// Recover's own swallow (sweepTargetHealth's defer, target_health.go)
+	// means an interpreted panic mid-probe would otherwise degrade to a
+	// silently-stuck "unknown" rather than a loud failure — asserting the
+	// FULL success shape here (not merely "state != unknown") is what
+	// makes a Yaegi incompatibility in the initialize/close handshake
+	// path visible instead of passing silently.
+	if health.State != "healthy" {
+		return fmt.Errorf("TARGETHEALTH-PROBE-2: GET /admin/api/targets: %q health.state = %q, want healthy (targetHealthProbeOnlyUpstream always answers initialize successfully)", targetHealthProbeOnlyServerName, health.State)
+	}
+
+	fmt.Println("yaegi-check: target health active probe sweep ran and recorded correctly interpreted")
+	return nil
+}
+
+// exerciseTargetHealth proves feat/target-health's PASSIVE recording end
+// to end under the REAL interpreter, now that
+// exerciseTargetHealthProbeWarmup (run() calls it first, above) has
+// already spent this gateway's one probeInterval-bounded sweep — no
+// further sweep can fire during this function, so neither part below
+// races the active probe path.
+//
+// Part (a): mcpProbeServerName receives one real federated tools/call
+// attempt via exerciseFederatedTooLarge (exerciseHandler, called before
+// this function) — its oversized response trips errMCPResponseTooLarge,
+// a transport-level failure from doBackendJSONRPC's own perspective
 // (mcp_federation.go), which mcpFederatedToolsCall records as a
-// target-health failure. One failure stays well under
-// targetHealthFailureThreshold, so the target still reads "healthy" —
-// target_health.go's own doc comment explains why 1-2 recent failures
-// short of the threshold stay healthy. Part (b): drives
-// targetHealthFailureThreshold consecutive failures through the direct
-// per-server proxy path (/mcp/{name}/..., handleTargetProxy) against
-// targetHealthDownServerName's dead upstream, then asserts the SAME
-// tracker flips that target to "unhealthy" on both GET
-// /admin/api/targets and llmgateway_target_healthy on /metrics.
+// target-health failure. This is the ONLY observation this target ever
+// receives (the warmup above never touches it — see
+// exerciseTargetHealthProbeWarmup's own doc comment for why spending the
+// sweep before this call matters), so it has never once succeeded:
+// F4 (feat/target-health review) reads that as "unknown", not "healthy"
+// — the failure-threshold gate still protects against this single
+// transient-looking failure, so it does not read "unhealthy" either.
+//
+// Part (b): drives targetHealthFailureThreshold consecutive failures
+// through the direct per-server proxy path (/mcp/{name}/...,
+// handleTargetProxy) against targetHealthDownServerName's dead upstream,
+// then asserts the SAME tracker flips that target to "unhealthy" on
+// both GET /admin/api/targets and llmgateway_target_healthy on
+// /metrics.
 func exerciseTargetHealth(handler http.Handler) error {
 	probeHealth, err := readTargetHealth(handler, mcpProbeServerName)
 	if err != nil {
 		return err
 	}
-	if probeHealth.State != "healthy" {
-		return fmt.Errorf("TARGETHEALTH-1: GET /admin/api/targets: %q health.state = %q, want healthy (after one federated tools/call attempt, below threshold): %+v", mcpProbeServerName, probeHealth.State, probeHealth)
+	if probeHealth.State != "unknown" {
+		return fmt.Errorf("TARGETHEALTH-1: GET /admin/api/targets: %q health.state = %q, want unknown (one failed federated tools/call attempt, never having succeeded, below threshold — F4): %+v", mcpProbeServerName, probeHealth.State, probeHealth)
 	}
 	if probeHealth.Source != "traffic" {
 		return fmt.Errorf("TARGETHEALTH-2: GET /admin/api/targets: %q health.source = %q, want %q", mcpProbeServerName, probeHealth.Source, "traffic")

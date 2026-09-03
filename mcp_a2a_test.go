@@ -1100,13 +1100,26 @@ func TestHandleTargetProxy_TargetHealth_HangTripsWatchdog_RecordsUnhealthy(t *te
 // TestHandleTargetProxy_TargetHealth_ClientCanceled_RecordsNothing
 // proves a canceled CLIENT request records nothing at all — the target's
 // own health stays "unknown", not "unhealthy", since the client hanging
-// up says nothing about the target.
+// up says nothing about the target. F6, feat/target-health review: uses
+// a channel handshake (cancel only once the handler has genuinely been
+// reached, then release it) instead of a 30ms-cancel-vs-200ms-sleep
+// wall-clock margin, which left no slack under load and could either
+// cancel before the request reached the handler or fail to prove the
+// cancel raced a still-in-flight request.
 func TestHandleTargetProxy_TargetHealth_ClientCanceled_RecordsNothing(t *testing.T) {
+	reached := make(chan struct{})
+	release := make(chan struct{})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		time.Sleep(200 * time.Millisecond)
+		close(reached)
+		<-release
 		w.WriteHeader(http.StatusOK)
 	}))
-	defer srv.Close()
+	// Registered in this order so t.Cleanup's LIFO order unblocks the
+	// handler (closing release) BEFORE srv.Close runs — see
+	// TestMaybeSweepTargetHealth_ConcurrentTriggers_SingleFlight's own
+	// comment (target_health_test.go) for the identical reasoning.
+	t.Cleanup(srv.Close)
+	t.Cleanup(func() { close(release) })
 
 	cfg := newTargetHealthProxyConfig(srv.URL)
 	h, err := New(context.Background(), http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), cfg, "llmgw")
@@ -1116,13 +1129,18 @@ func TestHandleTargetProxy_TargetHealth_ClientCanceled_RecordsNothing(t *testing
 	gw := h.(*Gateway)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	go func() {
-		time.Sleep(30 * time.Millisecond)
-		cancel()
-	}()
 	req := httptest.NewRequest(http.MethodGet, "/mcp/alpha/tools/list", nil).WithContext(ctx)
 	req.Header.Set("Authorization", "Bearer sk-alice")
-	h.ServeHTTP(httptest.NewRecorder(), req)
+
+	done := make(chan struct{})
+	go func() {
+		h.ServeHTTP(httptest.NewRecorder(), req)
+		close(done)
+	}()
+
+	<-reached
+	cancel()
+	<-done
 
 	snap := gw.targetHealth.snapshot(targetKindMCP, "alpha")
 	if snap.state != targetHealthUnknown {
