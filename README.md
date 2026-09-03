@@ -1893,7 +1893,12 @@ plugin's config.
     `POST /mcp`'s `tools/list` fan-out and `tools/call` record a failure
     only when the outbound call itself fails (`err != nil` from the
     backend call) — a JSON-RPC-level `error` in the backend's own
-    response still counts as reachable, since the server answered.
+    response still counts as reachable, since the server answered. A
+    context-caused failure (the caller canceling, or the shared fan-out
+    deadline expiring) records nothing at all, the same client-cancel
+    rule the per-server proxy above applies; a genuinely hung server is
+    still caught by the active probe sweep or its own per-server proxy
+    health.
   - **Active probes are opt-in** (`targetHealth.enabled: true`) and lazy:
     no timer, no background goroutine running on its own. A probe sweep
     is triggered by `/metrics`, `GET /admin/api/targets`, `GET

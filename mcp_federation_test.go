@@ -1995,3 +1995,164 @@ func TestHandleMCPFederated_ToolsCall_TargetHealth_UnreachableServer_RecordsUnhe
 		t.Errorf("alpha state = %q, want unhealthy", got)
 	}
 }
+
+// --- feat/target-health F2: context-caused fan-out errors record nothing ---
+//
+// A plain connection-refused server still recording a failure is already
+// covered by TestHandleMCPFederated_ToolsList_TargetHealth_RecordsPerServer
+// (tools/list) and TestHandleMCPFederated_ToolsCall_TargetHealth_UnreachableServer_RecordsUnhealthy
+// (tools/call) above — both must keep passing unchanged by the F2 fix
+// below, which only special-cases context.Canceled/context.DeadlineExceeded.
+
+// TestHandleMCPFederated_ToolsList_ClientCanceled_RecordsNothing proves F2:
+// a client cancel mid-fan-out — context.Canceled propagating from
+// r.Context() into fanoutCtx — records nothing for the servers still in
+// flight, mirroring recordTargetProxyHealth's own client-cancel rule
+// (target_health.go): a caller hanging up says nothing about the target's
+// own health.
+func TestHandleMCPFederated_ToolsList_ClientCanceled_RecordsNothing(t *testing.T) {
+	reached := make(chan struct{}, 2)
+	release := make(chan struct{})
+	blocking := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reached <- struct{}{}
+		<-release
+	})
+	alpha := httptest.NewServer(blocking)
+	beta := httptest.NewServer(blocking)
+	// Registered in this order so t.Cleanup's LIFO order unblocks both
+	// handlers (closing release) BEFORE either server's Close is called —
+	// httptest.Server.Close blocks until outstanding requests complete, so
+	// closing it first would deadlock until the test's own timeout (F6).
+	t.Cleanup(alpha.Close)
+	t.Cleanup(beta.Close)
+	t.Cleanup(func() { close(release) })
+
+	cfg := newFederationTestConfig(alpha.URL, beta.URL, false)
+	h, err := New(context.Background(), http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	gw := h.(*Gateway)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	req := newFederatedRequest(t, "sk-alice", jsonrpcRequest{JSONRPC: jsonrpcVersion, Method: "tools/list", ID: json.RawMessage("1")}).WithContext(ctx)
+
+	done := make(chan struct{})
+	rec := httptest.NewRecorder()
+	go func() {
+		h.ServeHTTP(rec, req)
+		close(done)
+	}()
+
+	<-reached
+	<-reached
+	cancel()
+	<-done
+
+	if got := gw.targetHealth.stateOf(targetKindMCP, "alpha"); got != targetHealthUnknown {
+		t.Errorf("alpha state = %q, want unknown (a client cancel must record nothing)", got)
+	}
+	if got := gw.targetHealth.stateOf(targetKindMCP, "beta"); got != targetHealthUnknown {
+		t.Errorf("beta state = %q, want unknown (a client cancel must record nothing)", got)
+	}
+}
+
+// TestHandleMCPFederated_ToolsList_SharedDeadlineExpiry_RecordsNothing
+// proves F2's second case: when the fan-out's own shared context expires
+// (toolsListBackendTimeout, or here the incoming request's own shorter
+// deadline — see TestHandleMCPFederated_ToolsList_SlowBackend_BoundedByRequestContext's
+// own doc comment for why that stands in for the real 20s budget), a
+// server still parked behind the fan-out semaphore — never actually
+// dialed — must not be recorded as a failure either. mcpBackendCall
+// returns the identical context.DeadlineExceeded whether a server was
+// slow or never contacted at all, so this case is handled by the same
+// guard as the client-cancel case above, not by tracking who was dialed.
+func TestHandleMCPFederated_ToolsList_SharedDeadlineExpiry_RecordsNothing(t *testing.T) {
+	block := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-block
+	}))
+	t.Cleanup(srv.Close)
+	t.Cleanup(func() { close(block) })
+
+	// One more server than the fan-out semaphore has slots for
+	// (mcpFederatedFanoutConcurrency) guarantees at least one is still
+	// parked on the semaphore, never dialed, when the shared deadline
+	// fires.
+	names := make([]string, 0, mcpFederatedFanoutConcurrency+1)
+	mcpServers := make(map[string]*TargetConfig, mcpFederatedFanoutConcurrency+1)
+	for i := 0; i < mcpFederatedFanoutConcurrency+1; i++ {
+		name := fmt.Sprintf("srv%d", i)
+		names = append(names, name)
+		mcpServers[name] = &TargetConfig{URL: srv.URL}
+	}
+
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{"openai": {Type: "openai", APIKey: "k"}}
+	cfg.MCPServers = mcpServers
+	cfg.Groups = map[string]*GroupConfig{"default": {}}
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{{Name: "alice", Group: "default", APIKey: "sk-alice"}}}
+
+	h, err := New(context.Background(), http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	gw := h.(*Gateway)
+
+	req := newFederatedRequest(t, "sk-alice", jsonrpcRequest{JSONRPC: jsonrpcVersion, Method: "tools/list", ID: json.RawMessage("1")})
+	shortCtx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	req = req.WithContext(shortCtx)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	for _, name := range names {
+		if got := gw.targetHealth.stateOf(targetKindMCP, name); got != targetHealthUnknown {
+			t.Errorf("mcp/%s state = %q, want unknown (a shared fan-out deadline expiry must record nothing)", name, got)
+		}
+	}
+}
+
+// TestHandleMCPFederated_ToolsCall_ClientCanceled_RecordsNothing mirrors
+// TestHandleMCPFederated_ToolsList_ClientCanceled_RecordsNothing for
+// tools/call's own, separate context.WithTimeout(r.Context(), ...) call
+// site.
+func TestHandleMCPFederated_ToolsCall_ClientCanceled_RecordsNothing(t *testing.T) {
+	reached := make(chan struct{})
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(reached)
+		<-release
+	}))
+	t.Cleanup(srv.Close)
+	t.Cleanup(func() { close(release) })
+
+	cfg := newFederationTestConfig(srv.URL, "http://beta.invalid", true)
+	h, err := New(context.Background(), http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	gw := h.(*Gateway)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	callParams, _ := json.Marshal(mcpToolCallParams{Name: "alpha_lookup"})
+	req := newFederatedRequest(t, "sk-alice", jsonrpcRequest{
+		JSONRPC: jsonrpcVersion, Method: "tools/call", ID: json.RawMessage("1"), Params: callParams,
+	}).WithContext(ctx)
+
+	done := make(chan struct{})
+	rec := httptest.NewRecorder()
+	go func() {
+		h.ServeHTTP(rec, req)
+		close(done)
+	}()
+
+	<-reached
+	cancel()
+	<-done
+
+	if got := gw.targetHealth.stateOf(targetKindMCP, "alpha"); got != targetHealthUnknown {
+		t.Errorf("alpha state = %q, want unknown (a client cancel must record nothing)", got)
+	}
+}

@@ -980,7 +980,20 @@ func (g *Gateway) mcpFederatedToolsList(w http.ResponseWriter, format mcpRespons
 			// it is recorded separately, below, once the shape is known.
 			probeStart := time.Now()
 			resp, err := g.mcpBackendCall(fanoutCtx, targetURL, "tools/list", struct{}{}, mcpBackendResponseMaxBytes)
-			g.targetHealth.record(targetKindMCP, name, targetURL, err == nil, err, time.Since(probeStart), targetHealthSourceTraffic)
+			// F2: fanoutCtx is derived from r.Context() (above), so a
+			// client hang-up (context.Canceled) surfaces here as EVERY
+			// still-in-flight server's own error, and the shared
+			// toolsListBackendTimeout expiry (context.DeadlineExceeded)
+			// surfaces identically for a server that was genuinely slow
+			// AND one still parked on sem, never dialed at all — neither
+			// says anything about that server's own health, so neither is
+			// recorded, mirroring recordTargetProxyHealth's identical
+			// client-cancel rule (target_health.go). A server that is
+			// really hung is instead caught by the active probe sweep or
+			// its own per-request proxy health, not by this fan-out.
+			if err == nil || (!errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded)) {
+				g.targetHealth.record(targetKindMCP, name, targetURL, err == nil, err, time.Since(probeStart), targetHealthSourceTraffic)
+			}
 
 			mu.Lock()
 			defer mu.Unlock()
@@ -1103,7 +1116,13 @@ func (g *Gateway) mcpFederatedToolsCall(w http.ResponseWriter, format mcpRespons
 	// not.
 	probeStart := time.Now()
 	resp, err := g.mcpBackendCall(ctx, targetURL, "tools/call", mcpToolCallParams{Name: toolName, Arguments: params.Arguments}, mcpBackendCallResponseMaxBytes)
-	g.targetHealth.record(targetKindMCP, serverName, targetURL, err == nil, err, time.Since(probeStart), targetHealthSourceTraffic)
+	// F2: same context-caused-error guard as mcpFederatedToolsList's own
+	// fan-out, above — ctx here derives from r.Context() too, so a client
+	// cancel or the shared toolsCallBackendTimeout expiry must record
+	// nothing rather than a false failure.
+	if err == nil || (!errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded)) {
+		g.targetHealth.record(targetKindMCP, serverName, targetURL, err == nil, err, time.Since(probeStart), targetHealthSourceTraffic)
+	}
 	g.limiter.countTargetRequest(targetKindMCP, serverName)
 	if err != nil {
 		g.logf("federated tools/call: server %q: %v", serverName, err)
