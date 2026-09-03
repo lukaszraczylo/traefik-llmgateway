@@ -23,4 +23,4 @@ const devPluginVersion = "0.0.0-dev"
 // The literal below must stay byte-identical to devPluginVersion:
 // workflow-prepare.sh rewrites THIS line by name, and telemetry compares
 // the two constants to decide whether the build was stamped.
-const pluginVersion = "0.0.0-dev"
+const pluginVersion = "1.0.79"
