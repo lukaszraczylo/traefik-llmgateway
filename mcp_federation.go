@@ -974,7 +974,13 @@ func (g *Gateway) mcpFederatedToolsList(w http.ResponseWriter, format mcpRespons
 			defer func() { <-sem }()
 
 			targetURL := g.cfg.MCPServers[name].URL
+			// feat/target-health: passive recording (target_health.go) —
+			// err != nil is a failure; a JSON-RPC-level resp.Error is NOT
+			// (the server answered, it just reported its own error), so
+			// it is recorded separately, below, once the shape is known.
+			probeStart := time.Now()
 			resp, err := g.mcpBackendCall(fanoutCtx, targetURL, "tools/list", struct{}{}, mcpBackendResponseMaxBytes)
+			g.targetHealth.record(targetKindMCP, name, err == nil, err, time.Since(probeStart), targetHealthSourceTraffic)
 
 			mu.Lock()
 			defer mu.Unlock()
@@ -1091,7 +1097,13 @@ func (g *Gateway) mcpFederatedToolsCall(w http.ResponseWriter, format mcpRespons
 	// important finding 4): tools/call always resolves to exactly ONE
 	// backend, so the fan-out memory-amplification argument does not
 	// apply here — see mcpBackendCallResponseMaxBytes' own doc comment.
+	// feat/target-health: passive recording (target_health.go) — measured
+	// around the whole outbound call, same rule as tools/list's own fan-
+	// out above: err != nil is a failure, a JSON-RPC-level resp.Error is
+	// not.
+	probeStart := time.Now()
 	resp, err := g.mcpBackendCall(ctx, targetURL, "tools/call", mcpToolCallParams{Name: toolName, Arguments: params.Arguments}, mcpBackendCallResponseMaxBytes)
+	g.targetHealth.record(targetKindMCP, serverName, err == nil, err, time.Since(probeStart), targetHealthSourceTraffic)
 	g.limiter.countTargetRequest(targetKindMCP, serverName)
 	if err != nil {
 		g.logf("federated tools/call: server %q: %v", serverName, err)

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/url"
 	"sort"
+	"time"
 )
 
 // Target kinds handleTargetProxy and resolveTarget dispatch on, selecting
@@ -63,6 +64,7 @@ type agentListing struct {
 // servers, filtered by group.allowsMCP and sorted by name for a
 // deterministic response.
 func (g *Gateway) handleMCPServers(w http.ResponseWriter, grp *group) {
+	g.maybeSweepTargetHealth()
 	names := make([]string, 0, len(g.cfg.MCPServers))
 	for name := range g.cfg.MCPServers {
 		if grp.allowsMCP(name) {
@@ -86,6 +88,7 @@ func (g *Gateway) handleMCPServers(w http.ResponseWriter, grp *group) {
 // proxy URL plus its configured card path, defaulting to
 // defaultAgentCardPath when AgentConfig.Card is empty.
 func (g *Gateway) handleAgents(w http.ResponseWriter, grp *group) {
+	g.maybeSweepTargetHealth()
 	names := make([]string, 0, len(g.cfg.Agents))
 	for name := range g.cfg.Agents {
 		if grp.allowsAgent(name) {
@@ -216,7 +219,14 @@ func (g *Gateway) handleTargetProxy(w http.ResponseWriter, r *http.Request, u *u
 		upstreamURL += "?" + r.URL.RawQuery
 	}
 
-	g.proxyUpstream(w, r, upstreamURL, g.targetClient, nil, nil, false, kind+" target (name "+name+")", g.targetTimeout)
+	// feat/target-health: passive recording (target_health.go) — latency
+	// measured around the whole proxyUpstream call, matching what an
+	// active probe of the same target measures. See
+	// recordTargetProxyHealth's own doc comment for the exact
+	// success/failure rule.
+	start := time.Now()
+	result, ok := g.proxyUpstream(w, r, upstreamURL, g.targetClient, nil, nil, false, kind+" target (name "+name+")", g.targetTimeout)
+	g.recordTargetProxyHealth(kind, name, result, ok, time.Since(start))
 }
 
 // validateTargetURLs checks every configured MCP-server and agent entry at

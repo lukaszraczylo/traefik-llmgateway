@@ -935,3 +935,229 @@ func TestHandleTargetProxy_PerTargetCounters_AttributedAndCollisionSafe(t *testi
 		})
 	}
 }
+
+// --- feat/target-health: passive recording via handleTargetProxy ---
+
+func newTargetHealthProxyConfig(mcpURL string) *Config {
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{"openai": {Type: "openai", APIKey: "k"}}
+	cfg.MCPServers = map[string]*TargetConfig{"alpha": {URL: mcpURL}}
+	cfg.Groups = map[string]*GroupConfig{"default": {}}
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{{Name: "alice", Group: "default", APIKey: "sk-alice"}}}
+	return cfg
+}
+
+// TestHandleTargetProxy_TargetHealth_200_RecordsHealthy proves an
+// ordinary successful proxy call records a healthy, "traffic"-sourced
+// observation.
+func TestHandleTargetProxy_TargetHealth_200_RecordsHealthy(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	cfg := newTargetHealthProxyConfig(srv.URL)
+	h, err := New(context.Background(), http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	gw := h.(*Gateway)
+
+	req := httptest.NewRequest(http.MethodGet, "/mcp/alpha/tools/list", nil)
+	req.Header.Set("Authorization", "Bearer sk-alice")
+	h.ServeHTTP(httptest.NewRecorder(), req)
+
+	snap := gw.targetHealth.snapshot(targetKindMCP, "alpha")
+	if snap.state != targetHealthHealthy {
+		t.Errorf("state = %q, want healthy", snap.state)
+	}
+	if snap.source != targetHealthSourceTraffic {
+		t.Errorf("source = %q, want %q", snap.source, targetHealthSourceTraffic)
+	}
+	if snap.consecutiveFailures != 0 {
+		t.Errorf("consecutiveFailures = %d, want 0", snap.consecutiveFailures)
+	}
+}
+
+// TestHandleTargetProxy_TargetHealth_404_RecordsHealthy proves a 4xx
+// upstream response still counts as reachable — only 5xx (or an outright
+// failed attempt) is a failure.
+func TestHandleTargetProxy_TargetHealth_404_RecordsHealthy(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	cfg := newTargetHealthProxyConfig(srv.URL)
+	h, err := New(context.Background(), http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	gw := h.(*Gateway)
+
+	req := httptest.NewRequest(http.MethodGet, "/mcp/alpha/tools/list", nil)
+	req.Header.Set("Authorization", "Bearer sk-alice")
+	h.ServeHTTP(httptest.NewRecorder(), req)
+
+	snap := gw.targetHealth.snapshot(targetKindMCP, "alpha")
+	if snap.state != targetHealthHealthy {
+		t.Errorf("state = %q, want healthy (a 4xx still proves the target answered)", snap.state)
+	}
+}
+
+// TestHandleTargetProxy_TargetHealth_500_RecordsUnhealthy proves an
+// upstream 5xx is a failure, distinct from a 4xx above.
+func TestHandleTargetProxy_TargetHealth_500_RecordsUnhealthy(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	cfg := newTargetHealthProxyConfig(srv.URL)
+	cfg.TargetHealth = TargetHealthConfig{FailureThreshold: 1}
+	h, err := New(context.Background(), http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	gw := h.(*Gateway)
+
+	req := httptest.NewRequest(http.MethodGet, "/mcp/alpha/tools/list", nil)
+	req.Header.Set("Authorization", "Bearer sk-alice")
+	h.ServeHTTP(httptest.NewRecorder(), req)
+
+	snap := gw.targetHealth.snapshot(targetKindMCP, "alpha")
+	if snap.state != targetHealthUnhealthy {
+		t.Errorf("state = %q, want unhealthy", snap.state)
+	}
+	if snap.lastError == "" {
+		t.Error("want a non-empty lastError naming the 500 status")
+	}
+}
+
+// TestHandleTargetProxy_TargetHealth_DeadUpstream_RecordsUnhealthy
+// proves an outright failed attempt (connection refused) is a failure,
+// exercising proxyResult's status=0/clientCanceled=false shape.
+func TestHandleTargetProxy_TargetHealth_DeadUpstream_RecordsUnhealthy(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	deadURL := srv.URL
+	srv.Close()
+
+	cfg := newTargetHealthProxyConfig(deadURL)
+	cfg.TargetHealth = TargetHealthConfig{FailureThreshold: 1}
+	h, err := New(context.Background(), http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	gw := h.(*Gateway)
+
+	req := httptest.NewRequest(http.MethodGet, "/mcp/alpha/tools/list", nil)
+	req.Header.Set("Authorization", "Bearer sk-alice")
+	h.ServeHTTP(httptest.NewRecorder(), req)
+
+	snap := gw.targetHealth.snapshot(targetKindMCP, "alpha")
+	if snap.state != targetHealthUnhealthy {
+		t.Errorf("state = %q, want unhealthy", snap.state)
+	}
+}
+
+// TestHandleTargetProxy_TargetHealth_HangTripsWatchdog_RecordsUnhealthy
+// proves a stalled upstream that trips the idle-progress watchdog
+// (timeout.go) is recorded as a failure, not silently ignored — the
+// hang fixture mirrors TestHandlePassthrough_StalledUpstream_AbortedAtTimeout
+// (timeout_test.go).
+func TestHandleTargetProxy_TargetHealth_HangTripsWatchdog_RecordsUnhealthy(t *testing.T) {
+	srv, release := newStallingServer(nil)
+	defer release()
+
+	cfg := newTargetHealthProxyConfig(srv.URL)
+	cfg.RequestTimeout = "60ms"
+	cfg.TargetHealth = TargetHealthConfig{FailureThreshold: 1}
+	h, err := New(context.Background(), http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	gw := h.(*Gateway)
+
+	req := httptest.NewRequest(http.MethodGet, "/mcp/alpha/tools/list", nil)
+	req.Header.Set("Authorization", "Bearer sk-alice")
+	rec := httptest.NewRecorder()
+
+	start := time.Now()
+	h.ServeHTTP(rec, req)
+	if elapsed := time.Since(start); elapsed > 3*time.Second {
+		t.Errorf("target proxy took %s to abort a 60ms requestTimeout", elapsed)
+	}
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502, body=%s", rec.Code, rec.Body.String())
+	}
+
+	snap := gw.targetHealth.snapshot(targetKindMCP, "alpha")
+	if snap.state != targetHealthUnhealthy {
+		t.Errorf("state = %q, want unhealthy (the watchdog firing must record a failure)", snap.state)
+	}
+}
+
+// TestHandleTargetProxy_TargetHealth_ClientCanceled_RecordsNothing
+// proves a canceled CLIENT request records nothing at all — the target's
+// own health stays "unknown", not "unhealthy", since the client hanging
+// up says nothing about the target.
+func TestHandleTargetProxy_TargetHealth_ClientCanceled_RecordsNothing(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(200 * time.Millisecond)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	cfg := newTargetHealthProxyConfig(srv.URL)
+	h, err := New(context.Background(), http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	gw := h.(*Gateway)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(30 * time.Millisecond)
+		cancel()
+	}()
+	req := httptest.NewRequest(http.MethodGet, "/mcp/alpha/tools/list", nil).WithContext(ctx)
+	req.Header.Set("Authorization", "Bearer sk-alice")
+	h.ServeHTTP(httptest.NewRecorder(), req)
+
+	snap := gw.targetHealth.snapshot(targetKindMCP, "alpha")
+	if snap.state != targetHealthUnknown {
+		t.Errorf("state = %q, want unknown (a client cancel must record nothing)", snap.state)
+	}
+}
+
+// TestHandleTargetProxy_TargetHealth_A2A_UsesAgentKind proves an A2A
+// target proxy call records under targetKindAgent, independent of an MCP
+// server sharing the same name.
+func TestHandleTargetProxy_TargetHealth_A2A_UsesAgentKind(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{"openai": {Type: "openai", APIKey: "k"}}
+	cfg.Agents = map[string]*AgentConfig{"alpha": {URL: srv.URL}}
+	cfg.Groups = map[string]*GroupConfig{"default": {}}
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{{Name: "alice", Group: "default", APIKey: "sk-alice"}}}
+	h, err := New(context.Background(), http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	gw := h.(*Gateway)
+
+	req := httptest.NewRequest(http.MethodGet, "/a2a/alpha/tasks", nil)
+	req.Header.Set("Authorization", "Bearer sk-alice")
+	h.ServeHTTP(httptest.NewRecorder(), req)
+
+	if gw.targetHealth.stateOf(targetKindAgent, "alpha") != targetHealthHealthy {
+		t.Errorf("agent/alpha state = %q, want healthy", gw.targetHealth.stateOf(targetKindAgent, "alpha"))
+	}
+	if gw.targetHealth.stateOf(targetKindMCP, "alpha") != targetHealthUnknown {
+		t.Errorf("mcp/alpha state = %q, want unknown (must not be conflated with the agent of the same name)", gw.targetHealth.stateOf(targetKindMCP, "alpha"))
+	}
+}

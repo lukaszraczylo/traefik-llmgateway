@@ -910,8 +910,27 @@ func (g *Gateway) handlePassthrough(w http.ResponseWriter, r *http.Request, u *u
 // nil unless accountJSON was true and the response's Content-Type was
 // application/json.
 type proxyResult struct {
-	tee    *cappedAccountingBuffer
+	tee *cappedAccountingBuffer
+	// status is the upstream response's own status code, once headers
+	// were actually written to w — 0 when proxyUpstream returned before
+	// ever writing them (a build/connection failure, or a client cancel
+	// before the request was even sent). Additive field for
+	// feat/target-health's passive recording (recordTargetProxyHealth,
+	// target_health.go): ok=false alone conflates "the upstream never
+	// answered at all" with "it answered with a 5xx", which that
+	// feature's failure rule needs to distinguish. Field order (pointer,
+	// then int, then the two bools) is fieldalignment-sensitive, the same
+	// convention this package's other structs already follow.
+	status int
 	isJSON bool
+	// clientCanceled is true exactly when either of proxyUpstream's own
+	// errors.Is(err, context.Canceled) branches fired — the CLIENT, not
+	// the upstream, ended the request, whether before the upstream call
+	// was even sent or mid-copy of an already-started response.
+	// feat/target-health's passive recording must record NOTHING for
+	// this case (handleTargetProxy's own doc comment, mcp_a2a.go): a
+	// client hanging up says nothing about the target's own health.
+	clientCanceled bool
 }
 
 // proxyUpstream is the shared reverse-proxy core behind both native
@@ -1054,7 +1073,7 @@ func (g *Gateway) proxyUpstream(w http.ResponseWriter, r *http.Request, upstream
 		cancel()
 		if errors.Is(err, context.Canceled) {
 			g.logf("%s: client canceled request: %v", logPrefix, err)
-			return proxyResult{}, false
+			return proxyResult{clientCanceled: true}, false
 		}
 		g.errorf("%s: upstream connection error: %v", logPrefix, err)
 		writeOAIError(w, http.StatusBadGateway, "server_error", "upstream connection error")
@@ -1099,10 +1118,10 @@ func (g *Gateway) proxyUpstream(w http.ResponseWriter, r *http.Request, upstream
 		// — the latter falls through to the errorf below, unchanged.
 		if errors.Is(err, context.Canceled) {
 			g.logf("%s: client canceled request: %v", logPrefix, err)
-			return proxyResult{isJSON: isJSON, tee: tee}, false
+			return proxyResult{isJSON: isJSON, tee: tee, status: resp.StatusCode, clientCanceled: true}, false
 		}
 		g.errorf("%s: stream response body: %v", logPrefix, err)
-		return proxyResult{isJSON: isJSON, tee: tee}, false
+		return proxyResult{isJSON: isJSON, tee: tee, status: resp.StatusCode}, false
 	}
-	return proxyResult{isJSON: isJSON, tee: tee}, true
+	return proxyResult{isJSON: isJSON, tee: tee, status: resp.StatusCode}, true
 }

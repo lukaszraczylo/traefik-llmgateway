@@ -1,0 +1,524 @@
+package traefikllmgateway
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"net/http"
+	"sync"
+	"sync/atomic"
+	"time"
+)
+
+// This file implements feat/target-health: a per-replica, in-memory
+// health tracker for MCP servers and A2A agents ("targets"), which have
+// no health signal today the way providers do (registry.go's discovery
+// circuit breaker, failover.go's requestHealthTracker). Two feeds keep
+// it current: always-on PASSIVE recording from real request traffic
+// (handleTargetProxy, mcp_a2a.go; mcpFederatedToolsList/
+// mcpFederatedToolsCall, mcp_federation.go) and an opt-in, lazy ACTIVE
+// probe sweep (maybeSweepTargetHealth, below). Exposure is always on
+// too: GET /admin/api/targets (admin.go) and the llmgateway_target_healthy
+// gauge (metrics.go) both read this tracker regardless of
+// Config.TargetHealth.Enabled — that flag gates only the active probe
+// sweep. This tracker is OBSERVE-ONLY: nothing in mcp_a2a.go or
+// mcp_federation.go ever skips a server or agent because it reports
+// unhealthy — federation routing behavior is unchanged by this feature.
+
+// targetHealthState is the tri-state health readout stateOf/snapshot
+// report for one target, mirroring the discovery breaker's healthState
+// string shape (registry.go's providerState) so the admin API and
+// dashboard can treat both consistently.
+type targetHealthState string
+
+const (
+	// targetHealthUnknown: the tracker has never recorded an observation
+	// (probe or traffic) for this (kind, name) — a target configured but
+	// never yet reached.
+	targetHealthUnknown targetHealthState = "unknown"
+	// targetHealthHealthy: recorded at least once, and consecutiveFailures
+	// has not yet reached failureThreshold. This DELIBERATELY includes a
+	// target whose most recent single observation was itself a failure:
+	// 1 or 2 recent failures after a success still read "healthy" until
+	// the configured threshold is actually crossed — the same
+	// consecutive-failure gate the discovery circuit breaker uses
+	// (registry.go's providerState/recordHealthLocked), reimplemented
+	// independently here since this tracker carries no open/half-open
+	// state machine of its own (see this file's own package doc comment
+	// for why).
+	targetHealthHealthy targetHealthState = "healthy"
+	// targetHealthUnhealthy: consecutiveFailures >= failureThreshold.
+	targetHealthUnhealthy targetHealthState = "unhealthy"
+)
+
+// Source values record's callers pass — which mechanism produced the
+// last observation, exposed on GET /admin/api/targets and stored per
+// entry.
+const (
+	targetHealthSourceProbe   = "probe"
+	targetHealthSourceTraffic = "traffic"
+)
+
+// targetHealthMaxErrorRunes bounds targetHealthEntry.lastError: an
+// upstream MCP/A2A target's own error text is not operator-controlled
+// the way its URL is, so a pathological error string must not grow this
+// in-memory tracker unbounded. Runes, not bytes (truncateRunes, below)
+// — a byte-level cut could split a multi-byte UTF-8 sequence.
+const targetHealthMaxErrorRunes = 200
+
+// targetHealthKey identifies one tracked target by routing kind
+// (targetKindMCP or targetKindAgent, mcp_a2a.go — NOT scopeKindAgent,
+// which is the limiter/admin-API-facing "agent" spelling for a2a
+// targets) and configured name.
+type targetHealthKey struct {
+	kind string
+	name string
+}
+
+// targetHealthEntry is one target's current health state, guarded by its
+// owning tracker's own mu (never its own) — mirrors latencyHistogram's
+// identical "guarded by the parent store's lock" convention
+// (metrics.go).
+type targetHealthEntry struct {
+	lastCheck           time.Time
+	lastError           string
+	source              string
+	latency             time.Duration
+	consecutiveFailures int
+	lastOK              bool
+}
+
+// targetHealthTracker is feat/target-health's own per-pod, in-memory
+// health signal for every configured MCP server and A2A agent.
+// Deliberately separate from requestHealthTracker (failover.go) and the
+// discovery circuit breaker (registry.go): this tracker carries no
+// open/half-open/backoff state machine and never gates routing — it
+// exists purely for operational visibility.
+//
+// Every method is nil-receiver-safe, matching this package's own
+// nil-means-disabled convention (requestHealthTracker's own doc
+// comment, failover.go) — a Gateway assembled directly in a test,
+// bypassing newGateway, degrades to "every target reads unknown" rather
+// than a nil-pointer panic, even though newGateway itself always
+// constructs a real one (see Gateway.targetHealth's own doc comment,
+// llmgateway.go).
+type targetHealthTracker struct {
+	entries map[targetHealthKey]*targetHealthEntry
+	nowFn   func() time.Time
+	// failureThreshold is TargetHealthConfig.FailureThreshold, validated
+	// and defaulted once at construction (validateTargetHealthConfig) —
+	// copied here rather than re-read from Config on every stateOf call,
+	// the same resolved-value-not-raw-config shape breakerConfig/
+	// failoverConfig already use.
+	failureThreshold int
+	mu               sync.Mutex
+}
+
+// newTargetHealthTracker returns an empty tracker: every target reads
+// "unknown" until its first recorded observation. threshold is the
+// resolved (validated, defaulted) TargetHealthConfig.FailureThreshold.
+func newTargetHealthTracker(threshold int) *targetHealthTracker {
+	return &targetHealthTracker{entries: make(map[targetHealthKey]*targetHealthEntry), nowFn: time.Now, failureThreshold: threshold}
+}
+
+// record accounts one observation (a real proxied request, or an active
+// probe) for (kind, name): success resets consecutiveFailures to 0 and
+// clears lastError; failure increments consecutiveFailures and stores
+// err's message, truncated to targetHealthMaxErrorRunes (err may be nil
+// even on failure — a caller with no Go error to attach, e.g. a bad
+// HTTP status alone, still leaves lastError at whatever it previously
+// held rather than clearing it, since there IS a new failure to report).
+// source is targetHealthSourceProbe or targetHealthSourceTraffic —
+// whichever mechanism produced this observation.
+func (t *targetHealthTracker) record(kind, name string, ok bool, err error, latency time.Duration, source string) {
+	if t == nil || name == "" {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	key := targetHealthKey{kind: kind, name: name}
+	e, exists := t.entries[key]
+	if !exists {
+		e = &targetHealthEntry{}
+		t.entries[key] = e
+	}
+	e.lastCheck = t.nowFn()
+	e.lastOK = ok
+	e.latency = latency
+	e.source = source
+	if ok {
+		e.consecutiveFailures = 0
+		e.lastError = ""
+		return
+	}
+	e.consecutiveFailures++
+	if err != nil {
+		e.lastError = truncateRunes(err.Error(), targetHealthMaxErrorRunes)
+	}
+}
+
+// stateOf reports (kind, name)'s current targetHealthState — see this
+// type's own doc comment for the exact unknown/healthy/unhealthy rule.
+func (t *targetHealthTracker) stateOf(kind, name string) targetHealthState {
+	if t == nil {
+		return targetHealthUnknown
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	e, ok := t.entries[targetHealthKey{kind: kind, name: name}]
+	if !ok {
+		return targetHealthUnknown
+	}
+	return t.stateForLocked(e)
+}
+
+// stateForLocked derives e's targetHealthState. Caller must hold t.mu.
+// Split out of stateOf/snapshot so both apply the identical rule.
+func (t *targetHealthTracker) stateForLocked(e *targetHealthEntry) targetHealthState {
+	if e.consecutiveFailures >= t.failureThreshold {
+		return targetHealthUnhealthy
+	}
+	return targetHealthHealthy
+}
+
+// targetHealthSnapshot is one target's fully-copied health state, safe
+// to read after targetHealthTracker.snapshot returns without holding its
+// lock — mirrors latencySnapshot's identical shape (metrics.go).
+type targetHealthSnapshot struct {
+	lastCheck           time.Time
+	state               targetHealthState
+	lastError           string
+	source              string
+	latency             time.Duration
+	consecutiveFailures int
+}
+
+// snapshot returns a copy of (kind, name)'s current health state —
+// buildAdminTargets (admin.go) and writeTargetMetrics (metrics.go) both
+// read through this, once per configured target, rather than exposing
+// t.entries directly. A target this tracker has never observed returns
+// a zero-valued snapshot with state targetHealthUnknown.
+func (t *targetHealthTracker) snapshot(kind, name string) targetHealthSnapshot {
+	if t == nil {
+		return targetHealthSnapshot{state: targetHealthUnknown}
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	e, ok := t.entries[targetHealthKey{kind: kind, name: name}]
+	if !ok {
+		return targetHealthSnapshot{state: targetHealthUnknown}
+	}
+	return targetHealthSnapshot{
+		state:               t.stateForLocked(e),
+		lastCheck:           e.lastCheck,
+		lastError:           e.lastError,
+		source:              e.source,
+		latency:             e.latency,
+		consecutiveFailures: e.consecutiveFailures,
+	}
+}
+
+// truncateRunes bounds s to at most n runes, decoding as UTF-8 rather
+// than slicing raw bytes — a byte-level cut on an arbitrary upstream
+// error string could split a multi-byte rune (escapeLabelValue's own
+// doc comment, metrics.go, is the identical concern applied to a
+// different string).
+func truncateRunes(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n])
+}
+
+// --- config: TargetHealthConfig validation ---
+
+// defaultTargetHealthProbeInterval/min/max bound TargetHealthConfig.
+// ProbeInterval; defaultTargetHealthFailureThreshold/max bound
+// TargetHealthConfig.FailureThreshold. See TargetHealthConfig's own doc
+// comment (llmgateway.go) for what each governs.
+const (
+	defaultTargetHealthProbeInterval    = 60 * time.Second
+	minTargetHealthProbeInterval        = 10 * time.Second
+	maxTargetHealthProbeInterval        = time.Hour
+	defaultTargetHealthFailureThreshold = 3
+	maxTargetHealthFailureThreshold     = 100
+)
+
+// targetHealthConfig is TargetHealthConfig, validated and defaulted once
+// at construction (newGateway, llmgateway.go) — mirrors breakerConfig/
+// failoverConfig's own resolved-value-not-raw-config shape.
+type targetHealthConfig struct {
+	probeInterval    time.Duration
+	failureThreshold int
+	enabled          bool
+}
+
+// validateTargetHealthConfig validates thc and returns the resolved
+// targetHealthConfig newGateway attaches to the Gateway. thc's zero
+// value (no targetHealth block at all) resolves to every default below
+// unchanged: enabled stays false (a deployment that predates this
+// feature, or never configures this block, sends no active probe
+// traffic), matching FailoverConfig's own "off unless explicitly opted
+// in" precedent (failover.go).
+func validateTargetHealthConfig(thc TargetHealthConfig) (targetHealthConfig, error) {
+	interval := defaultTargetHealthProbeInterval
+	if thc.ProbeInterval != "" {
+		d, err := time.ParseDuration(thc.ProbeInterval)
+		if err != nil {
+			return targetHealthConfig{}, fmt.Errorf("llmgateway: targetHealth.probeInterval %q is invalid: %w", thc.ProbeInterval, err)
+		}
+		if d < minTargetHealthProbeInterval || d > maxTargetHealthProbeInterval {
+			return targetHealthConfig{}, fmt.Errorf("llmgateway: targetHealth.probeInterval must be between %s and %s, got %q", minTargetHealthProbeInterval, maxTargetHealthProbeInterval, thc.ProbeInterval)
+		}
+		interval = d
+	}
+
+	threshold := thc.FailureThreshold
+	if threshold == 0 {
+		threshold = defaultTargetHealthFailureThreshold
+	}
+	if threshold < 1 || threshold > maxTargetHealthFailureThreshold {
+		return targetHealthConfig{}, fmt.Errorf("llmgateway: targetHealth.failureThreshold must be between 1 and %d, got %d", maxTargetHealthFailureThreshold, threshold)
+	}
+
+	return targetHealthConfig{enabled: thc.Enabled, probeInterval: interval, failureThreshold: threshold}, nil
+}
+
+// --- active probes: opt-in, lazy, single-flight ---
+
+// targetHealthMaxProbeTimeout caps how long any ONE active probe may
+// run, regardless of Config.RequestTimeout — a probe is a cheap,
+// synchronous health check, not real traffic, and defaultRequestTimeout
+// (timeout.go) is 5 minutes: without this cap, one hung MCP server or
+// agent could tie up a probe goroutine for that entire duration.
+const targetHealthMaxProbeTimeout = 10 * time.Second
+
+// targetHealthProbeTimeout resolves the timeout ONE active probe gets:
+// requestTimeout (g.targetTimeout), capped at
+// targetHealthMaxProbeTimeout. Written as a small helper rather than the
+// Go 1.21+ builtin min: this plugin runs interpreted under Yaegi, and
+// this repo's own constraints call for stdlib-only, builtin-free helpers
+// where a construct's interpreter support is unverified.
+func targetHealthProbeTimeout(requestTimeout time.Duration) time.Duration {
+	if requestTimeout <= 0 || requestTimeout > targetHealthMaxProbeTimeout {
+		return targetHealthMaxProbeTimeout
+	}
+	return requestTimeout
+}
+
+// maybeSweepTargetHealth is called at the top of every route a scrape or
+// a dashboard poll can reach (serveMetrics, metrics.go; serveAdminTargets/
+// handleMCPServers/handleAgents, admin.go/mcp_a2a.go) — that traffic IS
+// the heartbeat: this plugin has no Close hook under Traefik's hot
+// reload (Gateway.Close's own doc comment, llmgateway.go) and therefore
+// starts no timer or long-lived goroutine of its own here either,
+// mirroring modelRegistry.maybeRefresh's identical reasoning
+// (registry.go).
+//
+// Returns immediately when disabled. Otherwise: g.targetHealthSweeping
+// is the single-flight gate (an atomic CAS, not a mutex, since every
+// caller reaches this on a live request path and must never block
+// behind a lock another such call already holds) — a CAS that fails
+// means either a sweep is already in flight, in which case returning is
+// exactly right regardless of how long ago it started, or another
+// goroutine just won the race to start this interval's sweep, in which
+// case returning is exactly right too. The interval check above the CAS
+// is a cheap early-out only; the CAS itself is what actually enforces
+// "at most one sweep in flight, and at most one starts per interval".
+func (g *Gateway) maybeSweepTargetHealth() {
+	if !g.targetHealthCfg.enabled {
+		return
+	}
+	last := atomic.LoadInt64(&g.targetHealthLastSweepUnixNano)
+	if last != 0 && time.Duration(time.Now().UnixNano()-last) < g.targetHealthCfg.probeInterval {
+		return
+	}
+	if !atomic.CompareAndSwapInt32(&g.targetHealthSweeping, 0, 1) {
+		return
+	}
+	atomic.StoreInt64(&g.targetHealthLastSweepUnixNano, time.Now().UnixNano())
+	go g.sweepTargetHealth() //nolint:gosec // G118: self-terminating, bounded by mcpFederatedFanoutConcurrency*targetHealthMaxProbeTimeout worst case, and always clears targetHealthSweeping on return (including on panic) — see maybeRefresh's identical reasoning, registry.go, for why this plugin accepts a bounded, self-terminating background goroutine despite having no Close hook to await it
+}
+
+// sweepTargetHealth performs one active probe sweep: every configured
+// MCP server and agent, concurrently, behind a semaphore of
+// mcpFederatedFanoutConcurrency (mcp_federation.go) — reusing federation's
+// own fan-out concurrency constant rather than adding a second one for
+// an identical "how many outbound target requests at once" question.
+// Always clears g.targetHealthSweeping on return, even on panic
+// (mirrors modelRegistry.refreshProvider's own deferred-recover
+// reasoning, registry.go — this goroutine has no ServeHTTP caller to
+// unwind into either).
+func (g *Gateway) sweepTargetHealth() {
+	defer atomic.StoreInt32(&g.targetHealthSweeping, 0)
+	defer func() {
+		if rec := recover(); rec != nil {
+			g.logf("target health: sweep panicked: %v", rec)
+		}
+	}()
+
+	timeout := targetHealthProbeTimeout(g.targetTimeout)
+
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, mcpFederatedFanoutConcurrency)
+
+	for name, tc := range g.cfg.MCPServers {
+		if tc == nil {
+			continue
+		}
+		wg.Add(1)
+		go func(name, url string) {
+			defer wg.Done()
+			defer func() {
+				if rec := recover(); rec != nil {
+					g.logf("target health: probe for mcp %q panicked: %v", name, rec)
+				}
+			}()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			g.probeMCPTarget(name, url, timeout)
+		}(name, tc.URL)
+	}
+	for name, ac := range g.cfg.Agents {
+		if ac == nil {
+			continue
+		}
+		wg.Add(1)
+		go func(name, url, card string) {
+			defer wg.Done()
+			defer func() {
+				if rec := recover(); rec != nil {
+					g.logf("target health: probe for agent %q panicked: %v", name, rec)
+				}
+			}()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			g.probeAgentTarget(name, url, card, timeout)
+		}(name, ac.URL, ac.Card)
+	}
+	wg.Wait()
+}
+
+// probeMCPTarget performs one active probe of MCP server name at
+// rawURL, bounded by timeout, and records the result with source
+// "probe". A legacy HTTP+SSE-transport server (isLegacySSETransportURL,
+// mcp_federation.go) gets a plain GET with its body closed unread
+// (probeLegacySSE, below); every other server gets the same
+// initialize/close handshake mcpBackendCall's own fallback path already
+// uses (mcpBackendHandshake/mcpBackendCloseSession, mcp_federation.go)
+// — a JSON-RPC error answering "initialize" is a failure carrying that
+// message, exactly like a transport-level error.
+func (g *Gateway) probeMCPTarget(name, rawURL string, timeout time.Duration) {
+	start := time.Now()
+
+	if isLegacySSETransportURL(rawURL) {
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		ok, err := g.probeLegacySSE(ctx, rawURL)
+		cancel()
+		g.targetHealth.record(targetKindMCP, name, ok, err, time.Since(start), targetHealthSourceProbe)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	sessionID, err := g.mcpBackendHandshake(ctx, rawURL, mcpBackendResponseMaxBytes)
+	cancel()
+	ok := err == nil
+	if ok && sessionID != "" {
+		closeCtx, closeCancel := context.WithTimeout(context.Background(), mcpSessionCloseTimeout)
+		g.mcpBackendCloseSession(closeCtx, rawURL, sessionID)
+		closeCancel()
+	}
+	g.targetHealth.record(targetKindMCP, name, ok, err, time.Since(start), targetHealthSourceProbe)
+}
+
+// probeLegacySSE probes a legacy HTTP+SSE-transport MCP server (URL path
+// ends "/sse", isLegacySSETransportURL) with a plain GET: ok iff no
+// transport error and the response status is under 500. The body is
+// closed IMMEDIATELY after headers, never read — an SSE endpoint streams
+// indefinitely, so reading it would hang the probe for its entire
+// timeout budget on every sweep.
+func (g *Gateway) probeLegacySSE(ctx context.Context, rawURL string) (bool, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil) //nolint:gosec // operator-configured target URL, validated at construction (validateTargetURLs, mcp_a2a.go)
+	if err != nil {
+		return false, err
+	}
+	resp, err := g.targetClient.Do(req)
+	if err != nil {
+		return false, err
+	}
+	_ = resp.Body.Close() //nolint:errcheck // deliberately unread — see this function's own doc comment
+	if resp.StatusCode >= http.StatusInternalServerError {
+		return false, fmt.Errorf("legacy sse probe: upstream returned HTTP %d", resp.StatusCode)
+	}
+	return true, nil
+}
+
+// probeAgentTarget performs one active probe of agent name: a GET of
+// baseURL+cardPath (AgentConfig.Card, or defaultAgentCardPath when empty
+// — mcp_a2a.go), bounded by timeout. ok iff no transport error and the
+// response status is under 500 — a 404 counts as reachable (e.g. an
+// umbrella agent whose root has no card of its own), the identical
+// "any status under 500 proves the target answered" rule handleTargetProxy's
+// own passive recording applies (recordTargetProxyHealth, below). The
+// body is closed without being read: an agent-card probe only needs the
+// status.
+func (g *Gateway) probeAgentTarget(name, baseURL, cardPath string, timeout time.Duration) {
+	if cardPath == "" {
+		cardPath = defaultAgentCardPath
+	}
+	start := time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+cardPath, nil) //nolint:gosec // operator-configured target URL, validated at construction (validateTargetURLs, mcp_a2a.go)
+	if err != nil {
+		g.targetHealth.record(targetKindAgent, name, false, err, time.Since(start), targetHealthSourceProbe)
+		return
+	}
+	resp, err := g.targetClient.Do(req)
+	if err != nil {
+		g.targetHealth.record(targetKindAgent, name, false, err, time.Since(start), targetHealthSourceProbe)
+		return
+	}
+	_ = resp.Body.Close() //nolint:errcheck // read-side close; nothing actionable on failure
+	ok := resp.StatusCode < http.StatusInternalServerError
+	var probeErr error
+	if !ok {
+		probeErr = fmt.Errorf("agent probe: upstream returned HTTP %d", resp.StatusCode)
+	}
+	g.targetHealth.record(targetKindAgent, name, ok, probeErr, time.Since(start), targetHealthSourceProbe)
+}
+
+// --- passive recording: handleTargetProxy (mcp_a2a.go) ---
+
+// recordTargetProxyHealth applies handleTargetProxy's own passive
+// recording rule to one proxyUpstream result (routes_passthrough.go):
+// failure iff the proxy attempt itself failed for a reason other than
+// the client canceling, OR the upstream answered with a 5xx; otherwise
+// success — any status under 500 counts as reachable, 4xx included,
+// since a 4xx still proves the target itself answered. A client cancel
+// (result.clientCanceled) records nothing at all: a caller hanging up
+// says nothing about the target's own health.
+func (g *Gateway) recordTargetProxyHealth(kind, name string, result proxyResult, ok bool, latency time.Duration) {
+	if result.clientCanceled {
+		return
+	}
+	failed := !ok || result.status >= http.StatusInternalServerError
+	var err error
+	if failed {
+		err = targetProxyHealthError(ok, result.status)
+	}
+	g.targetHealth.record(kind, name, !failed, err, latency, targetHealthSourceTraffic)
+}
+
+// targetProxyHealthError builds a short, bounded description for a
+// failed passive observation. proxyUpstream itself already logged the
+// real underlying error; this is only what targetHealthEntry.lastError
+// — exposed via GET /admin/api/targets — shows an operator.
+func targetProxyHealthError(ok bool, status int) error {
+	if !ok {
+		return errors.New("target proxy: upstream request failed")
+	}
+	return fmt.Errorf("target proxy: upstream returned HTTP %d", status)
+}

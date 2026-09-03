@@ -1873,3 +1873,125 @@ func TestMcpBackendCall_SessionCloseFailure_NeverSurfacedToCaller(t *testing.T) 
 		t.Fatalf("tools = %+v, want alpha_search despite the session-close failure", result.Tools)
 	}
 }
+
+// --- feat/target-health: passive recording from federation traffic ---
+
+// TestHandleMCPFederated_ToolsList_TargetHealth_RecordsPerServer proves
+// tools/list's own fan-out records a failure for the one server that
+// could not be reached, and a healthy observation for every server that
+// answered — independent of the aggregate response degrading rather
+// than failing (TestHandleMCPFederated_ToolsList_UnreachableServerDegradesNotFails
+// already covers the response shape; this proves the target-health side
+// effect).
+func TestHandleMCPFederated_ToolsList_TargetHealth_RecordsPerServer(t *testing.T) {
+	alpha := newMockJSONRPCServer(t, []mcpTool{{Name: "lookup"}})
+	cfg := newFederationTestConfig(alpha.srv.URL, "http://127.0.0.1:1", false)
+	cfg.TargetHealth = TargetHealthConfig{FailureThreshold: 1}
+	h, err := New(context.Background(), http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	gw := h.(*Gateway)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, newFederatedRequest(t, "sk-alice", jsonrpcRequest{JSONRPC: jsonrpcVersion, Method: "tools/list", ID: json.RawMessage("1")}))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+
+	if got := gw.targetHealth.stateOf(targetKindMCP, "alpha"); got != targetHealthHealthy {
+		t.Errorf("alpha state = %q, want healthy", got)
+	}
+	if got := gw.targetHealth.stateOf(targetKindMCP, "beta"); got != targetHealthUnhealthy {
+		t.Errorf("beta state = %q, want unhealthy (unreachable)", got)
+	}
+}
+
+// TestHandleMCPFederated_ToolsList_TargetHealth_JSONRPCError_StillHealthy
+// proves a server that ANSWERS with its own JSON-RPC-level error is
+// still recorded healthy — it responded, which is what target-health
+// cares about; only a transport-level failure (err != nil from
+// mcpBackendCall) counts against it.
+func TestHandleMCPFederated_ToolsList_TargetHealth_JSONRPCError_StillHealthy(t *testing.T) {
+	alpha := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req jsonrpcRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(jsonrpcResponse{ID: req.ID, Error: &jsonrpcError{Code: -32000, Message: "tools unavailable"}})
+	}))
+	defer alpha.Close()
+
+	cfg := newFederationTestConfig(alpha.URL, alpha.URL, false)
+	h, err := New(context.Background(), http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	gw := h.(*Gateway)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, newFederatedRequest(t, "sk-alice", jsonrpcRequest{JSONRPC: jsonrpcVersion, Method: "tools/list", ID: json.RawMessage("1")}))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+
+	if got := gw.targetHealth.stateOf(targetKindMCP, "alpha"); got != targetHealthHealthy {
+		t.Errorf("alpha state = %q, want healthy — a JSON-RPC-level error still means the server answered", got)
+	}
+}
+
+// TestHandleMCPFederated_ToolsCall_TargetHealth_RecordsResolvedServerOnly
+// proves tools/call records health for the ONE resolved server, never
+// the other configured-but-uncontacted one.
+func TestHandleMCPFederated_ToolsCall_TargetHealth_RecordsResolvedServerOnly(t *testing.T) {
+	alpha := newMockJSONRPCServer(t, nil)
+	beta := newMockJSONRPCServer(t, nil)
+	cfg := newFederationTestConfig(alpha.srv.URL, beta.srv.URL, false)
+	h, err := New(context.Background(), http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	gw := h.(*Gateway)
+
+	callParams, _ := json.Marshal(mcpToolCallParams{Name: "alpha_lookup"})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, newFederatedRequest(t, "sk-alice", jsonrpcRequest{
+		JSONRPC: jsonrpcVersion, Method: "tools/call", ID: json.RawMessage("5"), Params: callParams,
+	}))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+
+	if got := gw.targetHealth.stateOf(targetKindMCP, "alpha"); got != targetHealthHealthy {
+		t.Errorf("alpha state = %q, want healthy", got)
+	}
+	if got := gw.targetHealth.stateOf(targetKindMCP, "beta"); got != targetHealthUnknown {
+		t.Errorf("beta state = %q, want unknown (never contacted)", got)
+	}
+}
+
+// TestHandleMCPFederated_ToolsCall_TargetHealth_UnreachableServer_RecordsUnhealthy
+// proves a resolved-but-unreachable backend records a failure even
+// though the client sees a generic JSON-RPC internal error, not a raw
+// transport error.
+func TestHandleMCPFederated_ToolsCall_TargetHealth_UnreachableServer_RecordsUnhealthy(t *testing.T) {
+	cfg := newFederationTestConfig("http://127.0.0.1:1", "http://127.0.0.1:1", false)
+	cfg.TargetHealth = TargetHealthConfig{FailureThreshold: 1}
+	h, err := New(context.Background(), http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	gw := h.(*Gateway)
+
+	callParams, _ := json.Marshal(mcpToolCallParams{Name: "alpha_lookup"})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, newFederatedRequest(t, "sk-alice", jsonrpcRequest{
+		JSONRPC: jsonrpcVersion, Method: "tools/call", ID: json.RawMessage("5"), Params: callParams,
+	}))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+
+	if got := gw.targetHealth.stateOf(targetKindMCP, "alpha"); got != targetHealthUnhealthy {
+		t.Errorf("alpha state = %q, want unhealthy", got)
+	}
+}

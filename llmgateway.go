@@ -111,6 +111,13 @@ type Config struct {
 	// Cache is a struct value, not a pointer, for the same reason as Retry
 	// above: its own Enabled field is the on/off signal.
 	Cache CacheConfig `json:"cache"`
+	// TargetHealth configures feat/target-health's opt-in active probe
+	// sweep for MCP servers and A2A agents — see TargetHealthConfig's own
+	// doc comment. A struct value, not a pointer, for the same
+	// zero-means-default reason as Breaker above: passive recording and
+	// exposure (GET /admin/api/targets, llmgateway_target_healthy) stay
+	// on unconditionally regardless of this block's presence.
+	TargetHealth TargetHealthConfig `json:"targetHealth"`
 	// MaxInFlightBodyRequests caps how many unified and media JSON/
 	// multipart requests (routes_unified.go's runUnified via
 	// readAndDecodeUnifiedBody; routes_media.go's decodeMediaJSONRequest/
@@ -362,6 +369,39 @@ type BreakerConfig struct {
 	FailureThreshold int `json:"failureThreshold,omitempty"`
 }
 
+// TargetHealthConfig configures feat/target-health's OPT-IN active probe
+// sweep for MCP servers and A2A agents (target_health.go). Passive
+// recording from real request traffic, and exposure via GET
+// /admin/api/targets and the llmgateway_target_healthy gauge, are ALWAYS
+// on regardless of this block's presence — Enabled here gates ONLY the
+// background probe sweep (maybeSweepTargetHealth, target_health.go). The
+// zero value (Enabled: false) preserves prior behavior exactly: a
+// deployment that predates this feature, or one that never configures
+// this block, sends no active probe traffic to any MCP server or agent.
+// Field order (string before the two scalars) is fieldalignment-
+// sensitive, the same convention BreakerConfig's own doc comment above
+// explains.
+type TargetHealthConfig struct {
+	// ProbeInterval is the minimum time between sweeps (a Go duration
+	// string, e.g. "60s"). Empty (the default) uses
+	// defaultTargetHealthProbeInterval (target_health.go). Must be
+	// between minTargetHealthProbeInterval (10s) and
+	// maxTargetHealthProbeInterval (1h) when set, or construction fails.
+	ProbeInterval string `json:"probeInterval,omitempty"`
+	// FailureThreshold is how many CONSECUTIVE failed observations
+	// (probe or traffic) mark a target unhealthy — see
+	// targetHealthTracker's own doc comment (target_health.go) for the
+	// exact state rule. 0 (the default) uses
+	// defaultTargetHealthFailureThreshold (3). Must be between 1 and 100,
+	// or construction fails.
+	FailureThreshold int `json:"failureThreshold,omitempty"`
+	// Enabled opts into the active probe sweep. false (the default)
+	// means no MCP server or A2A agent is ever proactively contacted for
+	// health purposes — passive recording from real proxied traffic
+	// still runs either way.
+	Enabled bool `json:"enabled,omitempty"`
+}
+
 // AdminConfig configures the read-only admin dashboard (spec §4, v0.2).
 // The zero value (Enabled: false) disables it, preserving v0.1 behavior
 // exactly: no /admin* route is registered, so those paths fall through
@@ -561,11 +601,22 @@ type Gateway struct {
 	// degrades to "failover never skips a candidate for request health"
 	// rather than a nil-pointer panic.
 	failoverHealth *requestHealthTracker
-	limiter        *limiter
-	registry       *modelRegistry
-	adapters       map[string]providerAdapter
-	cfg            *Config
-	auth           *authStore
+	// targetHealth is feat/target-health's own per-pod, in-memory health
+	// tracker for MCP servers and A2A agents (target_health.go) — always
+	// constructed, here, regardless of Config.TargetHealth.Enabled:
+	// passive recording (handleTargetProxy, mcp_a2a.go;
+	// mcpFederatedToolsList/mcpFederatedToolsCall, mcp_federation.go) and
+	// exposure (GET /admin/api/targets, llmgateway_target_healthy) both
+	// stay on unconditionally, mirroring g.latency/g.provenance's own
+	// "always-present, usually-empty, nil-receiver-safe" convention
+	// below. Enabled gates only maybeSweepTargetHealth's own active
+	// probe sweep.
+	targetHealth *targetHealthTracker
+	limiter      *limiter
+	registry     *modelRegistry
+	adapters     map[string]providerAdapter
+	cfg          *Config
+	auth         *authStore
 	// cache is nil whenever response caching is not configured or not
 	// usable (cfg.Cache.Enabled is false, or true with no config.Redis —
 	// see buildResponseCache, cache.go). Every call site checks for nil
@@ -624,6 +675,10 @@ type Gateway struct {
 	// failover is Config.Failover, validated and resolved once by
 	// newGateway (validateFailoverConfig, failover.go).
 	failover failoverConfig
+	// targetHealthCfg is Config.TargetHealth, validated and resolved once
+	// by validateTargetHealthConfig (target_health.go) — maybeSweepTargetHealth
+	// reads probeInterval/enabled from this, never the raw Config.
+	targetHealthCfg targetHealthConfig
 	// targetTimeout is targetClient's own resolved request timeout —
 	// Config.RequestTimeout only; an MCP/A2A target has no per-target
 	// override the way a provider does. proxyUpstream's own callers
@@ -631,6 +686,15 @@ type Gateway struct {
 	// idle-progress body watchdog (timeout.go) matches the
 	// ResponseHeaderTimeout already set on targetClient's Transport.
 	targetTimeout time.Duration
+	// targetHealthLastSweepUnixNano/targetHealthSweeping back
+	// maybeSweepTargetHealth's own single-flight, at-most-one-sweep-per-
+	// interval gate (target_health.go): a UnixNano timestamp and a CAS
+	// flag, both atomic rather than mutex-guarded, since every caller
+	// (serveMetrics, serveAdminTargets, handleMCPServers, handleAgents)
+	// reaches maybeSweepTargetHealth on a live request path and must
+	// never block behind a lock another such call already holds.
+	targetHealthLastSweepUnixNano int64
+	targetHealthSweeping          int32
 }
 
 // telemetryStartupOnce keeps the anonymous "plugin loaded" ping to one per
@@ -749,6 +813,18 @@ func newGateway(ctx context.Context, next http.Handler, config *Config, name str
 	}
 	g.failover = failoverCfg
 	g.failoverHealth = newRequestHealthTracker()
+
+	// feat/target-health: validated once, here — passive recording and
+	// exposure stay always-on regardless of this block; Enabled gates
+	// only maybeSweepTargetHealth's own active probe sweep
+	// (target_health.go).
+	targetHealthCfg, err := validateTargetHealthConfig(config.TargetHealth)
+	if err != nil {
+		return nil, err
+	}
+	g.targetHealthCfg = targetHealthCfg
+	g.targetHealth = newTargetHealthTracker(targetHealthCfg.failureThreshold)
+
 	// feat: instrument upstream latency — always constructed, regardless
 	// of whether Config.Metrics is nil/disabled; see g.latency's own doc
 	// comment above for why an always-present, usually-empty store is the
