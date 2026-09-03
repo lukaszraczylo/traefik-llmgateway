@@ -586,7 +586,26 @@ const maxExplicitBodyAdmissionCap = 10_000
 // convention (admin.go) for the same reasoning spelled out once; this
 // struct is the other place it applies.
 type Gateway struct {
-	next http.Handler
+	// targetHealthLastSweepUnixNano MUST stay the first field (F7,
+	// feat/target-health review). It backs maybeSweepTargetHealth's
+	// single-flight gate (target_health.go) and is read/written only via
+	// sync/atomic's 64-bit functions (atomic.LoadInt64/StoreInt64) — the
+	// sync/atomic package documents that "on ARM, x86-32, and 32-bit
+	// MIPS, it is the caller's responsibility to arrange for 64-bit
+	// alignment of 64-bit words accessed atomically," and guarantees
+	// that alignment only for "the first word in an allocated struct,
+	// array, or slice." Traefik ships armv7 and 386 builds alongside
+	// amd64/arm64, so this is not a hypothetical: any field placed
+	// ahead of this one could silently misalign it on those platforms.
+	// Every field below is ordered by golangci-lint's fieldalignment
+	// linter (pointer-containing fields grouped first, for GC scan
+	// efficiency, then the rest) — this one field is the sole, deliberate
+	// exception, verified with `fieldalignment ./...` to add no
+	// additional padding: an 8-byte int64 transitions cleanly into the
+	// 8-byte-aligned pointer block that follows on every architecture
+	// this plugin targets.
+	targetHealthLastSweepUnixNano int64
+	next                          http.Handler
 	// redisClient is the same instance newGateway hands to both the
 	// limiter's redisStore and the response cache (its own doc comment,
 	// below, explains why it's built once and shared) — kept here too,
@@ -617,19 +636,22 @@ type Gateway struct {
 	adapters     map[string]providerAdapter
 	cfg          *Config
 	auth         *authStore
+	// provenance is the in-process usage-accounting-provenance accumulator
+	// (feat: expose token-accounting provenance, metrics.go's
+	// provenanceStore) — recordUsageProvenance's only write target, and
+	// writeProvenanceMetrics/buildAdminProvenanceViews' (admin.go) own
+	// read source. Always constructed, here, by newGateway, even when
+	// Config.Metrics is nil or disabled, mirroring g.latency's own
+	// identical "always-present, usually-empty, nil-receiver-safe"
+	// convention immediately below — see that field's own doc comment for
+	// the full reasoning, which applies here unchanged.
+	provenance *provenanceStore
 	// cache is nil whenever response caching is not configured or not
 	// usable (cfg.Cache.Enabled is false, or true with no config.Redis —
 	// see buildResponseCache, cache.go). Every call site checks for nil
 	// before using it, rather than responseCache having its own
 	// always-disabled zero value.
 	cache *responseCache
-	// bodyAdmission is the buffered-channel semaphore acquireBodyAdmission
-	// (routes_unified.go) claims from and releases: security review
-	// finding 1b, 2026-08-22. Sized once, here, by newGateway (see
-	// defaultBodyAdmissionCap/Config.MaxInFlightBodyRequests) — never
-	// resized afterward, matching a Go channel's own fixed-capacity
-	// contract.
-	bodyAdmission chan struct{}
 	// targetClient is the shared, connection-pooled *http.Client the
 	// MCP/A2A target proxy (mcp_a2a.go) issues every upstream request
 	// through — built once via newAdapterHTTPClient, the same constructor
@@ -648,17 +670,14 @@ type Gateway struct {
 	// identical "safe even off a bare &Gateway{} literal" convention
 	// above.
 	latency *latencyStore
-	// provenance is the in-process usage-accounting-provenance accumulator
-	// (feat: expose token-accounting provenance, metrics.go's
-	// provenanceStore) — recordUsageProvenance's only write target, and
-	// writeProvenanceMetrics/buildAdminProvenanceViews' (admin.go) own
-	// read source. Always constructed, here, by newGateway, even when
-	// Config.Metrics is nil or disabled, mirroring g.latency's own
-	// identical "always-present, usually-empty, nil-receiver-safe"
-	// convention immediately above — see that field's own doc comment for
-	// the full reasoning, which applies here unchanged.
-	provenance *provenanceStore
-	name       string
+	// bodyAdmission is the buffered-channel semaphore acquireBodyAdmission
+	// (routes_unified.go) claims from and releases: security review
+	// finding 1b, 2026-08-22. Sized once, here, by newGateway (see
+	// defaultBodyAdmissionCap/Config.MaxInFlightBodyRequests) — never
+	// resized afterward, matching a Go channel's own fixed-capacity
+	// contract.
+	bodyAdmission chan struct{}
+	name          string
 	// failoverLogGate rate-limits runMeteredCall's generic "failing over"
 	// log line (routes_unified.go) to once per storeErrorLogEvery
 	// (adversarial-review fix, F10) — reuses auth.go's own logGate type,
@@ -672,13 +691,13 @@ type Gateway struct {
 	// never re-parses a CIDR string per scrape. nil when Metrics is
 	// unconfigured or carries no AllowedCIDRs entries.
 	metricsNets []*net.IPNet
-	// failover is Config.Failover, validated and resolved once by
-	// newGateway (validateFailoverConfig, failover.go).
-	failover failoverConfig
 	// targetHealthCfg is Config.TargetHealth, validated and resolved once
 	// by validateTargetHealthConfig (target_health.go) — maybeSweepTargetHealth
 	// reads probeInterval/enabled from this, never the raw Config.
 	targetHealthCfg targetHealthConfig
+	// failover is Config.Failover, validated and resolved once by
+	// newGateway (validateFailoverConfig, failover.go).
+	failover failoverConfig
 	// targetTimeout is targetClient's own resolved request timeout —
 	// Config.RequestTimeout only; an MCP/A2A target has no per-target
 	// override the way a provider does. proxyUpstream's own callers
@@ -686,15 +705,17 @@ type Gateway struct {
 	// idle-progress body watchdog (timeout.go) matches the
 	// ResponseHeaderTimeout already set on targetClient's Transport.
 	targetTimeout time.Duration
-	// targetHealthLastSweepUnixNano/targetHealthSweeping back
-	// maybeSweepTargetHealth's own single-flight, at-most-one-sweep-per-
-	// interval gate (target_health.go): a UnixNano timestamp and a CAS
-	// flag, both atomic rather than mutex-guarded, since every caller
-	// (serveMetrics, serveAdminTargets, handleMCPServers, handleAgents)
-	// reaches maybeSweepTargetHealth on a live request path and must
-	// never block behind a lock another such call already holds.
-	targetHealthLastSweepUnixNano int64
-	targetHealthSweeping          int32
+	// targetHealthSweeping is maybeSweepTargetHealth's own single-flight
+	// CAS flag (target_health.go) — its sibling, the UnixNano timestamp
+	// this same gate reads, is targetHealthLastSweepUnixNano, kept as
+	// this struct's FIRST field instead (see that field's own doc
+	// comment, top of this struct, for why). Both are atomic rather than
+	// mutex-guarded, since every caller (serveMetrics, serveAdminTargets,
+	// handleMCPServers, handleAgents) reaches maybeSweepTargetHealth on a
+	// live request path and must never block behind a lock another such
+	// call already holds. A plain int32 needs no special alignment
+	// treatment the way its int64 sibling does.
+	targetHealthSweeping int32
 }
 
 // telemetryStartupOnce keeps the anonymous "plugin loaded" ping to one per

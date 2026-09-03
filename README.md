@@ -1549,9 +1549,11 @@ or in CI.
   `health` is `{"state","lastCheck","lastError","consecutiveFailures","latencyMs","source"}`
   — see [MCP and A2A](#mcp-and-a2a)'s "Target health" section for the
   full contract. `state` is `"unknown"`, `"healthy"`, or `"unhealthy"`,
-  and `consecutiveFailures` is always present; every other field is
-  omitted while `state` is `"unknown"` (this target has never been
-  observed). This route always reads existing state; when
+  and `consecutiveFailures` is always present. Every other field is
+  omitted only while this target has never once been observed; `state`
+  alone does not decide the omission, since `"unknown"` also covers a
+  target that has been observed but has not yet succeeded, and that case
+  keeps every field. This route always reads existing state; when
   `targetHealth.enabled`, it additionally triggers a background probe
   sweep when one is due, so the response itself never waits on that
   sweep. Polled every 5 seconds, in the same batch as `overview` and
@@ -1921,11 +1923,27 @@ plugin's config.
       or the default `/.well-known/agent-card.json`); a `404` still
       counts as reachable — for example an umbrella agent whose root
       carries no card of its own.
-  - **State**: `"unknown"` (never observed), `"healthy"` (recorded at
-    least once, `consecutiveFailures` below `targetHealth.failureThreshold`),
-    or `"unhealthy"` (`consecutiveFailures` at or above the threshold). A
-    target with one or two recent failures after a success still reads
-    `"healthy"` until the threshold is actually crossed.
+  - **State**: `"healthy"` (succeeded at least once,
+    `consecutiveFailures` below `targetHealth.failureThreshold`), or
+    `"unhealthy"` (`consecutiveFailures` at or above the threshold,
+    whether or not the target has ever succeeded). A target with one or
+    two recent failures after a success still reads `"healthy"` until the
+    threshold is actually crossed.
+  - **`"unknown"` reads three ways**, all sharing one JSON `state`
+    value:
+    1. never observed at all — no probe or passive traffic has reached
+       this target yet. `GET /admin/api/targets` omits every health field
+       but `state`/`consecutiveFailures` for this case.
+    2. observed, but never once succeeded, and still below
+       `targetHealth.failureThreshold` — the threshold's protection
+       against a single transient first failure still applies, so this
+       does not jump straight to `"unhealthy"`, but a target this tracker
+       has never seen answer is not `"healthy"` either. Every other
+       health field is still present here, since there is a real
+       observation to show.
+    3. either way, `llmgateway_target_healthy` emits no sample while
+       `state` is `"unknown"` — a gap in the series is honest, a
+       fabricated `1` is not.
 
 ## Security notes
 
