@@ -1684,7 +1684,9 @@ plugin's config.
   - `llmgateway_target_healthy{kind,target}` — `1`/`0` gauge for an MCP
     server or A2A agent's tracked health; `kind` is `"mcp"` or `"agent"`.
     No sample at all for a target this tracker has never observed — see
-    [MCP and A2A](#mcp-and-a2a)'s "Target health" section.
+    [MCP and A2A](#mcp-and-a2a)'s "Target health" section. The whole
+    family, HELP and TYPE lines included, is absent entirely when no MCP
+    servers or agents are configured.
   - `llmgateway_limit_store_up` — `1`/`0` gauge for this replica's own
     connection to the configured limit store (Redis); absent entirely
     when no store is configured. Every store-backed family above simply

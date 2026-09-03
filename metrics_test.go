@@ -1521,6 +1521,58 @@ func TestMetrics_TargetHealthy_NoSampleWhileUnknown(t *testing.T) {
 	}
 }
 
+// TestMetrics_TargetHealthy_NoSampleWhileNeverSucceeded proves F4's
+// second no-sample case: a target that HAS been observed, but has never
+// once succeeded and is still below failureThreshold, reads "unknown"
+// (TestTargetHealthTracker_FirstObservationFailure_ReadsUnknown) and
+// therefore still emits no llmgateway_target_healthy sample — the same
+// "a gap is honest, a fabricated value is not" rule the never-observed
+// case above applies, now extended to "observed but never succeeded".
+func TestMetrics_TargetHealthy_NoSampleWhileNeverSucceeded(t *testing.T) {
+	t.Parallel()
+	cfg := newMetricsTestConfig()
+	cfg.MCPServers = map[string]*TargetConfig{"alpha": {URL: "http://mcp-alpha.internal"}}
+	h, gw := newMetricsGatewayHandle(t, cfg)
+
+	gw.targetHealth.record(targetKindMCP, "alpha", "", false, errors.New("boom"), time.Millisecond, targetHealthSourceProbe)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, metricsRequest(http.MethodGet, metricsPathDefault, "sk-admin1"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	_, samples := parsePrometheusText(t, rec.Body.Bytes())
+	for _, s := range samples {
+		if s.name == "llmgateway_target_healthy" {
+			t.Errorf("unexpected sample %v — a target that has never succeeded must emit nothing", s)
+		}
+	}
+}
+
+// TestMetrics_TargetHealthy_FamilyAbsentWhenNoTargetsConfigured proves
+// F7: writeTargetMetrics omits even llmgateway_target_healthy's own
+// HELP/TYPE header when no MCP server or agent is configured at all —
+// mirroring writeStoreHealthMetrics' identical "nothing to report, no
+// family either" behavior when Redis is unconfigured.
+func TestMetrics_TargetHealthy_FamilyAbsentWhenNoTargetsConfigured(t *testing.T) {
+	t.Parallel()
+	cfg := newMetricsTestConfig()
+	h, _ := newMetricsGatewayHandle(t, cfg)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, metricsRequest(http.MethodGet, metricsPathDefault, "sk-admin1"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	types, _ := parsePrometheusText(t, rec.Body.Bytes())
+	if _, ok := types["llmgateway_target_healthy"]; ok {
+		t.Error("want llmgateway_target_healthy's TYPE line absent when no MCP servers or agents are configured")
+	}
+	if strings.Contains(rec.Body.String(), "llmgateway_target_healthy") {
+		t.Errorf("body unexpectedly mentions llmgateway_target_healthy: %s", rec.Body.String())
+	}
+}
+
 // TestMetrics_TargetHealthy_ReflectsRecordedState proves the gauge
 // renders 1 for a healthy MCP server and 0 for an unhealthy agent, with
 // the documented kind label values ("mcp"/"agent" — NOT the internal

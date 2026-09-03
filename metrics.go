@@ -694,7 +694,15 @@ func (g *Gateway) writeProviderMetrics(m *metricWriter) {
 // unreadable". Iterates every CONFIGURED MCP server and agent (not just
 // ones the tracker happens to have an entry for), so a target removed
 // from config since its last observation contributes no stale series.
+// F7, feat/target-health review: returns before emitting even the family's
+// own HELP/TYPE header when no MCP server or agent is configured at all —
+// mirrors writeStoreHealthMetrics' identical "nothing to report, no family
+// either" early return above, rather than a HELP/TYPE line promising a
+// metric family that can never carry a sample in this deployment.
 func (g *Gateway) writeTargetMetrics(m *metricWriter) {
+	if len(g.cfg.MCPServers) == 0 && len(g.cfg.Agents) == 0 {
+		return
+	}
 	m.family("llmgateway_target_healthy", "gauge",
 		"1 when an MCP server or A2A agent's health (last passive observation or active probe) is healthy, 0 when its consecutive-failure count has reached targetHealth.failureThreshold. No sample while never yet observed."+aggregationNoteTargetHealthy)
 
