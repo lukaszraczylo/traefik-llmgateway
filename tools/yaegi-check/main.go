@@ -1896,31 +1896,51 @@ func readTargetHealth(handler http.Handler, name string) (targetHealthProbeView,
 // used to make TARGETHEALTH-2, below, racy under Yaegi's interpreter
 // overhead).
 //
-// targetHealthProbeOnlyServerName is dedicated to this assertion
-// specifically because it is NEVER proxied or federated through by any
-// other exercise in this harness — its health entry can only ever be
-// written by the probe, so source == "probe" here is not just likely,
-// it is the only value possible. Polling (pollTargetHealth) rather than
-// asserting on a single read: the sweep itself still runs on its own
-// spawned goroutine even though this call triggered it.
+// G5, feat/target-health review round 2: that guarantee only holds once
+// EVERY configured MCP server's own probe observation has actually
+// landed, not merely targetHealthProbeOnlyServerName's. sweepTargetHealth
+// probes every configured server CONCURRENTLY, on its own goroutines —
+// waiting for one target's record() to land says nothing about whether
+// mcpProbeServerName's own probe goroutine has finished yet. A version of
+// this function that returned as soon as targetHealthProbeOnlyServerName
+// alone changed could return while mcpProbeServerName's probe write was
+// still in flight; that write could then land AFTER
+// exerciseFederatedTooLarge's later traffic write, silently reverting
+// mcpProbeServerName's source back to "probe" and corrupting
+// exerciseTargetHealth's own TARGETHEALTH-2 assertion (source ==
+// "traffic"). Polling every configured MCP server for its own source ==
+// "probe" closes that gap: this function cannot return until the whole
+// sweep — not just the one target it happens to check last — has
+// finished writing.
+//
+// targetHealthProbeOnlyServerName is additionally asserted to the FULL
+// "healthy" state, not just source == "probe": it is NEVER proxied or
+// federated through by any other exercise in this harness, so its health
+// entry can only ever be written by the probe — recover's own swallow
+// (sweepTargetHealth's defer, target_health.go) means an interpreted
+// panic mid-probe would otherwise degrade to a silently-stuck "unknown"
+// rather than a loud failure, and asserting the full success shape here
+// is what makes a Yaegi incompatibility in the initialize/close handshake
+// path visible instead of passing silently.
 func exerciseTargetHealthProbeWarmup(handler http.Handler) error {
-	health, err := pollTargetHealth(handler, targetHealthProbeOnlyServerName, func(h targetHealthProbeView) bool {
-		return h.State != "unknown"
-	})
-	if err != nil {
-		return err
+	warmupServerNames := []string{mcpProbeServerName, targetHealthDownServerName, targetHealthProbeOnlyServerName}
+	var probeOnlyHealth targetHealthProbeView
+	for _, name := range warmupServerNames {
+		health, err := pollTargetHealth(handler, name, func(h targetHealthProbeView) bool {
+			return h.Source == "probe"
+		})
+		if err != nil {
+			return err
+		}
+		if health.Source != "probe" {
+			return fmt.Errorf("TARGETHEALTH-PROBE-1: GET /admin/api/targets: %q health.source = %q, want %q (the warmup sweep must probe every configured MCP server before any later exercise runs)", name, health.Source, "probe")
+		}
+		if name == targetHealthProbeOnlyServerName {
+			probeOnlyHealth = health
+		}
 	}
-	if health.Source != "probe" {
-		return fmt.Errorf("TARGETHEALTH-PROBE-1: GET /admin/api/targets: %q health.source = %q, want %q (only the active probe ever touches this target)", targetHealthProbeOnlyServerName, health.Source, "probe")
-	}
-	// Recover's own swallow (sweepTargetHealth's defer, target_health.go)
-	// means an interpreted panic mid-probe would otherwise degrade to a
-	// silently-stuck "unknown" rather than a loud failure — asserting the
-	// FULL success shape here (not merely "state != unknown") is what
-	// makes a Yaegi incompatibility in the initialize/close handshake
-	// path visible instead of passing silently.
-	if health.State != "healthy" {
-		return fmt.Errorf("TARGETHEALTH-PROBE-2: GET /admin/api/targets: %q health.state = %q, want healthy (targetHealthProbeOnlyUpstream always answers initialize successfully)", targetHealthProbeOnlyServerName, health.State)
+	if probeOnlyHealth.State != "healthy" {
+		return fmt.Errorf("TARGETHEALTH-PROBE-2: GET /admin/api/targets: %q health.state = %q, want healthy (targetHealthProbeOnlyUpstream always answers initialize successfully)", targetHealthProbeOnlyServerName, probeOnlyHealth.State)
 	}
 
 	fmt.Println("yaegi-check: target health active probe sweep ran and recorded correctly interpreted")
