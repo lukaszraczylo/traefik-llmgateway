@@ -3,6 +3,7 @@ package traefikllmgateway
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"net/http"
@@ -1493,4 +1494,78 @@ func TestRecordLatency_MetricsDisabled_NoObservationCollected(t *testing.T) {
 	if snaps := gw.latency.snapshot(); len(snaps) != 0 {
 		t.Errorf("g.latency has %d entries after a request with metrics disabled, want 0 — no latency observation should ever be collected when metrics is off", len(snaps))
 	}
+}
+
+// --- feat/target-health: llmgateway_target_healthy ---
+
+// TestMetrics_TargetHealthy_NoSampleWhileUnknown proves a configured but
+// never-observed target contributes NO sample at all — the same
+// "a gap is honest, a fabricated value is not" rule the store-backed
+// families apply to storeDown, applied here to "never yet observed".
+func TestMetrics_TargetHealthy_NoSampleWhileUnknown(t *testing.T) {
+	t.Parallel()
+	cfg := newMetricsTestConfig()
+	cfg.MCPServers = map[string]*TargetConfig{"alpha": {URL: "http://mcp-alpha.internal"}}
+	h, _ := newMetricsGatewayHandle(t, cfg)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, metricsRequest(http.MethodGet, metricsPathDefault, "sk-admin1"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	_, samples := parsePrometheusText(t, rec.Body.Bytes())
+	for _, s := range samples {
+		if s.name == "llmgateway_target_healthy" {
+			t.Errorf("unexpected sample %v — a never-observed target must emit nothing", s)
+		}
+	}
+}
+
+// TestMetrics_TargetHealthy_ReflectsRecordedState proves the gauge
+// renders 1 for a healthy MCP server and 0 for an unhealthy agent, with
+// the documented kind label values ("mcp"/"agent" — NOT the internal
+// routing kind "a2a").
+func TestMetrics_TargetHealthy_ReflectsRecordedState(t *testing.T) {
+	t.Parallel()
+	cfg := newMetricsTestConfig()
+	cfg.MCPServers = map[string]*TargetConfig{"alpha": {URL: "http://mcp-alpha.internal"}}
+	cfg.Agents = map[string]*AgentConfig{"bot1": {URL: "http://agent-bot1.internal"}}
+	cfg.TargetHealth = TargetHealthConfig{FailureThreshold: 1}
+	h, gw := newMetricsGatewayHandle(t, cfg)
+
+	gw.targetHealth.record(targetKindMCP, "alpha", true, nil, time.Millisecond, targetHealthSourceTraffic)
+	gw.targetHealth.record(targetKindAgent, "bot1", false, errors.New("boom"), time.Millisecond, targetHealthSourceProbe)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, metricsRequest(http.MethodGet, metricsPathDefault, "sk-admin1"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	_, samples := parsePrometheusText(t, rec.Body.Bytes())
+	assertSample(t, samples, "llmgateway_target_healthy", map[string]string{"kind": "mcp", "target": "alpha"}, "1")
+	assertSample(t, samples, "llmgateway_target_healthy", map[string]string{"kind": "agent", "target": "bot1"}, "0")
+}
+
+// TestMetrics_TargetHealthy_UnaffectedByStoreOutage proves this gauge is
+// unaffected by a limit-store outage — it reads the in-process
+// target-health tracker only, never the store, mirroring
+// llmgateway_provider_healthy's own identical independence
+// (TestMetrics_StoreDown_SkipsRatherThanFabricatesZero's own doc
+// comment explains why that one is asserted present during an outage;
+// this is the same claim for this feature's gauge).
+func TestMetrics_TargetHealthy_UnaffectedByStoreOutage(t *testing.T) {
+	t.Parallel()
+	cfg := newMetricsTestConfig()
+	cfg.MCPServers = map[string]*TargetConfig{"alpha": {URL: "http://mcp-alpha.internal"}}
+	h, gw := newMetricsGatewayHandle(t, cfg)
+	gw.targetHealth.record(targetKindMCP, "alpha", true, nil, time.Millisecond, targetHealthSourceTraffic)
+	gw.limiter.store = alwaysErrStore{}
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, metricsRequest(http.MethodGet, metricsPathDefault, "sk-admin1"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	_, samples := parsePrometheusText(t, rec.Body.Bytes())
+	assertSample(t, samples, "llmgateway_target_healthy", map[string]string{"kind": "mcp", "target": "alpha"}, "1")
 }

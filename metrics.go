@@ -170,6 +170,7 @@ func (g *Gateway) metricsSourceAllowed(r *http.Request) bool {
 // disk cache, and its declared Content-Type must never be second-guessed
 // by a client's MIME sniffer.
 func (g *Gateway) serveMetrics(w http.ResponseWriter) {
+	g.maybeSweepTargetHealth()
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Cache-Control", "no-store")
@@ -448,6 +449,16 @@ const aggregationNotePerProcess = " AGGREGATION ACROSS REPLICAS: this counter li
 // instant (e.g. one mid-backoff, one already recovered).
 const aggregationNoteProviderHealthy = " AGGREGATION ACROSS REPLICAS: each replica runs its own discovery circuit breaker in-process, never shared via Redis, so this can legitimately differ per replica. Read it per-instance where possible; if you must aggregate, use min() to surface \"at least one replica sees this provider as unhealthy\" — sum() is meaningless for a 0/1 gauge."
 
+// aggregationNoteTargetHealthy is appended to llmgateway_target_healthy's
+// HELP text (feat/target-health): the tracker behind this gauge
+// (target_health.go) is per-process, in-memory state, fed by each
+// replica's own passive traffic and, when enabled, its own active probe
+// sweep — never shared via Redis. A sibling to
+// aggregationNoteProviderHealthy above, not a reuse of it: this
+// tracker has no discovery step of its own, so that note's own
+// reference to "discovery circuit breaker" would not apply here.
+const aggregationNoteTargetHealthy = " AGGREGATION ACROSS REPLICAS: each replica tracks this target's health independently from its own passive traffic and, if enabled, its own active probes — never shared via Redis — so this can legitimately differ per replica. Read it per-instance where possible; if you must aggregate, use min() to surface \"at least one replica sees this target as unhealthy\" — sum() is meaningless for a 0/1 gauge."
+
 // aggregationNoteStoreHealth is appended to llmgateway_limit_store_up's
 // HELP text: whether THIS replica's own connection to the configured
 // limit store is currently healthy is, by definition, discovered
@@ -470,6 +481,7 @@ func (g *Gateway) renderMetrics() []byte {
 	var m metricWriter
 	g.writeUsageMetrics(&m)
 	g.writeProviderMetrics(&m)
+	g.writeTargetMetrics(&m)
 	g.writeLatencyMetrics(&m)
 	g.writeProvenanceMetrics(&m)
 	g.writeRejectionMetrics(&m)
@@ -671,6 +683,43 @@ func (g *Gateway) writeProviderMetrics(m *metricWriter) {
 			m.sampleInt("llmgateway_provider_model_failures_total", labels, mc.failuresDay)
 		}
 	}
+}
+
+// writeTargetMetrics emits llmgateway_target_healthy (feat/target-health):
+// 1 for a healthy MCP server or A2A agent, 0 for an unhealthy one, and NO
+// sample at all for a target this tracker has never observed — the
+// identical "a gap is honest, a fabricated value is not" convention
+// writeUsageMetrics/writeProviderMetrics already apply to a storeDown
+// read, applied here to "never yet observed" instead of "currently
+// unreadable". Iterates every CONFIGURED MCP server and agent (not just
+// ones the tracker happens to have an entry for), so a target removed
+// from config since its last observation contributes no stale series.
+func (g *Gateway) writeTargetMetrics(m *metricWriter) {
+	m.family("llmgateway_target_healthy", "gauge",
+		"1 when an MCP server or A2A agent's health (last passive observation or active probe) is healthy, 0 when its consecutive-failure count has reached targetHealth.failureThreshold. No sample while never yet observed."+aggregationNoteTargetHealthy)
+
+	for _, name := range sortedMCPServerNames(g.cfg.MCPServers) {
+		writeTargetHealthySample(m, g.targetHealth.snapshot(targetKindMCP, name), targetScopeKind(targetKindMCP), name)
+	}
+	for _, name := range sortedAgentNames(g.cfg.Agents) {
+		writeTargetHealthySample(m, g.targetHealth.snapshot(targetKindAgent, name), targetScopeKind(targetKindAgent), name)
+	}
+}
+
+// writeTargetHealthySample writes llmgateway_target_healthy's one sample
+// for (kindLabel, name), skipped entirely while snap's state is unknown
+// — see writeTargetMetrics' own doc comment for why. kindLabel is the
+// external "mcp"/"agent" spelling (targetScopeKind), never the internal
+// routing kind ("a2a") targetHealthTracker itself keys on.
+func writeTargetHealthySample(m *metricWriter, snap targetHealthSnapshot, kindLabel, name string) {
+	if snap.state == targetHealthUnknown {
+		return
+	}
+	healthy := int64(1)
+	if snap.state == targetHealthUnhealthy {
+		healthy = 0
+	}
+	m.sampleInt("llmgateway_target_healthy", []metricLabel{{"kind", kindLabel}, {"target", name}}, healthy)
 }
 
 // --- upstream latency (feat: instrument upstream latency) ---

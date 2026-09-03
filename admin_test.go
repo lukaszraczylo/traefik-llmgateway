@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"net/http"
@@ -2434,5 +2435,131 @@ func TestParseHistoryScope_ModelIDKeepsLaterSeparators(t *testing.T) {
 	kind, id, ok := parseHistoryScope("model:openrouter/some-model:free")
 	if !ok || kind != kindModel || id != "openrouter/some-model:free" {
 		t.Errorf("parseHistoryScope = (%q, %q, %v), want the full model id preserved", kind, id, ok)
+	}
+}
+
+// --- feat/target-health: GET /admin/api/targets "health" field ---
+
+// TestAdminTargets_Health_NeverObserved_UnknownWithOmittedFields proves
+// the exact JSON contract for a target this tracker has never observed:
+// "state":"unknown", consecutiveFailures present as 0, and every other
+// health field (lastCheck/lastError/latencyMs/source) omitted entirely.
+func TestAdminTargets_Health_NeverObserved_UnknownWithOmittedFields(t *testing.T) {
+	t.Parallel()
+	cfg := newAdminTestConfig()
+	cfg.MCPServers = map[string]*TargetConfig{"alpha": {URL: "http://mcp-alpha.internal"}}
+	h, _ := newAdminGatewayHandle(t, cfg)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, adminRequest(http.MethodGet, adminTargetsPath, "sk-admin1"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, `"health":{"state":"unknown","consecutiveFailures":0}`) {
+		t.Errorf("body = %s, want an unknown target's health object to carry only state and consecutiveFailures", body)
+	}
+}
+
+// TestAdminTargets_Health_Recorded_AllFieldsPresent proves a target with
+// at least one recorded observation carries every health field, and that
+// state/source/consecutiveFailures reflect the tracker exactly.
+func TestAdminTargets_Health_Recorded_AllFieldsPresent(t *testing.T) {
+	t.Parallel()
+	cfg := newAdminTestConfig()
+	cfg.MCPServers = map[string]*TargetConfig{"alpha": {URL: "http://mcp-alpha.internal"}}
+	h, gw := newAdminGatewayHandle(t, cfg)
+
+	gw.targetHealth.record(targetKindMCP, "alpha", true, nil, 12*time.Millisecond, targetHealthSourceTraffic)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, adminRequest(http.MethodGet, adminTargetsPath, "sk-admin1"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	var got adminTargetsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(got.MCPServers) != 1 {
+		t.Fatalf("mcpServers = %+v, want exactly 1", got.MCPServers)
+	}
+	health := got.MCPServers[0].Health
+	if health.State != targetHealthHealthy {
+		t.Errorf("state = %q, want healthy", health.State)
+	}
+	if health.LastCheck == "" {
+		t.Error("want a non-empty lastCheck (RFC3339)")
+	}
+	if _, err := time.Parse(time.RFC3339, health.LastCheck); err != nil {
+		t.Errorf("lastCheck = %q, want RFC3339: %v", health.LastCheck, err)
+	}
+	if health.Source != targetHealthSourceTraffic {
+		t.Errorf("source = %q, want %q", health.Source, targetHealthSourceTraffic)
+	}
+	if health.LatencyMs == nil || *health.LatencyMs != 12 {
+		t.Errorf("latencyMs = %v, want *12", health.LatencyMs)
+	}
+	if health.ConsecutiveFailures != 0 {
+		t.Errorf("consecutiveFailures = %d, want 0", health.ConsecutiveFailures)
+	}
+	if health.LastError != "" {
+		t.Errorf("lastError = %q, want empty (omitted) after a success", health.LastError)
+	}
+}
+
+// TestAdminTargets_Health_Unhealthy_LastErrorPresent proves an unhealthy
+// target's lastError is populated and non-empty.
+func TestAdminTargets_Health_Unhealthy_LastErrorPresent(t *testing.T) {
+	t.Parallel()
+	cfg := newAdminTestConfig()
+	cfg.MCPServers = map[string]*TargetConfig{"alpha": {URL: "http://mcp-alpha.internal"}}
+	cfg.TargetHealth = TargetHealthConfig{FailureThreshold: 1}
+	h, gw := newAdminGatewayHandle(t, cfg)
+
+	gw.targetHealth.record(targetKindMCP, "alpha", false, errors.New("dial tcp: connection refused"), 3*time.Millisecond, targetHealthSourceProbe)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, adminRequest(http.MethodGet, adminTargetsPath, "sk-admin1"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	var got adminTargetsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	health := got.MCPServers[0].Health
+	if health.State != targetHealthUnhealthy {
+		t.Errorf("state = %q, want unhealthy", health.State)
+	}
+	if health.LastError != "dial tcp: connection refused" {
+		t.Errorf("lastError = %q, want the recorded error text", health.LastError)
+	}
+	if health.Source != targetHealthSourceProbe {
+		t.Errorf("source = %q, want %q", health.Source, targetHealthSourceProbe)
+	}
+}
+
+// TestAdminTargets_Health_AgentUsesAgentKind proves an agent row's health
+// is read under targetKindAgent, not the mcp kind.
+func TestAdminTargets_Health_AgentUsesAgentKind(t *testing.T) {
+	t.Parallel()
+	cfg := newAdminTestConfig()
+	cfg.Agents = map[string]*AgentConfig{"bot1": {URL: "http://agent-bot1.internal"}}
+	h, gw := newAdminGatewayHandle(t, cfg)
+
+	gw.targetHealth.record(targetKindAgent, "bot1", true, nil, time.Millisecond, targetHealthSourceTraffic)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, adminRequest(http.MethodGet, adminTargetsPath, "sk-admin1"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	var got adminTargetsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(got.Agents) != 1 || got.Agents[0].Health.State != targetHealthHealthy {
+		t.Fatalf("agents = %+v, want bot1 healthy", got.Agents)
 	}
 }
