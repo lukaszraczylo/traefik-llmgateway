@@ -197,6 +197,7 @@ config accepts them as YAML, which decodes to the same JSON shape.
 | `requestTimeout` | `string` (Go duration) | `5m` | Progress-based upstream request timeout, applied to every provider adapter call, native passthrough, and the MCP/A2A target proxy — see [Request timeout](#request-timeout). **Behavior change for every deployment**: before this field existed, no timeout was set at all, so a provider that accepted a connection and then went silent hung the request forever. A provider's own `requestTimeout` (`ProviderConfig`) overrides this. Empty means the default; a value that fails to parse, or parses to zero or a negative duration, is a construction error. |
 | `cache` | `CacheConfig` | `{}` (disabled) | Opt-in Redis-backed response cache for unified non-streaming chat/embeddings — see [Caching](#caching). Omitted or `enabled: false` means no caching, byte-identical to a gateway built before this field existed. |
 | `breaker` | `BreakerConfig` | `{}` (every default) | Per-provider discovery circuit breaker — see [Provider health (discovery circuit breaker)](#provider-health-discovery-circuit-breaker). Every field is individually zero-means-default; a provider whose discovery never fails is unaffected regardless of what this block contains. |
+| `targetHealth` | `TargetHealthConfig` | `{}` (probes off) | Health tracking for MCP servers and A2A agents — see [MCP and A2A](#mcp-and-a2a)'s "Target health" section. Passive recording and exposure stay on regardless of this block; `enabled` gates only the active probe sweep. |
 | `admin` | `*AdminConfig` | `nil` (disabled) | Read-only admin dashboard — see [Admin](#admin). `nil` or `enabled: false` means the `/admin*` routes are not registered at all. |
 | `metrics` | `*MetricsConfig` | `nil` (disabled) | Prometheus text-exposition endpoint — see [Metrics](#metrics). `nil` or `enabled: false` means the metrics route is not registered at all. |
 | `modelAliases` | `map[string]string` | `{}` | Operator-defined alias id → target model id — see [Model aliases](#model-aliases). Omitted or empty means no aliases, byte-identical to a gateway built before this field existed. |
@@ -324,6 +325,21 @@ own is governed purely by their group's — see
 | `failureThreshold` | `int` | `3` | Consecutive failed discovery refreshes that open the breaker — see [Provider health](#provider-health-discovery-circuit-breaker). `0` uses the default. Must be between `1` and `100`, or construction fails. |
 | `openDuration` | `string` (Go duration) | `1m` | Base backoff a newly opened breaker waits before its first half-open probe; doubles on every further failed probe, capped at `maxOpenDuration`. Invalid or non-positive duration string is a construction error. |
 | `maxOpenDuration` | `string` (Go duration) | `6h` | Ceiling on the backoff `openDuration` doubles into. Must be `>= openDuration` and no more than `24h`, or construction fails. Deliberately longer than the default `discoveryInterval` (1h) — see [Provider health](#provider-health-discovery-circuit-breaker) for why a value at or below `discoveryInterval` suppresses nothing. |
+
+### `TargetHealthConfig`
+
+Configures the opt-in active probe sweep for MCP servers and A2A agents
+— see [MCP and A2A](#mcp-and-a2a)'s "Target health" section for the full
+contract. **Passive recording from real proxied traffic, and exposure
+through `GET /admin/api/targets` and the `llmgateway_target_healthy`
+gauge, stay on unconditionally, regardless of this block.** `enabled`
+gates only the background probe sweep.
+
+| Field | Type | Default | Semantics |
+|---|---|---|---|
+| `enabled` | `bool` | `false` | `false`: no MCP server or A2A agent is ever proactively contacted for health purposes. `true`: the active probe sweep runs, at most once per `probeInterval`, triggered by `/metrics`, `GET /admin/api/targets`, `GET /v1/mcp/servers`, or `GET /v1/agents` — never a timer. |
+| `probeInterval` | `string` (Go duration) | `60s` | Minimum time between sweeps. Must be between `10s` and `1h`, or construction fails. |
+| `failureThreshold` | `int` | `3` | Consecutive failed observations (probe or passive traffic) that mark a target unhealthy. `0` uses the default. Must be between `1` and `100`, or construction fails. |
 
 ### `AdminConfig`
 
@@ -1521,7 +1537,7 @@ or in CI.
 - **`GET /admin/api/targets`** returns every configured MCP server and
   agent for the dashboard's "MCP & Agents" tab:
   `{"mcpServers":[...],"agents":[...]}`, each entry
-  `{"name","url","access","counters"}`. `url` has any userinfo/query
+  `{"name","url","access","counters","health"}`. `url` has any userinfo/query
   string stripped, same as a provider's `baseUrl` in `overview`. `access`
   is the list of group names actually allowed to reach that target,
   computed via the identical glob match `mcpServers`/`agents`
@@ -1529,8 +1545,17 @@ or in CI.
   view can never disagree with what the proxy enforces; omitted when
   every configured group can reach it. `counters` is
   `requestsPerMinute`/`requestsPerDay`/`requestsPerMonth` — requests
-  only, no tokens or cost (see [MCP and A2A](#mcp-and-a2a) for why). Polled
-  every 5 seconds, in the same batch as `overview` and `usage`.
+  only, no tokens or cost (see [MCP and A2A](#mcp-and-a2a) for why).
+  `health` is `{"state","lastCheck","lastError","consecutiveFailures","latencyMs","source"}`
+  — see [MCP and A2A](#mcp-and-a2a)'s "Target health" section for the
+  full contract. `state` is `"unknown"`, `"healthy"`, or `"unhealthy"`,
+  and `consecutiveFailures` is always present; every other field is
+  omitted while `state` is `"unknown"` (this target has never been
+  observed). This route always reads existing state; when
+  `targetHealth.enabled`, it additionally triggers a background probe
+  sweep when one is due, so the response itself never waits on that
+  sweep. Polled every 5 seconds, in the same batch as `overview` and
+  `usage`.
 - **What's exposed**: provider names, types, base URLs (with any
   userinfo/query string stripped before it's ever echoed), model counts,
   discovery status, group/user names, membership, limits, MCP/agent
@@ -1656,6 +1681,10 @@ plugin's config.
   - `llmgateway_provider_healthy{provider}` — `1`/`0` gauge from the
     discovery circuit breaker (`healthState` in the admin API); see
     [Provider health](#provider-health-discovery-circuit-breaker).
+  - `llmgateway_target_healthy{kind,target}` — `1`/`0` gauge for an MCP
+    server or A2A agent's tracked health; `kind` is `"mcp"` or `"agent"`.
+    No sample at all for a target this tracker has never observed — see
+    [MCP and A2A](#mcp-and-a2a)'s "Target health" section.
   - `llmgateway_limit_store_up` — `1`/`0` gauge for this replica's own
     connection to the configured limit store (Redis); absent entirely
     when no store is configured. Every store-backed family above simply
@@ -1692,7 +1721,7 @@ plugin's config.
   identical families become genuinely **per-replica** instead — each
   replica counts only the traffic it personally handled — and `sum()`
   becomes the correct aggregation instead. This flips on that one config
-  bit; know which one you are running before wiring an alert. Three
+  bit; know which one you are running before wiring an alert. Four
   families do **not** follow this rule:
   - `llmgateway_rate_limit_rejections_total` lives only in each replica's
     own process memory, **never** in Redis, regardless of the `redis`
@@ -1704,6 +1733,11 @@ plugin's config.
     possible; if you must aggregate, `min()` surfaces "at least one
     replica sees this provider as unhealthy" — `sum()` is meaningless for
     a 0/1 gauge.
+  - `llmgateway_target_healthy` reflects each replica's own tracker,
+    fed by its own passive traffic and, if enabled, its own active
+    probes — never shared via Redis. Same guidance as
+    `llmgateway_provider_healthy`: read per-instance, `min()` if you must
+    aggregate.
   - `llmgateway_limit_store_up` reflects each replica's own, locally
     -discovered connection health to the configured store — it cannot
     itself be read from the store it describes, so it is inherently
@@ -1843,6 +1877,48 @@ plugin's config.
     /admin/api/targets` above and the request-rate note below. Applies to
     MCP servers only, not agents: there is no equivalent aggregated
     `/a2a` endpoint.
+- **Target health**: a per-replica, in-memory health tracker for every
+  configured MCP server and A2A agent — providers already have a health
+  signal (the discovery circuit breaker); this is the equivalent for
+  targets. Exposed via `GET /admin/api/targets`'s own `health` field
+  (above) and the `llmgateway_target_healthy` gauge (see
+  [Metrics](#metrics)). **Never gates routing**: federation and the
+  per-server proxy keep contacting every configured target regardless of
+  its recorded health — this tracker is observe-only.
+  - **Passive recording, always on**, independent of `targetHealth.enabled`:
+    the per-server proxy (`/mcp/{name}/...`, `/a2a/{name}/...`) records a
+    failure when the proxy attempt itself fails (excluding a client
+    cancel, which records nothing) or the upstream answers `5xx`; any
+    status under `500`, `4xx` included, counts as reachable. Federated
+    `POST /mcp`'s `tools/list` fan-out and `tools/call` record a failure
+    only when the outbound call itself fails (`err != nil` from the
+    backend call) — a JSON-RPC-level `error` in the backend's own
+    response still counts as reachable, since the server answered.
+  - **Active probes are opt-in** (`targetHealth.enabled: true`) and lazy:
+    no timer, no background goroutine running on its own. A probe sweep
+    is triggered by `/metrics`, `GET /admin/api/targets`, `GET
+    /v1/mcp/servers`, or `GET /v1/agents` — whichever is polled first
+    once `targetHealth.probeInterval` has elapsed since the last sweep —
+    and runs at most one sweep at a time, contacting every configured MCP
+    server and agent concurrently. Each probe gets its own timeout: the
+    configured `requestTimeout`, capped at `10s`.
+    - An MCP server on the Streamable HTTP transport gets an
+      `initialize`/session-close handshake; a JSON-RPC error answering
+      `initialize` is a failure carrying that message.
+    - An MCP server whose URL ends `/sse` (legacy HTTP+SSE transport,
+      same exclusion federation itself applies) gets a plain `GET`; the
+      response body is closed immediately, **never read** — an SSE
+      endpoint streams indefinitely. Reachable iff no transport error and
+      the status is under `500`.
+    - An A2A agent gets a `GET` of its agent-card path (`AgentConfig.card`,
+      or the default `/.well-known/agent-card.json`); a `404` still
+      counts as reachable — for example an umbrella agent whose root
+      carries no card of its own.
+  - **State**: `"unknown"` (never observed), `"healthy"` (recorded at
+    least once, `consecutiveFailures` below `targetHealth.failureThreshold`),
+    or `"unhealthy"` (`consecutiveFailures` at or above the threshold). A
+    target with one or two recent failures after a success still reads
+    `"healthy"` until the threshold is actually crossed.
 
 ## Security notes
 
