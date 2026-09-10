@@ -1563,17 +1563,29 @@ func (m *modelRegistry) aliasEntriesFor(grp *group) map[string]map[string]any {
 }
 
 // modelObject builds one OpenAI-compatible model list entry, extended
-// with two OpenAI-compat-safe extension fields (feature v0.23):
-// "context_window" (int) and "pricing" ({"input_per_mtok_usd",
-// "output_per_mtok_usd"} floats, USD per million tokens) — both omitted
-// entirely when meta reports them unknown, never emitted as a
-// misleading zero. "pricing" IS emitted with zeros for an explicitly
-// free model (meta.CostKnown true, both cost fields 0) — that is a
-// known, meaningful zero, not an absent one.
+// with OpenAI-compat-safe extension fields (feature v0.23): the context
+// window and "pricing" ({"input_per_mtok_usd", "output_per_mtok_usd"}
+// floats, USD per million tokens) — both omitted entirely when meta
+// reports them unknown, never emitted as a misleading zero. "pricing" IS
+// emitted with zeros for an explicitly free model (meta.CostKnown true,
+// both cost fields 0) — that is a known, meaningful zero, not an absent
+// one.
+//
+// The context window is emitted under THREE keys carrying the identical
+// integer: "context_window", "context_length" (the OpenRouter spelling)
+// and "max_model_len" (the vLLM spelling). OpenAI's own /v1/models
+// schema has no context field at all, so every client that wants one
+// reads some vendor dialect, and a client whose dialect is missing
+// silently substitutes its own default instead of asking. Emitting all
+// three costs two map entries and removes that whole failure class —
+// the same reason the metadata FETCHER already parses all of these
+// dialects on the inbound side (provider_openai.go's modelMetadata).
 func modelObject(id, ownedBy string, meta resolvedModelMeta) map[string]any {
 	obj := map[string]any{"id": id, "object": "model", "owned_by": ownedBy}
 	if meta.ContextKnown {
 		obj["context_window"] = meta.ContextTokens
+		obj["context_length"] = meta.ContextTokens
+		obj["max_model_len"] = meta.ContextTokens
 	}
 	if meta.CostKnown {
 		obj["pricing"] = map[string]any{

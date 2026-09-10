@@ -375,3 +375,36 @@ func TestModelRegistry_RefreshProvider_MetadataPanicDoesNotFailDiscovery(t *test
 		t.Error("want at least one log line recording the metadata-capture panic")
 	}
 }
+
+// TestModelObject_ContextDialectMirrors proves every model object carries its
+// context window under all three dialect keys OpenAI-compatible clients
+// actually read — "context_window", "context_length" and "max_model_len" —
+// always the identical integer, and that all three vanish together when the
+// window is unknown.
+//
+// Client-side reason this exists (2026-09-10): omp's openai-models-list
+// discovery reads `max_model_len ?? context_length ?? <bundled catalog> ??
+// 128000` and never looks at context_window, so a 1M-context local model was
+// advertised to it as the 128000 default. Other clients read the OpenRouter
+// spelling (context_length). One resolved value, three spellings, no
+// per-client configuration.
+//
+// Mutation that must make this test fail: drop either mirror key from
+// modelObject, or let one carry a different value from context_window.
+func TestModelObject_ContextDialectMirrors(t *testing.T) {
+	t.Parallel()
+
+	known := modelObject("m", "prov", resolvedModelMeta{ContextTokens: 1048576, ContextKnown: true})
+	for _, key := range []string{"context_window", "context_length", "max_model_len"} {
+		if known[key] != 1048576 {
+			t.Errorf("known[%q] = %v, want 1048576", key, known[key])
+		}
+	}
+
+	unknown := modelObject("m", "prov", resolvedModelMeta{})
+	for _, key := range []string{"context_window", "context_length", "max_model_len"} {
+		if v, present := unknown[key]; present {
+			t.Errorf("unknown[%q] present (%v), want omitted entirely", key, v)
+		}
+	}
+}

@@ -666,8 +666,8 @@ identical file with nothing to review.
 
 ### `GET /v1/models` extension fields
 
-Two OpenAI-compat-safe extra fields on each model object, present only
-when known:
+OpenAI-compat-safe extra fields on each model object, present only when
+known:
 
 ```json
 {
@@ -675,11 +675,19 @@ when known:
   "object": "model",
   "owned_by": "openai",
   "context_window": 400000,
+  "context_length": 400000,
+  "max_model_len": 400000,
   "pricing": {"input_per_mtok_usd": 1.25, "output_per_mtok_usd": 10}
 }
 ```
 
-- `context_window` — an integer token count, omitted when unknown.
+- `context_window`, `context_length`, `max_model_len` — the same integer
+  token count under all three dialect spellings, omitted together when
+  unknown. OpenAI's own schema has no context field, so each client reads
+  whichever vendor dialect it was built against: `context_length` is the
+  OpenRouter spelling, `max_model_len` the vLLM one. A client whose
+  dialect is missing does not ask — it silently substitutes its own
+  default (128k is a common one), so all three are emitted.
 - `pricing` — `{input_per_mtok_usd, output_per_mtok_usd}`, both floats
   in USD per 1,000,000 tokens. Omitted when unknown; present with `0`
   values for an explicitly free model — a known zero, not an absent
