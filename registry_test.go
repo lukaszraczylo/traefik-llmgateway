@@ -1785,3 +1785,73 @@ func TestModelRegistry_ListFor_Alias_DedupedAgainstDiscoveredCollision(t *testin
 		t.Errorf("owned_by = %q, want %q (the alias's own target provider)", ownedBy, "openai")
 	}
 }
+
+// TestModelRegistry_ListFor_Alias_ShadowedCollisionKeepsAliasEntry proves the
+// listing follows resolve's OWN precedence when a discovered model's bare id
+// collides with a configured alias id: the single bare entry must be the
+// ALIAS's (its target's owner and its resolved metadata), never the
+// discovered model's, because every request for that id lands on the alias
+// target instead (resolve's doc comment). The shadowed provider's own copy
+// stays listed in "provider/id" form so it remains both visible and
+// addressable.
+//
+// Live-fleet regression this fixes (2026-09-10): the alias
+// "deepseek-v4-flash-vision-exp" -> "gx10/current" was listed as the cloud
+// provider's identically-named model, owned_by that cloud provider and
+// carrying NO context_window at all, while every request for the id ran
+// against the local 1M-context model — so clients silently fell back to their
+// own 128k default.
+//
+// Mutation that must make this test fail: restore listFor's old
+// listed[alias]-keyed skip, which emitted the discovered model's entry and
+// dropped the alias's.
+func TestModelRegistry_ListFor_Alias_ShadowedCollisionKeepsAliasEntry(t *testing.T) {
+	t.Parallel()
+	adapters := map[string]providerAdapter{
+		"acme":  newFakeAdapter("acme"),
+		"local": newFakeAdapter("local"),
+	}
+	cfg := &Config{
+		Providers: map[string]*ProviderConfig{
+			"acme":  {Discovery: true},
+			"local": {Models: []string{"current"}},
+		},
+		ModelAliases: map[string]string{"shared-id": "local/current"},
+		ModelMeta: map[string]*ModelMetaConfig{
+			"local/current": {ContextTokens: 1048576, Free: true},
+		},
+	}
+	reg, err := newModelRegistry(adapters, cfg, func(string, ...any) {})
+	if err != nil {
+		t.Fatalf("newModelRegistry: %v", err)
+	}
+	// acme's discovery finds a model literally named "shared-id" — the same
+	// string as the configured alias, discovered only after construction, so
+	// validateModelAliases never saw it.
+	reg.states["acme"].finishRefresh(reg.now(), []string{"shared-id"}, nil)
+
+	got := reg.listFor(allowAllGroup())
+	byID := make(map[string]map[string]any, len(got))
+	bareCount := 0
+	for _, entry := range got {
+		id, _ := entry["id"].(string)
+		byID[id] = entry
+		if id == "shared-id" {
+			bareCount++
+		}
+	}
+	if bareCount != 1 {
+		t.Fatalf("listFor has %d entries for id %q, want exactly 1: %v", bareCount, "shared-id", got)
+	}
+
+	bare := byID["shared-id"]
+	if bare["owned_by"] != "local" {
+		t.Errorf("owned_by = %v, want %q (the alias's own target provider, matching resolve)", bare["owned_by"], "local")
+	}
+	if bare["context_window"] != 1048576 {
+		t.Errorf("context_window = %v, want 1048576 (the alias target's metadata)", bare["context_window"])
+	}
+	if _, ok := byID["acme/shared-id"]; !ok {
+		t.Errorf("listFor = %v, want the shadowed discovered model listed as %q", got, "acme/shared-id")
+	}
+}

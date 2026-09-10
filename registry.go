@@ -1452,14 +1452,14 @@ func (m *modelRegistry) listFor(grp *group) []map[string]any {
 	}
 
 	out := make([]map[string]any, 0, len(owners))
-	// listed tracks every id actually APPENDED to out below — not merely
-	// present in the raw, authorization-blind owners map — so the alias
-	// dedupe loop further down only skips an alias whose real-model entry
-	// this group can actually see (review fix, second pass): keying the
-	// dedupe on owners itself made a group-denied collision vanish the id
-	// from the listing entirely (neither the real entry nor the alias
-	// appeared), even though resolve still serves it through the alias.
-	listed := make(map[string]bool, len(owners))
+	// aliasEntries is every alias grp may actually use, resolved ONCE up
+	// front (spec §5) and keyed by alias id, so the id loop below can see
+	// which bare ids an alias shadows before it emits anything for them.
+	// An alias whose target does not resolve right now, or which grp is
+	// authorized for neither by alias name nor by target, is absent here
+	// and shadows nothing — the discovered model keeps its own bare entry
+	// in that case.
+	aliasEntries := m.aliasEntriesFor(grp)
 	visible := make([]string, 0, 4) // reused per id; provs is at most len(m.providerNames) long
 	for id, provs := range owners {
 		// warnCollisionOnce stays keyed on the GLOBAL owner set, not grp's
@@ -1482,12 +1482,23 @@ func (m *modelRegistry) listFor(grp *group) []map[string]any {
 			continue // grp cannot reach any provider serving id at all
 		}
 
+		// A discovered model whose bare id collides with a usable alias id
+		// is SHADOWED (bug fix, 2026-09-10): resolve gives the exact alias
+		// match precedence over every discovered bare id (its own doc
+		// comment), so the listing must agree — emitting the discovered
+		// model's own entry here would advertise that provider's owner and
+		// metadata for an id every request routes to the alias target
+		// instead. The alias's entry is appended after this loop; the
+		// shadowed model itself stays listed, and addressable, in
+		// "provider/id" form below, which is exactly how a client must
+		// address it once the alias owns the bare id.
+		_, shadowed := aliasEntries[id]
+
 		groupWinner := visible[0]
-		if grp.allowsModel(id) {
+		if grp.allowsModel(id) && !shadowed {
 			out = append(out, modelObject(id, groupWinner, m.resolveMetaFor(groupWinner, id)))
-			listed[id] = true
 		}
-		if len(visible) < 2 {
+		if len(visible) < 2 && !shadowed {
 			continue // only one provider serving id is visible to grp: no disambiguating prefix to add
 		}
 		for _, p := range visible {
@@ -1499,49 +1510,56 @@ func (m *modelRegistry) listFor(grp *group) []map[string]any {
 			// re-checked per candidate here.
 			if grp.allowsModel(pid) || grp.allowsModel(id) {
 				out = append(out, modelObject(pid, p, m.resolveMetaFor(p, id)))
-				listed[pid] = true
 			}
 		}
 	}
 
-	// Aliases (spec §5, v0.2): listed alongside real models only when
-	// both their target actually resolves right now (a target awaiting
-	// its provider's first discovery fetch is not listed — there is
-	// nothing yet to name as owned_by) and grp is authorized for it.
-	// resolveAliasTarget applies the exact same "alias name OR target"
-	// authorization rule request-time resolve uses (its own doc
-	// comment), so this listing can never promise access resolve would
-	// then deny. owned_by is recovered from the successful call's own
-	// canonical return value ("provider/upstreamModel") by splitting on
-	// the first "/" — exact, because a registry provider name can never
-	// itself contain one (configNamePattern, providers.go).
-	//
-	// An alias id that also happens to collide with a since-discovered
-	// model's own bare id (impossible for an EXPLICIT model —
-	// validateModelAliases already rejects that at construction) is
-	// SKIPPED here (review fix) only when that real model's own entry was
-	// actually EMITTED above (listed[alias], not merely present in
-	// owners) — otherwise adding it a second time would list it twice,
-	// duplicate, order-nondeterministic-looking entries in an
-	// OpenAI-shaped model list. resolve's own precedence (its doc
-	// comment) still has the alias win at REQUEST time regardless of
-	// which entry the listing shows; only the listing itself is deduped.
-	for alias, target := range m.aliases {
-		if listed[alias] {
-			continue
-		}
-		_, _, canonical, err := m.resolveAliasTarget(alias, target, grp)
-		if err != nil {
-			continue
-		}
-		providerName, bareTarget, _ := strings.Cut(canonical, "/")
-		out = append(out, modelObject(alias, providerName, m.resolveMetaForAlias(alias, providerName, bareTarget)))
+	// Aliases (spec §5, v0.2): appended after every real model, exactly
+	// once each. An alias id can never duplicate an entry emitted above —
+	// the id loop suppresses the bare entry of any id aliasEntries
+	// shadows, and an alias id can never take the "provider/id" form of a
+	// prefixed entry either (validateModelAliases rejects an alias whose
+	// prefix names a configured provider at construction).
+	for _, entry := range aliasEntries {
+		out = append(out, entry)
 	}
 
 	sort.Slice(out, func(i, j int) bool {
 		return out[i]["id"].(string) < out[j]["id"].(string) //nolint:forcetypeassert // modelObject always sets id to a string
 	})
 	return out
+}
+
+// aliasEntriesFor resolves every configured alias grp may actually use
+// into its finished listing entry, keyed by alias id (spec §5, v0.2). An
+// alias is present only when its target resolves right now (a target
+// awaiting its provider's first discovery fetch has nothing yet to name
+// as owned_by) and grp is authorized for it: resolveAliasTarget applies
+// the exact same "alias name OR target" authorization rule request-time
+// resolve uses (its own doc comment), so a listing built from this can
+// never promise access resolve would then deny. owned_by is recovered
+// from the successful call's own canonical return value
+// ("provider/upstreamModel") by splitting on the first "/" — exact,
+// because a registry provider name can never itself contain one
+// (configNamePattern, providers.go).
+//
+// Resolved once per listFor call rather than per candidate id: listFor
+// needs the same set twice — to know which bare ids an alias shadows,
+// and to emit the alias entries themselves.
+func (m *modelRegistry) aliasEntriesFor(grp *group) map[string]map[string]any {
+	if len(m.aliases) == 0 {
+		return nil // the v0.1 no-aliases case allocates nothing
+	}
+	entries := make(map[string]map[string]any, len(m.aliases))
+	for alias, target := range m.aliases {
+		_, _, canonical, err := m.resolveAliasTarget(alias, target, grp)
+		if err != nil {
+			continue
+		}
+		providerName, bareTarget, _ := strings.Cut(canonical, "/")
+		entries[alias] = modelObject(alias, providerName, m.resolveMetaForAlias(alias, providerName, bareTarget))
+	}
+	return entries
 }
 
 // modelObject builds one OpenAI-compatible model list entry, extended
