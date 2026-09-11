@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"path"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -18,6 +19,13 @@ import (
 type user struct {
 	limits          *LimitsConfig
 	name, groupName string
+	// groupNames is this user's full, de-duplicated, order-preserving
+	// member group list (effectiveGroupNames, below) — groupName above
+	// keeps only the first, for back-compat display; groupNames is the
+	// complete membership, read by snapshot (below) for the admin
+	// dashboard's per-user "groups" listing and for counting this user
+	// once in EACH member group's own memberCount.
+	groupNames []string
 	// admin grants access to the read-only admin dashboard (spec §4,
 	// v0.2) — an admin user is otherwise ordinary: their own limits and
 	// group authorization still apply, including to the admin routes.
@@ -31,16 +39,43 @@ type group struct {
 	// cache is GroupConfig.Cache carried through unchanged: nil inherits
 	// the global cache.enabled setting, non-nil overrides it for this
 	// group's requests. Resolved by groupCacheEnabled (cache.go).
-	cache      *bool
-	name       string
-	providers  []string
-	models     []string
-	mcpServers []string
-	agents     []string
+	cache *bool
+	// personalGrant is the same grant as grants' own LAST element,
+	// whenever a personal grant is present (effectiveGroup, below) — kept
+	// as its own field, distinct from indexing into grants, so
+	// allowsPassthroughPathForProvider (below, HIGH-1 fix, review round
+	// 2) can tell "the personal grant" apart from "the last member
+	// group's grant" directly, rather than inferring it from
+	// len(grants) vs len(memberGroups). nil for an ordinary group and for
+	// a multi-group user with no personal grant alike.
+	personalGrant *grant
+	name          string
+	providers     []string
+	models        []string
+	mcpServers    []string
+	agents        []string
 	// passthroughPaths is GroupConfig.PassthroughPaths carried through
 	// unchanged (security+performance audit, 2026-08-22) — see
 	// allowsPassthroughPath below.
 	passthroughPaths []string
+	// grants is the ordered list of (providers, models) authorization
+	// pairs this principal grants THROUGH — one per member group plus an
+	// optional personal grant appended last (effectiveGroup, below). nil
+	// for an ordinary, single-membership group with no personal grant
+	// (the overwhelmingly common case, including every group literal
+	// this package's own tests construct directly): allowsProviderModel
+	// (below) then falls back to treating grp itself — via its own
+	// providers/models fields above — as the sole implicit grant, so
+	// every existing group keeps behaving exactly as before this field
+	// existed.
+	grants []grant
+	// memberGroups is the list of actual, named *group values a
+	// synthetic multi-membership/personal-grant principal
+	// (effectiveGroup) was built from — nil for an ordinary group, which
+	// is its own sole member (memberScopeGroups, below, used by
+	// buildLimitScopes, routes_unified.go, for one limit scope per
+	// member group).
+	memberGroups []*group
 	// cacheTTL is GroupConfig.CacheTTL parsed and validated at construction
 	// (newAuthStore below): 0 inherits the global responseCache's TTL
 	// (effectiveTTL, cache.go); a positive value sets the TTL written
@@ -52,6 +87,18 @@ type group struct {
 	// that produces 0 here — every other value either becomes a positive
 	// duration or fails newAuthStore as a constructor error.
 	cacheTTL time.Duration
+}
+
+// grant is one (providers, models) authorization pair a principal (a
+// *group, possibly synthetic — effectiveGroup, below) grants access
+// through. A principal's authorization is the union of one grant per
+// member group plus an optional personal grant, but a request must match
+// a SINGLE grant's providers AND models — never a provider one grant
+// allows combined with a model only some OTHER grant allows
+// (allowsProviderModel, below).
+type grant struct {
+	providers []string
+	models    []string
 }
 
 // allowsProvider reports whether name matches one of the group's provider
@@ -88,6 +135,158 @@ func (grp *group) allowsModel(id string) bool {
 // exactly today's behavior for the overwhelming majority of traffic.
 func (grp *group) hasModelRestriction() bool {
 	return len(grp.models) > 0
+}
+
+// grantCount reports how many grants grp carries — len(grp.grants) for a
+// synthetic multi-membership/personal-grant principal, or 1 for grp's
+// own single-implicit-grant case (grp.grants nil) — WITHOUT allocating
+// (review round 2, NIT fix): callers that only need to know "single
+// grant or not" to pick a fast/slow path (bareEntryWinner, registry.go;
+// failoverCandidates, failover.go) used to call
+// len(grp.effectiveGrants()), which built and threw away a fresh
+// []grant{...} on every call, including every ordinary single-group
+// request — the overwhelmingly common case, on the request-path hot
+// loop.
+func (grp *group) grantCount() int {
+	if grp.grants != nil {
+		return len(grp.grants)
+	}
+	return 1
+}
+
+// allowsProviderModel reports whether SOME SINGLE grant of grp's own
+// allows provider AND at least one of ids — the multi-group/personal-
+// grant feature's "no cross-grant leak" rule: a provider one grant
+// allows combined with a model only a DIFFERENT grant allows must never
+// authorize a request neither grant alone would. For an ordinary group
+// with exactly one implicit grant (the overwhelmingly common case,
+// grp.grants nil), this is exactly the pre-existing combined "model glob
+// matches AND provider glob matches" check every caller below switched
+// to this method FROM — registry.go's resolveAgainst/listFor,
+// routes_passthrough.go's allowsPassthroughModel, and failover.go's
+// failoverCandidates for a multi-grant principal — specifically so
+// single-grant behavior is preserved byte-for-byte while the multi-grant
+// case gets this stricter, per-grant rule.
+//
+// The single-grant case is inlined directly against grp's own
+// providers/models fields (review round 2, NIT fix), rather than
+// wrapping them in a one-element []grant and looping that: this method
+// runs at least once per request through every metered route
+// (resolveAgainst, allowsPassthroughModel) and the wrapping slice was a
+// real per-request heap allocation for every ordinary, single-group
+// caller — the multi-grant loop below is unchanged and still used for
+// grp.grants != nil.
+func (grp *group) allowsProviderModel(provider string, ids ...string) bool {
+	if grp.grants == nil {
+		if !matchesGlob(grp.providers, provider) {
+			return false
+		}
+		for _, id := range ids {
+			if matchesGlob(grp.models, id) {
+				return true
+			}
+		}
+		return false
+	}
+	for _, g := range grp.grants {
+		if !matchesGlob(g.providers, provider) {
+			continue
+		}
+		for _, id := range ids {
+			if matchesGlob(g.models, id) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// memberScopeGroups returns the *group values buildLimitScopes (routes_
+// unified.go) builds one "group" limit scope per: grp.memberGroups for a
+// synthetic multi-membership/personal-grant principal (effectiveGroup,
+// below), or grp itself — its own sole member — for the overwhelmingly
+// common ordinary-group case (memberGroups nil), preserving today's
+// single "group" scope exactly.
+func (grp *group) memberScopeGroups() []*group {
+	if grp.memberGroups != nil {
+		return grp.memberGroups
+	}
+	return []*group{grp}
+}
+
+// writeLengthPrefixed appends s to b as "<decimal length>:<s>" (a
+// netstring — a well-known unambiguous, prefix-free encoding): a reader
+// that always consumes digits up to the first ':' as a byte count, then
+// consumes exactly that many further bytes as the value, can never
+// misinterpret where one component ends and the next begins, regardless
+// of what bytes s itself contains (including further digits or ':'
+// characters) — unlike a fixed separator byte/string, which a value
+// containing that exact separator can spoof. Used by modelsCacheKey,
+// below (NIT fix, review round 3): a plain "\x00"-joined encoding with
+// bare "p:"/"m:" marker literals let a group literally named "p:" (group
+// names carry no character-set validation — effectiveGroup's own doc
+// comment, above) produce a signature byte-for-byte identical to an
+// unrelated (membership, personal grant) combination.
+func writeLengthPrefixed(b *strings.Builder, s string) {
+	b.WriteString(strconv.Itoa(len(s)))
+	b.WriteByte(':')
+	b.WriteString(s)
+}
+
+// modelsCacheKey returns grp's stable STRING key for modelRegistry's
+// modelsCache (MEDIUM-3 fix, review round 2) — see modelsJSON's own doc
+// comment (registry.go) for why a *group pointer is unsafe to key that
+// cache on. A real, named group (grp.memberGroups nil) is keyed on its
+// own name, netstring-encoded (writeLengthPrefixed, above) behind a "g"
+// discriminator byte that can never collide with a synthetic key's own
+// "s" discriminator, regardless of what an operator names a group. A
+// synthetic principal (effectiveGroup) is keyed on its member group
+// names, in EFFECTIVE ORDER — each length-prefixed, preceded by their own
+// count, so the reader never needs a marker byte to know when the member
+// list ends — followed by a single 'Y'/'N' byte for "personal grant
+// present", and, when present, its own providers then models, each list
+// as a count followed by that many length-prefixed entries. Every
+// component of every list is length-prefixed (review round 3, NIT fix —
+// the pre-fix version separated components with a bare "\x00" byte and
+// bare "p:"/"m:" marker strings, both of which a sufficiently-adversarial
+// group/provider/model NAME could itself contain, producing a genuine
+// collision between two different, unrelated principals — see this
+// function's own regression test, registry_test.go, for the exact
+// reviewer-reported pair). Two DIFFERENT users with IDENTICAL membership
+// therefore still share one cache entry — including the SAME principal
+// rebuilt, as a brand-new *group, across a users-file hot reload
+// (effectiveGroup allocates fresh every call) — closing the reload-driven
+// unbounded growth MEDIUM-3 (review round 2) fixed, without reintroducing
+// this round's own ambiguity.
+func (grp *group) modelsCacheKey() string {
+	var b strings.Builder
+	if grp.memberGroups == nil {
+		b.WriteString("g")
+		writeLengthPrefixed(&b, grp.name)
+		return b.String()
+	}
+	b.WriteString("s")
+	b.WriteString(strconv.Itoa(len(grp.memberGroups)))
+	b.WriteByte(':')
+	for _, m := range grp.memberGroups {
+		writeLengthPrefixed(&b, m.name)
+	}
+	if grp.personalGrant == nil {
+		b.WriteByte('N')
+		return b.String()
+	}
+	b.WriteByte('Y')
+	b.WriteString(strconv.Itoa(len(grp.personalGrant.providers)))
+	b.WriteByte(':')
+	for _, p := range grp.personalGrant.providers {
+		writeLengthPrefixed(&b, p)
+	}
+	b.WriteString(strconv.Itoa(len(grp.personalGrant.models)))
+	b.WriteByte(':')
+	for _, mo := range grp.personalGrant.models {
+		writeLengthPrefixed(&b, mo)
+	}
+	return b.String()
 }
 
 // allowsMCP reports whether name matches one of the group's MCP-server glob
@@ -145,6 +344,135 @@ func (grp *group) allowsPassthroughPath(rest string) bool {
 		return false
 	}
 	return matchesGlob(grp.passthroughPaths, decoded)
+}
+
+// personalGrantAllowsPath reports whether grp's personal grant (if any)
+// authorizes path — the "personal grant borrows the primary group's own
+// paths" rule (HIGH-1 fix, review round 2; extracted into its own,
+// independently testable function in review round 3 so the rule cannot
+// be silently collapsed to "always allow" without a dedicated test
+// catching it — see auth_test.go's own mutation-checked test). The
+// personal grant carries no passthroughPaths of its own (UserConfig has
+// no such field on Providers/Models), so it borrows
+// grp.memberGroups[0] — the PRIMARY member group, "first in effective
+// order" (UserConfig.Group before Groups, effectiveGroupNames) — the
+// same one that already governs every other provider this principal can
+// reach without a more specific member group's own restriction. false
+// when grp has no personal grant at all, or (defensively) no member
+// groups to borrow from — every real caller with a non-nil
+// personalGrant also has a non-empty memberGroups (effectiveGroup, below,
+// never builds one without the other).
+func (grp *group) personalGrantAllowsPath(path string) bool {
+	if grp.personalGrant == nil || len(grp.memberGroups) == 0 {
+		return false
+	}
+	return grp.memberGroups[0].allowsPassthroughPath(path)
+}
+
+// allowsPassthroughPathForProvider reports whether grp authorizes a
+// native passthrough request to provider AND path TOGETHER (HIGH-1 fix,
+// review round 2). passthroughPaths is deliberately NOT unioned across
+// member groups the way providers/models/mcpServers/agents are
+// (unionOrAll, effectiveGroup below): unioning it let joining ANY
+// further group silently strip a DIFFERENT member group's own path
+// restriction — group "a" {providers:[alpha]}, no path restriction,
+// joined with group "b" {providers:[beta], passthroughPaths:[v1/chat/
+// completions]}, would otherwise let "a"'s own unrestricted paths
+// authorize "/beta/v1/files" even though NEITHER group alone ever
+// granted that combination.
+//
+// The rule: some MEMBER group g has g.allowsProvider(provider) AND
+// g.allowsPassthroughPath(path) — its OWN, un-merged path list — OR the
+// personal grant (if any) allows provider (matchesGlob against its own
+// providers; MEDIUM-5's constructor validation, buildEntry below,
+// guarantees a personal grant's providers is never empty when the grant
+// exists at all) AND personalGrantAllowsPath (above).
+//
+// This method alone does NOT couple the MODEL check to the same grant —
+// see hasModelRestrictionForProviderPath/allowsPassthroughModelForPath
+// below (HIGH fix, review round 3) for that: this function answers
+// "is provider+path authorized at all", used both by a single-grant
+// principal's own path gate (independent of its own, separately-checked
+// model gate — safe with only one grant to combine from) and by a
+// multi-grant principal's own path gate (handlePassthrough,
+// routes_passthrough.go), which then re-derives which SPECIFIC grants
+// matched provider+path before ever consulting a model.
+//
+// For an ordinary, single-grant group (grp.memberGroups nil), this
+// collapses to grp itself as its own sole member (memberScopeGroups):
+// grp.allowsProvider(provider) && grp.allowsPassthroughPath(path) —
+// byte-identical to the two independent checks handlePassthrough
+// (routes_passthrough.go) ran before this method existed.
+func (grp *group) allowsPassthroughPathForProvider(provider, path string) bool {
+	for _, m := range grp.memberScopeGroups() {
+		if m.allowsProvider(provider) && m.allowsPassthroughPath(path) {
+			return true
+		}
+	}
+	if grp.personalGrant != nil && matchesGlob(grp.personalGrant.providers, provider) && grp.personalGrantAllowsPath(path) {
+		return true
+	}
+	return false
+}
+
+// hasModelRestrictionForProviderPath reports whether EVERY grant that
+// allows BOTH provider AND path also restricts models (a non-empty
+// Models glob) — the HIGH fix's (review round 3) multi-grant, path-
+// coupled counterpart to the single-grant hasModelRestriction() above:
+// peeking the body is pointless once some grant that ALREADY covers this
+// EXACT provider+path combination also grants blanket model access on
+// it. Mirrors allowsPassthroughPathForProvider's own member-then-personal
+// structure exactly (down to reusing personalGrantAllowsPath), so the
+// two can never disagree about which grants "match" provider+path.
+//
+// Used only for a multi-grant principal (handlePassthrough,
+// routes_passthrough.go, gates on grp.grantCount() > 1 itself) — a
+// single-grant principal keeps using hasModelRestriction() directly,
+// unchanged, since a lone grant can never combine with itself to produce
+// the cross-grant leak this exists to prevent.
+func (grp *group) hasModelRestrictionForProviderPath(provider, path string) bool {
+	for _, m := range grp.memberScopeGroups() {
+		if m.allowsProvider(provider) && m.allowsPassthroughPath(path) && len(m.models) == 0 {
+			return false
+		}
+	}
+	if grp.personalGrant != nil && matchesGlob(grp.personalGrant.providers, provider) && grp.personalGrantAllowsPath(path) && len(grp.personalGrant.models) == 0 {
+		return false
+	}
+	return true
+}
+
+// allowsPassthroughModelForPath reports whether SOME SINGLE grant — a
+// member group's own, or the personal grant's own (borrowing the
+// primary's own paths via personalGrantAllowsPath) — authorizes provider
+// AND path AND at least one of ids, ALL from that SAME grant (HIGH fix,
+// review round 3): the defect P1/P2 reproduce is exactly a provider+path
+// match from one grant combined with a model match from a DIFFERENT
+// one — round 2's fix coupled provider+model per grant
+// (allowsProviderModel) and provider+path per grant
+// (allowsPassthroughPathForProvider) SEPARATELY, which still let the two
+// checks succeed via two DIFFERENT grants for the same request. Used
+// only for a multi-grant principal, mirroring
+// hasModelRestrictionForProviderPath's own gating.
+func (grp *group) allowsPassthroughModelForPath(provider, path string, ids ...string) bool {
+	for _, m := range grp.memberScopeGroups() {
+		if !m.allowsProvider(provider) || !m.allowsPassthroughPath(path) {
+			continue
+		}
+		for _, id := range ids {
+			if matchesGlob(m.models, id) {
+				return true
+			}
+		}
+	}
+	if grp.personalGrant != nil && matchesGlob(grp.personalGrant.providers, provider) && grp.personalGrantAllowsPath(path) {
+		for _, id := range ids {
+			if matchesGlob(grp.personalGrant.models, id) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // cloneStringSlice returns an independent copy of s, preserving nil (a nil
@@ -470,9 +798,154 @@ func newAuthStore(cfg *Config) (*authStore, error) {
 	return a, nil
 }
 
-// buildEntry resolves uc's group and API key into an authEntry. The API key
-// goes through resolveSecret before digesting, so env:/file: references
-// work the same as for provider keys.
+// unionOrAll returns the union of every list in lists' own glob patterns,
+// EXCEPT when some list is itself empty: matchesGlob's own contract (this
+// file) already treats an empty pattern list as "matches anything," so
+// one empty list among several already allows everything on its own —
+// the union must too, returning nil (matchesGlob's own empty fast path)
+// rather than a literal concatenation of the OTHER lists, which would
+// lose that all-allowing meaning entirely. Used by effectiveGroup, below,
+// for a synthetic principal's providers/models/mcpServers/agents fields:
+// "if ANY member's list is empty, the effective list is empty" is the
+// identical rule for every one of them. NOT used for passthroughPaths
+// (HIGH-1 fix, review round 2) — see allowsPassthroughPathForProvider's
+// own doc comment above for why a union is actively wrong for that one
+// field specifically: unlike providers/models/mcpServers/agents,
+// passthroughPaths is scoped to a SPECIFIC provider, so merging it
+// across member groups can strip a narrower member's own restriction the
+// instant a second, broader member group is joined.
+func unionOrAll(lists ...[]string) []string {
+	for _, l := range lists {
+		if len(l) == 0 {
+			return nil
+		}
+	}
+	var out []string
+	for _, l := range lists {
+		out = append(out, l...)
+	}
+	return out
+}
+
+// effectiveGroupNames returns uc's de-duplicated, order-preserving member
+// group name list: primary (UserConfig.Group) first when non-empty, then
+// extra (UserConfig.Groups) in order, skipping any name already seen —
+// UserConfig.Groups' own doc comment (llmgateway.go) has the full
+// contract this implements.
+func effectiveGroupNames(primary string, extra []string) []string {
+	seen := make(map[string]bool, len(extra)+1)
+	var names []string
+	if primary != "" {
+		seen[primary] = true
+		names = append(names, primary)
+	}
+	for _, name := range extra {
+		if name == "" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		names = append(names, name)
+	}
+	return names
+}
+
+// effectiveGroup returns the *group a user belonging to every group in
+// members, plus an optional personal grant, is authorized through —
+// UserConfig.Groups' own doc comment (llmgateway.go) has the full
+// authorization/limits/cache contract this builds.
+//
+// Identity is preserved for the overwhelmingly common case — exactly one
+// member group and no personal grant — by returning that member's own
+// *group pointer completely unchanged: name, limit-scope id, every
+// field, all identical to before this feature existed (multi-group
+// back-compat rule). Every other case builds a fresh, synthetic *group:
+// its name joins every member group's own name with "+", for display/log
+// use only — this synthetic group is never looked up by name (grp.name's
+// only reader outside tests, registry.go's modelsJSON, uses it purely to
+// label a log line), and Config.Groups keys go through no character-set
+// validation the way provider/mcpServers/agents names do
+// (validateConfigName, providers.go), so a real, operator-chosen group
+// name COULD textually collide with a synthetic one; that collision is
+// harmless (an ambiguous-looking log line, never a lookup) precisely
+// because nothing resolves a *group by this name. grants holds one
+// (providers, models) pair per member plus the personal grant (if any)
+// appended last (personalGrant, below, keeps that same last grant under
+// its own name too, for allowsPassthroughPathForProvider's own use), and
+// memberGroups keeps the actual member *group pointers, in EFFECTIVE
+// ORDER (primary first), for memberScopeGroups' own per-member-group
+// limit scope and for allowsPassthroughPathForProvider's own "primary
+// group" rule.
+//
+// passthroughPaths is deliberately left at its zero value (nil) here,
+// UNLIKE providers/models/mcpServers/agents: it is not a simple union
+// (HIGH-1 fix, review round 2) — allowsPassthroughPathForProvider reads
+// memberGroups/personalGrant directly instead, so a synthetic
+// principal's own .passthroughPaths field would be dead, and
+// potentially misleading, state if this function still populated it.
+func effectiveGroup(members []*group, personal *grant) *group {
+	if len(members) == 1 && personal == nil {
+		return members[0]
+	}
+
+	names := make([]string, len(members))
+	grants := make([]grant, 0, len(members)+1)
+	var providerLists, modelLists, mcpLists, agentLists [][]string
+	var sawCacheFalse, sawCacheTrue bool
+	var minTTL time.Duration
+	for i, m := range members {
+		names[i] = m.name
+		grants = append(grants, grant{providers: m.providers, models: m.models})
+		providerLists = append(providerLists, m.providers)
+		modelLists = append(modelLists, m.models)
+		mcpLists = append(mcpLists, m.mcpServers)
+		agentLists = append(agentLists, m.agents)
+		if m.cache != nil {
+			if *m.cache {
+				sawCacheTrue = true
+			} else {
+				sawCacheFalse = true
+			}
+		}
+		if m.cacheTTL > 0 && (minTTL == 0 || m.cacheTTL < minTTL) {
+			minTTL = m.cacheTTL
+		}
+	}
+	var personalGrant *grant
+	if personal != nil {
+		grants = append(grants, *personal)
+		providerLists = append(providerLists, personal.providers)
+		modelLists = append(modelLists, personal.models)
+		personalGrant = personal
+	}
+
+	var cache *bool
+	switch {
+	case sawCacheFalse:
+		f := false
+		cache = &f
+	case sawCacheTrue:
+		t := true
+		cache = &t
+	}
+
+	return &group{
+		name:          strings.Join(names, "+"),
+		providers:     unionOrAll(providerLists...),
+		models:        unionOrAll(modelLists...),
+		mcpServers:    unionOrAll(mcpLists...),
+		agents:        unionOrAll(agentLists...),
+		cache:         cache,
+		cacheTTL:      minTTL,
+		grants:        grants,
+		memberGroups:  members,
+		personalGrant: personalGrant,
+	}
+}
+
+// buildEntry resolves uc's groups (Group/Groups, effectiveGroupNames),
+// its optional personal grant (Providers/Models), and its API key into an
+// authEntry. The API key goes through resolveSecret before digesting, so
+// env:/file: references work the same as for provider keys.
 //
 // uc.Name must be non-empty (security audit finding 5, 2026-08-22):
 // counters are keyed on a user's name (windowKey's "kind:id:..." shape,
@@ -500,10 +973,41 @@ func (a *authStore) buildEntry(uc *UserConfig) (*authEntry, error) {
 	if uc.Name == "" {
 		return nil, fmt.Errorf("llmgateway: user config entry must have a non-empty name")
 	}
-	grp, ok := a.groups[uc.Group]
-	if !ok {
-		return nil, fmt.Errorf("llmgateway: user %q references unknown group %q", uc.Name, uc.Group)
+	groupNames := effectiveGroupNames(uc.Group, uc.Groups)
+	if len(groupNames) == 0 {
+		return nil, fmt.Errorf("llmgateway: user %q must belong to at least one group", uc.Name)
 	}
+	members := make([]*group, len(groupNames))
+	for i, name := range groupNames {
+		grp, ok := a.groups[name]
+		if !ok {
+			return nil, fmt.Errorf("llmgateway: user %q references unknown group %q", uc.Name, name)
+		}
+		members[i] = grp
+	}
+	// personal is uc's own Providers/Models grant — present only when at
+	// least one of the two lists is non-empty (UserConfig.Providers/
+	// Models' own doc comment, llmgateway.go): an empty personal grant
+	// can never mean "allow everything" on its own.
+	//
+	// A MODELS-ONLY personal grant (Models set, Providers empty) is
+	// rejected here (MEDIUM-5 fix, review round 2): empty Providers means
+	// "any provider" (matchesGlob's own empty-means-all contract), so a
+	// models-only grant would silently reach every configured provider —
+	// including ones no member group of this user covers at all — and
+	// would pass allowsPassthroughPathForProvider's own provider gate for
+	// any provider too. A Providers-only grant (Models empty) is valid:
+	// it means "every model on those providers," the same empty-means-all
+	// contract applied the other way round.
+	var personal *grant
+	if len(uc.Providers) > 0 || len(uc.Models) > 0 {
+		if len(uc.Providers) == 0 {
+			return nil, fmt.Errorf("llmgateway: user %q: personal \"models\" requires personal \"providers\"", uc.Name)
+		}
+		personal = &grant{providers: uc.Providers, models: uc.Models}
+	}
+	effective := effectiveGroup(members, personal)
+
 	if err := uc.Limits.validate(); err != nil {
 		return nil, fmt.Errorf("llmgateway: user %q: %w", uc.Name, err)
 	}
@@ -517,8 +1021,14 @@ func (a *authStore) buildEntry(uc *UserConfig) (*authEntry, error) {
 	digest := sha256.Sum256([]byte(key))
 	return &authEntry{
 		digest: digest,
-		user:   &user{limits: uc.Limits, name: uc.Name, groupName: uc.Group, admin: uc.Admin},
-		group:  grp,
+		user: &user{
+			limits:     uc.Limits,
+			groupNames: groupNames,
+			name:       uc.Name,
+			groupName:  groupNames[0],
+			admin:      uc.Admin,
+		},
+		group: effective,
 	}, nil
 }
 
@@ -733,6 +1243,10 @@ type userSummary struct {
 	limits    *LimitsConfig
 	name      string
 	groupName string
+	// groups is the user's full, de-duplicated member group list
+	// (user.groupNames) — groupName above keeps only the first, for
+	// back-compat display (admin.go's adminUsageEntryView.GroupName).
+	groups []string
 }
 
 // groupSummary mirrors userSummary for one configured group, plus its
@@ -770,8 +1284,21 @@ func (a *authStore) snapshot() ([]userSummary, []groupSummary) {
 	users := make([]userSummary, 0, len(a.byDigest))
 	memberCounts := make(map[string]int, len(a.groups))
 	for _, entry := range a.byDigest {
-		users = append(users, userSummary{limits: entry.user.limits, name: entry.user.name, groupName: entry.user.groupName})
-		memberCounts[entry.user.groupName]++
+		users = append(users, userSummary{
+			limits:    entry.user.limits,
+			name:      entry.user.name,
+			groupName: entry.user.groupName,
+			groups:    cloneStringSlice(entry.user.groupNames),
+		})
+		// A multi-group user counts once in EACH member group's own
+		// memberCount (UserConfig.Groups' own doc comment, llmgateway.go)
+		// — entry.user.groupNames is always non-empty (buildEntry rejects
+		// a user with none), so this is exactly one increment per member
+		// group, matching the single-group case's own one-increment
+		// behavior before this field existed.
+		for _, name := range entry.user.groupNames {
+			memberCounts[name]++
+		}
 	}
 	a.mu.RUnlock()
 	sort.Slice(users, func(i, j int) bool { return users[i].name < users[j].name })

@@ -267,7 +267,70 @@ type UserConfig struct {
 	Limits *LimitsConfig `json:"limits,omitempty"`
 	Name   string        `json:"name"`
 	Group  string        `json:"group"`
-	APIKey string        `json:"apiKey"`
+	// Groups lists further groups this user belongs to, alongside Group
+	// (multi-group support). Effective membership is Group first (when
+	// non-empty), then Groups, de-duplicated, order preserved
+	// (effectiveGroupNames, auth.go) — at least one group, from either
+	// field, is required: a user naming none at all is a constructor
+	// error. Every named group, whether from Group or Groups, must
+	// reference a configured group — an unknown one is a constructor
+	// error naming the user and the unknown group, the same
+	// "llmgateway: user %q references unknown group %q" shape Group
+	// alone always used.
+	//
+	// A multi-group user's effective authorization is the UNION of every
+	// member group's own grant (effectiveGroup, auth.go): a request is
+	// allowed when it matches some SINGLE member group's providers AND
+	// models — providers from one member group never combine with models
+	// only some OTHER member group allows to authorize a request neither
+	// alone would (no cross-grant leak; see Providers/Models below, which
+	// carry the identical rule for the personal grant). Each member
+	// group's own limits apply as ITS OWN limit scope (kind "group", id
+	// that group's own name) — never merged into one combined limit.
+	// mcpServers/agents are unioned across every member group, with the
+	// rule that any ONE member group's empty (allow-all) list makes the
+	// union allow-all too. passthroughPaths is NOT unioned this way — a
+	// native passthrough request is authorized only when ONE grant (a
+	// member group's own, or the personal grant, which has none of its
+	// own and so borrows the PRIMARY group's — Group, or Groups[0] when
+	// Group is empty) covers the provider AND the path AND (when
+	// restricted) the model TOGETHER; unioning it the same way as the
+	// other lists would let joining a further, less-restricted group
+	// silently strip a more specific member group's own path restriction
+	// on a provider that other group does not even reach. The effective
+	// cache setting is false if any member group sets cache false, else
+	// true if any sets true, else nil (inherit); cacheTTL is the smallest
+	// positive cacheTTL configured among member groups.
+	//
+	// A user belonging to exactly one group (Group alone, Groups empty)
+	// with no personal grant below behaves byte-identically to before
+	// this field existed, down to *group pointer identity
+	// (effectiveGroup's own back-compat rule, auth.go).
+	Groups []string `json:"groups,omitempty"`
+	APIKey string   `json:"apiKey"`
+	// Providers and Models together describe this user's own PERSONAL
+	// grant — access beyond whatever their member group(s) already allow,
+	// with the identical glob semantics a group's own Providers/Models
+	// carry (matchesGlob, auth.go: an empty list matches anything). The
+	// personal grant exists at all ONLY when Providers is non-empty:
+	// Models alone, with Providers left empty, is a constructor error
+	// naming the user (`personal "models" requires personal "providers"`)
+	// — an empty Providers list means "any provider" (matchesGlob's own
+	// empty-means-all contract), so a Models-only grant would silently
+	// reach every configured provider, including ones no member group of
+	// this user covers at all. Providers alone (Models left empty) is
+	// valid and means "every model on those providers." Leaving both
+	// empty/omitted (the default) means this user has no personal grant
+	// beyond their member group(s)'. Like a member group's own grant, the
+	// personal grant participates in the "some SINGLE grant must allow
+	// provider AND model" rule Groups' own doc comment above states — and,
+	// for native passthrough specifically, the identical rule extended to
+	// a provider+path+model triple, borrowing the PRIMARY group's own
+	// passthroughPaths (Groups' own doc comment above): it has no limits
+	// of its own, and contributes to a request's authorization only
+	// through those combined checks, never as a separate limit scope.
+	Providers []string `json:"providers,omitempty"`
+	Models    []string `json:"models,omitempty"`
 	// Admin grants this user access to the read-only admin dashboard
 	// (spec §4, v0.2), whether the user is inline or file-sourced —
 	// file-users granting admin is operator-controlled via the Secret

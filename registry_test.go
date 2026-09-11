@@ -295,6 +295,221 @@ func TestModelRegistry_Resolve_ProviderPrefixed_ModelGlobMatchesViaBareCandidate
 	}
 }
 
+// --- resolve: multi-group / personal-grant authorization ---
+
+// TestModelRegistry_Resolve_MultiGroup_UnionAcrossMemberGroups proves a
+// multi-group principal (effectiveGroup, auth.go) is authorized through
+// EITHER member group's own grant — the union rule.
+func TestModelRegistry_Resolve_MultiGroup_UnionAcrossMemberGroups(t *testing.T) {
+	t.Parallel()
+	adapters := map[string]providerAdapter{
+		"minimax": newFakeAdapter("minimax"),
+		"gx10":    newFakeAdapter("gx10"),
+	}
+	cfg := &Config{Providers: map[string]*ProviderConfig{
+		"minimax": {Models: []string{"m1"}},
+		"gx10":    {Models: []string{"only"}},
+	}}
+	reg, err := newModelRegistry(adapters, cfg, func(string, ...any) {})
+	if err != nil {
+		t.Fatalf("newModelRegistry: %v", err)
+	}
+
+	a := &group{name: "minimax-friends", providers: []string{"minimax"}}
+	b := &group{name: "gx10-only", providers: []string{"gx10"}, models: []string{"gx10/only"}}
+	grp := effectiveGroup([]*group{a, b}, nil)
+
+	if _, _, _, err := reg.resolve("minimax/m1", grp); err != nil {
+		t.Errorf("resolve minimax/m1: %v, want success via member group a's unrestricted-model grant", err)
+	}
+	if _, _, _, err := reg.resolve("gx10/only", grp); err != nil {
+		t.Errorf("resolve gx10/only: %v, want success via member group b's own grant", err)
+	}
+}
+
+// TestModelRegistry_Resolve_MultiGroup_CrossGrantLeakDenied is the
+// feature's core safety rule: grant A {providers:[minimax], models:[]}
+// (models unrestricted, but only within minimax) must never combine with
+// grant B {providers:[gx10], models:[gx10/only]} to authorize
+// "gx10/other" — a naive "any grant allows the provider AND any grant
+// allows the model" check would wrongly allow it, since A's own empty
+// Models list matches anything on its own.
+func TestModelRegistry_Resolve_MultiGroup_CrossGrantLeakDenied(t *testing.T) {
+	t.Parallel()
+	adapters := map[string]providerAdapter{
+		"minimax": newFakeAdapter("minimax"),
+		"gx10":    newFakeAdapter("gx10"),
+	}
+	cfg := &Config{Providers: map[string]*ProviderConfig{
+		"minimax": {Models: []string{"m1"}},
+		"gx10":    {Models: []string{"only", "other"}},
+	}}
+	reg, err := newModelRegistry(adapters, cfg, func(string, ...any) {})
+	if err != nil {
+		t.Fatalf("newModelRegistry: %v", err)
+	}
+
+	a := &group{name: "minimax-unrestricted", providers: []string{"minimax"}}
+	b := &group{name: "gx10-only", providers: []string{"gx10"}, models: []string{"gx10/only"}}
+	grp := effectiveGroup([]*group{a, b}, nil)
+
+	if _, _, _, err := reg.resolve("gx10/only", grp); err != nil {
+		t.Errorf("resolve gx10/only: %v, want success", err)
+	}
+	if _, _, _, err := reg.resolve("gx10/other", grp); err != errModelDenied {
+		t.Errorf("resolve gx10/other: err = %v, want errModelDenied (no cross-grant leak from A's unrestricted models)", err)
+	}
+}
+
+// TestModelRegistry_Resolve_PersonalProvidersGrant_AddsProviderKeepsGroupIntact
+// covers a personal Providers-only grant layered on top of a group: group
+// friends{providers:[minimax,uni]} plus a personal grant of
+// providers:[gx10] must allow gx10 in addition to minimax/uni, unchanged,
+// and deny every other provider.
+func TestModelRegistry_Resolve_PersonalProvidersGrant_AddsProviderKeepsGroupIntact(t *testing.T) {
+	t.Parallel()
+	adapters := map[string]providerAdapter{
+		"minimax": newFakeAdapter("minimax"),
+		"uni":     newFakeAdapter("uni"),
+		"gx10":    newFakeAdapter("gx10"),
+		"other":   newFakeAdapter("other"),
+	}
+	cfg := &Config{Providers: map[string]*ProviderConfig{
+		"minimax": {Models: []string{"m1"}},
+		"uni":     {Models: []string{"u1"}},
+		"gx10":    {Models: []string{"g1"}},
+		"other":   {Models: []string{"o1"}},
+	}}
+	reg, err := newModelRegistry(adapters, cfg, func(string, ...any) {})
+	if err != nil {
+		t.Fatalf("newModelRegistry: %v", err)
+	}
+
+	friends := &group{name: "friends", providers: []string{"minimax", "uni"}}
+	grp := effectiveGroup([]*group{friends}, &grant{providers: []string{"gx10"}})
+
+	for _, id := range []string{"minimax/m1", "uni/u1", "gx10/g1"} {
+		if _, _, _, err := reg.resolve(id, grp); err != nil {
+			t.Errorf("resolve %s: %v, want success", id, err)
+		}
+	}
+	if _, _, _, err := reg.resolve("other/o1", grp); err != errModelDenied {
+		t.Errorf("resolve other/o1: err = %v, want errModelDenied (personal grant only adds gx10)", err)
+	}
+}
+
+// TestModelRegistry_Resolve_PersonalModelsOnlyGrant_ExactModelAllowedOthersDenied
+// covers a personal Models-only grant: models:["gx10/GLM-5.3-Flash-EXL3"]
+// allows exactly that id and denies "gx10/other", independent of the
+// user's own group's (unrelated) model restriction.
+func TestModelRegistry_Resolve_PersonalModelsOnlyGrant_ExactModelAllowedOthersDenied(t *testing.T) {
+	t.Parallel()
+	adapters := map[string]providerAdapter{"gx10": newFakeAdapter("gx10")}
+	cfg := &Config{Providers: map[string]*ProviderConfig{
+		"gx10": {Models: []string{"GLM-5.3-Flash-EXL3", "other"}},
+	}}
+	reg, err := newModelRegistry(adapters, cfg, func(string, ...any) {})
+	if err != nil {
+		t.Fatalf("newModelRegistry: %v", err)
+	}
+
+	base := &group{name: "base", providers: []string{"gx10"}, models: []string{"nothing-else"}}
+	grp := effectiveGroup([]*group{base}, &grant{models: []string{"gx10/GLM-5.3-Flash-EXL3"}})
+
+	if _, _, _, err := reg.resolve("gx10/GLM-5.3-Flash-EXL3", grp); err != nil {
+		t.Errorf("resolve gx10/GLM-5.3-Flash-EXL3: %v, want success via personal grant", err)
+	}
+	if _, _, _, err := reg.resolve("gx10/other", grp); err != errModelDenied {
+		t.Errorf("resolve gx10/other: err = %v, want errModelDenied", err)
+	}
+}
+
+// TestModelRegistry_ListFor_MultiGroup_ShowsUnionOfMemberGroupAndPersonalGrant
+// proves GET /v1/models (listFor) shows exactly the union: a member
+// group's own unrestricted-model provider, and the personal grant's own
+// restricted model, with everything the personal grant does not list
+// absent.
+func TestModelRegistry_ListFor_MultiGroup_ShowsUnionOfMemberGroupAndPersonalGrant(t *testing.T) {
+	t.Parallel()
+	adapters := map[string]providerAdapter{
+		"minimax": newFakeAdapter("minimax"),
+		"gx10":    newFakeAdapter("gx10"),
+	}
+	cfg := &Config{Providers: map[string]*ProviderConfig{
+		"minimax": {Models: []string{"m1"}},
+		"gx10":    {Models: []string{"only", "other"}},
+	}}
+	reg, err := newModelRegistry(adapters, cfg, func(string, ...any) {})
+	if err != nil {
+		t.Fatalf("newModelRegistry: %v", err)
+	}
+
+	member := &group{name: "minimax-friends", providers: []string{"minimax"}}
+	grp := effectiveGroup([]*group{member}, &grant{providers: []string{"gx10"}, models: []string{"only"}})
+
+	ids := map[string]bool{}
+	for _, entry := range reg.listFor(grp) {
+		ids[entry["id"].(string)] = true //nolint:forcetypeassert // modelObject always sets id to a string
+	}
+	if !ids["m1"] {
+		t.Errorf("listFor ids = %v, want \"m1\" present (member group's unrestricted grant on minimax)", ids)
+	}
+	if !ids["only"] {
+		t.Errorf("listFor ids = %v, want \"only\" present (personal grant)", ids)
+	}
+	if ids["other"] {
+		t.Errorf("listFor ids = %v, want \"other\" absent (personal grant restricts gx10 to \"only\")", ids)
+	}
+}
+
+// TestModelRegistry_Resolve_MultiGrant_BareWinnerPrefersGrantThatActuallyAuthorizes
+// is HIGH-2's regression (review round 2): eng{providers:[beta]} alone
+// already fully authorizes bare "llama" via beta (unrestricted models).
+// Adding a personal grant restricted to alpha/special must NEVER take
+// that away — a union-based bareWinner picks alpha first (visible via
+// the personal grant's own provider entry) and then denies it (alpha's
+// grant doesn't cover "llama"), even though beta, right behind it in
+// sorted order, is fully authorized by eng's own grant. bareWinner (and
+// listFor's identical bare-entry selection) must skip alpha and land on
+// beta instead.
+func TestModelRegistry_Resolve_MultiGrant_BareWinnerPrefersGrantThatActuallyAuthorizes(t *testing.T) {
+	t.Parallel()
+	adapters := map[string]providerAdapter{
+		"alpha": newFakeAdapter("alpha"),
+		"beta":  newFakeAdapter("beta"),
+	}
+	cfg := &Config{Providers: map[string]*ProviderConfig{
+		"alpha": {Models: []string{"llama", "special"}},
+		"beta":  {Models: []string{"llama"}},
+	}}
+	reg, err := newModelRegistry(adapters, cfg, func(string, ...any) {})
+	if err != nil {
+		t.Fatalf("newModelRegistry: %v", err)
+	}
+
+	eng := &group{name: "eng", providers: []string{"beta"}}
+	grp := effectiveGroup([]*group{eng}, &grant{providers: []string{"alpha"}, models: []string{"alpha/special"}})
+
+	adapter, upstreamModel, canonical, err := reg.resolve("llama", grp)
+	if err != nil {
+		t.Fatalf("resolve(llama): %v, want success via eng's own unrestricted-model grant on beta", err)
+	}
+	if adapter != adapters["beta"] {
+		t.Errorf("adapter = %v, want beta's adapter", adapter)
+	}
+	if upstreamModel != "llama" || canonical != "beta/llama" {
+		t.Errorf("upstreamModel/canonical = %q/%q, want \"llama\"/\"beta/llama\"", upstreamModel, canonical)
+	}
+
+	ids := map[string]bool{}
+	for _, e := range reg.listFor(grp) {
+		ids[e["id"].(string)] = true
+	}
+	if !ids["llama"] {
+		t.Errorf("listFor ids = %v, want bare \"llama\" still listed (via eng's own grant on beta)", ids)
+	}
+}
+
 // --- resolve: collision precedence (ruling g) ---
 
 func TestModelRegistry_Resolve_BareIDCollision_PicksSortedFirstProvider(t *testing.T) {
@@ -1164,6 +1379,123 @@ func TestModelRegistry_ModelsJSON_PerGroupIsolation(t *testing.T) {
 	}
 	if !strings.Contains(string(bodyAnthropic), "claude-x") {
 		t.Errorf("anthropic-only group's body = %s, want it to contain claude-x", bodyAnthropic)
+	}
+}
+
+// TestGroup_ModelsCacheKey_NoAmbiguityBetweenMemberNamesAndPersonalGrantMarkers
+// is the round-3 NIT regression: the cache key's own "p:"/"m:" markers
+// used to be bare string literals inside the joined \x00-separated
+// signature, so a member group literally NAMED "p:" or "m:" (group names
+// carry no character-set validation — effectiveGroup's own doc comment,
+// auth.go) could produce a signature IDENTICAL to an entirely different
+// (membership, personal grant) combination: members=[A,"p:","x","m:"]
+// (no personal grant) collided byte-for-byte with members=[A] plus a
+// personal grant of providers:["x"] — both joined to
+// "s:A\x00p:\x00x\x00m:". Both must now get distinct keys.
+func TestGroup_ModelsCacheKey_NoAmbiguityBetweenMemberNamesAndPersonalGrantMarkers(t *testing.T) {
+	t.Parallel()
+	a := &group{name: "A"}
+	pColon := &group{name: "p:"}
+	x := &group{name: "x"}
+	mColon := &group{name: "m:"}
+
+	ambiguousMembers := effectiveGroup([]*group{a, pColon, x, mColon}, nil)
+	ambiguousPersonal := effectiveGroup([]*group{a}, &grant{providers: []string{"x"}})
+
+	keyMembers := ambiguousMembers.modelsCacheKey()
+	keyPersonal := ambiguousPersonal.modelsCacheKey()
+	if keyMembers == keyPersonal {
+		t.Errorf("modelsCacheKey collision: members=[A,p:,x,m:] (no personal) and members=[A]+personal{providers:[x]} both produced %q", keyMembers)
+	}
+}
+
+// TestGroup_ModelsCacheKey_LengthPrefixPreventsSplitPointAmbiguity is the
+// round-4 regression: the test above already distinguishes its two
+// signatures by member COUNT alone (4 vs 1), so it stays green even if
+// writeLengthPrefixed's own length prefix were removed entirely — the
+// count prefix ahead of the member list would still differ. This test
+// isolates the length prefix's OWN job with two adversarial pairs:
+//
+//   - members=["ab","c"] vs members=["a","bc"]: both concatenate to the
+//     IDENTICAL "abc" once a split point moves, so with NO separator at
+//     all (raw concatenation), both would produce "s2:abcN".
+//   - members=["a:b","c"] vs members=["a","b:c"] (round-6 regression):
+//     both concatenate to "a:b:c" — this pair specifically catches a
+//     WEAKER mutation than "no separator at all": writeLengthPrefixed
+//     keeping ONLY a bare ":" separator, with the length DIGITS dropped,
+//     would still produce ":a:b" + ":c" = ":a:b:c" for the first and
+//     ":a" + ":b:c" = ":a:b:c" for the second — identical
+//     ("s2::a:b:cN" either way) — because a bare ":" is not
+//     self-delimiting the way "<len>:" is; it does not tell a reader
+//     where the CURRENT component ends if the component's own value can
+//     itself contain ":".
+//
+// Only writeLengthPrefixed's own length-then-colon-then-value encoding
+// (a netstring) keeps every pair apart: "2:ab1:c" is never confusable
+// with "1:a2:bc", and "3:a:b1:c" is never confusable with "1:a3:b:c",
+// regardless of what either component contains.
+func TestGroup_ModelsCacheKey_LengthPrefixPreventsSplitPointAmbiguity(t *testing.T) {
+	t.Parallel()
+	splitAbC := effectiveGroup([]*group{{name: "ab"}, {name: "c"}}, nil)
+	splitABc := effectiveGroup([]*group{{name: "a"}, {name: "bc"}}, nil)
+
+	keyAbC := splitAbC.modelsCacheKey()
+	keyABc := splitABc.modelsCacheKey()
+	if keyAbC == keyABc {
+		t.Errorf("modelsCacheKey collision: members=[ab,c] and members=[a,bc] (same count, concatenation \"abc\" either way) both produced %q", keyAbC)
+	}
+
+	splitAColonBC := effectiveGroup([]*group{{name: "a:b"}, {name: "c"}}, nil)
+	splitABColonC := effectiveGroup([]*group{{name: "a"}, {name: "b:c"}}, nil)
+
+	keyAColonBC := splitAColonBC.modelsCacheKey()
+	keyABColonC := splitABColonC.modelsCacheKey()
+	if keyAColonBC == keyABColonC {
+		t.Errorf("modelsCacheKey collision: members=[a:b,c] and members=[a,b:c] (same count, concatenation \"a:b:c\" either way) both produced %q", keyAColonBC)
+	}
+}
+
+// TestModelRegistry_ModelsJSON_MultiGroupReload_CacheStaysBounded is
+// MEDIUM-3's regression (review round 2): effectiveGroup (auth.go)
+// allocates a FRESH *group for every multi-group/personal-grant
+// principal, so a *group-pointer-keyed modelsCache grows without bound
+// across repeated, semantically IDENTICAL users-file reloads (each
+// reload rebuilds every user's principal from scratch, even when nothing
+// changed). Five identical reloads of the same two-member-group user
+// must leave the cache no larger than the number of DISTINCT principals
+// actually queried (here: one multi-group user + one single-group user =
+// 2 stable cache keys), not one entry per reload.
+func TestModelRegistry_ModelsJSON_MultiGroupReload_CacheStaysBounded(t *testing.T) {
+	a, err := newAuthStore(&Config{Groups: map[string]*GroupConfig{"eng": {}, "ops": {}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reg, err := newModelRegistry(map[string]providerAdapter{"alpha": newFakeAdapter("alpha")},
+		&Config{Providers: map[string]*ProviderConfig{"alpha": {Models: []string{"m1"}}}}, func(string, ...any) {})
+	if err != nil {
+		t.Fatalf("newModelRegistry: %v", err)
+	}
+
+	for i := 0; i < 5; i++ {
+		if err := a.replaceFileUsers([]*UserConfig{
+			{Name: "carol", Group: "eng", Groups: []string{"ops"}, APIKey: "sk-carol"},
+			{Name: "dave", Group: "eng", APIKey: "sk-dave"},
+		}); err != nil {
+			t.Fatalf("replaceFileUsers (reload %d): %v", i, err)
+		}
+		for _, key := range []string{"sk-carol", "sk-dave"} {
+			_, grp, ok := identifyWithKey(a, key)
+			if !ok {
+				t.Fatalf("identify failed for %q on reload %d", key, i)
+			}
+			if body := reg.modelsJSON(grp); len(body) == 0 {
+				t.Fatalf("modelsJSON returned an empty body on reload %d", i)
+			}
+		}
+	}
+
+	if got := len(reg.modelsCache); got > 2 {
+		t.Errorf("modelsCache entries after 5 identical reloads = %d, want at most 2 (one per DISTINCT principal — carol's multi-group principal must share one cache entry across reloads, not grow one per reload)", got)
 	}
 }
 

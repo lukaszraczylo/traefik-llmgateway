@@ -136,6 +136,292 @@ func TestNewAuthStore_UnknownGroup_ReturnsError(t *testing.T) {
 	}
 }
 
+// TestNewAuthStore_UnknownGroupInGroupsList_ReturnsError proves an
+// unknown group named in UserConfig.Groups (not just Group) is a
+// constructor error naming the user and the unknown group, the same
+// style as the pre-existing Group-alone check above.
+func TestNewAuthStore_UnknownGroupInGroupsList_ReturnsError(t *testing.T) {
+	cfg := &Config{
+		Providers: map[string]*ProviderConfig{"openai": {Type: "openai", APIKey: "k"}},
+		Groups:    map[string]*GroupConfig{"eng": {}},
+		Users: &UsersConfig{Inline: []*UserConfig{
+			{Name: "a", Group: "eng", Groups: []string{"nonexistent"}, APIKey: "sk-secret"},
+		}},
+	}
+	_, err := newAuthStore(cfg)
+	if err == nil {
+		t.Fatal("want error for a user referencing an unknown group in Groups")
+	}
+	if !strings.Contains(err.Error(), `user "a"`) || !strings.Contains(err.Error(), `unknown group "nonexistent"`) {
+		t.Errorf("err = %v, want it to name the user and the unknown group", err)
+	}
+}
+
+// TestNewAuthStore_UserWithNoGroupAtAll_ReturnsError proves a user naming
+// neither Group nor Groups is a constructor error: at least one group is
+// required.
+func TestNewAuthStore_UserWithNoGroupAtAll_ReturnsError(t *testing.T) {
+	cfg := &Config{
+		Providers: map[string]*ProviderConfig{"openai": {Type: "openai", APIKey: "k"}},
+		Groups:    map[string]*GroupConfig{"eng": {}},
+		Users:     &UsersConfig{Inline: []*UserConfig{{Name: "a", APIKey: "sk-secret"}}},
+	}
+	if _, err := newAuthStore(cfg); err == nil {
+		t.Fatal("want error for a user with no group at all")
+	}
+}
+
+// TestBuildEntry_SingleGroupNoPersonalGrant_ReusesSharedGroupPointer is
+// the multi-group feature's back-compat rule: a user belonging to exactly
+// one group, with no personal Providers/Models grant, resolves to the
+// EXACT SAME *group pointer newAuthStore already built for that group —
+// identity preserved, not merely equal values.
+func TestBuildEntry_SingleGroupNoPersonalGrant_ReusesSharedGroupPointer(t *testing.T) {
+	cfg := &Config{
+		Providers: map[string]*ProviderConfig{"openai": {Type: "openai", APIKey: "k"}},
+		Groups:    map[string]*GroupConfig{"eng": {Providers: []string{"openai"}}},
+		Users:     &UsersConfig{Inline: []*UserConfig{{Name: "a", Group: "eng", APIKey: "sk-secret"}}},
+	}
+	a, err := newAuthStore(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, grp, ok := identifyWithKey(a, "sk-secret")
+	if !ok {
+		t.Fatal("identify failed")
+	}
+	if grp != a.groups["eng"] {
+		t.Error("want the exact shared *group pointer for a single-group user with no personal grant")
+	}
+}
+
+// --- LOW (review round 3): personalGrantAllowsPath's own "borrow the
+// primary group's paths" rule, isolated and mutation-checked ---
+
+// TestGroup_PersonalGrantAllowsPath_BorrowsPrimaryGroupPaths proves the
+// personal grant's own path authorization borrows the PRIMARY member
+// group's (memberGroups[0]) own passthroughPaths — never an unconditional
+// allow, and never a DIFFERENT member group's list.
+func TestGroup_PersonalGrantAllowsPath_BorrowsPrimaryGroupPaths(t *testing.T) {
+	primary := &group{name: "home", passthroughPaths: []string{"v1/chat/completions"}}
+	other := &group{name: "friends"}
+	grp := effectiveGroup([]*group{primary, other}, &grant{providers: []string{"beta"}})
+
+	if !grp.personalGrantAllowsPath("v1/chat/completions") {
+		t.Error("want the personal grant to allow the PRIMARY group's own allowed path")
+	}
+	if grp.personalGrantAllowsPath("v1/files") {
+		t.Error("want the personal grant denied a path the PRIMARY group does not allow — this must not silently become \"always allow\"")
+	}
+}
+
+// TestGroup_PersonalGrantAllowsPath_NoPersonalGrant_ReturnsFalse proves
+// the method is not vacuously true for a principal with no personal
+// grant at all.
+func TestGroup_PersonalGrantAllowsPath_NoPersonalGrant_ReturnsFalse(t *testing.T) {
+	grp := effectiveGroup([]*group{{name: "a"}, {name: "b"}}, nil)
+	if grp.personalGrantAllowsPath("anything") {
+		t.Error("want false: no personal grant exists to borrow a path for")
+	}
+}
+
+// --- LOW-7 (review round 2): test-gap coverage for rules the suite
+// stayed green about even after they were reverted ---
+
+// TestUnionOrAll_AnyEmptyList_AllowsAll pins unionOrAll's own contract:
+// ONE empty list among several already means "matches anything"
+// (matchesGlob's own empty-means-all rule), so the union of everything
+// must too, regardless of what the OTHER lists contain.
+func TestUnionOrAll_AnyEmptyList_AllowsAll(t *testing.T) {
+	if got := unionOrAll([]string{"a", "b"}, nil); got != nil {
+		t.Errorf("unionOrAll([a b], nil) = %v, want nil (one empty list allows everything)", got)
+	}
+	if got := unionOrAll([]string{"a"}, []string{}, []string{"c"}); got != nil {
+		t.Errorf("unionOrAll = %v, want nil (an empty list ANYWHERE in the input allows everything)", got)
+	}
+}
+
+// TestUnionOrAll_NoEmptyLists_ConcatenatesEveryPattern proves the
+// positive case: with no empty list among the inputs, the union is
+// every pattern from every list, in order.
+func TestUnionOrAll_NoEmptyLists_ConcatenatesEveryPattern(t *testing.T) {
+	got := unionOrAll([]string{"a", "b"}, []string{"c"})
+	want := []string{"a", "b", "c"}
+	if len(got) != len(want) {
+		t.Fatalf("unionOrAll = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("unionOrAll = %v, want %v", got, want)
+		}
+	}
+}
+
+// TestBuildLimitScopes_DuplicateGroupInGroupsList_CountedOnce proves
+// effectiveGroupNames' de-duplication (auth.go) actually matters end to
+// end: a user naming the SAME group via both Group and Groups collapses
+// to a single-member principal — reusing the shared *group pointer
+// (back-compat identity rule) — and buildLimitScopes/snapshot must count
+// it exactly once, never twice.
+func TestBuildLimitScopes_DuplicateGroupInGroupsList_CountedOnce(t *testing.T) {
+	cfg := &Config{
+		Providers: map[string]*ProviderConfig{"openai": {Type: "openai", APIKey: "k"}},
+		Groups:    map[string]*GroupConfig{"eng": {}},
+		Users: &UsersConfig{Inline: []*UserConfig{
+			{Name: "a", Group: "eng", Groups: []string{"eng"}, APIKey: "sk-secret"},
+		}},
+	}
+	a, err := newAuthStore(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	u, grp, ok := identifyWithKey(a, "sk-secret")
+	if !ok {
+		t.Fatal("identify failed")
+	}
+	if grp != a.groups["eng"] {
+		t.Error("want the exact shared *group pointer — a duplicate group name must collapse to a single-member principal")
+	}
+
+	scopes := buildLimitScopes(u, grp)
+	if len(scopes) != 2 {
+		t.Fatalf("len(scopes) = %d, want 2 (1 user + 1 group — a group listed twice must not produce two scopes)", len(scopes))
+	}
+
+	_, groups := a.snapshot()
+	for _, g := range groups {
+		if g.name == "eng" && g.memberCount != 1 {
+			t.Errorf("eng memberCount = %d, want 1 (listing the same group twice must not double-count the user)", g.memberCount)
+		}
+	}
+}
+
+// TestEffectiveGroup_MCPServersUnion_AnyEmptyMemberAllowsAll and
+// TestEffectiveGroup_MCPServersUnion_BothRestricted_ConcatenatesPatterns
+// (plus their Agents counterparts, below) pin mcpServers/agents' own
+// union rule (effectiveGroup, auth.go) — LOW-7 test-gap coverage,
+// mirroring providers/models' own already-covered union tests
+// (TestModelRegistry_Resolve_MultiGroup_UnionAcrossMemberGroups) for the
+// two fields that stay a plain union (unlike passthroughPaths, HIGH-1).
+func TestEffectiveGroup_MCPServersUnion_AnyEmptyMemberAllowsAll(t *testing.T) {
+	a := &group{name: "a", mcpServers: []string{"search-*"}}
+	b := &group{name: "b"} // empty: allow-all
+	grp := effectiveGroup([]*group{a, b}, nil)
+	if !grp.allowsMCP("anything-at-all") {
+		t.Errorf("mcpServers = %v, want allow-all (member b's own empty list)", grp.mcpServers)
+	}
+}
+
+func TestEffectiveGroup_MCPServersUnion_BothRestricted_ConcatenatesPatterns(t *testing.T) {
+	a := &group{name: "a", mcpServers: []string{"search-*"}}
+	b := &group{name: "b", mcpServers: []string{"db-admin"}}
+	grp := effectiveGroup([]*group{a, b}, nil)
+	if !grp.allowsMCP("search-web") || !grp.allowsMCP("db-admin") {
+		t.Errorf("want both search-web and db-admin allowed, mcpServers=%v", grp.mcpServers)
+	}
+	if grp.allowsMCP("other") {
+		t.Errorf("want \"other\" denied, mcpServers=%v", grp.mcpServers)
+	}
+}
+
+func TestEffectiveGroup_AgentsUnion_AnyEmptyMemberAllowsAll(t *testing.T) {
+	a := &group{name: "a", agents: []string{"triage"}}
+	b := &group{name: "b"} // empty: allow-all
+	grp := effectiveGroup([]*group{a, b}, nil)
+	if !grp.allowsAgent("anything-at-all") {
+		t.Errorf("agents = %v, want allow-all (member b's own empty list)", grp.agents)
+	}
+}
+
+func TestEffectiveGroup_AgentsUnion_BothRestricted_ConcatenatesPatterns(t *testing.T) {
+	a := &group{name: "a", agents: []string{"triage"}}
+	b := &group{name: "b", agents: []string{"support"}}
+	grp := effectiveGroup([]*group{a, b}, nil)
+	if !grp.allowsAgent("triage") || !grp.allowsAgent("support") {
+		t.Errorf("want both triage and support allowed, agents=%v", grp.agents)
+	}
+	if grp.allowsAgent("other") {
+		t.Errorf("want \"other\" denied, agents=%v", grp.agents)
+	}
+}
+
+// TestNewAuthStore_ModelsOnlyPersonalGrant_ReturnsConstructorError is
+// MEDIUM-5's regression (review round 2): a personal grant with Models
+// set but Providers left empty means "any provider" (matchesGlob's own
+// empty-means-all contract) combined with a model restriction — which
+// silently reaches EVERY configured provider, not just the ones the user's
+// group(s) already cover, and passes the passthrough provider gate for
+// any provider too. This must be rejected at construction, naming the
+// user, rather than silently granted.
+func TestNewAuthStore_ModelsOnlyPersonalGrant_ReturnsConstructorError(t *testing.T) {
+	cfg := &Config{
+		Providers: map[string]*ProviderConfig{"openai": {Type: "openai", APIKey: "k"}},
+		Groups:    map[string]*GroupConfig{"eng": {}},
+		Users: &UsersConfig{Inline: []*UserConfig{
+			{Name: "a", Group: "eng", APIKey: "sk-secret", Models: []string{"gpt-x"}},
+		}},
+	}
+	_, err := newAuthStore(cfg)
+	if err == nil {
+		t.Fatal("want a constructor error for a models-only personal grant (no personal providers)")
+	}
+	if !strings.Contains(err.Error(), `user "a"`) {
+		t.Errorf("err = %v, want it to name the user", err)
+	}
+}
+
+// TestNewAuthStore_ProvidersOnlyPersonalGrant_OK is the positive control:
+// a personal grant with Providers set and Models left empty is valid —
+// it means "every model on those providers," never a construction error.
+func TestNewAuthStore_ProvidersOnlyPersonalGrant_OK(t *testing.T) {
+	cfg := &Config{
+		Providers: map[string]*ProviderConfig{"openai": {Type: "openai", APIKey: "k"}},
+		Groups:    map[string]*GroupConfig{"eng": {}},
+		Users: &UsersConfig{Inline: []*UserConfig{
+			{Name: "a", Group: "eng", APIKey: "sk-secret", Providers: []string{"gx10"}},
+		}},
+	}
+	if _, err := newAuthStore(cfg); err != nil {
+		t.Fatalf("newAuthStore: %v, want no error for a providers-only personal grant", err)
+	}
+}
+
+// TestAuthStore_Snapshot_MultiGroupUser_ListsAllGroupsAndCountsEachMember
+// proves the admin-snapshot side of multi-group support: a user's own
+// summary lists every member group (not just the first, which stays for
+// back-compat), and each member group's memberCount includes that user
+// once — see UserConfig.Groups' own doc comment (llmgateway.go).
+func TestAuthStore_Snapshot_MultiGroupUser_ListsAllGroupsAndCountsEachMember(t *testing.T) {
+	cfg := &Config{
+		Providers: map[string]*ProviderConfig{"openai": {Type: "openai", APIKey: "k"}},
+		Groups:    map[string]*GroupConfig{"eng": {}, "ops": {}},
+		Users: &UsersConfig{Inline: []*UserConfig{
+			{Name: "carol", Group: "eng", Groups: []string{"ops"}, APIKey: "sk-carol"},
+		}},
+	}
+	a, err := newAuthStore(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	users, groups := a.snapshot()
+	if len(users) != 1 {
+		t.Fatalf("users = %v, want 1", users)
+	}
+	if users[0].groupName != "eng" {
+		t.Errorf("groupName = %q, want %q (first group, back-compat)", users[0].groupName, "eng")
+	}
+	if len(users[0].groups) != 2 || users[0].groups[0] != "eng" || users[0].groups[1] != "ops" {
+		t.Errorf("groups = %v, want [eng ops]", users[0].groups)
+	}
+	counts := map[string]int{}
+	for _, g := range groups {
+		counts[g.name] = g.memberCount
+	}
+	if counts["eng"] != 1 || counts["ops"] != 1 {
+		t.Errorf("memberCounts = %v, want eng=1 ops=1", counts)
+	}
+}
+
 func TestNewAuthStore_DuplicateAPIKey_ReturnsError(t *testing.T) {
 	cfg := &Config{
 		Providers: map[string]*ProviderConfig{"openai": {Type: "openai", APIKey: "k"}},

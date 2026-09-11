@@ -1080,6 +1080,42 @@ func TestAdminUsage_GroupAccessLists(t *testing.T) {
 	}
 }
 
+// TestAdminUsage_MultiGroupUser_ListsAllGroupsInJSON proves the admin
+// usage JSON view (adminUsageEntryView.Groups) lists every member group
+// for a multi-group user, not just the first — GroupName (singular)
+// keeps the first group for back-compat.
+func TestAdminUsage_MultiGroupUser_ListsAllGroupsInJSON(t *testing.T) {
+	t.Parallel()
+	cfg := CreateConfig()
+	cfg.Admin = &AdminConfig{Enabled: true}
+	cfg.Providers = map[string]*ProviderConfig{
+		"alpha": {Type: "openai", BaseURL: "http://alpha.invalid", APIKey: "sk-alpha"},
+	}
+	cfg.Groups = map[string]*GroupConfig{"eng": {}, "ops": {}}
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{
+		{Name: "carol", Group: "eng", Groups: []string{"ops"}, APIKey: "sk-carol"},
+		{Name: "admin1", Group: "eng", APIKey: "sk-admin1", Admin: true},
+	}}
+	h, _ := newAdminGatewayHandle(t, cfg)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, adminRequest(http.MethodGet, adminUsagePath, "sk-admin1"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	var got adminUsageResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	carol := findUsageEntry(t, got.Users, "carol")
+	if carol.GroupName != "eng" {
+		t.Errorf("carol.GroupName = %q, want %q (first group, back-compat)", carol.GroupName, "eng")
+	}
+	if !slices.Equal(carol.Groups, []string{"eng", "ops"}) {
+		t.Errorf("carol.Groups = %v, want [eng ops]", carol.Groups)
+	}
+}
+
 // TestLimiterCurrentUsage_StoreDown drives limiter.currentUsage's
 // fail-closed path directly: a configured store whose every operation
 // errors, with failOpen false, must report storeDown and zero values

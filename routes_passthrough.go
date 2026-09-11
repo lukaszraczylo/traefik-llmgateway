@@ -488,9 +488,11 @@ func extractPassthroughUsage(typeName, providerName string, body []byte) (usage,
 // body, up to 32MiB, into memory before forwarding it).
 //
 // Callers only invoke this once they have already decided enforcement is
-// required (handlePassthrough checks group.hasModelRestriction() first) —
-// this function itself has no fail-open/fail-closed opinion; hasModel
-// simply reports whether a non-empty top-level "model" STRING was found
+// required (handlePassthrough checks group.hasModelRestriction —
+// single-grant — or group.hasModelRestrictionForProviderPath —
+// multi-grant — first) — this function itself has no fail-open/
+// fail-closed opinion; hasModel simply reports whether a non-empty
+// top-level "model" STRING was found
 // within the peek window. It is skipped, at no cost — no read at all —
 // for a Content-Type isPassthroughBinaryContentType recognizes as
 // genuinely binary (multipart uploads, audio/image/video, octet-stream):
@@ -713,7 +715,61 @@ func (g *Gateway) allowsPassthroughModel(grp *group, providerName, model string)
 	if _, rest, ok := g.registry.splitConfiguredProvider(model); ok {
 		bareModel = rest
 	}
-	return grp.allowsModel(model) || grp.allowsModel(bareModel) || grp.allowsModel(providerName+"/"+bareModel)
+	// allowsProviderModel (multi-group/personal-grant feature, auth.go)
+	// requires providerName AND one of the three model candidates to come
+	// from the SAME grant — the no-cross-grant-leak rule. For an ordinary
+	// single-grant group this is byte-identical to the combined
+	// provider-then-model check this replaced (handlePassthrough already
+	// gated on grp.allowsProvider(providerName) before ever calling
+	// here).
+	return grp.allowsProviderModel(providerName, model, bareModel, providerName+"/"+bareModel)
+}
+
+// allowsPassthroughModelForPath is allowsPassthroughModel's multi-grant,
+// path-coupled counterpart (HIGH fix, review round 3): the SAME three
+// model candidates, but checked via group.allowsPassthroughModelForPath
+// — which requires provider, path, AND the model to all come from ONE
+// grant — rather than group.allowsProviderModel, which knows nothing
+// about path at all. Used only when grp.grantCount() > 1
+// (handlePassthrough, below); a single-grant principal keeps calling
+// allowsPassthroughModel, unchanged.
+func (g *Gateway) allowsPassthroughModelForPath(grp *group, providerName, path, model string) bool {
+	bareModel := model
+	if _, rest, ok := g.registry.splitConfiguredProvider(model); ok {
+		bareModel = rest
+	}
+	return grp.allowsPassthroughModelForPath(providerName, path, model, bareModel, providerName+"/"+bareModel)
+}
+
+// peekAndValidateModel runs peekPassthroughModel and its two fail-closed
+// checks (truncated, no model found), writing the matching 400/403 error
+// itself on failure — shared by handlePassthrough's single-grant and
+// multi-grant (HIGH fix, review round 3) branches so the two can never
+// drift into different error bodies for the identical failure. ok is
+// false whenever an error was already written and the caller must return
+// immediately without doing anything else.
+func (g *Gateway) peekAndValidateModel(w http.ResponseWriter, r *http.Request) (model string, ok bool) {
+	model, hasModel, truncated, err := peekPassthroughModel(r)
+	if err != nil {
+		writeOAIError(w, http.StatusBadRequest, "invalid_request_error", "cannot read request body")
+		return "", false
+	}
+	// Checked BEFORE hasModel (round-3 coordinator ruling, 2026-08-22):
+	// a truncated peek means a "model" found within the window cannot
+	// be trusted — a duplicate top-level "model" beyond
+	// maxModelPeekBytes may still exist and would win upstream
+	// (last-wins parsing) — so this must fail closed regardless of
+	// whatever hasModel/model peekPassthroughModel also returned. See
+	// peekPassthroughModel's own doc comment for the full mechanism.
+	if truncated {
+		writeOAIError(w, http.StatusForbidden, "invalid_request_error", "request body exceeds the model-enforcement window; a top-level model field beyond it cannot be safely authorized")
+		return "", false
+	}
+	if !hasModel {
+		writeOAIError(w, http.StatusForbidden, "invalid_request_error", "model could not be determined")
+		return "", false
+	}
+	return model, true
 }
 
 // handlePassthrough implements the native provider passthrough route:
@@ -725,24 +781,47 @@ func (g *Gateway) allowsPassthroughModel(grp *group, providerName, model string)
 // in the gateway's own error envelope the way the unified routes wrap a
 // providerHTTPError.
 //
-// Checks run in this order: group authorization — provider (403), model
-// when the group restricts models at all (403), path allowlist (403) —
-// before capability checks (Upgrade→501, path validity→400) before rate
-// limits (429/503) — a caller who cannot use providerName/model/path at
-// all learns that first, rather than learning something about how they
-// tried to use it. The provider-level Passthrough toggle (ProviderConfig,
-// llmgateway.go) is checked earlier still, by ServeHTTP's own route gate
-// — a disabled provider never reaches this function at all, reported as
-// the ordinary unknown-route 404 instead.
+// Checks run in this order: group authorization — provider (403), then
+// EITHER model-then-path OR path-then-model (see below), each check
+// itself a 403 — before capability checks (Upgrade→501, path
+// validity→400) before rate limits (429/503) — a caller who cannot use
+// providerName/model/path at all learns that first, rather than learning
+// something about how they tried to use it. The provider-level
+// Passthrough toggle (ProviderConfig, llmgateway.go) is checked earlier
+// still, by ServeHTTP's own route gate — a disabled provider never
+// reaches this function at all, reported as the ordinary unknown-route
+// 404 instead.
+//
+// ORDER DIFFERS BY GRANT COUNT (HIGH fix, review round 3): a
+// SINGLE-grant principal (grp.grantCount() == 1, the overwhelmingly
+// common case) keeps this feature's original order — model (when
+// restricted at all) THEN path, checked INDEPENDENTLY of each other,
+// exactly as before multi-group support existed; with only one grant to
+// combine from, independent checks can never disagree about which grant
+// authorized what. A MULTI-grant principal checks path FIRST, then
+// model, and BOTH must be satisfied by the SAME grant — see the
+// MODEL+PATH FROM ONE GRANT paragraph below for why, and why the order
+// flips for that case specifically (cheaper to fail on path before ever
+// peeking a body).
 //
 // MODEL ENFORCEMENT (security review, 2026-08-22, round 2 — closes a
-// round-1 bypass): enforcement runs ONLY for a group with a non-empty
-// Models list (grp.hasModelRestriction) — a group that has not opted into
-// model restriction has nothing allowsModel could reject, so the request
-// body is never even read, exactly as before this feature existed at all.
-// For a restricted group, peekPassthroughModel reads (bounded,
+// round-1 bypass): for a SINGLE-grant principal, enforcement runs ONLY
+// when that one grant restricts models (grp.hasModelRestriction, auth.go
+// — for an ordinary single-grant group this is exactly "a non-empty
+// Models list"). For a MULTI-grant principal, enforcement runs
+// ONLY when EVERY grant that allows THIS EXACT provider+path combination
+// also restricts models (grp.hasModelRestrictionForProviderPath, auth.go
+// — the HIGH fix's own per-provider-AND-path scoping, review round 3;
+// see the MODEL+PATH FROM ONE GRANT paragraph below for why provider
+// alone is no longer the right scope once a principal can carry more
+// than one grant). Either way, a grant with nothing allowsProviderModel/
+// allowsPassthroughModelForPath could ever reject means the request body
+// is never even read, exactly as before this feature, and before the
+// multi-group/personal-grant feature, existed at all. For a restricted
+// principal, peekPassthroughModel reads (bounded,
 // maxModelPeekBytes) for a top-level "model" field and this function
-// checks it via allowsPassthroughModel — the round-1 version instead
+// checks it via allowsPassthroughModel (single-grant) or
+// allowsPassthroughModelForPath (multi-grant) — the round-1 version instead
 // gated the READ ITSELF on Content-Type containing "application/json",
 // which a client fully controls: sending "text/plain", an unexpected
 // value, or no Content-Type at all skipped the check outright and let
@@ -779,11 +858,40 @@ func (g *Gateway) allowsPassthroughModel(grp *group, providerName, model string)
 //
 // PATH ALLOWLIST (same review): GroupConfig.PassthroughPaths, when
 // non-empty, additionally restricts which rest path this group's
-// passthrough requests may address (grp.allowsPassthroughPath). Empty
-// (the default, matchesGlob's own empty-means-all contract) allows every
-// path, exactly as before this field existed — see its own doc comment
-// for a path.Match footgun this allow-list inherits (a literal "*"
-// pattern does NOT mean "allow everything").
+// passthrough requests may address
+// (grp.allowsPassthroughPathForProvider, which couples the path check to
+// the SAME grant that authorizes providerName — HIGH-1 fix, review round
+// 2: passthroughPaths is not simply unioned across a multi-group
+// principal's member groups, so joining a further, less-restricted group
+// can never strip a more specific one's own path restriction on a
+// DIFFERENT provider). Empty (the default, matchesGlob's own
+// empty-means-all contract) allows every path, exactly as before this
+// field existed — see its own doc comment for a path.Match footgun this
+// allow-list inherits (a literal "*" pattern does NOT mean "allow
+// everything").
+//
+// MODEL+PATH FROM ONE GRANT (HIGH fix, review round 3 — closes a round-2
+// residual gap): round 2 coupled provider+model per grant
+// (group.allowsProviderModel) and, separately, provider+path per grant
+// (group.allowsPassthroughPathForProvider) — but nothing required BOTH
+// checks to succeed via the SAME grant. A multi-grant principal with one
+// grant that restricts models but not paths, and another that restricts
+// paths but not models, could satisfy the path check via the second
+// grant's own unrestricted models and the (irrelevant) model check via
+// the first grant's own unrestricted path — authorizing a provider+path+
+// model combination NEITHER grant alone ever granted. Fixed by branching
+// on grp.grantCount(): a MULTI-grant principal (> 1) checks path FIRST
+// (group.allowsPassthroughPathForProvider, unchanged), then — only when
+// EVERY grant that allows that exact provider+path also restricts
+// models (group.hasModelRestrictionForProviderPath) — peeks the body and
+// checks the model via group.allowsPassthroughModelForPath, which
+// re-derives the SAME provider+path-matching grant set and requires one
+// of THOSE to also allow the model. A SINGLE-grant principal (the
+// overwhelmingly common case, grp.grantCount() == 1) keeps the exact
+// pre-round-3 code, order, and error messages: model (if grp.
+// hasModelRestriction) then path — with only one grant to combine
+// from, the two checks can never disagree about which grant authorized
+// what, so there is nothing to couple.
 //
 // For a Gemini provider, rest is appended to base() exactly as the client
 // sent it: there is no model extraction or URL rewriting here, so a
@@ -797,36 +905,46 @@ func (g *Gateway) handlePassthrough(w http.ResponseWriter, r *http.Request, u *u
 		return
 	}
 
-	if grp.hasModelRestriction() {
-		model, hasModel, truncated, err := peekPassthroughModel(r)
-		if err != nil {
-			writeOAIError(w, http.StatusBadRequest, "invalid_request_error", "cannot read request body")
+	if grp.grantCount() > 1 {
+		// Multi-grant principal (HIGH fix, review round 3): path checked
+		// BEFORE model — cheaper than peeking a body, and it lets
+		// hasModelRestrictionForProviderPath/allowsPassthroughModelForPath
+		// below scope themselves to exactly the grants that already
+		// matched provider+path, never a grant that only matched provider.
+		if !grp.allowsPassthroughPathForProvider(providerName, rest) {
+			writeOAIError(w, http.StatusForbidden, "invalid_request_error", "path access denied")
 			return
 		}
-		// Checked BEFORE hasModel (round-3 coordinator ruling, 2026-08-22):
-		// a truncated peek means a "model" found within the window cannot
-		// be trusted — a duplicate top-level "model" beyond
-		// maxModelPeekBytes may still exist and would win upstream
-		// (last-wins parsing) — so this must fail closed regardless of
-		// whatever hasModel/model peekPassthroughModel also returned. See
-		// peekPassthroughModel's own doc comment for the full mechanism.
-		if truncated {
-			writeOAIError(w, http.StatusForbidden, "invalid_request_error", "request body exceeds the model-enforcement window; a top-level model field beyond it cannot be safely authorized")
-			return
+		if grp.hasModelRestrictionForProviderPath(providerName, rest) {
+			model, ok := g.peekAndValidateModel(w, r)
+			if !ok {
+				return
+			}
+			if !g.allowsPassthroughModelForPath(grp, providerName, rest, model) {
+				writeOAIError(w, http.StatusForbidden, "invalid_request_error", "model access denied")
+				return
+			}
 		}
-		if !hasModel {
-			writeOAIError(w, http.StatusForbidden, "invalid_request_error", "model could not be determined")
-			return
+	} else {
+		// Single-grant principal: unchanged pre-round-3 order (model, then
+		// path), checked INDEPENDENTLY of each other — with only one grant
+		// to combine from, this can never produce the cross-grant leak the
+		// branch above exists to prevent.
+		if grp.hasModelRestriction() {
+			model, ok := g.peekAndValidateModel(w, r)
+			if !ok {
+				return
+			}
+			if !g.allowsPassthroughModel(grp, providerName, model) {
+				writeOAIError(w, http.StatusForbidden, "invalid_request_error", "model access denied")
+				return
+			}
 		}
-		if !g.allowsPassthroughModel(grp, providerName, model) {
-			writeOAIError(w, http.StatusForbidden, "invalid_request_error", "model access denied")
-			return
-		}
-	}
 
-	if !grp.allowsPassthroughPath(rest) {
-		writeOAIError(w, http.StatusForbidden, "invalid_request_error", "path access denied")
-		return
+		if !grp.allowsPassthroughPathForProvider(providerName, rest) {
+			writeOAIError(w, http.StatusForbidden, "invalid_request_error", "path access denied")
+			return
+		}
 	}
 
 	if r.Header.Get("Upgrade") != "" {

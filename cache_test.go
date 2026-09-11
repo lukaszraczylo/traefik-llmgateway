@@ -656,6 +656,60 @@ func TestEffectiveTTL_NilInheritsGlobal(t *testing.T) {
 
 // TestEffectiveTTL_GroupOverrideHonored proves a group's own resolved
 // cacheTTL wins over the cache's global TTL.
+// --- effectiveGroup: multi-group cache merge rule ---
+
+// TestEffectiveGroup_CacheMerge_FalseWinsOverTrue proves the multi-group
+// cache-merge rule (UserConfig.Groups' own doc comment, llmgateway.go):
+// if ANY member group sets cache false, the synthetic principal's own
+// effective cache setting is false, even when another member sets it
+// true.
+func TestEffectiveGroup_CacheMerge_FalseWinsOverTrue(t *testing.T) {
+	no, yes := false, true
+	a := &group{name: "a", cache: &yes}
+	b := &group{name: "b", cache: &no}
+	grp := effectiveGroup([]*group{a, b}, nil)
+	if groupCacheEnabled(grp) {
+		t.Error("groupCacheEnabled = true, want false (one member group opts out)")
+	}
+}
+
+// TestEffectiveGroup_CacheMerge_TrueWinsOverNil proves true wins when no
+// member group sets false but at least one sets true.
+func TestEffectiveGroup_CacheMerge_TrueWinsOverNil(t *testing.T) {
+	yes := true
+	a := &group{name: "a", cache: &yes}
+	b := &group{name: "b"} // nil: inherit
+	grp := effectiveGroup([]*group{a, b}, nil)
+	if !groupCacheEnabled(grp) {
+		t.Error("groupCacheEnabled = false, want true (one member group opts in, none opts out)")
+	}
+}
+
+// TestEffectiveGroup_CacheMerge_AllNilInherits proves nil-inherit stays
+// nil-inherit when no member group sets Cache at all.
+func TestEffectiveGroup_CacheMerge_AllNilInherits(t *testing.T) {
+	a := &group{name: "a"}
+	b := &group{name: "b"}
+	grp := effectiveGroup([]*group{a, b}, nil)
+	if grp.cache != nil {
+		t.Errorf("grp.cache = %v, want nil (no member group sets it)", grp.cache)
+	}
+}
+
+// TestEffectiveGroup_CacheTTLMerge_SmallestPositiveWins proves the
+// multi-group cacheTTL-merge rule: the SMALLEST positive cacheTTL among
+// member groups wins; a member that leaves cacheTTL unset (0) must never
+// win as "smallest".
+func TestEffectiveGroup_CacheTTLMerge_SmallestPositiveWins(t *testing.T) {
+	a := &group{name: "a", cacheTTL: 30 * time.Second}
+	b := &group{name: "b", cacheTTL: 5 * time.Minute}
+	c := &group{name: "c"} // 0: unset
+	grp := effectiveGroup([]*group{a, b, c}, nil)
+	if grp.cacheTTL != 30*time.Second {
+		t.Errorf("grp.cacheTTL = %v, want 30s (the smallest positive among member groups)", grp.cacheTTL)
+	}
+}
+
 func TestEffectiveTTL_GroupOverrideHonored(t *testing.T) {
 	c := &responseCache{ttl: 5 * time.Minute}
 	grp := &group{name: "g", cacheTTL: 30 * time.Second}

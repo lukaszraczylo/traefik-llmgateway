@@ -1356,6 +1356,344 @@ func TestHandlePassthrough_UnrestrictedGroup_SkipsModelPeekEntirely(t *testing.T
 	}
 }
 
+// TestHandlePassthrough_MultiGrant_UnrestrictedGrantProvider_SkipsModelPeek
+// proves handlePassthrough's hasModelRestrictionForProviderPath gate for
+// a multi-grant (group + personal grant) principal: a provider reachable
+// only through a grant that carries NO model restriction never even
+// reads the request body — mirrors TestHandlePassthrough_
+// UnrestrictedGroup_SkipsModelPeekEntirely above, but for a principal
+// that also carries a personal grant restricting a DIFFERENT provider
+// (proved not to interfere, by the companion test right below).
+func TestHandlePassthrough_MultiGrant_UnrestrictedGrantProvider_SkipsModelPeek(t *testing.T) {
+	var upstreamCalled bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalled = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{"open": {Type: "openai", BaseURL: srv.URL, APIKey: "sk-up"}}
+	cfg.Groups = map[string]*GroupConfig{"base": {Providers: []string{"open"}}} // no Models restriction
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{
+		{Name: "alice", Group: "base", APIKey: "sk-alice", Providers: []string{"closed"}, Models: []string{"closed/allowed"}},
+	}}
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/open/v1/audio/transcriptions", strings.NewReader("--boundary\r\nfake multipart body\r\n--boundary--"))
+	req.Header.Set("Authorization", "Bearer sk-alice")
+	req.Header.Set("Content-Type", "multipart/form-data; boundary=boundary")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (base group's own grant is unrestricted on \"open\"), body=%s", rec.Code, rec.Body.String())
+	}
+	if !upstreamCalled {
+		t.Error("upstream must be called: the grant that allows \"open\" carries no model restriction")
+	}
+}
+
+// TestHandlePassthrough_MultiGrant_RestrictedPersonalGrantProvider_EnforcesModel
+// is the opposite case for the SAME principal as the test above: the
+// personal grant restricts "closed" to exactly one model, so a
+// passthrough request against "closed" must peek and enforce it.
+func TestHandlePassthrough_MultiGrant_RestrictedPersonalGrantProvider_EnforcesModel(t *testing.T) {
+	var upstreamCalled bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalled = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{
+		"open":   {Type: "openai", BaseURL: srv.URL, APIKey: "sk-up"},
+		"closed": {Type: "openai", BaseURL: srv.URL, APIKey: "sk-up"},
+	}
+	cfg.Groups = map[string]*GroupConfig{"base": {Providers: []string{"open"}}}
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{
+		{Name: "alice", Group: "base", APIKey: "sk-alice", Providers: []string{"closed"}, Models: []string{"closed/allowed"}},
+	}}
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	deniedReq := httptest.NewRequest(http.MethodPost, "/closed/v1/native-endpoint", strings.NewReader(`{"model":"closed/denied"}`))
+	deniedReq.Header.Set("Authorization", "Bearer sk-alice")
+	deniedReq.Header.Set("Content-Type", "application/json")
+	deniedRec := httptest.NewRecorder()
+	h.ServeHTTP(deniedRec, deniedReq)
+	if deniedRec.Code != http.StatusForbidden {
+		t.Fatalf("denied model: status = %d, want 403, body=%s", deniedRec.Code, deniedRec.Body.String())
+	}
+	if upstreamCalled {
+		t.Error("upstream must never be called for a model the personal grant does not list")
+	}
+
+	allowedReq := httptest.NewRequest(http.MethodPost, "/closed/v1/native-endpoint", strings.NewReader(`{"model":"closed/allowed"}`))
+	allowedReq.Header.Set("Authorization", "Bearer sk-alice")
+	allowedReq.Header.Set("Content-Type", "application/json")
+	allowedRec := httptest.NewRecorder()
+	h.ServeHTTP(allowedRec, allowedReq)
+	if allowedRec.Code != http.StatusOK {
+		t.Fatalf("allowed model: status = %d, want 200, body=%s", allowedRec.Code, allowedRec.Body.String())
+	}
+	if !upstreamCalled {
+		t.Error("upstream must be called for the personal grant's own allowed model")
+	}
+}
+
+// TestHandlePassthrough_MultiGroup_PassthroughPathsNeverUnionAcrossProviders
+// is HIGH-1's regression (review round 2): passthroughPaths must NOT be
+// unioned across member groups the way providers/models/mcpServers/agents
+// are — group "a" {providers:[alpha]} carries no path restriction at all,
+// group "b" {providers:[beta], passthroughPaths:[v1/chat/completions]}
+// restricts beta narrowly. A user in BOTH groups must still be denied
+// "/beta/v1/files": pairing "a"'s own unrestricted paths with "b"'s own
+// provider would let joining group "a" silently strip group "b"'s own
+// path restriction, even though NEITHER group alone ever authorized that
+// combination. "/beta/v1/chat/completions" (b's own allowed path) and
+// "/alpha/v1/files" (a's own unrestricted provider) must both still work.
+func TestHandlePassthrough_MultiGroup_PassthroughPathsNeverUnionAcrossProviders(t *testing.T) {
+	var lastPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		lastPath = r.URL.Path
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{
+		"alpha": {Type: "openai", BaseURL: srv.URL, APIKey: "sk-up"},
+		"beta":  {Type: "openai", BaseURL: srv.URL, APIKey: "sk-up"},
+	}
+	cfg.Groups = map[string]*GroupConfig{
+		"a": {Providers: []string{"alpha"}},
+		"b": {Providers: []string{"beta"}, PassthroughPaths: []string{"v1/chat/completions"}},
+	}
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{
+		{Name: "multi", Group: "a", Groups: []string{"b"}, APIKey: "sk-multi"},
+	}}
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	post := func(path string) int {
+		lastPath = ""
+		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{}`))
+		req.Header.Set("Authorization", "Bearer sk-multi")
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec.Code
+	}
+
+	if code := post("/beta/v1/files"); code != http.StatusForbidden {
+		t.Errorf("POST /beta/v1/files: status = %d, want 403 (group b's own passthroughPaths restriction must not be stripped by joining group a)", code)
+	}
+	if lastPath != "" {
+		t.Error("upstream must never be called for a path denied by the coupled provider+path check")
+	}
+	if code := post("/beta/v1/chat/completions"); code != http.StatusOK {
+		t.Errorf("POST /beta/v1/chat/completions: status = %d, want 200 (group b's own allowed path)", code)
+	}
+	if code := post("/alpha/v1/files"); code != http.StatusOK {
+		t.Errorf("POST /alpha/v1/files: status = %d, want 200 (group a's own unrestricted provider)", code)
+	}
+}
+
+// TestHandlePassthrough_MultiGroup_ModelAndPathMustComeFromSameGrant is
+// the round-3 HIGH regression (review round 3, repro P1): group
+// a{providers:[beta], models:[m1]} restricts models but not paths;
+// group b{providers:[beta], passthroughPaths:[v1/chat/completions]}
+// restricts paths but not models. Round 2's own fix coupled provider+
+// path per grant and provider+model per grant SEPARATELY — but nothing
+// required BOTH to come from the SAME grant, so a multi-grant user could
+// satisfy the path check via b's own unrestricted-model grant and the
+// (irrelevant) model check via a's own unrestricted-path grant,
+// authorizing a combination NEITHER grant alone ever granted. Every
+// single-grant user (a-only, b-only) must still be denied on their own
+// terms too (sanity controls, unaffected by this fix).
+func TestHandlePassthrough_MultiGroup_ModelAndPathMustComeFromSameGrant(t *testing.T) {
+	var upstreamCalled bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalled = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{"beta": {Type: "openai", BaseURL: srv.URL, APIKey: "sk-up"}}
+	cfg.Groups = map[string]*GroupConfig{
+		"a": {Providers: []string{"beta"}, Models: []string{"m1"}},
+		"b": {Providers: []string{"beta"}, PassthroughPaths: []string{"v1/chat/completions"}},
+	}
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{
+		{Name: "ua", Group: "a", APIKey: "sk-a"},
+		{Name: "ub", Group: "b", APIKey: "sk-b"},
+		{Name: "uab", Group: "a", Groups: []string{"b"}, APIKey: "sk-ab"},
+	}}
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	post := func(key string) int {
+		upstreamCalled = false
+		req := httptest.NewRequest(http.MethodPost, "/beta/v1/files", strings.NewReader(`{"model":"m2"}`))
+		req.Header.Set("Authorization", "Bearer "+key)
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if upstreamCalled {
+			t.Errorf("key %q: upstream must never be called for a denied combination", key)
+		}
+		return rec.Code
+	}
+
+	if code := post("sk-a"); code != http.StatusForbidden {
+		t.Errorf("a-only: status = %d, want 403 (a has no path restriction, but model m2 is not m1)", code)
+	}
+	if code := post("sk-b"); code != http.StatusForbidden {
+		t.Errorf("b-only: status = %d, want 403 (b has no model restriction, but v1/files is not v1/chat/completions)", code)
+	}
+	if code := post("sk-ab"); code != http.StatusForbidden {
+		t.Errorf("a+b: status = %d, want 403 — model m2 must not be authorized by combining a's own unrestricted path with b's own unrestricted model", code)
+	}
+}
+
+// TestHandlePassthrough_MultiGroup_PersonalGrantModelAndPathFromSameGrant
+// is the round-3 HIGH regression's personal-grant half (review round 3,
+// repro P2): primary "home"{providers:[alpha]} carries no path
+// restriction; member "friends"{providers:[beta], passthroughPaths:
+// [v1/chat/completions]} restricts beta's own paths; carol's personal
+// grant adds providers:[beta],models:[beta/m1]. Her request must be
+// checked as ONE unit — the path it borrows is home's (the primary
+// group's) own list, and the model it allows is its own — home's own
+// unrestricted paths must never combine with friends' own unrestricted
+// models to authorize a request the personal grant itself denies.
+func TestHandlePassthrough_MultiGroup_PersonalGrantModelAndPathFromSameGrant(t *testing.T) {
+	var upstreamCalled bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalled = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{
+		"alpha": {Type: "openai", BaseURL: srv.URL, APIKey: "sk-up"},
+		"beta":  {Type: "openai", BaseURL: srv.URL, APIKey: "sk-up"},
+	}
+	cfg.Groups = map[string]*GroupConfig{
+		"home":    {Providers: []string{"alpha"}},
+		"friends": {Providers: []string{"beta"}, PassthroughPaths: []string{"v1/chat/completions"}},
+	}
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{
+		{Name: "carol", Group: "home", Groups: []string{"friends"}, APIKey: "sk-carol", Providers: []string{"beta"}, Models: []string{"beta/m1"}},
+	}}
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/beta/v1/files", strings.NewReader(`{"model":"beta/other"}`))
+	req.Header.Set("Authorization", "Bearer sk-carol")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 (the personal grant's own Models list denies %q; home's own unrestricted paths and friends' own unrestricted models must not combine to authorize it)", rec.Code, "beta/other")
+	}
+	if upstreamCalled {
+		t.Error("upstream must never be called for a model the personal grant denies")
+	}
+}
+
+// TestHandlePassthrough_MultiGroup_ModelAndPathFromSameGrant_PositiveCases
+// are the round-3 HIGH fix's own positive controls, using the SAME
+// fixtures as the two regression tests above: a request whose model AND
+// path both come from ONE grant must still succeed.
+func TestHandlePassthrough_MultiGroup_ModelAndPathFromSameGrant_PositiveCases(t *testing.T) {
+	var upstreamCalled bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalled = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{
+		"alpha": {Type: "openai", BaseURL: srv.URL, APIKey: "sk-up"},
+		"beta":  {Type: "openai", BaseURL: srv.URL, APIKey: "sk-up"},
+	}
+	cfg.Groups = map[string]*GroupConfig{
+		"a":       {Providers: []string{"beta"}, Models: []string{"m1"}},
+		"b":       {Providers: []string{"beta"}, PassthroughPaths: []string{"v1/chat/completions"}},
+		"home":    {Providers: []string{"alpha"}},
+		"friends": {Providers: []string{"beta"}, PassthroughPaths: []string{"v1/chat/completions"}},
+	}
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{
+		{Name: "ub", Group: "b", APIKey: "sk-b"},
+		{Name: "uab", Group: "a", Groups: []string{"b"}, APIKey: "sk-ab"},
+		{Name: "carol", Group: "home", Groups: []string{"friends"}, APIKey: "sk-carol", Providers: []string{"beta"}, Models: []string{"beta/m1"}},
+	}}
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	post := func(key, path, body string) int {
+		upstreamCalled = false
+		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+key)
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec.Code
+	}
+
+	// b-only: b's own grant allows beta with no model restriction, and
+	// b's own allowed path — must succeed regardless of model.
+	if code := post("sk-b", "/beta/v1/chat/completions", `{"model":"anything"}`); code != http.StatusOK {
+		t.Errorf("b-only on v1/chat/completions: status = %d, want 200", code)
+	}
+	if !upstreamCalled {
+		t.Error("b-only: upstream must be called")
+	}
+
+	// a+b: model m1 on a path a allows (a has no path restriction) — a's
+	// OWN grant covers both model and path together.
+	if code := post("sk-ab", "/beta/v1/files", `{"model":"m1"}`); code != http.StatusOK {
+		t.Errorf("a+b, model m1 on a's own unrestricted path: status = %d, want 200", code)
+	}
+	if !upstreamCalled {
+		t.Error("a+b: upstream must be called")
+	}
+
+	// carol: personal grant's own model (beta/m1) on a path the PRIMARY
+	// group (home) allows (home has no path restriction).
+	if code := post("sk-carol", "/beta/v1/anything-home-allows", `{"model":"beta/m1"}`); code != http.StatusOK {
+		t.Errorf("personal grant, model beta/m1 on home's own unrestricted path: status = %d, want 200", code)
+	}
+	if !upstreamCalled {
+		t.Error("carol: upstream must be called")
+	}
+}
+
 // TestHandlePassthrough_RestrictedGroup_BinaryContentType_Returns403 is
 // ruling item 4's fail-closed case for a genuinely binary body: a
 // RESTRICTED group's multipart/audio/image/video upload carries no

@@ -641,15 +641,20 @@ func (g *Gateway) runMeteredCall(sw *statusTrackingWriter, r *http.Request, scop
 }
 
 // buildLimitScopes returns the limitScope slice runUnified passes to the
-// limiter: a user scope and a group scope, ALWAYS both, unconditionally
-// (v0.21 fix — see this function's doc comment history below for the bug
-// this closes). The user scope is listed first, so checkAndCount reports a
-// user's own violation ahead of their group's when both are breached by the
-// same request.
+// limiter: a user scope and one group scope PER MEMBER GROUP (grp.
+// memberScopeGroups, auth.go — one for an ordinary, single-membership
+// group, more for a multi-group principal; UserConfig.Groups' own "each
+// member group's own limits apply as its own limit scope" rule,
+// llmgateway.go), ALWAYS all of them, unconditionally (v0.21 fix — see
+// this function's doc comment history below for the bug this closes).
+// The user scope is listed first, so checkAndCount reports a user's own
+// violation ahead of their group's when both are breached by the same
+// request.
 //
-// u.limits or grp.limits may be nil — that scope simply carries no limit for
-// checkAndCount (limits.go) to enforce, and checkAndCount's own nil-limits
-// check skips it during evaluation. It is NOT omitted from the slice: usage
+// u.limits or a member group's own limits may be nil — that scope simply
+// carries no limit for checkAndCount (limits.go) to enforce, and
+// checkAndCount's own nil-limits check skips it during evaluation. It is
+// NOT omitted from the slice: usage
 // accounting (checkAndCount's own counting half, and account) is
 // unconditional and must never be coupled to whether a limit happens to be
 // configured. Production bug (root-caused live, 2026-08-21): the previous
@@ -675,10 +680,13 @@ func (g *Gateway) runMeteredCall(sw *statusTrackingWriter, r *http.Request, scop
 // handleAdminAPI "calls this directly, without withTotalScope" — it never
 // called this function at all, on any version of this file.
 func buildLimitScopes(u *user, grp *group) []limitScope {
-	return []limitScope{
-		{limits: u.limits, kind: "user", id: u.name},
-		{limits: grp.limits, kind: "group", id: grp.name},
+	members := grp.memberScopeGroups()
+	scopes := make([]limitScope, 0, 1+len(members))
+	scopes = append(scopes, limitScope{limits: u.limits, kind: "user", id: u.name})
+	for _, mg := range members {
+		scopes = append(scopes, limitScope{limits: mg.limits, kind: "group", id: mg.name})
 	}
+	return scopes
 }
 
 // withTotalScope returns scopes with the synthetic total scope

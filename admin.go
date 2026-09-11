@@ -732,23 +732,28 @@ func (g *Gateway) serveAdminOverview(w http.ResponseWriter) {
 // dashboard can tell "explicitly restricted to these N" apart from
 // "unrestricted" without the payload growing with catalog size.
 type adminUsageEntryView struct {
-	Limits               *LimitsConfig `json:"limits,omitempty"`
-	Kind                 string        `json:"kind"`
-	ID                   string        `json:"id"`
-	GroupName            string        `json:"groupName,omitempty"`
-	Providers            []string      `json:"providers,omitempty"`
-	Models               []string      `json:"models,omitempty"`
-	MCPServers           []string      `json:"mcpServers,omitempty"`
-	Agents               []string      `json:"agents,omitempty"`
-	RequestsPerMinute    int64         `json:"requestsPerMinute"`
-	RequestsPerDay       int64         `json:"requestsPerDay"`
-	TokensInPerDay       int64         `json:"tokensInPerDay"`
-	TokensOutPerDay      int64         `json:"tokensOutPerDay"`
-	TokensInPerMonth     int64         `json:"tokensInPerMonth"`
-	TokensOutPerMonth    int64         `json:"tokensOutPerMonth"`
-	CostPerDayMicroUSD   int64         `json:"costPerDayMicroUsd"`
-	CostPerMonthMicroUSD int64         `json:"costPerMonthMicroUsd"`
-	StoreDown            bool          `json:"storeDown,omitempty"`
+	Limits    *LimitsConfig `json:"limits,omitempty"`
+	Kind      string        `json:"kind"`
+	ID        string        `json:"id"`
+	GroupName string        `json:"groupName,omitempty"`
+	// Groups is the user's full member group list (multi-group support)
+	// — set only for a user entry, same "user-only" convention GroupName
+	// above already follows. GroupName keeps the first group for
+	// back-compat; Groups is the complete membership.
+	Groups               []string `json:"groups,omitempty"`
+	Providers            []string `json:"providers,omitempty"`
+	Models               []string `json:"models,omitempty"`
+	MCPServers           []string `json:"mcpServers,omitempty"`
+	Agents               []string `json:"agents,omitempty"`
+	RequestsPerMinute    int64    `json:"requestsPerMinute"`
+	RequestsPerDay       int64    `json:"requestsPerDay"`
+	TokensInPerDay       int64    `json:"tokensInPerDay"`
+	TokensOutPerDay      int64    `json:"tokensOutPerDay"`
+	TokensInPerMonth     int64    `json:"tokensInPerMonth"`
+	TokensOutPerMonth    int64    `json:"tokensOutPerMonth"`
+	CostPerDayMicroUSD   int64    `json:"costPerDayMicroUsd"`
+	CostPerMonthMicroUSD int64    `json:"costPerMonthMicroUsd"`
+	StoreDown            bool     `json:"storeDown,omitempty"`
 }
 
 // adminUsageResponse is the full body of GET /admin/api/usage: every
@@ -863,6 +868,7 @@ func (g *Gateway) buildAdminUsage() adminUsageResponse {
 	for i, su := range userUsage {
 		users[i] = usageEntryView(su, userSummaries[i].limits)
 		users[i].GroupName = userSummaries[i].groupName
+		users[i].Groups = userSummaries[i].groups
 	}
 	groups := make([]adminUsageEntryView, len(groupUsage))
 	for i, su := range groupUsage {

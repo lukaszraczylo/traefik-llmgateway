@@ -240,6 +240,39 @@ also a construction error, never a panic (`providers.go`, `mcp_a2a.go`,
 
 ### `GroupConfig`
 
+A user can belong to more than one group (`UserConfig.group`/`groups`)
+and can additionally carry a personal `providers`/`models` grant of their
+own — see [`UserConfig`](#userconfig) for the full contract. In short:
+a request is authorized when it matches some **single** member group's
+own `providers` **and** `models` (or the personal grant's own), never a
+provider from one group combined with a model only a *different* group
+or the personal grant allows — providers/models from separate grants
+never merge. Each member group's own `limits` apply as its own,
+independent limit scope; `mcpServers`/`agents` are unioned across member
+groups (any one member's empty list makes the union allow-all too); the
+effective `cache` setting is `false` if any member sets it `false`, else
+`true` if any sets it `true`, else inherits; `cacheTTL` is the smallest
+positive `cacheTTL` configured among member groups. A user belonging to
+exactly one group with no personal grant is completely unaffected by any
+of this — it behaves exactly as before multi-group support existed.
+
+`passthroughPaths` is the one exception to the union rule above: it is
+**coupled to the provider AND the model**, not unioned across member
+groups. A native passthrough request to provider `P`, path `X`, and body
+model `M` is authorized when some **single** grant — a member group's
+own, or the personal grant, which has none of its own `passthroughPaths`
+and so borrows the user's *primary* group's (`group`, or `groups[0]` when
+`group` is empty) — allows `P` **and** `X` **and** (its own `models` list
+is empty, or `M` matches it). Unioning `passthroughPaths` the same way as
+the other lists, or checking the model against a *different* matching
+grant than the one that authorized the path, would both let joining
+another group (or adding a personal grant) authorize a combination no
+single grant ever granted — e.g. group `a` (`providers: [beta], models:
+[m1]`, no path restriction) joined with group `b` (`providers: [beta],
+passthroughPaths: [v1/chat/completions]`, no model restriction) must
+still deny `/beta/v1/files` with body `{"model":"m2"}`, even though `a`
+alone allows the path and `b` alone allows the model.
+
 | Field | Type | Default | Semantics |
 |---|---|---|---|
 | `limits` | `*LimitsConfig` | `nil` (unlimited) | |
@@ -288,10 +321,17 @@ own is governed purely by their group's — see
 | Field | Type | Default | Semantics |
 |---|---|---|---|
 | `name` | `string` | — | Required. |
-| `group` | `string` | — | Required; must reference a configured group, or construction fails. |
+| `group` | `string` | — | The user's primary group. May be left empty when `groups` below names at least one group instead — see `groups` for the "at least one" rule. Any non-empty value here or in `groups` must reference a configured group, or construction fails. |
+| `groups` | `[]string` | `[]` | Further member groups, alongside `group` — see [`GroupConfig`](#groupconfig) for the full multi-group authorization/limits/cache contract. Effective membership is `group` first (when non-empty), then `groups`, de-duplicated, order preserved. At least one group, from either field, is required — a user naming none at all fails construction. |
 | `apiKey` | `string` | — | Secret form (see [Secret forms](#secret-forms)); must resolve non-empty and unique across every inline **and** file-sourced user. |
-| `limits` | `*LimitsConfig` | `nil` (governed by group's limits alone) | When set, enforced alongside — not instead of — the group's own limits; both scopes are checked, and the request is refused by whichever is breached first. |
-| `admin` | `bool` | `false` | Grants access to the read-only admin dashboard — see [Admin](#admin). Works the same for an inline or a file-sourced user. An admin user is otherwise ordinary: their own keys, group, and limits still apply, including to the admin routes themselves. |
+| `providers` | `[]string` | `[]` | This user's own personal grant — access beyond whatever their group(s) already allow, glob-matched exactly like a group's own `providers`. Set alone (with `models` left empty), it grants **every** model on those providers — the same empty-`models`-means-all-models contract a group's own `models` carries. The personal grant exists at all only when `providers` is non-empty — leaving it empty/omitted never means "allow everything" on its own, regardless of `models`. |
+| `models` | `[]string` | `[]` | The personal grant's own model glob, narrowing `providers` above — same semantics as a group's own `models`. Requires `providers` to be non-empty too: a `models`-only personal grant (no `providers`) would reach every configured provider, not just the ones already covered — a construction error naming the user. |
+| `limits` | `*LimitsConfig` | `nil` (governed by group's limits alone) | When set, enforced alongside — not instead of — every member group's own limits (one independent scope per member group); the request is refused by whichever scope is breached first. The personal grant above carries no limits of its own. |
+| `admin` | `bool` | `false` | Grants access to the read-only admin dashboard — see [Admin](#admin). Works the same for an inline or a file-sourced user. An admin user is otherwise ordinary: their own keys, group(s), and limits still apply, including to the admin routes themselves. |
+
+A user belonging to exactly one group (`group` alone, `groups` empty)
+with no personal grant (`providers`/`models` both empty) behaves
+byte-identically to before multi-group support existed.
 
 ### `RedisConfig`
 
@@ -416,10 +456,24 @@ Secret (`users_file.go`):
 {
   "users": [
     {"name": "alice", "group": "engineering", "apiKey": "sk-llmgw-..."},
-    {"name": "bob", "group": "general", "apiKey": "env:LLMGW_KEY_BOB", "limits": {"requestsPerDay": 100}}
+    {"name": "bob", "group": "general", "apiKey": "env:LLMGW_KEY_BOB", "limits": {"requestsPerDay": 100}},
+    {
+      "name": "carol",
+      "group": "engineering",
+      "groups": ["friends"],
+      "apiKey": "env:LLMGW_KEY_CAROL",
+      "providers": ["gx10"],
+      "models": ["gx10/GLM-5.3-Flash-EXL3"]
+    }
   ]
 }
 ```
+
+Carol belongs to both `engineering` and `friends` (each group's own
+grant authorizes her independently — see [`GroupConfig`](#groupconfig)),
+**plus** a personal grant adding exactly one `gx10` model — an addition
+on top of whatever `engineering`/`friends` themselves already allow, not
+a cap on her overall access.
 
 A file user with the same `name` as an inline user overrides it (the
 inline entry is dropped from the merged set). Hot reload polls the file's

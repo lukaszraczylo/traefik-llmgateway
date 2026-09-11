@@ -2094,6 +2094,37 @@ func TestBuildLimitScopes_AlwaysBuildsBothScopes(t *testing.T) {
 	}
 }
 
+// TestBuildLimitScopes_MultiGroup_OneScopePerMemberGroup proves a
+// multi-group principal's own limit scopes are one PER MEMBER GROUP,
+// each under its own name and its own limits — never merged into one
+// combined scope, and never carrying the synthetic principal's own "+"
+// -joined name.
+func TestBuildLimitScopes_MultiGroup_OneScopePerMemberGroup(t *testing.T) {
+	a := &group{name: "eng", limits: &LimitsConfig{RequestsPerMinute: 5}}
+	b := &group{name: "ops", limits: &LimitsConfig{RequestsPerMinute: 9}}
+	grp := effectiveGroup([]*group{a, b}, nil)
+
+	u := &user{name: "u1"}
+	scopes := buildLimitScopes(u, grp)
+
+	if len(scopes) != 3 {
+		t.Fatalf("len(scopes) = %d, want 3 (1 user + 2 member groups)", len(scopes))
+	}
+	if scopes[0].kind != "user" || scopes[0].id != "u1" {
+		t.Errorf("scopes[0] = %+v, want the user scope first", scopes[0])
+	}
+	got := map[string]*LimitsConfig{}
+	for _, s := range scopes[1:] {
+		if s.kind != "group" {
+			t.Errorf("scope kind = %q, want %q", s.kind, "group")
+		}
+		got[s.id] = s.limits
+	}
+	if got["eng"] != a.limits || got["ops"] != b.limits {
+		t.Errorf("group scopes = %v, want each member group's own limits under its own name", got)
+	}
+}
+
 func TestUnifiedCostMicros(t *testing.T) {
 	u := usage{prompt: 1_000_000, completion: 1_000_000}
 

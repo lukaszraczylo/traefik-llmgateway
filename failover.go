@@ -156,16 +156,28 @@ func (m *modelRegistry) resolveWithCandidates(id string, grp *group) (resolveCan
 	primary := resolveCandidate{adapter: adapter, providerName: adapter.name(), upstreamModel: upstreamModel, canonical: canonical}
 
 	bareID := id
+	// extraID is id's own alias name, when id resolved via one (LOW-6
+	// fix, review round 2) — empty otherwise. Passed through to
+	// failoverCandidates below so a multi-grant principal's per-candidate
+	// check sees the SAME extra id candidate resolveAgainst itself
+	// checked to resolve the primary (resolveAliasTarget's own
+	// extraModelName): without it, a candidate provider reachable ONLY
+	// via a grant that names the alias itself — not the bare target id,
+	// nor "provider/bareID" — was wrongly excluded from the pool even
+	// though the primary resolution just succeeded through that exact
+	// same grant.
+	extraID := ""
 	if target, isAlias := m.aliases[id]; isAlias {
 		if _, _, ok := m.splitConfiguredProvider(target); ok {
 			return primary, nil, nil
 		}
 		bareID = target
+		extraID = id
 	} else if _, _, ok := m.splitConfiguredProvider(id); ok {
 		return primary, nil, nil
 	}
 
-	return primary, m.failoverCandidates(bareID, primary.providerName, grp), nil
+	return primary, m.failoverCandidates(bareID, extraID, primary.providerName, grp), nil
 }
 
 // resolvePrimaryOnly resolves id exactly like resolveWithCandidates'
@@ -191,20 +203,49 @@ func (m *modelRegistry) resolvePrimaryOnly(id string, grp *group) (resolveCandid
 // raw candidate pool orderedFailoverCandidates (below) narrows and
 // reorders further by health.
 //
-// Only grp.allowsProvider is re-checked per candidate: grp.allowsModel is
-// already known true from the primary winner's own successful resolve
-// call, and — for the identical bare id string every candidate here
-// shares by construction — allowsModel's result does not vary by
-// provider (auth.go's allowsModel takes no provider argument), so
-// re-checking it per candidate would be redundant work, not a
+// Only grp.allowsProvider is re-checked per candidate FOR A SINGLE-GRANT
+// PRINCIPAL (grp.grantCount() == 1 — the overwhelmingly common case,
+// unchanged from before the multi-group/personal-grant feature existed):
+// grp.allowsModel is already known true from the primary winner's own
+// successful resolve call, and — for the identical bare id string every
+// candidate here shares by construction — allowsModel's result does not
+// vary by provider (auth.go's allowsModel takes no provider argument),
+// so re-checking it per candidate would be redundant work, not a
 // correctness gap.
-func (m *modelRegistry) failoverCandidates(bareID, primaryProvider string, grp *group) []resolveCandidate {
+//
+// A MULTI-GRANT principal (more than one member group and/or a personal
+// grant) cannot use that shortcut: grp.allowsProvider(name) is a UNION
+// across every grant (auth.go's effectiveGroup), so it can report true
+// for a candidate whose OWN grant does not authorize this bareID at
+// all — the exact no-cross-grant-leak rule allowsProviderModel (auth.go)
+// exists to enforce. For that case, every candidate is checked via
+// allowsProviderModel(name, bareID, name+"/"+bareID, extraID) instead —
+// the same candidate shape resolveAgainst (registry.go) checks for a
+// direct request. extraID is resolveWithCandidates' own alias name (LOW-6
+// fix, review round 2) — empty for a non-alias resolution — passed
+// through unconditionally rather than only in the multi-grant branch,
+// so a future single-grant caller that starts needing it never has to
+// remember to add it; matchesGlob(nil-or-non-nil, "") is simply never
+// true against a real glob pattern, so an empty extraID here is a no-op.
+func (m *modelRegistry) failoverCandidates(bareID, extraID, primaryProvider string, grp *group) []resolveCandidate {
 	var extra []resolveCandidate
+	multiGrant := grp.grantCount() > 1
 	for _, name := range m.providerNames {
 		if name == primaryProvider {
 			continue
 		}
-		if !m.states[name].hasModel(bareID) || !grp.allowsProvider(name) {
+		if !m.states[name].hasModel(bareID) {
+			continue
+		}
+		if multiGrant {
+			ids := []string{bareID, name + "/" + bareID}
+			if extraID != "" {
+				ids = append(ids, extraID)
+			}
+			if !grp.allowsProviderModel(name, ids...) {
+				continue
+			}
+		} else if !grp.allowsProvider(name) {
 			continue
 		}
 		// canonical assigned to a local before the struct literal, matching

@@ -582,9 +582,11 @@ type modelRegistry struct {
 	// modelsCache holds one encoded GET /v1/models response body per
 	// group, tagged with the modelsGen it was built from (perf finding 3,
 	// 2026-08-2x audit: 15.9ms/21.3MB/552,884 allocs per uncached call at
-	// the live 1,033-model catalog) — see modelsJSON's own doc comment.
-	// Guarded by modelsCacheMu.
-	modelsCache   map[*group]modelsCacheEntry
+	// the live 1,033-model catalog) — see modelsJSON's own doc comment,
+	// including MEDIUM-3's (review round 2) own key-shape correction:
+	// keyed by group.modelsCacheKey()'s stable STRING signature, not a
+	// *group pointer. Guarded by modelsCacheMu.
+	modelsCache   map[string]modelsCacheEntry
 	providerNames []string
 	// modelsGen counts how many times finishRefresh (below) has recorded a
 	// discovery attempt for ANY provider — bumped unconditionally, success
@@ -691,7 +693,7 @@ func newModelRegistry(adapters map[string]providerAdapter, cfg *Config, log func
 		nowFn:         time.Now,
 		warned:        make(map[string]bool),
 		providerNames: make([]string, 0, len(adapters)),
-		modelsCache:   make(map[*group]modelsCacheEntry),
+		modelsCache:   make(map[string]modelsCacheEntry),
 	}
 	for name := range adapters {
 		m.providerNames = append(m.providerNames, name)
@@ -1087,6 +1089,48 @@ func (m *modelRegistry) splitConfiguredProvider(id string) (providerName, rest s
 	return "", "", false
 }
 
+// bareEntryWinner returns the first provider in owners (already sorted
+// and already PROVIDER-authorized for grp — bareWinner's own "visible",
+// or listFor's identical "visible") that grp additionally authorizes id
+// (plus any further candidate resolveAgainst would also check for this
+// specific call site, e.g. resolveAliasTarget's own alias name) ON —
+// HIGH-2 fix, review round 2. Shared by bareWinner (below) and listFor's
+// own bare-entry selection, so the two can never drift into picking a
+// different winner for the identical scenario.
+//
+// For a single-grant grp (grp.grantCount() <= 1 — the overwhelmingly
+// common case), this is exactly owners[0]: a single grant's own provider
+// authorization and model authorization are independent axes, already
+// checked SEPARATELY by every caller (resolveAgainst's own model check;
+// listFor's own grp.allowsProviderModel check on the returned winner), so
+// this never needs to consult id/extraIDs for that case at all — the
+// identical, unconditional "first provider-visible owner" bareWinner
+// always returned before this fix existed.
+//
+// For a MULTI-grant grp, owners[0] alone is not good enough: it might be
+// authorized for PROVIDER ONLY by one grant while a LATER owner in the
+// same list is authorized for BOTH provider and model by a DIFFERENT
+// grant. Before this fix, both bareWinner and listFor picked owners[0]
+// unconditionally and let the caller's own separate model check deny it
+// — silently taking away a model the principal could actually reach via
+// a later, still-visible owner. ok is false only when NO owner's own
+// grant covers both provider and (any of) id/extraIDs.
+func bareEntryWinner(owners []string, grp *group, id string, extraIDs ...string) (string, bool) {
+	if len(owners) == 0 {
+		return "", false
+	}
+	if grp.grantCount() <= 1 {
+		return owners[0], true
+	}
+	ids := append([]string{id}, extraIDs...)
+	for _, name := range owners {
+		if grp.allowsProviderModel(name, ids...) {
+			return name, true
+		}
+	}
+	return "", false
+}
+
 // bareWinner returns the provider that owns bare id when more than one
 // provider's known model set contains it: the first, in sorted
 // provider-name order, among providers grp is authorized to use (ruling
@@ -1094,34 +1138,59 @@ func (m *modelRegistry) splitConfiguredProvider(id string) (providerName, rest s
 // always return the GLOBAL sorted-first owning provider, so a caller was
 // denied a model they were actually entitled to whenever some OTHER,
 // group-invisible provider happened to sort earlier and also served that
-// id). grp.allowsModel is NOT consulted here — only allowsProvider; model-
-// level authorization still happens once, in resolveAgainst, against
-// whichever provider this returns.
+// id).
 //
-// When grp allows none of id's owning providers, this still returns the
-// GLOBAL sorted-first owner with ok true, exactly as the pre-fix version
-// always did, rather than reporting "not found": id is still a genuinely
-// known model, just not one this group may reach, and the caller
+// MULTI-GRANT (HIGH-2 fix, review round 2): for a principal with more
+// than one grant, "authorized to use" additionally requires the SAME
+// grant to also cover id (plus extraIDs, the caller's own further
+// resolveAgainst candidate — e.g. resolveAliasTarget passes its alias
+// name), via the shared bareEntryWinner helper above — not merely the
+// coarser grp.allowsProvider union check a single-grant principal still
+// uses. Before this fix, a multi-grant principal's bareWinner could pick
+// a provider visible only through a DIFFERENT grant than the one that
+// actually covers this model, which resolveAgainst then denied — even
+// when a LATER owning provider, further down the sorted list, was fully
+// authorized by one of the principal's own grants. Consulting the
+// eventual model check up front avoids that false deny. Single-grant
+// principals are unaffected: bareEntryWinner's own fast path keeps this
+// byte-identical to the original, provider-only preference.
+//
+// When grp allows none of id's owning providers at all (no grant even
+// matches the PROVIDER for any owner), this still returns the GLOBAL
+// sorted-first owner with ok true, exactly as the pre-fix version always
+// did, rather than reporting "not found": id is still a genuinely known
+// model, just not one this group may reach, and the caller
 // (resolveAgainst) must see it as known-but-denied (errModelDenied) —
 // the same outcome grp got before this fix — not the wrong
-// errModelUnknown a "no visible owner" result would produce.
-//
-// Single pass, same O(providerNames) bound as before: the fallback and the
-// grp-preferred search share one loop instead of two.
-func (m *modelRegistry) bareWinner(id string, grp *group) (string, bool) {
-	fallback, fallbackOK := "", false
+// errModelUnknown a "no visible owner" result would produce. The same
+// fallback covers the multi-grant case where grp allows the PROVIDER for
+// one or more owners but no single grant covers both that provider and
+// this model: bareEntryWinner reports no winner, so this falls back to
+// the first PROVIDER-visible owner instead (visible[0]) —
+// resolveAgainst will independently re-derive errModelDenied against it,
+// so the eventual error is unaffected, only which provider it is denied
+// against.
+func (m *modelRegistry) bareWinner(id string, grp *group, extraIDs ...string) (string, bool) {
+	var owners, visible []string
 	for _, name := range m.providerNames {
 		if !m.states[name].hasModel(id) {
 			continue
 		}
-		if !fallbackOK {
-			fallback, fallbackOK = name, true
-		}
+		owners = append(owners, name)
 		if grp.allowsProvider(name) {
-			return name, true
+			visible = append(visible, name)
 		}
 	}
-	return fallback, fallbackOK
+	if len(owners) == 0 {
+		return "", false
+	}
+	if len(visible) == 0 {
+		return owners[0], true
+	}
+	if winner, ok := bareEntryWinner(visible, grp, id, extraIDs...); ok {
+		return winner, true
+	}
+	return visible[0], true
 }
 
 // resolve maps a client-requested model id to the adapter that serves it.
@@ -1224,7 +1293,14 @@ func (m *modelRegistry) resolveAliasTarget(alias, target string, grp *group) (pr
 	if providerName, rest, ok := m.splitConfiguredProvider(target); ok {
 		return m.resolveAgainst(providerName, rest, target, alias, grp, notFound)
 	}
-	providerName, ok := m.bareWinner(target, grp)
+	// alias passed through as bareWinner's own extraIDs (HIGH-2 fix,
+	// review round 2): the SAME extraModelName candidate resolveAgainst
+	// itself checks two lines below — a multi-grant principal whose only
+	// grant reaching some owning provider does so via the alias's own
+	// name (not target's bare form) must still be preferred over a
+	// grant-mismatched, merely PROVIDER-visible owner earlier in sorted
+	// order.
+	providerName, ok := m.bareWinner(target, grp, alias)
 	if !ok {
 		return nil, "", "", notFound
 	}
@@ -1307,11 +1383,17 @@ func (m *modelRegistry) resolveAgainst(providerName, upstreamModel, requestedID,
 	if !m.states[providerName].hasModel(upstreamModel) {
 		return nil, "", "", notFoundErr
 	}
-	allowed := grp.allowsModel(requestedID) || grp.allowsModel(upstreamModel)
+	// allowsProviderModel (multi-group/personal-grant feature, auth.go)
+	// requires provider AND model to both come from the SAME grant — the
+	// no-cross-grant-leak rule. For an ordinary single-grant group this
+	// is byte-identical to the combined "model matches (requestedID OR
+	// upstreamModel OR extraModelName) AND provider matches" check this
+	// replaced.
+	ids := []string{requestedID, upstreamModel}
 	if extraModelName != "" {
-		allowed = allowed || grp.allowsModel(extraModelName)
+		ids = append(ids, extraModelName)
 	}
-	if !allowed || !grp.allowsProvider(providerName) {
+	if !grp.allowsProviderModel(providerName, ids...) {
 		return nil, "", "", errModelDenied
 	}
 	// canonical is assigned to a local before the return, not inlined into
@@ -1385,18 +1467,31 @@ func (m *modelRegistry) warnf(msg string) {
 // the identical cached bytes without re-walking every provider's model
 // set or re-marshaling.
 //
-// Cached per *group pointer, not by name or any other derived key:
-// authStore builds every group once, at construction (auth.go's
-// newAuthStore), and never rebuilds or replaces that map afterward — a
-// config reload constructs an entirely new Gateway (and so a new
-// modelRegistry with its own empty modelsCache), so a *group pointer here
-// can never alias a different group's catalog, either within one
-// registry's lifetime or across a reload.
+// Cached by grp.modelsCacheKey()'s stable STRING signature (MEDIUM-3
+// fix, review round 2), NOT by *group pointer identity: that assumption
+// held for every ordinary, named group — authStore builds those once, at
+// construction (auth.go's newAuthStore), and never rebuilds or replaces
+// them afterward, so a config reload (which constructs an entirely new
+// Gateway, and so a new modelRegistry with its own empty modelsCache) was
+// never actually the risk. It broke for a SYNTHETIC multi-group/
+// personal-grant principal (effectiveGroup, auth.go): that function
+// allocates a FRESH *group on every call, so authStore.replaceFileUsers
+// (users_file.go's hot-reload path) rebuilds a semantically identical
+// principal as a brand-new pointer on every reload — a *group-pointer
+// key left the OLD pointer's entry permanently unreachable, growing this
+// cache without bound across repeated reloads even when nothing about
+// the user's membership changed (reviewer-reproduced: 5 identical
+// reloads of one two-group user left 6 entries). group.modelsCacheKey()
+// derives a signature from what actually determines this cache's VALUE
+// (member group names plus the personal grant's own providers/models),
+// so two principals with identical membership — including the SAME
+// principal rebuilt across reloads — always share one entry.
 func (m *modelRegistry) modelsJSON(grp *group) []byte {
 	gen := atomic.LoadInt64(&m.modelsGen)
+	key := grp.modelsCacheKey()
 
 	m.modelsCacheMu.Lock()
-	if entry, ok := m.modelsCache[grp]; ok && entry.gen == gen {
+	if entry, ok := m.modelsCache[key]; ok && entry.gen == gen {
 		m.modelsCacheMu.Unlock()
 		return entry.body
 	}
@@ -1423,7 +1518,7 @@ func (m *modelRegistry) modelsJSON(grp *group) []byte {
 	body = append(body, '\n')
 
 	m.modelsCacheMu.Lock()
-	m.modelsCache[grp] = modelsCacheEntry{gen: gen, body: body}
+	m.modelsCache[key] = modelsCacheEntry{gen: gen, body: body}
 	m.modelsCacheMu.Unlock()
 	return body
 }
@@ -1494,8 +1589,24 @@ func (m *modelRegistry) listFor(grp *group) []map[string]any {
 		// address it once the alias owns the bare id.
 		_, shadowed := aliasEntries[id]
 
-		groupWinner := visible[0]
-		if grp.allowsModel(id) && !shadowed {
+		// bareEntryWinner (HIGH-2 fix, review round 2), the same shared
+		// helper bareWinner uses: for a single-grant grp this is exactly
+		// visible[0] (today's pre-fix behavior); for a multi-grant grp it
+		// skips a merely PROVIDER-visible owner whose OWN grant does not
+		// also cover id, in favor of a later visible owner whose grant
+		// covers both — never silently dropping a model the principal can
+		// actually reach through some other visible provider.
+		groupWinner, gwOK := bareEntryWinner(visible, grp, id)
+		// allowsProviderModel (multi-group/personal-grant feature,
+		// auth.go), checked against groupWinner specifically — the
+		// no-cross-grant-leak rule: a grant that allows some OTHER
+		// visible provider must never authorize THIS entry, which is
+		// attributed to groupWinner alone. Redundant with
+		// bareEntryWinner's own multi-grant check when gwOK came from
+		// that branch (harmless — matchesGlob is cheap), but still
+		// REQUIRED for the single-grant fast path, which never consults
+		// id at all.
+		if gwOK && grp.allowsProviderModel(groupWinner, id) && !shadowed {
 			out = append(out, modelObject(id, groupWinner, m.resolveMetaFor(groupWinner, id)))
 		}
 		if len(visible) < 2 && !shadowed {
@@ -1505,10 +1616,10 @@ func (m *modelRegistry) listFor(grp *group) []map[string]any {
 			pid := p + "/" + id
 			// allowsModel does no prefix-stripping (auth.go): check both the
 			// prefixed form and its bare suffix, same as resolveAgainst does
-			// for the equivalent client request. allowsProvider(p) is already
-			// established by p's membership in visible, so it is not
-			// re-checked per candidate here.
-			if grp.allowsModel(pid) || grp.allowsModel(id) {
+			// for the equivalent client request — allowsProviderModel(p, ...)
+			// requires BOTH candidates come from a grant that also allows p
+			// itself (no cross-grant leak).
+			if grp.allowsProviderModel(p, pid, id) {
 				out = append(out, modelObject(pid, p, m.resolveMetaFor(p, id)))
 			}
 		}

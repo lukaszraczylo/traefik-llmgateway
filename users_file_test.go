@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -169,6 +170,46 @@ func TestUsersFile_Load_ValidFile(t *testing.T) {
 	}
 }
 
+// TestUsersFile_Load_GroupsProvidersModels proves the multi-group/
+// personal-grant fields (UserConfig.Groups/Providers/Models,
+// llmgateway.go) round-trip through the users file's JSON shape exactly
+// like every other UserConfig field.
+func TestUsersFile_Load_GroupsProvidersModels(t *testing.T) {
+	dir := t.TempDir()
+	fp := writeUsersFile(t, dir, "users.json", []*UserConfig{
+		{
+			Name:      "carol",
+			Group:     "friends",
+			Groups:    []string{"home"},
+			APIKey:    "sk-carol",
+			Providers: []string{"gx10"},
+			Models:    []string{"gx10/GLM-5.3-Flash-EXL3"},
+		},
+	})
+
+	uf := newUsersFile(fp)
+	users, err := uf.load()
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if len(users) != 1 {
+		t.Fatalf("want 1 user, got %d", len(users))
+	}
+	got := users[0]
+	if got.Group != "friends" {
+		t.Errorf("Group = %q, want %q", got.Group, "friends")
+	}
+	if !slices.Equal(got.Groups, []string{"home"}) {
+		t.Errorf("Groups = %v, want [home]", got.Groups)
+	}
+	if !slices.Equal(got.Providers, []string{"gx10"}) {
+		t.Errorf("Providers = %v, want [gx10]", got.Providers)
+	}
+	if !slices.Equal(got.Models, []string{"gx10/GLM-5.3-Flash-EXL3"}) {
+		t.Errorf("Models = %v, want [gx10/GLM-5.3-Flash-EXL3]", got.Models)
+	}
+}
+
 func TestUsersFile_Load_MalformedJSON_ReturnsError(t *testing.T) {
 	dir := t.TempDir()
 	fp := filepath.Join(dir, "bad.json")
@@ -328,5 +369,81 @@ func TestAuthStore_MaybeReload_FileUserSameNameAsInline_FileWins(t *testing.T) {
 	u, _, ok := identifyWithKey(a, "sk-file-alice")
 	if !ok || u.name != "alice" {
 		t.Fatalf("want file alice identifiable, got %v ok=%v", u, ok)
+	}
+}
+
+// TestAuthStore_MaybeReload_MultiGroupUser_RebuiltPrincipalStillAuthorizesCorrectly
+// is LOW-7's regression coverage (review round 2): a users-file hot
+// reload rebuilds EVERY principal from scratch (replaceFileUsers calls
+// buildEntry fresh for each user) — a multi-group user's rebuilt
+// principal must still resolve exactly the same union of member-group
+// authorization after a reload as before it. This is functional
+// correctness, distinct from MEDIUM-3's own modelsCache-growth-bound
+// test: that test proves the CACHE stays bounded across reloads; this
+// one proves the REBUILT principal itself still authorizes correctly.
+func TestAuthStore_MaybeReload_MultiGroupUser_RebuiltPrincipalStillAuthorizesCorrectly(t *testing.T) {
+	dir := t.TempDir()
+	fp := writeUsersFile(t, dir, "users.json", []*UserConfig{
+		{Name: "carol", Group: "eng", Groups: []string{"ops"}, APIKey: "sk-carol"},
+	})
+
+	cfg := &Config{
+		Providers: map[string]*ProviderConfig{"openai": {Type: "openai", APIKey: "k"}},
+		Groups: map[string]*GroupConfig{
+			"eng": {Providers: []string{"alpha"}},
+			"ops": {Providers: []string{"beta"}},
+		},
+	}
+	a, err := newAuthStore(cfg)
+	if err != nil {
+		t.Fatalf("newAuthStore: %v", err)
+	}
+	uf := newUsersFile(fp)
+	initial, err := uf.load()
+	if err != nil {
+		t.Fatalf("initial load: %v", err)
+	}
+	if err := a.replaceFileUsers(initial); err != nil {
+		t.Fatalf("initial replaceFileUsers: %v", err)
+	}
+
+	clock := &fakeClock{now: time.Unix(1_700_000_000, 0)}
+	a.usersFile = uf
+	a.log = &stubLogger{}
+	a.nowFn = clock.Now
+	if info, statErr := os.Stat(fp); statErr == nil {
+		a.lastModTime = info.ModTime()
+	}
+	a.lastCheck = clock.Now()
+
+	_, grpBefore, ok := identifyWithKey(a, "sk-carol")
+	if !ok {
+		t.Fatal("identify failed before reload")
+	}
+	if !grpBefore.allowsProvider("alpha") || !grpBefore.allowsProvider("beta") {
+		t.Fatalf("sanity: want both alpha and beta reachable before reload, providers=%v", grpBefore.providers)
+	}
+
+	// Force a real reload of the IDENTICAL content — buildEntry rebuilds
+	// carol's principal as a brand-new *group either way (effectiveGroup
+	// never caches or reuses a synthetic principal across calls).
+	writeUsersDoc(t, fp, []*UserConfig{
+		{Name: "carol", Group: "eng", Groups: []string{"ops"}, APIKey: "sk-carol"},
+	}, time.Now().Add(time.Hour))
+	clock.Advance(reloadEvery + time.Second)
+	a.maybeReload()
+
+	_, grpAfter, ok := identifyWithKey(a, "sk-carol")
+	if !ok {
+		t.Fatal("identify failed after reload")
+	}
+	if grpAfter == grpBefore {
+		t.Fatal("sanity: want a NEW *group pointer after reload (buildEntry rebuilds every principal from scratch) — otherwise this test never exercises the rebuild path at all")
+	}
+	if !grpAfter.allowsProvider("alpha") || !grpAfter.allowsProvider("beta") {
+		t.Errorf("want both alpha and beta still reachable after reload, providers=%v", grpAfter.providers)
+	}
+	if grpAfter.allowsProvider("gamma") {
+		t.Error("want gamma still denied after reload")
 	}
 }

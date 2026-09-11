@@ -543,6 +543,101 @@ func run() error {
 	}))
 	defer bareWinnerBUpstream.Close()
 
+	// multiGroupBUpstream backs exerciseMultiGroupPersonalGrant (multi-
+	// group/personal-grant feature, UserConfig.Groups/Providers/Models,
+	// llmgateway.go): the ONLY grant that reaches "multi-group-b" at all
+	// is the harness user's own PERSONAL grant (run()'s "users"
+	// override), restricted to multiGroupAllowedModelID alone — neither
+	// of the user's two member groups (multiGroupEngGroupName/
+	// multiGroupOpsGroupName) names "multi-group-b" in their own
+	// providers list. A CORRECT per-grant check must still deny
+	// multiGroupDeniedModelID here; a naive "any grant allows the
+	// provider (union) AND any grant allows the model (union)" check
+	// would instead WRONGLY ALLOW it — neither member group restricts its
+	// own models at all, so the models-side union collapses to "allow
+	// anything," and pairing that with the personal grant's own
+	// providers-side reach to "multi-group-b" authorizes a combination
+	// neither grant alone ever granted — see this const block's own doc
+	// comments below for the full shape.
+	multiGroupBHits := new(int64)
+	multiGroupBUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt64(multiGroupBHits, 1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"id":"c-multi-group","object":"chat.completion","model":"` + multiGroupAllowedModelID + `","choices":[{"index":0,"message":{"role":"assistant","content":"served by multi-group-b"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`))
+	}))
+	defer multiGroupBUpstream.Close()
+
+	// multiGroupCUpstream/multiGroupSharedXUpstream back
+	// exerciseMultiGroupBareWinnerFailoverAndPassthroughPaths (LOW-8,
+	// review round 2 — extends the multi-group/personal-grant probe
+	// above to also cover HIGH-1's provider-coupled passthroughPaths fix
+	// and HIGH-2's per-grant bareWinner/failover fix under the REAL
+	// interpreter). Both serve multiGroupSharedModelID as a BARE id
+	// alongside "multi-group-b" (all three configured below), the exact
+	// three-owner collision shape HIGH-2's own compiled regression test
+	// (TestModelRegistry_Resolve_MultiGrant_BareWinnerPrefersGrantThatActuallyAuthorizes)
+	// drives, here reachable only through the harness user's THREE
+	// distinct grants (multiGroupEngGroupName, multiGroupOpsGroupName,
+	// and the personal grant) — sorted provider-name order is
+	// "multi-group-b" < "multi-group-c" < "multi-group-shared-x", and
+	// only the personal grant (restricted to multiGroupAllowedModelID
+	// alone) reaches "multi-group-b", the sorted-first owner, so a
+	// pre-fix bareWinner picks it and wrongly denies the whole request
+	// even though multiGroupOpsGroupName's own unrestricted grant on
+	// "multi-group-c" would happily serve it.
+	//
+	// multiGroupCUpstream also DOUBLES as the primary-failure trigger for
+	// the failover half of that same assertion: it always 500s a chat-
+	// completions call (path-detected below) specifically so
+	// runMeteredCall's own failover loop falls through past the correctly
+	// -chosen primary ("multi-group-c") to the next candidate
+	// ("multi-group-shared-x", reachable via multiGroupEngGroupName's own
+	// unrestricted grant) — while any OTHER path it receives (a native
+	// passthrough request) succeeds normally, backing the HIGH-1
+	// passthroughPaths assertion multiGroupOpsGroupName's own
+	// "passthroughPaths" override (below) restricts.
+	multiGroupCChatHits := new(int64)
+	multiGroupCPassthroughHits := new(int64)
+	multiGroupCUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/chat/completions" {
+			atomic.AddInt64(multiGroupCChatHits, 1)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"error":{"message":"multi-group-c chat completions always fails, forcing failover","type":"server_error"}}`))
+			return
+		}
+		atomic.AddInt64(multiGroupCPassthroughHits, 1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer multiGroupCUpstream.Close()
+	multiGroupSharedXHits := new(int64)
+	multiGroupSharedXUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/chat/completions" {
+			atomic.AddInt64(multiGroupSharedXHits, 1)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"id":"c-multi-group-shared-x","object":"chat.completion","model":"` + multiGroupSharedModelID + `","choices":[{"index":0,"message":{"role":"assistant","content":"served by multi-group-shared-x"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer multiGroupSharedXUpstream.Close()
+
+	// round3SharedUpstream backs exerciseRound3ModelAndPathFromSameGrant
+	// (HIGH fix, review round 3): a native passthrough request never
+	// carries a translated "/v1/chat/completions" path the way the
+	// chat-completions route does (handlePassthrough forwards rest
+	// verbatim), so this upstream only ever needs to record that it was
+	// reached at all — both P1 and P2 (this probe's own doc comment) must
+	// deny before ever calling it.
+	round3PassthroughHits := new(int64)
+	round3PassthroughUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt64(round3PassthroughHits, 1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer round3PassthroughUpstream.Close()
+
 	// failover.enabled must be set explicitly here: FailoverConfig.Enabled
 	// defaults to false (coordinator ruling — a version upgrade with no
 	// config change must preserve prior behavior), so without this the
@@ -591,13 +686,52 @@ func run() error {
 		// failover-a/failover-b: same collision shape, different fix under
 		// test.
 		`"bare-winner-a":{"type":"openai","baseUrl":"` + bareWinnerAUpstream.URL + `","apiKey":"sk-up","models":["` + bareWinnerModelID + `"]},` +
-		`"bare-winner-b":{"type":"openai","baseUrl":"` + bareWinnerBUpstream.URL + `","apiKey":"sk-up","models":["` + bareWinnerModelID + `"]}},` +
-		// groups: ADDS bareWinnerGroupName to the map Unmarshal already
-		// populated from .traefik.yml's own testData.groups.default — map
-		// keys merge (run()'s own doc comment, above, on why "brk" and the
-		// other new provider keys above are additive rather than
-		// replacing), so "default" (providers: [], allow-all) is untouched.
-		`"groups":{"` + bareWinnerGroupName + `":{"providers":["bare-winner-b"]}},` +
+		`"bare-winner-b":{"type":"openai","baseUrl":"` + bareWinnerBUpstream.URL + `","apiKey":"sk-up","models":["` + bareWinnerModelID + `"]},` +
+		// "multi-group-b" backs exerciseMultiGroupPersonalGrant — see
+		// multiGroupBUpstream's own doc comment above. Its models list
+		// ALSO includes multiGroupSharedModelID (LOW-8 extension) so it
+		// participates as the (wrongly-preferred, pre-fix) sorted-first
+		// owner in the bareWinner/failover collision
+		// exerciseMultiGroupBareWinnerFailoverAndPassthroughPaths drives
+		// — see multiGroupCUpstream's own doc comment above for the full
+		// three-provider shape.
+		`"multi-group-b":{"type":"openai","baseUrl":"` + multiGroupBUpstream.URL + `","apiKey":"sk-up","models":["only","other","` + multiGroupSharedModelID + `"]},` +
+		`"multi-group-c":{"type":"openai","baseUrl":"` + multiGroupCUpstream.URL + `","apiKey":"sk-up","models":["` + multiGroupSharedModelID + `"]},` +
+		`"multi-group-shared-x":{"type":"openai","baseUrl":"` + multiGroupSharedXUpstream.URL + `","apiKey":"sk-up","models":["` + multiGroupSharedModelID + `"]},` +
+		// "round3-shared" backs exerciseRound3ModelAndPathFromSameGrant
+		// (HIGH fix, review round 3) — a single real provider both P1's
+		// and P2's own groups reach, native passthrough only (no Models
+		// list needed: passthrough authorization is purely group-driven,
+		// never consults a provider's own configured Models).
+		`"round3-shared":{"type":"openai","baseUrl":"` + round3PassthroughUpstream.URL + `","apiKey":"sk-up"}},` +
+		// groups: ADDS bareWinnerGroupName and the two exerciseMultiGroupPersonalGrant
+		// member groups to the map Unmarshal already populated from
+		// .traefik.yml's own testData.groups.default — map keys merge
+		// (run()'s own doc comment, above, on why "brk" and the other new
+		// provider keys above are additive rather than replacing), so
+		// "default" (providers: [], allow-all) is untouched. Neither
+		// multiGroupEngGroupName nor multiGroupOpsGroupName names
+		// "multi-group-b" — only the harness user's own PERSONAL grant
+		// (below) does — so a correct implementation reaches "multi-group-b"
+		// through that personal grant alone, not through either group.
+		// multiGroupOpsGroupName's own "passthroughPaths" restricts ITS
+		// OWN provider ("multi-group-c") to multiGroupAllowedPathID alone
+		// (LOW-8/HIGH-1 extension) — multiGroupEngGroupName carries no
+		// such restriction on its own provider ("multi-group-shared-x"),
+		// and the fix under test (auth.go's
+		// allowsPassthroughPathForProvider) must keep the two from
+		// leaking into each other.
+		// round3P1AGroupName/round3P1BGroupName (P1) and
+		// round3P2HomeGroupName/round3P2FriendsGroupName (P2) — see
+		// exerciseRound3ModelAndPathFromSameGrant's own doc comment for the
+		// full shape each pair reproduces.
+		`"groups":{"` + bareWinnerGroupName + `":{"providers":["bare-winner-b"]},` +
+		`"` + multiGroupEngGroupName + `":{"providers":["multi-group-shared-x"]},` +
+		`"` + multiGroupOpsGroupName + `":{"providers":["multi-group-c"],"passthroughPaths":["` + multiGroupAllowedPathID + `"]},` +
+		`"` + round3P1AGroupName + `":{"providers":["round3-shared"],"models":["` + round3ModelID + `"]},` +
+		`"` + round3P1BGroupName + `":{"providers":["round3-shared"],"passthroughPaths":["v1/chat/completions"]},` +
+		`"` + round3P2HomeGroupName + `":{"providers":["round3-alpha"]},` +
+		`"` + round3P2FriendsGroupName + `":{"providers":["round3-shared"],"passthroughPaths":["v1/chat/completions"]}},` +
 		// modelMeta (feature v0.23): a config-override entry for
 		// testDataWantModel, so exerciseHandler's GET /v1/models
 		// assertion below proves resolveModelMeta's config-override
@@ -645,7 +779,25 @@ func run() error {
 		// exerciseBareWinnerGroupAware's own — group bareWinnerGroupName,
 		// authorized for "bare-winner-b" only (the "groups" override
 		// above).
-		`"admin":{"enabled":true},"users":{"inline":[{"name":"tester","group":"default","apiKey":"` + testDataUserAPIKey + `"},{"name":"admin1","group":"default","apiKey":"` + attemptAccountingAdminAPIKey + `","admin":true},{"name":` + string(trickyNameJSON) + `,"group":"default","apiKey":"sk-tricky"},{"name":"bare-winner-friend","group":"` + bareWinnerGroupName + `","apiKey":"` + bareWinnerFriendAPIKey + `"}]}}`
+		//
+		// The fifth inline user (multiGroupUserAPIKey) is
+		// exerciseMultiGroupPersonalGrant's own — member of BOTH
+		// multiGroupEngGroupName and multiGroupOpsGroupName (group +
+		// groups, multi-group support), plus a personal grant
+		// (providers/models) restricting "multi-group-b" to
+		// multiGroupAllowedModelID alone.
+		//
+		// The sixth inline user (round3P1UserAPIKey) is
+		// exerciseRound3ModelAndPathFromSameGrant's own P1 principal —
+		// member of BOTH round3P1AGroupName (models-restricted) and
+		// round3P1BGroupName (paths-restricted), no personal grant.
+		//
+		// The seventh inline user (round3P2UserAPIKey) is that same
+		// probe's own P2 principal — member of round3P2HomeGroupName
+		// (primary, unrestricted) and round3P2FriendsGroupName
+		// (paths-restricted), plus a personal grant restricting
+		// "round3-shared" to round3PersonalModelID alone.
+		`"admin":{"enabled":true},"users":{"inline":[{"name":"tester","group":"default","apiKey":"` + testDataUserAPIKey + `"},{"name":"admin1","group":"default","apiKey":"` + attemptAccountingAdminAPIKey + `","admin":true},{"name":` + string(trickyNameJSON) + `,"group":"default","apiKey":"sk-tricky"},{"name":"bare-winner-friend","group":"` + bareWinnerGroupName + `","apiKey":"` + bareWinnerFriendAPIKey + `"},{"name":"multi-group-user","group":"` + multiGroupEngGroupName + `","groups":["` + multiGroupOpsGroupName + `"],"apiKey":"` + multiGroupUserAPIKey + `","providers":["multi-group-b"],"models":["` + multiGroupAllowedModelID + `"]},{"name":"round3-p1-user","group":"` + round3P1AGroupName + `","groups":["` + round3P1BGroupName + `"],"apiKey":"` + round3P1UserAPIKey + `"},{"name":"round3-p2-user","group":"` + round3P2HomeGroupName + `","groups":["` + round3P2FriendsGroupName + `"],"apiKey":"` + round3P2UserAPIKey + `","providers":["round3-shared"],"models":["` + round3PersonalModelID + `"]}]}}`
 	if err = json.Unmarshal([]byte(attemptAccountingOverride), cfgVal.Interface()); err != nil {
 		return fmt.Errorf("decode attempt-accounting harness override into the interpreted Config: %w", err)
 	}
@@ -711,6 +863,30 @@ func run() error {
 	// probe's /metrics assertions, which are all keyed to OTHER provider/
 	// model names.
 	if err := exerciseBareWinnerGroupAware(handler, bareWinnerAHits); err != nil {
+		return err
+	}
+	// exerciseMultiGroupPersonalGrant (multi-group/personal-grant feature)
+	// runs right after exerciseBareWinnerGroupAware, for the identical
+	// reason: it drives its own, freshly named provider/groups/user, so it
+	// cannot perturb exerciseBreaker's "brk"-specific hit counting or any
+	// later probe's /metrics assertions, which are all keyed to OTHER
+	// provider/model names.
+	if err := exerciseMultiGroupPersonalGrant(handler, multiGroupBHits); err != nil {
+		return err
+	}
+	// exerciseMultiGroupBareWinnerFailoverAndPassthroughPaths (LOW-8,
+	// review round 2) runs right after exerciseMultiGroupPersonalGrant,
+	// against the SAME multi-group-user principal but its own, freshly
+	// named providers/models/paths, so it cannot perturb any earlier or
+	// later probe's own hit counters or /metrics assertions.
+	if err := exerciseMultiGroupBareWinnerFailoverAndPassthroughPaths(handler, multiGroupBHits, multiGroupCChatHits, multiGroupCPassthroughHits, multiGroupSharedXHits); err != nil {
+		return err
+	}
+	// exerciseRound3ModelAndPathFromSameGrant (HIGH fix, review round 3)
+	// runs right after, against its own, freshly named P1/P2 providers/
+	// groups/users, so it cannot perturb any earlier or later probe's own
+	// hit counters or /metrics assertions.
+	if err := exerciseRound3ModelAndPathFromSameGrant(handler, round3PassthroughHits); err != nil {
 		return err
 	}
 	// exerciseBreaker (feat/provider-health, adversarial-review round 2):
@@ -799,6 +975,100 @@ const bareWinnerGroupName = "bare-winner-friends"
 // bareWinnerFriendAPIKey authenticates bareWinnerGroupName's one inline
 // user (run()'s "users" override).
 const bareWinnerFriendAPIKey = "sk-bare-winner-friend" // #nosec G101 -- test fixture literal, not a real credential
+
+// multiGroupEngGroupName/multiGroupOpsGroupName are the two member groups
+// exerciseMultiGroupPersonalGrant's own inline user belongs to
+// (UserConfig.Group/Groups, llmgateway.go, run()'s "users" override) —
+// neither names "multi-group-b" in its own "groups" override providers
+// list, so the only grant reaching it at all is the user's own personal
+// one (multiGroupUserAPIKey's own doc comment, below).
+const (
+	multiGroupEngGroupName = "multi-group-eng"
+	multiGroupOpsGroupName = "multi-group-ops"
+)
+
+// multiGroupUserAPIKey authenticates exerciseMultiGroupPersonalGrant's
+// own inline user: member of BOTH multiGroupEngGroupName and
+// multiGroupOpsGroupName (run()'s "users" override), plus a personal
+// grant (Providers/Models) restricting "multi-group-b" to
+// multiGroupAllowedModelID alone.
+const multiGroupUserAPIKey = "sk-multi-group-user" // #nosec G101 -- test fixture literal, not a real credential
+
+// multiGroupAllowedModelID/multiGroupDeniedModelID are two ids served by
+// the SAME real provider ("multi-group-b", run()'s "providers" override):
+// the personal grant's own Models list (run()'s "users" override) names
+// only the "only" form, so the "other" form must resolve as
+// errModelDenied — proving the multi-group/personal-grant feature's
+// per-grant (not per-union) model check runs correctly under Yaegi, not
+// merely compiled (registry_test.go's own
+// TestModelRegistry_Resolve_MultiGroup_CrossGrantLeakDenied covers the
+// identical rule compiled).
+const (
+	multiGroupAllowedModelID = "multi-group-b/only"
+	multiGroupDeniedModelID  = "multi-group-b/other"
+)
+
+// multiGroupSharedModelID is the BARE id (no provider prefix) all three
+// of "multi-group-b", "multi-group-c", and "multi-group-shared-x" serve
+// (run()'s "providers" override) — LOW-8's extension of this probe
+// (review round 2), exercising HIGH-2's bareWinner/listFor/failover fix
+// under the REAL interpreter: sorted provider-name order is
+// "multi-group-b" < "multi-group-c" < "multi-group-shared-x", and only
+// the harness user's PERSONAL grant reaches "multi-group-b" — restricted
+// to multiGroupAllowedModelID alone, which does NOT cover this bare id —
+// so a pre-fix, union-based bareWinner picks "multi-group-b" first and
+// wrongly denies the whole request, even though multiGroupOpsGroupName's
+// own unrestricted grant on "multi-group-c" (sorted next) would happily
+// serve it. multiGroupCUpstream's own doc comment (above) has the full
+// three-provider shape, including how it doubles as the failover
+// trigger.
+const multiGroupSharedModelID = "multi-group-shared"
+
+// multiGroupAllowedPathID is the one native-passthrough REST path
+// multiGroupOpsGroupName's own "passthroughPaths" override (run()'s
+// "groups" override) allows on ITS OWN provider ("multi-group-c") —
+// LOW-8's HIGH-1 extension (review round 2): multiGroupEngGroupName
+// carries no such restriction on its own, DIFFERENT provider
+// ("multi-group-shared-x"), and
+// exerciseMultiGroupBareWinnerFailoverAndPassthroughPaths (below) proves
+// the two never leak into each other under the REAL interpreter — the
+// identical rule routes_passthrough_test.go's own
+// TestHandlePassthrough_MultiGroup_PassthroughPathsNeverUnionAcrossProviders
+// covers compiled.
+const multiGroupAllowedPathID = "v1/allowed-path"
+
+// multiGroupDeniedPathID is any path NOT in multiGroupOpsGroupName's own
+// "passthroughPaths" list — must be denied on "multi-group-c" regardless
+// of multiGroupEngGroupName's own unrestricted paths on its DIFFERENT
+// provider.
+const multiGroupDeniedPathID = "v1/other-path"
+
+// round3P1AGroupName/round3P1BGroupName back
+// exerciseRound3ModelAndPathFromSameGrant's own P1 reproduction (HIGH
+// fix, review round 3): group A restricts models (round3ModelID) but not
+// paths; group B restricts paths ("v1/chat/completions") but not models
+// — both cover the SAME provider ("round3-shared"). round3P1UserAPIKey's
+// own principal belongs to BOTH, no personal grant.
+const (
+	round3P1AGroupName = "round3-p1-a"
+	round3P1BGroupName = "round3-p1-b"
+	round3P1UserAPIKey = "sk-round3-p1-user" // #nosec G101 -- test fixture literal, not a real credential
+	round3ModelID      = "round3-m1"
+)
+
+// round3P2HomeGroupName/round3P2FriendsGroupName back
+// exerciseRound3ModelAndPathFromSameGrant's own P2 reproduction: "home"
+// is the PRIMARY group (no path restriction of its own); "friends"
+// restricts paths on "round3-shared" but not models.
+// round3P2UserAPIKey's own principal belongs to both, PLUS a personal
+// grant restricting "round3-shared" to round3PersonalModelID alone —
+// borrowing home's own unrestricted paths.
+const (
+	round3P2HomeGroupName    = "round3-p2-home"
+	round3P2FriendsGroupName = "round3-p2-friends"
+	round3P2UserAPIKey       = "sk-round3-p2-user" // #nosec G101 -- test fixture literal, not a real credential
+	round3PersonalModelID    = "round3-shared/m1"
+)
 
 // mcpProbeServerName is the federated MCP server run() configures against
 // mcpProbeUpstream, and mcpProbeToolName is a tool id carrying its
@@ -2207,6 +2477,253 @@ func exerciseBareWinnerGroupAware(handler http.Handler, aHits *int64) error {
 	}
 
 	fmt.Println("yaegi-check: group-aware bareWinner resolved and listed bare-winner-shared via bare-winner-b, never touching bare-winner-a")
+	return nil
+}
+
+// exerciseMultiGroupPersonalGrant proves the multi-group/personal-grant
+// feature (UserConfig.Groups/Providers/Models, llmgateway.go) resolves
+// correctly under the REAL interpreter: multiGroupUserAPIKey's own
+// principal belongs to TWO groups (multiGroupEngGroupName,
+// multiGroupOpsGroupName — neither reaching "multi-group-b" at all)
+// plus a personal grant restricting "multi-group-b" to
+// multiGroupAllowedModelID alone. A request for the personal grant's own
+// allowed model must succeed; a request for a DIFFERENT model on the
+// SAME provider must be denied — the no-cross-grant-leak rule
+// (group.allowsProviderModel, auth.go) a naive union-based check would
+// get wrong.
+func exerciseMultiGroupPersonalGrant(handler http.Handler, bHits *int64) error {
+	allowedBody := `{"model":"` + multiGroupAllowedModelID + `","messages":[{"role":"user","content":"hi"}]}`
+	allowedReq := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(allowedBody))
+	allowedReq.Header.Set("Authorization", "Bearer "+multiGroupUserAPIKey)
+	allowedReq.Header.Set("Content-Type", "application/json")
+	allowedRec := httptest.NewRecorder()
+	handler.ServeHTTP(allowedRec, allowedReq)
+	if allowedRec.Code != http.StatusOK {
+		return fmt.Errorf("POST /v1/chat/completions (multi-group/personal-grant harness, allowed model): status = %d, want 200, body=%s", allowedRec.Code, allowedRec.Body.String())
+	}
+	if !strings.Contains(allowedRec.Body.String(), "served by multi-group-b") {
+		return fmt.Errorf("POST /v1/chat/completions (multi-group/personal-grant harness, allowed model): body does not contain multi-group-b's own content: %s", allowedRec.Body.String())
+	}
+	if got := atomic.LoadInt64(bHits); got != 1 {
+		return fmt.Errorf("multi-group/personal-grant harness: multi-group-b upstream hit count = %d, want exactly 1 after the allowed request", got)
+	}
+
+	deniedBody := `{"model":"` + multiGroupDeniedModelID + `","messages":[{"role":"user","content":"hi"}]}`
+	deniedReq := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(deniedBody))
+	deniedReq.Header.Set("Authorization", "Bearer "+multiGroupUserAPIKey)
+	deniedReq.Header.Set("Content-Type", "application/json")
+	deniedRec := httptest.NewRecorder()
+	handler.ServeHTTP(deniedRec, deniedReq)
+	if deniedRec.Code != http.StatusForbidden {
+		return fmt.Errorf("POST /v1/chat/completions (multi-group/personal-grant harness, cross-grant model): status = %d, want 403 (the personal grant's own Models list denies %q; neither member group's grant may leak into authorizing it), body=%s", deniedRec.Code, multiGroupDeniedModelID, deniedRec.Body.String())
+	}
+	if got := atomic.LoadInt64(bHits); got != 1 {
+		return fmt.Errorf("multi-group/personal-grant harness: multi-group-b upstream hit count = %d, want still exactly 1 (the denied request must never reach the upstream)", got)
+	}
+
+	fmt.Println("yaegi-check: multi-group user with a personal grant resolved the personal-grant provider's allowed model and was denied a cross-grant model")
+	return nil
+}
+
+// exerciseMultiGroupBareWinnerFailoverAndPassthroughPaths extends the
+// multi-group/personal-grant probe above (LOW-8, review round 2) to
+// additionally assert, under the REAL interpreter:
+//
+//   - HIGH-2: bareWinner/listFor prefer a grant that actually authorizes
+//     a bare-id collision, not merely the sorted-first PROVIDER-visible
+//     owner — resolving multiGroupSharedModelID (a bare, three-provider
+//     collision: "multi-group-b" < "multi-group-c" <
+//     "multi-group-shared-x") must land on "multi-group-c"
+//     (multiGroupOpsGroupName's own unrestricted grant), never get
+//     denied via "multi-group-b" (the personal grant's own, narrower
+//     one, which sorts first but does not cover this id).
+//   - The SAME multi-grant principal's failover pool correctly includes
+//     "multi-group-shared-x" (multiGroupEngGroupName's own grant) and
+//     correctly excludes "multi-group-b" — multiGroupCUpstream always
+//     500s its chat-completions call, forcing the fall-through past the
+//     correctly-chosen primary.
+//   - GET /v1/models shows exactly the union this principal is entitled
+//     to for multiGroupSharedModelID: the bare id (owned by
+//     "multi-group-c"), "multi-group-c/"+id, and
+//     "multi-group-shared-x/"+id — never "multi-group-b/"+id.
+//   - HIGH-1: a native passthrough request to "multi-group-c" is denied
+//     on multiGroupDeniedPathID and allowed on multiGroupAllowedPathID
+//     (multiGroupOpsGroupName's own "passthroughPaths"), while
+//     "multi-group-shared-x" (multiGroupEngGroupName's own, unrestricted
+//     provider) stays reachable on an arbitrary path either way —
+//     proving passthroughPaths stays coupled to the SAME grant that
+//     authorizes the provider, never unioned across this principal's
+//     member groups.
+func exerciseMultiGroupBareWinnerFailoverAndPassthroughPaths(handler http.Handler, bHits, cChatHits, cPassthroughHits, sharedXHits *int64) error {
+	bHitsBefore := atomic.LoadInt64(bHits) // exerciseMultiGroupPersonalGrant already drove one hit
+
+	// --- HIGH-2 + failover ---
+	body := `{"model":"` + multiGroupSharedModelID + `","messages":[{"role":"user","content":"hi"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+multiGroupUserAPIKey)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		return fmt.Errorf("POST /v1/chat/completions (multi-group bareWinner/failover harness): status = %d, want 200 (bareWinner must land on \"multi-group-c\" via multiGroupOpsGroupName's own grant, then fail over to \"multi-group-shared-x\" once multi-group-c's own upstream 500s), body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "served by multi-group-shared-x") {
+		return fmt.Errorf("POST /v1/chat/completions (multi-group bareWinner/failover harness): body does not contain multi-group-shared-x's own content, want the failover candidate's response: %s", rec.Body.String())
+	}
+	if got := atomic.LoadInt64(cChatHits); got != 1 {
+		return fmt.Errorf("multi-group bareWinner/failover harness: multi-group-c chat-completions hit count = %d, want exactly 1 (bareWinner must choose multi-group-c as primary — a pre-fix, union-based bareWinner would pick \"multi-group-b\" first and never reach multi-group-c at all)", got)
+	}
+	if got := atomic.LoadInt64(sharedXHits); got != 1 {
+		return fmt.Errorf("multi-group bareWinner/failover harness: multi-group-shared-x hit count = %d, want exactly 1 (the correctly-included failover candidate)", got)
+	}
+	if got := atomic.LoadInt64(bHits) - bHitsBefore; got != 0 {
+		return fmt.Errorf("multi-group bareWinner/failover harness: multi-group-b hit count delta = %d, want exactly 0 (the personal grant's own Models list does not cover %q; multi-group-b must never be offered as a failover candidate for it)", got, multiGroupSharedModelID)
+	}
+
+	// --- GET /v1/models: the union this principal is entitled to ---
+	listReq := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	listReq.Header.Set("Authorization", "Bearer "+multiGroupUserAPIKey)
+	listRec := httptest.NewRecorder()
+	handler.ServeHTTP(listRec, listReq)
+	if listRec.Code != http.StatusOK {
+		return fmt.Errorf("GET /v1/models (multi-group bareWinner harness): status = %d, want 200, body=%s", listRec.Code, listRec.Body.String())
+	}
+	var listBody struct {
+		Data []map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal(listRec.Body.Bytes(), &listBody); err != nil {
+		return fmt.Errorf("decode GET /v1/models body (multi-group bareWinner harness): %w (body=%s)", err, listRec.Body.String())
+	}
+	ownedBy := map[string]string{}
+	for _, entry := range listBody.Data {
+		id, idOK := entry["id"].(string)
+		owner, ownerOK := entry["owned_by"].(string)
+		if idOK && ownerOK {
+			ownedBy[id] = owner
+		}
+	}
+	if ownedBy[multiGroupSharedModelID] != "multi-group-c" {
+		return fmt.Errorf("GET /v1/models (multi-group bareWinner harness): bare %q owned_by = %q, want \"multi-group-c\"", multiGroupSharedModelID, ownedBy[multiGroupSharedModelID])
+	}
+	if _, ok := ownedBy["multi-group-c/"+multiGroupSharedModelID]; !ok {
+		return fmt.Errorf("GET /v1/models (multi-group bareWinner harness): missing \"multi-group-c/%s\"", multiGroupSharedModelID)
+	}
+	if _, ok := ownedBy["multi-group-shared-x/"+multiGroupSharedModelID]; !ok {
+		return fmt.Errorf("GET /v1/models (multi-group bareWinner harness): missing \"multi-group-shared-x/%s\"", multiGroupSharedModelID)
+	}
+	if _, ok := ownedBy["multi-group-b/"+multiGroupSharedModelID]; ok {
+		return fmt.Errorf("GET /v1/models (multi-group bareWinner harness): \"multi-group-b/%s\" must be absent (the personal grant's own Models list does not cover it)", multiGroupSharedModelID)
+	}
+
+	// --- HIGH-1: passthroughPaths coupled to the provider ---
+	deniedPathReq := httptest.NewRequest(http.MethodPost, "/multi-group-c/"+multiGroupDeniedPathID, strings.NewReader(`{}`))
+	deniedPathReq.Header.Set("Authorization", "Bearer "+multiGroupUserAPIKey)
+	deniedPathReq.Header.Set("Content-Type", "application/json")
+	deniedPathRec := httptest.NewRecorder()
+	handler.ServeHTTP(deniedPathRec, deniedPathReq)
+	if deniedPathRec.Code != http.StatusForbidden {
+		return fmt.Errorf("POST /multi-group-c/%s (multi-group passthroughPaths harness): status = %d, want 403 (multiGroupOpsGroupName's own path restriction on its OWN provider must survive, never stripped by multiGroupEngGroupName's own unrestricted paths on a DIFFERENT provider), body=%s", multiGroupDeniedPathID, deniedPathRec.Code, deniedPathRec.Body.String())
+	}
+	if got := atomic.LoadInt64(cPassthroughHits); got != 0 {
+		return fmt.Errorf("multi-group passthroughPaths harness: multi-group-c passthrough hit count = %d, want exactly 0 (the denied-path request must never reach the upstream)", got)
+	}
+
+	allowedPathReq := httptest.NewRequest(http.MethodPost, "/multi-group-c/"+multiGroupAllowedPathID, strings.NewReader(`{}`))
+	allowedPathReq.Header.Set("Authorization", "Bearer "+multiGroupUserAPIKey)
+	allowedPathReq.Header.Set("Content-Type", "application/json")
+	allowedPathRec := httptest.NewRecorder()
+	handler.ServeHTTP(allowedPathRec, allowedPathReq)
+	if allowedPathRec.Code != http.StatusOK {
+		return fmt.Errorf("POST /multi-group-c/%s (multi-group passthroughPaths harness): status = %d, want 200 (multiGroupOpsGroupName's own allowed path), body=%s", multiGroupAllowedPathID, allowedPathRec.Code, allowedPathRec.Body.String())
+	}
+	if got := atomic.LoadInt64(cPassthroughHits); got != 1 {
+		return fmt.Errorf("multi-group passthroughPaths harness: multi-group-c passthrough hit count = %d, want exactly 1 after the allowed-path request", got)
+	}
+
+	sharedXPathReq := httptest.NewRequest(http.MethodPost, "/multi-group-shared-x/"+multiGroupDeniedPathID, strings.NewReader(`{}`))
+	sharedXPathReq.Header.Set("Authorization", "Bearer "+multiGroupUserAPIKey)
+	sharedXPathReq.Header.Set("Content-Type", "application/json")
+	sharedXPathRec := httptest.NewRecorder()
+	handler.ServeHTTP(sharedXPathRec, sharedXPathReq)
+	if sharedXPathRec.Code != http.StatusOK {
+		return fmt.Errorf("POST /multi-group-shared-x/%s (multi-group passthroughPaths harness): status = %d, want 200 (multiGroupEngGroupName's own provider carries no path restriction at all, regardless of multiGroupOpsGroupName's own restriction on a DIFFERENT provider), body=%s", multiGroupDeniedPathID, sharedXPathRec.Code, sharedXPathRec.Body.String())
+	}
+
+	fmt.Println("yaegi-check: multi-group principal's bareWinner/listFor/failover chose the grant-authorized owner, GET /v1/models showed exactly the union, and passthroughPaths stayed coupled to its own provider")
+	return nil
+}
+
+// exerciseRound3ModelAndPathFromSameGrant proves the HIGH fix (review
+// round 3) under the REAL interpreter: model and path authorization for
+// native passthrough must come from ONE grant, never two different ones.
+//
+//   - P1: round3P1AGroupName restricts models (round3ModelID) but not
+//     paths; round3P1BGroupName restricts paths ("v1/chat/completions")
+//     but not models — both cover "round3-shared". round3-p1-user
+//     (member of both, no personal grant) POSTs a model
+//     round3P1AGroupName denies, on a path only round3P1BGroupName would
+//     allow: round3P1AGroupName's own unrestricted path must never
+//     combine with round3P1BGroupName's own unrestricted model to
+//     authorize it.
+//   - P2: round3P2HomeGroupName (primary) carries no path restriction;
+//     round3P2FriendsGroupName restricts paths on "round3-shared" but not
+//     models; round3-p2-user's own personal grant restricts
+//     "round3-shared" to round3PersonalModelID alone. The personal grant
+//     borrows home's own unrestricted paths, but its OWN model
+//     restriction must still apply — friends' own unrestricted models
+//     must never leak into it via a shared provider.
+//
+// Both must deny (403) and never reach round3PassthroughUpstream.
+func exerciseRound3ModelAndPathFromSameGrant(handler http.Handler, hits *int64) error {
+	hitsBefore := atomic.LoadInt64(hits)
+
+	p1Body := `{"model":"round3-m2"}`
+	p1Req := httptest.NewRequest(http.MethodPost, "/round3-shared/v1/files", strings.NewReader(p1Body))
+	p1Req.Header.Set("Authorization", "Bearer "+round3P1UserAPIKey)
+	p1Req.Header.Set("Content-Type", "application/json")
+	p1Rec := httptest.NewRecorder()
+	handler.ServeHTTP(p1Rec, p1Req)
+	if p1Rec.Code != http.StatusForbidden {
+		return fmt.Errorf("P1 POST /round3-shared/v1/files (round-3 model+path-from-same-grant harness): status = %d, want 403 — round3P1AGroupName's own unrestricted path must never combine with round3P1BGroupName's own unrestricted model to authorize %q, body=%s", p1Rec.Code, round3ModelID, p1Rec.Body.String())
+	}
+
+	p2Body := `{"model":"round3-shared/other"}`
+	p2Req := httptest.NewRequest(http.MethodPost, "/round3-shared/v1/files", strings.NewReader(p2Body))
+	p2Req.Header.Set("Authorization", "Bearer "+round3P2UserAPIKey)
+	p2Req.Header.Set("Content-Type", "application/json")
+	p2Rec := httptest.NewRecorder()
+	handler.ServeHTTP(p2Rec, p2Req)
+	if p2Rec.Code != http.StatusForbidden {
+		return fmt.Errorf("P2 POST /round3-shared/v1/files (round-3 model+path-from-same-grant harness): status = %d, want 403 — home's own unrestricted paths and friends' own unrestricted models must not combine to authorize a model the personal grant itself denies, body=%s", p2Rec.Code, p2Rec.Body.String())
+	}
+
+	if got := atomic.LoadInt64(hits) - hitsBefore; got != 0 {
+		return fmt.Errorf("round-3 model+path-from-same-grant harness: round3-shared upstream hit count delta = %d, want exactly 0 (neither P1's nor P2's denied request may ever reach the upstream)", got)
+	}
+
+	// P2+ (positive control, review round 4): the personal grant's own
+	// ALLOWED model (round3PersonalModelID), on a path the PRIMARY group
+	// (round3P2HomeGroupName) allows — home carries no path restriction
+	// at all, so ANY path is allowed via the "personal grant borrows the
+	// primary group's own paths" rule (auth.go's personalGrantAllowsPath).
+	// Proves the round-3 coupling fix denies the WRONG combination (P2
+	// above, a different model on the same provider+path) without also
+	// wrongly denying the RIGHT one — the body IS peeked (the personal
+	// grant restricts models) and the model IS matched.
+	p2PositiveBody := `{"model":"` + round3PersonalModelID + `"}`
+	p2PositiveReq := httptest.NewRequest(http.MethodPost, "/round3-shared/v1/files", strings.NewReader(p2PositiveBody))
+	p2PositiveReq.Header.Set("Authorization", "Bearer "+round3P2UserAPIKey)
+	p2PositiveReq.Header.Set("Content-Type", "application/json")
+	p2PositiveRec := httptest.NewRecorder()
+	handler.ServeHTTP(p2PositiveRec, p2PositiveReq)
+	if p2PositiveRec.Code != http.StatusOK {
+		return fmt.Errorf("P2+ POST /round3-shared/v1/files (round-3 model+path-from-same-grant harness): status = %d, want 200 — the personal grant's own model (%q) on a path the PRIMARY group (home) allows must succeed, body=%s", p2PositiveRec.Code, round3PersonalModelID, p2PositiveRec.Body.String())
+	}
+	if got := atomic.LoadInt64(hits) - hitsBefore; got != 1 {
+		return fmt.Errorf("round-3 model+path-from-same-grant harness: round3-shared upstream hit count delta after the P2+ positive case = %d, want exactly 1", got)
+	}
+
+	fmt.Println("yaegi-check: native passthrough denied a model and a path that could only be authorized by combining two DIFFERENT grants (P1: two member groups; P2: primary group's paths + a personal grant's own model restriction), and allowed the personal grant's own model on the primary group's own path (P2+)")
 	return nil
 }
 

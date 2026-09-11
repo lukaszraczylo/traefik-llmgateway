@@ -160,6 +160,105 @@ func TestModelRegistry_ResolveWithCandidates_ResolveError_PropagatesUnchanged(t 
 	assert.Nil(t, extra)
 }
 
+// TestModelRegistry_FailoverCandidates_MultiGrant_CrossGrantLeakDenied
+// proves feat/failover's own per-candidate check for a multi-grant
+// principal (multi-group and/or personal grant): a candidate provider
+// reachable ONLY through a grant that does not itself authorize the
+// requested bare model must never be offered as a failover candidate,
+// even though a DIFFERENT grant of the same principal allows some OTHER
+// provider entirely — a naive provider-only check (grp.allowsProvider
+// would see "beta" as true via the union) must not be used for a
+// multi-grant principal.
+func TestModelRegistry_FailoverCandidates_MultiGrant_CrossGrantLeakDenied(t *testing.T) {
+	t.Parallel()
+	adapters := map[string]providerAdapter{
+		"alpha": newFakeAdapter("alpha"),
+		"beta":  newFakeAdapter("beta"),
+	}
+	cfg := &Config{Providers: map[string]*ProviderConfig{
+		"alpha": {Models: []string{"shared"}},
+		"beta":  {Models: []string{"shared"}},
+	}}
+	reg, err := newModelRegistry(adapters, cfg, func(string, ...any) {})
+	require.NoError(t, err)
+
+	member := &group{name: "alpha-friends", providers: []string{"alpha"}}
+	grp := effectiveGroup([]*group{member}, &grant{providers: []string{"beta"}, models: []string{"completely-different"}})
+
+	primary, extra, err := reg.resolveWithCandidates("shared", grp)
+	require.NoError(t, err)
+	assert.Equal(t, "alpha", primary.providerName)
+	for _, c := range extra {
+		assert.NotEqual(t, "beta", c.providerName, "beta is reachable only through a grant whose own models list denies \"shared\"; it must never be offered as a failover candidate despite the principal's OTHER grant allowing a different provider")
+	}
+}
+
+// TestModelRegistry_FailoverCandidates_MultiGrant_IncludesAliasName is
+// LOW-6's regression (review round 2): resolveWithCandidates resolved
+// "aliased" (-> bare target "shared") via member group "eng"'s own
+// direct match on "shared" — but the personal grant's own reach to
+// "beta" is authorized ONLY via the alias's own name ("aliased" itself,
+// not "shared" or "beta/shared"), exactly the extra candidate id
+// resolveAgainst itself would check for an alias target
+// (resolveAliasTarget's own extraModelName). Without passing that same
+// id through to failoverCandidates, beta is wrongly excluded from the
+// candidate pool even though the principal's own personal grant
+// genuinely authorizes it via the alias.
+func TestModelRegistry_FailoverCandidates_MultiGrant_IncludesAliasName(t *testing.T) {
+	t.Parallel()
+	adapters := map[string]providerAdapter{
+		"alpha": newFakeAdapter("alpha"),
+		"beta":  newFakeAdapter("beta"),
+	}
+	cfg := &Config{
+		Providers: map[string]*ProviderConfig{
+			"alpha": {Models: []string{"shared"}},
+			"beta":  {Models: []string{"shared"}},
+		},
+		ModelAliases: map[string]string{"aliased": "shared"},
+	}
+	reg, err := newModelRegistry(adapters, cfg, func(string, ...any) {})
+	require.NoError(t, err)
+
+	eng := &group{name: "eng", providers: []string{"alpha"}, models: []string{"shared"}}
+	grp := effectiveGroup([]*group{eng}, &grant{providers: []string{"beta"}, models: []string{"aliased"}})
+
+	primary, extra, err := reg.resolveWithCandidates("aliased", grp)
+	require.NoError(t, err)
+	assert.Equal(t, "alpha", primary.providerName, "primary must resolve via eng's own direct match on the bare target")
+
+	names := make([]string, len(extra))
+	for i, c := range extra {
+		names[i] = c.providerName
+	}
+	assert.Contains(t, names, "beta", "beta is reachable via the personal grant's own alias-name authorization and must be offered as a failover candidate")
+}
+
+// TestModelRegistry_FailoverCandidates_MultiGrant_MatchingGrantAllowed is
+// the positive control for the test above: a candidate provider whose
+// OWN grant allows both it and the model IS offered.
+func TestModelRegistry_FailoverCandidates_MultiGrant_MatchingGrantAllowed(t *testing.T) {
+	t.Parallel()
+	adapters := map[string]providerAdapter{
+		"alpha": newFakeAdapter("alpha"),
+		"beta":  newFakeAdapter("beta"),
+	}
+	cfg := &Config{Providers: map[string]*ProviderConfig{
+		"alpha": {Models: []string{"shared"}},
+		"beta":  {Models: []string{"shared"}},
+	}}
+	reg, err := newModelRegistry(adapters, cfg, func(string, ...any) {})
+	require.NoError(t, err)
+
+	member := &group{name: "alpha-friends", providers: []string{"alpha"}}
+	grp := effectiveGroup([]*group{member}, &grant{providers: []string{"beta"}, models: []string{"beta/shared"}})
+
+	_, extra, err := reg.resolveWithCandidates("shared", grp)
+	require.NoError(t, err)
+	require.Len(t, extra, 1)
+	assert.Equal(t, "beta", extra[0].providerName)
+}
+
 // --- requestHealthTracker ---
 
 func TestRequestHealthTracker_HealthyByDefault(t *testing.T) {
