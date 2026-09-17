@@ -2392,3 +2392,127 @@ func TestModelTotals(t *testing.T) {
 	assert.True(t, ok, "an empty id list is not a failed read")
 	assert.Empty(t, empty)
 }
+
+// --- bucketsFor: every window's bucketFor computed once per call ---
+
+// TestBucketsFor_MatchesBucketForEachWindow pins bucketsFor's four fields
+// against bucketFor called directly per window.
+func TestBucketsFor_MatchesBucketForEachWindow(t *testing.T) {
+	now := time.Date(2026, 8, 20, 14, 37, 9, 0, time.UTC)
+	wb := bucketsFor(now)
+	assert.Equal(t, bucketFor(now, windowMin), wb.min)
+	assert.Equal(t, bucketFor(now, windowHour), wb.hour)
+	assert.Equal(t, bucketFor(now, windowDay), wb.day)
+	assert.Equal(t, bucketFor(now, windowMonth), wb.month)
+}
+
+// TestEnforceTTLsFor_MatchesEnforceTTLForEachWindow pins enforceTTLsFor's
+// four fields against enforceTTLFor called directly per window — the two
+// must never drift apart, since checkAndCount/account/countTargetRequests/
+// recordProviderAttempt all build their counterIncr entries from
+// enforceTTLsFor's single shared value instead of calling enforceTTLFor
+// per entry.
+func TestEnforceTTLsFor_MatchesEnforceTTLForEachWindow(t *testing.T) {
+	et := enforceTTLsFor()
+	assert.Equal(t, enforceTTLFor(windowMin), et.min)
+	assert.Equal(t, enforceTTLFor(windowHour), et.hour)
+	assert.Equal(t, enforceTTLFor(windowDay), et.day)
+	assert.Equal(t, enforceTTLFor(windowMonth), et.month)
+}
+
+// TestWindowKeyForBucket_MatchesWindowKey pins windowKeyForBucket (the
+// building block windowKey and every checkAndCount/account/
+// countTargetRequests/recordProviderAttempt call site now use directly
+// with a bucket from their own bucketsFor(now) call) against windowKey's
+// own output for the equivalent bucketFor(t, window) — the two must
+// produce byte-identical keys, since windowKey is now defined in terms of
+// this function.
+func TestWindowKeyForBucket_MatchesWindowKey(t *testing.T) {
+	now := time.Date(2026, 8, 20, 9, 0, 30, 0, time.UTC)
+	for _, window := range []string{windowMin, windowHour, windowDay, windowMonth} {
+		got := windowKeyForBucket("user", "a", metricReq, window, bucketFor(now, window))
+		want := windowKey("user", "a", metricReq, window, now)
+		assert.Equal(t, want, got, "window=%s", window)
+	}
+}
+
+// --- the window/bucket/TTL/enforceTTL pairing invariant the 27 inline
+// counterIncr{...} literals (checkAndCount/account/countTargetRequests/
+// recordProviderAttempt) removed structural protection for. newCounterIncr
+// used to derive enforceTTL from window itself, so a mismatch between the
+// two was impossible by construction; the inline literals pair window,
+// bucket, ttl, and enforceTTL by hand at each of the 27 call sites, and
+// nothing in the Go type system keeps them correctly paired any more. ---
+
+// recordingStore is a counterStore that records every counterIncr entry
+// passed to incrMulti/incrAndGetMulti and otherwise behaves like a
+// trivially successful backend — used by
+// TestCounterIncrEntries_WindowBucketTTLInvariant to capture exactly what
+// each of the four methods hands the store, without a real Redis or the
+// in-process fallback's own bucketing in the way.
+type recordingStore struct {
+	entries []counterIncr
+}
+
+func (s *recordingStore) incrBy(string, int64, time.Duration) (int64, error) { return 0, nil }
+func (s *recordingStore) get(string) (int64, error)                          { return 0, nil }
+func (s *recordingStore) getMulti(keys []string) ([]int64, error) {
+	return make([]int64, len(keys)), nil
+}
+func (s *recordingStore) incrMulti(entries []counterIncr) ([]int64, error) {
+	s.entries = append(s.entries, entries...)
+	return make([]int64, len(entries)), nil
+}
+func (s *recordingStore) incrAndGetMulti(entries []counterIncr, reads []string) ([]int64, []int64, error) {
+	s.entries = append(s.entries, entries...)
+	return make([]int64, len(entries)), make([]int64, len(reads)), nil
+}
+
+// TestCounterIncrEntries_WindowBucketTTLInvariant asserts, for every entry
+// each of the four methods produces: its enforceTTL equals
+// enforceTTLFor of the WINDOW embedded in its own key (key shape
+// llmgw:kind:id:metric:window:bucket, so strings.Split(e.key, ":")[4] is
+// the window), and its key ends in the bucket that window actually has
+// for now (bucketFor(now, window)) — catching a hand-paired mismatch like
+// a windowDay entry built with et.month, which nothing else in the suite
+// would notice (the wrong enforceTTL only ever changes memoryStore's
+// clampTTL floor, never the value counted).
+func TestCounterIncrEntries_WindowBucketTTLInvariant(t *testing.T) {
+	now := time.Date(2026, 8, 20, 9, 30, 0, 0, time.UTC)
+	scopes := []limitScope{{kind: "user", id: "u1", limits: &LimitsConfig{RequestsPerMinute: 1000, RequestsPerDay: 1000}}}
+
+	cases := []struct {
+		run  func(l *limiter)
+		name string
+	}{
+		{name: "checkAndCount", run: func(l *limiter) { l.checkAndCount(scopes) }},
+		{name: "account", run: func(l *limiter) { l.account(scopes, usage{prompt: 10, completion: 5}, 100) }},
+		{name: "countTargetRequests", run: func(l *limiter) { l.countTargetRequests(scopes) }},
+		{name: "recordProviderAttempt", run: func(l *limiter) {
+			l.recordProviderAttempt("openai", "gpt-4o", nil, errors.New("boom"))
+		}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			store := &recordingStore{}
+			l := newLimiter(store, true)
+			l.nowFn = func() time.Time { return now }
+			l.spawn = func(f func()) { f() } // recordProviderAttempt's write must land synchronously to be captured
+
+			c.run(l)
+
+			require.NotEmpty(t, store.entries, "test fixture produced no counterIncr entries to check")
+			for _, e := range store.entries {
+				parts := strings.Split(e.key, ":")
+				require.GreaterOrEqualf(t, len(parts), 6, "key %q does not have the llmgw:kind:id:metric:window:bucket shape", e.key)
+				window := parts[4]
+
+				wantTTL := enforceTTLFor(window)
+				assert.Equalf(t, wantTTL, e.enforceTTL, "entry %q: enforceTTL, want enforceTTLFor(%q)", e.key, window)
+
+				wantBucket := bucketFor(now, window)
+				assert.Truef(t, strings.HasSuffix(e.key, wantBucket), "entry %q does not end with bucketFor(now, %q) = %q", e.key, window, wantBucket)
+			}
+		})
+	}
+}

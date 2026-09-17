@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 )
@@ -91,6 +92,18 @@ const (
 	monthWindowTTL = 400 * 24 * time.Hour
 )
 
+// enforceTTLMinWindow/HourWindow/DayWindow/MonthWindow are enforceTTLFor's
+// four return values, factored out as named constants so enforceTTLFor and
+// enforceTTLsFor (computing all four windows' floors at once instead of one
+// enforceTTLFor call per counterIncr) share a single source of truth
+// instead of two switches that could silently drift apart.
+const (
+	enforceTTLMinWindow   = minWindowTTL
+	enforceTTLHourWindow  = 2 * time.Hour
+	enforceTTLDayWindow   = 25 * time.Hour
+	enforceTTLMonthWindow = 32 * 24 * time.Hour
+)
+
 // usdToMicroFactor scales a USD amount to micro-USD (1e6 micro-USD per
 // USD), matching the integer accounting unit used by account and the
 // counterStore.
@@ -169,16 +182,6 @@ type counterIncr struct {
 	// this field entirely — ttl is applied in full there; the ceiling and
 	// this floor only ever matter for the in-process fallback.
 	enforceTTL time.Duration
-}
-
-// newCounterIncr builds one counterIncr for (kind, id, metric, window) at
-// t: key from windowKey, delta and the history-retention ttl exactly as
-// the caller gives them, and enforceTTL derived from window itself
-// (enforceTTLFor). checkAndCount and account build every entry through
-// this one helper so a (window, ttl) pair can never reach incrMulti
-// without its matching enforcement floor.
-func newCounterIncr(kind, id, metric, window string, t time.Time, delta int64, ttl time.Duration) counterIncr {
-	return counterIncr{key: windowKey(kind, id, metric, window, t), delta: delta, ttl: ttl, enforceTTL: enforceTTLFor(window)}
 }
 
 // counterStore is the storage backend the limiter uses for atomic windowed
@@ -298,20 +301,22 @@ const memoryStoreMaxTTL = 48 * time.Hour
 // pre-history-retention-bump values (25h/32d, v0.2 data-layer task) —
 // that bump only ever existed to serve the usage-history API's charts;
 // enforcement itself only ever needed a key to outlive its own window's
-// single rollover. Called by newCounterIncr for every checkAndCount/
-// account entry; a window not among the four handled here is a
+// single rollover. Called for every checkAndCount/account/
+// countTargetRequests/recordProviderAttempt entry (directly, or via
+// enforceTTLsFor's own equivalent four-window fan-out); a window not
+// among the four handled here is a
 // programming error, mirroring windowKey/windowEnd/bucketFor's own panic
 // convention.
 func enforceTTLFor(window string) time.Duration {
 	switch window {
 	case windowMin:
-		return minWindowTTL
+		return enforceTTLMinWindow
 	case windowHour:
-		return 2 * time.Hour
+		return enforceTTLHourWindow
 	case windowDay:
-		return 25 * time.Hour
+		return enforceTTLDayWindow
 	case windowMonth:
-		return 32 * 24 * time.Hour
+		return enforceTTLMonthWindow
 	default:
 		panic(fmt.Sprintf("llmgateway: enforceTTLFor: unknown window %q", window))
 	}
@@ -1119,12 +1124,63 @@ func bucketFor(t time.Time, window string) string {
 	}
 }
 
+// windowBuckets holds all four windows' bucketFor strings for one instant,
+// as bucketsFor (below) computes them: checkAndCount/account/
+// countTargetRequests/recordProviderAttempt each need several of these
+// together (never just one) and call bucketsFor(now) exactly once per
+// call, computing every bucket it needs once — instead of once per
+// counterIncr, as windowKey/bucketFor did directly before this type
+// existed.
+type windowBuckets struct {
+	min, hour, day, month string
+}
+
+// bucketsFor computes t's four window buckets via bucketFor, once each,
+// for a caller that needs several of them together.
+func bucketsFor(t time.Time) windowBuckets {
+	return windowBuckets{
+		min:   bucketFor(t, windowMin),
+		hour:  bucketFor(t, windowHour),
+		day:   bucketFor(t, windowDay),
+		month: bucketFor(t, windowMonth),
+	}
+}
+
+// enforceTTLSet holds all four windows' enforceTTLFor floors together, the
+// TTL-side counterpart to windowBuckets — built fresh by enforceTTLsFor on
+// every call (unlike windowBuckets, these four values are the same
+// compile-time constants regardless of t, so there is nothing to cache).
+type enforceTTLSet struct {
+	min, hour, day, month time.Duration
+}
+
+// enforceTTLsFor returns enforceTTLFor's four window floors at once, so
+// checkAndCount/account/countTargetRequests/recordProviderAttempt can
+// build every counterIncr in the call from one shared value instead of
+// calling enforceTTLFor per entry.
+func enforceTTLsFor() enforceTTLSet {
+	return enforceTTLSet{min: enforceTTLMinWindow, hour: enforceTTLHourWindow, day: enforceTTLDayWindow, month: enforceTTLMonthWindow}
+}
+
+// windowKeyForBucket builds the counterStore key for one (kind, id,
+// metric, window) counter given an already-computed bucket string:
+// llmgw:{kind}:{id}:{metric}:{window}:{bucket}. windowKey (below) is the
+// bucketFor(t, window)-deriving convenience wrapper every existing caller
+// still uses; checkAndCount/account/countTargetRequests/
+// recordProviderAttempt call this directly with a bucket from their own
+// bucketsFor(now) call instead, skipping a redundant bucketFor call per
+// counterIncr when several entries in the same call already share the
+// same window's bucket.
+func windowKeyForBucket(kind, id, metric, window, bucket string) string {
+	return strings.Join([]string{"llmgw", kind, id, metric, window, bucket}, ":")
+}
+
 // windowKey builds the counterStore key for one (kind, id, metric, window)
 // counter at time t: llmgw:{kind}:{id}:{metric}:{window}:{bucket}. bucket
 // is t.UTC() formatted to the window's granularity (bucketFor), so a
 // counter's key changes automatically when its window rolls over.
 func windowKey(kind, id, metric, window string, t time.Time) string {
-	return fmt.Sprintf("llmgw:%s:%s:%s:%s:%s", kind, id, metric, window, bucketFor(t, window))
+	return windowKeyForBucket(kind, id, metric, window, bucketFor(t, window))
 }
 
 // windowEnd returns the UTC instant at which window's bucket containing t
@@ -1282,13 +1338,15 @@ func buildBudgetProbes(scopes []limitScope, now time.Time) (probes []budgetProbe
 // accepted trade-off, unchanged from before this round.
 func (l *limiter) checkAndCount(scopes []limitScope) *limitViolation {
 	now := l.now()
+	wb := bucketsFor(now)
+	et := enforceTTLsFor()
 
 	entries := make([]counterIncr, 0, len(scopes)*checkAndCountKeysPerScope)
 	for _, sc := range scopes {
 		entries = append(entries,
-			newCounterIncr(sc.kind, sc.id, metricReq, windowMin, now, 1, minWindowTTL),
-			newCounterIncr(sc.kind, sc.id, metricReq, windowDay, now, 1, dayWindowTTL),
-			newCounterIncr(sc.kind, sc.id, metricReq, windowHour, now, 1, hourWindowTTL),
+			counterIncr{key: windowKeyForBucket(sc.kind, sc.id, metricReq, windowMin, wb.min), delta: 1, ttl: minWindowTTL, enforceTTL: et.min},
+			counterIncr{key: windowKeyForBucket(sc.kind, sc.id, metricReq, windowDay, wb.day), delta: 1, ttl: dayWindowTTL, enforceTTL: et.day},
+			counterIncr{key: windowKeyForBucket(sc.kind, sc.id, metricReq, windowHour, wb.hour), delta: 1, ttl: hourWindowTTL, enforceTTL: et.hour},
 		)
 	}
 	probes, reads := buildBudgetProbes(scopes, now)
@@ -1366,6 +1424,8 @@ func requestLimitViolation(sc limitScope, name string, limit, count int64, windo
 // applied per-key before this call became one batch.
 func (l *limiter) account(scopes []limitScope, u usage, costMicros int64) {
 	now := l.now()
+	wb := bucketsFor(now)
+	et := enforceTTLsFor()
 
 	entries := make([]counterIncr, 0, len(scopes)*12)
 	for _, sc := range scopes {
@@ -1380,30 +1440,30 @@ func (l *limiter) account(scopes []limitScope, u usage, costMicros int64) {
 		// no usage at all.
 		if sc.kind == kindModel {
 			entries = append(entries,
-				newCounterIncr(sc.kind, sc.id, metricReq, windowHour, now, 1, hourWindowTTL),
-				newCounterIncr(sc.kind, sc.id, metricReq, windowDay, now, 1, dayWindowTTL),
-				newCounterIncr(sc.kind, sc.id, metricReq, windowMonth, now, 1, monthWindowTTL),
+				counterIncr{key: windowKeyForBucket(sc.kind, sc.id, metricReq, windowHour, wb.hour), delta: 1, ttl: hourWindowTTL, enforceTTL: et.hour},
+				counterIncr{key: windowKeyForBucket(sc.kind, sc.id, metricReq, windowDay, wb.day), delta: 1, ttl: dayWindowTTL, enforceTTL: et.day},
+				counterIncr{key: windowKeyForBucket(sc.kind, sc.id, metricReq, windowMonth, wb.month), delta: 1, ttl: monthWindowTTL, enforceTTL: et.month},
 			)
 		}
 		if u.prompt != 0 {
 			entries = append(entries,
-				newCounterIncr(sc.kind, sc.id, metricTokIn, windowHour, now, u.prompt, hourWindowTTL),
-				newCounterIncr(sc.kind, sc.id, metricTokIn, windowDay, now, u.prompt, dayWindowTTL),
-				newCounterIncr(sc.kind, sc.id, metricTokIn, windowMonth, now, u.prompt, monthWindowTTL),
+				counterIncr{key: windowKeyForBucket(sc.kind, sc.id, metricTokIn, windowHour, wb.hour), delta: u.prompt, ttl: hourWindowTTL, enforceTTL: et.hour},
+				counterIncr{key: windowKeyForBucket(sc.kind, sc.id, metricTokIn, windowDay, wb.day), delta: u.prompt, ttl: dayWindowTTL, enforceTTL: et.day},
+				counterIncr{key: windowKeyForBucket(sc.kind, sc.id, metricTokIn, windowMonth, wb.month), delta: u.prompt, ttl: monthWindowTTL, enforceTTL: et.month},
 			)
 		}
 		if u.completion != 0 {
 			entries = append(entries,
-				newCounterIncr(sc.kind, sc.id, metricTokOut, windowHour, now, u.completion, hourWindowTTL),
-				newCounterIncr(sc.kind, sc.id, metricTokOut, windowDay, now, u.completion, dayWindowTTL),
-				newCounterIncr(sc.kind, sc.id, metricTokOut, windowMonth, now, u.completion, monthWindowTTL),
+				counterIncr{key: windowKeyForBucket(sc.kind, sc.id, metricTokOut, windowHour, wb.hour), delta: u.completion, ttl: hourWindowTTL, enforceTTL: et.hour},
+				counterIncr{key: windowKeyForBucket(sc.kind, sc.id, metricTokOut, windowDay, wb.day), delta: u.completion, ttl: dayWindowTTL, enforceTTL: et.day},
+				counterIncr{key: windowKeyForBucket(sc.kind, sc.id, metricTokOut, windowMonth, wb.month), delta: u.completion, ttl: monthWindowTTL, enforceTTL: et.month},
 			)
 		}
 		if costMicros != 0 {
 			entries = append(entries,
-				newCounterIncr(sc.kind, sc.id, metricCost, windowHour, now, costMicros, hourWindowTTL),
-				newCounterIncr(sc.kind, sc.id, metricCost, windowDay, now, costMicros, dayWindowTTL),
-				newCounterIncr(sc.kind, sc.id, metricCost, windowMonth, now, costMicros, monthWindowTTL),
+				counterIncr{key: windowKeyForBucket(sc.kind, sc.id, metricCost, windowHour, wb.hour), delta: costMicros, ttl: hourWindowTTL, enforceTTL: et.hour},
+				counterIncr{key: windowKeyForBucket(sc.kind, sc.id, metricCost, windowDay, wb.day), delta: costMicros, ttl: dayWindowTTL, enforceTTL: et.day},
+				counterIncr{key: windowKeyForBucket(sc.kind, sc.id, metricCost, windowMonth, wb.month), delta: costMicros, ttl: monthWindowTTL, enforceTTL: et.month},
 			)
 		}
 	}
@@ -1457,13 +1517,15 @@ func (l *limiter) countTargetRequests(scopes []limitScope) {
 		return
 	}
 	now := l.now()
+	wb := bucketsFor(now)
+	et := enforceTTLsFor()
 	entries := make([]counterIncr, 0, len(scopes)*4)
 	for _, sc := range scopes {
 		entries = append(entries,
-			newCounterIncr(sc.kind, sc.id, metricReq, windowMin, now, 1, minWindowTTL),
-			newCounterIncr(sc.kind, sc.id, metricReq, windowHour, now, 1, hourWindowTTL),
-			newCounterIncr(sc.kind, sc.id, metricReq, windowDay, now, 1, dayWindowTTL),
-			newCounterIncr(sc.kind, sc.id, metricReq, windowMonth, now, 1, monthWindowTTL),
+			counterIncr{key: windowKeyForBucket(sc.kind, sc.id, metricReq, windowMin, wb.min), delta: 1, ttl: minWindowTTL, enforceTTL: et.min},
+			counterIncr{key: windowKeyForBucket(sc.kind, sc.id, metricReq, windowHour, wb.hour), delta: 1, ttl: hourWindowTTL, enforceTTL: et.hour},
+			counterIncr{key: windowKeyForBucket(sc.kind, sc.id, metricReq, windowDay, wb.day), delta: 1, ttl: dayWindowTTL, enforceTTL: et.day},
+			counterIncr{key: windowKeyForBucket(sc.kind, sc.id, metricReq, windowMonth, wb.month), delta: 1, ttl: monthWindowTTL, enforceTTL: et.month},
 		)
 	}
 	l.storeIncrMulti(entries)
@@ -1755,29 +1817,31 @@ func (l *limiter) recordProviderAttempt(provider, model string, resp *http.Respo
 		return
 	}
 	now := l.now()
+	wb := bucketsFor(now)
+	et := enforceTTLsFor()
 	fail := isTransient(resp, err) || isDeadlineExceeded(err)
 
 	entries := make([]counterIncr, 0, 8)
 	entries = append(entries,
-		newCounterIncr(kindProvider, provider, metricProvAttempt, windowMin, now, 1, minWindowTTL),
-		newCounterIncr(kindProvider, provider, metricProvAttempt, windowDay, now, 1, dayWindowTTL),
+		counterIncr{key: windowKeyForBucket(kindProvider, provider, metricProvAttempt, windowMin, wb.min), delta: 1, ttl: minWindowTTL, enforceTTL: et.min},
+		counterIncr{key: windowKeyForBucket(kindProvider, provider, metricProvAttempt, windowDay, wb.day), delta: 1, ttl: dayWindowTTL, enforceTTL: et.day},
 	)
 	if fail {
 		entries = append(entries,
-			newCounterIncr(kindProvider, provider, metricProvFail, windowMin, now, 1, minWindowTTL),
-			newCounterIncr(kindProvider, provider, metricProvFail, windowDay, now, 1, dayWindowTTL),
+			counterIncr{key: windowKeyForBucket(kindProvider, provider, metricProvFail, windowMin, wb.min), delta: 1, ttl: minWindowTTL, enforceTTL: et.min},
+			counterIncr{key: windowKeyForBucket(kindProvider, provider, metricProvFail, windowDay, wb.day), delta: 1, ttl: dayWindowTTL, enforceTTL: et.day},
 		)
 	}
 	if model != "" {
 		id := providerModelScopeID(provider, model)
 		entries = append(entries,
-			newCounterIncr(kindProviderModel, id, metricProvAttempt, windowMin, now, 1, minWindowTTL),
-			newCounterIncr(kindProviderModel, id, metricProvAttempt, windowDay, now, 1, dayWindowTTL),
+			counterIncr{key: windowKeyForBucket(kindProviderModel, id, metricProvAttempt, windowMin, wb.min), delta: 1, ttl: minWindowTTL, enforceTTL: et.min},
+			counterIncr{key: windowKeyForBucket(kindProviderModel, id, metricProvAttempt, windowDay, wb.day), delta: 1, ttl: dayWindowTTL, enforceTTL: et.day},
 		)
 		if fail {
 			entries = append(entries,
-				newCounterIncr(kindProviderModel, id, metricProvFail, windowMin, now, 1, minWindowTTL),
-				newCounterIncr(kindProviderModel, id, metricProvFail, windowDay, now, 1, dayWindowTTL),
+				counterIncr{key: windowKeyForBucket(kindProviderModel, id, metricProvFail, windowMin, wb.min), delta: 1, ttl: minWindowTTL, enforceTTL: et.min},
+				counterIncr{key: windowKeyForBucket(kindProviderModel, id, metricProvFail, windowDay, wb.day), delta: 1, ttl: dayWindowTTL, enforceTTL: et.day},
 			)
 		}
 	}
