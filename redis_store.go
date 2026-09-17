@@ -41,6 +41,81 @@ func newRedisStore(client *respClient) *redisStore {
 // hot counters.
 const expireOnceCacheMax = 4096
 
+// needsExpireBatch is needsExpire (below) extended to a whole incrMulti/
+// incrAndGetMulti batch: it takes expireMu ONCE for the whole slice
+// instead of once per entry, computed for every entry BEFORE any of the
+// batch's commands are even sent (mirroring needsExpire's own
+// check-before-any-pipeline-attempt contract) — the per-entry decisions
+// this returns are exactly what needsExpire would have returned called
+// once per key, just without len(entries) separate lock/unlock pairs.
+func (s *redisStore) needsExpireBatch(entries []counterIncr) []bool {
+	out := make([]bool, len(entries))
+	s.expireMu.Lock()
+	defer s.expireMu.Unlock()
+	for i, e := range entries {
+		_, ok := s.expireSeen[e.key]
+		out[i] = !ok
+	}
+	return out
+}
+
+// settleExpireBatch applies incrMulti/incrAndGetMulti's post-pipeline
+// expire bookkeeping for a whole batch in ONE expireMu acquisition:
+// sent[i] is whether THIS call actually sent EXPIRE for entry i
+// (needsExpireBatch's own return, reused after the reply arrives — same
+// as incrMulti's pre-batching sendExpire[i]); firstWrite[i] is whether
+// entry i's INCRBY reply revealed it was recreated (reply == delta), the
+// same commit-after-success/forget-on-recreate contract as commitExpire/
+// forgetExpire's own doc comments, just decided per-entry and applied
+// together here instead of via len(entries) separate commitExpire/
+// forgetExpire calls. Only entries[:n] for whatever n the caller actually
+// finished processing should ever be passed in — see incrMulti/
+// incrAndGetMulti's own `processed` handling for why a partial prefix,
+// not always the whole batch, is what gets settled.
+func (s *redisStore) settleExpireBatch(entries []counterIncr, sent, firstWrite []bool) {
+	s.expireMu.Lock()
+	defer s.expireMu.Unlock()
+	for i, e := range entries {
+		if sent[i] {
+			s.commitExpireLocked(e.key)
+		} else if firstWrite[i] {
+			s.forgetExpireLocked(e.key)
+		}
+	}
+}
+
+// commitExpireLocked is commitExpire's body without its own lock/unlock —
+// callers already hold expireMu (settleExpireBatch), batching every
+// entry's commit into the ONE lock acquisition that method takes for the
+// whole call, instead of one lock per key the way calling the exported,
+// self-locking commitExpire per entry would. commitExpire itself is now
+// just commitExpireLocked wrapped in its own lock, for incrBy's
+// single-key path.
+func (s *redisStore) commitExpireLocked(key string) {
+	if _, ok := s.expireSeen[key]; ok {
+		return
+	}
+	if len(s.expireOrder) >= expireOnceCacheMax {
+		oldest := s.expireOrder[0]
+		s.expireOrder = s.expireOrder[1:]
+		delete(s.expireSeen, oldest)
+	}
+	s.expireSeen[key] = struct{}{}
+	s.expireOrder = append(s.expireOrder, key)
+}
+
+// forgetExpireLocked is forgetExpire's body without its own lock/unlock —
+// callers already hold expireMu (settleExpireBatch), the same relationship
+// commitExpireLocked has to commitExpire. expireOrder may still carry a
+// stale entry for key afterward; left as-is, exactly as forgetExpire's own
+// doc comment explains — the only consequence is commitExpireLocked's own
+// FIFO eviction occasionally evicting a key one step early if it is
+// re-committed at a new position later, itself always safe (a spurious
+// extra EXPIRE, the same accepted cost as any other eviction).
+func (s *redisStore) forgetExpireLocked(key string) {
+	delete(s.expireSeen, key)
+}
+
 // needsExpire reports whether key does NOT currently have a CONFIRMED
 // EXPIRE recorded for it (perf finding 2, 2026-08-2x audit, deleting
 // EXPIRE entirely measured as the upper bound: 74->43 cmds/req, p50
@@ -87,16 +162,7 @@ func (s *redisStore) needsExpire(key string) bool {
 func (s *redisStore) commitExpire(key string) {
 	s.expireMu.Lock()
 	defer s.expireMu.Unlock()
-	if _, ok := s.expireSeen[key]; ok {
-		return
-	}
-	if len(s.expireOrder) >= expireOnceCacheMax {
-		oldest := s.expireOrder[0]
-		s.expireOrder = s.expireOrder[1:]
-		delete(s.expireSeen, oldest)
-	}
-	s.expireSeen[key] = struct{}{}
-	s.expireOrder = append(s.expireOrder, key)
+	s.commitExpireLocked(key)
 }
 
 // forgetExpire removes key from the confirmed-EXPIRE set — called when an
@@ -119,13 +185,7 @@ func (s *redisStore) commitExpire(key string) {
 func (s *redisStore) forgetExpire(key string) {
 	s.expireMu.Lock()
 	defer s.expireMu.Unlock()
-	delete(s.expireSeen, key)
-	// expireOrder may still carry a stale entry for key; left as-is. The
-	// only consequence is commitExpire's FIFO eviction occasionally
-	// evicting a key one step early if it is re-committed at a new
-	// position later — itself always safe (a spurious extra EXPIRE, the
-	// same accepted cost as any other eviction), so a full scan-and-purge
-	// here would add complexity for no correctness benefit.
+	s.forgetExpireLocked(key)
 }
 
 // ttlToSeconds converts ttl to whole Redis EXPIRE seconds, rounded up,
@@ -217,6 +277,47 @@ func (s *redisStore) incrBy(key string, n int64, ttl time.Duration) (int64, erro
 // after the server already applied the pipeline can cause
 // respClient.pipeline's reconnect-once retry to re-send it, over-counting
 // every entry in it by its own delta.
+// applyIncrReplies decodes the INCRBY replies for entries — each entry's
+// own reply located via incrReplyIdx[i], not a fixed stride (a skipped
+// EXPIRE shifts every later entry's commands left by one; see incrMulti/
+// incrAndGetMulti's own doc comments) — writing each entry's post-
+// increment value into out[i] and whether its reply equalled its own
+// delta (the Redis-lost-the-key recreate signal firstWrite feeds into
+// settleExpireBatch) into firstWrite[i]. method names the caller
+// ("incrMulti" or "incrAndGetMulti") purely for the error message prefix,
+// so both callers' error text stays byte-identical to what they built
+// inline before this was factored out.
+//
+// It reports how many entries it finished examining: len(entries) on full
+// success, or the index of the first failing entry (0 if the very first
+// one fails) — never entries[i] itself when it fails, since out[i]/
+// firstWrite[i] were never validly written for it. Both callers settle
+// expire bookkeeping for exactly that PROCESSED prefix in ONE
+// settleExpireBatch call at their own single call site, on every return
+// path, rather than a deferred closure per pipeline (measured ~1.5%
+// overhead under yaegi v0.16.1: a closure capturing three slices, paid
+// twice per request — one settle call site fed by this helper's reported
+// progress keeps the CRITICAL review fix, below, without that cost) or
+// losing the bookkeeping for entries already examined before a later
+// failure (review fix, CRITICAL: entries[:processed] must still be
+// settled even when entries[processed] itself failed — see needsExpire's
+// own doc comment for why a lost forget is the dangerous half).
+func (s *redisStore) applyIncrReplies(method string, entries []counterIncr, replies []any, incrReplyIdx []int, out []int64, firstWrite []bool) (processed int, err error) {
+	for i, e := range entries {
+		reply := replies[incrReplyIdx[i]]
+		if re, ok := reply.(error); ok {
+			return i, fmt.Errorf("redisStore: %s %q: INCRBY failed: %w", method, e.key, re)
+		}
+		v, ok := reply.(int64)
+		if !ok {
+			return i, fmt.Errorf("redisStore: %s %q: unexpected INCRBY reply type %T", method, e.key, reply)
+		}
+		out[i] = v
+		firstWrite[i] = v == e.delta
+	}
+	return len(entries), nil
+}
+
 func (s *redisStore) incrMulti(entries []counterIncr) ([]int64, error) {
 	if len(entries) == 0 {
 		return nil, nil
@@ -224,11 +325,10 @@ func (s *redisStore) incrMulti(entries []counterIncr) ([]int64, error) {
 
 	cmds := make([][]string, 0, len(entries)*2)
 	incrReplyIdx := make([]int, len(entries))
-	sendExpire := make([]bool, len(entries))
+	sendExpire := s.needsExpireBatch(entries)
 	for i, e := range entries {
 		incrReplyIdx[i] = len(cmds)
 		cmds = append(cmds, []string{"INCRBY", e.key, strconv.FormatInt(e.delta, 10)})
-		sendExpire[i] = s.needsExpire(e.key)
 		if sendExpire[i] {
 			cmds = append(cmds, []string{"EXPIRE", e.key, strconv.FormatInt(ttlToSeconds(e.ttl), 10)})
 		}
@@ -243,21 +343,11 @@ func (s *redisStore) incrMulti(entries []counterIncr) ([]int64, error) {
 	}
 
 	out := make([]int64, len(entries))
-	for i, e := range entries {
-		reply := replies[incrReplyIdx[i]]
-		if re, ok := reply.(error); ok {
-			return nil, fmt.Errorf("redisStore: incrMulti %q: INCRBY failed: %w", e.key, re)
-		}
-		v, ok := reply.(int64)
-		if !ok {
-			return nil, fmt.Errorf("redisStore: incrMulti %q: unexpected INCRBY reply type %T", e.key, reply)
-		}
-		out[i] = v
-		if sendExpire[i] {
-			s.commitExpire(e.key)
-		} else if v == e.delta {
-			s.forgetExpire(e.key)
-		}
+	firstWrite := make([]bool, len(entries))
+	processed, applyErr := s.applyIncrReplies("incrMulti", entries, replies, incrReplyIdx, out, firstWrite)
+	s.settleExpireBatch(entries[:processed], sendExpire[:processed], firstWrite[:processed])
+	if applyErr != nil {
+		return nil, applyErr
 	}
 	return out, nil
 }
@@ -287,11 +377,10 @@ func (s *redisStore) incrAndGetMulti(entries []counterIncr, reads []string) ([]i
 
 	cmds := make([][]string, 0, len(entries)*2+len(reads))
 	incrReplyIdx := make([]int, len(entries))
-	sendExpire := make([]bool, len(entries))
+	sendExpire := s.needsExpireBatch(entries)
 	for i, e := range entries {
 		incrReplyIdx[i] = len(cmds)
 		cmds = append(cmds, []string{"INCRBY", e.key, strconv.FormatInt(e.delta, 10)})
-		sendExpire[i] = s.needsExpire(e.key)
 		if sendExpire[i] {
 			cmds = append(cmds, []string{"EXPIRE", e.key, strconv.FormatInt(ttlToSeconds(e.ttl), 10)})
 		}
@@ -310,23 +399,19 @@ func (s *redisStore) incrAndGetMulti(entries []counterIncr, reads []string) ([]i
 	}
 
 	incrVals := make([]int64, len(entries))
-	for i, e := range entries {
-		reply := replies[incrReplyIdx[i]]
-		if re, ok := reply.(error); ok {
-			return nil, nil, fmt.Errorf("redisStore: incrAndGetMulti %q: INCRBY failed: %w", e.key, re)
-		}
-		v, ok := reply.(int64)
-		if !ok {
-			return nil, nil, fmt.Errorf("redisStore: incrAndGetMulti %q: unexpected INCRBY reply type %T", e.key, reply)
-		}
-		incrVals[i] = v
-		if sendExpire[i] {
-			s.commitExpire(e.key)
-		} else if v == e.delta {
-			s.forgetExpire(e.key)
-		}
+	firstWrite := make([]bool, len(entries))
+	processed, applyErr := s.applyIncrReplies("incrAndGetMulti", entries, replies, incrReplyIdx, incrVals, firstWrite)
+	s.settleExpireBatch(entries[:processed], sendExpire[:processed], firstWrite[:processed])
+	if applyErr != nil {
+		return nil, nil, applyErr
 	}
 
+	// The GET half is read-only (incrAndGetMulti's own doc comment) — its
+	// own error returns below come strictly after expire bookkeeping is
+	// already settled above, so none of them need any settle of their
+	// own, and no settle call belongs inside this loop: its index i counts
+	// reads, not entries, and slicing entries/sendExpire/firstWrite by it
+	// would settle the wrong prefix.
 	readVals := make([]int64, len(reads))
 	for i, k := range reads {
 		reply := replies[base+i]

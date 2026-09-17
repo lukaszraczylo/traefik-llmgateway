@@ -557,6 +557,100 @@ func TestRedisStore_IncrMulti_KeyRecreatedAfterLoss_ForgetsAndResendsExpireNextC
 	}
 }
 
+// --- CRITICAL review fix: a pipeline that fails PARTWAY through its own
+// reply loop (not the whole client.pipeline call — that case already
+// settles nothing, correctly, since nothing is known to have landed) must
+// still settle every entry it actually got to examine before the failing
+// one. incrMulti/incrAndGetMulti used to accumulate commit/forget
+// decisions and apply them only after the whole reply loop finished, so an
+// early return on an error reply or unexpected reply type skipped settle
+// entirely — losing the already-decided bookkeeping for every entry ahead
+// of the failure. The lost FORGET is the dangerous half: a key stays
+// seen=true with no confirmed EXPIRE on Redis, never resends one, and
+// v == e.delta can never true again for it — permanently TTL-less until
+// FIFO eviction, exactly the failure mode needsExpire's own doc comment
+// records as a prior CRITICAL finding. Both tests below reproduce the
+// reviewer's exact repro shape: kA/kB already confirmed EXPIRE (primed via
+// commitExpire before the call) so this batch's INCRBY for them carries no
+// EXPIRE, and both replies equal their own delta — the Redis-lost-the-key
+// recreate signal, which must forget them — while kC, later in the same
+// batch, replies with a READONLY error (a Dragonfly failover mid-batch),
+// failing the whole call.
+
+// TestRedisStore_IncrMulti_PartialFailureStillSettlesProcessedPrefix is
+// incrMulti's half of the CRITICAL review fix above.
+func TestRedisStore_IncrMulti_PartialFailureStillSettlesProcessedPrefix(t *testing.T) {
+	ln := newFakeListener(t)
+	runFakeRESPServer(t, ln, []respStep{
+		{wantArgs: []string{"SELECT", "0"}, reply: []byte("+OK\r\n")},
+		{wantArgs: []string{"INCRBY", "kA", "1"}, reply: []byte(":1\r\n")},
+		{wantArgs: []string{"INCRBY", "kB", "1"}, reply: []byte(":1\r\n")},
+		// kC is new (never committed), so the pipeline built upfront
+		// still includes its EXPIRE right after its INCRBY — both
+		// commands are already on the wire by the time the INCRBY reply
+		// turns out to be an error, so the fake server must still answer
+		// the EXPIRE too, even though incrMulti/incrAndGetMulti's own
+		// reply loop never looks at it (it returns on kC's INCRBY error
+		// first).
+		{wantArgs: []string{"INCRBY", "kC", "1"}, reply: []byte("-READONLY You can't write against a read only replica.\r\n")},
+		{wantArgs: []string{"EXPIRE", "kC", "60"}, reply: []byte(":1\r\n")},
+	})
+
+	store := newRedisStore(newRESPClientPool(ln.Addr().String(), "", 0, 1))
+	store.commitExpire("kA")
+	store.commitExpire("kB")
+
+	entries := []counterIncr{
+		{key: "kA", delta: 1, ttl: time.Minute},
+		{key: "kB", delta: 1, ttl: time.Minute},
+		{key: "kC", delta: 1, ttl: time.Minute},
+	}
+	_, err := store.incrMulti(entries)
+	require.Error(t, err, "kC's READONLY reply must fail the whole call")
+	assert.Contains(t, err.Error(), "READONLY")
+
+	assert.True(t, store.needsExpire("kA"), "kA must be forgotten — its delta-equal reply was processed before kC's failure")
+	assert.True(t, store.needsExpire("kB"), "kB must be forgotten — its delta-equal reply was processed before kC's failure")
+	assert.True(t, store.needsExpire("kC"), "kC was never reached far enough to commit or forget; must stay in its original unseen state")
+}
+
+// TestRedisStore_IncrAndGetMulti_PartialFailureStillSettlesProcessedPrefix
+// is incrAndGetMulti's half of the CRITICAL review fix above.
+func TestRedisStore_IncrAndGetMulti_PartialFailureStillSettlesProcessedPrefix(t *testing.T) {
+	ln := newFakeListener(t)
+	runFakeRESPServer(t, ln, []respStep{
+		{wantArgs: []string{"SELECT", "0"}, reply: []byte("+OK\r\n")},
+		{wantArgs: []string{"INCRBY", "kA", "1"}, reply: []byte(":1\r\n")},
+		{wantArgs: []string{"INCRBY", "kB", "1"}, reply: []byte(":1\r\n")},
+		// kC is new (never committed), so the pipeline built upfront
+		// still includes its EXPIRE right after its INCRBY — both
+		// commands are already on the wire by the time the INCRBY reply
+		// turns out to be an error, so the fake server must still answer
+		// the EXPIRE too, even though incrMulti/incrAndGetMulti's own
+		// reply loop never looks at it (it returns on kC's INCRBY error
+		// first).
+		{wantArgs: []string{"INCRBY", "kC", "1"}, reply: []byte("-READONLY You can't write against a read only replica.\r\n")},
+		{wantArgs: []string{"EXPIRE", "kC", "60"}, reply: []byte(":1\r\n")},
+	})
+
+	store := newRedisStore(newRESPClientPool(ln.Addr().String(), "", 0, 1))
+	store.commitExpire("kA")
+	store.commitExpire("kB")
+
+	entries := []counterIncr{
+		{key: "kA", delta: 1, ttl: time.Minute},
+		{key: "kB", delta: 1, ttl: time.Minute},
+		{key: "kC", delta: 1, ttl: time.Minute},
+	}
+	_, _, err := store.incrAndGetMulti(entries, nil)
+	require.Error(t, err, "kC's READONLY reply must fail the whole call")
+	assert.Contains(t, err.Error(), "READONLY")
+
+	assert.True(t, store.needsExpire("kA"), "kA must be forgotten — its delta-equal reply was processed before kC's failure")
+	assert.True(t, store.needsExpire("kB"), "kB must be forgotten — its delta-equal reply was processed before kC's failure")
+	assert.True(t, store.needsExpire("kC"), "kC was never reached far enough to commit or forget; must stay in its original unseen state")
+}
+
 // TestLimiter_FailOpenFalse_DeadRedisAddress_ReturnsStoreDownViolation is
 // the brief's Step-1 case: a limiter backed by a redisStore pointed at an
 // address nothing listens on, with failOpen=false, must refuse the
@@ -640,6 +734,106 @@ func TestLimiter_FailOpenTrue_HungRedisServer_FallsBackQuickly(t *testing.T) {
 	}
 	if elapsed >= 3*time.Second {
 		t.Fatalf("elapsed = %v, want < 3s (one respCallTimeout for the first op, the second latched and skipping the network entirely)", elapsed)
+	}
+}
+
+// --- needsExpireBatch/settleExpireBatch: incrMulti/incrAndGetMulti's
+// per-batch expire bookkeeping (one expireMu acquisition per pipeline
+// instead of one per key; both methods now settle through the same
+// settleExpireBatch call — point 4 collapsed incrAndGetMulti's own
+// settleExpireFlags into it, since commits[i] was always just sendExpire[i]
+// copied into a redundant slice). These pin the new methods' exact
+// contract at the unit level, no network — complementing the full
+// pipeline-level regressions above (e.g.
+// TestRedisStore_IncrMulti_KeyRecreatedAfterLoss_ForgetsAndResendsExpireNextCall),
+// which already drive the identical "EXPIRE sent exactly once per key
+// across calls, a delta-equal reply forgets it" behavior through a
+// scripted fake server end to end.
+
+// TestRedisStore_NeedsExpireBatch_SettleExpireBatch is incrMulti's own
+// bookkeeping shape: a key gets EXPIRE exactly once (needsExpireBatch
+// reports it needs one, settleExpireBatch commits it — every later
+// needsExpireBatch call reports false) until a delta-equal INCRBY reply
+// (a Redis-side recreate) forgets it, at which point the very next call
+// needs EXPIRE again.
+func TestRedisStore_NeedsExpireBatch_SettleExpireBatch(t *testing.T) {
+	s := newRedisStore(nil) // no network: these methods touch only in-process state
+	entries := []counterIncr{{key: "a", delta: 1}}
+
+	// Round 1: "a" is genuinely new — needs and gets EXPIRE, then commits.
+	sent := s.needsExpireBatch(entries)
+	assert.Equal(t, []bool{true}, sent)
+	s.settleExpireBatch(entries, sent, []bool{false})
+	assert.False(t, s.needsExpire("a"))
+
+	// Round 2: cache says "a" already has a confirmed EXPIRE, so none is
+	// sent this round — but the (simulated) INCRBY reply equals this
+	// round's own delta, the Redis-lost-the-key recreate signal.
+	sent = s.needsExpireBatch(entries)
+	assert.Equal(t, []bool{false}, sent)
+	s.settleExpireBatch(entries, sent, []bool{true})
+	assert.True(t, s.needsExpire("a"), "a delta-equal reply must forget the key so the next call resends EXPIRE")
+
+	// Round 3: EXPIRE is needed again, proving the forget actually took.
+	sent = s.needsExpireBatch(entries)
+	assert.Equal(t, []bool{true}, sent)
+}
+
+// TestRedisStore_NeedsExpireBatch_OneLockForTheWholeSlice asserts
+// needsExpireBatch reports per-key state correctly across a mixed batch —
+// some keys already committed, some genuinely new — not merely for a
+// single-entry slice.
+func TestRedisStore_NeedsExpireBatch_OneLockForTheWholeSlice(t *testing.T) {
+	s := newRedisStore(nil)
+	s.commitExpire("hot")
+	entries := []counterIncr{{key: "hot", delta: 1}, {key: "cold", delta: 1}}
+
+	got := s.needsExpireBatch(entries)
+	assert.Equal(t, []bool{false, true}, got, "hot is already committed; cold is genuinely new")
+}
+
+// TestRedisStore_SettleExpireBatch_NoCommitNoForgetLeavesKeyUntouched
+// asserts settleExpireBatch's third outcome (neither sent nor firstWrite)
+// — incrAndGetMulti now drives its own bookkeeping through this same
+// method (point 4, collapsed from a separate settleExpireFlags), so its
+// "leave alone" branch needs its own direct coverage, not just the
+// commit/forget branches TestRedisStore_NeedsExpireBatch_SettleExpireBatch
+// already covers.
+func TestRedisStore_SettleExpireBatch_NoCommitNoForgetLeavesKeyUntouched(t *testing.T) {
+	s := newRedisStore(nil)
+	entries := []counterIncr{{key: "x", delta: 1}, {key: "y", delta: 1}}
+
+	s.settleExpireBatch(entries, []bool{true, false}, []bool{false, false})
+	assert.False(t, s.needsExpire("x"), "sent[0]=true must commit x")
+	assert.True(t, s.needsExpire("y"), "neither sent nor firstWrite for y must leave it unseen")
+
+	s.commitExpire("y")
+	s.settleExpireBatch(entries, []bool{false, false}, []bool{false, true})
+	assert.True(t, s.needsExpire("y"), "firstWrite[1]=true with sent[1]=false must forget y")
+	assert.False(t, s.needsExpire("x"), "x must be untouched by a settle call that neither commits nor forgets it")
+}
+
+// TestRedisStore_CommitExpireLocked_BoundedEviction is
+// TestRedisStore_ExpireOnce_BoundedEviction's counterpart for the shared
+// commitExpireLocked body — commitExpire (single key, self-locking) and
+// settleExpireBatch (batched, already holding the lock) both now funnel
+// through it, so its FIFO eviction must still hold exactly as before
+// regardless of which caller drives it.
+func TestRedisStore_CommitExpireLocked_BoundedEviction(t *testing.T) {
+	s := newRedisStore(nil)
+	entries := make([]counterIncr, 0, expireOnceCacheMax+1)
+	for i := 0; i <= expireOnceCacheMax; i++ {
+		entries = append(entries, counterIncr{key: fmt.Sprintf("key-%d", i), delta: 1})
+	}
+	sent := s.needsExpireBatch(entries)
+	firstWrite := make([]bool, len(entries))
+	s.settleExpireBatch(entries, sent, firstWrite)
+
+	if got := len(s.expireSeen); got != expireOnceCacheMax {
+		t.Errorf("len(expireSeen) = %d, want exactly %d (bounded)", got, expireOnceCacheMax)
+	}
+	if !s.needsExpire("key-0") {
+		t.Error("needsExpire(key-0) after the tracker wrapped = false, want true (evicted, so unseen again)")
 	}
 }
 
