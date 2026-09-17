@@ -39,11 +39,65 @@ func TestEncodeCommand(t *testing.T) {
 	}
 }
 
+// referenceEncodeCommand is encodeCommand's pre-optimisation implementation
+// (fmt.Fprintf into a strings.Builder), kept verbatim as the byte-for-byte
+// oracle encodeCommands must match.
+func referenceEncodeCommand(args []string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "*%d\r\n", len(args))
+	for _, a := range args {
+		fmt.Fprintf(&b, "$%d\r\n%s\r\n", len(a), a)
+	}
+	return b.String()
+}
+
+// TestEncodeCommands_MatchesReference checks encodeCommands against
+// referenceEncodeCommand byte-for-byte across a range of pipelines.
+func TestEncodeCommands_MatchesReference(t *testing.T) {
+	hundredK := strings.Repeat("x", 100000)
+	cases := []struct {
+		name string
+		cmds [][]string
+	}{
+		{name: "one command", cmds: [][]string{{"GET", "k"}}},
+		{name: "pipeline of several commands", cmds: [][]string{
+			{"SET", "k", "v"},
+			{"GET", "k"},
+			{"EXPIRE", "k", "10"},
+		}},
+		{name: "empty string arg", cmds: [][]string{{"SET", "k", ""}}},
+		{name: "command with zero args", cmds: [][]string{{}}},
+		{name: "zero commands", cmds: nil},
+		{name: "binary arg with CRLF, NUL and invalid UTF-8 bytes", cmds: [][]string{{"SET", "k", "a\r\nb\x00c\xff\x80"}}},
+		{name: "100000 byte arg (multi-digit length)", cmds: [][]string{{"SET", "k", hundredK}}},
+		{name: "arg length crosses 9 to 10 bytes", cmds: [][]string{
+			{"SET", "k", strings.Repeat("a", 9)},
+			{"SET", "k", strings.Repeat("a", 10)},
+		}},
+		{name: "arg length crosses 99 to 100 bytes", cmds: [][]string{
+			{"SET", "k", strings.Repeat("a", 99)},
+			{"SET", "k", strings.Repeat("a", 100)},
+		}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var want strings.Builder
+			for _, args := range c.cmds {
+				want.WriteString(referenceEncodeCommand(args))
+			}
+
+			got := encodeCommands(c.cmds)
+
+			assert.Equal(t, want.String(), string(got))
+		})
+	}
+}
+
 // TestDecodeReply covers every RESP2 type respClient must decode: simple
 // string, error, integer, bulk string (including the null bulk "$-1"), and
 // a single top-level array (including the null array "*-1"). Every call
 // passes depth 0 — a top-level reply, matching every real call site in
-// resp.go (attemptPipelineOn, handshakeOn, and decodeArray's own
+// resp.go (attemptEncodedOn, handshakeOn, and decodeArray's own
 // element loop, which passes depth+1).
 func TestDecodeReply(t *testing.T) {
 	t.Run("simple string", func(t *testing.T) {
@@ -524,6 +578,53 @@ func TestRESPClient_SetEx_ServerErrorReplyIsReturned(t *testing.T) {
 	}
 }
 
+// TestRESPClient_SetEx_WireBytesMatchReference asserts setEx's hand-built
+// fmt.Appendf payload is byte-for-byte identical to referenceEncodeCommand's
+// framing of the equivalent "SET key val EX seconds" command — catching a
+// mis-sized literal segment or wrong length field that a respStep.wantArgs
+// check (parsed back through readRESPCommand) would not distinguish from a
+// correct encoding. It presets the pooled connection's conn directly
+// (fakeConn, recording writes) so ensureConnOn skips the AUTH/SELECT
+// handshake entirely, leaving only the SET payload on the wire.
+func TestRESPClient_SetEx_WireBytesMatchReference(t *testing.T) {
+	cases := []struct {
+		name string
+		key  string
+		val  []byte
+		ttl  time.Duration
+	}{
+		{name: "small ASCII value", key: "k", val: []byte("hello"), ttl: 5 * time.Second},
+		{name: "binary value with CRLF, NUL and non-UTF8 bytes", key: "k", val: []byte("a\r\nb\x00c\xff\x80"), ttl: 5 * time.Second},
+		{name: "100000 byte value", key: "k", val: bytes.Repeat([]byte("x"), 100000), ttl: 5 * time.Second},
+		{name: "ttl rounds 1500ms up to 2s", key: "k", val: []byte("v"), ttl: 1500 * time.Millisecond},
+		{name: "ttl floors 0 up to 1s", key: "k", val: []byte("v"), ttl: 0},
+		{name: "multi-digit ttl (default 5m cache TTL)", key: "k", val: []byte("v"), ttl: 300 * time.Second},
+		{name: "key with CRLF, NUL, 0xff and a literal %s", key: "k\r\n\x00\xff%s", val: []byte("v"), ttl: 5 * time.Second},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			ttlSeconds := int64(c.ttl / time.Second)
+			if c.ttl%time.Second != 0 {
+				ttlSeconds++
+			}
+			if ttlSeconds < 1 {
+				ttlSeconds = 1
+			}
+			want := referenceEncodeCommand([]string{"SET", c.key, string(c.val), "EX", strconv.FormatInt(ttlSeconds, 10)})
+
+			var written []byte
+			client := &respClient{free: make(chan *respConn, 1)}
+			client.free <- &respConn{
+				conn: fakeConn{written: &written},
+				r:    bufio.NewReader(strings.NewReader("+OK\r\n")),
+			}
+
+			require.NoError(t, client.setEx(c.key, c.val, c.ttl))
+			assert.Equal(t, want, string(written))
+		})
+	}
+}
+
 // TestRESPClient_GetBytes_HitReturnsBody covers the cache-hit case: a
 // bulk reply decodes to the stored bytes with found=true.
 func TestRESPClient_GetBytes_HitReturnsBody(t *testing.T) {
@@ -603,7 +704,8 @@ func TestRESPClient_GetBytes_DownServer_ReturnsError(t *testing.T) {
 // --- fakeConn: a net.Conn whose Write/SetDeadline fail on command, for
 // the handful of respClient error branches a real TCP connection cannot be
 // coaxed into deterministically (a write failing on an otherwise-live
-// connection, SetDeadline failing on a reused connection) ---
+// connection, SetDeadline failing on a reused connection), and which can
+// optionally record what was written for a wire-format assertion ---
 
 // fakeAddr is a trivial net.Addr for fakeConn's LocalAddr/RemoteAddr.
 type fakeAddr struct{}
@@ -615,10 +717,14 @@ func (fakeAddr) String() string  { return "fake" }
 // setDeadlineErr from SetDeadline when set, so a test can drive respClient
 // methods directly against a connection already known bad — bypassing
 // ensureConnOn's real net.DialTimeout, which always succeeds against a
-// live listener and so cannot itself be made to fail this way.
+// live listener and so cannot itself be made to fail this way. When
+// written is non-nil, every Write appends its argument to *written instead
+// of discarding it, letting a test assert on the exact bytes a method put
+// on the wire.
 type fakeConn struct {
 	writeErr       error
 	setDeadlineErr error
+	written        *[]byte
 }
 
 func (fakeConn) Read([]byte) (int, error) { return 0, io.EOF }
@@ -626,6 +732,9 @@ func (fakeConn) Read([]byte) (int, error) { return 0, io.EOF }
 func (c fakeConn) Write(b []byte) (int, error) {
 	if c.writeErr != nil {
 		return 0, c.writeErr
+	}
+	if c.written != nil {
+		*c.written = append(*c.written, b...)
 	}
 	return len(b), nil
 }
@@ -702,7 +811,7 @@ func TestRespDeadlineExceededErr(t *testing.T) {
 	assert.True(t, err.Temporary())
 }
 
-// --- ensureConnOn / attemptPipelineOn / handshakeOn error branches only
+// --- ensureConnOn / attemptEncodedOn / handshakeOn error branches only
 // reachable via a pre-set connection, not a real dial ---
 
 // TestRESPClient_EnsureConnOn_Errors covers ensureConnOn's two error
@@ -747,7 +856,7 @@ func TestRESPClient_EnsureConnOn_Errors(t *testing.T) {
 }
 
 // TestRESPClient_WriteError_BrokenPipe covers the identical broken-pipe
-// shape shared by attemptPipelineOn's command write and handshakeOn's own
+// shape shared by attemptEncodedOn's payload write and handshakeOn's own
 // write: both fail deterministically on an already-connected socket that
 // refuses a write — distinct from a dial failure, which never reaches
 // either code path.
@@ -758,9 +867,9 @@ func TestRESPClient_WriteError_BrokenPipe(t *testing.T) {
 		wantErrContains string
 	}{
 		{
-			name: "attemptPipelineOn: command write fails",
+			name: "attemptEncodedOn: payload write fails",
 			run: func(c *respClient, pc *respConn) error {
-				_, err := c.attemptPipelineOn(pc, [][]string{{"GET", "k"}}, time.Now().Add(time.Second))
+				_, err := c.attemptEncodedOn(pc, encodeCommands([][]string{{"GET", "k"}}), 1, time.Now().Add(time.Second))
 				return err
 			},
 			wantErrContains: "write",
@@ -791,7 +900,7 @@ func TestRESPClient_WriteError_BrokenPipe(t *testing.T) {
 // ensureConnOn's AUTH-failure branch and handshakeOn's respErr branch
 // together: a RESP error reply to AUTH must fail the call, not be
 // silently treated as success. It acquires one pooled slot and calls
-// attemptPipelineOn directly (one attempt, one scripted connection)
+// attemptEncodedOn directly (one attempt, one scripted connection)
 // rather than the public do/pipeline, which would retry once more against
 // a second connection the fakeRESPServer fixture — built for a
 // server-initiated closeConn, not a client-initiated close on handshake
@@ -806,7 +915,7 @@ func TestRESPClient_AuthHandshakeFailure_ErrorReplySurfaces(t *testing.T) {
 	deadline := time.Now().Add(2 * time.Second)
 	pc, err := c.acquire(deadline)
 	require.NoError(t, err)
-	_, err = c.attemptPipelineOn(pc, [][]string{{"GET", "k"}}, deadline)
+	_, err = c.attemptEncodedOn(pc, encodeCommands([][]string{{"GET", "k"}}), 1, deadline)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "AUTH failed")
 }

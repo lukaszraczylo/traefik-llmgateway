@@ -224,7 +224,15 @@ func (c *respClient) do(args ...string) (any, error) {
 	return replies[0], nil
 }
 
-// pipeline sends every command in cmds on one round trip, over one pooled
+// pipeline sends every command in cmds on one round trip and returns their
+// decoded replies in the same order. It encodes cmds once and hands off to
+// pipelineEncoded, which owns the connection/retry logic.
+func (c *respClient) pipeline(cmds [][]string) ([]any, error) {
+	return c.pipelineEncoded(encodeCommands(cmds), len(cmds))
+}
+
+// pipelineEncoded runs pipeline's connection/retry logic over an
+// already-encoded RESP2 payload representing n commands, over one pooled
 // connection acquired for the duration of the call, and returns their
 // decoded replies in the same order.
 //
@@ -241,8 +249,10 @@ func (c *respClient) do(args ...string) (any, error) {
 // closed (closeConn) so the next call to acquire this slot lazily
 // reconnects fresh rather than reusing a connection already known bad —
 // the slot itself always returns to the pool via the deferred send below,
-// whether or not its connection survived the call.
-func (c *respClient) pipeline(cmds [][]string) ([]any, error) {
+// whether or not its connection survived the call. payload is encoded once
+// by the caller, so the retry re-sends the identical bytes without
+// re-encoding cmds a second time.
+func (c *respClient) pipelineEncoded(payload []byte, n int) ([]any, error) {
 	deadline := time.Now().Add(respCallTimeout)
 
 	pc, err := c.acquire(deadline)
@@ -251,7 +261,7 @@ func (c *respClient) pipeline(cmds [][]string) ([]any, error) {
 	}
 	defer func() { c.free <- pc }()
 
-	replies, err := c.attemptPipelineOn(pc, cmds, deadline)
+	replies, err := c.attemptEncodedOn(pc, payload, n, deadline)
 	if err == nil {
 		return replies, nil
 	}
@@ -260,7 +270,7 @@ func (c *respClient) pipeline(cmds [][]string) ([]any, error) {
 		return nil, err
 	}
 
-	replies, err = c.attemptPipelineOn(pc, cmds, deadline)
+	replies, err = c.attemptEncodedOn(pc, payload, n, deadline)
 	if err != nil {
 		closeConn(pc)
 		return nil, err
@@ -328,28 +338,24 @@ func (respDeadlineExceededErr) Error() string   { return "resp: call deadline al
 func (respDeadlineExceededErr) Timeout() bool   { return true }
 func (respDeadlineExceededErr) Temporary() bool { return true }
 
-// attemptPipelineOn runs one full attempt of cmds over pc, connecting
-// first if needed, with every read and write bound by deadline. Callers
-// own pc exclusively for the duration of this call (acquired from
-// c.free).
-func (c *respClient) attemptPipelineOn(pc *respConn, cmds [][]string, deadline time.Time) ([]any, error) {
+// attemptEncodedOn runs one full attempt of an already-encoded RESP2
+// payload representing n commands over pc, connecting first if needed,
+// with every read and write bound by deadline. Callers own pc exclusively
+// for the duration of this call (acquired from c.free).
+func (c *respClient) attemptEncodedOn(pc *respConn, payload []byte, n int, deadline time.Time) ([]any, error) {
 	if err := c.ensureConnOn(pc, deadline); err != nil {
 		return nil, err
 	}
 
-	var buf strings.Builder
-	for _, args := range cmds {
-		buf.WriteString(encodeCommand(args))
-	}
-	if _, err := io.WriteString(pc.conn, buf.String()); err != nil {
+	if _, err := pc.conn.Write(payload); err != nil {
 		return nil, fmt.Errorf("resp: write: %w", err)
 	}
 
-	replies := make([]any, len(cmds))
-	for i := range cmds {
+	replies := make([]any, n)
+	for i := 0; i < n; i++ {
 		v, err := decodeReply(pc.r, 0)
 		if err != nil {
-			return nil, fmt.Errorf("resp: read reply %d/%d: %w", i+1, len(cmds), err)
+			return nil, fmt.Errorf("resp: read reply %d/%d: %w", i+1, n, err)
 		}
 		replies[i] = v
 	}
@@ -402,7 +408,7 @@ func (c *respClient) ensureConnOn(pc *respConn, deadline time.Time) error {
 // requires a non-error reply. Callers own pc exclusively, with a live
 // pc.conn whose deadline is already set.
 func (c *respClient) handshakeOn(pc *respConn, cmd, arg string) error {
-	if _, err := io.WriteString(pc.conn, encodeCommand([]string{cmd, arg})); err != nil {
+	if _, err := pc.conn.Write(encodeCommands([][]string{{cmd, arg}})); err != nil {
 		return fmt.Errorf("resp: %s: write: %w", cmd, err)
 	}
 	v, err := decodeReply(pc.r, 0)
@@ -427,15 +433,27 @@ func closeConn(pc *respConn) {
 	pc.r = nil
 }
 
+// encodeCommands renders every command in cmds as consecutive RESP2 arrays,
+// one fmt.Appendf call per header/argument appending into a single growing
+// slice — no strings.Builder and no string/[]byte conversion. Measured
+// under yaegi v0.16.1: cheaper than either presizing (the interpreted size
+// loop cost more than native slice regrowth) or appending raw bytes
+// directly (append with a string operand copies it under yaegi).
+func encodeCommands(cmds [][]string) []byte {
+	var dst []byte
+	for _, args := range cmds {
+		dst = fmt.Appendf(dst, "*%d\r\n", len(args))
+		for _, a := range args {
+			dst = fmt.Appendf(dst, "$%d\r\n%s\r\n", len(a), a)
+		}
+	}
+	return dst
+}
+
 // encodeCommand renders args as a RESP2 command array:
 // "*N\r\n$len\r\narg\r\n..." for each arg.
 func encodeCommand(args []string) string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "*%d\r\n", len(args))
-	for _, a := range args {
-		fmt.Fprintf(&b, "$%d\r\n%s\r\n", len(a), a)
-	}
-	return b.String()
+	return string(encodeCommands([][]string{args}))
 }
 
 // decodeReply reads and decodes one RESP2 reply from r. depth is 0 for a
@@ -561,10 +579,11 @@ func decodeArray(r *bufio.Reader, lenField string, depth int) (any, error) {
 // seconds", used by the response cache (cache.go) to store a cached
 // response. ttl is rounded up to whole seconds and floored at 1s — Redis's
 // EX argument is whole seconds only — matching redisStore.incrBy's EXPIRE
-// rounding exactly. val is converted to a string via a bare string(val): a
-// Go string is just a byte sequence, so this conversion, and
-// encodeCommand's own len(a)-based framing, are lossless for arbitrary
-// binary data, not just UTF-8 text.
+// rounding exactly. The payload is built directly with fmt.Appendf rather
+// than going through do/encodeCommands: val (a cached response, often tens
+// of KB) is framed straight from its own bytes — "%s" on a []byte writes
+// it verbatim — avoiding both the string(val) copy the old []string-args
+// call required and a second encoding pass.
 func (c *respClient) setEx(key string, val []byte, ttl time.Duration) error {
 	ttlSeconds := int64(ttl / time.Second)
 	if ttl%time.Second != 0 {
@@ -574,10 +593,13 @@ func (c *respClient) setEx(key string, val []byte, ttl time.Duration) error {
 		ttlSeconds = 1
 	}
 
-	reply, err := c.do("SET", key, string(val), "EX", strconv.FormatInt(ttlSeconds, 10))
+	ttlArg := strconv.FormatInt(ttlSeconds, 10)
+	payload := fmt.Appendf(nil, "*5\r\n$3\r\nSET\r\n$%d\r\n%s\r\n$%d\r\n%s\r\n$2\r\nEX\r\n$%d\r\n%s\r\n", len(key), key, len(val), val, len(ttlArg), ttlArg)
+	replies, err := c.pipelineEncoded(payload, 1)
 	if err != nil {
 		return fmt.Errorf("resp: setEx %q: %w", key, err)
 	}
+	reply := replies[0]
 	if e, ok := reply.(respErr); ok {
 		return fmt.Errorf("resp: setEx %q: %w", key, e)
 	}
