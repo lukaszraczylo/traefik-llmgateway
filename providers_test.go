@@ -1,9 +1,13 @@
 package traefikllmgateway
 
 import (
+	"bytes"
 	"context"
+	"errors"
+	"io"
 	"net/http"
 	"testing"
+	"testing/iotest"
 )
 
 // TestProviderPassthroughEnabled is the security+performance audit
@@ -93,5 +97,116 @@ func TestWithAttemptRecorder_NilRecorder_ReturnsSameContext(t *testing.T) {
 	}
 	if rec := attemptRecorderFromContext(got); rec != nil {
 		t.Errorf("attemptRecorderFromContext = %v, want nil after a nil recorder was passed in", rec)
+	}
+}
+
+// TestReadAllLimited compares readAllLimited against the reference
+// io.ReadAll(io.LimitReader(r, limit)) on an identical input for every
+// shape of contentLength hint: exact, too small, too large, unknown (-1),
+// zero with a non-empty body, larger than limit, and a body longer than
+// limit (which must still truncate to limit) both via the io.ReadAll
+// fallback (hint <= 0 or hint > limit) and via the presized bytes.Buffer
+// fast path directly (hint > 0 and hint <= limit) — the fast path's own
+// io.LimitReader must still do the truncating, not just size the buffer.
+func TestReadAllLimited(t *testing.T) {
+	cases := []struct {
+		name          string
+		body          []byte
+		contentLength int64
+		limit         int64
+	}{
+		{name: "exact content-length", body: []byte("hello world"), contentLength: 11, limit: 1024},
+		{name: "hint smaller than body", body: []byte("hello world"), contentLength: 3, limit: 1024},
+		{name: "hint larger than body", body: []byte("hi"), contentLength: 1000, limit: 1024},
+		{name: "unknown content-length (-1)", body: []byte("hello"), contentLength: -1, limit: 1024},
+		{name: "zero hint with non-empty body", body: []byte("hello"), contentLength: 0, limit: 1024},
+		{name: "hint larger than limit", body: []byte("hello world"), contentLength: 2000, limit: 5},
+		{name: "body longer than limit, hint exceeds limit (fallback path) truncates", body: bytes.Repeat([]byte("x"), 20), contentLength: 20, limit: 10},
+		{name: "body longer than limit, unknown hint (fallback path) truncates", body: bytes.Repeat([]byte("x"), 20), contentLength: -1, limit: 10},
+		{name: "body longer than limit, hint equals limit (fast path) truncates", body: bytes.Repeat([]byte("x"), 20), contentLength: 10, limit: 10},
+		{name: "body longer than limit, hint below limit (fast path) truncates", body: bytes.Repeat([]byte("x"), 20), contentLength: 5, limit: 10},
+		{name: "empty body", body: nil, contentLength: 0, limit: 1024},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			want, wantErr := io.ReadAll(io.LimitReader(bytes.NewReader(c.body), c.limit))
+			got, gotErr := readAllLimited(bytes.NewReader(c.body), c.contentLength, c.limit)
+
+			if (gotErr == nil) != (wantErr == nil) {
+				t.Fatalf("err = %v, want error presence %v", gotErr, wantErr != nil)
+			}
+			if !bytes.Equal(got, want) {
+				t.Errorf("readAllLimited(%q, %d, %d) = %q, want %q", c.body, c.contentLength, c.limit, got, want)
+			}
+		})
+	}
+}
+
+// TestReadAllLimited_ClampsHintToReadAllHintMax asserts a large declared
+// Content-Length never drives an unbounded up-front allocation before any
+// byte has arrived — an authenticated peer that declares a huge length and
+// then stalls must not make readAllLimited hold more than readAllHintMax
+// per call — while a genuinely large body (bigger than readAllHintMax)
+// still reads back identically to the io.ReadAll(io.LimitReader(...))
+// reference, just via regrowth past the initial cap.
+func TestReadAllLimited_ClampsHintToReadAllHintMax(t *testing.T) {
+	t.Run("huge declared length, tiny body: allocation stays capped", func(t *testing.T) {
+		body := []byte("0123456789")
+		const contentLength = 32 << 20
+		const limit = 32 << 20
+
+		got, err := readAllLimited(bytes.NewReader(body), contentLength, limit)
+		if err != nil {
+			t.Fatalf("readAllLimited: %v", err)
+		}
+		if !bytes.Equal(got, body) {
+			t.Errorf("readAllLimited = %q, want %q", got, body)
+		}
+		if cap(got) > readAllHintMax+bytes.MinRead {
+			t.Errorf("cap(got) = %d, want <= %d: the declared length must not drive an unbounded up-front allocation",
+				cap(got), readAllHintMax+bytes.MinRead)
+		}
+	})
+
+	t.Run("body larger than readAllHintMax with exact hint still reads fully", func(t *testing.T) {
+		body := bytes.Repeat([]byte("y"), readAllHintMax+100)
+		contentLength := int64(len(body))
+		limit := int64(len(body))
+
+		want, wantErr := io.ReadAll(io.LimitReader(bytes.NewReader(body), limit))
+		if wantErr != nil {
+			t.Fatalf("reference io.ReadAll: %v", wantErr)
+		}
+		got, err := readAllLimited(bytes.NewReader(body), contentLength, limit)
+		if err != nil {
+			t.Fatalf("readAllLimited: %v", err)
+		}
+		if !bytes.Equal(got, want) {
+			t.Errorf("readAllLimited returned %d bytes, want %d bytes matching reference", len(got), len(want))
+		}
+	})
+}
+
+// TestReadAllLimited_PropagatesNonEOFError asserts a reader that yields
+// some data and then a non-EOF error fails readAllLimited the same way it
+// fails the reference io.ReadAll(io.LimitReader(r, limit)) — the injected
+// error must still be reachable via errors.Is, not swallowed.
+func TestReadAllLimited_PropagatesNonEOFError(t *testing.T) {
+	injected := errors.New("stub: read failed")
+	newFailingReader := func() io.Reader {
+		return io.MultiReader(bytes.NewReader([]byte("partial")), iotest.ErrReader(injected))
+	}
+
+	_, refErr := io.ReadAll(io.LimitReader(newFailingReader(), 1024))
+	if !errors.Is(refErr, injected) {
+		t.Fatalf("reference io.ReadAll(io.LimitReader) err = %v, want errors.Is match for %v", refErr, injected)
+	}
+
+	_, gotErr := readAllLimited(newFailingReader(), 100, 1024)
+	if gotErr == nil {
+		t.Fatal("readAllLimited: want a non-nil error")
+	}
+	if !errors.Is(gotErr, injected) {
+		t.Errorf("readAllLimited err = %v, want errors.Is match for %v", gotErr, injected)
 	}
 }

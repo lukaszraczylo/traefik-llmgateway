@@ -214,7 +214,7 @@ type chatUsagePayload struct {
 // since a malformed-but-readable body is the upstream's problem to answer
 // for, not a reason to swallow the response.
 func (a *openaiAdapter) forwardJSON(w http.ResponseWriter, resp *http.Response) (usage, error) {
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
+	body, err := readAllLimited(resp.Body, resp.ContentLength, maxResponseBytes)
 	if err != nil {
 		return usage{}, fmt.Errorf("%w: read response body: %w", errUpstream, err)
 	}

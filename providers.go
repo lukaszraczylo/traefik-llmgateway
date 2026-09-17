@@ -80,6 +80,35 @@ func newProviderHTTPError(resp *http.Response) *providerHTTPError {
 	return &providerHTTPError{status: resp.StatusCode, body: body}
 }
 
+// readAllHintMax caps how much readAllLimited allocates up front from a
+// declared Content-Length. A peer that declares a large length and then
+// stalls must not make the gateway hold more than this before any byte
+// arrives; a longer body still reads correctly, it just regrows past it.
+const readAllHintMax = 1 << 20
+
+// readAllLimited returns the same result as io.ReadAll(io.LimitReader(r,
+// limit)); contentLength is only a capacity hint — a wrong value still
+// reads to EOF or limit, never trusted for correctness. Used for upstream
+// response bodies (forwardJSON), where the sender is the operator-
+// configured provider, not an arbitrary client. When it looks usable, it
+// lets a body of known length be read into a single allocation instead of
+// io.ReadAll's repeated doubling regrowth, but the hint itself is clamped
+// to readAllHintMax before allocating — the added bytes.MinRead keeps
+// ReadFrom's final probe read (which always tries to read past what it
+// expects) from itself forcing one more regrow.
+func readAllLimited(r io.Reader, contentLength, limit int64) ([]byte, error) {
+	if contentLength <= 0 || contentLength > limit {
+		return io.ReadAll(io.LimitReader(r, limit))
+	}
+	hint := contentLength
+	if hint > readAllHintMax {
+		hint = readAllHintMax
+	}
+	buf := bytes.NewBuffer(make([]byte, 0, hint+bytes.MinRead))
+	_, err := buf.ReadFrom(io.LimitReader(r, limit))
+	return buf.Bytes(), err
+}
+
 // errUpstream is a sentinel wrapped into errors an adapter returns when it
 // cannot reach, or cannot make sense of a response from, its upstream —
 // distinct from providerHTTPError, which means the upstream answered, just
