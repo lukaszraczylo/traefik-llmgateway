@@ -93,6 +93,34 @@ func TestEncodeCommands_MatchesReference(t *testing.T) {
 	}
 }
 
+// TestEncodeCommands_ArityBoundary pins the 3-argument fast path's exact
+// boundary against referenceEncodeCommand: arities 2, 3, 4, and 5 must all
+// match byte-for-byte. None of TestEncodeCommands_MatchesReference's own
+// cases happen to use a 4- or 5-argument command, so a mutated guard (e.g.
+// `len(args) == 3 || len(args) == 4`) would pass that whole test suite
+// unnoticed — the fast path's body only ever reads args[0..2], so a
+// 4-argument command routed into it would silently emit a "*3" header and
+// drop its own 4th argument entirely, a malformed wire encoding no
+// existing command arity exercises.
+func TestEncodeCommands_ArityBoundary(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+	}{
+		{name: "2 args, below the fast path", args: []string{"GET", "k"}},
+		{name: "3 args, the fast path itself", args: []string{"INCRBY", "k", "5"}},
+		{name: "4 args, just above the fast path", args: []string{"HSET", "k", "f", "v"}},
+		{name: "5 args, well above the fast path", args: []string{"MSET", "k1", "v1", "k2", "v2"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			want := referenceEncodeCommand(c.args)
+			got := string(encodeCommands([][]string{c.args}))
+			assert.Equal(t, want, got)
+		})
+	}
+}
+
 // TestDecodeReply covers every RESP2 type respClient must decode: simple
 // string, error, integer, bulk string (including the null bulk "$-1"), and
 // a single top-level array (including the null array "*-1"). Every call
