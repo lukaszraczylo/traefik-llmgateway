@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { modelRankingCsv, usageCsv } from './usage-csv'
+import { modelDetailCsv, modelRankingCsv, usageCsv } from './usage-csv'
 import type { AdminUsageEntryView, AdminUsageModelEntry } from '@/types/api'
 
 function testEntry(overrides: Partial<AdminUsageEntryView> = {}): AdminUsageEntryView {
@@ -116,5 +116,42 @@ describe('modelRankingCsv', () => {
     const lines = csv.split('\r\n')
     expect(lines[0]).toBe('Model,"Cost (USD) (24h, span 24)"')
     expect(lines[1]).toBe('openai/gpt-4,1.234500')
+  })
+})
+
+// free-models-plan.md: the Models tab's CSV export now includes every
+// detail=1 figure per row (Requests/Tokens in/Tokens out/Cost), plus a
+// separate Free flag column — not just the single ranked metric
+// modelRankingCsv above exports.
+describe('modelDetailCsv', () => {
+  it('renders a header naming every detail column, with window/span folded into Requests only', () => {
+    const csv = modelDetailCsv([], '24h', 24)
+    expect(csv).toBe('Model,"Requests (24h, span 24)",Tokens in,Tokens out,Cost (USD),Free\r\n')
+  })
+
+  it('renders one row per model with every detail figure as a plain machine-readable number', () => {
+    const models: AdminUsageModelEntry[] = [
+      { id: 'openai/gpt-4', value: 100, requests: 10, tokensIn: 1000, tokensOut: 2000, costMicroUsd: 1_234_500, free: false },
+    ]
+    const csv = modelDetailCsv(models, '24h', 24)
+    expect(csv.split('\r\n')[1]).toBe('openai/gpt-4,10,1000,2000,1.234500,false')
+  })
+
+  it('exports the real 0 cost (never the string "free") in the Cost column, with Free as its own "true" column', () => {
+    const models: AdminUsageModelEntry[] = [
+      { id: 'uni/free-model', value: 0, requests: 5, tokensIn: 50, tokensOut: 75, costMicroUsd: 0, free: true },
+    ]
+    const csv = modelDetailCsv(models, '24h', 24)
+    expect(csv.split('\r\n')[1]).toBe('uni/free-model,5,50,75,0.000000,true')
+  })
+
+  it('falls back every missing detail field to 0/false when detail was not actually requested (defensive)', () => {
+    const models: AdminUsageModelEntry[] = [{ id: 'openai/gpt-4', value: 100 }]
+    const csv = modelDetailCsv(models, '24h', 24)
+    expect(csv.split('\r\n')[1]).toBe('openai/gpt-4,0,0,0,0.000000,false')
+  })
+
+  it('renders just the header for an empty ranking', () => {
+    expect(modelDetailCsv([], '30d', 30)).toBe('Model,"Requests (30d, span 30)",Tokens in,Tokens out,Cost (USD),Free\r\n')
   })
 })

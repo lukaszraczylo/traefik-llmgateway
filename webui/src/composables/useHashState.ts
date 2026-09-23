@@ -16,7 +16,15 @@ import type { HistoryWindow } from '@/types/api'
 /** The five defaults every per-tab param omits from the built hash when the field is already at its default value (buildHash's own "caller decides what's default" contract, lib/hash-state.ts). */
 const DEFAULT_WINDOW: HistoryWindow = 'hour'
 const DEFAULT_CHART_TAB: ChartTab = 'requests'
-const DEFAULT_METRIC: ModelMetric = 'cost'
+/**
+ * DEFAULT_METRIC mirrors stores/history.ts's own initial `modelMetric`
+ * state (free-models-plan.md: 'req', not 'cost' — a cost-default ranking
+ * hides every free model). An omitted `metric` hash param, or one this
+ * build does not recognize (parseChartsParams' own independent-field
+ * validation, lib/hash-state.ts), falls back to this value here; an
+ * explicit `metric=cost` in the hash still parses and applies normally.
+ */
+const DEFAULT_METRIC: ModelMetric = 'req'
 const DEFAULT_SCOPE = 'total'
 const DEFAULT_MODEL_FILTER = ''
 

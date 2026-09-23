@@ -1,8 +1,12 @@
 // F8 (CSV export): builds the actual CSV text for the Usage tab's Users/
-// Groups exports (usageCsv) and, imported unmodified by WP-B2's Models
-// tab, the model-ranking export (modelRankingCsv). Both funnel through
-// lib/csv.ts's toCsv, so quoting/line-ending behavior is defined in
-// exactly one place (that module's own doc comment).
+// Groups exports (usageCsv) and the Models tab's ranking export. The
+// Models tab's own ChartsView.vue calls modelDetailCsv (free-models-
+// plan.md's per-row requests/tokens/cost/free breakdown) — modelRankingCsv
+// stays exported and tested as a general single-metric exporter, kept for
+// any future caller that only wants the ranked value column. Every export
+// funnels through lib/csv.ts's toCsv, so quoting/line-ending (and CSV-
+// formula-injection neutralisation) behavior is defined in exactly one
+// place (that module's own doc comment).
 import { toCsv } from '@/lib/csv'
 import { monthProgress, projectMonthEnd } from '@/lib/forecast'
 import { formatLimits } from '@/lib/format'
@@ -141,5 +145,45 @@ export function modelRankingCsv(
   const unit = isCostMetric ? ' (USD)' : ''
   const headers = ['Model', `${metricLabel}${unit} (${windowLabel}, span ${span})`]
   const rows = models.map((m) => [m.id, isCostMetric ? csvCostUsd(m.value) : m.value])
+  return toCsv(headers, rows)
+}
+
+/**
+ * modelDetailCsv renders the Models tab's current ranking with every
+ * `detail=1` figure per row (free-models-plan.md, UI section), not just
+ * the single ranked metric modelRankingCsv above exports: Model, Requests,
+ * Tokens in, Tokens out, Cost (USD), Free. stores/history.ts's
+ * fetchModelRanking always requests detail=1 now, so every entry passed
+ * here is expected to carry every detail field; `?? 0` covers the same
+ * theoretical-undefined case lib/model-table-columns.ts's
+ * numericDetailColumn already guards against, never a silent mis-export of
+ * a genuine 0.
+ *
+ * Cost is the SAME plain, machine-readable decimal-USD convention
+ * usageCsv/modelRankingCsv above already use (csvCostUsd) — a free model's
+ * own costMicroUsd is a real 0, exported as "0.000000" like any other zero
+ * cost, never overwritten by the text "free"; `free` is its own separate
+ * boolean column instead ("true"/"false"), so a spreadsheet reader can
+ * filter/sum the numeric Cost column without a stray non-numeric value
+ * breaking that — mirrors the on-screen table's own "the badge only
+ * changes what's displayed, never the sort key" rule
+ * (model-table-columns.ts's costColumn doc comment).
+ *
+ * `windowLabel`/`span` are the caller's own already-resolved DISPLAY
+ * strings/number (mirroring modelRankingCsv's identical parameters),
+ * folded into the Requests column's header only — every detail figure
+ * shares the identical span, so naming it once keeps the file
+ * self-describing without repeating it four times.
+ */
+export function modelDetailCsv(models: AdminUsageModelEntry[], windowLabel: string, span: number): string {
+  const headers = ['Model', `Requests (${windowLabel}, span ${span})`, 'Tokens in', 'Tokens out', 'Cost (USD)', 'Free']
+  const rows = models.map((m) => [
+    m.id,
+    m.requests ?? 0,
+    m.tokensIn ?? 0,
+    m.tokensOut ?? 0,
+    csvCostUsd(m.costMicroUsd ?? 0),
+    m.free ? 'true' : 'false',
+  ])
   return toCsv(headers, rows)
 }

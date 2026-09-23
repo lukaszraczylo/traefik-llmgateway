@@ -1,5 +1,5 @@
 // F8 (CSV export): the one RFC 4180 encoder every CSV export in this panel
-// builds on (usage-csv.ts's usageCsv/modelRankingCsv, WP-B2's Models tab
+// builds on (usage-csv.ts's usageCsv/modelDetailCsv, the Models tab's
 // export) — one implementation, not a copy per export (vue.md: "if you've
 // written it twice, you owe an abstraction").
 

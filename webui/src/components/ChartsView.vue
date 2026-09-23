@@ -14,11 +14,13 @@ import {
 } from '@/components/ui/select'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import CsvExportButton from '@/components/CsvExportButton.vue'
+import DataTable from '@/components/DataTable.vue'
 import ModelUsageChart from '@/components/ModelUsageChart.vue'
 import UsageChart from '@/components/UsageChart.vue'
 import { useSearchQuery } from '@/composables/useSearchQuery'
 import { filterModelsByPrefix } from '@/lib/model-filter'
-import { modelRankingCsv } from '@/lib/usage-csv'
+import { modelTableColumns } from '@/lib/model-table-columns'
+import { modelDetailCsv } from '@/lib/usage-csv'
 import { groupMatches, userMatches } from '@/lib/usage-search'
 import { useDashboardStore } from '@/stores/dashboard'
 import {
@@ -87,6 +89,15 @@ const scopeOptions = computed(() => {
 const windows: HistoryWindow[] = ['hour', 'day', 'month']
 const modelMetrics: ModelMetric[] = ['cost', 'req', 'tokin', 'tokout']
 
+/**
+ * modelColumns is a stateless ColumnDef set (lib/model-table-columns.ts),
+ * built once rather than per-render — the same convention
+ * TargetsView.vue's own `columns` constant follows for its identical
+ * reason (no per-row closures capture component state, so there is
+ * nothing to rebuild).
+ */
+const modelColumns = modelTableColumns()
+
 // --- Models-tab prefix filter (F6, dashboard-plan.md) ---
 //
 // history.modelFilter is set by ProvidersView.vue's provider-header link
@@ -101,22 +112,15 @@ const filteredModelRanking = computed(() => filterModelsByPrefix(history.modelRa
 
 /**
  * Exports exactly the ranking rows on screen (filter applied, server order
- * kept). P6 review fix: passes the resolved DISPLAY label constants
- * (MODEL_METRIC_LABEL/WINDOW_LABEL), not the raw enum values
- * ("cost"/"hour") modelRankingCsv's own doc comment always said the caller
- * should — the header used to read the literal "cost (hour, span 24)"
- * with no stated unit. `isCostMetric` states whether the CURRENTLY ranked
- * metric is cost, so modelRankingCsv can convert the raw micro-USD `value`
- * to a plain decimal USD number and name the unit in the header.
+ * kept). free-models-plan.md: every ranking fetch now requests detail=1
+ * (stores/history.ts's fetchModelRanking), so the export carries every
+ * per-row figure (requests/tokens in/tokens out/cost/free) via
+ * modelDetailCsv, not just the single metric currently being ranked by —
+ * matching the on-screen table (lib/model-table-columns.ts) exactly,
+ * regardless of which metric history.modelMetric happens to be.
  */
 function modelsCsv(): string {
-  return modelRankingCsv(
-    filteredModelRanking.value,
-    MODEL_METRIC_LABEL[history.modelMetric],
-    WINDOW_LABEL[history.window],
-    WINDOW_SPAN[history.window],
-    history.modelMetric === 'cost',
-  )
+  return modelDetailCsv(filteredModelRanking.value, WINDOW_LABEL[history.window], WINDOW_SPAN[history.window])
 }
 
 function clearModelFilter(): void {
@@ -251,6 +255,22 @@ watch(scopeOptions, (options) => {
           Top {{ MODEL_RANKING_LIMIT }} models
         </p>
         <ModelUsageChart :metric="history.modelMetric" :models="filteredModelRanking" />
+        <!--
+          free-models-plan.md: the per-model detail table beneath the
+          chart, with a per-row Requests/Tokens in/Tokens out/Cost
+          breakdown (a free model shows a "free" badge instead of $0 —
+          lib/model-table-columns.ts). Guarded by the same
+          filteredModelRanking.length check ModelUsageChart's own empty
+          state already uses above, so an empty window shows exactly ONE
+          "no model recorded any usage" message, not a second, empty
+          table stacked under it.
+        -->
+        <DataTable
+          v-if="filteredModelRanking.length"
+          :columns="modelColumns"
+          :data="filteredModelRanking"
+          empty-message="No model recorded any usage in this window."
+        />
         <div class="flex justify-end">
           <CsvExportButton :filename="`usage-models-${history.window}.csv`" :build="modelsCsv" />
         </div>

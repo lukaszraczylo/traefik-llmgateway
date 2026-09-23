@@ -81,6 +81,42 @@ describe('useHistoryStore model ranking', () => {
     expect(paths.some((p) => p.startsWith('/admin/api/usage/history'))).toBe(false)
   })
 
+  // free-models-plan.md: a cost-default ranking hides every free model
+  // (its cost total is always 0) — the store now defaults to ranking by
+  // request count instead.
+  it('defaults modelMetric to "req", not "cost"', () => {
+    expect(useHistoryStore().modelMetric).toBe('req')
+  })
+
+  // free-models-plan.md: the ranking fetch always requests the per-model
+  // detail breakdown (requests/tokensIn/tokensOut/costMicroUsd/free), not
+  // just the single ranked `value` — lib/model-table-columns.ts's table
+  // renders every figure regardless of which metric is currently ranking.
+  it('always sends detail=1 on the ranking fetch, regardless of metric or prefix', async () => {
+    routeFetch({})
+    const history = useHistoryStore()
+    history.tab = 'models'
+    history.modelFilter = 'openai/'
+
+    await history.fetchModelRanking()
+
+    const rankingCall = mockedAdminFetch.mock.calls.map((c) => String(c[0])).find((p) => p.startsWith('/admin/api/usage/models'))
+    expect(rankingCall).toContain('detail=1')
+  })
+
+  // The scope picker's model list (fetchModelOptions) only ever needs ids
+  // — it must NOT pay for the detail breakdown the ranking fetch above
+  // does.
+  it('never sends detail=1 on the picker-list fetch', async () => {
+    routeFetch({})
+    const history = useHistoryStore()
+
+    await history.fetchModelOptions()
+
+    const optionsCall = mockedAdminFetch.mock.calls.map((c) => String(c[0])).find((p) => p.includes('/usage/models'))
+    expect(optionsCall).not.toContain('detail=1')
+  })
+
   it('ranks by the selected metric, independently of the tab', async () => {
     routeFetch({})
     const history = useHistoryStore()
@@ -410,7 +446,10 @@ describe('useHistoryStore: latest-request-wins', () => {
     history.tab = 'models'
     history.modelRanking = [{ id: 'alpha/a-model-1', value: 3 }]
 
-    history.setModelMetric('req')
+    // 'cost', not 'req' — the store now DEFAULTS to 'req' (free-models-
+    // plan.md), so setModelMetric('req') here would be a no-op early
+    // return rather than the actual change this test means to exercise.
+    history.setModelMetric('cost')
 
     expect(history.modelRanking).toEqual([])
   })
@@ -523,7 +562,7 @@ describe('useHistoryStore.setSelection (P12: batched, one fetch)', () => {
     const history = useHistoryStore()
     const callsBefore = mockedAdminFetch.mock.calls.length
 
-    history.setSelection({ scope: 'total', window: 'hour', tab: 'requests', modelMetric: 'cost' }) // all defaults
+    history.setSelection({ scope: 'total', window: 'hour', tab: 'requests', modelMetric: 'req' }) // all defaults
     await flush()
 
     expect(mockedAdminFetch.mock.calls.length).toBe(callsBefore)

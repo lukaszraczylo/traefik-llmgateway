@@ -132,8 +132,14 @@ export const useHistoryStore = defineStore('history', {
     scope: 'total',
     window: 'hour' as HistoryWindow,
     tab: 'requests' as ChartTab,
-    /** Which metric the Models ranking ranks by — independent of `tab`. */
-    modelMetric: 'cost' as ModelMetric,
+    /**
+     * Which metric the Models ranking ranks by — independent of `tab`.
+     * Defaults to 'req' (free-models-plan.md), not 'cost': a cost-default
+     * ranking silently hides every free model (its cost total is always
+     * 0), and the picker/table both need free models to be reachable
+     * without the reader first knowing to switch metrics.
+     */
+    modelMetric: 'req' as ModelMetric,
     seriesByMetric: {} as Partial<Record<HistoryMetric, UsageHistoryPoint[]>>,
     /** The current Models-tab ranking. Empty means "nothing used in this window". */
     modelRanking: [] as AdminUsageModelEntry[],
@@ -391,8 +397,15 @@ export const useHistoryStore = defineStore('history', {
         // provider's models entirely, or return only a partial view of them
         // (the CONFIRMED problem this fixes).
         const prefixParam = this.modelFilter ? `&prefix=${encodeURIComponent(this.modelFilter)}` : ''
+        // detail=1 (free-models-plan.md): the Models tab's own ranking
+        // fetch always asks for the per-entry requests/tokensIn/tokensOut/
+        // costMicroUsd/free breakdown, not just the single ranked `value` —
+        // lib/model-table-columns.ts's table renders all four figures
+        // (plus the free badge) beside every row regardless of which
+        // metric is currently ranking. fetchModelOptions below stays
+        // detail-free: the scope picker only ever needs an id list.
         const res = await adminFetch<AdminUsageModelsResponse>(
-          `/admin/api/usage/models?metric=${this.modelMetric}&window=${this.window}&limit=${MODEL_RANKING_LIMIT}&span=${span}${prefixParam}`,
+          `/admin/api/usage/models?metric=${this.modelMetric}&window=${this.window}&limit=${MODEL_RANKING_LIMIT}&span=${span}${prefixParam}&detail=1`,
         )
         if (requestId !== this.seriesReqId) return
         this.modelRanking = res.models

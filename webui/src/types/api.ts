@@ -327,11 +327,30 @@ export interface UsageHistoryResponse {
  * One ranked model in GET /admin/api/usage/models (admin.go:
  * adminUsageModelEntryView). `id` is the canonical "provider/model" — the
  * provider that actually SERVED the traffic, which is why a failover
- * target and its primary appear as two separate rows.
+ * target and its primary appear as two separate rows. `value` is the total
+ * for whichever metric the request asked to rank by — unchanged meaning
+ * whether or not `detail` was requested.
+ *
+ * free-models-plan.md (per-model stats for free models): requests/tokensIn/
+ * tokensOut/costMicroUsd/free are `detail=1`-only — present (each field
+ * independently, possibly 0) only when the request set `detail=1`
+ * (AdminUsageModelsResponse.detail), undefined otherwise. An id is included
+ * by the server whenever ANY of the four totals is > 0, so a free model
+ * with real request traffic but zero cost is still listed even when
+ * ranking by cost, with `value` (and `costMicroUsd`) genuinely 0 — `free`
+ * is how a reader tells that apart from "this model simply has no cost
+ * data yet" (mirrors AdminModelMetaView's own "undefined means unknown,
+ * present 0 means known-free" convention, never infer either from a value
+ * being falsy).
  */
 export interface AdminUsageModelEntry {
   id: string
   value: number
+  requests?: number
+  tokensIn?: number
+  tokensOut?: number
+  costMicroUsd?: number
+  free?: boolean
 }
 
 /**
@@ -357,6 +376,13 @@ export interface AdminUsageModelsResponse {
    * string.
    */
   span: number
+  /**
+   * detail echoes whether the request set `detail=1` (free-models-plan.md)
+   * — true means every entry in `models` additionally carries its own
+   * requests/tokensIn/tokensOut/costMicroUsd/free. Omitted (falsy) for the
+   * ordinary, byte-identical-with-before response.
+   */
+  detail?: boolean
   models: AdminUsageModelEntry[]
 }
 
