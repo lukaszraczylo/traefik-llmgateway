@@ -1800,6 +1800,7 @@ func TestHandlePassthrough_UnpricedModelCostBudget_Returns402(t *testing.T) {
 		wantCode                    int
 		allowUnpricedWithCostBudget bool
 		wantUpstreamCalled          bool
+		wantEvent                   bool // item 5, this round: the 402 refusal must reach the events feed
 	}{
 		{
 			name:               "unpriced model, cost budget configured: refused",
@@ -1808,6 +1809,7 @@ func TestHandlePassthrough_UnpricedModelCostBudget_Returns402(t *testing.T) {
 			costBudget:         5,
 			wantCode:           http.StatusPaymentRequired,
 			wantUpstreamCalled: false,
+			wantEvent:          true,
 		},
 		{
 			name:               "unpriced model, no cost budget: passes",
@@ -1880,6 +1882,22 @@ func TestHandlePassthrough_UnpricedModelCostBudget_Returns402(t *testing.T) {
 			}
 			if upstreamCalled != tt.wantUpstreamCalled {
 				t.Errorf("upstreamCalled = %v, want %v", upstreamCalled, tt.wantUpstreamCalled)
+			}
+			if tt.wantEvent {
+				events := h.(*Gateway).events.ring.snapshot(eventRingCap)
+				if len(events) == 0 {
+					t.Fatal("want an event recorded for the 402 refusal, got none")
+				}
+				ev := events[0] // newest first
+				if ev.Kind != eventKindUnpriced {
+					t.Errorf("Kind = %q, want %q", ev.Kind, eventKindUnpriced)
+				}
+				if ev.Status != http.StatusPaymentRequired {
+					t.Errorf("Status = %d, want %d", ev.Status, http.StatusPaymentRequired)
+				}
+				if ev.Route != routePassthrough {
+					t.Errorf("Route = %q, want %q", ev.Route, routePassthrough)
+				}
 			}
 		})
 	}

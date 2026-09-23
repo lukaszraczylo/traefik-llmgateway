@@ -2322,6 +2322,74 @@ func TestHandleChat_ContextDeadlineExceeded_RecordsProviderFailure(t *testing.T)
 	}
 }
 
+// TestHandleChat_UnpricedModelCostBudget_Returns402AndRecordsEvent is the
+// unified route's own analog of routes_passthrough_test.go's
+// TestHandlePassthrough_UnpricedModelCostBudget_Returns402: it drives a
+// REAL request for an unpriced model against a caller with a configured
+// cost budget through the security-audit run-1 finding F-1 gate
+// (routes_unified.go, just before call()), and additionally proves item 5
+// (this round): the refusal now reaches GET /admin/api/events as an
+// eventKindUnpriced/402 entry, not just a logged line — the ONLY route-
+// level coverage this specific 402 gate had before this test was the
+// upstream body never being reached (implicitly, via other tests); this
+// asserts the response, the event, and that the upstream was never
+// called, together.
+func TestHandleChat_UnpricedModelCostBudget_Returns402AndRecordsEvent(t *testing.T) {
+	var upstreamCalled bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalled = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{
+		"openai": {Type: "openai", BaseURL: srv.URL, APIKey: "sk-up", Models: []string{"totally-unpriced-model"}},
+	}
+	cfg.Groups = map[string]*GroupConfig{"default": {}}
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{
+		{Name: "alice", Group: "default", APIKey: "sk-alice", Limits: &LimitsConfig{CostPerDayUSD: 5}},
+	}}
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	gw, ok := h.(*Gateway)
+	if !ok {
+		t.Fatal("handler is not *Gateway")
+	}
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, newUnifiedRequest(t, http.MethodPost, "/v1/chat/completions", "sk-alice",
+		map[string]any{"model": "totally-unpriced-model", "messages": []any{map[string]any{"role": "user", "content": "hi"}}}))
+
+	if rec.Code != http.StatusPaymentRequired {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusPaymentRequired, rec.Body.String())
+	}
+	if upstreamCalled {
+		t.Error("upstream must never be called: the refusal fires before call()")
+	}
+
+	events := gw.events.ring.snapshot(eventRingCap)
+	if len(events) == 0 {
+		t.Fatal("want an event recorded for the 402 refusal, got none")
+	}
+	ev := events[0] // newest first
+	if ev.Kind != eventKindUnpriced {
+		t.Errorf("Kind = %q, want %q", ev.Kind, eventKindUnpriced)
+	}
+	if ev.Status != http.StatusPaymentRequired {
+		t.Errorf("Status = %d, want %d", ev.Status, http.StatusPaymentRequired)
+	}
+	if ev.Route != routeChatCompletions {
+		t.Errorf("Route = %q, want %q", ev.Route, routeChatCompletions)
+	}
+	if ev.User != "alice" {
+		t.Errorf("User = %q, want %q", ev.User, "alice")
+	}
+}
+
 // --- security review finding 1, 2026-08-22: admission before decode,
 // body-admission semaphore, narrower unified body cap ---
 
@@ -2343,7 +2411,7 @@ func (b *readTrackingBody) Close() error { return nil }
 
 // TestHandleChat_RequestLimitExceeded_BodyNeverRead is the GATE's own
 // explicit requirement: a 429'd user's body must never be read at all,
-// proving admitRequest now runs strictly before io.ReadAll in runUnified
+// proving admitRequestForRoute now runs strictly before io.ReadAll in runUnified
 // (finding 1a) rather than merely returning the same status code for a
 // different reason.
 func TestHandleChat_RequestLimitExceeded_BodyNeverRead(t *testing.T) {
@@ -2382,7 +2450,7 @@ func TestHandleChat_RequestLimitExceeded_BodyNeverRead(t *testing.T) {
 		t.Fatalf("status = %d, want 429, body=%s", rec2.Code, rec2.Body.String())
 	}
 	if tracked.called {
-		t.Error("a 429'd request's body must never be read — admitRequest must run before io.ReadAll")
+		t.Error("a 429'd request's body must never be read — admitRequestForRoute must run before io.ReadAll")
 	}
 }
 
@@ -2410,7 +2478,7 @@ func TestHandleImagesGenerations_RequestLimitExceeded_BodyNeverRead(t *testing.T
 		t.Fatalf("status = %d, want 429, body=%s", rec2.Code, rec2.Body.String())
 	}
 	if tracked.called {
-		t.Error("a 429'd media request's body must never be read — admitRequest must run before decode")
+		t.Error("a 429'd media request's body must never be read — admitRequestForRoute must run before decode")
 	}
 }
 

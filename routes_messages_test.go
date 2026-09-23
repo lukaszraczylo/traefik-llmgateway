@@ -325,7 +325,7 @@ func TestHandleMessages_StreamingRejected(t *testing.T) {
 
 			// requestsPerMinute: 1 so a second wrongly-counted request
 			// would 429 — proving the rejection happens before
-			// admitRequest ever runs (item 2 fix): both requests below
+			// admitRequestForRoute ever runs (item 2 fix): both requests below
 			// must succeed at the "not yet counted" stage.
 			cfg := CreateConfig()
 			cfg.Providers = map[string]*ProviderConfig{"anthropic": {Type: providerTypeAnthropic, BaseURL: srv.URL, APIKey: "sk-ant-up", Models: []string{"claude-test"}}} // #nosec G101 -- test fixture literal, not a real credential
@@ -379,7 +379,7 @@ func TestHandleMessages_StreamingRejected(t *testing.T) {
 
 			// item 2's actual fix: TWO streaming-rejected attempts against
 			// a requestsPerMinute:1 user must BOTH succeed (as 400s, not
-			// as a 429 on the second one) — proving admitRequest's
+			// as a 429 on the second one) — proving admitRequestForRoute's
 			// checkAndCount never ran for either.
 			reqCount, ok := gw.limiter.getCounter("user", "alice", metricReq, windowMin, time.Now())
 			if !ok || reqCount != 0 {
@@ -475,7 +475,7 @@ func TestHandleMessages_RateLimited_Returns429(t *testing.T) {
 	}
 
 	// Envelope-shape assertion (item 8 fix, 2026-08-22 review): now that
-	// admitRequest threads an envelopeWriter through
+	// admitRequestForRoute threads an envelopeWriter through
 	// (routes_unified.go's writeLimitViolationEnvelope), a 429 on this
 	// route must answer in Anthropic's shape like every other error this
 	// route produces, not OpenAI's flat one.
@@ -497,6 +497,70 @@ func TestHandleMessages_RateLimited_Returns429(t *testing.T) {
 	tokIn, ok := gw.limiter.getCounter("user", "alice", metricTokIn, windowDay, time.Now())
 	if !ok || tokIn != 1 {
 		t.Errorf("user tokin/day counter = %d (ok=%v), want 1 (only the first, successful request accounted)", tokIn, ok)
+	}
+}
+
+// TestHandleMessages_RateLimited_RecordsRateLimitEvent proves a
+// /v1/messages 429 is recorded to GET /admin/api/events (F3 hook 1, v0.3
+// dashboard task) exactly like every other metered route: handleMessages
+// switched from the route-blind admitRequest to admitRequestForRoute
+// (routes_unified.go) with routeMessages, so recordLimitEvent now runs
+// on this route's own rejection path too. Mirrors
+// admin_events_test.go's TestAdminEvents_RateLimitEvent, scoped to this
+// route's own Anthropic-shaped request/response.
+func TestHandleMessages_RateLimited_RecordsRateLimitEvent(t *testing.T) {
+	const anthResp = `{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}],"model":"claude-real","stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(anthResp))
+	}))
+	defer srv.Close()
+
+	cfg := CreateConfig()
+	cfg.Admin = &AdminConfig{Enabled: true}
+	cfg.Providers = map[string]*ProviderConfig{"anthropic": {Type: providerTypeAnthropic, BaseURL: srv.URL, APIKey: "sk-ant-up", Models: []string{"claude-test"}}} // #nosec G101 -- test fixture literal, not a real credential
+	cfg.Groups = map[string]*GroupConfig{"default": {}}
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{
+		{Name: "alice", Group: "default", APIKey: "sk-alice", Limits: &LimitsConfig{RequestsPerMinute: 1}},
+		{Name: "admin1", Group: "default", APIKey: "sk-admin1", Admin: true},
+	}}
+	next := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	body := map[string]any{"model": "claude-test", "max_tokens": 10, "messages": []any{map[string]any{"role": "user", "content": "hi"}}}
+
+	rec1 := httptest.NewRecorder()
+	h.ServeHTTP(rec1, newMessagesRequest(t, body, "x-api-key", "sk-alice"))
+	if rec1.Code != http.StatusOK {
+		t.Fatalf("1st call: status = %d, want 200, body=%s", rec1.Code, rec1.Body.String())
+	}
+
+	rec2 := httptest.NewRecorder()
+	h.ServeHTTP(rec2, newMessagesRequest(t, body, "x-api-key", "sk-alice"))
+	if rec2.Code != http.StatusTooManyRequests {
+		t.Fatalf("2nd call: status = %d, want 429 (over requestsPerMinute:1), body=%s", rec2.Code, rec2.Body.String())
+	}
+
+	got := getAdminEvents(t, h, "?limit=10")
+	if len(got.Events) == 0 {
+		t.Fatal("want at least one event")
+	}
+	ev := got.Events[0] // newest first
+	if ev.Kind != eventKindRateLimit {
+		t.Errorf("Kind = %q, want %q", ev.Kind, eventKindRateLimit)
+	}
+	if ev.Route != routeMessages {
+		t.Errorf("Route = %q, want %q", ev.Route, routeMessages)
+	}
+	if ev.User != "alice" {
+		t.Errorf("User = %q, want %q", ev.User, "alice")
+	}
+	if ev.Status != http.StatusTooManyRequests {
+		t.Errorf("Status = %d, want 429", ev.Status)
 	}
 }
 

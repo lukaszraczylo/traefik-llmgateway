@@ -17,6 +17,35 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// TestPipelineMutates_LPUSH proves LPUSH is registered as a mutating
+// command (F3, v0.3 dashboard task: events.go's eventLog.push sends it) —
+// pipelineEncoded's own retry-safety gate must never blindly resend a
+// pipeline containing it after a reply was lost mid-read, or a lost-ACK
+// event push could be double-applied. Table-driven alongside the
+// pre-existing INCRBY/INCRBYFLOAT/GET cases so a future change to any of
+// the four can't silently drift the others.
+func TestPipelineMutates_LPUSH(t *testing.T) {
+	cases := []struct {
+		name string
+		cmds [][]string
+		want bool
+	}{
+		{name: "LPUSH alone", cmds: [][]string{{"LPUSH", "llmgw:events", "{}"}}, want: true},
+		{name: "LPUSH+LTRIM (events.go's own pipeline)", cmds: [][]string{{"LPUSH", "k", "v"}, {"LTRIM", "k", "0", "199"}}, want: true},
+		{name: "INCRBY still mutates", cmds: [][]string{{"INCRBY", "k", "1"}}, want: true},
+		{name: "INCRBYFLOAT still mutates", cmds: [][]string{{"INCRBYFLOAT", "k", "1.5"}}, want: true},
+		{name: "read-only GET/LRANGE does not mutate", cmds: [][]string{{"GET", "k"}, {"LRANGE", "llmgw:events", "0", "49"}}, want: false},
+		{name: "empty pipeline does not mutate", cmds: nil, want: false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := pipelineMutates(c.cmds); got != c.want {
+				t.Errorf("pipelineMutates(%v) = %v, want %v", c.cmds, got, c.want)
+			}
+		})
+	}
+}
+
 // TestEncodeCommand pins the exact RESP2 wire format every command must
 // use: "*N\r\n$len\r\narg\r\n..." — a fake or real server parses this
 // framing byte-for-byte, so a drift here breaks every other test silently.

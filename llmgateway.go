@@ -726,8 +726,8 @@ const maxExplicitBodyAdmissionCap = 10_000
 //nolint:govet
 type Gateway struct {
 	next                          http.Handler
-	provenance                    *provenanceStore
-	targetClient                  *http.Client
+	events                        *eventLog
+	bodyAdmission                 chan struct{}
 	failoverHealth                *requestHealthTracker
 	targetHealth                  *targetHealthTracker
 	limiter                       *limiter
@@ -735,18 +735,44 @@ type Gateway struct {
 	adapters                      map[string]providerAdapter
 	cfg                           *Config
 	auth                          *authStore
-	bodyAdmission                 chan struct{}
+	cache                         *responseCache
 	redisClient                   *respClient
 	latency                       *latencyStore
-	cache                         *responseCache
+	targetClient                  *http.Client
+	provenance                    *provenanceStore
 	name                          string
+	replica                       string
 	failoverLogGate               logGate
 	metricsNets                   []*net.IPNet
+	configWarnings                []string
 	targetHealthCfg               targetHealthConfig
 	failover                      failoverConfig
-	targetHealthLastSweepUnixNano int64
 	targetTimeout                 time.Duration
+	targetHealthLastSweepUnixNano int64
+	configWarningsDropped         int
+	warnMu                        sync.Mutex
 	targetHealthSweeping          int32
+	collectingWarnings            bool
+}
+
+// replicaID resolves this process's identity for Gateway.replica (F4/F9,
+// v0.3 dashboard task): os.Hostname() when available — the pod name under
+// Kubernetes with the common hostNetwork: false setup — else the
+// HOSTNAME environment variable some container runtimes set directly,
+// else the literal "unknown", so the field is never empty. Called once,
+// in newGateway, not per request.
+//
+// CAVEAT (document in README, WP-C): under hostNetwork: true, every pod
+// on a node shares the node's own hostname, so replica no longer
+// uniquely identifies one gateway instance.
+func replicaID() string {
+	if h, err := os.Hostname(); err == nil && h != "" {
+		return h
+	}
+	if h := os.Getenv("HOSTNAME"); h != "" {
+		return h
+	}
+	return "unknown"
 }
 
 // telemetryStartupOnce keeps the anonymous "plugin loaded" ping to one per
@@ -865,6 +891,12 @@ func newGateway(ctx context.Context, next http.Handler, config *Config, name str
 		return nil, err
 	}
 	g := &Gateway{next: next, name: name, cfg: config, auth: auth}
+	// replica/collectingWarnings (F4/F9/F10, v0.3 dashboard task): resolved
+	// immediately, before anything below can call warnf — every warnf
+	// call from here to this function's return is a construction-time
+	// warning noteConfigWarning (logger.go) must collect.
+	g.replica = replicaID()
+	g.collectingWarnings = true
 
 	// feat/failover: validated once, here — see FailoverConfig's own doc
 	// comment (failover.go) for the default (disabled, coordinator
@@ -888,7 +920,13 @@ func newGateway(ctx context.Context, next http.Handler, config *Config, name str
 			retries = defaultRetryAttempts
 		}
 		if worst := failoverCfg.maxAttempts * (retries + 1); worst > warnComposedOutboundCalls {
-			g.logf("config: failover.maxAttempts (%d) and retry.attempts (%d) compose to as many as %d outbound provider calls for ONE admitted client request; each consumes the provider quota shared by every tenant of this gateway",
+			// Q5 (coordinator decision, v0.3 dashboard task): promoted
+			// logf -> warnf — this is a config warning (an operator may
+			// want to know about it, resolved deterministically, no
+			// request affected), the exact class warnf's own doc comment
+			// describes, and GET /admin/api/overview's Warnings field
+			// (F10) should surface it.
+			g.warnf("config: failover.maxAttempts (%d) and retry.attempts (%d) compose to as many as %d outbound provider calls for ONE admitted client request; each consumes the provider quota shared by every tenant of this gateway",
 				failoverCfg.maxAttempts, retries, worst)
 		}
 	}
@@ -999,6 +1037,21 @@ func newGateway(ctx context.Context, next http.Handler, config *Config, name str
 	lim := newConfiguredLimiter(config, redisClient)
 	lim.logf = g.errorf
 	g.limiter = lim
+	// events (F3, v0.3 dashboard task): built here, after redisClient/
+	// limiter both exist — shares the SAME respClient (spec §2, above)
+	// and reuses the limiter's own bounded spawn (limits.go's
+	// providerAttemptSpawnCap semaphore) rather than a second one, so an
+	// event-feed write storm and a provider-attempt write storm compete
+	// for the identical bounded pool instead of two independent ones.
+	g.events = &eventLog{
+		ring:     &eventRing{},
+		client:   redisClient,
+		replica:  g.replica,
+		instance: g.name,
+		nowFn:    time.Now,
+		spawn:    lim.spawn,
+		logf:     g.errorf,
+	}
 
 	cache, err := buildResponseCache(config.Cache, redisClient, g.logf, g.warnf, g.errorf)
 	if err != nil {
@@ -1045,6 +1098,20 @@ func newGateway(ctx context.Context, next http.Handler, config *Config, name str
 	registry.warmFill(ctx)
 	g.registry = registry
 
+	// F10 (v0.3 dashboard task): construction is finished — every warnf
+	// call from here on is a runtime warning, not a config warning, and
+	// noteConfigWarning must stop collecting it into g.configWarnings.
+	//
+	// Locked (item 4, this round): noteConfigWarning (logger.go) always
+	// reads collectingWarnings under warnMu, and this write is the one
+	// place that used to set it unlocked — harmless today (no goroutine
+	// calls warnf during construction: sweepTargetHealth/refreshProvider
+	// only ever start from ServeHTTP, after New has already returned),
+	// but taking the same lock here removes the need to keep re-proving
+	// that absence every time this file changes.
+	g.warnMu.Lock()
+	g.collectingWarnings = false
+	g.warnMu.Unlock()
 	return g, nil
 }
 

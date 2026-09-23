@@ -171,8 +171,8 @@ func (g *Gateway) handleEmbeddings(w http.ResponseWriter, r *http.Request, u *us
 // ordering (decode, resolve model, THEN checkAndCount) meant a caller
 // already over their requestsPerMinute paid the full cost of reading and
 // json-decoding a body that was always going to be discarded.
-// admitRequest needs only u/grp, already available as this function's
-// own parameters, so it has no reason to wait for the body. Model
+// admitRequestForRoute needs only u/grp, already available as this
+// function's own parameters, so it has no reason to wait for the body. Model
 // resolution still runs AFTER decode — it genuinely needs the client's
 // requested model id, which only exists once the body is parsed — so
 // its own errors (unknown/denied model) are still reported after a
@@ -206,19 +206,20 @@ func (g *Gateway) handleEmbeddings(w http.ResponseWriter, r *http.Request, u *us
 // here since neither is visible from the diff alone.
 //
 // SHARED CORE (item 7 fix, 2026-08-22 review): routes_messages.go's
-// handleMessages needs admitRequest and the body decode in a DIFFERENT
-// relative order than this route does (its own doc comment explains
-// why — a streaming request must never touch the rate-limit counters at
-// all, which means it has to know "is this streaming" from the decoded
-// body before admitRequest ever runs). That is the one genuine ordering
-// difference between the two routes, and it is why THIS function still
-// owns admitRequest/readAndDecodeUnifiedBody directly rather than folding
+// handleMessages needs admitRequestForRoute and the body decode in a
+// DIFFERENT relative order than this route does (its own doc comment
+// explains why — a streaming request must never touch the rate-limit
+// counters at all, which means it has to know "is this streaming" from
+// the decoded body before admitRequestForRoute ever runs). That is the
+// one genuine ordering difference between the two routes, and it is why
+// THIS function still owns admitRequestForRoute/readAndDecodeUnifiedBody
+// directly rather than folding
 // them into runMeteredCall too — everything after both are done is
 // identical regardless of wire shape, and lives in runMeteredCall alone.
 func (g *Gateway) runUnified(w http.ResponseWriter, r *http.Request, u *user, grp *group, endpoint string, call adapterCall) {
 	sw := &statusTrackingWriter{ResponseWriter: w}
 
-	scopes, ok := g.admitRequest(sw, u, grp, writeOAIError)
+	scopes, ok := g.admitRequestForRoute(sw, u, grp, writeOAIError, eventRouteForEndpoint(endpoint))
 	if !ok {
 		return
 	}
@@ -243,7 +244,7 @@ func (g *Gateway) runUnified(w http.ResponseWriter, r *http.Request, u *user, gr
 // routes_messages.go's handleMessages) that is genuinely identical
 // regardless of wire shape (item 7 fix, 2026-08-22 review: this body used
 // to be duplicated almost verbatim in routes_messages.go). Callers have
-// already run admitRequest (rate limiting) and decoded the request body
+// already run admitRequestForRoute (rate limiting) and decoded the request body
 // into req, in whichever relative order their own route needs (see
 // runUnified's own doc comment for why that order differs for
 // /v1/messages) — this function starts only once both are done.
@@ -365,11 +366,12 @@ func (g *Gateway) runMeteredCall(sw *statusTrackingWriter, r *http.Request, scop
 			// chasing further doomed candidates and wrongly opening a
 			// perfectly healthy provider's request-health breaker.
 			if r.Context().Err() != nil {
+				g.recordUpstreamEvent(scopes, candidates[i-1].canonical, lastProviderName, eventRouteForEndpoint(endpoint), lastErr)
 				g.handleAdapterErrorEnvelope(sw, lastErr, lastProviderName, logPrefix, envelope, writeUpstream)
 				return
 			}
 
-			// checkAndCount above (admitRequest, this file) already
+			// checkAndCount above (admitRequestForRoute, this file) already
 			// counted this request exactly once — never double-count: a
 			// failover attempt is a NEW upstream attempt, not a new
 			// logical request, so nothing here calls checkAndCount
@@ -530,7 +532,7 @@ func (g *Gateway) runMeteredCall(sw *statusTrackingWriter, r *http.Request, scop
 		// fire. Serving the request would spend the operator's money
 		// against a control that provably cannot stop it.
 		//
-		// Placed HERE, not in admitRequest, because admitRequest runs
+		// Placed HERE, not in admitRequestForRoute, because admitRequestForRoute runs
 		// before the body is decoded (runUnified's own ordering) and so
 		// before any model id exists; this is the first point where the
 		// SERVING model is known. It is before call(), so nothing has been
@@ -549,6 +551,7 @@ func (g *Gateway) runMeteredCall(sw *statusTrackingWriter, r *http.Request, scop
 			!priceKnown(cand.canonical, cand.upstreamModel, g.cfg.Pricing, g.cfg.ModelMeta) &&
 			scopesHaveCostBudget(scopes) {
 			g.logf("%s: refusing model %q: it has no configured price, and a cost budget applies to this caller that cannot be enforced without one", logPrefix, cand.canonical)
+			g.recordUnpricedRefusalEvent(scopes, cand.canonical, cand.providerName, eventRouteForEndpoint(endpoint)) // F3 hook 5 (item 5, this round)
 			envelope(sw, http.StatusPaymentRequired, "invalid_request_error",
 				fmt.Sprintf("model %q has no configured price, so the cost budget that applies to this request cannot be enforced; add a \"pricing\" entry for it, or set allowUnpricedWithCostBudget to serve it unbounded", cand.canonical))
 			return
@@ -722,6 +725,7 @@ func (g *Gateway) runMeteredCall(sw *statusTrackingWriter, r *http.Request, scop
 		// before this feature existed, regardless of how many candidates
 		// remain.
 		if sw.wroteHeader {
+			g.recordUpstreamEvent(scopes, cand.canonical, providerName, eventRouteForEndpoint(endpoint), callErr)
 			g.handleAdapterErrorEnvelope(sw, callErr, providerName, logPrefix, envelope, writeUpstream)
 			return
 		}
@@ -743,6 +747,7 @@ func (g *Gateway) runMeteredCall(sw *statusTrackingWriter, r *http.Request, scop
 			g.errorf("%s: provider %q returned 404 for model %q; failing over to %q — this usually means a real provider/model configuration mistake, not a transient outage", logPrefix, providerName, requestedModel, candidates[i+1].providerName)
 		}
 		if !hasNext {
+			g.recordUpstreamEvent(scopes, cand.canonical, providerName, eventRouteForEndpoint(endpoint), callErr)
 			g.handleAdapterErrorEnvelope(sw, callErr, providerName, logPrefix, envelope, writeUpstream)
 			return
 		}
@@ -801,9 +806,10 @@ func buildLimitScopes(u *user, grp *group) []limitScope {
 
 // withTotalScope returns scopes with the synthetic total scope
 // (totalScopeKind/totalScopeID, limits.go) appended — the single helper
-// every metered route (runUnified above, via admitRequest below;
+// every metered route (runUnified above, via admitRequestForRoute below;
 // handleImagesGenerations/handleAudioSpeech/handleAudioTranscriptions,
-// routes_media.go, via the same admitRequest; handlePassthrough,
+// routes_media.go, via the same admitRequestForRoute; handleMessages,
+// routes_messages.go, via the same admitRequestForRoute; handlePassthrough,
 // routes_passthrough.go; handleTargetProxy, mcp_a2a.go; handleMCPFederated,
 // mcp_federation.go) calls around its own buildLimitScopes result, so none
 // of them can forget it and none of them duplicate the scope literal.
@@ -818,9 +824,9 @@ func withTotalScope(scopes []limitScope) []limitScope {
 	return append(scopes, limitScope{kind: totalScopeKind, id: totalScopeID, limits: nil})
 }
 
-// admitRequest enforces per-user/per-group/total REQUEST-RATE limits
-// (checkAndCount) using only u and grp — never a request body — so every
-// caller can, and now does, call this before reading or decoding
+// admitRequestForRoute enforces per-user/per-group/total REQUEST-RATE
+// limits (checkAndCount) using only u and grp — never a request body —
+// so every caller can, and does, call this before reading or decoding
 // anything (security review finding 1a, 2026-08-22): a caller already
 // over budget is refused on the strength of who they are alone, never
 // after paying the cost of reading and json-decoding a body that turns
@@ -829,7 +835,10 @@ func withTotalScope(scopes []limitScope) []limitScope {
 // call, rather than rebuilding (and risking scope-list drift from) a
 // second buildLimitScopes/withTotalScope pair. A violation writes its
 // response to sw itself, via envelope (writeLimitViolationEnvelope,
-// below), and returns ok=false.
+// below), records a rate_limit/budget/store_down event (F3 hook 1, v0.3
+// dashboard task) via recordLimitEvent so GET /admin/api/events can
+// attribute the rejection to route — one of the Route vocabulary
+// constants, events.go — and returns ok=false.
 //
 // Shared verbatim by every unified/media/messages route (runUnified
 // above; handleImagesGenerations/handleAudioSpeech/
@@ -841,9 +850,10 @@ func withTotalScope(scopes []limitScope) []limitScope {
 // 2026-08-22 review) lets routes_messages.go answer a violation in
 // Anthropic's own error shape instead of OpenAI's, without a second copy
 // of this function's own logic.
-func (g *Gateway) admitRequest(sw *statusTrackingWriter, u *user, grp *group, envelope envelopeWriter) (scopes []limitScope, ok bool) {
+func (g *Gateway) admitRequestForRoute(sw *statusTrackingWriter, u *user, grp *group, envelope envelopeWriter, route string) (scopes []limitScope, ok bool) {
 	scopes = withTotalScope(buildLimitScopes(u, grp))
 	if violation := g.limiter.checkAndCount(scopes); violation != nil {
+		g.recordLimitEvent(scopes, route, violation)
 		writeLimitViolationEnvelope(sw, violation, envelope)
 		return scopes, false
 	}
@@ -932,6 +942,14 @@ func (g *Gateway) acquireBodyAdmission(sw *statusTrackingWriter, envelope envelo
 	default:
 		sw.Header().Set("Retry-After", strconv.Itoa(bodyAdmissionRetryAfterSeconds))
 		envelope(sw, http.StatusServiceUnavailable, "server_error", "server is at capacity; try again shortly")
+		// F3 hook 5 (v0.3 dashboard task, Q4: "capacity 503 without user:
+		// record user-less"): this semaphore is shared across every
+		// unified/media/messages caller (readAndDecodeUnifiedBody/
+		// decodeMediaJSONRequest/readAdmittedCapped) and fires before any
+		// caller-specific context is threaded through, so the event
+		// carries no User/Group/route attribution — routeCapacity is a
+		// fixed, documented simplification (events.go's own doc comment).
+		g.recordEvent(gatewayEvent{Route: routeCapacity, Kind: eventKindCapacity, Message: "server is at capacity; try again shortly", Status: http.StatusServiceUnavailable})
 		return func() {}, false
 	}
 }
@@ -1076,7 +1094,7 @@ func writeLimitViolationEnvelope(w http.ResponseWriter, v *limitViolation, envel
 // writeLimitViolation is writeLimitViolationEnvelope pinned to the
 // OpenAI envelope shape — the thin wrapper every existing direct call
 // site (mcp_a2a.go, mcp_federation.go, routes_passthrough.go, all of
-// which call checkAndCount themselves rather than through admitRequest)
+// which call checkAndCount themselves rather than through admitRequestForRoute)
 // keeps calling unchanged.
 func writeLimitViolation(w http.ResponseWriter, v *limitViolation) {
 	writeLimitViolationEnvelope(w, v, writeOAIError)

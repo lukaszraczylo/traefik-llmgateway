@@ -82,13 +82,13 @@ func (g *Gateway) decodeMediaJSONRequest(sw *statusTrackingWriter, r *http.Reque
 //
 // This used to also run checkAndCount (a limit check), and was named
 // resolveMediaRequest — security review finding 1a, 2026-08-22, split
-// that out into admitRequest (routes_unified.go), called by every media
-// handler BEFORE the request body is even read: checkAndCount needs only
-// u and grp, both already known ahead of decode, so there was never a
+// that out into admitRequestForRoute (routes_unified.go), called by every
+// media handler BEFORE the request body is even read: checkAndCount needs
+// only u and grp, both already known ahead of decode, so there was never a
 // reason to make a rate-limited caller pay for reading and decoding a
-// body that was always going to be discarded. See admitRequest's own doc
-// comment for the full rationale, shared verbatim with runUnified's
-// identical fix.
+// body that was always going to be discarded. See admitRequestForRoute's
+// own doc comment for the full rationale, shared verbatim with
+// runUnified's identical fix.
 func (g *Gateway) resolveMediaModel(sw *statusTrackingWriter, grp *group, requestedModel string) (adapter providerAdapter, upstreamModel string, ok bool) {
 	adapter, upstreamModel, _, err := g.registry.resolve(requestedModel, grp)
 	if err != nil {
@@ -103,11 +103,12 @@ func (g *Gateway) resolveMediaModel(sw *statusTrackingWriter, grp *group, reques
 // Imagen (translate_gemini_images.go); anthropic always answers 501
 // (provider_anthropic.go's imagesGeneration). Images are never cached
 // (spec §2) and never cost-accounted (spec §3) — only the request
-// counters admitRequest's checkAndCount call already incremented move.
+// counters admitRequestForRoute's checkAndCount call already incremented move.
 func (g *Gateway) handleImagesGenerations(w http.ResponseWriter, r *http.Request, u *user, grp *group) {
 	sw := &statusTrackingWriter{ResponseWriter: w}
 
-	if _, ok := g.admitRequest(sw, u, grp, writeOAIError); !ok {
+	scopes, ok := g.admitRequestForRoute(sw, u, grp, writeOAIError, routeImages)
+	if !ok {
 		return
 	}
 
@@ -134,6 +135,7 @@ func (g *Gateway) handleImagesGenerations(w http.ResponseWriter, r *http.Request
 		})
 	}
 	if _, err := adapter.imagesGeneration(ctx, sw, req); err != nil {
+		g.recordUpstreamEvent(scopes, upstreamModel, adapter.name(), routeImages, err)
 		g.handleAdapterError(sw, err, adapter.name())
 	}
 }
@@ -151,7 +153,8 @@ func (g *Gateway) handleImagesGenerations(w http.ResponseWriter, r *http.Request
 func (g *Gateway) handleAudioSpeech(w http.ResponseWriter, r *http.Request, u *user, grp *group) {
 	sw := &statusTrackingWriter{ResponseWriter: w}
 
-	if _, ok := g.admitRequest(sw, u, grp, writeOAIError); !ok {
+	scopes, ok := g.admitRequestForRoute(sw, u, grp, writeOAIError, routeAudioSpeech)
+	if !ok {
 		return
 	}
 
@@ -199,6 +202,7 @@ func (g *Gateway) handleAudioSpeech(w http.ResponseWriter, r *http.Request, u *u
 		})
 	}
 	if _, err := adapter.audioSpeech(ctx, sw, body, "application/json"); err != nil {
+		g.recordUpstreamEvent(scopes, upstreamModel, adapter.name(), routeAudioSpeech, err)
 		g.handleAdapterError(sw, err, adapter.name())
 	}
 }
@@ -218,7 +222,8 @@ func (g *Gateway) handleAudioSpeech(w http.ResponseWriter, r *http.Request, u *u
 func (g *Gateway) handleAudioTranscriptions(w http.ResponseWriter, r *http.Request, u *user, grp *group) {
 	sw := &statusTrackingWriter{ResponseWriter: w}
 
-	if _, ok := g.admitRequest(sw, u, grp, writeOAIError); !ok {
+	scopes, ok := g.admitRequestForRoute(sw, u, grp, writeOAIError, routeAudioTranscriptions)
+	if !ok {
 		return
 	}
 
@@ -303,6 +308,7 @@ func (g *Gateway) handleAudioTranscriptions(w http.ResponseWriter, r *http.Reque
 		})
 	}
 	if _, err := adapter.audioTranscription(ctx, sw, uploadBody, uploadContentType); err != nil {
+		g.recordUpstreamEvent(scopes, upstreamModel, adapter.name(), routeAudioTranscriptions, err)
 		g.handleAdapterError(sw, err, adapter.name())
 	}
 }

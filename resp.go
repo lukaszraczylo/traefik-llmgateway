@@ -351,10 +351,13 @@ func (c *respClient) pipelineEncoded(payload []byte, n int, mutates bool) ([]any
 // INCRBYFLOAT is not currently sent by this client (only INCRBY is —
 // redis_store.go), but is listed for the same reason INCRBY is: an
 // operator or a future caller adding it must not have to rediscover this
-// gate.
+// gate. LPUSH (events.go's eventLog.push, F3 v0.3 dashboard task) joins
+// the same list for the identical reason: replaying it after an ambiguous
+// failure could push the same event twice.
 var pipelineMutatingCommands = map[string]bool{
 	"INCRBY":      true,
 	"INCRBYFLOAT": true,
+	"LPUSH":       true,
 }
 
 // pipelineMutates reports whether any command in cmds is one of

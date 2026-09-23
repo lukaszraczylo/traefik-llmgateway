@@ -463,6 +463,7 @@ func (g *Gateway) handleMCPFederated(w http.ResponseWriter, r *http.Request, u *
 
 	scopes := withTotalScope(buildLimitScopes(u, grp))
 	if violation := g.limiter.checkAndCount(scopes); violation != nil {
+		g.recordLimitEvent(scopes, routeMCPFederated, violation) // F3 hook 1 (v0.3 dashboard task)
 		writeLimitViolation(w, violation)
 		return
 	}

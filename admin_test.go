@@ -93,6 +93,36 @@ func TestAdmin_Disabled_FallsThroughTo404(t *testing.T) {
 	}
 }
 
+// TestIsAdminPath covers every admin route, including adminEventsPath
+// (F3, v0.3 dashboard task), plus representative non-admin paths.
+func TestIsAdminPath(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		path string
+		want bool
+	}{
+		{adminPagePath, true},
+		{adminOverviewPath, true},
+		{adminUsagePath, true},
+		{adminUsageHistoryPath, true},
+		{adminUsageModelsPath, true},
+		{adminTargetsPath, true},
+		{adminEventsPath, true},
+		{adminAssetsPathPrefix + "index-abc123.js", true},
+		{"/v1/chat/completions", false},
+		{"/admin/api/unknown", false},
+		{"/adminx", false},
+		{"/", false},
+	}
+	for _, c := range cases {
+		t.Run(c.path, func(t *testing.T) {
+			if got := isAdminPath(c.path); got != c.want {
+				t.Errorf("isAdminPath(%q) = %v, want %v", c.path, got, c.want)
+			}
+		})
+	}
+}
+
 func TestAdmin_DisabledExplicitly_FallsThroughTo404(t *testing.T) {
 	t.Parallel()
 	cfg := newAdminTestConfig()
@@ -2452,6 +2482,8 @@ func TestAdminUsageModels_ValidatesParameters(t *testing.T) {
 		{"limit negative", "?metric=cost&window=day&limit=-3"},
 		{"limit over max", "?metric=cost&window=day&limit=101"},
 		{"limit not a number", "?metric=cost&window=day&limit=lots"},
+		// item 6, v0.3 dashboard task round 2: prefix over usageModelsPrefixMaxLen.
+		{"prefix over max length", "?metric=cost&window=day&prefix=" + strings.Repeat("a", usageModelsPrefixMaxLen+1)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rec := httptest.NewRecorder()
@@ -2460,6 +2492,104 @@ func TestAdminUsageModels_ValidatesParameters(t *testing.T) {
 				t.Errorf("status = %d, want 400, body=%s", rec.Code, rec.Body.String())
 			}
 		})
+	}
+}
+
+// TestAdminUsageModels_PrefixFiltersCatalog proves ?prefix= (item 6, v0.3
+// dashboard task round 2) narrows the ranking to catalog ids that start
+// with it, excluding a non-zero model outside the prefix rather than
+// merely deprioritizing it.
+func TestAdminUsageModels_PrefixFiltersCatalog(t *testing.T) {
+	t.Parallel()
+	cfg := newAdminTestConfig()
+	h, gw := newAdminGatewayHandle(t, cfg)
+
+	fixedNow := time.Date(2026, 8, 20, 12, 30, 0, 0, time.UTC)
+	gw.limiter.nowFn = func() time.Time { return fixedNow }
+
+	seedModelCounter(gw, "alpha/a-model-1", metricCost, windowDay, fixedNow, 10)
+	seedModelCounter(gw, "alpha/a-model-2", metricCost, windowDay, fixedNow, 20)
+	seedModelCounter(gw, "zeta/z-model", metricCost, windowDay, fixedNow, 4_100)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, adminRequest(http.MethodGet, adminUsageModelsPath+"?metric=cost&window=day&prefix=alpha%2F", "sk-admin1"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	var got adminUsageModelsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(got.Models) != 2 {
+		t.Fatalf("models = %+v, want exactly the 2 alpha/ entries", got.Models)
+	}
+	for _, m := range got.Models {
+		if m.ID == "zeta/z-model" {
+			t.Errorf("prefix=alpha/ must exclude zeta/z-model even though it is the busiest model: %+v", got.Models)
+		}
+	}
+}
+
+// TestAdminUsageModels_PrefixAppliesBeforeLimit proves prefix narrows the
+// catalog BEFORE limit caps it — limit truncates the FILTERED ranking's
+// own top-N, not the unfiltered ranking's top-N re-filtered afterward,
+// which would silently return fewer than limit matches (or the wrong
+// ones) whenever a higher-value id outside the prefix would otherwise
+// have consumed the limit's budget.
+func TestAdminUsageModels_PrefixAppliesBeforeLimit(t *testing.T) {
+	t.Parallel()
+	cfg := newAdminTestConfig()
+	h, gw := newAdminGatewayHandle(t, cfg)
+
+	fixedNow := time.Date(2026, 8, 20, 12, 30, 0, 0, time.UTC)
+	gw.limiter.nowFn = func() time.Time { return fixedNow }
+
+	seedModelCounter(gw, "alpha/a-model-1", metricCost, windowDay, fixedNow, 10)
+	seedModelCounter(gw, "alpha/a-model-2", metricCost, windowDay, fixedNow, 50)
+	// zeta/z-model is the GLOBAL busiest model — with limit=1 and no
+	// prefix it would be the only entry returned (TestAdminUsageModels_
+	// Limit's own case). With prefix=alpha/, it must never appear.
+	seedModelCounter(gw, "zeta/z-model", metricCost, windowDay, fixedNow, 999)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, adminRequest(http.MethodGet, adminUsageModelsPath+"?metric=cost&window=day&prefix=alpha%2F&limit=1", "sk-admin1"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	var got adminUsageModelsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(got.Models) != 1 || got.Models[0].ID != "alpha/a-model-2" {
+		t.Errorf("models = %+v, want only alpha/a-model-2 (the busiest WITHIN the alpha/ prefix)", got.Models)
+	}
+}
+
+// TestAdminUsageModels_PrefixEmptyMatchesEverything proves an absent (or
+// empty) ?prefix= behaves exactly as before the parameter existed — the
+// pre-item-6 unfiltered ranking, not an empty result.
+func TestAdminUsageModels_PrefixEmptyMatchesEverything(t *testing.T) {
+	t.Parallel()
+	cfg := newAdminTestConfig()
+	h, gw := newAdminGatewayHandle(t, cfg)
+
+	fixedNow := time.Date(2026, 8, 20, 12, 30, 0, 0, time.UTC)
+	gw.limiter.nowFn = func() time.Time { return fixedNow }
+
+	seedModelCounter(gw, "alpha/a-model-1", metricCost, windowDay, fixedNow, 10)
+	seedModelCounter(gw, "zeta/z-model", metricCost, windowDay, fixedNow, 20)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, adminRequest(http.MethodGet, adminUsageModelsPath+"?metric=cost&window=day&prefix=", "sk-admin1"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	var got adminUsageModelsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(got.Models) != 2 {
+		t.Errorf("models = %+v, want both entries (empty prefix filters nothing)", got.Models)
 	}
 }
 
@@ -2475,6 +2605,263 @@ func TestAdminUsageModels_StoreDownIs503(t *testing.T) {
 	h.ServeHTTP(rec, adminRequest(http.MethodGet, adminUsageModelsPath+"?metric=cost&window=day", "sk-admin1"))
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want 503, body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// --- usage/models: span (F2, v0.3 dashboard task) ---
+
+// TestAdminUsageModels_SpanDefaultIsCurrentBucket proves an absent
+// ?span= behaves exactly as before span existed: only today's own bucket
+// counts, and the response echoes Span=1.
+func TestAdminUsageModels_SpanDefaultIsCurrentBucket(t *testing.T) {
+	t.Parallel()
+	cfg := newAdminTestConfig()
+	h, gw := newAdminGatewayHandle(t, cfg)
+
+	fixedNow := time.Date(2026, 8, 20, 12, 30, 0, 0, time.UTC)
+	gw.limiter.nowFn = func() time.Time { return fixedNow }
+
+	seedModelCounter(gw, "alpha/a-model-1", metricReq, windowDay, fixedNow, 5)
+	// Yesterday's traffic must NOT count without an explicit ?span=.
+	gw.limiter.incrCounter(kindModel, "alpha/a-model-1", metricReq, windowDay, historyStepBack(fixedNow, windowDay, 1), 100, dayWindowTTL)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, adminRequest(http.MethodGet, adminUsageModelsPath+"?metric=req&window=day", "sk-admin1"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	var got adminUsageModelsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Span != 1 {
+		t.Errorf("Span = %d, want 1 (default)", got.Span)
+	}
+	if len(got.Models) != 1 || got.Models[0].Value != 5 {
+		t.Errorf("models = %+v, want only today's own bucket (5), not yesterday's 100 too", got.Models)
+	}
+}
+
+// TestAdminUsageModels_SpanSumsPastBuckets proves ?span=N actually sums
+// N buckets ending at now, using the SAME seeded-yesterday traffic
+// TestAdminUsageModels_SpanDefaultIsCurrentBucket proved span=1 excludes.
+func TestAdminUsageModels_SpanSumsPastBuckets(t *testing.T) {
+	t.Parallel()
+	cfg := newAdminTestConfig()
+	h, gw := newAdminGatewayHandle(t, cfg)
+
+	fixedNow := time.Date(2026, 8, 20, 12, 30, 0, 0, time.UTC)
+	gw.limiter.nowFn = func() time.Time { return fixedNow }
+
+	seedModelCounter(gw, "alpha/a-model-1", metricReq, windowDay, fixedNow, 5)
+	gw.limiter.incrCounter(kindModel, "alpha/a-model-1", metricReq, windowDay, historyStepBack(fixedNow, windowDay, 1), 100, dayWindowTTL)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, adminRequest(http.MethodGet, adminUsageModelsPath+"?metric=req&window=day&span=2", "sk-admin1"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	var got adminUsageModelsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Span != 2 {
+		t.Errorf("Span = %d, want 2", got.Span)
+	}
+	if len(got.Models) != 1 || got.Models[0].Value != 105 {
+		t.Errorf("models = %+v, want [alpha/a-model-1: 105] (5 today + 100 yesterday)", got.Models)
+	}
+}
+
+// TestAdminUsageModels_SpanBounds covers the validation range: 0 and
+// window's max+1 are both 400, a non-integer is 400, and window's own
+// max (historyMaxSpan) is accepted.
+func TestAdminUsageModels_SpanBounds(t *testing.T) {
+	t.Parallel()
+	cfg := newAdminTestConfig()
+	h, _ := newAdminGatewayHandle(t, cfg)
+
+	for _, tc := range []struct{ name, query string }{
+		{"span zero", "?metric=cost&window=day&span=0"},
+		{"span negative", "?metric=cost&window=day&span=-1"},
+		{"span over max", fmt.Sprintf("?metric=cost&window=day&span=%d", historyMaxSpan(windowDay)+1)},
+		{"span not a number", "?metric=cost&window=day&span=lots"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, adminRequest(http.MethodGet, adminUsageModelsPath+tc.query, "sk-admin1"))
+			if rec.Code != http.StatusBadRequest {
+				t.Errorf("status = %d, want 400, body=%s", rec.Code, rec.Body.String())
+			}
+		})
+	}
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, adminRequest(http.MethodGet, fmt.Sprintf("%s?metric=cost&window=day&span=%d", adminUsageModelsPath, historyMaxSpan(windowDay)), "sk-admin1"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 for span at window's own max, body=%s", rec.Code, rec.Body.String())
+	}
+	var got adminUsageModelsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Span != historyMaxSpan(windowDay) {
+		t.Errorf("Span = %d, want %d", got.Span, historyMaxSpan(windowDay))
+	}
+}
+
+// TestAdminUsageModels_SpanStoreDownIs503 is TestAdminUsageModels_StoreDownIs503's
+// own span-path counterpart: an unreachable store must answer 503 through
+// chunkedModelSpanTotals too, not just modelTotals' own span=1 path.
+func TestAdminUsageModels_SpanStoreDownIs503(t *testing.T) {
+	t.Parallel()
+	cfg := newAdminTestConfig()
+	h, gw := newAdminGatewayHandle(t, cfg)
+	gw.limiter = newLimiter(alwaysErrStore{}, false)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, adminRequest(http.MethodGet, adminUsageModelsPath+"?metric=cost&window=day&span=5", "sk-admin1"))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503, body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestChunkedModelSpanTotals_SplitsIntoMultipleRoundTrips is F2 (v0.3
+// dashboard task): a span-multiplied catalog read stays chunked to at
+// most usageModelsChunkKeys keys per storeGetMulti round trip, mirroring
+// TestChunkedCurrentUsage_SplitsIntoMultipleRoundTrips' own multi-round-
+// trip discipline (above), sized for span instead of the fixed
+// usageKeysPerScope stride. wantCalls is derived from the SAME
+// perChunk/ceil-division formula chunkedModelSpanTotals itself applies,
+// so this asserts the real chunk boundary, not a hand-picked number.
+func TestChunkedModelSpanTotals_SplitsIntoMultipleRoundTrips(t *testing.T) {
+	t.Parallel()
+	fixedNow := time.Date(2026, 9, 23, 10, 0, 0, 0, time.UTC)
+	const n = 400
+	const span = 24
+
+	store := &countingMultiStore{values: make(map[string]int64, n)}
+	ids := make([]string, n)
+	for i := 0; i < n; i++ {
+		ids[i] = fmt.Sprintf("provider/model-%d", i)
+		// Only today's own bucket is seeded, so each id's span sum is
+		// exactly its own index i — a direct probe of ordering.
+		store.values[windowKey(kindModel, ids[i], metricReq, windowDay, fixedNow)] = int64(i)
+	}
+
+	l := newLimiter(store, true)
+	l.nowFn = func() time.Time { return fixedNow }
+	gw := &Gateway{limiter: l}
+
+	got, ok := gw.chunkedModelSpanTotals(ids, metricReq, windowDay, fixedNow, span)
+	if !ok {
+		t.Fatal("want ok=true")
+	}
+	if len(got) != n {
+		t.Fatalf("len(got) = %d, want %d", len(got), n)
+	}
+
+	perChunk := usageModelsChunkKeys / span
+	wantCalls := (n + perChunk - 1) / perChunk
+	if store.getMultiCalls != wantCalls {
+		t.Errorf("getMultiCalls = %d, want %d (%d ids, %d ids/chunk, each chunk <= %d keys)", store.getMultiCalls, wantCalls, n, perChunk, usageModelsChunkKeys)
+	}
+	// Order preserved across the chunk boundary.
+	if got[perChunk] != int64(perChunk) {
+		t.Errorf("got[%d] = %d, want %d (order preserved across the chunk boundary)", perChunk, got[perChunk], perChunk)
+	}
+	if got[n-1] != int64(n-1) {
+		t.Errorf("got[%d] = %d, want %d", n-1, got[n-1], n-1)
+	}
+}
+
+// --- usage: rejectionsPerDay (F4, v0.3 dashboard task) ---
+
+// TestAdminUsage_RejectionsPerDayField proves rejectionsPerDay is
+// fleet-wide: a rejection recorded by one replica's own limiter (sharing
+// the same underlying counterStore) is visible through GET
+// /admin/api/usage served by a DIFFERENT limiter/replica reading the
+// identical store — the rej:day key checkAndCount/settleRejection write
+// to depends only on (kind, id), never on which *limiter instance wrote
+// it.
+func TestAdminUsage_RejectionsPerDayField(t *testing.T) {
+	t.Parallel()
+	fixedNow := time.Date(2026, 9, 23, 9, 0, 0, 0, time.UTC)
+	shared := newMemoryStore()
+
+	replicaA := newLimiter(shared, true)
+	replicaA.nowFn = func() time.Time { return fixedNow }
+	scopes := withTotalScope([]limitScope{{kind: "user", id: "alice", limits: &LimitsConfig{RequestsPerMinute: 1}}})
+	if v := replicaA.checkAndCount(scopes); v != nil {
+		t.Fatalf("1st call should pass, got %+v", v)
+	}
+	if v := replicaA.checkAndCount(scopes); v == nil {
+		t.Fatal("2nd call should violate alice's requestsPerMinute:1")
+	}
+
+	cfg := newAdminTestConfig()
+	h, gw := newAdminGatewayHandle(t, cfg)
+	replicaB := newLimiter(shared, true)
+	replicaB.nowFn = func() time.Time { return fixedNow }
+	gw.limiter = replicaB
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, adminRequest(http.MethodGet, adminUsagePath, "sk-admin1"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	var got adminUsageResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	var alice *adminUsageEntryView
+	for i := range got.Users {
+		if got.Users[i].ID == "alice" {
+			alice = &got.Users[i]
+		}
+	}
+	if alice == nil {
+		t.Fatalf("alice not found in users: %+v", got.Users)
+	}
+	if alice.RejectionsPerDay != 1 {
+		t.Errorf("alice.RejectionsPerDay = %d, want 1", alice.RejectionsPerDay)
+	}
+	if got.Total.RejectionsPerDay != 1 {
+		t.Errorf("total.RejectionsPerDay = %d, want 1 (Q6: rejections attributed to total/all too)", got.Total.RejectionsPerDay)
+	}
+}
+
+// --- overview: replica/instance/warnings (F4/F9/F10, v0.3 dashboard task) ---
+
+// TestAdminOverview_Replica proves the overview response carries a
+// non-empty Replica identical to g.replica, Instance echoing the
+// middleware instance name New(...) was given, and a never-nil Warnings
+// slice.
+func TestAdminOverview_Replica(t *testing.T) {
+	t.Parallel()
+	cfg := newAdminTestConfig()
+	h, gw := newAdminGatewayHandle(t, cfg)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, adminRequest(http.MethodGet, adminOverviewPath, "sk-admin1"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	var got adminOverviewResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Replica == "" {
+		t.Error("Replica must not be empty")
+	}
+	if got.Replica != gw.replica {
+		t.Errorf("Replica = %q, want %q (g.replica)", got.Replica, gw.replica)
+	}
+	if got.Instance != "llmgw" {
+		t.Errorf("Instance = %q, want %q (the New(...) instance name)", got.Instance, "llmgw")
+	}
+	if got.Warnings == nil {
+		t.Error("Warnings must never be nil")
 	}
 }
 

@@ -67,10 +67,13 @@ func adminEnabled(cfg *Config) bool {
 
 // isAdminPath reports whether path is one of the admin dashboard's
 // routes: the page, any hashed asset under adminAssetsPathPrefix, or one
-// of the /admin/api/* JSON routes.
+// of the /admin/api/* JSON routes. adminEventsPath (F3, v0.3 dashboard
+// task) is defined in events.go, alongside the rest of that feature's own
+// constants.
 func isAdminPath(path string) bool {
 	if path == adminPagePath || path == adminOverviewPath || path == adminUsagePath ||
-		path == adminUsageHistoryPath || path == adminUsageModelsPath || path == adminTargetsPath {
+		path == adminUsageHistoryPath || path == adminUsageModelsPath || path == adminTargetsPath ||
+		path == adminEventsPath {
 		return true
 	}
 	return strings.HasPrefix(path, adminAssetsPathPrefix)
@@ -147,6 +150,8 @@ func (g *Gateway) handleAdminAPI(sw *statusTrackingWriter, r *http.Request) {
 		g.serveAdminUsageModels(sw, r)
 	case adminTargetsPath:
 		g.serveAdminTargets(sw)
+	case adminEventsPath:
+		g.serveAdminEvents(sw, r)
 	}
 }
 
@@ -612,12 +617,18 @@ type adminAliasView struct {
 // reflects current state.
 type adminOverviewResponse struct {
 	Version   string              `json:"version"`
+	Replica   string              `json:"replica"` // F4/F9, v0.3 dashboard task: os.Hostname() -> $HOSTNAME -> "unknown" (replicaID, llmgateway.go)
+	Instance  string              `json:"instance"`
+	Warnings  []string            `json:"warnings"` // F10, v0.3 dashboard task: collected construction warnings, never nil
 	Providers []adminProviderView `json:"providers"`
 	Groups    []adminGroupView    `json:"groups"`
 	Aliases   []adminAliasView    `json:"aliases"`
 	Redis     adminRedisView      `json:"redis"`
 	Cache     adminCacheView      `json:"cache"`
 	Retry     adminRetryView      `json:"retry"`
+	// WarningsDropped counts construction warnings that did not fit within
+	// configWarningsCap (logger.go) — omitted (0) means nothing was dropped.
+	WarningsDropped int `json:"warningsDropped,omitempty"`
 }
 
 // buildAdminOverview assembles adminOverviewResponse from the registry,
@@ -731,14 +742,19 @@ func (g *Gateway) buildAdminOverview() adminOverviewResponse {
 		}
 	}
 
+	warnings, warningsDropped := g.configWarningsSnapshot()
 	return adminOverviewResponse{
-		Providers: providers,
-		Redis:     adminRedisView{Configured: configured, LastErr: redisLastErr, LastErrAt: redisLastErrAt},
-		Cache:     adminCacheView{Enabled: cacheEnabled, TTL: ttl},
-		Retry:     retryView,
-		Groups:    groups,
-		Aliases:   aliases,
-		Version:   pluginVersion,
+		Providers:       providers,
+		Redis:           adminRedisView{Configured: configured, LastErr: redisLastErr, LastErrAt: redisLastErrAt},
+		Cache:           adminCacheView{Enabled: cacheEnabled, TTL: ttl},
+		Retry:           retryView,
+		Groups:          groups,
+		Aliases:         aliases,
+		Version:         pluginVersion,
+		Replica:         g.replica,
+		Instance:        g.name,
+		Warnings:        warnings,
+		WarningsDropped: warningsDropped,
 	}
 }
 
@@ -790,7 +806,11 @@ type adminUsageEntryView struct {
 	TokensOutPerMonth    int64    `json:"tokensOutPerMonth"`
 	CostPerDayMicroUSD   int64    `json:"costPerDayMicroUsd"`
 	CostPerMonthMicroUSD int64    `json:"costPerMonthMicroUsd"`
-	StoreDown            bool     `json:"storeDown,omitempty"`
+	// RejectionsPerDay is the fleet-wide count of checkAndCount rejections
+	// attributed to this scope today (F4, v0.3 dashboard task) — read via
+	// windowKey's metric "rej", window "day" (limits.go's metricRej).
+	RejectionsPerDay int64 `json:"rejectionsPerDay"`
+	StoreDown        bool  `json:"storeDown,omitempty"`
 }
 
 // adminUsageResponse is the full body of GET /admin/api/usage: every
@@ -820,6 +840,7 @@ func usageEntryView(su scopeUsage, limits *LimitsConfig) adminUsageEntryView {
 		TokensOutPerMonth:    su.tokensOutPerMonth,
 		CostPerDayMicroUSD:   su.costPerDayMicros,
 		CostPerMonthMicroUSD: su.costPerMonthMicros,
+		RejectionsPerDay:     su.rejectionsPerDay,
 		StoreDown:            su.storeDown,
 	}
 }
@@ -847,7 +868,8 @@ func usageEntryView(su scopeUsage, limits *LimitsConfig) adminUsageEntryView {
 // that round trip's own pipeline size, and how long it holds the shared,
 // mutex-guarded Redis connection (respClient, resp.go), now scales with
 // how many users and groups are configured. With 1,000 users that is
-// ~8,000 GETs (usageKeysPerScope=8) in one pipelined call, during which
+// ~9,000 GETs (usageKeysPerScope=9, F4 v0.3 dashboard task's rej:day
+// counter) in one pipelined call, during which
 // every concurrent checkAndCount from live LLM traffic queues behind the
 // same connection mutex — and the admin dashboard polls this endpoint
 // every 5s. chunkedCurrentUsage (below) keeps each individual round trip's
@@ -1156,6 +1178,51 @@ func parseUsageModelsLimit(raw string) (limit int, ok bool) {
 	return n, true
 }
 
+// usageModelsPrefixMaxLen bounds GET /admin/api/usage/models' optional
+// "prefix" query parameter (item 6, v0.3 dashboard task round 2): an
+// operator-typed search string from the Charts view's model filter box,
+// not a value with any legitimate reason to run long — a real model id
+// this endpoint ranks over is always far shorter. Bounding it keeps a
+// malformed or hostile query cheap to reject before catalogModelScopeIDs
+// is even walked.
+const usageModelsPrefixMaxLen = 256
+
+// parseUsageModelsPrefix parses GET /admin/api/usage/models' optional
+// "prefix" query parameter: empty means no filtering (every catalogued
+// model ranked, this endpoint's original, pre-prefix behavior), otherwise
+// the raw string unchanged, so long as it is at most
+// usageModelsPrefixMaxLen bytes. ok is false for anything longer,
+// mirroring parseUsageModelsLimit/parseUsageModelsSpan's own
+// validate-before-reading shape. No further validation: a prefix that
+// matches nothing in the catalog is not an error, just an empty (still
+// 200) ranking — the same "no non-zero models" shape an ordinary,
+// unfiltered ranking already answers when nothing was used yet.
+func parseUsageModelsPrefix(raw string) (prefix string, ok bool) {
+	if len(raw) > usageModelsPrefixMaxLen {
+		return "", false
+	}
+	return raw, true
+}
+
+// parseUsageModelsSpan parses GET /admin/api/usage/models' optional
+// "span" query parameter (F2, v0.3 dashboard task): empty means 1 —
+// today's own bucket, this endpoint's original, pre-span behavior —
+// otherwise an integer between 1 and window's own historyMaxSpan
+// inclusive, mirroring parseHistorySpan's own validate-before-reading
+// shape and identical range. window is assumed already validated by
+// validHistoryWindow, exactly like parseHistorySpan's own precondition.
+func parseUsageModelsSpan(raw, window string) (span int, ok bool) {
+	if raw == "" {
+		return 1, true
+	}
+	max := historyMaxSpan(window)
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < 1 || n > max {
+		return 0, false
+	}
+	return n, true
+}
+
 // catalogModelScopeIDs returns every catalogued (provider, model) pair's
 // canonical kindModel scope id, in the registry snapshot's own order. It
 // is the enumeration GET /admin/api/usage/models ranks over, and the same
@@ -1181,19 +1248,68 @@ type adminUsageModelEntryView struct {
 	Value int64  `json:"value"`
 }
 
-// adminUsageModelsResponse is GET /admin/api/usage/models' body.
+// adminUsageModelsResponse is GET /admin/api/usage/models' body. Span
+// (F2, v0.3 dashboard task) echoes the resolved span (1 when the request
+// carried no ?span= parameter — parseUsageModelsSpan's own default).
 type adminUsageModelsResponse struct {
 	Metric string                     `json:"metric"`
 	Window string                     `json:"window"`
 	Models []adminUsageModelEntryView `json:"models"`
+	Span   int                        `json:"span"`
+}
+
+// usageModelsChunkKeys bounds how many counterStore keys
+// chunkedModelSpanTotals (below) reads in a single storeGetMulti round
+// trip — adminUsageChunkScopes' own reasoning (buildAdminUsage, above)
+// applied to the catalog-sized, now span-multiplied read GET
+// /admin/api/usage/models performs once a caller asks for span > 1: with
+// ?span=24 on an hour window and a 400-model catalog, an unchunked read
+// would pipeline 400*24 = 9,600 keys in one call, holding the shared
+// Redis connection mutex (respClient, resp.go) for that whole pipeline
+// while live traffic's own checkAndCount/account calls queue behind it.
+const usageModelsChunkKeys = 1600
+
+// chunkedModelSpanTotals calls limiter.modelSpanTotals in batches sized
+// so each batch's own key count (len(chunk)*span) stays at or under
+// usageModelsChunkKeys — mirroring chunkedCurrentUsage's chunking
+// (above), sized for span instead of the fixed usageKeysPerScope stride.
+// now is resolved once by the caller and threaded through every chunk, so
+// every id's span ends at the identical instant regardless of how many
+// chunks the catalog splits into. Any chunk that fails (storeDown or a
+// mismatched read) fails the whole call: a ranking silently missing an
+// arbitrary subset of models is worse than a 503, so this never returns a
+// partial ranking.
+func (g *Gateway) chunkedModelSpanTotals(ids []string, metric, window string, now time.Time, span int) ([]int64, bool) {
+	perChunk := usageModelsChunkKeys / span
+	if perChunk < 1 {
+		perChunk = 1
+	}
+	out := make([]int64, 0, len(ids))
+	for len(ids) > 0 {
+		n := perChunk
+		if n > len(ids) {
+			n = len(ids)
+		}
+		totals, ok := g.limiter.modelSpanTotals(ids[:n], metric, window, now, span)
+		if !ok {
+			return nil, false
+		}
+		out = append(out, totals...)
+		ids = ids[n:]
+	}
+	return out, true
 }
 
 // serveAdminUsageModels writes GET /admin/api/usage/models' ranking of the
 // most-used models for one metric/window (the Charts view's "Models"
 // tab): "metric"=req|tokin|tokout|cost, "window"=hour|day|month, optional
-// "limit"=N (default and max per the constants above). Every parameter is
-// validated before the store is touched — 400 for an unrecognized metric
-// or window, or an out-of-range limit.
+// "limit"=N (default and max per the constants above), optional
+// "prefix"=STRING (item 6, v0.3 dashboard task round 2: the Charts
+// view's model search box) narrowing the catalog to ids that start with
+// it before anything is ranked — see below. Every parameter is validated
+// before the store is touched — 400 for an unrecognized metric or
+// window, an out-of-range limit, or a prefix over
+// usageModelsPrefixMaxLen.
 //
 // ONLY NON-ZERO models are returned, by explicit operator requirement: the
 // catalog runs to hundreds of models and a ranking padded with zeroes is
@@ -1202,6 +1318,16 @@ type adminUsageModelsResponse struct {
 // storeGetMulti (limiter.modelTotals), which is the same
 // one-batched-read-per-poll shape serveAdminOverview already uses for
 // per-provider counters.
+//
+// prefix narrows catalogModelScopeIDs' own output BEFORE
+// chunkedModelSpanTotals ever reads a counter for it, and before limit is
+// applied — not a post-hoc filter over an already-ranked, already-limited
+// result. A caller searching the Charts view down to one provider's
+// models (a common id shape here is "provider/model") must not still pay
+// a catalog-sized store read for ids its own prefix already excludes, and
+// limit must cap the FILTERED set's own top-N, not silently return fewer
+// than limit matches because the unfiltered ranking's top N happened to
+// fall outside the prefix.
 //
 // Ties break on the id, ascending, so a ranking of equal values is stable
 // across polls rather than reshuffling under the reader. A storeDown read
@@ -1226,9 +1352,28 @@ func (g *Gateway) serveAdminUsageModels(sw *statusTrackingWriter, r *http.Reques
 		writeOAIError(sw, http.StatusBadRequest, "invalid_request_error", "invalid limit")
 		return
 	}
+	span, ok := parseUsageModelsSpan(q.Get("span"), window)
+	if !ok {
+		writeOAIError(sw, http.StatusBadRequest, "invalid_request_error", "invalid span")
+		return
+	}
+	prefix, ok := parseUsageModelsPrefix(q.Get("prefix"))
+	if !ok {
+		writeOAIError(sw, http.StatusBadRequest, "invalid_request_error", "invalid prefix")
+		return
+	}
 
 	ids := g.catalogModelScopeIDs()
-	totals, storeOK := g.limiter.modelTotals(ids, metric, window)
+	if prefix != "" {
+		filtered := make([]string, 0, len(ids))
+		for _, id := range ids {
+			if strings.HasPrefix(id, prefix) {
+				filtered = append(filtered, id)
+			}
+		}
+		ids = filtered
+	}
+	totals, storeOK := g.chunkedModelSpanTotals(ids, metric, window, g.limiter.now(), span)
 	if !storeOK {
 		writeOAIError(sw, http.StatusServiceUnavailable, "server_error", "usage history store unavailable")
 		return
@@ -1252,7 +1397,50 @@ func (g *Gateway) serveAdminUsageModels(sw *statusTrackingWriter, r *http.Reques
 	}
 
 	setAdminJSONHeaders(sw)
-	_ = json.NewEncoder(sw).Encode(adminUsageModelsResponse{Metric: metric, Window: window, Models: models})
+	_ = json.NewEncoder(sw).Encode(adminUsageModelsResponse{Metric: metric, Window: window, Span: span, Models: models})
+}
+
+// parseEventsLimit parses GET /admin/api/events' "limit" query parameter
+// (F3, v0.3 dashboard task): empty means adminEventsDefaultLimit,
+// otherwise an integer between 1 and adminEventsMaxLimit inclusive,
+// mirroring parseUsageModelsLimit's own validate-before-reading shape.
+func parseEventsLimit(raw string) (limit int, ok bool) {
+	if raw == "" {
+		return adminEventsDefaultLimit, true
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < 1 || n > adminEventsMaxLimit {
+		return 0, false
+	}
+	return n, true
+}
+
+// serveAdminEvents writes GET /admin/api/events' most recent gateway
+// events (F3, v0.3 dashboard task): rate-limit/budget/store-down
+// admission rejections and upstream/timeout/unpriced/capacity error-path
+// signals, newest first. "limit" is optional (adminEventsDefaultLimit),
+// 1..adminEventsMaxLimit inclusive otherwise 400. Never calls
+// checkAndCount — the same admin-traffic-must-not-move-usage-statistics
+// rule every other /admin/api/* route already follows (handleAdminAPI's
+// own doc comment). Answers from the shared Redis-backed list when
+// reachable (source "redis"), falling back to this replica's own local
+// ring otherwise (source "replica", Degraded true when Redis is
+// configured but this particular read failed) — fail-open: the local
+// ring always answers (eventLog.read's own doc comment, events.go).
+func (g *Gateway) serveAdminEvents(sw *statusTrackingWriter, r *http.Request) {
+	limit, ok := parseEventsLimit(r.URL.Query().Get("limit"))
+	if !ok {
+		writeOAIError(sw, http.StatusBadRequest, "invalid_request_error", "invalid limit")
+		return
+	}
+	events, source, degraded := g.events.read(limit, g.limiter.storeLatched())
+	if events == nil {
+		events = []gatewayEvent{}
+	}
+	setAdminJSONHeaders(sw)
+	_ = json.NewEncoder(sw).Encode(adminEventsResponse{
+		Events: events, Source: source, Replica: g.replica, Capacity: eventRingCap, Degraded: degraded,
+	})
 }
 
 // adminTargetCountersView is one target's current-window request counters

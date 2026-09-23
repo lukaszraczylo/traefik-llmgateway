@@ -55,11 +55,11 @@ var anthropicPassthroughForwardedHeaders = []string{"anthropic-beta"}
 // {"error":{...}} — see writeAnthropicError and its callers, below).
 //
 // ORDERING (item 2 fix, 2026-08-22 review): body admission + decode run
-// BEFORE admitRequest (the rate-limit check) on THIS route — the
+// BEFORE admitRequestForRoute (the rate-limit check) on THIS route — the
 // opposite order from runUnified's own finding 1a. anthropic-sdk-python
 // retries any status >= 500, and Claude Code streams on every call: the
-// previous ordering (admitRequest first, streaming rejected only after
-// decode) meant every real client hitting this not-yet-streaming-capable
+// previous ordering (admitRequestForRoute first, streaming rejected only
+// after decode) meant every real client hitting this not-yet-streaming-capable
 // route burned three requests of rate-limit budget per logical call —
 // verified repro: requestsPerMinute 2, three attempts -> 501, 501, 429,
 // day counter reads 3. Deciding "is this streaming" requires the decoded
@@ -103,7 +103,7 @@ func (g *Gateway) handleMessages(w http.ResponseWriter, r *http.Request, u *user
 		return
 	}
 
-	scopes, ok := g.admitRequest(sw, u, grp, writeAnthropicError)
+	scopes, ok := g.admitRequestForRoute(sw, u, grp, writeAnthropicError, routeMessages)
 	if !ok {
 		return
 	}

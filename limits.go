@@ -56,6 +56,13 @@ const (
 	metricTokIn  = "tokin"
 	metricTokOut = "tokout"
 	metricCost   = "cost"
+	// metricRej is the fleet-wide rejection counter F4 (v0.3 dashboard
+	// task) adds: a day-bucketed count of every checkAndCount rejection,
+	// per scope, folded into the SAME storeIncrMulti round trip
+	// settleRejection already pays to compensate other scopes' counters
+	// (below) — never a second round trip. Read back as
+	// scopeUsage.rejectionsPerDay / adminUsageEntryView.RejectionsPerDay.
+	metricRej = "rej"
 )
 
 // TTLs applied to counter keys. They exceed their window's natural length
@@ -502,6 +509,14 @@ const (
 // limitViolation describes the first limit a request breached.
 type limitViolation struct {
 	message string
+	// kind is one of the eventKindRateLimit/eventKindBudget/
+	// eventKindStoreDown vocabulary (events.go, F3 v0.3 dashboard task) —
+	// set once, at construction (storeDownViolation, requestLimitViolation,
+	// checkAndCount's own budget-probe branch), so recordLimitEvent can
+	// classify GET /admin/api/events' Kind field straight from it instead
+	// of re-deriving the same distinction from v.message/v.storeDown a
+	// second time.
+	kind string
 	// retryAfter is the number of seconds until the violated window ends
 	// — until the client can plausibly succeed again. Left at its zero
 	// value for a storeDown violation, which carries no meaningful window.
@@ -1041,7 +1056,7 @@ func (l *limiter) failPolicyIncrAndGetMulti(entries []counterIncr, reads []strin
 // non-shared fallback, so a backend outage cannot let every configured
 // limit go unenforced across a fleet of gateway instances.
 func storeDownViolation() *limitViolation {
-	return &limitViolation{message: "limit store unavailable", storeDown: true}
+	return &limitViolation{message: "limit store unavailable", storeDown: true, kind: eventKindStoreDown}
 }
 
 // bucketFor formats t (in UTC) to window's bucket granularity: the string
@@ -1222,18 +1237,19 @@ func buildBudgetProbes(scopes []limitScope, now time.Time) (probes []budgetProbe
 // storeDownViolation immediately — the request is refused rather than
 // evaluated against partial or fallback-only counters.
 //
-// On a violation, rollbackOtherScopeCounts (finding F1, 2026-09 review)
-// compensates the increments made above for every scope OTHER than the
-// one that actually violated: the violating scope's own counter still
-// reflects a real admission attempt against ITS OWN limit — unchanged,
-// intentional — but WITHOUT the rollback, every OTHER scope (a user's
-// group, the synthetic total scope) would also count that same rejected
-// request toward ITS rate tracking, even though it never had anything to
-// do with the rejection. Left unrolled-back, a single user hammering past
-// their own requests-per-minute limit drives their group's identical
-// counter up on every one of those 429s too, and can lock out every
-// OTHER member of the group once the group's own limit is reached from
-// traffic that was never actually admitted.
+// On a violation, settleRejection (finding F1, 2026-09 review; extended by
+// F4, v0.3 dashboard task, to also record the fleet-wide rejection —
+// see its own doc comment) compensates the increments made above for
+// every scope OTHER than the one that actually violated: the violating
+// scope's own counter still reflects a real admission attempt against
+// ITS OWN limit — unchanged, intentional — but WITHOUT the rollback,
+// every OTHER scope (a user's group, the synthetic total scope) would
+// also count that same rejected request toward ITS rate tracking, even
+// though it never had anything to do with the rejection. Left unrolled-
+// back, a single user hammering past their own requests-per-minute limit
+// drives their group's identical counter up on every one of those 429s
+// too, and can lock out every OTHER member of the group once the group's
+// own limit is reached from traffic that was never actually admitted.
 //
 // Every scope's three increments AND every scope's token/cost budget reads
 // ride ONE storeIncrAndGetMulti round trip (perf review round 3,
@@ -1302,12 +1318,12 @@ func (l *limiter) checkAndCount(scopes []limitScope) *limitViolation {
 		// stats-only, deliberately never read here.
 		if v := requestLimitViolation(sc, "requests-per-minute", sc.limits.RequestsPerMinute, minCount, windowMin, now); v != nil {
 			l.rejections.increment(sc.kind, sc.id)
-			l.rollbackOtherScopeCounts(entries, i, len(scopes))
+			l.settleRejection(entries, i, scopes, wb, et)
 			return v
 		}
 		if v := requestLimitViolation(sc, "requests-per-day", sc.limits.RequestsPerDay, dayCount, windowDay, now); v != nil {
 			l.rejections.increment(sc.kind, sc.id)
-			l.rollbackOtherScopeCounts(entries, i, len(scopes))
+			l.settleRejection(entries, i, scopes, wb, et)
 			return v
 		}
 		for _, p := range probes {
@@ -1322,49 +1338,33 @@ func (l *limiter) checkAndCount(scopes []limitScope) *limitViolation {
 				continue
 			}
 			l.rejections.increment(sc.kind, sc.id)
-			l.rollbackOtherScopeCounts(entries, i, len(scopes))
+			l.settleRejection(entries, i, scopes, wb, et)
 			return &limitViolation{
 				message:    fmt.Sprintf("%s %q exceeded %s budget", sc.kind, sc.id, p.name),
 				retryAfter: retryAfterSeconds(now, p.window),
+				kind:       eventKindBudget,
 			}
 		}
 	}
 	return nil
 }
 
-// rollbackOtherScopeCounts compensates the req:min/req:day/req:hour
-// increments checkAndCount already made for every scope OTHER than
-// violatedIdx, in ONE further batched store call (finding F1, 2026-09
-// review — the group-lockout bug): checkAndCount counts every scope
-// UNCONDITIONALLY before evaluating any of them, by design, so that a
-// request refused by one scope's own limit still counts toward every
-// other scope's rate tracking (see checkAndCount's own doc comment) — but
-// that means a user hammering past THEIR OWN requests-per-minute limit
-// also drives up their group's identical counter on every one of those
-// rejected attempts, and can lock out every other member of the group
-// once the group's own limit is reached too, entirely from traffic that
-// was never admitted.
-//
-// The scope that actually violated (violatedIdx) keeps its own
-// increment — that counter reflecting a real admission attempt against
-// ITS OWN limit is exactly the existing, intentional behavior; only the
-// OTHER scopes' counts, which had nothing to do with this rejection, are
-// undone. Sent as negative-delta counterIncr entries through the same
-// storeIncrMulti path every other write in this file already uses — one
-// extra round trip, only on rejection, never on the (overwhelmingly more
-// common) admitted path.
-//
-// Best-effort: a failed rollback batch is logged and otherwise ignored —
-// the request is being rejected either way, and a failed rollback only
-// ever leaves an extra +1 on an unrelated scope's counter, which is
-// exactly this bug's own pre-fix behavior for that one counter, not a new
-// hazard.
-func (l *limiter) rollbackOtherScopeCounts(entries []counterIncr, violatedIdx, numScopes int) {
-	if numScopes <= 1 {
-		return
-	}
-	comp := make([]counterIncr, 0, (numScopes-1)*checkAndCountKeysPerScope)
-	for i := 0; i < numScopes; i++ {
+// settleRejection compensates the req:min/req:day/req:hour increments
+// checkAndCount already made for every scope OTHER than violatedIdx —
+// exactly what rollbackOtherScopeCounts (its pre-F4 name) did — AND, in
+// the SAME batched store call, records the fleet-wide rejection: +1 to
+// the violated scope's own rej:day counter, and +1 to the synthetic total
+// scope's rej:day counter when one is present in scopes (F4, v0.3
+// dashboard task — GET /admin/api/usage's rejectionsPerDay field, Q6:
+// "attribute rejections to total/all too"). Folding this into the
+// compensating batch, rather than a separate storeIncrMulti call, means a
+// rejection still pays exactly the one further round trip it already did
+// before F4 existed — see checkAndCount's own doc comment for the round-
+// trip accounting this preserves.
+func (l *limiter) settleRejection(entries []counterIncr, violatedIdx int, scopes []limitScope, wb windowBuckets, et enforceTTLSet) {
+	comp := make([]counterIncr, 0, len(scopes)*checkAndCountKeysPerScope)
+	totalPresent := false
+	for i, sc := range scopes {
 		if i == violatedIdx {
 			continue
 		}
@@ -1372,13 +1372,26 @@ func (l *limiter) rollbackOtherScopeCounts(entries []counterIncr, violatedIdx, n
 			e := entries[i*checkAndCountKeysPerScope+k]
 			comp = append(comp, counterIncr{key: e.key, delta: -e.delta, ttl: e.ttl, enforceTTL: e.enforceTTL})
 		}
+		if sc.kind == totalScopeKind && sc.id == totalScopeID {
+			totalPresent = true
+		}
 	}
-	if len(comp) == 0 {
-		return
+	violated := scopes[violatedIdx]
+	comp = append(comp, rejectionCounterIncr(violated.kind, violated.id, wb.day, et.day))
+	if totalPresent {
+		comp = append(comp, rejectionCounterIncr(totalScopeKind, totalScopeID, wb.day, et.day))
 	}
 	if _, ok := l.storeIncrMulti(comp); !ok {
-		l.logf("limits: rollback of other-scope request counters failed after a rejection; those scopes' req:min/day/hour counters may be over-counted by 1 for the current window")
+		l.logf("limits: rollback/rejection-accounting batch failed after a rejection; other scopes' req:min/day/hour counters may be over-counted by 1, and rejectionsPerDay may undercount, for the current window")
 	}
+}
+
+// rejectionCounterIncr builds the single rej:day counterIncr entry
+// settleRejection adds per scope it attributes a rejection to — delta 1,
+// ttl/enforceTTL matching every other day-window counter this file writes
+// (dayWindowTTL/et.day, exactly like checkAndCount's own req:day entry).
+func rejectionCounterIncr(kind, id, dayBucket string, enforceTTL time.Duration) counterIncr {
+	return counterIncr{key: windowKeyForBucket(kind, id, metricRej, windowDay, dayBucket), delta: 1, ttl: dayWindowTTL, enforceTTL: enforceTTL}
 }
 
 // requestLimitViolation reports a violation when count (already
@@ -1390,6 +1403,7 @@ func requestLimitViolation(sc limitScope, name string, limit, count int64, windo
 	return &limitViolation{
 		message:    fmt.Sprintf("%s %q exceeded %s limit (%d)", sc.kind, sc.id, name, limit),
 		retryAfter: retryAfterSeconds(now, window),
+		kind:       eventKindRateLimit,
 	}
 }
 
@@ -1676,7 +1690,7 @@ const maxModelScopeIDLen = 256
 // withModelScope returns scopes plus a kindModel scope for canonical, the
 // "provider/model" id that actually SERVED the request. It copies rather
 // than appending in place: the caller's slice is the same one
-// admitRequest already passed to checkAndCount, and growing it through a
+// admitRequestForRoute already passed to checkAndCount, and growing it through a
 // shared backing array would be a data race waiting to happen.
 //
 // canonical is returned unchanged (no model scope added) when it names no
@@ -2081,8 +2095,10 @@ func (l *limiter) providerUsage(scopes []limitScope) []providerCounters {
 // v0.2 final review wave follow-up (2026-08-20) that flagged the previous
 // literal "6" as a magic-number stride: this task grows the per-scope key
 // count from 6 to 8 for the tokens-in/tokens-out split, which is exactly
-// the moment a silent off-by-N here would have gone unnoticed.
-const usageKeysPerScope = 8
+// the moment a silent off-by-N here would have gone unnoticed. F4 (v0.3
+// dashboard task) grows it again, 8 to 9, for the fleet-wide
+// rejectionsPerDay counter (metricRej) usageWindowKeys now appends.
+const usageKeysPerScope = 9
 
 // scopeUsage is one scope's (a user's, a group's, or the synthetic total
 // scope's — totalScopeKind) current-window counter values — the admin
@@ -2105,6 +2121,11 @@ type scopeUsage struct {
 	tokensOutPerMonth  int64
 	costPerDayMicros   int64
 	costPerMonthMicros int64
+	// rejectionsPerDay is the fleet-wide count of checkAndCount rejections
+	// attributed to this scope today (metricRej, F4 v0.3 dashboard task) —
+	// GET /admin/api/usage's rejectionsPerDay field. Unlike every other
+	// field here, this counts REFUSED requests, not admitted ones.
+	rejectionsPerDay int64
 	// storeDown reports whether reading any of the usageKeysPerScope
 	// counters above failed closed (a configured store errored and
 	// failOpen is false) — mirrors limitViolation.storeDown. Every value
@@ -2116,9 +2137,10 @@ type scopeUsage struct {
 // usageWindowKeys returns the usageKeysPerScope windowKey strings
 // currentUsage reads for sc at time now, in a fixed order — req/min,
 // req/day, tokin/day, tokin/month, tokout/day, tokout/month, cost/day,
-// cost/month — matching scopeUsage's field order exactly, so currentUsage
-// can map storeGetMulti's result slice back to named fields by plain
-// index.
+// cost/month, rej/day — matching scopeUsage's field order exactly, so
+// currentUsage can map storeGetMulti's result slice back to named fields
+// by plain index. rej/day (F4, v0.3 dashboard task) is appended last so
+// every existing index above it stays byte-for-byte unchanged.
 func usageWindowKeys(sc limitScope, now time.Time) []string {
 	return []string{
 		windowKey(sc.kind, sc.id, metricReq, windowMin, now),
@@ -2129,6 +2151,7 @@ func usageWindowKeys(sc limitScope, now time.Time) []string {
 		windowKey(sc.kind, sc.id, metricTokOut, windowMonth, now),
 		windowKey(sc.kind, sc.id, metricCost, windowDay, now),
 		windowKey(sc.kind, sc.id, metricCost, windowMonth, now),
+		windowKey(sc.kind, sc.id, metricRej, windowDay, now),
 	}
 }
 
@@ -2203,6 +2226,7 @@ func (l *limiter) currentUsage(scopes []limitScope) []scopeUsage {
 			tokensInPerDay: v[2], tokensInPerMonth: v[3],
 			tokensOutPerDay: v[4], tokensOutPerMonth: v[5],
 			costPerDayMicros: v[6], costPerMonthMicros: v[7],
+			rejectionsPerDay: v[8],
 		}
 	}
 	return out
@@ -2218,17 +2242,21 @@ type historyPoint struct {
 	value  int64
 }
 
-// modelTotals reads ONE counter per id — metric at window's CURRENT bucket
-// — in a single storeGetMulti, returning values positionally (result[i] is
-// ids[i]'s total). It backs GET /admin/api/usage/models, whose ranking
-// needs a single comparable number per model rather than history's whole
-// span: reading a span of buckets per model would multiply an already
-// catalog-sized read (one key per configured model) by the span.
+// modelSpanTotals reads span counter buckets per id — via
+// historyBucketKeys, the identical per-id bucket walk history (below)
+// uses for one scope — flattens every id's span keys into ONE
+// storeGetMulti round trip, and returns each id's SUM over its own span,
+// positionally (result[i] is the sum for ids[i]). F2, v0.3 dashboard
+// task: backs GET /admin/api/usage/models' optional ?span= parameter, so
+// the Charts view's "Models" ranking can show a window wider than the
+// current bucket alone. modelTotals (below) is the span=1 special case,
+// unchanged in behavior from before this function existed.
 //
-// ok is false when the store read fails, exactly as history does, so the
-// caller answers 503 rather than presenting an all-zero ranking as though
-// no model had been used. An empty ids slice is not a store read at all:
-// it returns an empty result and ok, never a round trip.
+// ok is false when the store read fails, exactly as history/modelTotals
+// already promise, so the caller answers 503 rather than presenting a
+// partial or fallback-served sum as a genuine ranking. An empty ids slice
+// is not a store read at all: it returns an empty result and ok, never a
+// round trip.
 //
 // configuredStoreDown is checked alongside storeGetMulti's own ok
 // (finding F5, 2026-09 review, applying currentUsage/providerUsage's own
@@ -2239,20 +2267,37 @@ type historyPoint struct {
 // present a fail-open read of near-empty fallback data as a genuine
 // "these models were barely used" ranking instead of the 503 this
 // function's own doc comment already promises for a store failure.
-func (l *limiter) modelTotals(ids []string, metric, window string) ([]int64, bool) {
+func (l *limiter) modelSpanTotals(ids []string, metric, window string, now time.Time, span int) ([]int64, bool) {
 	if len(ids) == 0 {
 		return nil, true
 	}
-	now := l.now()
-	keys := make([]string, len(ids))
-	for i, id := range ids {
-		keys[i] = windowKey(kindModel, id, metric, window, now)
+	allKeys := make([]string, 0, len(ids)*span)
+	for _, id := range ids {
+		keys, _ := historyBucketKeys(kindModel, id, metric, window, now, span)
+		allKeys = append(allKeys, keys...)
 	}
-	vals, ok := l.storeGetMulti(keys)
-	if !ok || len(vals) != len(keys) || l.configuredStoreDown() {
+	vals, ok := l.storeGetMulti(allKeys)
+	if !ok || len(vals) != len(allKeys) || l.configuredStoreDown() {
 		return nil, false
 	}
-	return vals, true
+	out := make([]int64, len(ids))
+	for i := range ids {
+		var sum int64
+		for _, v := range vals[i*span : i*span+span] {
+			sum += v
+		}
+		out[i] = sum
+	}
+	return out, true
+}
+
+// modelTotals reads ONE counter per id — metric at window's CURRENT
+// bucket — the modelSpanTotals span=1 special case: historyBucketKeys'
+// own i=0/span=1 step lands on exactly the same key windowKey(kindModel,
+// id, metric, window, now) would have built directly, so this wrapper is
+// byte-for-byte the pre-F2 implementation's behavior.
+func (l *limiter) modelTotals(ids []string, metric, window string) ([]int64, bool) {
+	return l.modelSpanTotals(ids, metric, window, l.now(), 1)
 }
 
 // historyStepBack returns the instant window's bucket was current i steps

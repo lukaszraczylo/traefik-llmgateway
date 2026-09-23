@@ -1192,6 +1192,7 @@ func (g *Gateway) handlePassthrough(w http.ResponseWriter, r *http.Request, u *u
 
 	scopes := withTotalScope(buildLimitScopes(u, grp))
 	if violation := g.limiter.checkAndCount(scopes); violation != nil {
+		g.recordLimitEvent(scopes, routePassthrough, violation)
 		writeLimitViolation(w, violation)
 		return
 	}
@@ -1225,6 +1226,7 @@ func (g *Gateway) handlePassthrough(w http.ResponseWriter, r *http.Request, u *u
 			canonical := providerName + "/" + model
 			if !priceKnown(canonical, model, g.cfg.Pricing, g.cfg.ModelMeta) {
 				g.logf("passthrough: refusing model %q: it has no configured price, and a cost budget applies to this caller that cannot be enforced without one", model)
+				g.recordUnpricedRefusalEvent(scopes, canonical, providerName, routePassthrough) // F3 hook 5 (item 5, this round)
 				writeOAIError(w, http.StatusPaymentRequired, "invalid_request_error",
 					fmt.Sprintf("model %q has no configured price, so the cost budget that applies to this request cannot be enforced; add a \"pricing\" entry for it, or set allowUnpricedWithCostBudget to serve it unbounded", model))
 				return
@@ -1257,6 +1259,7 @@ func (g *Gateway) handlePassthrough(w http.ResponseWriter, r *http.Request, u *u
 	}
 
 	result, complete := g.proxyUpstream(w, r, upstreamURL, adapter.httpClient(), adapter.injectAuth, providerCredentialRetargetHeaders, true, "passthrough (provider "+providerName+")", adapter.requestTimeout())
+	g.recordProxyEvent(scopes, providerName, routePassthrough, result) // F3 hook 3 (v0.3 dashboard task)
 
 	// Finding 2 fix (review-routes.md): a build/dial failure that never
 	// produced any response at all (result.status == 0 — proxyUpstream

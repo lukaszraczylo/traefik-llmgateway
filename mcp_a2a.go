@@ -207,6 +207,7 @@ func (g *Gateway) handleTargetProxy(w http.ResponseWriter, r *http.Request, u *u
 
 	scopes := withTotalScope(buildLimitScopes(u, grp))
 	if violation := g.limiter.checkAndCount(scopes); violation != nil {
+		g.recordLimitEvent(scopes, kind, violation) // F3 hook 1 (v0.3 dashboard task): kind is already "mcp"/"a2a"
 		writeLimitViolation(w, violation)
 		return
 	}
@@ -230,6 +231,7 @@ func (g *Gateway) handleTargetProxy(w http.ResponseWriter, r *http.Request, u *u
 	start := time.Now()
 	result, ok := g.proxyUpstream(w, r, upstreamURL, g.targetClient, nil, nil, false, kind+" target (name "+name+")", g.targetTimeout)
 	g.recordTargetProxyHealth(kind, name, targetURL, result, ok, time.Since(start))
+	g.recordProxyEvent(scopes, name, kind, result) // F3 hook 3 (v0.3 dashboard task)
 }
 
 // buildUpstreamTargetURL joins targetURL (an MCP server or A2A agent's own

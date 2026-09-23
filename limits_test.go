@@ -2629,6 +2629,153 @@ func TestModelTotals_ConfiguredStoreDown_FailOpen_ReturnsNotOK(t *testing.T) {
 	}
 }
 
+// TestModelSpanTotalsSumsBuckets is F2 (v0.3 dashboard task):
+// modelSpanTotals sums span buckets ending at now, per id, positionally
+// — the arithmetic GET /admin/api/usage/models' ?span= parameter relies
+// on. It also proves modelTotals (its span=1 special case) reads only
+// today's own bucket, byte-for-byte the pre-F2 behavior.
+func TestModelSpanTotalsSumsBuckets(t *testing.T) {
+	l := newLimiter(nil, true)
+	now := time.Date(2026, 9, 23, 10, 0, 0, 0, time.UTC)
+	id := "openai/gpt-4o"
+
+	l.incrCounter(kindModel, id, metricReq, windowDay, historyStepBack(now, windowDay, 2), 5, dayWindowTTL)
+	l.incrCounter(kindModel, id, metricReq, windowDay, historyStepBack(now, windowDay, 1), 7, dayWindowTTL)
+	l.incrCounter(kindModel, id, metricReq, windowDay, historyStepBack(now, windowDay, 0), 11, dayWindowTTL)
+
+	got, ok := l.modelSpanTotals([]string{id}, metricReq, windowDay, now, 3)
+	if !ok {
+		t.Fatal("want ok=true")
+	}
+	if len(got) != 1 || got[0] != 23 {
+		t.Errorf("span=3 got = %v, want [23] (5+7+11)", got)
+	}
+
+	span1, ok := l.modelTotals([]string{id}, metricReq, windowDay)
+	if !ok || len(span1) != 1 || span1[0] != 11 {
+		t.Errorf("modelTotals (span=1 wrapper) got = %v ok=%v, want [11] (today's own bucket only)", span1, ok)
+	}
+}
+
+// TestModelSpanTotalsSumsBuckets_MultipleIDsPositional proves the
+// flattened storeGetMulti's reply is sliced back per id in the SAME
+// order ids was given, not just correct for a single id.
+func TestModelSpanTotalsSumsBuckets_MultipleIDsPositional(t *testing.T) {
+	l := newLimiter(nil, true)
+	now := time.Date(2026, 9, 23, 10, 0, 0, 0, time.UTC)
+
+	l.incrCounter(kindModel, "a/one", metricCost, windowDay, historyStepBack(now, windowDay, 1), 100, dayWindowTTL)
+	l.incrCounter(kindModel, "a/one", metricCost, windowDay, historyStepBack(now, windowDay, 0), 50, dayWindowTTL)
+	l.incrCounter(kindModel, "b/two", metricCost, windowDay, historyStepBack(now, windowDay, 1), 3, dayWindowTTL)
+	l.incrCounter(kindModel, "b/two", metricCost, windowDay, historyStepBack(now, windowDay, 0), 4, dayWindowTTL)
+
+	got, ok := l.modelSpanTotals([]string{"a/one", "b/two"}, metricCost, windowDay, now, 2)
+	if !ok {
+		t.Fatal("want ok=true")
+	}
+	if len(got) != 2 || got[0] != 150 || got[1] != 7 {
+		t.Errorf("got = %v, want [150 7]", got)
+	}
+}
+
+// TestModelSpanTotals_EmptyIDs_NoStoreRead proves an empty ids slice
+// never touches the store at all — matches modelTotals' own pre-existing
+// contract, unaffected by F2's span extension.
+func TestModelSpanTotals_EmptyIDs_NoStoreRead(t *testing.T) {
+	l := newLimiter(alwaysErrStore{}, false) // fail-closed AND always-erroring: any store read would fail the test
+	got, ok := l.modelSpanTotals(nil, metricReq, windowDay, time.Now(), 5)
+	if !ok || got != nil {
+		t.Errorf("got = %v, ok = %v, want nil, true (no store read for an empty ids slice)", got, ok)
+	}
+}
+
+// TestCheckAndCountRejectionFoldedIntoRollbackBatch is F4 (v0.3 dashboard
+// task): the fleet-wide rejectionsPerDay counter for the violated scope
+// AND the synthetic total scope rides the SAME storeIncrMulti batch
+// settleRejection already pays to compensate every other scope's
+// increments (see TestCheckAndCount_OneIncrAndGetMultiCallRegardlessOfScopeCount
+// above) — a rejection never costs a SECOND round trip beyond that one.
+func TestCheckAndCountRejectionFoldedIntoRollbackBatch(t *testing.T) {
+	store := &countingIncrStore{}
+	l := newLimiter(store, true)
+	now := time.Date(2026, 9, 23, 9, 0, 0, 0, time.UTC)
+	l.nowFn = func() time.Time { return now }
+
+	scopes := []limitScope{
+		{kind: "user", id: "u", limits: &LimitsConfig{RequestsPerMinute: 1}},
+		{kind: "group", id: "g", limits: nil},
+		{kind: totalScopeKind, id: totalScopeID, limits: nil},
+	}
+
+	if v := l.checkAndCount(scopes); v != nil {
+		t.Fatalf("1st call should pass, got %+v", v)
+	}
+	v := l.checkAndCount(scopes)
+	if v == nil {
+		t.Fatal("2nd call should violate u's requestsPerMinute:1")
+	}
+	if v.kind != eventKindRateLimit {
+		t.Errorf("v.kind = %q, want %q", v.kind, eventKindRateLimit)
+	}
+	if store.incrMultiCalls != 1 {
+		t.Errorf("incrMultiCalls after the violation = %d, want 1 (compensations + rejection counters share one batch)", store.incrMultiCalls)
+	}
+
+	uRej, ok := l.getCounter("user", "u", metricRej, windowDay, now)
+	if !ok || uRej != 1 {
+		t.Errorf("user rej:day = %d, ok=%v, want 1", uRej, ok)
+	}
+	totalRej, ok := l.getCounter(totalScopeKind, totalScopeID, metricRej, windowDay, now)
+	if !ok || totalRej != 1 {
+		t.Errorf("total rej:day = %d, ok=%v, want 1 (Q6: rejections attributed to total/all too)", totalRej, ok)
+	}
+	gRej, ok := l.getCounter("group", "g", metricRej, windowDay, now)
+	if ok && gRej != 0 {
+		t.Errorf("group rej:day = %d, want 0 (group did not violate)", gRej)
+	}
+}
+
+// TestCheckAndCount_StoreDownRejection_NoRejCounterWrite proves the
+// store-down branch stays purely in-process (limits.go's own checkAndCount
+// doc comment): a storeDown violation never reaches settleRejection at
+// all — it fires before any per-scope evaluation loop — so it costs no
+// further store round trip beyond the one failed incrAndGetMulti attempt.
+func TestCheckAndCount_StoreDownRejection_NoRejCounterWrite(t *testing.T) {
+	store := &erroringStore{err: errStoreDownStub}
+	l := newLimiter(store, false) // fail-closed
+	scopes := []limitScope{{kind: "user", id: "u", limits: &LimitsConfig{RequestsPerMinute: 1}}}
+
+	v := l.checkAndCount(scopes)
+	if v == nil || !v.storeDown {
+		t.Fatalf("v = %+v, want a storeDown violation", v)
+	}
+	if v.kind != eventKindStoreDown {
+		t.Errorf("v.kind = %q, want %q", v.kind, eventKindStoreDown)
+	}
+}
+
+// TestCurrentUsage_RejectionsPerDay proves currentUsage reads the
+// rej:day counter into scopeUsage.rejectionsPerDay — F4's usageKeysPerScope
+// 8->9 growth (v0.3 dashboard task).
+func TestCurrentUsage_RejectionsPerDay(t *testing.T) {
+	l := newLimiter(nil, true)
+	now := time.Date(2026, 9, 23, 9, 0, 0, 0, time.UTC)
+	l.nowFn = func() time.Time { return now }
+
+	l.incrCounter("user", "u", metricRej, windowDay, now, 3, dayWindowTTL)
+
+	got := l.currentUsage([]limitScope{{kind: "user", id: "u"}})
+	if len(got) != 1 {
+		t.Fatalf("len(got) = %d, want 1", len(got))
+	}
+	if got[0].rejectionsPerDay != 3 {
+		t.Errorf("rejectionsPerDay = %d, want 3", got[0].rejectionsPerDay)
+	}
+	if got[0].storeDown {
+		t.Error("storeDown = true, want false")
+	}
+}
+
 // TestTargetUsage_ConfiguredStoreDown_FailOpen_ReturnsZeroCounters is
 // finding F5, 2026-09 review — targetUsage's own counterpart: with
 // failOpen=true, a store outage must fall back to the same zero-value

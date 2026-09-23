@@ -931,6 +931,88 @@ func TestGateway_PricingWarn_LogsUnderOwnInstance(t *testing.T) {
 	}
 }
 
+// TestNewCollectsConfigWarnings is F10 (v0.3 dashboard task): every
+// construction-time warnf call — here, metrics.path="/v1/models"
+// (shadowed-route warning) AND cache.ttl="0s" (zero-TTL warning),
+// triggered together in one construction — lands in g.configWarnings,
+// readable via GET /admin/api/overview's Warnings field. Both are real
+// existing warnf call sites (TestNewGateway_MetricsPath_Validation/
+// TestBuildResponseCache_NonPositiveTTL_WarnsAndAccepts prove they fire
+// at all); this test proves F10's NEW behavior — that warnf's own line
+// is ALSO collected, not just written to stderr.
+func TestNewCollectsConfigWarnings(t *testing.T) {
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{"openai": {Type: "openai", APIKey: "k"}}
+	cfg.Metrics = &MetricsConfig{Enabled: true, Path: "/v1/models"}
+	cfg.Cache = CacheConfig{Enabled: true, TTL: "0s"} // no Redis configured — buildResponseCache still warns before its own nil-client return
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	gw := h.(*Gateway)
+
+	warnings, dropped := gw.configWarningsSnapshot()
+	if dropped != 0 {
+		t.Errorf("dropped = %d, want 0", dropped)
+	}
+	var sawMetricsPath, sawCacheTTL bool
+	for _, w := range warnings {
+		if strings.Contains(w, "metrics.path") {
+			sawMetricsPath = true
+		}
+		if strings.Contains(w, "cache: ttl") {
+			sawCacheTTL = true
+		}
+	}
+	if !sawMetricsPath {
+		t.Errorf("warnings = %v, want one mentioning metrics.path", warnings)
+	}
+	if !sawCacheTTL {
+		t.Errorf("warnings = %v, want one mentioning cache: ttl", warnings)
+	}
+}
+
+// TestNoteConfigWarning_CapAndDropped proves configWarningsCap bounds
+// g.configWarnings and configWarningsDropped counts what did not fit —
+// F10's own overflow behavior, exercised directly against noteConfigWarning
+// (via warnf) rather than contriving 50+ real construction warnings.
+func TestNoteConfigWarning_CapAndDropped(t *testing.T) {
+	g := &Gateway{name: "llmgw", collectingWarnings: true}
+	const over = 5
+	for i := 0; i < configWarningsCap+over; i++ {
+		g.warnf("warning %d", i)
+	}
+	warnings, dropped := g.configWarningsSnapshot()
+	if len(warnings) != configWarningsCap {
+		t.Errorf("len(warnings) = %d, want %d", len(warnings), configWarningsCap)
+	}
+	if dropped != over {
+		t.Errorf("dropped = %d, want %d", dropped, over)
+	}
+	if warnings[0] != "warning 0" {
+		t.Errorf("warnings[0] = %q, want %q (the first configWarningsCap warnings are kept, not the last)", warnings[0], "warning 0")
+	}
+}
+
+// TestNoteConfigWarning_RuntimeWarnfNotCollected proves a warnf call
+// AFTER collectingWarnings is false (construction finished — newGateway's
+// own final step) is never appended to g.configWarnings: only
+// construction-time warnings belong in GET /admin/api/overview's
+// Warnings field.
+func TestNoteConfigWarning_RuntimeWarnfNotCollected(t *testing.T) {
+	g := &Gateway{name: "llmgw", collectingWarnings: true}
+	g.warnf("during construction")
+	g.collectingWarnings = false
+	g.warnf("after construction, must not be collected")
+
+	warnings, _ := g.configWarningsSnapshot()
+	if len(warnings) != 1 || warnings[0] != "during construction" {
+		t.Errorf("warnings = %v, want exactly [%q]", warnings, "during construction")
+	}
+}
+
 // TestShouldSendTelemetry pins the guard that keeps unstamped builds from
 // phoning home. Every developer checkout and every CI run carries
 // devPluginVersion, so the false cases are the state this code is in
