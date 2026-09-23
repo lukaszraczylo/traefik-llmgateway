@@ -1,6 +1,14 @@
 import { describe, expect, it } from 'vitest'
 
-import { buildAccessMatrix, providerAccessCell, targetAccessCell } from './access-matrix'
+import {
+  buildAccessMatrix,
+  MATRIX_KIND_LABEL,
+  MATRIX_KINDS,
+  matrixColumnsState,
+  parseMatrixKind,
+  providerAccessCell,
+  targetAccessCell,
+} from './access-matrix'
 import type { AdminConsumerGroup, AdminTargetView } from '@/types/api'
 
 function group(overrides: Partial<AdminConsumerGroup> = {}): AdminConsumerGroup {
@@ -97,5 +105,60 @@ describe('buildAccessMatrix', () => {
 
   it('returns an empty array for no groups', () => {
     expect(buildAccessMatrix([], ['anthropic'], [], [])).toEqual([])
+  })
+})
+
+describe('MATRIX_KINDS', () => {
+  it('orders the three kinds models, mcp, agents', () => {
+    expect(MATRIX_KINDS).toEqual(['models', 'mcp', 'agents'])
+  })
+
+  it('labels every kind', () => {
+    expect(MATRIX_KIND_LABEL).toEqual({ models: 'Models', mcp: 'MCP servers', agents: 'Agents' })
+  })
+})
+
+describe('parseMatrixKind', () => {
+  it('parses each valid kind', () => {
+    expect(parseMatrixKind('models')).toBe('models')
+    expect(parseMatrixKind('mcp')).toBe('mcp')
+    expect(parseMatrixKind('agents')).toBe('agents')
+  })
+
+  it('falls back to models for an unknown value', () => {
+    expect(parseMatrixKind('bogus')).toBe('models')
+  })
+
+  it('falls back to models when undefined', () => {
+    expect(parseMatrixKind(undefined)).toBe('models')
+  })
+})
+
+describe('matrixColumnsState', () => {
+  it('is "loading" when the source has not loaded yet and there is no dashboard error', () => {
+    expect(matrixColumnsState(false, 0, '')).toBe('loading')
+  })
+
+  it('is "error" when the source has not loaded and dashboard.error is set', () => {
+    expect(matrixColumnsState(false, 0, 'overview: fetch failed')).toBe('error')
+  })
+
+  // Bug this helper fixes: a not-yet-loaded source maps to 0 columns via
+  // `?? []`, indistinguishable from a genuinely empty, loaded source by
+  // column count alone — so columnCount must never override sourceLoaded.
+  it('is "loading", not "empty", when the source has not loaded even though columnCount is 0', () => {
+    expect(matrixColumnsState(false, 0, '')).not.toBe('empty')
+  })
+
+  it('is "empty" when the source has loaded with zero columns', () => {
+    expect(matrixColumnsState(true, 0, '')).toBe('empty')
+  })
+
+  it('is "empty" when the source has loaded with zero columns even if a stale dashboard.error lingers', () => {
+    expect(matrixColumnsState(true, 0, 'usage: fetch failed')).toBe('empty')
+  })
+
+  it('is "ready" when the source has loaded with at least one column', () => {
+    expect(matrixColumnsState(true, 3, '')).toBe('ready')
   })
 })

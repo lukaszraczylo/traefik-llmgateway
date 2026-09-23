@@ -3,8 +3,11 @@ import { computed, ref, watch } from 'vue'
 
 import ClampedRangeNotice from '@/components/ClampedRangeNotice.vue'
 import DataTable from '@/components/DataTable.vue'
+import ErrorState from '@/components/ErrorState.vue'
+import SkeletonTable from '@/components/SkeletonTable.vue'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { adminFetch } from '@/lib/api'
+import { loadState } from '@/lib/load-state'
 import { dayOrMonthWindow, totalsUrl } from '@/lib/range'
 import { targetCallerColumns } from '@/lib/target-columns'
 import { useFiltersStore } from '@/stores/filters'
@@ -47,7 +50,8 @@ const filters = useFiltersStore()
 
 const rows = ref<AdminTotalsResponse['rows']>([])
 const loading = ref(false)
-const loaded = ref(false)
+/** loadedOk is true only right after a SUCCESSFUL fetch for the CURRENT selection (even with zero rows — a genuine "no callers" answer is still data) — reset synchronously at the top of every load() call, not just on props.target changing, so a range change gets the identical "skeleton while this NEW selection's own fetch is in flight" treatment (states-plan.md item 1: a skeleton only for the current selection's own missing data, never stale data from the previous one). */
+const loadedOk = ref(false)
 const error = ref('')
 /** reqId guards against an out-of-order response overwriting a newer one (latest-request-wins, stores/catalog.ts's own convention) — a quick target switch, or a range change mid-flight, no longer risks showing a STALE target's callers under the new heading. */
 let reqId = 0
@@ -55,6 +59,9 @@ let reqId = 0
 async function load(): Promise<void> {
   const requestId = ++reqId
   loading.value = true
+  rows.value = []
+  loadedOk.value = false
+  error.value = ''
   try {
     const { window, span } = dayOrMonthWindow(filters.window, filters.span)
     const res = await adminFetch<AdminTotalsResponse>(
@@ -62,15 +69,12 @@ async function load(): Promise<void> {
     )
     if (requestId !== reqId) return
     rows.value = res.rows
-    error.value = ''
+    loadedOk.value = true
   } catch (err) {
     if (requestId !== reqId) return
     error.value = err instanceof Error ? err.message : String(err)
   } finally {
-    if (requestId === reqId) {
-      loading.value = false
-      loaded.value = true
-    }
+    if (requestId === reqId) loading.value = false
   }
 }
 
@@ -82,10 +86,8 @@ watch(
 
 const columns = computed(() => targetCallerColumns(!props.target))
 
-const emptyMessage = computed(() => {
-  if (!loaded.value) return 'loading…'
-  return 'no callers recorded in this window'
-})
+/** callersLoadState (lib/load-state.ts) replaces the old "loading…" text this view used to render inline as a fake DataTable empty-row — it no longer distinguished a still-loading fetch from one that had already FAILED (an initial-fetch failure rendered the identical "loading…" text forever, the same class of bug EventsView.vue's own P9 fix addressed). */
+const callersLoadState = computed(() => loadState({ loading: loading.value, hasData: loadedOk.value, error: error.value }))
 </script>
 
 <template>
@@ -96,8 +98,9 @@ const emptyMessage = computed(() => {
     </CardHeader>
     <CardContent class="flex flex-col gap-3">
       <ClampedRangeNotice :window="filters.window" :span="filters.span" />
-      <p v-if="error" class="text-sm text-destructive">{{ error }}</p>
-      <DataTable :columns="columns" :data="rows" :empty-message="emptyMessage" />
+      <SkeletonTable v-if="callersLoadState === 'skeleton'" :rows="5" :cols="columns.length" />
+      <ErrorState v-else-if="callersLoadState === 'error'" :message="error" :on-retry="load" />
+      <DataTable v-else :columns="columns" :data="rows" empty-message="no callers recorded in this window" />
     </CardContent>
   </Card>
 </template>

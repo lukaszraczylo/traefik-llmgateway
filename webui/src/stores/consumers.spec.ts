@@ -108,7 +108,8 @@ describe('useConsumersStore.fetchUserDetail', () => {
     expect(paths.some((p) => p.includes('scope=user%3Aalice') && p.includes('metric=req'))).toBe(true)
     expect(paths.some((p) => p.includes('scope=user%3Aalice') && p.includes('metric=cost'))).toBe(true)
     expect(store.detail.alice.loading).toBe(false)
-    expect(store.detail.alice.error).toBe('')
+    expect(store.detail.alice.reqError).toBe('')
+    expect(store.detail.alice.costError).toBe('')
     expect(store.detail.alice.reqSeries).toEqual(emptySeries)
     expect(store.detail.alice.costSeries).toEqual(emptySeries)
   })
@@ -181,8 +182,139 @@ describe('useConsumersStore.fetchUserDetail', () => {
     mockedAdminFetch.mockRejectedValue(new Error('boom'))
     await store.fetchUserDetail('bob', 'day', 7, false)
 
-    expect(store.detail.alice.error).toBe('')
+    expect(store.detail.alice.reqError).toBe('')
+    expect(store.detail.alice.costError).toBe('')
     expect(store.detail.alice.reqSeries).toEqual(emptySeries)
-    expect(store.detail.bob.error).toBe('boom')
+    expect(store.detail.bob.reqError).toBe('boom')
+    expect(store.detail.bob.costError).toBe('boom')
+  })
+
+  // verify-ui-states.md #4: a failure in only ONE of the three parallel
+  // requests must set only THAT field's own error, never a shared field
+  // the req/cost charts both read — an unrelated modelTotals failure used
+  // to replace two perfectly valid, already-loaded charts with ErrorState.
+  it('scopes each request\'s failure to its own error field, never a shared one', async () => {
+    mockedAdminFetch.mockImplementation((async (path: string) => {
+      if (path.includes('kind=usermodel')) throw new Error('usermodel boom')
+      return emptySeries
+    }) as typeof adminFetch)
+    const store = useConsumersStore()
+    await store.fetchUserDetail('alice', 'day', 7, true)
+
+    expect(store.detail.alice.reqError).toBe('')
+    expect(store.detail.alice.costError).toBe('')
+    expect(store.detail.alice.modelError).toBe('usermodel boom')
+    expect(store.detail.alice.reqSeries).toEqual(emptySeries)
+    expect(store.detail.alice.costSeries).toEqual(emptySeries)
+  })
+
+  // verify-ui-states.md #4: re-fetching the SAME range (a retry, or the
+  // featuresUserModelStats-triggered follow-up UserDetail.vue's own watch
+  // fires) must keep the previous series in `detail` while `loading` is
+  // true, so the caller's own `loading && !reqSeries` skeleton condition
+  // does not flip back on over data already on screen — this is also
+  // exactly what makes re-opening a cached user show its data immediately.
+  it('keeps the previous series while loading is true for a SAME-range refetch', async () => {
+    mockedAdminFetch.mockResolvedValue(emptySeries)
+    const store = useConsumersStore()
+    await store.fetchUserDetail('alice', 'day', 7, false)
+    expect(store.detail.alice.reqSeries).toEqual(emptySeries)
+
+    // Second call never resolves within this assertion window — read
+    // `detail.alice` synchronously right after firing it, before either
+    // of the two (req, cost) in-flight fetches settle, to inspect the
+    // mid-flight state. Both pending calls share this one mock
+    // implementation, so every resolver gets collected and released.
+    const resolvers: (() => void)[] = []
+    mockedAdminFetch.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolvers.push(() => resolve(emptySeries))
+        }),
+    )
+    const inFlight = store.fetchUserDetail('alice', 'day', 7, false)
+    expect(store.detail.alice.loading).toBe(true)
+    expect(store.detail.alice.reqSeries).toEqual(emptySeries)
+
+    resolvers.forEach((resolve) => resolve())
+    await inFlight
+  })
+
+  // verify-ui-states.md #4: a genuine RANGE change for the same user
+  // clears the previous range's own series before the new fetch starts,
+  // so a stale (wrong-range) chart never sits under the new heading.
+  it('clears the previous series when the range genuinely changes', async () => {
+    mockedAdminFetch.mockResolvedValue(emptySeries)
+    const store = useConsumersStore()
+    await store.fetchUserDetail('alice', 'day', 7, false)
+    expect(store.detail.alice.reqSeries).toEqual(emptySeries)
+
+    const resolvers: (() => void)[] = []
+    mockedAdminFetch.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolvers.push(() => resolve(emptySeries))
+        }),
+    )
+    const inFlight = store.fetchUserDetail('alice', 'day', 14, false)
+    expect(store.detail.alice.loading).toBe(true)
+    expect(store.detail.alice.reqSeries).toBeNull()
+    expect(store.detail.alice.costSeries).toBeNull()
+
+    resolvers.forEach((resolve) => resolve())
+    await inFlight
+  })
+
+  // verify-ui-states-2.md #7: a genuine RANGE change must also clear the
+  // PREVIOUS range's own per-section errors, not just its series/totals —
+  // otherwise loadState's own "error beats loading" precedence keeps the
+  // old range's ErrorState on screen under the new range's heading instead
+  // of the skeleton the cleared reqSeries/costSeries/modelTotals is meant
+  // to produce.
+  it('clears reqError/costError/modelError when the range genuinely changes', async () => {
+    mockedAdminFetch.mockImplementation((async (path: string) => {
+      if (path.includes('kind=usermodel')) throw new Error('usermodel boom')
+      throw new Error('series boom')
+    }) as typeof adminFetch)
+    const store = useConsumersStore()
+    await store.fetchUserDetail('alice', 'day', 7, true)
+    expect(store.detail.alice.reqError).toBe('series boom')
+    expect(store.detail.alice.costError).toBe('series boom')
+    expect(store.detail.alice.modelError).toBe('usermodel boom')
+
+    const resolvers: (() => void)[] = []
+    mockedAdminFetch.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolvers.push(() => resolve(emptySeries))
+        }),
+    )
+    const inFlight = store.fetchUserDetail('alice', 'day', 14, true)
+    expect(store.detail.alice.reqError).toBe('')
+    expect(store.detail.alice.costError).toBe('')
+    expect(store.detail.alice.modelError).toBe('')
+
+    resolvers.forEach((resolve) => resolve())
+    await inFlight
+  })
+
+  it('keeps the previous errors on a SAME-range refetch (a retry) — only a genuine range change clears them', async () => {
+    mockedAdminFetch.mockRejectedValue(new Error('boom'))
+    const store = useConsumersStore()
+    await store.fetchUserDetail('alice', 'day', 7, false)
+    expect(store.detail.alice.reqError).toBe('boom')
+
+    const resolvers: (() => void)[] = []
+    mockedAdminFetch.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolvers.push(() => resolve(emptySeries))
+        }),
+    )
+    const inFlight = store.fetchUserDetail('alice', 'day', 7, false)
+    expect(store.detail.alice.reqError).toBe('boom')
+
+    resolvers.forEach((resolve) => resolve())
+    await inFlight
   })
 })

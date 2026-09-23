@@ -2,9 +2,13 @@
 import { computed } from 'vue'
 
 import DataTable from '@/components/DataTable.vue'
+import EmptyState from '@/components/EmptyState.vue'
+import ErrorState from '@/components/ErrorState.vue'
 import SearchInput from '@/components/SearchInput.vue'
+import SkeletonTable from '@/components/SkeletonTable.vue'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { useSearchQuery } from '@/composables/useSearchQuery'
+import { loadState } from '@/lib/load-state'
 import { composeTargetId, targetColumns } from '@/lib/target-columns'
 import type { TargetKind } from '@/lib/target-columns'
 import { useDashboardStore } from '@/stores/dashboard'
@@ -62,6 +66,33 @@ function emptyMessage(configuredCount: number, filteredCount: number): string {
 const mcpEmptyMessage = computed(() => emptyMessage(targets.value?.mcpServers.length ?? 0, filteredMCPServers.value.length))
 const agentsEmptyMessage = computed(() => emptyMessage(targets.value?.agents.length ?? 0, filteredAgents.value.length))
 
+/**
+ * targetsLoadState (lib/load-state.ts) — GET /admin/api/targets used to
+ * have NO loading/error handling at all here: `targets` mapped a
+ * not-yet-loaded/errored dashboard.targets straight to `[]` (`?? []`
+ * above), which DataTable then rendered as a confirmed, empty table —
+ * exactly the same class of bug lib/access-matrix.ts's matrixColumnsState
+ * fixed for the Access matrix (Task A). 'ready' once dashboard.targets
+ * has loaded at least once, even if both lists are genuinely empty —
+ * `noTargetsAtAll` below is the SEPARATE "loaded, but nothing configured"
+ * check, same split as matrixColumnsState's own loaded-vs-empty
+ * precedence.
+ */
+const targetsLoadState = computed(() => loadState({ loading: true, hasData: dashboard.targets !== null, error: dashboard.error }))
+
+/**
+ * noTargetsAtAll (states-plan.md item 2: "MCP & Agents: 'No MCP servers
+ * or agents configured'") is true only once targets have genuinely
+ * loaded with BOTH lists empty — read off the raw configured counts, not
+ * the filtered ones, so an active search query never flips this true (a
+ * query matching nothing is `mcpEmptyMessage`/`agentsEmptyMessage`'s own
+ * "no targets match" case instead, a routine filter interaction, not a
+ * fleet-configuration fact worth the same combined empty-state).
+ */
+const noTargetsAtAll = computed(
+  () => targetsLoadState.value === 'ready' && (targets.value?.mcpServers.length ?? 0) === 0 && (targets.value?.agents.length ?? 0) === 0,
+)
+
 // Two separate column-def sets (lib/target-columns.ts) — MCP servers and
 // Agents each close over their own fixed `kind` (see onSelect above) so a
 // name click composes the right "mcp/…"/"agent/…" id. Stateless ColumnDef
@@ -75,30 +106,45 @@ const agentColumns = targetColumns(onSelect('agent'))
   <div class="flex flex-col gap-6">
     <SearchInput v-model="query" placeholder="Filter MCP servers or agents" class="max-w-sm" />
 
-    <Card>
-      <CardHeader>
-        <CardTitle>MCP servers</CardTitle>
-        <CardDescription>
-          Configured MCP proxy targets, the groups allowed to reach them, and their request counters. Click a name to see its
-          callers.
-        </CardDescription>
-      </CardHeader>
+    <Card v-if="noTargetsAtAll">
       <CardContent>
-        <DataTable :columns="mcpColumns" :data="filteredMCPServers" :empty-message="mcpEmptyMessage" />
+        <EmptyState
+          title="No MCP servers or agents configured."
+          description="Add an mcpServers or agents entry to the middleware config to see them here."
+        />
       </CardContent>
     </Card>
 
-    <Card>
-      <CardHeader>
-        <CardTitle>Agents</CardTitle>
-        <CardDescription>
-          Configured A2A agent proxy targets, the groups allowed to reach them, and their request counters. Click a name to
-          see its callers.
-        </CardDescription>
-      </CardHeader>
-      <CardContent>
-        <DataTable :columns="agentColumns" :data="filteredAgents" :empty-message="agentsEmptyMessage" />
-      </CardContent>
-    </Card>
+    <template v-else>
+      <Card>
+        <CardHeader>
+          <CardTitle>MCP servers</CardTitle>
+          <CardDescription>
+            Configured MCP proxy targets, the groups allowed to reach them, and their request counters. Click a name to see
+            its callers.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <SkeletonTable v-if="targetsLoadState === 'skeleton'" :rows="3" :cols="mcpColumns.length" />
+          <ErrorState v-else-if="targetsLoadState === 'error'" :message="dashboard.error" />
+          <DataTable v-else :columns="mcpColumns" :data="filteredMCPServers" :empty-message="mcpEmptyMessage" />
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Agents</CardTitle>
+          <CardDescription>
+            Configured A2A agent proxy targets, the groups allowed to reach them, and their request counters. Click a name to
+            see its callers.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <SkeletonTable v-if="targetsLoadState === 'skeleton'" :rows="3" :cols="agentColumns.length" />
+          <ErrorState v-else-if="targetsLoadState === 'error'" :message="dashboard.error" />
+          <DataTable v-else :columns="agentColumns" :data="filteredAgents" :empty-message="agentsEmptyMessage" />
+        </CardContent>
+      </Card>
+    </template>
   </div>
 </template>

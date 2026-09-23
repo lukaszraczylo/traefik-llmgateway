@@ -3,8 +3,8 @@ import { describe, expect, it } from 'vitest'
 
 import CompactNumber from '@/components/CompactNumber.vue'
 import { Badge } from '@/components/ui/badge'
-import { composeTargetId, parseTargetCallerId, targetCallerColumns, targetColumns } from './target-columns'
-import type { AdminTargetHealthView, AdminTargetView, AdminTotalsResponse } from '@/types/api'
+import { composeTargetId, parseTargetCallerId, resolveTargetRef, targetCallerColumns, targetColumns } from './target-columns'
+import type { AdminTargetHealthView, AdminTargetsResponse, AdminTargetView, AdminTotalsResponse } from '@/types/api'
 
 /**
  * Target health rendering (feat/target-health): mirrors usage-columns.
@@ -274,5 +274,79 @@ describe('targetCallerColumns', () => {
     const rendered = cell({ row: { original: { id: 'mcp/fetch/alice', values: {} } } })
     expect(isVNode(rendered) && rendered.type).toBe(CompactNumber)
     expect(isVNode(rendered) && rendered.props?.value).toBe(0)
+  })
+})
+
+// --- resolveTargetRef (P2 item: a hand-typed #targets?target=demo-mcp
+// 400ed — parseTargetRef, stats_read.go, only accepts "mcp/{name}"/
+// "agent/{name}") ---
+
+function namedTarget(name: string): AdminTargetView {
+  return {
+    name,
+    url: 'https://example.com/mcp',
+    counters: { requestsPerMinute: 0, requestsPerDay: 0, requestsPerMonth: 0 },
+    health: { state: 'unknown', consecutiveFailures: 0 },
+  }
+}
+
+function targets(mcpNames: string[], agentNames: string[]): Pick<AdminTargetsResponse, 'mcpServers' | 'agents'> {
+  return { mcpServers: mcpNames.map(namedTarget), agents: agentNames.map(namedTarget) }
+}
+
+describe('resolveTargetRef', () => {
+  it('passes an already-prefixed "mcp/{name}" ref through unchanged, without needing targets loaded', () => {
+    expect(resolveTargetRef('mcp/fetch', null)).toEqual({ kind: 'ref', ref: 'mcp/fetch', name: 'fetch' })
+  })
+
+  it('passes an already-prefixed "agent/{name}" ref through unchanged', () => {
+    expect(resolveTargetRef('agent/agentkit', targets([], ['agentkit']))).toEqual({
+      kind: 'ref',
+      ref: 'agent/agentkit',
+      name: 'agentkit',
+    })
+  })
+
+  it('round-trips a name that itself contains a slash, matching stats_read.go\'s Cut-on-first-slash', () => {
+    expect(resolveTargetRef('mcp/team/fetch', null)).toEqual({ kind: 'ref', ref: 'mcp/team/fetch', name: 'team/fetch' })
+  })
+
+  it('is "pending" for a bare name while dashboard.targets has not loaded yet (null)', () => {
+    expect(resolveTargetRef('demo-mcp', null)).toEqual({ kind: 'pending' })
+  })
+
+  it('resolves a bare name found only in mcpServers', () => {
+    expect(resolveTargetRef('demo-mcp', targets(['demo-mcp'], []))).toEqual({
+      kind: 'ref',
+      ref: 'mcp/demo-mcp',
+      name: 'demo-mcp',
+    })
+  })
+
+  it('resolves a bare name found only in agents', () => {
+    expect(resolveTargetRef('agentkit', targets([], ['agentkit']))).toEqual({
+      kind: 'ref',
+      ref: 'agent/agentkit',
+      name: 'agentkit',
+    })
+  })
+
+  it('shows a notice for a bare name found in neither list (unknown)', () => {
+    const result = resolveTargetRef('nope', targets(['demo-mcp'], ['agentkit']))
+    expect(result.kind).toBe('notice')
+    expect(result.kind === 'notice' && result.message).toContain('No MCP server or agent named "nope"')
+  })
+
+  it('shows a notice for a bare name found in BOTH lists (ambiguous) rather than guessing', () => {
+    const result = resolveTargetRef('shared', targets(['shared'], ['shared']))
+    expect(result.kind).toBe('notice')
+    expect(result.kind === 'notice' && result.message).toContain('matches both an MCP server and an agent')
+  })
+
+  it('rejects an unknown prefix as a bare name, not a ref (e.g. "http/foo" is looked up, not passed through)', () => {
+    expect(resolveTargetRef('http/foo', targets([], []))).toEqual({
+      kind: 'notice',
+      message: 'No MCP server or agent named "http/foo" is configured.',
+    })
   })
 })

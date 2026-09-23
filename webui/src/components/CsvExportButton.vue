@@ -60,6 +60,14 @@ async function onClick(): Promise<void> {
   if (exporting.value) return
   exporting.value = true
   try {
+    // Inline feedback ONLY (verify-ui-states.md #9 fix) — this used to
+    // ALSO push a toast on failure, on top of the button's own "Export
+    // failed" label/icon swap right at the click target: two
+    // notifications for the one event, exactly the double-notify
+    // states-plan.md item 3 says to avoid ("keep one, don't
+    // double-notify"). The inline state is immediate, contextual, and
+    // already dismisses itself after FEEDBACK_MS — a toast added nothing
+    // a reader watching the button they just clicked wouldn't already see.
     feedback.value = await downloadText(props.filename, props.build())
     clearFeedbackAfterDelay()
   } finally {

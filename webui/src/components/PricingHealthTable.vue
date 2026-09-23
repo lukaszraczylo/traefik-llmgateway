@@ -5,11 +5,16 @@ import { computed, h } from 'vue'
 import CompactNumber from '@/components/CompactNumber.vue'
 import CsvExportButton from '@/components/CsvExportButton.vue'
 import DataTable from '@/components/DataTable.vue'
+import EmptyState from '@/components/EmptyState.vue'
 import EntityLink from '@/components/EntityLink.vue'
+import ErrorState from '@/components/ErrorState.vue'
+import SkeletonTable from '@/components/SkeletonTable.vue'
+import TryLongerRangeButton from '@/components/TryLongerRangeButton.vue'
 import { Badge } from '@/components/ui/badge'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { toCsv } from '@/lib/csv'
 import { formatContextWindow, formatCost, formatModelCostHover } from '@/lib/format'
+import { loadState } from '@/lib/load-state'
 import { joinPricingHealth, pricingHealthOrder } from '@/lib/pricing-health'
 import type { PricingHealthRow } from '@/lib/pricing-health'
 import type { AdminCatalogModel, AdminUsageModelEntry, PriceSource } from '@/types/api'
@@ -21,13 +26,36 @@ import type { AdminCatalogModel, AdminUsageModelEntry, PriceSource } from '@/typ
  * destructive badge (pricingHealthOrder) — the row an operator most needs
  * to act on (a served model billing at $0 because no pricing rule
  * matched) is always the first thing they see, before any manual sort.
+ *
+ * `loading`/`error` (verify-ui-states.md #3/#7 fix): this card had NO
+ * loading or error input at all before — `spend.pricingHealthRanking` /
+ * `catalog.modelsById` both start empty, so the very first Spend load, and
+ * any failed Spend/catalog fetch, rendered the identical "No traffic in
+ * this range." a genuinely empty fleet gets, with no way to tell the three
+ * apart.
+ *
+ * `loaded` (verify-ui-states-2.md #2 fix): `hasData` below is "has a fetch
+ * completed for the current range" (spend.pricingHealthLoaded), not
+ * `rows.length > 0` — the 60s poll (stores/spend.ts's own refresh())
+ * flips `loading` true on every tick, and a genuinely empty pricing-health
+ * table used to flash a skeleton back on for each of those ticks. The
+ * template below still checks `rows.length` directly for EmptyState vs.
+ * the real table, the same way UserDetail.vue's own "Models used" table
+ * does.
  */
 const props = defineProps<{
   models: AdminUsageModelEntry[]
   catalog: Map<string, AdminCatalogModel>
+  loading: boolean
+  loaded: boolean
+  error: string
+  /** Renders ErrorState's own "Retry" button — SpendPage.vue's own spend.fetchPricingHealthRanking. */
+  onRetry?: () => void | Promise<void>
 }>()
 
 const rows = computed<PricingHealthRow[]>(() => pricingHealthOrder(joinPricingHealth(props.models, props.catalog)))
+
+const state = computed(() => loadState({ loading: props.loading, hasData: props.loaded, error: props.error }))
 
 const unpricedCount = computed<number>(() => rows.value.filter((r) => r.priceSource === 'unpriced').length)
 
@@ -143,10 +171,17 @@ function pricingHealthCsv(): string {
       <CardDescription>Every model served in range, joined with its billing price source.</CardDescription>
     </CardHeader>
     <CardContent class="flex flex-col gap-3">
-      <DataTable :columns="columns" :data="rows" empty-message="No model served any traffic in this range." />
-      <div class="flex justify-end">
-        <CsvExportButton filename="pricing-health.csv" :build="pricingHealthCsv" />
-      </div>
+      <SkeletonTable v-if="state === 'skeleton'" :rows="5" :cols="columns.length" />
+      <ErrorState v-else-if="state === 'error'" :message="error" :on-retry="onRetry" />
+      <EmptyState v-else-if="rows.length === 0" title="No traffic in this range.">
+        <TryLongerRangeButton />
+      </EmptyState>
+      <template v-else>
+        <DataTable :columns="columns" :data="rows" empty-message="none" />
+        <div class="flex justify-end">
+          <CsvExportButton filename="pricing-health.csv" :build="pricingHealthCsv" />
+        </div>
+      </template>
     </CardContent>
   </Card>
 </template>

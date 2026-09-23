@@ -8,10 +8,27 @@ import type { AdminConsumersResponse, AdminSeriesResponse, AdminTotalsResponse, 
 /** REFRESH_STALE_MS is how long a previously-fetched /admin/api/consumers response is trusted before ConsumersPage.vue's mount triggers a fresh fetch — this endpoint reflects the operator's own config (users/groups/access lists), which changes on a config edit, not every 5s like the polled dashboard store. A 60s staleness window (matches Q12's "new endpoints on demand or 60s" DECISION) means switching between pages within the Consumers tab never re-fetches on every mount, while a long-open session still notices a config reload eventually. */
 const REFRESH_STALE_MS = 60_000
 
-/** UserDetailState is one user's on-demand detail — UserDetail.vue's own data (timeline series, per-model totals), fetched only when that user's row is actually opened, keyed by user id so switching between two already-opened users never re-fetches. */
+/**
+ * UserDetailState is one user's on-demand detail — UserDetail.vue's own
+ * data (timeline series, per-model totals), fetched only when that
+ * user's row is actually opened, keyed by user id so switching between
+ * two already-opened users never re-fetches.
+ *
+ * `reqError`/`costError`/`modelError` are THREE independent fields
+ * (verify-ui-states.md #4 fix — previously one shared `error`, joined
+ * from all three requests): a failure in only ONE of the three
+ * Promise.allSettled calls (say, the usermodel totals) used to set that
+ * one shared field, and UserDetail.vue's template read it for BOTH the
+ * "Requests over time" and "Cost over time" cards — an unrelated
+ * modelTotals failure replaced two perfectly valid, already-loaded
+ * charts with ErrorState. Each chart/table now reads only its own field.
+ */
 export interface UserDetailState {
   loading: boolean
-  error: string
+  reqError: string
+  costError: string
+  /** '' whenever modelTotalsUnavailable is true (a 404 is an expected, named state — modelTotalsUnavailable below, not a generic error) or the fetch was skipped (userModelStatsEnabled false). */
+  modelError: string
   reqSeries: AdminSeriesResponse | null
   costSeries: AdminSeriesResponse | null
   /** null while userModelStats is off (no fetch attempted), the 404 case (see modelTotalsUnavailable), or before the first fetch resolves. */
@@ -21,22 +38,29 @@ export interface UserDetailState {
   fetchedAt: number | null
   /** reqId guards against an out-of-order response overwriting a newer one (latest-request-wins) — two ranges in flight for the same user can otherwise land out of order. */
   reqId: number
+  /** The (window, span) this state's OWN reqSeries/costSeries/modelTotals were fetched for, or null before the first fetch ever starts — fetchUserDetail's own "is this a genuine range change, not just a same-range refetch" check (verify-ui-states.md #4 fix), see that action's own doc comment. */
+  window: HistoryWindow | null
+  span: number | null
 }
 
 function emptyDetail(): UserDetailState {
   return {
     loading: false,
-    error: '',
+    reqError: '',
+    costError: '',
+    modelError: '',
     reqSeries: null,
     costSeries: null,
     modelTotals: null,
     modelTotalsUnavailable: false,
     fetchedAt: null,
     reqId: 0,
+    window: null,
+    span: null,
   }
 }
 
-/** settledError reads one Error message off a rejected PromiseSettledResult, or '' for a fulfilled one — fetchUserDetail's own small helper for building a combined error message out of whichever of its three independent requests failed. */
+/** settledError reads one Error message off a rejected PromiseSettledResult, or '' for a fulfilled one. */
 function settledError(result: PromiseSettledResult<unknown>): string {
   if (result.status !== 'rejected') return ''
   return result.reason instanceof Error ? result.reason.message : String(result.reason)
@@ -58,10 +82,20 @@ export const useConsumersStore = defineStore('consumers', {
     detail: {} as Record<string, UserDetailState>,
   }),
   actions: {
-    /** fetchConsumers fetches GET /admin/api/consumers unconditionally — callers that want the staleness guard use ensureConsumers instead. */
+    /**
+     * fetchConsumers fetches GET /admin/api/consumers unconditionally —
+     * callers that want the staleness guard use ensureConsumers instead.
+     * The `this.loading` in-flight guard (verify-ui-states.md #11 fix)
+     * matches stores/dashboard.ts's/stores/events.ts's own identical
+     * guard on their refresh() — without it, AccessMatrix.vue's own
+     * ErrorState Retry button (wired directly to this action) could fire
+     * a second overlapping request on a rapid double-click, free to
+     * resolve in either order.
+     */
     async fetchConsumers(): Promise<void> {
       const auth = useAuthStore()
       if (!auth.isAuthenticated) return
+      if (this.loading) return
       this.loading = true
       try {
         this.data = await adminFetch<AdminConsumersResponse>('/admin/api/consumers')
@@ -106,7 +140,34 @@ export const useConsumersStore = defineStore('consumers', {
       if (!auth.isAuthenticated) return
       const existing = this.detail[userId] ?? emptyDetail()
       const requestId = existing.reqId + 1
-      this.detail[userId] = { ...existing, loading: true, reqId: requestId }
+      // A genuine RANGE change for this same user (verify-ui-states.md #4
+      // fix) clears the previous range's own series/totals before the
+      // fetch starts — UserDetail.vue's own skeleton condition (`loading
+      // && !reqSeries`) then shows a skeleton instead of the WRONG
+      // range's numbers sitting under the new heading until the fresh
+      // response lands. A SAME-range refetch (re-opening this cached
+      // user, a retry, or the featuresUserModelStats-triggered follow-up
+      // UserDetail.vue's own watch fires) is NOT a selection change —
+      // `existing.window === null` (never fetched before) also takes this
+      // branch, which is harmless since there is nothing to clear yet.
+      const rangeChanged = existing.window !== null && (existing.window !== window || existing.span !== span)
+      this.detail[userId] = {
+        ...existing,
+        loading: true,
+        reqId: requestId,
+        reqSeries: rangeChanged ? null : existing.reqSeries,
+        costSeries: rangeChanged ? null : existing.costSeries,
+        modelTotals: rangeChanged ? null : existing.modelTotals,
+        // verify-ui-states-2.md #7: a genuine range change also clears the
+        // PREVIOUS range's own per-section errors — without this, an old
+        // range's ErrorState (loadState's own "error beats loading"
+        // precedence) stayed on screen under the new range's heading until
+        // the fresh response landed, instead of the skeleton a cleared
+        // reqSeries/costSeries/modelTotals is meant to produce.
+        reqError: rangeChanged ? '' : existing.reqError,
+        costError: rangeChanged ? '' : existing.costError,
+        modelError: rangeChanged ? '' : existing.modelError,
+      }
 
       const clamped = dayOrMonthWindow(window, span)
       const [reqResult, costResult, modelResult] = await Promise.allSettled([
@@ -132,27 +193,23 @@ export const useConsumersStore = defineStore('consumers', {
         modelResult.status === 'rejected' && modelResult.reason instanceof AdminApiError && modelResult.reason.status === 404
 
       const current = this.detail[userId] ?? emptyDetail()
-      // A 404 on the usermodel call is a known, EXPECTED state (the
-      // feature is off server-side) — surfaced via modelTotalsUnavailable
-      // instead, never folded into the generic error message. Deduped
-      // (Set) — the req and cost calls commonly fail with the IDENTICAL
-      // message (e.g. the same network error, or the same 503 "usage
-      // store unavailable"), and repeating it twice reads as noise, not
-      // two distinct problems.
-      const errorMessages = new Set(
-        [settledError(reqResult), settledError(costResult), modelTotalsUnavailable ? '' : settledError(modelResult)].filter(Boolean),
-      )
-      const combinedError = Array.from(errorMessages).join('; ')
-
       this.detail[userId] = {
         loading: false,
-        error: combinedError,
+        // Per-section errors (verify-ui-states.md #4 fix) — see this
+        // state's own doc comment. A 404 on the usermodel call is a
+        // known, EXPECTED state (the feature is off server-side),
+        // surfaced via modelTotalsUnavailable instead, never as an error.
+        reqError: settledError(reqResult),
+        costError: settledError(costResult),
+        modelError: modelTotalsUnavailable ? '' : settledError(modelResult),
         reqSeries: reqResult.status === 'fulfilled' ? reqResult.value : current.reqSeries,
         costSeries: costResult.status === 'fulfilled' ? costResult.value : current.costSeries,
         modelTotals: modelResult.status === 'fulfilled' ? modelResult.value : modelTotalsUnavailable ? null : current.modelTotals,
         modelTotalsUnavailable,
         fetchedAt: Date.now(),
         reqId: requestId,
+        window,
+        span,
       }
     },
   },

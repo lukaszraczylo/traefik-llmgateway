@@ -132,6 +132,25 @@ describe('useReliabilityStore.fetch', () => {
     expect(reliability.error).toBe('')
   })
 
+  // Live-preview fix: dashboard.overview being null means the fleet's
+  // provider list is UNKNOWN, not genuinely zero — fetch() must not resolve
+  // as "loaded, empty" (the bug above's own short-circuit used to do this
+  // BEFORE dashboard.overview had ever landed too), or ReliabilityPage.vue's
+  // per-provider charts briefly render an empty grid on a cold reload
+  // instead of staying on their skeleton.
+  it('no-ops with no adminFetch calls and leaves state untouched when dashboard.overview has not loaded yet', async () => {
+    // useDashboardStore().overview defaults to null — never assigned here.
+    const reliability = useReliabilityStore()
+
+    await reliability.fetch()
+
+    expect(mockedAdminFetch).not.toHaveBeenCalled()
+    expect(reliability.buckets).toEqual([])
+    expect(reliability.lastUpdated).toBeNull()
+    expect(reliability.error).toBe('')
+    expect(reliability.loading).toBe(false)
+  })
+
   it('fetches attempt/fail/timeout/fover per configured provider scope, plus total rej/r402, and assigns every field', async () => {
     useDashboardStore().overview = providerOverview(['openai', 'anthropic'])
     const reliability = useReliabilityStore()

@@ -5,7 +5,9 @@ import AttributionDrilldown from '@/components/AttributionDrilldown.vue'
 import BurnDownChart from '@/components/BurnDownChart.vue'
 import CostAvoidedCard from '@/components/CostAvoidedCard.vue'
 import CostForecastCard from '@/components/CostForecastCard.vue'
+import ErrorState from '@/components/ErrorState.vue'
 import PricingHealthTable from '@/components/PricingHealthTable.vue'
+import SkeletonChart from '@/components/SkeletonChart.vue'
 import TimeSeriesChart from '@/components/TimeSeriesChart.vue'
 import type { TimeSeriesComparisonDataset, TimeSeriesDataset } from '@/components/TimeSeriesChart.vue'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
@@ -13,6 +15,7 @@ import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { useNow } from '@/composables/useNow'
 import { cacheSavingsStatus } from '@/lib/cache-savings'
 import { formatBucketLabel, formatCompactCount, formatCost } from '@/lib/format'
+import { loadState } from '@/lib/load-state'
 import { useCatalogStore } from '@/stores/catalog'
 import { useDashboardStore } from '@/stores/dashboard'
 import { useFiltersStore } from '@/stores/filters'
@@ -222,6 +225,28 @@ const cacheStatsEnabled = computed<boolean>(() => dashboard.overview?.features.c
 const cacheSavingsStatusResult = computed(() => cacheSavingsStatus(filters.window))
 const cacheSavingsAvailable = computed<boolean>(() => cacheSavingsStatusResult.value.available)
 const cacheSavingsNote = computed<string | null>(() => cacheSavingsStatusResult.value.note)
+
+// --- skeleton/error states (verify-ui-states.md #7: "Spend and Reliability
+// pages got no skeletons or ErrorState") -----------------------------------
+
+/** breakdownState gates the main breakdown chart's own skeleton/error — hasData is bucket presence (a real response landed), not "every value is non-zero", so a genuinely zero-traffic range still reads 'ready' and the chart draws its own honest zero line. BurnDownChart.vue computes its own identical state internally now (it owns its own Card/CardHeader, verify-ui-states.md fix) — SpendPage.vue just forwards spend.burndownLoading/spend.burndownError as props. */
+const breakdownState = computed(() => loadState({ loading: spend.loading, hasData: spend.buckets.length > 0, error: spend.breakdownError }))
+
+/**
+ * retryPricingHealthTable (verify-ui-states-2.md #9 fix) is
+ * PricingHealthTable's own Retry action — the table joins
+ * spend.pricingHealthRanking with catalog.modelsById, so a failure whose
+ * ROOT CAUSE is the catalog fetch (catalog.error, shown alongside
+ * spend.pricingHealthError below) never gets fixed by re-running
+ * spend.fetchPricingHealthRanking alone. Always re-runs the pricing fetch;
+ * additionally re-runs catalog.fetch() when the catalog is the one
+ * currently failing.
+ */
+function retryPricingHealthTable(): Promise<void> {
+  const tasks: Promise<void>[] = [spend.fetchPricingHealthRanking()]
+  if (catalog.error) tasks.push(catalog.fetch())
+  return Promise.all(tasks).then(() => undefined)
+}
 </script>
 
 <template>
@@ -259,12 +284,27 @@ const cacheSavingsNote = computed<string | null>(() => cacheSavingsStatusResult.
       Showing <span class="font-mono text-xs">{{ filters.scope }}</span> directly — clear the scope filter to break spend down by
       model, provider, or group.
     </p>
-    <p v-if="spend.error" class="text-sm text-destructive">{{ spend.error }}</p>
+    <!-- verify-ui-states-2.md #3: spend.breakdownError still renders via
+    the breakdown chart's own ErrorState below when there is no data at all
+    (breakdownState === 'error') — never a second, duplicate line for that
+    case (the item-8-style duplicate-error bug this fix set also corrected
+    for ModelsPage.vue). verify-ui-states-3.md NEW-1 adds the ONE case
+    ErrorState can't cover: a background refetch (poll tick, or a
+    metric/by/range/scope change) fails while a PREVIOUS successful result
+    is still on screen (breakdownState === 'ready', loadState's own 'ready'
+    precedence) — the failure was otherwise invisible. See the paragraph
+    below the chart. -->
     <!-- P3 item 23: catalog.error was never rendered — PricingHealthTable/
     CostAvoidedCard both depend on catalog.modelsById and silently showed
     empty/"no priced model" with no indication the catalog fetch itself
     had failed. -->
-    <p v-if="catalog.error" class="text-sm text-destructive">{{ catalog.error }}</p>
+    <p v-if="catalog.error" class="text-sm break-words text-destructive">{{ catalog.error }}</p>
+    <!-- verify-ui-states-3.md pre-existing fix: fetchModelRanking's own
+    failure has its own field (rankingError), never cross-cleared by a
+    later, unrelated fetchBreakdown success — shown unconditionally next to
+    the chart since nothing else surfaces it (by=model then silently renders
+    100% "Other" off a still-empty ranking). -->
+    <p v-if="spend.rankingError" class="text-sm break-words text-destructive">{{ spend.rankingError }}</p>
     <!-- P3 item 19 / Q5: a requested-but-unavailable comparison (a
     single-provider scope) used to leave the "vs previous period" toggle
     pressed with no dashed line and no explanation. -->
@@ -272,7 +312,10 @@ const cacheSavingsNote = computed<string | null>(() => cacheSavingsStatusResult.
       {{ spend.comparisonUnavailableReason }}
     </p>
 
+    <SkeletonChart v-if="breakdownState === 'skeleton'" />
+    <ErrorState v-else-if="breakdownState === 'error'" :message="spend.breakdownError" :on-retry="spend.refresh" />
     <TimeSeriesChart
+      v-else
       :labels="breakdownLabels"
       :datasets="breakdownDatasets"
       :comparison-datasets="comparisonDatasets"
@@ -280,6 +323,13 @@ const cacheSavingsNote = computed<string | null>(() => cacheSavingsStatusResult.
       :value-formatter="valueFormatter"
       :ariaLabel="`${SPEND_METRIC_LABEL[metric]} breakdown ${SPEND_BY_LABEL[by].toLowerCase()} over time`"
     />
+    <!-- verify-ui-states-3.md NEW-1: a background refetch failure (poll
+    tick, or a metric/by/range/scope change) while the PREVIOUS selection's
+    data is still on screen — breakdownState stays 'ready' (loadState's own
+    precedence), so the ErrorState above never mounts. Without this line the
+    failure was invisible: the chart kept the old series under the new
+    labels/formatter with no indication anything had gone wrong. -->
+    <p v-if="spend.breakdownError && breakdownState === 'ready'" class="text-sm break-words text-destructive">{{ spend.breakdownError }}</p>
 
     <div class="grid grid-cols-1 gap-4 lg:grid-cols-2">
       <BurnDownChart
@@ -288,6 +338,9 @@ const cacheSavingsNote = computed<string | null>(() => cacheSavingsStatusResult.
         :points="spend.burndownPoints"
         :budget-micros="spend.burndownBudgetMicros"
         :now="now"
+        :loading="spend.burndownLoading"
+        :error="spend.burndownError"
+        :on-retry="spend.refresh"
       />
       <CostForecastCard v-if="forecastAvailable" :mtd-micros="scopeMtdMicros" :limits="scopeLimits" :now="now" />
     </div>
@@ -302,7 +355,14 @@ const cacheSavingsNote = computed<string | null>(() => cacheSavingsStatusResult.
       @update:ref-model="onRefUpdate"
     />
 
-    <PricingHealthTable :models="spend.pricingHealthRanking" :catalog="catalog.modelsById" />
+    <PricingHealthTable
+      :models="spend.pricingHealthRanking"
+      :catalog="catalog.modelsById"
+      :loading="spend.pricingHealthLoading"
+      :loaded="spend.pricingHealthLoaded"
+      :error="spend.pricingHealthError || catalog.error"
+      :on-retry="retryPricingHealthTable"
+    />
 
     <AttributionDrilldown
       :rows="spend.drilldownRows"
@@ -312,6 +372,10 @@ const cacheSavingsNote = computed<string | null>(() => cacheSavingsStatusResult.
       :user-model-stats-enabled="userModelStatsEnabled"
       :window="filters.window"
       :span="filters.span"
+      :loading="spend.drilldownLoading"
+      :loaded="spend.drilldownLoaded"
+      :error="spend.drilldownError"
+      :on-retry="spend.fetchDrilldown"
       @update:drill="onDrillUpdate"
     />
   </div>

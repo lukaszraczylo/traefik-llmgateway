@@ -1,16 +1,20 @@
 <script setup lang="ts">
-import { faTriangleExclamation } from '@fortawesome/free-solid-svg-icons'
+import { faCircleCheck, faTriangleExclamation } from '@fortawesome/free-solid-svg-icons'
 import { storeToRefs } from 'pinia'
 import { computed, onMounted, onUnmounted } from 'vue'
 
 import DataTable from '@/components/DataTable.vue'
+import EmptyState from '@/components/EmptyState.vue'
+import ErrorState from '@/components/ErrorState.vue'
 import SearchInput from '@/components/SearchInput.vue'
+import SkeletonTable from '@/components/SkeletonTable.vue'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { useSearchQuery } from '@/composables/useSearchQuery'
 import { eventsColumns } from '@/lib/events-columns'
 import { EVENT_KIND_LABEL, EVENT_KINDS, filterEvents } from '@/lib/events-filter'
+import { loadState } from '@/lib/load-state'
 import { useEventsStore } from '@/stores/events'
 
 // This component backs the new "Events" tab (App.vue, F3) — GET
@@ -49,21 +53,42 @@ function onKindChange(value: unknown): void {
 const columns = eventsColumns()
 
 /**
- * emptyMessage mirrors TargetsView.vue/ConsumerDirectory.vue's own
- * three-way pattern: distinguishes "nothing recorded at all" from
- * "nothing matches the active filter".
- *
- * P9 review fix: gated on events.lastUpdated (null until the first fetch
- * settles, stores/events.ts) — this used to read events.events.length
- * directly, which is an empty array from the store's OWN initial state,
- * before any fetch has even started. That produced "no events recorded"
- * for a fraction of a second (or longer, on a slow poll) on every mount,
- * indistinguishable from the real "genuinely nothing has ever happened"
- * case — a false negative, not a loading state.
+ * eventsLoadState (lib/load-state.ts) replaces the old lone
+ * `!events.lastUpdated` check this view used everywhere: 'skeleton' for
+ * the first fetch, 'error' when that first fetch itself failed (P9's own
+ * false-negative bug — an initial-load FAILURE used to render the exact
+ * same "loading…" text as a genuine in-flight load, forever, since
+ * events.error was never even read here), 'ready' once there is a
+ * successful fetch to show (an EMPTY events list after a successful
+ * fetch is still 'ready' — DataTable's own emptyMessage below renders
+ * the real "no events recorded" row, not this card-level state). A
+ * LATER background-poll failure, with events already on screen, stays
+ * 'ready' too (stores/events.ts's own toast covers that case instead —
+ * states-plan.md item 3 — so content is never wiped/replaced by a
+ * skeleton or error here).
  */
+const eventsLoadState = computed(() => loadState({ loading: events.refreshing, hasData: events.lastUpdated !== null, error: events.error }))
+
+/**
+ * noEventsRecorded is the GENUINE "nothing has ever happened" case
+ * (states-plan.md item 2: "Events/Reliability: 'No failures recorded'
+ * (positive tone, success icon)") — renders EmptyState instead of an
+ * empty DataTable row, since a clean fleet is worth a reassuring visual,
+ * not just quiet table text. Distinct from "nothing matches the active
+ * filter" below, which stays a plain inline DataTable row: a filter
+ * producing zero rows is a routine, low-stakes interaction, not a
+ * fleet-health signal worth the same visual weight.
+ *
+ * The copy below deliberately does NOT say "in this range" (verify-ui-
+ * states.md #11 fix): the events store fetches the last EVENTS_LIMIT
+ * events (stores/events.ts: GET /admin/api/events?limit=200), unscoped by
+ * the global range filter — "in this range" would misleadingly imply a
+ * narrower window filtered this list down to zero.
+ */
+const noEventsRecorded = computed(() => events.events.length === 0)
+
+/** emptyMessage is DataTable's own inline empty-row text for the "some events exist, but the active filter matches none" case — only ever rendered while noEventsRecorded is false (see the template below). */
 const emptyMessage = computed(() => {
-  if (!events.lastUpdated) return 'loading…'
-  if (events.events.length === 0) return 'no events recorded'
   if (kindFilter.value !== '' || normalizedUserQuery.value) return 'no events match the current filter'
   return 'none'
 })
@@ -71,17 +96,11 @@ const emptyMessage = computed(() => {
 /**
  * sourceCaption states plainly whether the list below is fleet-wide or
  * this-replica-only — the Events view must never present a replica-only
- * fallback as if it were the fleet-wide picture.
- *
- * P9 review fix: gated on events.lastUpdated, mirroring emptyMessage's own
- * doc comment above — the store's initial state (source: 'replica',
- * replica: '', capacity: 0) otherwise rendered as "This replica only
- * (unknown) — Redis is unreachable or unconfigured" before the first
- * fetch had even resolved, misreporting a genuine degraded-Redis state
- * that had not actually been observed yet.
+ * fallback as if it were the fleet-wide picture. Only rendered while
+ * eventsLoadState is 'ready' (see the template below), so this never
+ * reads the store's pristine initial source/replica/capacity values.
  */
 const sourceCaption = computed(() => {
-  if (!events.lastUpdated) return 'loading…'
   if (events.source === 'redis') return 'Fleet-wide, across every replica'
   return `This replica only (${events.replica || 'unknown'}) — Redis is unreachable or unconfigured`
 })
@@ -109,9 +128,8 @@ onUnmounted(() => {
       <CardHeader class="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <CardTitle>Events</CardTitle>
-          <!-- P9: a loading state until the first fetch settles (events.lastUpdated), instead of showing the store's initial (pre-fetch) source/capacity as if it were real. -->
-          <CardDescription v-if="!events.lastUpdated">Loading…</CardDescription>
-          <CardDescription v-else>
+          <!-- Only rendered once there is a real fetch to describe (eventsLoadState 'ready') — 'skeleton'/'error' show nothing here, the CardContent body below already signals which of those it is. -->
+          <CardDescription v-if="eventsLoadState === 'ready'">
             {{ sourceCaption }} &mdash; rate limit, budget, and upstream events, newest first (capacity
             {{ events.capacity }}).
           </CardDescription>
@@ -130,8 +148,15 @@ onUnmounted(() => {
         </div>
       </CardHeader>
       <CardContent>
-        <p v-if="events.error" class="mb-3 text-sm text-destructive">{{ events.error }}</p>
-        <DataTable :columns="columns" :data="filteredEvents" :empty-message="emptyMessage" />
+        <SkeletonTable v-if="eventsLoadState === 'skeleton'" :rows="5" :cols="columns.length" />
+        <ErrorState v-else-if="eventsLoadState === 'error'" :message="events.error" :on-retry="events.refresh" />
+        <EmptyState
+          v-else-if="noEventsRecorded"
+          :icon="faCircleCheck"
+          title="No failures recorded."
+          description="Rate-limit, budget, and upstream events will show up here as they happen."
+        />
+        <DataTable v-else :columns="columns" :data="filteredEvents" :empty-message="emptyMessage" />
       </CardContent>
     </Card>
   </div>

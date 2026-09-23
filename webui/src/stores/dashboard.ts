@@ -3,6 +3,7 @@ import { defineStore } from 'pinia'
 import { AdminApiError, adminFetch } from '@/lib/api'
 import { createVisibilityPoller, type VisibilityPoller } from '@/lib/polling'
 import { useAuthStore } from '@/stores/auth'
+import { useToastsStore } from '@/stores/toasts'
 import type { AdminOverviewResponse, AdminTargetsResponse, AdminUsageResponse } from '@/types/api'
 
 /** How often the Providers/Usage/Targets views poll (matches the replaced vanilla-JS page). */
@@ -39,6 +40,8 @@ export const useDashboardStore = defineStore('dashboard', {
      * so the dashboard never resorts to comparing response ordering.
      */
     refreshing: false,
+    /** toastedForFailure guards states-plan.md item 3's "one toast per failure streak until it recovers" — set once a background-refresh-failure toast has fired for the CURRENT ongoing failure streak, reset the moment a refresh fully succeeds again (failures.length === 0 in doRefresh). */
+    toastedForFailure: false,
   }),
   actions: {
     async refresh(): Promise<void> {
@@ -54,6 +57,16 @@ export const useDashboardStore = defineStore('dashboard', {
     },
     /** doRefresh is refresh()'s actual body, split out so the in-flight guard above wraps it in one place rather than every early-return branch below needing its own `finally`. */
     async doRefresh(): Promise<void> {
+      // Captured BEFORE this tick's results are assigned below — overview/
+      // usage/targets are never cleared on a failed fetch (only ever
+      // assigned on a FULFILLED result), so this is a true "did the reader
+      // already have something on screen before this attempt" read, not
+      // just "did the previous refresh fully succeed" (a first attempt
+      // that partially succeeds still advances lastUpdated below, which
+      // would otherwise make a same-tick check on `lastUpdated` see this
+      // attempt's own partial success instead of the PRIOR state).
+      const hadDataBefore = this.overview !== null || this.usage !== null || this.targets !== null
+
       const [overviewResult, usageResult, targetsResult] = await Promise.allSettled([
         adminFetch<AdminOverviewResponse>('/admin/api/overview'),
         adminFetch<AdminUsageResponse>('/admin/api/usage'),
@@ -78,6 +91,7 @@ export const useDashboardStore = defineStore('dashboard', {
       if (failures.length === 0) {
         this.lastUpdated = new Date()
         this.error = ''
+        this.toastedForFailure = false
         return
       }
 
@@ -96,6 +110,19 @@ export const useDashboardStore = defineStore('dashboard', {
       this.error = failures
         .map(({ label, reason }) => `${label}: ${reason instanceof Error ? reason.message : String(reason)}`)
         .join('; ')
+
+      // states-plan.md item 3: a background refresh failure while data is
+      // ALREADY shown gets a toast instead of wiping content (the header's
+      // own inline `error` text already covers that case too, but a toast
+      // surfaces it even when the reader is looking at a different page
+      // than the one showing the stale data) — never fired on a genuine
+      // first-load failure (hadDataBefore false), which is an ErrorState's
+      // job instead, and never repeated on every tick of an ONGOING
+      // failure streak (toastedForFailure).
+      if (hadDataBefore && !this.toastedForFailure) {
+        useToastsStore().push({ kind: 'error', message: `Dashboard refresh failed: ${this.error}` })
+      }
+      this.toastedForFailure = true
     },
     /**
      * startPolling is idempotent and safe to call before a key is stored —

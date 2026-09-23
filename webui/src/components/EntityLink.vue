@@ -27,6 +27,19 @@ const props = defineProps<{
   kind: 'user' | 'model'
   /** The raw entity id (never pre-formatted as "kind:id" — this component builds nav.goTo's own params itself). */
   id: string
+  /**
+   * Applied to the inner label `<span>`, never the root `<button>`
+   * (verify-ui-states.md #10 fix). A caller that used to pass `truncate`
+   * through the root's own fallthrough `class` got a hard clip with no
+   * "…" and the trailing icon clipped away too: `text-overflow: ellipsis`
+   * only renders on the element whose own overflow is hidden, and
+   * `min-width: auto` on an inline-flex child ignores the parent's
+   * shrunk width — the label never actually shrank enough to overflow.
+   * Passing `truncate` here instead lets the label span (which also gets
+   * `min-w-0` unconditionally, see the template) genuinely truncate with
+   * an ellipsis while the icon (`shrink-0`) stays fully visible.
+   */
+  labelClass?: string
 }>()
 
 const nav = useNavStore()
@@ -48,10 +61,10 @@ function onClick(event: MouseEvent): void {
     type="button"
     :aria-label="`View ${label} in ${TARGET[kind].noun}`"
     :title="`View ${label} in ${TARGET[kind].noun}`"
-    class="inline-flex cursor-pointer items-center gap-1 rounded-sm text-inherit hover:text-primary hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+    class="inline-flex min-w-0 cursor-pointer items-center gap-1 rounded-sm text-inherit hover:text-primary hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
     @click="onClick"
   >
-    <span>{{ label }}</span>
-    <FontAwesomeIcon :icon="faArrowUpRightFromSquare" class="size-3" aria-hidden="true" />
+    <span class="min-w-0" :class="labelClass">{{ label }}</span>
+    <FontAwesomeIcon :icon="faArrowUpRightFromSquare" class="size-3 shrink-0" aria-hidden="true" />
   </button>
 </template>

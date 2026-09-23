@@ -86,6 +86,44 @@ describe('useSpendStore.fetchModelRanking', () => {
   })
 })
 
+// verify-ui-states-3.md pre-existing fix: fetchModelRanking's failures used
+// to fold into breakdownError, which a later, unrelated fetchBreakdown
+// success then cleared unconditionally — silently wiping a real ranking
+// failure. rankingError is its own field, never touched by fetchBreakdown.
+describe('useSpendStore.fetchModelRanking: rankingError', () => {
+  it('sets rankingError on failure, and a later breakdown success never clears it', async () => {
+    mockRoutes({
+      models: () => {
+        throw new Error('ranking boom')
+      },
+      series: () => seriesFor(['total'], 5),
+    })
+    const spend = useSpendStore()
+    await spend.fetchModelRanking()
+    expect(spend.rankingError).toBe('ranking boom')
+    expect(spend.breakdownError).toBe('')
+
+    await spend.fetchBreakdown() // succeeds even off a still-empty ranking (by=model with 0 ids just charts nothing)
+    expect(spend.breakdownError).toBe('')
+    expect(spend.rankingError).toBe('ranking boom') // NOT cross-cleared
+  })
+
+  it('clears rankingError on the next successful ranking fetch', async () => {
+    mockRoutes({
+      models: () => {
+        throw new Error('ranking boom')
+      },
+    })
+    const spend = useSpendStore()
+    await spend.fetchModelRanking()
+    expect(spend.rankingError).toBe('ranking boom')
+
+    mockRoutes({ models: () => rankingWith(['a/one']) })
+    await spend.fetchModelRanking()
+    expect(spend.rankingError).toBe('')
+  })
+})
+
 // P3 item 21: PricingHealthTable.vue's "unpriced first" ordering needs a
 // ranking sorted by TRAFFIC (req), independent of whatever metric the
 // Spend breakdown chart currently sorts by — sorting by `cost` (the
@@ -251,6 +289,59 @@ describe('useSpendStore.fetchBreakdown: comparison', () => {
   })
 })
 
+// verify-ui-states-3.md NEW-1: a genuine selection change (by, metric,
+// window, span, or scope) clears `buckets` SYNCHRONOUSLY, before the new
+// fetch resolves — SpendPage.vue's breakdownState (hasData: buckets.length
+// > 0) must flip to 'skeleton' immediately, never keep the OLD selection's
+// series on screen mislabeled under the NEW selection. A same-selection
+// refetch (a poll tick, or a Retry) must leave `buckets` alone.
+describe('useSpendStore.fetchBreakdown: NEW-1 buckets-clear-on-selection-change', () => {
+  it('clears buckets synchronously on a genuine selection change, before the fetch resolves', async () => {
+    mockRoutes({ models: () => rankingWith([]), series: () => seriesFor(['total'], 5) })
+    const spend = useSpendStore()
+    await spend.fetchModelRanking()
+    await spend.fetchBreakdown()
+    expect(spend.buckets).toEqual(['20260922', '20260923'])
+
+    spend.$patch({ metric: 'req' }) // a genuine selection change
+    const pending = spend.fetchBreakdown()
+    expect(spend.buckets).toEqual([]) // cleared before the network call even starts
+    await pending
+    expect(spend.buckets).toEqual(['20260922', '20260923']) // repopulated once the new selection's fetch lands
+  })
+
+  it('leaves buckets on screen across a same-selection refetch (a poll tick)', async () => {
+    mockRoutes({ models: () => rankingWith([]), series: () => seriesFor(['total'], 5) })
+    const spend = useSpendStore()
+    await spend.fetchModelRanking()
+    await spend.fetchBreakdown()
+    expect(spend.buckets).toEqual(['20260922', '20260923'])
+
+    const pending = spend.fetchBreakdown() // same by/metric/window/span/scope
+    expect(spend.buckets).toEqual(['20260922', '20260923']) // NOT cleared
+    await pending
+    expect(spend.buckets).toEqual(['20260922', '20260923'])
+  })
+
+  it('a same-selection refetch failure sets breakdownError but leaves buckets on screen (the "ready" state the inline error line in SpendPage.vue depends on)', async () => {
+    mockRoutes({ models: () => rankingWith([]), series: () => seriesFor(['total'], 5) })
+    const spend = useSpendStore()
+    await spend.fetchModelRanking()
+    await spend.fetchBreakdown()
+    expect(spend.buckets.length).toBeGreaterThan(0)
+    expect(spend.breakdownError).toBe('')
+
+    mockedAdminFetch.mockImplementation((async (path: string) => {
+      if (path.startsWith('/admin/api/usage/series')) throw new Error('breakdown boom')
+      return rankingWith([])
+    }) as typeof adminFetch)
+    await spend.fetchBreakdown()
+
+    expect(spend.breakdownError).toBe('breakdown boom')
+    expect(spend.buckets.length).toBeGreaterThan(0) // still on screen: loadState reads 'ready', not 'error'
+  })
+})
+
 describe('useSpendStore.fetchBurndown', () => {
   it('fetches a day-window total series spanning the current UTC day-of-month', async () => {
     mockRoutes({
@@ -294,6 +385,32 @@ describe('useSpendStore.fetchBurndown', () => {
     const spend = useSpendStore()
     await spend.fetchBurndown()
     expect(spend.burndownBudgetMicros).toBe(10_000_000)
+  })
+})
+
+// verify-ui-states-3.md NEW-2: the scope===null (provider-scope) branch
+// must also reset burndownError/burndownLoading, not just buckets/points/
+// budget — otherwise a stale error/loading from a PREVIOUS scope's failed
+// fetch survives a detour through a provider scope (chart hidden) and
+// reappears once the reader switches back to a scope with a chart.
+describe('useSpendStore.fetchBurndown: NEW-2 provider-scope reset', () => {
+  it('resets burndownError and burndownLoading when scope narrows to a provider', async () => {
+    mockRoutes({
+      series: () => {
+        throw new Error('burndown boom')
+      },
+    })
+    const spend = useSpendStore()
+    await spend.fetchBurndown() // fails against the default 'all' scope
+    expect(spend.burndownError).toBe('burndown boom')
+
+    useFiltersStore().setFilters({ scope: 'provider:openai' })
+    await spend.fetchBurndown() // burndownAvailable is now false -> scope===null branch
+    expect(spend.burndownError).toBe('')
+    expect(spend.burndownLoading).toBe(false)
+    expect(spend.burndownBuckets).toEqual([])
+    expect(spend.burndownPoints).toEqual([])
+    expect(spend.burndownBudgetMicros).toBeNull()
   })
 })
 
@@ -375,7 +492,7 @@ describe('useSpendStore.fetchDrilldown', () => {
     spend.$patch({ drill: 'user:alice' })
     await spend.fetchDrilldown()
     expect(spend.drilldownDisabled).toBe(true)
-    expect(spend.error).toBe('')
+    expect(spend.drilldownError).toBe('')
   })
 })
 
@@ -396,5 +513,194 @@ describe('useSpendStore.setSelection', () => {
     const refreshSpy = vi.spyOn(spend, 'refresh')
     spend.setSelection({ by: 'model', metric: 'cost', drill: '' })
     expect(refreshSpy).not.toHaveBeenCalled()
+  })
+})
+
+// verify-ui-states-2.md #3: breakdownError/pricingHealthError/drilldownError/
+// burndownError replace one shared `error` field — each leg's own failure
+// must never surface under, or get silently cleared by, an unrelated leg.
+describe('useSpendStore: per-request error fields', () => {
+  it('a pricing-health failure sets only pricingHealthError, leaving the other three legs at \'\'', async () => {
+    mockRoutes({
+      models: (url) => {
+        if (url.includes('metric=req')) throw new Error('pricing boom')
+        return rankingWith([])
+      },
+    })
+    const spend = useSpendStore()
+    await spend.refresh()
+
+    expect(spend.pricingHealthError).toBe('pricing boom')
+    expect(spend.breakdownError).toBe('')
+    expect(spend.drilldownError).toBe('')
+    expect(spend.burndownError).toBe('')
+  })
+
+  it('a drilldown failure sets only drilldownError, leaving the other three legs at \'\'', async () => {
+    mockRoutes({
+      totals: () => {
+        throw new Error('drilldown boom')
+      },
+    })
+    const spend = useSpendStore()
+    await spend.refresh()
+
+    expect(spend.drilldownError).toBe('drilldown boom')
+    expect(spend.breakdownError).toBe('')
+    expect(spend.pricingHealthError).toBe('')
+    expect(spend.burndownError).toBe('')
+  })
+
+  it('a later breakdown success never clears an already-set pricingHealthError', async () => {
+    mockRoutes({
+      models: (url) => {
+        if (url.includes('metric=req')) throw new Error('pricing boom')
+        return rankingWith([])
+      },
+    })
+    const spend = useSpendStore()
+    await spend.refresh()
+    expect(spend.pricingHealthError).toBe('pricing boom')
+
+    mockRoutes({}) // every route now succeeds
+    await spend.fetchBreakdown()
+    expect(spend.breakdownError).toBe('')
+    expect(spend.pricingHealthError).toBe('pricing boom')
+  })
+
+  it('retrying only the failing leg clears only that leg\'s own error', async () => {
+    mockRoutes({
+      models: (url) => {
+        if (url.includes('metric=req')) throw new Error('pricing boom')
+        return rankingWith([])
+      },
+    })
+    const spend = useSpendStore()
+    await spend.refresh()
+    expect(spend.pricingHealthError).toBe('pricing boom')
+
+    mockRoutes({}) // the network recovers
+    await spend.fetchPricingHealthRanking()
+    expect(spend.pricingHealthError).toBe('')
+  })
+})
+
+// verify-ui-states-2.md #2: pricingHealthLoaded/drilldownLoaded are "has a
+// fetch completed for the CURRENT selection", reset only on a genuine
+// selection change (window/span for pricing health; window/span/drill for
+// the drilldown) — never on a same-selection refetch (a 60s poll tick),
+// which must not flash a skeleton back on over an already-settled result.
+describe('useSpendStore: pricingHealthLoaded / drilldownLoaded', () => {
+  it('pricingHealthLoaded flips true on a successful fetch, even with zero ranked models', async () => {
+    mockRoutes({ models: () => rankingWith([]) })
+    const spend = useSpendStore()
+    expect(spend.pricingHealthLoaded).toBe(false)
+    await spend.fetchPricingHealthRanking()
+    expect(spend.pricingHealthLoaded).toBe(true)
+  })
+
+  it('pricingHealthLoaded stays true across a same-range refetch, and resets before a genuine range change resolves', async () => {
+    mockRoutes({ models: () => rankingWith(['a/one']) })
+    const spend = useSpendStore()
+    await spend.fetchPricingHealthRanking()
+    expect(spend.pricingHealthLoaded).toBe(true)
+
+    // Same range again (a poll tick): must read true DURING the fetch too
+    // — a caller (PricingHealthTable) checking mid-flight must not see a
+    // skeleton flash for an unchanged selection.
+    let sawLoadedDuringSameRangeRefetch: boolean | undefined
+    mockedAdminFetch.mockImplementation((async () => {
+      sawLoadedDuringSameRangeRefetch = spend.pricingHealthLoaded
+      return rankingWith(['a/one'])
+    }) as typeof adminFetch)
+    await spend.fetchPricingHealthRanking()
+    expect(sawLoadedDuringSameRangeRefetch).toBe(true)
+
+    // A genuine range change (span 7 -> 30, still window=day) DOES reset
+    // it before the new fetch resolves.
+    useFiltersStore().setFilters({ range: '30d' })
+    let sawLoadedDuringRangeChange: boolean | undefined
+    mockedAdminFetch.mockImplementation((async () => {
+      sawLoadedDuringRangeChange = spend.pricingHealthLoaded
+      return rankingWith(['a/one'])
+    }) as typeof adminFetch)
+    await spend.fetchPricingHealthRanking()
+    expect(sawLoadedDuringRangeChange).toBe(false)
+  })
+
+  it('drilldownLoaded flips true on a successful fetch and on a 404 (a settled, known-disabled state)', async () => {
+    mockRoutes({ totals: () => ({ kind: 'group', window: 'day', span: 2, offset: 0, metrics: ['cost'], rows: [] }) })
+    const spend = useSpendStore()
+    expect(spend.drilldownLoaded).toBe(false)
+    await spend.fetchDrilldown()
+    expect(spend.drilldownLoaded).toBe(true)
+
+    mockedAdminFetch.mockImplementation((async (path: string) => {
+      if (path.startsWith('/admin/api/usage/totals')) throw new AdminApiError('user-model statistics are not enabled', 404)
+      throw new Error(`unexpected path ${path}`)
+    }) as typeof adminFetch)
+    const spend2 = useSpendStore()
+    spend2.$patch({ drill: 'user:alice' })
+    await spend2.fetchDrilldown()
+    expect(spend2.drilldownDisabled).toBe(true)
+    expect(spend2.drilldownLoaded).toBe(true)
+  })
+
+  it('drilldownLoaded resets when `drill` changes, not on a same-selection refetch', async () => {
+    mockRoutes({ totals: () => ({ kind: 'group', window: 'day', span: 2, offset: 0, metrics: ['cost'], rows: [] }) })
+    const spend = useSpendStore()
+    await spend.fetchDrilldown()
+    expect(spend.drilldownLoaded).toBe(true)
+
+    let sawLoadedDuringSameDrillRefetch: boolean | undefined
+    mockedAdminFetch.mockImplementation((async () => {
+      sawLoadedDuringSameDrillRefetch = spend.drilldownLoaded
+      return { kind: 'group', window: 'day', span: 2, offset: 0, metrics: ['cost'], rows: [] }
+    }) as typeof adminFetch)
+    await spend.fetchDrilldown()
+    expect(sawLoadedDuringSameDrillRefetch).toBe(true)
+
+    spend.$patch({ drill: 'group:friends' })
+    let sawLoadedDuringDrillChange: boolean | undefined
+    mockedAdminFetch.mockImplementation((async () => {
+      sawLoadedDuringDrillChange = spend.drilldownLoaded
+      return { kind: 'user', window: 'day', span: 2, offset: 0, metrics: ['cost'], rows: [] }
+    }) as typeof adminFetch)
+    await spend.fetchDrilldown()
+    expect(sawLoadedDuringDrillChange).toBe(false)
+  })
+})
+
+// verify-ui-states-2.md #10: an overlapping poll-tick refresh() and a
+// selection/filter-change refresh() can resolve in either order — only the
+// LATEST refresh call may clear `loading`.
+describe('useSpendStore.refresh: overlapping calls', () => {
+  it('an earlier refresh finishing after a newer one has started does not clear loading', async () => {
+    const spend = useSpendStore()
+    vi.spyOn(spend, 'fetchModelRanking').mockResolvedValue(undefined)
+
+    const pending: (() => void)[] = []
+    const controlled = (): Promise<void> => new Promise((resolve) => pending.push(resolve))
+    vi.spyOn(spend, 'fetchBreakdown').mockImplementation(controlled)
+    vi.spyOn(spend, 'fetchPricingHealthRanking').mockImplementation(controlled)
+    vi.spyOn(spend, 'fetchBurndown').mockImplementation(controlled)
+    vi.spyOn(spend, 'fetchDrilldown').mockImplementation(controlled)
+
+    const firstRefresh = spend.refresh()
+    await vi.waitFor(() => expect(pending.length).toBe(4))
+    const firstPending = pending.splice(0, pending.length)
+
+    const secondRefresh = spend.refresh()
+    await vi.waitFor(() => expect(pending.length).toBe(4))
+    const secondPending = pending.splice(0, pending.length)
+
+    // Resolve only the FIRST (now stale) refresh's own legs.
+    firstPending.forEach((resolve) => resolve())
+    await firstRefresh
+    expect(spend.loading).toBe(true) // the second, newer refresh is still in flight
+
+    secondPending.forEach((resolve) => resolve())
+    await secondRefresh
+    expect(spend.loading).toBe(false)
   })
 })

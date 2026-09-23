@@ -1,13 +1,20 @@
 <script setup lang="ts">
 import { computed, onMounted, watch } from 'vue'
 
+import EmptyState from '@/components/EmptyState.vue'
+import ErrorState from '@/components/ErrorState.vue'
 import EventsView from '@/components/EventsView.vue'
+import SkeletonChart from '@/components/SkeletonChart.vue'
+import SkeletonList from '@/components/SkeletonList.vue'
 import TimeSeriesChart from '@/components/TimeSeriesChart.vue'
 import type { TimeSeriesDataset } from '@/components/TimeSeriesChart.vue'
-import { Alert, AlertDescription } from '@/components/ui/alert'
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
+import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { formatBucketLabel } from '@/lib/format'
+import { loadState } from '@/lib/load-state'
+import type { LoadState } from '@/lib/load-state'
 import { formatErrorRatePercent } from '@/lib/provider-rate'
 import { useDashboardStore } from '@/stores/dashboard'
 import { useEventsStore } from '@/stores/events'
@@ -106,6 +113,37 @@ function errorRatePercent(value: number): string {
 const hasProviders = computed(() => (dashboard.overview?.providers.length ?? 0) > 0)
 const noFailoverConfigured = computed(() => dashboard.overview !== null && dashboard.overview.features.failover === false)
 
+/**
+ * dashboardLoadState (live-preview fix, same class as verify-ui-states.md
+ * #3): `hasProviders` alone reads false BOTH when the fleet genuinely has
+ * no configured providers AND before the polled dashboard.overview has
+ * ever landed (or after it failed to) — "No providers configured." used
+ * to render as a false fleet fact on a deep link straight to this page,
+ * before the 5s dashboard poll's first response arrives. Every OTHER page
+ * already reads dashboard.overview after it has settled at least once
+ * (they mount later in a typical session); this page can be the very
+ * first thing mounted on a cold reload.
+ */
+const dashboardLoadState = computed(() => loadState({ loading: !dashboard.lastUpdated, hasData: dashboard.overview !== null, error: dashboard.error }))
+
+/**
+ * providersState (live-preview fix: "per-provider charts briefly render an
+ * empty grid before providers are known") gates the FOUR per-provider chart
+ * cards below (error rate, selected provider performance, timeouts,
+ * failovers) — the same three-way split lib/access-matrix.ts's
+ * matrixColumnsState makes for AccessMatrix.vue's own columns: 'skeleton'
+ * while dashboard.overview has not loaded yet (dashboardLoadState itself
+ * still unsettled — this page is often the very first thing mounted on a
+ * cold reload), 'error' forwarded from that same first-load failure,
+ * 'empty' once overview has genuinely loaded with zero configured
+ * providers (a real fleet fact, not a loading artifact), 'ready' once it
+ * has loaded with at least one provider to chart.
+ */
+const providersState = computed<LoadState>(() => {
+  if (dashboardLoadState.value !== 'ready') return dashboardLoadState.value
+  return hasProviders.value ? 'ready' : 'empty'
+})
+
 // --- selected-provider performance (N3 fix, redesign-plan.md section
 // 3.3: "performance series=1 for the selected provider") ---
 const latencyStatsEnabled = computed(() => dashboard.overview?.features.latencyStats ?? false)
@@ -142,6 +180,31 @@ watch(
  * showing the most recent 30 days.
  */
 const monthRangeClamped = computed(() => filters.window === 'month')
+
+// --- skeleton/error states (verify-ui-states.md #7: "Spend and
+// Reliability pages got no skeletons or ErrorState") -----------------------
+
+/**
+ * reliabilityState (lib/load-state.ts) gates every fleet-wide chart on this
+ * page (error rate, timeouts, failovers, rejections, unpriced) — all five
+ * are populated by the ONE reliability.fetch() call, so one shared state is
+ * correct rather than each chart re-deriving its own from the same three
+ * underlying signals. Checked FIRST: dashboardLoadState — reliability.fetch
+ * (stores/reliability.ts) now no-ops while dashboard.overview has not
+ * loaded yet, rather than resolving as "loaded, empty" (the live-preview
+ * fix this composition closes), so reliability.loading/buckets/error alone
+ * can no longer be trusted to read 'skeleton' during that window; once
+ * dashboardLoadState settles 'ready', this falls through to reliability's
+ * own loading/buckets/error exactly as before.
+ */
+const reliabilityState = computed<LoadState>(() => {
+  if (dashboardLoadState.value !== 'ready') return dashboardLoadState.value
+  return loadState({ loading: reliability.loading, hasData: reliability.buckets.length > 0, error: reliability.error })
+})
+/** providerPerfState mirrors reliabilityState for the "Selected provider performance" chart pair — reliability.fetchProviderPerf runs independently of fetch() (its own doc comment), so it needs its own loading/error signal, only reachable once providerPerfAvailable is already true. */
+const providerPerfState = computed(() =>
+  loadState({ loading: reliability.providerPerfLoading, hasData: reliability.providerPerfPoints.length > 0, error: reliability.providerPerfError }),
+)
 
 // Refetch whenever the global range changes (Q12 DECISIONS: "new endpoints
 // on demand or 60s" — this is the "on demand" case, driven by the reader's
@@ -212,7 +275,9 @@ onMounted(() => void reliability.fetch())
         </div>
       </CardHeader>
       <CardContent>
-        <p v-if="reliability.error" class="text-sm text-destructive">{{ reliability.error }}</p>
+        <SkeletonList v-if="dashboardLoadState === 'skeleton'" :rows="2" />
+        <ErrorState v-else-if="dashboardLoadState === 'error'" :message="dashboard.error" :on-retry="dashboard.refresh" />
+        <p v-else-if="reliability.error" class="text-sm break-words text-destructive">{{ reliability.error }}</p>
         <p v-else-if="!hasProviders" class="text-sm text-muted-foreground">No providers configured.</p>
       </CardContent>
     </Card>
@@ -224,71 +289,133 @@ onMounted(() => void reliability.fetch())
       </AlertDescription>
     </Alert>
 
-    <Card v-if="hasProviders">
-      <CardHeader>
-        <CardTitle>Error rate by provider</CardTitle>
-        <CardDescription>Failed attempts / total attempts per bucket. A gap means no attempts in that bucket.</CardDescription>
-      </CardHeader>
+    <!--
+      providersState (live-preview fix: "per-provider charts briefly render
+      an empty grid before providers are known") gates this whole group of
+      FOUR per-provider cards as one unit — 'skeleton' while
+      dashboard.overview has not loaded, 'empty' once it has loaded with
+      zero configured providers (a real fleet fact, shown once via a single
+      EmptyState rather than four repeated ones), 'ready' to render the
+      actual charts below exactly as before.
+    -->
+    <template v-if="providersState === 'skeleton'">
+      <Card>
+        <CardHeader>
+          <CardTitle>Error rate by provider</CardTitle>
+        </CardHeader>
+        <CardContent><SkeletonChart /></CardContent>
+      </Card>
+      <Card>
+        <CardHeader>
+          <CardTitle>Selected provider performance</CardTitle>
+        </CardHeader>
+        <CardContent><SkeletonChart /></CardContent>
+      </Card>
+      <Card>
+        <CardHeader>
+          <CardTitle>Timeouts by provider</CardTitle>
+        </CardHeader>
+        <CardContent><SkeletonChart /></CardContent>
+      </Card>
+      <Card>
+        <CardHeader>
+          <CardTitle>Failovers by provider</CardTitle>
+        </CardHeader>
+        <CardContent><SkeletonChart /></CardContent>
+      </Card>
+    </template>
+    <Card v-else-if="providersState === 'empty'">
       <CardContent>
-        <TimeSeriesChart :labels="bucketLabels" :datasets="errorRateDatasets" :value-formatter="errorRatePercent" ariaLabel="Error rate by provider over time" />
+        <EmptyState
+          title="No providers configured."
+          description="Add a providers entry to the middleware config to see per-provider reliability charts here."
+        />
       </CardContent>
     </Card>
+    <template v-else-if="providersState === 'ready'">
+      <Card>
+        <CardHeader>
+          <CardTitle>Error rate by provider</CardTitle>
+          <CardDescription>Failed attempts / total attempts per bucket. A gap means no attempts in that bucket.</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <SkeletonChart v-if="reliabilityState === 'skeleton'" />
+          <ErrorState v-else-if="reliabilityState === 'error'" :message="reliability.error" :on-retry="reliability.fetch" />
+          <TimeSeriesChart v-else :labels="bucketLabels" :datasets="errorRateDatasets" :value-formatter="errorRatePercent" ariaLabel="Error rate by provider over time" />
+        </CardContent>
+      </Card>
 
-    <Card v-if="hasProviders">
-      <CardHeader>
-        <CardTitle>Selected provider performance</CardTitle>
-        <CardDescription>Latency (p50/p95) and failures per bucket for one provider.</CardDescription>
-      </CardHeader>
-      <CardContent class="flex flex-col gap-4">
-        <p v-if="selectedProvider === ''" class="text-sm text-muted-foreground">
-          Select a provider above to see its latency and failure breakdown per bucket.
-        </p>
-        <p v-else-if="!latencyStatsEnabled" class="text-sm text-muted-foreground">
-          Enable <code class="font-mono text-xs">admin.stats.latency</code> in the plugin config to see per-bucket latency for
-          {{ selectedProvider }}.
-        </p>
-        <template v-else-if="providerPerfAvailable">
-          <p v-if="reliability.providerPerfError" class="text-sm text-destructive">{{ reliability.providerPerfError }}</p>
-          <div class="grid gap-6 lg:grid-cols-2">
-            <div>
-              <p class="mb-2 text-sm font-medium text-muted-foreground">Latency (ms)</p>
-              <TimeSeriesChart
-                :labels="providerPerfBucketLabels"
-                :datasets="providerLatencyDatasets"
-                :ariaLabel="`p50/p95 latency for ${selectedProvider} over time`"
-              />
+      <Card>
+        <CardHeader>
+          <CardTitle>Selected provider performance</CardTitle>
+          <CardDescription>Latency (p50/p95) and failures per bucket for one provider.</CardDescription>
+        </CardHeader>
+        <CardContent class="flex flex-col gap-4">
+          <p v-if="selectedProvider === ''" class="text-sm text-muted-foreground">
+            Select a provider above to see its latency and failure breakdown per bucket.
+          </p>
+          <Alert v-else-if="!latencyStatsEnabled" variant="warn">
+            <AlertTitle>Latency statistics are off</AlertTitle>
+            <AlertDescription class="flex flex-wrap items-center gap-2">
+              <span
+                >Enable <code class="font-mono text-xs">admin.stats.latency</code> in the middleware config to see per-bucket latency
+                for {{ selectedProvider }}.</span
+              >
+              <Button type="button" variant="outline" size="sm" @click="nav.goTo('config')">Open Config</Button>
+            </AlertDescription>
+          </Alert>
+          <template v-else-if="providerPerfAvailable">
+            <SkeletonChart v-if="providerPerfState === 'skeleton'" />
+            <ErrorState
+              v-else-if="providerPerfState === 'error'"
+              :message="reliability.providerPerfError"
+              :on-retry="() => reliability.fetchProviderPerf(selectedProvider)"
+            />
+            <div v-else class="grid gap-6 lg:grid-cols-2">
+              <div>
+                <p class="mb-2 text-sm font-medium text-muted-foreground">Latency (ms)</p>
+                <TimeSeriesChart
+                  :labels="providerPerfBucketLabels"
+                  :datasets="providerLatencyDatasets"
+                  :ariaLabel="`p50/p95 latency for ${selectedProvider} over time`"
+                />
+              </div>
+              <div>
+                <p class="mb-2 text-sm font-medium text-muted-foreground">Failures</p>
+                <TimeSeriesChart
+                  :labels="providerPerfBucketLabels"
+                  :datasets="providerFailureDatasets"
+                  :ariaLabel="`Failures for ${selectedProvider} over time`"
+                />
+              </div>
             </div>
-            <div>
-              <p class="mb-2 text-sm font-medium text-muted-foreground">Failures</p>
-              <TimeSeriesChart
-                :labels="providerPerfBucketLabels"
-                :datasets="providerFailureDatasets"
-                :ariaLabel="`Failures for ${selectedProvider} over time`"
-              />
-            </div>
-          </div>
-        </template>
-      </CardContent>
-    </Card>
+          </template>
+        </CardContent>
+      </Card>
 
-    <Card v-if="hasProviders">
-      <CardHeader>
-        <CardTitle>Timeouts by provider</CardTitle>
-      </CardHeader>
-      <CardContent>
-        <TimeSeriesChart :labels="bucketLabels" :datasets="timeoutDatasets" ariaLabel="Timeouts by provider over time" />
-      </CardContent>
-    </Card>
+      <Card>
+        <CardHeader>
+          <CardTitle>Timeouts by provider</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <SkeletonChart v-if="reliabilityState === 'skeleton'" />
+          <ErrorState v-else-if="reliabilityState === 'error'" :message="reliability.error" :on-retry="reliability.fetch" />
+          <TimeSeriesChart v-else :labels="bucketLabels" :datasets="timeoutDatasets" ariaLabel="Timeouts by provider over time" />
+        </CardContent>
+      </Card>
 
-    <Card v-if="hasProviders">
-      <CardHeader>
-        <CardTitle>Failovers by provider</CardTitle>
-        <CardDescription v-if="noFailoverConfigured">This deployment has no failover chains configured.</CardDescription>
-      </CardHeader>
-      <CardContent>
-        <TimeSeriesChart :labels="bucketLabels" :datasets="failoverDatasets" ariaLabel="Failovers by provider over time" />
-      </CardContent>
-    </Card>
+      <Card>
+        <CardHeader>
+          <CardTitle>Failovers by provider</CardTitle>
+          <CardDescription v-if="noFailoverConfigured">This deployment has no failover chains configured.</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <SkeletonChart v-if="reliabilityState === 'skeleton'" />
+          <ErrorState v-else-if="reliabilityState === 'error'" :message="reliability.error" :on-retry="reliability.fetch" />
+          <TimeSeriesChart v-else :labels="bucketLabels" :datasets="failoverDatasets" ariaLabel="Failovers by provider over time" />
+        </CardContent>
+      </Card>
+    </template>
 
     <div class="grid gap-6 lg:grid-cols-2">
       <Card>
@@ -297,7 +424,9 @@ onMounted(() => void reliability.fetch())
           <CardDescription>Fleet-wide, every scope combined.</CardDescription>
         </CardHeader>
         <CardContent>
-          <TimeSeriesChart :labels="bucketLabels" :datasets="rejectionDatasets" ariaLabel="Rate-limit rejections over time, fleet-wide" />
+          <SkeletonChart v-if="reliabilityState === 'skeleton'" />
+          <ErrorState v-else-if="reliabilityState === 'error'" :message="reliability.error" :on-retry="reliability.fetch" />
+          <TimeSeriesChart v-else :labels="bucketLabels" :datasets="rejectionDatasets" ariaLabel="Rate-limit rejections over time, fleet-wide" />
         </CardContent>
       </Card>
 
@@ -307,7 +436,9 @@ onMounted(() => void reliability.fetch())
           <CardDescription>Fleet-wide requests refused for having no resolvable price.</CardDescription>
         </CardHeader>
         <CardContent>
-          <TimeSeriesChart :labels="bucketLabels" :datasets="unpricedDatasets" ariaLabel="Unpriced refusals (402) over time, fleet-wide" />
+          <SkeletonChart v-if="reliabilityState === 'skeleton'" />
+          <ErrorState v-else-if="reliabilityState === 'error'" :message="reliability.error" :on-retry="reliability.fetch" />
+          <TimeSeriesChart v-else :labels="bucketLabels" :datasets="unpricedDatasets" ariaLabel="Unpriced refusals (402) over time, fleet-wide" />
         </CardContent>
       </Card>
     </div>

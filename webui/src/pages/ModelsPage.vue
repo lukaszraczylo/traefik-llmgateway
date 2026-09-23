@@ -54,12 +54,18 @@ watch(
 <template>
   <div class="flex flex-col gap-6">
     <ProviderHealthPanel />
-    <p v-if="models.error" class="text-sm text-destructive">{{ models.error }}</p>
+    <!-- verify-ui-states-2.md #8: shown only for a BACKGROUND failure
+    (rows already on screen) — a first-load failure already renders via
+    ModelCatalogTable's own ErrorState below, and showing both duplicated
+    the same message twice. -->
+    <p v-if="models.error && models.rows.length > 0" class="text-sm break-words text-destructive">{{ models.error }}</p>
     <ModelCatalogTable
       :rows="models.rows"
       :query="query"
       :latency-enabled="models.latencyEnabled"
       :loading="models.loading"
+      :error="models.error"
+      :on-retry="models.fetch"
       @update:query="query = $event"
     />
   </div>

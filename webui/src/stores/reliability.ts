@@ -119,12 +119,27 @@ export const useReliabilityStore = defineStore('reliability', {
   }),
   actions: {
     async fetch(): Promise<void> {
+      const dashboard = useDashboardStore()
+      /**
+       * dashboard.overview not having loaded yet (live-preview fix) means
+       * the fleet's provider list is UNKNOWN, not genuinely zero — a
+       * no-op here, rather than falling into the zero-providers
+       * short-circuit below, which used to resolve `lastUpdated`/`buckets`
+       * as "loaded, empty" before the dashboard's own first poll had even
+       * landed, briefly rendering an empty chart grid on a cold reload
+       * instead of a skeleton. ReliabilityPage.vue's own watch on
+       * `dashboard.overview?.providers.length` re-fires this fetch the
+       * moment overview actually loads, so nothing is lost by skipping it
+       * here — this.loading/buckets/error are left exactly as they were.
+       */
+      const overview = dashboard.overview
+      if (overview === null) return
+
       const requestId = ++this.reqId
       this.loading = true
       try {
         const filters = useFiltersStore()
-        const dashboard = useDashboardStore()
-        const providerNames = (dashboard.overview?.providers ?? []).map((p) => p.name)
+        const providerNames = overview.providers.map((p) => p.name)
 
         if (providerNames.length === 0) {
           if (requestId !== this.reqId) return

@@ -4,9 +4,14 @@ import { computed, onMounted, onUnmounted, watch } from 'vue'
 
 import ClampedRangeNotice from '@/components/ClampedRangeNotice.vue'
 import CompactNumber from '@/components/CompactNumber.vue'
+import EmptyState from '@/components/EmptyState.vue'
+import ErrorState from '@/components/ErrorState.vue'
 import ModelChip from '@/components/ModelChip.vue'
+import SkeletonChart from '@/components/SkeletonChart.vue'
+import SkeletonTable from '@/components/SkeletonTable.vue'
 import TimeSeriesChart from '@/components/TimeSeriesChart.vue'
-import { Alert, AlertDescription } from '@/components/ui/alert'
+import TryLongerRangeButton from '@/components/TryLongerRangeButton.vue'
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
@@ -15,11 +20,13 @@ import UsageBar from '@/components/UsageBar.vue'
 import { useNow } from '@/composables/useNow'
 import { runOutDate as computeRunOutDate } from '@/lib/burndown'
 import { formatBucketLabel, formatCost, formatExactInt, formatLimits, formatTimestamp } from '@/lib/format'
+import { loadState } from '@/lib/load-state'
 import { BUDGET_RATIO_LABEL, budgetRatios } from '@/lib/usage-bars'
 import { useConsumersStore } from '@/stores/consumers'
 import { useDashboardStore } from '@/stores/dashboard'
 import { useEventsStore } from '@/stores/events'
 import { useFiltersStore } from '@/stores/filters'
+import { useNavStore } from '@/stores/nav'
 
 /**
  * UserDetail (redesign-plan.md section 3.4) is the Consumers page's
@@ -35,6 +42,7 @@ const dashboard = useDashboardStore()
 const consumers = useConsumersStore()
 const events = useEventsStore()
 const filters = useFiltersStore()
+const nav = useNavStore()
 const { now, start: startClock, stop: stopClock } = useNow()
 onMounted(startClock)
 onUnmounted(stopClock)
@@ -47,12 +55,19 @@ const consumerUser = computed(() => consumers.data?.users.find((u) => u.name ===
 
 const featuresUserModelStats = computed(() => dashboard.overview?.features.userModelStats ?? false)
 
-function loadDetail(): void {
-  void consumers.fetchUserDetail(props.userId, filters.window, filters.span, featuresUserModelStats.value)
+/**
+ * loadDetail (verify-ui-states-2.md #6 fix) returns fetchUserDetail's own
+ * promise rather than `void`-ing it — ErrorState.onRetryClick (ErrorState.
+ * vue) awaits `onRetry()` to drive its own local `retrying` spinner/disable
+ * state; with this returning `void`, that await resolved immediately and
+ * the Retry button showed no in-flight feedback at all.
+ */
+function loadDetail(): Promise<void> {
+  return consumers.fetchUserDetail(props.userId, filters.window, filters.span, featuresUserModelStats.value)
 }
 
 onMounted(() => {
-  loadDetail()
+  void loadDetail()
   void events.refresh()
 })
 // featuresUserModelStats is included alongside userId/range: on a deep
@@ -87,6 +102,24 @@ const costDatasets = computed(() => [
   { label: 'Cost', data: (detail.value?.costSeries?.series[0]?.points ?? []).map((v) => v), color: '--chart-cost' },
 ])
 
+/**
+ * reqState/costState/modelState (verify-ui-states.md #4 fix) replace the
+ * old bare `detail?.loading` skeleton check, which flipped a skeleton
+ * back on over already-valid, already-rendered data in three cases:
+ * (a) re-opening a cached user (consumers.detail[userId] keeps its
+ * series, but loading flips true again on every fetchUserDetail call);
+ * (b) the featuresUserModelStats watch's own follow-up refetch once the
+ * overview lands; (c) a Retry click. `hasData` (reqSeries/costSeries/
+ * modelRows non-null/non-empty) now takes precedence over `loading` —
+ * lib/load-state.ts's own 'ready' precedence — so a background refetch
+ * with data already on screen never shows a skeleton, and each chart/
+ * table reads only its OWN error field (stores/consumers.ts's
+ * UserDetailState split), so an unrelated section's failure never
+ * blanks a perfectly valid one.
+ */
+const reqState = computed(() => loadState({ loading: detail.value?.loading ?? false, hasData: detail.value?.reqSeries != null, error: detail.value?.reqError ?? '' }))
+const costState = computed(() => loadState({ loading: detail.value?.loading ?? false, hasData: detail.value?.costSeries != null, error: detail.value?.costError ?? '' }))
+
 /** showUserModelHint mirrors AttributionDrilldown.vue's own convention (Spend page): the hint shows when the client's own feature flag reads off, OR the usermodel call itself came back 404 (stores/consumers.ts's modelTotalsUnavailable) — the second case catches a stale/not-yet-loaded overview on a deep link or reload, where featuresUserModelStats can read true for a moment while the server still says otherwise. */
 const showUserModelHint = computed(() => !featuresUserModelStats.value || detail.value?.modelTotalsUnavailable === true)
 
@@ -95,6 +128,21 @@ const modelRows = computed(() => {
   const rows = detail.value?.modelTotals?.rows ?? []
   return [...rows].sort((a, b) => (b.values.cost ?? b.values.req ?? 0) - (a.values.cost ?? a.values.req ?? 0))
 })
+
+/**
+ * modelState mirrors reqState/costState above for the "Models used" table
+ * — only reachable once showUserModelHint is false (the template checks
+ * that Alert first), so 'error'/'skeleton' here are always a genuine fetch
+ * problem, not the feature simply being off. `hasData` (verify-ui-states-2.
+ * md #2 fix) is `detail.modelTotals != null`, not `modelRows.length > 0` —
+ * a user with genuinely zero per-model rows used to flash a skeleton back
+ * on over the "No traffic in this range." EmptyState on a re-open, a
+ * Retry, or the featuresUserModelStats follow-up refetch (every one of
+ * which flips `detail.loading` true again). The template's own
+ * `!modelRows.length` check (below) still routes an empty result to
+ * EmptyState.
+ */
+const modelState = computed(() => loadState({ loading: detail.value?.loading ?? false, hasData: detail.value?.modelTotals != null, error: detail.value?.modelError ?? '' }))
 
 /** recentErrors filters the shared Events store (WP-F, read-only import) down to this user — the newest 10, matching the store's own newest-first order. */
 const recentErrors = computed(() => events.events.filter((e) => e.user === props.userId).slice(0, 10))
@@ -131,7 +179,7 @@ const runOutDate = computed(() => {
     <Card>
       <CardHeader>
         <div class="flex flex-wrap items-center gap-2">
-          <CardTitle class="font-mono">{{ userId }}</CardTitle>
+          <CardTitle class="min-w-0 break-all font-mono">{{ userId }}</CardTitle>
           <Badge v-if="consumerUser?.admin" variant="destructive">admin</Badge>
           <Badge v-if="consumerUser?.source" variant="secondary">{{ consumerUser.source }}</Badge>
         </div>
@@ -184,8 +232,8 @@ const runOutDate = computed(() => {
         <CardTitle>Requests over time</CardTitle>
       </CardHeader>
       <CardContent>
-        <p v-if="detail?.loading" class="text-sm text-muted-foreground">loading…</p>
-        <p v-else-if="detail?.error" class="text-sm text-destructive">{{ detail.error }}</p>
+        <SkeletonChart v-if="reqState === 'skeleton'" />
+        <ErrorState v-else-if="reqState === 'error'" :message="detail?.reqError ?? ''" :on-retry="loadDetail" />
         <TimeSeriesChart v-else :labels="reqLabels" :datasets="reqDatasets" :ariaLabel="`Requests over time for ${userId}`" />
       </CardContent>
     </Card>
@@ -195,8 +243,8 @@ const runOutDate = computed(() => {
         <CardTitle>Cost over time</CardTitle>
       </CardHeader>
       <CardContent>
-        <p v-if="detail?.loading" class="text-sm text-muted-foreground">loading…</p>
-        <p v-else-if="detail?.error" class="text-sm text-destructive">{{ detail.error }}</p>
+        <SkeletonChart v-if="costState === 'skeleton'" />
+        <ErrorState v-else-if="costState === 'error'" :message="detail?.costError ?? ''" :on-retry="loadDetail" />
         <TimeSeriesChart v-else :labels="costLabels" :datasets="costDatasets" :value-formatter="formatCost" :ariaLabel="`Cost over time for ${userId}`" />
       </CardContent>
     </Card>
@@ -208,9 +256,18 @@ const runOutDate = computed(() => {
       <CardContent class="flex flex-col gap-3">
         <ClampedRangeNotice :window="filters.window" :span="filters.span" />
         <Alert v-if="showUserModelHint" variant="warn">
-          <AlertDescription>Enable admin.stats.userModel in the plugin config to see a per-model breakdown for this user.</AlertDescription>
+          <AlertTitle>Per-user-model statistics are off</AlertTitle>
+          <AlertDescription class="flex flex-wrap items-center gap-2">
+            <span>Enable <code class="font-mono text-xs">admin.stats.userModel</code> in the middleware config to see a per-model breakdown for this user.</span>
+            <Button type="button" variant="outline" size="sm" @click="nav.goTo('config')">Open Config</Button>
+          </AlertDescription>
         </Alert>
-        <Table v-else-if="modelRows.length">
+        <SkeletonTable v-else-if="modelState === 'skeleton'" :rows="3" :cols="3" />
+        <ErrorState v-else-if="modelState === 'error'" :message="detail?.modelError ?? ''" :on-retry="loadDetail" />
+        <EmptyState v-else-if="!modelRows.length" title="No traffic in this range.">
+          <TryLongerRangeButton />
+        </EmptyState>
+        <Table v-else>
           <TableHeader>
             <TableRow>
               <TableHead>Model</TableHead>
@@ -226,7 +283,6 @@ const runOutDate = computed(() => {
             </TableRow>
           </TableBody>
         </Table>
-        <p v-else class="py-6 text-center text-sm text-muted-foreground">no model usage in this range</p>
       </CardContent>
     </Card>
 
@@ -257,7 +313,14 @@ const runOutDate = computed(() => {
         <div>
           <p class="mb-1.5 text-xs text-muted-foreground">Providers</p>
           <div class="flex flex-wrap gap-1.5">
-            <Badge v-for="name in consumerUser?.providers ?? []" :key="name" as="span" variant="secondary" class="font-mono font-normal">
+            <Badge
+              v-for="name in consumerUser?.providers ?? []"
+              :key="name"
+              as="span"
+              variant="secondary"
+              class="max-w-full truncate font-mono font-normal"
+              :title="name"
+            >
               {{ name }}
             </Badge>
           </div>

@@ -7,9 +7,17 @@ import { computed, h, ref } from 'vue'
 import ClampedRangeNotice from '@/components/ClampedRangeNotice.vue'
 import CompactNumber from '@/components/CompactNumber.vue'
 import DataTable from '@/components/DataTable.vue'
+import EmptyState from '@/components/EmptyState.vue'
 import EntityLink from '@/components/EntityLink.vue'
+import ErrorState from '@/components/ErrorState.vue'
+import SkeletonTable from '@/components/SkeletonTable.vue'
+import TryLongerRangeButton from '@/components/TryLongerRangeButton.vue'
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
+import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { formatCost } from '@/lib/format'
+import { loadState } from '@/lib/load-state'
+import { useNavStore } from '@/stores/nav'
 import { SPEND_METRIC_LABEL } from '@/stores/spend'
 import type { AdminTotalsResponse, HistoryMetric, HistoryWindow } from '@/types/api'
 
@@ -44,9 +52,25 @@ const props = defineProps<{
   /** The global filters store's current window/span (N3 fix) — ClampedRangeNotice's own props, forwarded so this stays a controlled, props-driven component rather than reaching into stores/filters.ts itself. */
   window: HistoryWindow
   span: number
+  /** spend.drilldownLoading (verify-ui-states.md #3 fix) — this card had no loading/error input at all: `spend.drilldownRows` starts as [], so the very first Spend load, and any failed drilldown fetch, rendered the identical "No traffic in this range." a genuinely empty group/user/model list gets. */
+  loading: boolean
+  /**
+   * spend.drilldownLoaded (verify-ui-states-2.md #2 fix) — "has a fetch
+   * completed for the current window/span/drill selection", not
+   * `rows.length > 0`: the 60s poll flips `loading` true on every tick, and
+   * a genuinely empty level (e.g. a group with no users) used to flash a
+   * skeleton back on for each tick. `noTrafficInRange` below still checks
+   * `rows.length` directly for EmptyState vs. the real table.
+   */
+  loaded: boolean
+  error: string
+  /** Renders ErrorState's own "Retry" button — SpendPage.vue's own spend.fetchDrilldown. */
+  onRetry?: () => void | Promise<void>
 }>()
 
 const emit = defineEmits<{ 'update:drill': [value: string] }>()
+
+const nav = useNavStore()
 
 type Level = { kind: 'group' } | { kind: 'user'; group: string } | { kind: 'usermodel'; user: string }
 
@@ -122,6 +146,22 @@ const columns = computed<ColumnDef<DrilldownRow, unknown>[]>(() => [
 ])
 
 const showUserModelHint = computed<boolean>(() => level.value.kind === 'user' && (!props.userModelStatsEnabled || props.disabled))
+
+const state = computed(() => loadState({ loading: props.loading, hasData: props.loaded, error: props.error }))
+
+/**
+ * noTrafficInRange (states-plan.md item 2: "Spend/Models/Home lists: 'No
+ * traffic in this range'") is the genuine "nothing to show" case — gated
+ * directly on `rows.length === 0` (verify-ui-states-2.md #2 fix; `state`
+ * no longer distinguishes empty from non-empty once `loaded` is true, see
+ * this component's own `loaded` prop doc comment), the same way
+ * UserDetail.vue's own "Models used" table checks `!modelRows.length`. The
+ * template below still checks `state === 'skeleton'`/`'error'` FIRST, so a
+ * first/failed fetch never reaches this branch. Never true alongside
+ * showUserModelHint, which takes precedence in the template below (that
+ * state has its own, more specific copy).
+ */
+const noTrafficInRange = computed<boolean>(() => !showUserModelHint.value && props.rows.length === 0)
 </script>
 
 <template>
@@ -149,15 +189,19 @@ const showUserModelHint = computed<boolean>(() => level.value.kind === 'user' &&
     </CardHeader>
     <CardContent class="flex flex-col gap-3">
       <ClampedRangeNotice v-if="level.kind === 'usermodel'" :window="window" :span="span" />
-      <p v-if="showUserModelHint" class="text-sm text-muted-foreground">
-        Per-model attribution for this user needs <code class="font-mono text-xs">admin.stats.userModel</code> enabled.
-      </p>
-      <DataTable
-        v-else
-        :columns="columns"
-        :data="rows"
-        :empty-message="level.kind === 'group' ? 'No group has spend in this range.' : 'Nothing in this range.'"
-      />
+      <Alert v-if="showUserModelHint" variant="warn">
+        <AlertTitle>Per-user-model statistics are off</AlertTitle>
+        <AlertDescription class="flex flex-wrap items-center gap-2">
+          <span>Enable <code class="font-mono text-xs">admin.stats.userModel</code> in the middleware config to see per-model attribution for this user.</span>
+          <Button type="button" variant="outline" size="sm" @click="nav.goTo('config')">Open Config</Button>
+        </AlertDescription>
+      </Alert>
+      <SkeletonTable v-else-if="state === 'skeleton'" :rows="5" :cols="metrics.length + 1" />
+      <ErrorState v-else-if="state === 'error'" :message="error" :on-retry="onRetry" />
+      <EmptyState v-else-if="noTrafficInRange" title="No traffic in this range.">
+        <TryLongerRangeButton />
+      </EmptyState>
+      <DataTable v-else :columns="columns" :data="rows" empty-message="none" />
     </CardContent>
   </Card>
 </template>

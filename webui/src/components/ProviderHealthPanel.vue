@@ -9,12 +9,15 @@ import { computed, h, reactive, watch } from 'vue'
 
 import DataTable from '@/components/DataTable.vue'
 import EntityLink from '@/components/EntityLink.vue'
+import ErrorState from '@/components/ErrorState.vue'
 import ModelChip from '@/components/ModelChip.vue'
 import ProviderRateBadge from '@/components/ProviderRateBadge.vue'
 import SearchInput from '@/components/SearchInput.vue'
+import SkeletonList from '@/components/SkeletonList.vue'
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/components/ui/accordion'
-import { Alert, AlertDescription } from '@/components/ui/alert'
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
 import {
   Card,
   CardContent,
@@ -24,6 +27,7 @@ import {
 } from '@/components/ui/card'
 import { useSearchQuery } from '@/composables/useSearchQuery'
 import { formatAgo, formatContextWindow, formatLatencyMs, formatUntil, refreshDetailLabel, refreshLabel, routableModelId } from '@/lib/format'
+import { loadState } from '@/lib/load-state'
 import { isModelDegraded } from '@/lib/provider-rate'
 import { type ExpandState, clearExpandOverrides, computeExpandedItems, toggleItemExpand } from '@/lib/search-expand'
 import { useDashboardStore } from '@/stores/dashboard'
@@ -85,6 +89,19 @@ function providerMatches(p: AdminProviderView): boolean {
 function aliasMatches(a: AdminAliasView): boolean {
   return a.alias.toLowerCase().includes(normalizedQuery.value) || a.target.toLowerCase().includes(normalizedQuery.value)
 }
+
+/**
+ * providersLoadState (live-preview fix, same class of bug as
+ * lib/access-matrix.ts's matrixColumnsState / TargetsView.vue's
+ * targetsLoadState) — `overview` maps a not-yet-loaded dashboard.overview
+ * straight to `[]` via `?? []` below, which the template used to render as
+ * a confirmed "none" (no providers configured at all) before the 5s
+ * dashboard poll's first response had even landed. `loading: true` mirrors
+ * those same two call sites' own idiom: it is only ever consulted once
+ * `hasData` (dashboard.overview !== null) is already false, so there is
+ * nothing else to fall back to but a skeleton or the dashboard's own error.
+ */
+const providersLoadState = computed(() => loadState({ loading: true, hasData: overview.value !== null, error: dashboard.error }))
 
 const filteredProviders = computed<AdminProviderView[]>(() => {
   const all = overview.value?.providers ?? []
@@ -340,11 +357,15 @@ const aliasEmptyMessage = computed(() =>
       </CardHeader>
       <CardContent class="flex flex-col gap-3">
         <Alert v-if="!models.latencyEnabled" variant="warn">
-          <AlertDescription>
-            Fleet p50/p95 are off for this deployment. Enable <code>admin.stats.latency</code> to see them.
+          <AlertTitle>Latency statistics are off</AlertTitle>
+          <AlertDescription class="flex flex-wrap items-center gap-2">
+            <span>Enable <code>admin.stats.latency</code> in the middleware config to see fleet p50/p95.</span>
+            <Button type="button" variant="outline" size="sm" @click="nav.goTo('config')">Open Config</Button>
           </AlertDescription>
         </Alert>
-        <p v-if="!overview?.providers.length" class="py-6 text-center text-sm text-muted-foreground">none</p>
+        <SkeletonList v-if="providersLoadState === 'skeleton'" :rows="3" />
+        <ErrorState v-else-if="providersLoadState === 'error'" :message="dashboard.error" :on-retry="dashboard.refresh" />
+        <p v-else-if="!overview?.providers.length" class="py-6 text-center text-sm text-muted-foreground">none</p>
         <p
           v-else-if="hasQuery && filteredProviders.length === 0"
           class="py-6 text-center text-sm text-muted-foreground"
@@ -485,14 +506,14 @@ const aliasEmptyMessage = computed(() =>
                 </div>
               </dl>
               <div v-if="visibleModels(p).length" class="flex flex-wrap gap-1.5">
-                <span v-for="m in visibleModels(p)" :key="m" class="inline-flex items-center gap-1">
+                <span v-for="m in visibleModels(p)" :key="m" class="inline-flex min-w-0 max-w-full items-center gap-1">
                   <ModelChip
                     :id="routableModelId(p.name, m)"
                     :context-tokens="modelMetaFor(p, m).contextTokens"
                     :input-per-m-tok-usd="modelMetaFor(p, m).inputPerMTokUsd"
                     :output-per-m-tok-usd="modelMetaFor(p, m).outputPerMTokUsd"
                   />
-                  <EntityLink :label="routableModelId(p.name, m)" kind="model" :id="routableModelId(p.name, m)" />
+                  <EntityLink :label="routableModelId(p.name, m)" kind="model" :id="routableModelId(p.name, m)" class="min-w-0" label-class="truncate" />
                   <span
                     v-if="modelMetaFor(p, m).contextTokens !== undefined"
                     title="context window"

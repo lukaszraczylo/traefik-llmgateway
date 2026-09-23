@@ -115,7 +115,7 @@ watch(() => auth.error, (err) => {
               <FontAwesomeIcon :icon="showKey ? faEyeSlash : faEye" class="size-3.5" aria-hidden="true" />
             </Button>
           </div>
-          <Button type="submit" class="w-full" :disabled="!canSubmit">
+          <Button type="submit" class="h-10 w-full" :disabled="!canSubmit">
             Continue
           </Button>
         </form>

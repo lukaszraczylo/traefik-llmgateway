@@ -3,7 +3,9 @@ import { computed, onMounted } from 'vue'
 
 import ChangeHelper from '@/components/ChangeHelper.vue'
 import ConfigTree from '@/components/ConfigTree.vue'
+import ErrorState from '@/components/ErrorState.vue'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import { Skeleton } from '@/components/ui/skeleton'
 import { useConfigStore } from '@/stores/config'
 import { useConsumersStore } from '@/stores/consumers'
 import { useDashboardStore } from '@/stores/dashboard'
@@ -32,13 +34,21 @@ const userNames = computed(() => (consumers.data?.users ?? []).map((u) => u.name
 
 <template>
   <div class="flex flex-col gap-6">
-    <Card v-if="config.error">
+    <Card v-if="config.error && !config.data">
       <CardHeader>
         <CardTitle>Config</CardTitle>
-        <CardDescription class="text-destructive">{{ config.error }}</CardDescription>
       </CardHeader>
+      <CardContent>
+        <ErrorState :message="config.error" :on-retry="config.fetchConfig" />
+      </CardContent>
     </Card>
-    <p v-else-if="config.loading && !config.data" class="text-sm text-muted-foreground">loading…</p>
+    <!-- Mirrors ConfigTree's own final SnippetBlock shape (a label line above a bordered block) so it causes no layout shift once the real config arrives. -->
+    <Card v-else-if="config.loading && !config.data">
+      <CardContent class="flex flex-col gap-1.5">
+        <Skeleton class="h-3 w-56" />
+        <Skeleton class="h-64 w-full rounded-md" />
+      </CardContent>
+    </Card>
     <ConfigTree v-else-if="config.data" :config="config.data.config" :warnings="config.data.warnings" />
 
     <Card>

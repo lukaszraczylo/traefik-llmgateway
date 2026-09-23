@@ -63,6 +63,35 @@ export function targetAccessCell(group: AdminConsumerGroup, target: Pick<AdminTa
   return { allowed: target.access.includes(group.name) }
 }
 
+/**
+ * MatrixKind is AccessMatrix.vue's own view switch: which one column
+ * group the table currently renders (P4 three-view split — the old
+ * matrix mixed providers, MCP servers, and agents in one wide table,
+ * which was hard to scan). `'models'` is the default.
+ */
+export type MatrixKind = 'models' | 'mcp' | 'agents'
+
+/** MATRIX_KINDS is the ordered list AccessMatrix.vue's Tabs render from — this array's order IS the tab order. */
+export const MATRIX_KINDS: MatrixKind[] = ['models', 'mcp', 'agents']
+
+/** MATRIX_KIND_LABEL is each kind's tab/column-group label. */
+export const MATRIX_KIND_LABEL: Record<MatrixKind, string> = {
+  models: 'Models',
+  mcp: 'MCP servers',
+  agents: 'Agents',
+}
+
+/**
+ * parseMatrixKind reads the `matrix` hash page param (ConsumersPage.vue,
+ * mirroring its own `view` param's parsing) into a MatrixKind — unknown
+ * or absent values (a stale/hand-edited link, or the clean default hash
+ * with no `matrix` param at all) fall back to `'models'` rather than
+ * throwing.
+ */
+export function parseMatrixKind(raw: string | undefined): MatrixKind {
+  return (MATRIX_KINDS as readonly string[]).includes(raw ?? '') ? (raw as MatrixKind) : 'models'
+}
+
 /** AccessMatrixRow is one group's full row: its own provider/MCP-server/agent cells, each keyed by that column's own name — AccessMatrix.vue iterates `providerNames`/`mcpServers`/`agents` (the caller's own column order) and looks up each cell by name rather than relying on object key iteration order. */
 export interface AccessMatrixRow {
   group: string
@@ -91,4 +120,34 @@ export function buildAccessMatrix(
     mcpServers: Object.fromEntries(mcpServers.map((target) => [target.name, targetAccessCell(group, target)])),
     agents: Object.fromEntries(agents.map((target) => [target.name, targetAccessCell(group, target)])),
   }))
+}
+
+/**
+ * MatrixColumnsState is what AccessMatrix.vue's CardContent renders in
+ * place of a table for the CURRENTLY SELECTED kind's own columns —
+ * distinct from the separate consumers.error/consumers.loading/
+ * rows.length===0 branches ahead of it in the template, which are about
+ * GROUPS (rows, stores/consumers.ts), a different store entirely.
+ */
+export type MatrixColumnsState = 'loading' | 'error' | 'empty' | 'ready'
+
+/**
+ * matrixColumnsState decides which of the four states above the current
+ * kind's own column source is in. `sourceLoaded` must be whether the
+ * RAW dashboard field is non-null (`dashboard.overview !== null` for
+ * 'models', `dashboard.targets !== null` for 'mcp'/'agents') — NOT
+ * whether the derived column list (which maps a null source to `[]`) is
+ * empty, since those two are indistinguishable by column count alone.
+ * Previously AccessMatrix.vue read `columns.length === 0` on its own to
+ * decide whether to show "No providers configured." etc — true both
+ * while the source had not loaded yet (or had just failed) AND once it
+ * had genuinely loaded with zero columns, so a page still on its first
+ * fetch, or whose fetch had just failed, showed "no MCP servers
+ * configured" as a confirmed fact about the fleet rather than "still
+ * loading" or the real error. `dashboardError` (dashboard.ts's own
+ * `error` field) is read only in the 'error' state.
+ */
+export function matrixColumnsState(sourceLoaded: boolean, columnCount: number, dashboardError: string): MatrixColumnsState {
+  if (!sourceLoaded) return dashboardError ? 'error' : 'loading'
+  return columnCount === 0 ? 'empty' : 'ready'
 }

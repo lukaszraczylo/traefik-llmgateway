@@ -144,13 +144,95 @@ export const useSpendStore = defineStore('spend', {
     drilldownDisabled: false,
 
     loading: false,
-    error: '',
+    /**
+     * breakdownError/pricingHealthError/drilldownError/burndownError
+     * (verify-ui-states-2.md #3 fix) replace a single shared `error` field
+     * — that field was cleared ONLY on fetchBreakdown's own success (never
+     * by the other three legs), so a pricing-health/drilldown/burndown
+     * failure that happened to land before a later, unrelated breakdown
+     * success got silently wiped (a false "no traffic" reading over a real
+     * failure), or, the other direction, an already-cleared error from one
+     * leg could sit stale under a DIFFERENT card that loaded fine. Each
+     * card below (SpendPage.vue) now reads and retries only its own field.
+     * fetchModelRanking's own failures used to fold into `breakdownError`
+     * too — see `rankingError` below (verify-ui-states-3.md pre-existing
+     * fix) for why that was also wrong and what replaced it.
+     */
+    breakdownError: '',
+    /**
+     * rankingError (verify-ui-states-3.md pre-existing-bug fix) is
+     * fetchModelRanking's OWN error field. It used to fold into
+     * `breakdownError`, which a SUBSEQUENT fetchBreakdown success then
+     * cleared unconditionally (line below), silently wiping a real ranking
+     * failure the moment breakdown itself finished fetching — even a
+     * breakdown built from that same still-empty/stale ranking (a cold
+     * by=model load then renders 100% "Other" with no error in sight).
+     * Never touched by fetchBreakdown, so SpendPage.vue can surface it next
+     * to the breakdown chart independently, with no cross-clearing.
+     */
+    rankingError: '',
+    pricingHealthError: '',
+    drilldownError: '',
+    burndownError: '',
+    /**
+     * pricingHealthLoading/drilldownLoading/burndownLoading (verify-ui-
+     * states.md #3/#7): PricingHealthTable.vue, AttributionDrilldown.vue,
+     * and BurnDownChart's own SpendPage.vue wrapper each need their OWN
+     * in-flight signal — `loading` above only wraps fetchBreakdown (the
+     * by=model/provider/group chart), not these three, which run in
+     * parallel via refresh()'s own Promise.all — so reusing `loading` for
+     * any of them would read false (or wrongly true) independent of
+     * whether THEIR OWN fetch is actually in flight.
+     */
+    pricingHealthLoading: false,
+    drilldownLoading: false,
+    burndownLoading: false,
+    /**
+     * pricingHealthLoaded/drilldownLoaded (verify-ui-states-2.md #2 fix)
+     * are "has a fetch completed for the CURRENT selection" —
+     * PricingHealthTable.vue's/AttributionDrilldown.vue's own `loaded`
+     * prop — set once their own fetch settles into a genuine result
+     * (success, or a known-disabled 404 for the drilldown), and reset the
+     * moment the selection they depend on changes (see
+     * pricingHealthWindow/pricingHealthSpan and
+     * drilldownWindow/drilldownSpan/drilldownDrill below), so a
+     * genuinely empty table still reads as settled/empty across the 60s
+     * poll's own `loading` flips instead of flashing a skeleton on every
+     * tick.
+     */
+    pricingHealthLoaded: false,
+    drilldownLoaded: false,
+    /** The (window, span) pricingHealthRanking was last fetched FOR — fetchPricingHealthRanking's own "did the selection this ranking depends on actually change" check, resetting pricingHealthLoaded below exactly when it did. */
+    pricingHealthWindow: null as HistoryWindow | null,
+    pricingHealthSpan: null as number | null,
+    /** The (window, span, drill) drilldownRows were last fetched FOR — fetchDrilldown's own equivalent of the field above. */
+    drilldownWindow: null as HistoryWindow | null,
+    drilldownSpan: null as number | null,
+    drilldownDrillFetchedFor: null as string | null,
+    /**
+     * The (by, metric, window, span, scope) `buckets` was last fetched FOR
+     * (verify-ui-states-3.md NEW-1) — fetchBreakdown's own equivalent of
+     * the two field groups above. A genuine SELECTION change clears
+     * `buckets` synchronously, before the fetch starts, so SpendPage.vue's
+     * breakdownState (hasData: buckets.length > 0) flips to 'skeleton'
+     * immediately instead of leaving the PREVIOUS selection's series on
+     * screen mislabeled under the NEW selection's metric/by/range/scope. A
+     * same-selection refetch (a 60s poll tick, or a Retry) leaves `buckets`
+     * alone — loadState's own 'ready' precedence (lib/load-state.ts).
+     */
+    breakdownByFetchedFor: null as SpendBy | null,
+    breakdownMetricFetchedFor: null as HistoryMetric | null,
+    breakdownWindow: null as HistoryWindow | null,
+    breakdownSpan: null as number | null,
+    breakdownScope: null as string | null,
     /** breakdownReqId/rankingReqId/burndownReqId/drilldownReqId are FOUR independent latest-request-wins counters (stores/history.ts's own seriesReqId precedent), one per concern — unlike history.ts's tabs, every one of these fetches concurrently on a single Spend page render, so a single shared counter would make an in-flight ranking fetch spuriously discard a still-relevant breakdown fetch (or vice versa) merely for starting first. */
     breakdownReqId: 0,
     rankingReqId: 0,
     pricingHealthReqId: 0,
     burndownReqId: 0,
     drilldownReqId: 0,
+    /** refreshReqId (verify-ui-states-2.md #10 fix) is refresh()'s own latest-request-wins counter over `this.loading` — an overlapping poll-tick refresh and a selection/filter-change refresh can otherwise resolve in either order, and the FIRST to finish clears `loading` while the SECOND is still in flight. */
+    refreshReqId: 0,
     poller: undefined as VisibilityPoller | undefined,
   }),
   getters: {
@@ -186,16 +268,37 @@ export const useSpendStore = defineStore('spend', {
      * concurrently would race fetchBreakdown against a still-in-flight (or
      * still-empty, on first load) ranking. fetchBurndown/fetchDrilldown
      * depend on neither and run fully in parallel with that chain.
+     *
+     * `this.loading` is now owned HERE, wrapping the whole
+     * fetchModelRanking-then-fetchBreakdown chain (verify-ui-states.md
+     * live-preview fix), not just fetchBreakdown's own body: SpendPage.
+     * vue's breakdownState (lib/load-state.ts) reads `spend.loading` to
+     * decide skeleton-vs-empty for the breakdown chart, and with the flag
+     * previously scoped to fetchBreakdown alone, it stayed FALSE for the
+     * entire fetchModelRanking leg — live verification caught the
+     * breakdown chart rendering as a bare empty grid (loadState's 'empty'
+     * branch, not 'skeleton') for that whole first leg on every load.
      */
     async refresh(): Promise<void> {
       const auth = useAuthStore()
       if (!auth.isAuthenticated) return
-      await Promise.all([
-        this.fetchModelRanking().then(() => this.fetchBreakdown()),
-        this.fetchPricingHealthRanking(),
-        this.fetchBurndown(),
-        this.fetchDrilldown(),
-      ])
+      // verify-ui-states-2.md #10: latest-request-wins over `this.loading`
+      // itself — a poll tick and a selection/filter-change refresh can
+      // overlap and resolve in either order; only the LATEST refresh call
+      // is allowed to clear the flag, so an earlier, still-settling one
+      // finishing first never clears it out from under the later one.
+      const requestId = ++this.refreshReqId
+      this.loading = true
+      try {
+        await Promise.all([
+          this.fetchModelRanking().then(() => this.fetchBreakdown()),
+          this.fetchPricingHealthRanking(),
+          this.fetchBurndown(),
+          this.fetchDrilldown(),
+        ])
+      } finally {
+        if (requestId === this.refreshReqId) this.loading = false
+      }
     },
     async fetchModelRanking(): Promise<void> {
       const filters = useFiltersStore()
@@ -206,32 +309,69 @@ export const useSpendStore = defineStore('spend', {
         )
         if (requestId !== this.rankingReqId) return
         this.modelRanking = res.models
+        this.rankingError = ''
       } catch (err) {
         if (requestId !== this.rankingReqId) return
         if (isAuthRejection(err)) return
-        this.error = messageOf(err)
+        // Own field, never folded into breakdownError — see this store's
+        // own doc comment on rankingError (verify-ui-states-3.md
+        // pre-existing fix).
+        this.rankingError = messageOf(err)
       }
     },
     /** fetchPricingHealthRanking is pricingHealthRanking's own fetch — always metric=req, independent of `this.metric` (see that field's own doc comment, P3 item 21). Runs in parallel with fetchModelRanking in refresh(), not chained after it: neither depends on the other's result. */
     async fetchPricingHealthRanking(): Promise<void> {
       const filters = useFiltersStore()
+      // verify-ui-states-2.md #2: a genuine SELECTION change (this ranking
+      // depends only on window/span, not `by`/`metric`/`drill`/scope)
+      // resets pricingHealthLoaded so the new selection's own skeleton
+      // shows — a background poll tick (same window/span) leaves it alone.
+      if (this.pricingHealthWindow !== filters.window || this.pricingHealthSpan !== filters.span) {
+        this.pricingHealthLoaded = false
+      }
+      this.pricingHealthWindow = filters.window
+      this.pricingHealthSpan = filters.span
       const requestId = ++this.pricingHealthReqId
+      this.pricingHealthLoading = true
       try {
         const res = await adminFetch<AdminUsageModelsResponse>(
           `/admin/api/usage/models?metric=req&window=${filters.window}&span=${filters.span}&limit=${MODEL_RANKING_LIMIT}&detail=1`,
         )
         if (requestId !== this.pricingHealthReqId) return
         this.pricingHealthRanking = res.models
+        this.pricingHealthError = ''
+        this.pricingHealthLoaded = true
       } catch (err) {
         if (requestId !== this.pricingHealthReqId) return
         if (isAuthRejection(err)) return
-        this.error = messageOf(err)
+        this.pricingHealthError = messageOf(err)
+      } finally {
+        if (requestId === this.pricingHealthReqId) this.pricingHealthLoading = false
       }
     },
     async fetchBreakdown(): Promise<void> {
       const filters = useFiltersStore()
+      // verify-ui-states-3.md NEW-1: a genuine SELECTION change (by,
+      // metric, window, span, or scope) clears `buckets` synchronously,
+      // BEFORE the fetch starts — flips breakdownState to 'skeleton'
+      // immediately instead of leaving the OLD selection's series on
+      // screen mislabeled under the NEW selection. A same-selection
+      // refetch (a 60s poll tick, or a Retry) leaves `buckets` alone.
+      if (
+        this.breakdownByFetchedFor !== this.by ||
+        this.breakdownMetricFetchedFor !== this.metric ||
+        this.breakdownWindow !== filters.window ||
+        this.breakdownSpan !== filters.span ||
+        this.breakdownScope !== filters.scope
+      ) {
+        this.buckets = []
+      }
+      this.breakdownByFetchedFor = this.by
+      this.breakdownMetricFetchedFor = this.metric
+      this.breakdownWindow = filters.window
+      this.breakdownSpan = filters.span
+      this.breakdownScope = filters.scope
       const requestId = ++this.breakdownReqId
-      this.loading = true
       try {
         if (filters.scope === 'all') {
           await this.fetchBreakdownFleetWide(filters.window, filters.span, requestId)
@@ -244,7 +384,7 @@ export const useSpendStore = defineStore('spend', {
           await this.fetchBreakdownProviderScope(filters.scope.slice('provider:'.length), filters.window, filters.span, requestId)
         }
         if (requestId !== this.breakdownReqId) return
-        this.error = ''
+        this.breakdownError = ''
         if (filters.cmpSpec.requested) {
           await this.fetchComparison(filters.scope, filters.window, filters.span, filters.cmpSpec.offset, requestId)
         } else {
@@ -254,9 +394,7 @@ export const useSpendStore = defineStore('spend', {
       } catch (err) {
         if (requestId !== this.breakdownReqId) return
         if (isAuthRejection(err)) return
-        this.error = messageOf(err)
-      } finally {
-        if (requestId === this.breakdownReqId) this.loading = false
+        this.breakdownError = messageOf(err)
       }
     },
     /**
@@ -383,8 +521,17 @@ export const useSpendStore = defineStore('spend', {
         this.burndownBuckets = []
         this.burndownPoints = []
         this.burndownBudgetMicros = null
+        // verify-ui-states-3.md NEW-2: also reset burndownError/Loading —
+        // an in-flight burndown for a PREVIOUS scope has its own `finally`
+        // fail the reqId check below (burndownReqId was just bumped
+        // above), so without this its stale error/loading would otherwise
+        // survive a detour through a provider scope (chart hidden) and
+        // reappear once the reader switches back to a scope with a chart.
+        this.burndownError = ''
+        this.burndownLoading = false
         return
       }
+      this.burndownLoading = true
       try {
         const span = currentMonthDaySpan(new Date())
         const res = await this.fetchSeries([scope], 'cost', 'day', span, 0)
@@ -392,16 +539,30 @@ export const useSpendStore = defineStore('spend', {
         this.burndownBuckets = res.buckets
         this.burndownPoints = res.series.find((s) => s.scope === scope)?.points ?? new Array<number>(res.buckets.length).fill(0)
         this.burndownBudgetMicros = burndownBudgetMicros(scope)
+        this.burndownError = ''
       } catch (err) {
         if (requestId !== this.burndownReqId) return
         if (isAuthRejection(err)) return
-        this.error = messageOf(err)
+        this.burndownError = messageOf(err)
+      } finally {
+        if (requestId === this.burndownReqId) this.burndownLoading = false
       }
     },
     async fetchDrilldown(): Promise<void> {
       const filters = useFiltersStore()
+      // verify-ui-states-2.md #2: a genuine SELECTION change (window,
+      // span, or the drill breadcrumb itself) resets drilldownLoaded so
+      // the new selection's own skeleton shows — a background poll tick
+      // (same three values) leaves it alone.
+      if (this.drilldownWindow !== filters.window || this.drilldownSpan !== filters.span || this.drilldownDrillFetchedFor !== this.drill) {
+        this.drilldownLoaded = false
+      }
+      this.drilldownWindow = filters.window
+      this.drilldownSpan = filters.span
+      this.drilldownDrillFetchedFor = this.drill
       const requestId = ++this.drilldownReqId
       const level = drilldownLevel(this.drill)
+      this.drilldownLoading = true
       try {
         // usermodel only accepts day/month (redesign-plan.md section
         // 1.3.v) — clamped via lib/range.ts's shared dayOrMonthWindow so
@@ -421,19 +582,28 @@ export const useSpendStore = defineStore('spend', {
         this.drilldownRows = res.rows
         this.drilldownMetrics = res.metrics
         this.drilldownDisabled = false
+        this.drilldownError = ''
+        this.drilldownLoaded = true
       } catch (err) {
         if (requestId !== this.drilldownReqId) return
         if (isAuthRejection(err)) return
         if (err instanceof AdminApiError && err.status === 404) {
           // usermodel with admin.stats.userModel off (redesign-plan.md
           // section 1.3.v) — a known, named-in-the-hint state, not an
-          // error the reader needs to see in the status line.
+          // error the reader needs to see in the status line. Still a
+          // SETTLED fetch for this selection (AttributionDrilldown.vue's
+          // own hint Alert takes precedence over skeleton/error/empty
+          // regardless), so drilldownLoaded is set here too.
           this.drilldownRows = []
           this.drilldownMetrics = []
           this.drilldownDisabled = true
+          this.drilldownError = ''
+          this.drilldownLoaded = true
           return
         }
-        this.error = messageOf(err)
+        this.drilldownError = messageOf(err)
+      } finally {
+        if (requestId === this.drilldownReqId) this.drilldownLoading = false
       }
     },
     startPolling(): void {

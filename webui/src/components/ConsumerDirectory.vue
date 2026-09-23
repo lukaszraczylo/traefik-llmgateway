@@ -6,11 +6,16 @@ import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import CompactNumber from '@/components/CompactNumber.vue'
 import CostForecastCard from '@/components/CostForecastCard.vue'
 import CsvExportButton from '@/components/CsvExportButton.vue'
+import EmptyState from '@/components/EmptyState.vue'
+import ErrorState from '@/components/ErrorState.vue'
 import ModelChip from '@/components/ModelChip.vue'
 import SearchInput from '@/components/SearchInput.vue'
+import SkeletonList from '@/components/SkeletonList.vue'
+import SkeletonTable from '@/components/SkeletonTable.vue'
 import SortHeaderButton from '@/components/SortHeaderButton.vue'
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/components/ui/accordion'
 import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { valueUpdater } from '@/components/ui/table'
 import UsageBar from '@/components/UsageBar.vue'
@@ -19,6 +24,7 @@ import { useNow } from '@/composables/useNow'
 import { useSearchQuery } from '@/composables/useSearchQuery'
 import { headroom, monthProgress, projectMonthEnd } from '@/lib/forecast'
 import { formatCost, formatExactInt, formatLimits } from '@/lib/format'
+import { loadState } from '@/lib/load-state'
 import { type ExpandState, clearExpandOverrides, computeExpandedItems, toggleItemExpand } from '@/lib/search-expand'
 import { BUDGET_RATIO_LABEL, type BudgetRatio, budgetRatios } from '@/lib/usage-bars'
 import { usageColumns } from '@/lib/usage-columns'
@@ -45,6 +51,23 @@ const dashboard = useDashboardStore()
 const consumers = useConsumersStore()
 const nav = useNavStore()
 const usage = computed(() => dashboard.usage)
+
+/**
+ * dashboardLoadState (verify-ui-states.md #3) gates the Groups/Users
+ * cards' own skeleton/error — `hasData` is "has GET /admin/api/usage EVER
+ * landed", not "are there any groups/users": a fleet with genuinely zero
+ * groups/users still reads 'ready' and falls through to the EXISTING
+ * noGroupsConfigured/usersEmptyMessage copy below, unchanged. Mirrors
+ * HomePage.vue's own identical kpiTilesState convention (verify-ui-states-2.
+ * md #11: this comment named the old kpiTilesLoading identifier, since
+ * renamed) — both read the same polled dashboard store. Previously
+ * `noGroupsConfigured`/
+ * `usersEmptyMessage` read `usage.value?.groups/users.length ?? 0 === 0`
+ * directly, which was ALSO true before the first successful fetch (or
+ * after a failed one) — "No groups/users configured" rendered as a false
+ * fleet fact while the real state was "not loaded yet" or "failed".
+ */
+const dashboardLoadState = computed(() => loadState({ loading: !dashboard.lastUpdated, hasData: usage.value !== null, error: dashboard.error }))
 
 onMounted(() => {
   void consumers.ensureConsumers()
@@ -116,6 +139,9 @@ function visibleMembers(group: AdminUsageEntryView): AdminUsageEntryView[] {
 const groupsEmptyMessage = computed(() =>
   !usage.value?.groups.length ? 'none configured' : hasQuery.value ? `no groups match "${userQuery.value}"` : 'none',
 )
+
+/** noGroupsConfigured (states-plan.md item 2: "Consumers: 'No groups configured' + hint to the Config page change helper") — mirrors AccessMatrix.vue's identical own noGroupsConfigured, the Access matrix view's own copy of this same "Consumers" page fact. Only true when genuinely nothing is configured, never while a search query merely matches none (groupsEmptyMessage's own "no groups match" case keeps its plain inline text — a filter producing zero rows is a routine interaction, not a fleet-configuration fact worth the same visual weight). */
+const noGroupsConfigured = computed(() => (usage.value?.groups.length ?? 0) === 0 && !hasQuery.value)
 
 /** filteredUsers is every user matching the query directly, PLUS every member of a group that matched by NAME. */
 const filteredUsers = computed<AdminUsageEntryView[]>(() => {
@@ -301,6 +327,9 @@ function groupsCsv(): string {
         </div>
       </CardHeader>
       <CardContent>
+        <SkeletonList v-if="dashboardLoadState === 'skeleton'" :rows="3" />
+        <ErrorState v-else-if="dashboardLoadState === 'error'" :message="dashboard.error" :on-retry="dashboard.refresh" />
+        <template v-else>
         <div v-if="sortedGroupRows.length" class="mb-3 flex flex-wrap gap-x-4 gap-y-1 text-xs font-medium text-muted-foreground">
           <SortHeaderButton v-for="header in toolbarHeaders" :key="header.id" :header="header" />
         </div>
@@ -334,7 +363,8 @@ function groupsCsv(): string {
                         :key="providerName"
                         as="span"
                         variant="secondary"
-                        class="font-mono font-normal"
+                        class="max-w-full truncate font-mono font-normal"
+                        :title="providerName"
                       >
                         {{ providerName }}
                       </Badge>
@@ -348,7 +378,7 @@ function groupsCsv(): string {
                     <div v-if="row.original.models?.length" class="flex flex-wrap gap-1.5">
                       <template v-for="modelId in row.original.models" :key="modelId">
                         <ModelChip v-if="!isGlobPattern(modelId)" :id="modelId" />
-                        <Badge v-else as="span" variant="secondary" class="font-mono font-normal">{{ modelId }}</Badge>
+                        <Badge v-else as="span" variant="secondary" class="max-w-full truncate font-mono font-normal" :title="modelId">{{ modelId }}</Badge>
                       </template>
                     </div>
                     <span v-else class="text-muted-foreground">All models</span>
@@ -363,7 +393,8 @@ function groupsCsv(): string {
                         :key="serverName"
                         as="span"
                         variant="secondary"
-                        class="font-mono font-normal"
+                        class="max-w-full truncate font-mono font-normal"
+                        :title="serverName"
                       >
                         {{ serverName }}
                       </Badge>
@@ -375,7 +406,14 @@ function groupsCsv(): string {
                   <dt class="text-xs text-muted-foreground" :title="GLOB_HINT">Agents</dt>
                   <dd>
                     <div v-if="row.original.agents?.length" class="flex flex-wrap gap-1.5">
-                      <Badge v-for="agentName in row.original.agents" :key="agentName" as="span" variant="secondary" class="font-mono font-normal">
+                      <Badge
+                        v-for="agentName in row.original.agents"
+                        :key="agentName"
+                        as="span"
+                        variant="secondary"
+                        class="max-w-full truncate font-mono font-normal"
+                        :title="agentName"
+                      >
                         {{ agentName }}
                       </Badge>
                     </div>
@@ -467,7 +505,11 @@ function groupsCsv(): string {
             </AccordionContent>
           </AccordionItem>
         </Accordion>
+        <EmptyState v-else-if="noGroupsConfigured" title="No groups configured." description="Grant a group access from the Config page's change helper.">
+          <Button type="button" variant="outline" size="sm" @click="nav.goTo('config', { helper: 'grant' })">Open change helper</Button>
+        </EmptyState>
         <p v-else class="py-6 text-center text-sm text-muted-foreground">{{ groupsEmptyMessage }}</p>
+        </template>
       </CardContent>
     </Card>
 
@@ -482,7 +524,10 @@ function groupsCsv(): string {
         </div>
       </CardHeader>
       <CardContent>
+        <SkeletonTable v-if="dashboardLoadState === 'skeleton'" :rows="5" :cols="5" />
+        <ErrorState v-else-if="dashboardLoadState === 'error'" :message="dashboard.error" :on-retry="dashboard.refresh" />
         <UsageTable
+          v-else
           id-label="Name"
           secondary-column-label="Group"
           :entries="filteredUsers"

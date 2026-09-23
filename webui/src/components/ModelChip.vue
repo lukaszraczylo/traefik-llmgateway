@@ -5,6 +5,7 @@ import { computed, onUnmounted, ref, useTemplateRef } from 'vue'
 import { Badge } from '@/components/ui/badge'
 import { copyText } from '@/lib/clipboard'
 import { formatContextWindow, formatModelCostHover } from '@/lib/format'
+import { useToastsStore } from '@/stores/toasts'
 
 /**
  * ModelChip is one clickable, copyable model-id chip, used anywhere a
@@ -51,6 +52,7 @@ const props = defineProps<{
 const labelRef = useTemplateRef<HTMLElement>('label')
 const state = ref<'idle' | 'copied' | 'selected' | 'failed'>('idle')
 let resetTimer: ReturnType<typeof setTimeout> | undefined
+const toasts = useToastsStore()
 
 function scheduleReset(): void {
   clearTimeout(resetTimer)
@@ -64,8 +66,13 @@ async function onClick(): Promise<void> {
   // 'failed' (neither the Clipboard API nor the selection fallback
   // worked) gets its own visible state rather than a silent no-op — a
   // click that visibly does nothing reads as a broken button, not as
-  // "nothing to report".
+  // "nothing to report". Only a FAILURE also gets a toast (states-plan.md
+  // item 3) — 'copied'/'selected' already have clear, accessible inline
+  // feedback right at the click target (the icon swap plus this same
+  // title/aria-label text), so a success toast on top would double-notify
+  // for something the reader is already looking straight at.
   state.value = result
+  if (result === 'failed') toasts.push({ kind: 'error', message: `Could not copy ${props.id}.` })
   scheduleReset()
 }
 
@@ -123,13 +130,13 @@ onUnmounted(() => {
     as="button"
     type="button"
     variant="secondary"
-    class="cursor-pointer gap-1 font-mono text-xs font-normal transition-colors hover:bg-accent hover:text-accent-foreground"
+    class="max-w-full cursor-pointer gap-1 truncate font-mono text-xs font-normal transition-colors hover:bg-accent hover:text-accent-foreground"
     :class="state === 'failed' ? 'text-destructive' : ''"
     :title="title"
     :aria-label="title"
     @click="onClick"
   >
-    <span ref="label" class="select-text">{{ id }}</span>
+    <span ref="label" class="min-w-0 truncate select-text">{{ id }}</span>
     <FontAwesomeIcon :icon="icon[state]" class="size-2.5 shrink-0" aria-hidden="true" />
   </Badge>
 </template>

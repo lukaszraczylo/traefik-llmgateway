@@ -4,6 +4,7 @@ import { onUnmounted, ref, useTemplateRef } from 'vue'
 
 import { Button } from '@/components/ui/button'
 import { copyText } from '@/lib/clipboard'
+import { useToastsStore } from '@/stores/toasts'
 
 /**
  * SnippetBlock (redesign-plan.md section 3.4) is the one "here is text to
@@ -22,9 +23,15 @@ const props = defineProps<{
 const preRef = useTemplateRef<HTMLElement>('pre')
 const state = ref<'idle' | 'copied' | 'selected' | 'failed'>('idle')
 let resetTimer: ReturnType<typeof setTimeout> | undefined
+const toasts = useToastsStore()
 
 async function onCopy(): Promise<void> {
   state.value = await copyText(props.text, preRef.value ?? undefined)
+  // Only a FAILURE also gets a toast (states-plan.md item 3) — see
+  // ModelChip.vue's own identical doc comment: 'copied'/'selected'
+  // already have clear inline feedback (the button's own icon/label
+  // swap right below), so a success toast would double-notify.
+  if (state.value === 'failed') toasts.push({ kind: 'error', message: 'Could not copy the snippet.' })
   clearTimeout(resetTimer)
   resetTimer = setTimeout(() => {
     state.value = 'idle'

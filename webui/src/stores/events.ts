@@ -3,6 +3,7 @@ import { defineStore } from 'pinia'
 import { AdminApiError, adminFetch } from '@/lib/api'
 import { createVisibilityPoller, type VisibilityPoller } from '@/lib/polling'
 import { useAuthStore } from '@/stores/auth'
+import { useToastsStore } from '@/stores/toasts'
 import type { AdminEventsResponse, AdminEventView } from '@/types/api'
 
 /** How often the Events view polls while mounted — same cadence as the Providers/Usage/Targets dashboard poll (stores/dashboard.ts's own POLL_MS): a rate-limit/upstream event is exactly the kind of thing an operator wants to see within a few seconds, not thirty. */
@@ -57,6 +58,8 @@ export const useEventsStore = defineStore('events', {
     poller: undefined as VisibilityPoller | undefined,
     /** Mirrors dashboard.ts's own in-flight guard: a round trip slower than POLL_MS must never stack a second refresh() on top of the first. */
     refreshing: false,
+    /** toastedForFailure mirrors dashboard.ts's own flag: states-plan.md item 3's "one toast per failure streak per store until it recovers". */
+    toastedForFailure: false,
   }),
   actions: {
     async refresh(): Promise<void> {
@@ -64,6 +67,12 @@ export const useEventsStore = defineStore('events', {
       if (!auth.isAuthenticated) return
       if (this.refreshing) return
       this.refreshing = true
+      // Captured before this tick's own result lands — see dashboard.ts's
+      // doRefresh's identical hadDataBefore doc comment: `error` alone is
+      // stale-friendly (a previous failure leaves it set), but `lastUpdated`
+      // is null exactly until the FIRST successful fetch ever completes,
+      // regardless of how many failures came before it.
+      const hadDataBefore = this.lastUpdated !== null
       try {
         const res = await adminFetch<AdminEventsResponse>(`/admin/api/events?limit=${EVENTS_LIMIT}`)
         this.events = res.events
@@ -73,12 +82,20 @@ export const useEventsStore = defineStore('events', {
         this.degraded = res.degraded ?? false
         this.lastUpdated = new Date()
         this.error = ''
+        this.toastedForFailure = false
       } catch (err) {
         // A 401/403 already rejected the key (lib/api.ts) — the AuthGate
         // takes over the whole view, matching dashboard.ts's own
         // identical carve-out; nothing left to report here.
         if (err instanceof AdminApiError && (err.status === 401 || err.status === 403)) return
         this.error = err instanceof Error ? err.message : String(err)
+        // states-plan.md item 3 — see dashboard.ts's doRefresh for the
+        // full reasoning: only when the reader already had a successful
+        // fetch to show, and only once per ongoing failure streak.
+        if (hadDataBefore && !this.toastedForFailure) {
+          useToastsStore().push({ kind: 'error', message: `Events refresh failed: ${this.error}` })
+        }
+        this.toastedForFailure = true
       } finally {
         this.refreshing = false
       }

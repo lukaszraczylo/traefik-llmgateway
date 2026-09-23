@@ -8,7 +8,9 @@ import AuthGate from '@/components/AuthGate.vue'
 import ConfigWarningsBanner from '@/components/ConfigWarningsBanner.vue'
 import GlobalFilterBar from '@/components/GlobalFilterBar.vue'
 import SidebarNav from '@/components/SidebarNav.vue'
+import ToastViewport from '@/components/ToastViewport.vue'
 import { Button } from '@/components/ui/button'
+import { Skeleton } from '@/components/ui/skeleton'
 import { useHashState } from '@/composables/useHashState'
 import type { PageId } from '@/lib/pages'
 import { useAuthStore } from '@/stores/auth'
@@ -56,19 +58,24 @@ const currentPage = computed<Component>(() => PAGES[nav.page])
 // statusText reads dashboard.error/lastUpdated unconditionally — it is
 // correct only while the template's own `v-if="auth.isAuthenticated"`
 // below keeps it off-screen otherwise, so a first load with no stored
-// key never shows a stale "refresh failed"/"loading..." line under the
-// auth gate. Appended only on a genuinely successful poll —
-// dashboard.overview.replica reflects WHICH replica answered that poll,
-// so it must never be shown alongside a stale value during a failed or
-// still-loading refresh.
+// key never shows a stale "refresh failed" line under the auth gate.
+// Appended only on a genuinely successful poll — dashboard.overview.
+// replica reflects WHICH replica answered that poll, so it must never be
+// shown alongside a stale value during a failed or still-loading refresh.
+// The unreachable 'loading...' fallback (verify-ui-states.md #5 fix) was
+// dead code: isInitialStatusLoad below covers exactly
+// `!dashboard.error && !dashboard.lastUpdated`, the ONLY state in which
+// neither of this function's two `if` branches fires, and the template
+// renders the Skeleton for that state instead of ever reading statusText.
 const statusText = computed<string>(() => {
   if (dashboard.error) return `refresh failed: ${dashboard.error}`
-  if (dashboard.lastUpdated) {
-    const replica = dashboard.overview?.replica
-    return `last updated ${dashboard.lastUpdated.toLocaleTimeString()}${replica ? ` · replica ${replica}` : ''}`
-  }
-  return 'loading...'
+  const replica = dashboard.overview?.replica
+  const updated = dashboard.lastUpdated?.toLocaleTimeString() ?? ''
+  return `last updated ${updated}${replica ? ` · replica ${replica}` : ''}`
 })
+
+/** isInitialStatusLoad gates the header status line's skeleton — the FIRST dashboard poll only (states-plan.md item 1: a skeleton only when there is no data yet, never on a background refresh — dashboard.lastUpdated stays set through every later poll, success or failure). */
+const isInitialStatusLoad = computed<boolean>(() => !dashboard.error && !dashboard.lastUpdated)
 
 onMounted(() => {
   dashboard.startPolling()
@@ -93,9 +100,29 @@ onMounted(() => {
           <FontAwesomeIcon :icon="faGithub" class="size-4" aria-hidden="true" />
         </Button>
       </div>
+      <!--
+        No role="status" here (verify-ui-states.md #5 fix) — this line
+        updates every 5s (dashboard.ts's POLL_MS), and a live region
+        re-announces its FULL text on every single change; a screen
+        reader would have read "last updated HH:MM:SS" once every 5
+        seconds for as long as the session stayed open. A background
+        refresh FAILURE (the one change actually worth announcing) is
+        already a "meaningful change" a screen reader hears from
+        elsewhere: stores/dashboard.ts's own toast (states-plan.md item 3,
+        "background refresh failures when data is already shown") fires
+        exactly once per failure streak, through ToastViewport's own
+        assertive live region — a second, duplicate announcement here
+        would only repeat it.
+      -->
       <p v-if="auth.isAuthenticated" class="flex items-center gap-1.5 text-sm text-muted-foreground">
-        <FontAwesomeIcon v-if="dashboard.error" :icon="faCircleExclamation" class="size-3.5 text-destructive" aria-hidden="true" />
-        <span :class="dashboard.error ? 'text-destructive' : undefined">{{ statusText }}</span>
+        <template v-if="isInitialStatusLoad">
+          <Skeleton class="h-4 w-40" />
+          <span class="sr-only">Loading dashboard status…</span>
+        </template>
+        <template v-else>
+          <FontAwesomeIcon v-if="dashboard.error" :icon="faCircleExclamation" class="size-3.5 text-destructive" aria-hidden="true" />
+          <span :class="dashboard.error ? 'text-destructive' : undefined">{{ statusText }}</span>
+        </template>
       </p>
       <GlobalFilterBar v-if="auth.isAuthenticated" />
     </header>
@@ -116,4 +143,5 @@ onMounted(() => {
       </main>
     </div>
   </div>
+  <ToastViewport />
 </template>
