@@ -21,3 +21,30 @@ jobs:
       go-version: "1.25.x"
       coverage-threshold: 75
     secrets: inherit
+
+  # C2 (review round 3, 2026-09): the shared pr-checks job above runs
+  # `go vet`/staticcheck/`go test -race`/gosec/govulncheck/CodeQL against
+  # `./...`, which stops at every NESTED go.mod (tools/yaegi-check,
+  # tools/pricing-sync, integration/) — so neither the yaegi interpreter
+  # compatibility check nor the pricing-sync tool's own tests ran in CI at
+  # all before this job existed. This job runs both, the same two commands
+  # a contributor is expected to run locally before pushing.
+  yaegi-and-tools:
+    name: Yaegi compatibility & tooling
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.25.x"
+          cache: true
+
+      - name: yaegi-check
+        run: make yaegi-check
+
+      - name: pricing-sync tests
+        run: cd tools/pricing-sync && go test ./...

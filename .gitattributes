@@ -32,6 +32,44 @@ tools/ export-ignore
 docs/ export-ignore
 examples/ export-ignore
 testdata/ export-ignore
+# cmd/gateway/testdata/ holds a real captured production config used as the
+# config-loader test fixture. It carries no key material (every provider key
+# in it is a `file:` reference resolved from a mounted volume), but it does
+# carry in-cluster hostnames and addresses that have no business in a public
+# catalog tarball.
+#
+# Written as `/**`, not as a trailing-slash directory pattern like the
+# lines above, so `git check-attr export-ignore --` can confirm THIS one
+# line is live for a specific file path (P5, review round 4: the
+# trailing-slash form below is NOT broken — see the next paragraph — this
+# is only about what check-attr itself can verify). `git check-attr`
+# evaluates a pattern as if for a FILE, and a pattern ending in "/"
+# matches only a directory, so it always reports "unspecified" for a
+# trailing-slash pattern regardless of whether git archive actually
+# honours it; `/**` sidesteps that check-attr quirk. Verified with `git
+# check-attr export-ignore --`: this line reports "set", while a
+# `cmd/gateway/testdata/` form reported "unspecified" even though (next
+# paragraph) that form still works for git archive.
+#
+# The same check reports "unspecified" for tools/, webui/, examples/ and the
+# repo-root testdata/ above — but that is a `git check-attr` quirk, NOT
+# evidence those lines are no-ops. check-attr evaluates the attribute as if
+# for a FILE, and a pattern ending in "/" only ever matches a directory, so
+# it reports "unspecified" for any per-file path you hand it, whether or
+# not the pattern actually governs that path. `git archive` walks the tree
+# and applies export-ignore to each directory ENTRY it visits, which a
+# trailing-slash pattern matches directly — verified: `git archive
+# --worktree-attributes HEAD | tar -t | grep -c '^tools/'` (and the same for
+# webui/, examples/, testdata/, integration/, .github/) all print 0, i.e.
+# every file under each of those directories is excluded from the release
+# tarball today. These lines are live, not no-ops — do not "fix" them to
+# `/**` (harmless, but unnecessary) or delete them as dead weight (deleting
+# them would send ~250 test and tooling files into the catalog tarball).
+# The *_test.go and .gitattributes lines below reach the same outcome
+# through an ordinary no-slash pattern, which check-attr reports correctly
+# for both a file and a directory path — hence no similar-looking discrepancy
+# there.
+cmd/gateway/testdata/** export-ignore
 .superpowers/ export-ignore
 .github/ export-ignore
 *_test.go export-ignore
