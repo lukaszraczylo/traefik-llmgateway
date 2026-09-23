@@ -6,10 +6,14 @@ providers, per-user API keys organised into groups, request/token/cost
 limits, and a registry plus authenticated proxy for in-cluster MCP servers
 and A2A agents.
 
-The plugin is self-contained. It has no sidecar and no companion service.
-It runs as a [Yaegi](https://github.com/traefik/yaegi)-interpreted Go
-module, the same way [`traefikoidc`](https://github.com/lukaszraczylo/traefikoidc)
-does, configured per-middleware in Traefik's dynamic configuration.
+It runs in either of two forms from this one codebase — as a
+[Yaegi](https://github.com/traefik/yaegi)-interpreted Traefik middleware
+plugin, the same way [`traefikoidc`](https://github.com/lukaszraczylo/traefikoidc)
+does, configured per-middleware in Traefik's dynamic configuration; or as
+a standalone compiled binary sitting behind Traefik. The plugin form needs
+no sidecar and no companion service; the binary form exists because
+streaming arrives token-by-token there and buffered in the plugin. See
+[Deployment modes](#deployment-modes).
 
 **Status:** stable at **v1.0**. Configuration keys, endpoints, and
 behaviour now follow semver — breaking changes wait for a major release
@@ -19,7 +23,8 @@ Feature-complete, all gates green (unit tests, `-race`, `yaegi-check`,
 integration), and published to the Traefik Plugin Catalog. One behaviour
 worth knowing before you deploy: [streaming is delivered buffered rather
 than token-by-token](#known-limitations) under the current Traefik + Yaegi
-combination.
+combination — which is exactly what running the [standalone
+binary](#deployment-modes) instead fixes.
 
 ## What it is
 
@@ -86,6 +91,179 @@ Every route the plugin recognises is handled entirely inside the
 middleware — `next` (the router's configured backing service) is only
 reached when a request matches none of the plugin's routes and
 `passthroughUnknown` is `true`.
+
+## Deployment modes
+
+The same codebase runs in two forms. Pick one; they are not deployed
+together.
+
+| | **(A) Traefik plugin** | **(B) Standalone binary** |
+|---|---|---|
+| How it runs | Yaegi-interpreted inside Traefik | compiled process behind Traefik |
+| Configured by | `Middleware` CR / dynamic config | a YAML or JSON config file |
+| **Streaming** | **buffered** ([why](#known-limitations)) | **incremental** |
+| Config hot-reload | automatic, on CR change | restart the process |
+| Extra moving parts | none | one Deployment + Service + image |
+| Catalog-supported | yes | build it yourself |
+
+**Form (A) is still the default** and nothing about it changed. Choose form
+(B) for one reason: SSE arrives token-by-token. Traefik hands the
+interpreted plugin a synthetic `http.ResponseWriter` that does not carry
+`http.Flusher` across Yaegi's reflect boundary, so every flush the plugin
+performs is a no-op and the whole response lands at once when the handler
+returns ([traefik/traefik#10269](https://github.com/traefik/traefik/issues/10269)).
+Compiled, the identical assertion in `statusTrackingWriter.Flush`
+(`errors.go`) succeeds against a real `*http.response` and chunks reach
+the client as they are produced.
+
+Everything else is the same code: the same routing, auth, limits,
+accounting, admin API and MCP/A2A proxy, and the same `literal` /
+`env:NAME` / `file:/path` [secret forms](#secret-forms).
+
+### Running the binary
+
+```sh
+make build-binary                  # -> bin/llmgateway
+make docker-build IMAGE=registry.example/llmgateway:v1 PLATFORMS=linux/amd64,linux/arm64
+./bin/llmgateway -config /etc/llmgateway/config.yaml
+```
+
+Every flag has a matching `LLMGW_*` environment variable. An explicitly
+passed flag always beats the environment.
+
+| Flag | Env | Default |
+|---|---|---|
+| `-config` | `LLMGW_CONFIG` | `/etc/llmgateway/config.yaml` |
+| `-listen` | `LLMGW_LISTEN` | `:8080` |
+| `-name` | `LLMGW_NAME` | `gateway` (the `llmgw[<name>]` log prefix) |
+| `-log-level` | `LLMGW_LOG_LEVEL` | `info` |
+| `-shutdown-timeout` | `LLMGW_SHUTDOWN_TIMEOUT` | `30s` |
+| `-drain-delay` | `LLMGW_DRAIN_DELAY` | `5s` |
+| `-health-path` | `LLMGW_HEALTH_PATH` | `/healthz` |
+| `-ready-path` | `LLMGW_READY_PATH` | `/readyz` |
+
+`-log-level` filters **only the binary's own lifecycle lines**. The
+gateway's own `INFO`/`WARN`/`ERROR` output is written unconditionally to
+stderr by the root package (`logger.go`) and is never filtered.
+
+The config file is the same structure as the plugin's `plugin.llmgateway`
+block, hoisted to the top level — so a `Middleware` CR's `spec.plugin.llmgateway`
+can be lifted into a `ConfigMap` unchanged. `.json` is accepted directly.
+
+### Things that differ from the plugin, and will bite you
+
+- **`metrics.allowedCIDRs` inverts from closed to open.** This is the one
+  that matters. Behind Traefik, every request's `RemoteAddr` is Traefik's
+  own pod IP — inside the pod CIDR that `allowedCIDRs` is meant to be
+  narrowed to — so the keyless-scrape allowlist starts admitting anyone
+  who can reach Traefik. **Drop `metrics.allowedCIDRs` from a binary
+  config** and require an admin key. The binary logs this warning at
+  warn level on startup whenever `metrics.allowedCIDRs` is non-empty
+  (`metricsCIDRWarning`, `cmd/gateway/main.go`). Full explanation under
+  [Metrics](#metrics).
+
+- **An unrecognized config key refuses to start, not silently ignored.**
+  The binary's own JSON decode (after the YAML round-trip, `loadConfig`)
+  uses `encoding/json`'s `DisallowUnknownFields`, so a typo like
+  `alowedCIDRs` for `allowedCIDRs` is a startup error (key matching stays
+  case-insensitive, so `allowedCidrs` still binds to `allowedCIDRs`), not a config that
+  boots with that setting silently off. This applies only to the
+  standalone binary's own decode — the Traefik-plugin form stays on
+  Traefik's own, more lenient decoder.
+
+- **Set `responseHeaderTimeout` on the Traefik side, or long generations
+  die at the proxy.** Traefik now talks to this gateway over HTTP as a
+  normal upstream, which means the router's `ServersTransport` timeouts
+  apply — and a non-streaming completion can take **minutes** to produce
+  its first response header. Set it explicitly to `0` (no limit) or to
+  something longer than your slowest generation:
+
+  ```yaml
+  apiVersion: traefik.io/v1alpha1
+  kind: ServersTransport
+  metadata:
+    name: llmgateway
+  spec:
+    forwardingTimeouts:
+      dialTimeout: 10s
+      responseHeaderTimeout: 0   # a long completion returns no header for minutes
+      idleConnTimeout: 90s
+  ```
+
+  Do not set `idleConnTimeout` low either: it reaps pooled connections
+  between requests, but a short value churns them under streaming load.
+  The correct per-request bound is the gateway's own
+  [`requestTimeout`](#request-timeout) — a progress-based watchdog, five
+  minutes by default — not a proxy deadline.
+
+- **Config changes need a restart.** Traefik rebuilds the plugin
+  automatically on a CR change; a binary has no such hook. Roll the pods
+  by putting a checksum of the `ConfigMap` in the Deployment's pod
+  annotations, so an ArgoCD sync restarts them. There is deliberately no
+  SIGHUP and no file watcher: a rebuild re-runs the synchronous discovery
+  warm-fill, and a single-file watch never fires on a `ConfigMap` update
+  anyway (the kubelet swaps the whole directory's symlink).
+
+  **The users file is the exception and needs none of this.** It still
+  hot-reloads on its own 5-second mtime poll from the request path, exactly
+  as in the plugin form. Do not add a watcher for it — it would race the
+  existing one.
+
+- **Provider keys resolve once, at construction**, in both forms. Rotating
+  one means a restart even though the mounted file changed. Only
+  file-sourced *user* keys re-resolve on the users-file reload.
+
+- **Mount the same secret volumes.** A `file:/llmgw/providers/openai`
+  `apiKey` reads that exact path in the binary too. Reproduce the volumes,
+  or the gateway fails construction.
+
+- **`passthroughUnknown` has no meaning.** Traefik is in front of this
+  process, not behind it, so there is no downstream. The binary logs a
+  warning and returns a clean OpenAI-shaped 404 for unknown routes. Route
+  non-gateway paths in Traefik instead.
+
+### Health, readiness and shutdown
+
+The binary adds `GET /healthz` and `GET /readyz`; the gateway package
+itself has no health route. Liveness is unconditional — making it depend
+on a provider or on Redis would turn any upstream outage into a restart
+loop. Readiness is true from a successful construction until shutdown
+begins, and deliberately does **not** depend on discovery or Redis:
+warm-fill failures are non-fatal by design, and `redis.failOpen` means a
+Redis loss degrades to in-process counters rather than failing requests.
+
+Startup blocks on a synchronous discovery warm-fill for every provider
+with `discovery: true`, which on a large provider set runs for **minutes**
+before the listener opens. Size a `startupProbe` for it rather than a
+short readiness `initialDelaySeconds`, or the pod flaps through every
+rollout.
+
+Shutdown fails readiness first, waits `-drain-delay` so the load balancer
+drops the endpoint, then stops accepting and waits up to
+`-shutdown-timeout` for in-flight requests. `Shutdown` *waits for*
+handlers rather than interrupting them, so that timeout is really "how
+long before a long generation is abandoned" — raise it and
+`terminationGracePeriodSeconds` together where long streams matter.
+
+Neither probe path should be routed from a public Traefik entrypoint. If a
+provider is ever named `healthz`, rename it or move the probe with
+`-health-path`; the binary matches its own paths first.
+
+### Telemetry
+
+Unchanged, and no new flag: `oss-telemetry` reads `DO_NOT_TRACK`,
+`OSS_TELEMETRY_DISABLED` and `TRAEFIK_LLMGATEWAY_DISABLE_TELEMETRY` from
+the process environment, so setting one on the Deployment works exactly as
+it does on the Traefik pod (see [Anonymous usage
+reporting](#anonymous-usage-reporting)). The binary logs which opt-out is
+set at startup. A locally built binary carries the `0.0.0-dev` sentinel
+and never pings regardless.
+
+```yaml
+env:
+  - name: DO_NOT_TRACK
+    value: "1"
+```
 
 ## Quickstart
 
@@ -186,8 +364,9 @@ config accepts them as YAML, which decodes to the same JSON shape.
 | Field | Type | Default | Semantics |
 |---|---|---|---|
 | `providers` | `map[string]ProviderConfig` | — | Required, at least one entry, or the plugin refuses to construct. |
-| `groups` | `map[string]GroupConfig` | `{}` | Optional. A user references one group by name; an unknown reference is a construction error. |
-| `pricing` | `map[string]ModelPricing` | `{}` | Per-model USD/1M-token overrides, keyed by model id (bare or `provider/model`). Merged over, not replacing, the built-in table (`pricing.go`). |
+| `groups` | `map[string]GroupConfig` | `{}` | Optional. A user references one or more of these groups by name (`UserConfig.group`/`groups`); an unknown reference is a construction error. |
+| `pricing` | `map[string]ModelPricing` | `{}` | Per-model USD/1M-token overrides, keyed by model id (bare or `provider/model`). Merged over, not replacing, the built-in table (`pricing.go`). Every entry is validated at construction — see [Limits and accounting](#limits-and-accounting). |
+| `allowUnpricedWithCostBudget` | `bool` | `false` | `false`: a request for a model with no known price — no `pricing` override, no built-in table entry, and no `modelMeta` entry marking it `free: true` — is refused with **402** whenever the caller's user or group has `costPerDayUSD`/`costPerMonthUSD` configured, since that budget could not otherwise be enforced. Applies to the unified routes and to native passthrough when the model is identifiable from the request body. `true` serves the request anyway, billing it as unpriced (cost `0`) — prefer adding the missing `pricing` entry instead. A caller with no cost budget configured is unaffected either way. |
 | `mcpServers` | `map[string]TargetConfig` | `{}` | MCP server registry; see [MCP/A2A](#mcp-and-a2a). |
 | `agents` | `map[string]AgentConfig` | `{}` | A2A agent registry; see [MCP/A2A](#mcp-and-a2a). |
 | `users` | `UsersConfig` | — | Inline and/or file-backed API-key holders. With none configured, every request is unauthenticated and gets 401. |
@@ -216,10 +395,11 @@ config accepts them as YAML, which decodes to the same JSON shape.
 > every time.
 
 Provider, `mcpServers`, and `agents` map **keys** (names) must match
-`^[a-zA-Z0-9._-]+$` and must not be `v1`, `mcp`, or `a2a` — those names are
-reserved because they would shadow the gateway's own fixed routes
-(`/v1/...`, `/mcp/{name}/...`, `/a2a/{name}/...`); a name that collides is
-a construction error, not a silently-unreachable provider. A `nil` map
+`^[a-zA-Z0-9._-]+$` and must not be `v1`, `mcp`, `a2a`, or `admin` — those
+names are reserved because they would shadow the gateway's own fixed
+routes (`/v1/...`, `/mcp/{name}/...`, `/a2a/{name}/...`, `/admin/...`); a
+name that collides is a construction error, not a silently-unreachable
+provider. A `nil` map
 *value* under any of `providers`, `groups`, `mcpServers`, or `agents` is
 also a construction error, never a panic (`providers.go`, `mcp_a2a.go`,
 `auth.go`).
@@ -341,6 +521,8 @@ byte-identically to before multi-group support existed.
 | `password` | `string` | `""` (no `AUTH`) | Secret form. |
 | `db` | `int` | `0` | Must be `≥ 0`. Sent via `SELECT` on every new connection. |
 | `failOpen` | `*bool` | `true` | `true`: a Redis error switches that operation to the in-process fallback store and logs (rate-limited to once per 30s). `false`: a Redis error returns 503 instead of enforcing against a non-shared fallback. |
+| `poolSize` | `int` | `0` (self-tuned) | Maximum pooled RESP connections. `0` self-tunes from the host's `GOMAXPROCS`, clamped to `4`-`8`; an explicit value always overrides the auto-tuned size (house engineering rule), up to a maximum of `256`. Negative, or above that maximum, is a construction error. |
+| `tls` | `bool` | `false` | Dial Redis over TLS instead of plaintext, verifying the server certificate against `address`'s host. `false` preserves a plaintext connection exactly as before this field existed; enable it unless the path to Redis is already encrypted some other way (service-mesh mTLS, an stunnel/TLS sidecar, a private link). |
 
 ### `RetryConfig`
 
@@ -355,7 +537,7 @@ byte-identically to before multi-group support existed.
 | Field | Type | Default | Semantics |
 |---|---|---|---|
 | `enabled` | `bool` | `false` | `false`: no caching, `/v1/chat/completions` and `/v1/embeddings` behave byte-identically to a gateway built before this field existed. `true`: caching per [Caching](#caching) below — requires `redis` to be configured too, or it silently stays off (one warning logged). |
-| `ttl` | `string` (Go duration) | `5m` | How long a cached response stays valid. Invalid duration string is a construction error. |
+| `ttl` | `string` (Go duration) | `5m` | How long a cached response stays valid. A malformed duration string is a construction error. Zero or negative is accepted, not refused — construction logs one warning, since the store floors it to a 1-second TTL rather than actually disabling the cache; set `enabled: false` to turn caching off. |
 | `maxBodyBytes` | `int` | `1048576` (1MiB) | Largest response body still eligible for caching; a larger one is skipped (never stored, never an error). Maximum accepted value is `8388608` (8MiB) — above that is a construction error. |
 
 ### `BreakerConfig`
@@ -392,7 +574,7 @@ gates only the background probe sweep.
 | Field | Type | Default | Semantics |
 |---|---|---|---|
 | `enabled` | `bool` | `false` | `false`: the metrics route is not registered at all. `true`: the Prometheus text-exposition endpoint per [Metrics](#metrics) below. |
-| `path` | `string` | `/metrics` | Overrides the served path. |
+| `path` | `string` | `/metrics` | Overrides the served path. Must start with `/`, or construction fails. A path at or under a reserved route prefix (the admin dashboard, `/v1`, `/mcp`, `/a2a`) is accepted with a construction warning — see [Metrics](#metrics). |
 | `allowedCIDRs` | `[]string` | `[]` (no bypass) | CIDR blocks whose source address may scrape without an admin key — e.g. `10.42.0.0/16` for a cluster's pod network. **Never use a whole RFC1918 range like `10.0.0.0/8`** — see [Metrics](#metrics)'s own warning for why that specific mistake is live-reproducible, not theoretical. |
 | `modelLabel` | `bool` | `false` | Adds a `model` label to the provider attempt/failure counters, breaking them out per `(provider, model)` pair. Off by default: a deployment with hundreds of discovered model ids is a series-count explosion waiting to happen. |
 
@@ -428,7 +610,7 @@ changes what a request is billed.
 | Field | Type | Default | Semantics |
 |---|---|---|---|
 | `url` | `string` | — | Required; same URL validation as `TargetConfig`. |
-| `card` | `string` | `/.well-known/agent-card.json` | Path appended to the agent's gateway-relative proxy URL for its A2A agent-card listing. |
+| `card` | `string` | `/.well-known/agent-card.json` | Path appended to the agent's gateway-relative proxy URL for its A2A agent-card listing. Must start with `/` when set, checked at construction — otherwise it concatenates onto the agent name instead of starting a new path segment, reaching the wrong route rather than failing cleanly. |
 
 ### Secret forms
 
@@ -444,8 +626,12 @@ Every `apiKey`/`password` field accepts one of three forms
 
 Provider keys, Redis's password, and inline users' keys are resolved
 **once**, at plugin construction. A file-sourced user's `apiKey` is
-re-resolved on every hot reload (see below), so it can use `env:`/`file:`
-forms too and pick up a rotated value without a Traefik restart.
+re-resolved every time the users file's own hot reload actually fires
+(see below), so it can use `env:`/`file:` forms too and pick up a rotated
+value without a Traefik restart — but reload is gated on `users.json`'s
+own mtime alone. Rotating just the *referenced* secret file, leaving
+`users.json` itself untouched, is not picked up until something else also
+changes `users.json`'s mtime.
 
 ### Users file format
 
@@ -502,12 +688,14 @@ kept — a bad edit to the file never breaks already-authenticated traffic.
   every `provider/model` form.
 - **On the unified routes** (`modelRegistry.resolve`, used by
   `/v1/chat/completions`, `/v1/embeddings`, and the three media
-  endpoints), authorization requires both `group.allowsModel` and
+  endpoints), authorization requires both `group.allowsProviderModel` and
   `group.allowsProvider` for the resolved provider — a model that exists
   but the caller's group cannot reach returns 403, distinct from a model no
   configured provider knows at all (404). Native passthrough
   (`/{provider}/...`) always checks `group.allowsProvider`, and additionally
-  checks `group.allowsModel` — against a `model` field peeked from the
+  checks `group.allowsProviderModel` (or, for a multi-group/personal-grant
+  caller, `group.allowsPassthroughModelForPath`, which also couples the
+  REST path into the same grant) — against a `model` field peeked from the
   request body — whenever the group's `models` list is non-empty; see
   [Native passthrough model authorization](#native-passthrough-model-authorization)
   and the authorization row in [Unified vs.
@@ -627,7 +815,14 @@ Per-model context window and per-token cost, resolved for display —
 actually knows about a model, without inventing a number nobody
 configured or reported. `modelMeta` (config overrides) is a **separate**
 config surface from `pricing` (request-cost accounting, see
-[`ModelPricing`](#modelpricing)) — the two never affect each other.
+[`ModelPricing`](#modelpricing)), with one exception: a `modelMeta` entry
+marked `free: true` also drives billing itself (`unifiedCostMicros`) —
+that request's cost is `0` and treated as known, never a real price the
+model's bare id happens to share with the built-in LiteLLM-synced table.
+Every other `modelMeta` field (context window, cost overrides that are
+not `free: true`) affects only display, never billing. Where billing
+does look at price, precedence is: `free: true` (`0`, wins outright) →
+`pricing` overrides → the built-in table.
 
 Context and cost each resolve through their own layer stack
 (`modelmeta.go`'s `resolveModelMeta`), most specific first:
@@ -797,11 +992,19 @@ model id) and per alias (`aliases[].modelMeta`) — see
   evaluated against a limit. It is the finest granularity the usage-
   history API (below) can query.
 - Cost is `tokens × price`, computed in integer **micro-USD**
-  (1,000,000ths of a dollar) throughout to avoid float drift, from the
-  built-in per-model table (`pricing.go`) or a configured `pricing`
-  override. An unpriced model costs 0 and logs a once-per-model warning
-  (capped at 128 distinct unpriced model names per process lifetime, then
-  one summary warning). The built-in table is **approximate** — list
+  (1,000,000ths of a dollar) throughout to avoid float drift. Price
+  resolves in order: a configured `pricing` override, then the curated
+  built-in table (`pricing.go`'s `builtinPricing`), then a larger
+  generated table synced from LiteLLM's own published pricing
+  (`pricing_data_gen.go`) — the first of the three that knows the model
+  wins. Every `pricing` override is validated at construction: a negative,
+  `NaN`, or `±Inf` rate is a construction error, not a value that
+  silently defeats a `costPerDayUSD`/`costPerMonthUSD` budget later. An
+  unpriced model (none of the three layers knows it) costs 0 and logs a
+  once-per-model warning (capped at 128 distinct unpriced model names per
+  process lifetime, then one summary warning) — see
+  `allowUnpricedWithCostBudget` (`Config` table above) to refuse such a
+  request outright instead. The curated table is **approximate** — list
   prices as each provider published them, recorded 2026-08, and not kept
   in sync automatically. Set `pricing` overrides for billing-grade
   accuracy.
@@ -883,6 +1086,31 @@ model id) and per alias (`aliases[].modelMeta`) — see
   upstream model, if any, only appears in the response body, read after
   the attempt has already resolved — so it never writes a `provmodel`
   counter, only the provider-level ones above.
+- **Native passthrough usage accounting covers streaming too.** A
+  streamed (SSE) passthrough response is parsed for usage the same as a
+  non-streaming one: the OpenAI-shaped final `usage` chunk (present when
+  the client itself set `stream_options.include_usage`), or Anthropic's
+  `message_start`/`message_delta` events. When neither yields usage —
+  Gemini's own SSE convention is left unhandled, or the stream never
+  reports one — the request-body-size estimate (`ceil(request-bytes / 4)`
+  prompt tokens, `estimated`) covers it instead, so a streamed or
+  malformed passthrough response is never billed zero just for never
+  finishing cleanly.
+- **Native passthrough request bodies are capped at 32MiB**
+  (`maxPassthroughBytes`, `routes_passthrough.go`) — generous enough for
+  a multimodal payload the unified routes' own narrower caps do not need
+  to accommodate. A request whose declared `Content-Length` already
+  exceeds the cap is rejected with **413** before any upstream call is
+  built; a body with no declared length (chunked transfer) is caught
+  mid-copy instead and also answers **413**, never a
+  silently truncated body forwarded upstream.
+- **`allowUnpricedWithCostBudget` also applies to native passthrough.**
+  When a caller's user or group has a cost budget configured and the
+  model — read the same way [Native passthrough model
+  authorization](#native-passthrough-model-authorization) reads it, from
+  the request body — has no known price, the request is refused with
+  **402** exactly like the unified routes, unless
+  `allowUnpricedWithCostBudget` is set.
 
 ### Body-admission limit
 
@@ -946,13 +1174,22 @@ below for the separate, cross-provider mechanism.
   forwarded, a stream that then dies mid-flight is not retried, since the
   client already holds partial data.
 - **Waiting**: a 429 response carrying a `Retry-After` header that parses
-  as a non-negative whole-second count no greater than 2s waits exactly
-  that long. Every other case — no header, an unparseable value (for
-  example the HTTP-date form), a negative value, a value over 2s, or a
-  `Retry-After` on a non-429 5xx — falls back to exponential backoff
-  (`backoff × 2^(attempt-1)`), capped at 2s per wait either way. A
-  context canceled or timed out during a wait aborts the remaining
-  retries immediately, rather than blocking out the wait in full.
+  as a non-negative whole-second count is honoured, clamped to 30s when
+  it asks for longer. Every other case — no header, an unparseable value
+  (for example the HTTP-date form), a negative value, or a `Retry-After`
+  on a non-429 5xx — falls back to exponential backoff
+  (`backoff × 2^(attempt-1)`), capped at 2s per wait. The two caps are
+  deliberately different: 2s bounds the wait the gateway computes for
+  *itself*, 30s bounds only what an upstream may explicitly *ask* for.
+  Before this was fixed, a `Retry-After` above 2s was discarded and
+  replaced by the ≤2s ladder, so a saturated provider could not ask this
+  gateway to pause for longer than two seconds — it answered an explicit
+  overload signal by retrying sooner than asked.
+  The computed backoff also carries **equal jitter** — each wait is a
+  random value in `[d/2, d]` — so that many requests failing at the same
+  instant do not retry in lockstep against the same upstream. A context
+  canceled or timed out during a wait aborts the remaining retries
+  immediately, rather than blocking out the wait in full.
 - **Accounting**: only the final attempt's usage is recorded — a failed
   attempt's body is drained and discarded, never parsed for usage, so it
   is never double-counted. Request counters still increment once per
@@ -1059,17 +1296,23 @@ never a second candidate to try.
   maximum 10) — distinct from `retry.attempts`, which retries the SAME
   provider. `failover.enabled: false` (the default) turns the whole
   mechanism off.
-- **Known limitation — no per-attempt timeout**: `newAdapterHTTPClient`
-  sets no client timeout and no response-header timeout; the only bound
-  on an upstream call is the incoming request's own context, shared
-  identically across every candidate. A provider that accepts the TCP
-  connection and then simply never responds will hang the request
-  indefinitely and never trigger failover — only a failure fast enough to
-  leave time on that shared context (a dial failure, a fast non-2xx
-  response, or the context's own deadline finally expiring) does. This is
-  a pre-existing property of the plugin's HTTP client, not specific to
-  failover, and applies to every route, not only this one; it is not
-  addressed in this change.
+- **Known limitation — per-attempt bounds do not compose**:
+  `newAdapterHTTPClient` *does* set `Transport.ResponseHeaderTimeout`
+  (from `requestTimeout`, five minutes by default), and `watchdogBody`
+  adds an idle-progress bound on the response body. What it deliberately
+  does not set is `http.Client.Timeout`, which would truncate a healthy
+  long stream. Both existing bounds are therefore **per attempt**, not
+  per request: nothing bounds their sum. With failover and retry both
+  enabled, one admitted request can make up to
+  `failover.maxAttempts × (retry.attempts + 1)` outbound calls — as many
+  as 40 at the configured maxima, 6 with both merely switched on at their
+  own defaults — and each attempt gets its own full `ResponseHeaderTimeout`
+  budget rather than sharing one. The gateway logs the composed worst
+  case at startup when it exceeds 12. The only aggregate bound is
+  whatever deadline the incoming request's context already carries, which
+  in the Traefik plugin form comes from the entrypoint's
+  `respondingTimeouts` and in the standalone binary must come from a
+  fronting proxy. A per-request outbound-call budget is not implemented.
 
 ## Request timeout
 
@@ -1252,9 +1495,15 @@ one.
   observable and the provider is refreshed at the same cadence a
   deployment without this feature would already see. The shipped
   defaults are chosen with this in mind: `maxOpenDuration` (6h) is
-  deliberately longer than the default `discoveryInterval` (1h), so a
-  permanently broken provider under stock config backs off 1h, 2h, 4h,
-  6h, 6h, ... — roughly 5 re-probes a day instead of 24. A custom
+  deliberately longer than the default `discoveryInterval` (1h). The
+  backoff only starts to matter once it exceeds that hourly gate: doubling
+  from `openDuration`'s `1m` default reaches 64m, then 128m, then 256m,
+  then caps at `maxOpenDuration` (6h) from then on. A permanently broken
+  provider under stock config sees roughly 13 discovery attempts on the
+  day the breaker trips (the hourly-gated ramp plus the first few
+  backoff-governed probes), settling to a steady state of roughly 4
+  attempts a day thereafter (24h ÷ 360m) — down from 24 without this
+  feature. A custom
   `discoveryInterval` shorter than `maxOpenDuration` keeps this relationship;
   one set LONGER than `maxOpenDuration` reverts to plain interval-only
   throttling with no suppression from this feature at all.
@@ -1287,7 +1536,7 @@ one.
 | | Unified (`/v1/...`) | Native passthrough (`/{provider}/...`) |
 |---|---|---|
 | Wire format | Always OpenAI-shaped in, OpenAI-shaped out. | The provider's own native format, untouched. |
-| Authorization | `group.allowsModel` AND `group.allowsProvider`, both checked against the resolved provider (`modelRegistry.resolve` — see [Model routing](#model-routing)). | `group.allowsProvider`, always. `group.allowsModel` too, but ONLY when the group's `models` list is non-empty — see the model-enforcement note below the table. `passthroughPaths`, when set, also gates the REST path. |
+| Authorization | `group.allowsProviderModel` AND `group.allowsProvider`, both checked against the resolved provider (`modelRegistry.resolve` — see [Model routing](#model-routing)). | `group.allowsProvider`, always. `group.allowsProviderModel` (or, for a multi-group/personal-grant caller, `group.allowsPassthroughModelForPath`) too, but ONLY when the group's `models` list is non-empty — see the model-enforcement note below the table. `passthroughPaths`, when set, also gates the REST path, coupled to the same grant as the model check for a multi-group caller. |
 | Translation | `openai`-type: body forwarded verbatim (model id rewritten). `anthropic`/`gemini`: full bidirectional translation, including streaming, chunk by chunk. | None — a raw reverse proxy. |
 | Model alias in the response | Translated providers (`anthropic`, `gemini`) echo back the client's exact requested model string in the response's `model` field, even though the upstream call used the resolved provider model id. An `openai`-type response is a verbatim passthrough of the upstream body, so it carries whatever model id the upstream itself returned — this asymmetry is intentional, not a bug. | The upstream's own `model` field, verbatim — there is no alias to echo. |
 | Embeddings | `openai`-type: passthrough. `gemini`: mapped to `:embedContent`/`:batchEmbedContents`. `anthropic`: **501** — Anthropic's API has no embeddings endpoint. | Whatever the provider itself supports at that path, subject to the same `models`/`passthroughPaths` authorization as every other native passthrough request. |
@@ -1299,9 +1548,10 @@ one.
 A group's `models` glob authorizes native passthrough traffic too, but
 only once it has something to authorize:
 
-- **`models` empty (the default)** — nothing for `allowsModel` to reject,
-  so the request body is never even read for this purpose. Every request
-  reaches the provider exactly as it did before this feature existed.
+- **`models` empty (the default)** — nothing for `allowsProviderModel` to
+  reject, so the request body is never even read for this purpose. Every
+  request reaches the provider exactly as it did before this feature
+  existed.
 - **`models` non-empty** — the gateway reads up to 64KiB of a JSON request
   body looking for a top-level `model` field (a genuinely binary body —
   multipart, `audio/*`, `image/*`, `video/*`, `application/octet-stream`
@@ -1604,8 +1854,8 @@ or in CI.
   is the list of group names actually allowed to reach that target,
   computed via the identical glob match `mcpServers`/`agents`
   authorization itself uses (`GroupConfig.mcpServers`/`agents`), so this
-  view can never disagree with what the proxy enforces; omitted when
-  every configured group can reach it. `counters` is
+  view can never disagree with what the proxy enforces; `null` when
+  every configured group can reach it, `[]` when no group can. `counters` is
   `requestsPerMinute`/`requestsPerDay`/`requestsPerMonth` — requests
   only, no tokens or cost (see [MCP and A2A](#mcp-and-a2a) for why).
   `health` is `{"state","lastCheck","lastError","consecutiveFailures","latencyMs","source"}`
@@ -1668,7 +1918,14 @@ stdlib-only under Yaegi, so it cannot use `client_golang` or any other
 metrics library. Off by default (`metrics.enabled: false`, or the
 `metrics` block omitted entirely): the route is not registered at all,
 the same nil-disables convention [Admin](#admin) uses. Served at
-`/metrics` by default, overridable via `metrics.path`. Works identically
+`/metrics` by default, overridable via `metrics.path`. `metrics.path` must
+start with `/`, or construction fails. A path that sits at or under
+another fixed route (`/admin`, `/v1`, `/mcp`, `/a2a`) is still accepted,
+so a config that already worked keeps working, but logs one warning at
+construction. `ServeHTTP` matches only `GET /v1/models` and the admin
+dashboard's GET paths before the metrics route: a `metrics.path` equal to
+one of those is unreachable (the warning says so). Any other such path
+serves metrics instead of whatever normally lives at that exact path. Works identically
 with any scraper that speaks the standard text exposition format —
 Prometheus with a `ServiceMonitor`/`PodMonitor`, or
 [VictoriaMetrics](https://victoriametrics.com) with a `VMServiceScrape`;
@@ -1699,6 +1956,25 @@ plugin's config.
     or "no one" depending on what address arrives; confirm `RemoteAddr`
     reflects the scraper's own address in your deployment before relying
     on this instead of a key.
+
+  > **Running the [standalone binary](#deployment-modes) inverts this
+  > allowlist from closed to open.** In form (B) every request arrives
+  > from Traefik, so `RemoteAddr` is always Traefik's own pod address —
+  > and on a Kubernetes cluster that address is inside the pod CIDR, which
+  > is precisely the block `allowedCIDRs` is supposed to be narrowed to.
+  > `allowedCIDRs: ["10.42.0.0/16"]` therefore stops meaning "cluster
+  > scrapers only" and starts meaning "anyone who can reach Traefik",
+  > with no key, against an endpoint serving per-user cost data.
+  > `clientIP` (`auth.go`) reads `RemoteAddr` and deliberately ignores
+  > `X-Forwarded-For`, so the header does not rescue this.
+  >
+  > **Drop `metrics.allowedCIDRs` entirely from a standalone-binary
+  > config** and let every scrape carry an admin bearer token, or serve
+  > metrics on a second listener that Traefik does not route to. Do not
+  > carry the plugin form's `allowedCIDRs` across unchanged. The same
+  > single-source-address collapse also applies to the auth-failure
+  > throttle and to audit log lines, which in form (B) see one address
+  > for every client.
 
   **On CIDR sizing — this is the mistake that actually breaks security,
   live-reproduced, not a theoretical warning**: always scope
@@ -1742,6 +2018,17 @@ plugin's config.
     `llmgateway_provider_failures_total{provider}` (+ opt-in
     `_model_` variants, above) — the identical `attemptsDay`/`failuresDay`
     counters `GET /admin/api/overview` already exposes.
+  - `llmgateway_upstream_ttfb_seconds{provider,stream}` /
+    `llmgateway_upstream_duration_seconds{provider,stream}` — always-on
+    histograms of time-to-first-byte and total upstream response body
+    duration. With `metrics.modelLabel` also on, a separate, additional
+    pair of families —
+    `llmgateway_upstream_model_ttfb_seconds{provider,stream,model}` /
+    `llmgateway_upstream_model_duration_seconds{provider,stream,model}` —
+    carries the identical measurements broken out per `(provider, stream,
+    model)` too. These are distinct metric names, not the unlabelled pair
+    re-emitted under a wider label set, so a query against the unlabelled
+    families is unaffected either way.
   - `llmgateway_provider_healthy{provider}` — `1`/`0` gauge from the
     discovery circuit breaker (`healthState` in the admin API); see
     [Provider health](#provider-health-discovery-circuit-breaker).
@@ -1852,7 +2139,11 @@ plugin's config.
   — unlike native provider passthrough — **no credential is injected** on
   the way out: an MCP server or A2A agent is treated as an in-cluster
   target that trusts the gateway's network position, not a per-provider
-  key the gateway holds on the caller's behalf.
+  key the gateway holds on the caller's behalf. A target `url` carrying
+  its own query string (the only way `TargetConfig`/`AgentConfig` can pass
+  a credential today, since neither has a header field) keeps it — the
+  incoming request's own query string is merged in alongside it, neither
+  one overwriting the other.
 - Request-rate limits (`requestsPerMinute`/`requestsPerDay`) apply to
   target-proxy calls the same as everywhere else; token/cost metrics do
   not, since there is no usage to parse from an arbitrary MCP/A2A
@@ -1877,39 +2168,59 @@ plugin's config.
   (below) lives entirely inside the one client request that triggered it.
   Any other HTTP method on exactly `/mcp` is a `405` with an
   `Allow: POST` header, checked before authentication.
-  - `tools/list` fans out to every allowed server concurrently — each
-    under its own 20s timeout — and merges the results, prefixing each
+  - `tools/list` fans out to every allowed server concurrently — the
+    WHOLE fan-out shares ONE 20s budget, not 20s per server, so a server
+    dialed later in the fan-out inherits whatever budget remains rather
+    than a fresh 20s of its own — and merges the results, prefixing each
     tool's name `"<serverName>_<toolName>"` — the same underscore-
     separator convention the earlier agentgateway used and that existing
     MCP clients (pugbot's `mcpclient`, agentkit) already persist in their
-    own tool-id records (e.g. `brave-search_brave_web_search`). A server
-    that errors, times out, or answers with a response that is not valid
-    JSON-RPC is skipped, not surfaced as a whole-call failure — the
-    aggregate degrades to every other server's tools. If EVERY attempted
-    server fails, the response is a JSON-RPC `internal error`
-    (`"no MCP server reachable"`) instead of a silently-empty tools list,
-    which would otherwise be indistinguishable from "this caller's group
-    has no MCP access at all".
+    own tool-id records (e.g. `brave-search_brave_web_search`). Every
+    other field of a tool object (`title`, `annotations`, `outputSchema`,
+    `_meta`, ...) passes through unchanged — only `name` is rewritten. A
+    paginated server is followed via its own `nextCursor` up to a
+    per-server page cap, still inside that server's share of the shared
+    20s budget, never a fresh timeout per page. Two servers whose
+    namespaced tool name collides keep only the first, by a deterministic
+    `(name, server)` sort — never whichever goroutine happened to finish
+    first — and drop the rest, logged. A server that errors, times out, or
+    answers with a response that is not valid JSON-RPC is skipped, not
+    surfaced as a whole-call failure — the aggregate degrades to every
+    other server's tools. If EVERY attempted server fails, the response is
+    a JSON-RPC `internal error` (`"no MCP server reachable"`) instead of a
+    silently-empty tools list, which would otherwise be indistinguishable
+    from "this caller's group has no MCP access at all".
   - `tools/call` resolves the target server by the LONGEST matching
     `"<serverName>_"` prefix against the caller's allowed servers (so two
     configured servers where one name prefixes the other, e.g. `foo` and
     `foo_bar`, resolve unambiguously), strips the prefix, forwards the
-    call under a 120s timeout, and relays the result under the caller's
-    own JSON-RPC `id`. An unresolvable prefix — including one that names a
-    real but group-restricted or transport-excluded server (below) — is a
-    JSON-RPC `invalid params` error (`-32602`), not an HTTP `404`: the
-    request reached a real route and method, it just named a tool nothing
-    could route.
+    call — including the caller's own `_meta` object verbatim — under a
+    120s timeout, and relays the result under the caller's own JSON-RPC
+    `id`. A global `requestTimeout` configured below 120s shortens this
+    in practice, since both
+    the fan-out and this call share the same
+    `Transport.ResponseHeaderTimeout` — see [Request
+    timeout](#request-timeout)'s "Federated MCP" note. An unresolvable
+    prefix — including one that names a real but group-restricted or
+    transport-excluded server (below) — is a JSON-RPC `invalid params`
+    error (`-32602`), not an HTTP `404`: the request reached a real route
+    and method, it just named a tool nothing could route.
   - **Session handshake fallback**: each outbound backend call tries bare
-    (no session) first. A backend that answers with a JSON-RPC error or an
-    HTTP `4xx` — signalling "you need a session" — gets ONE retry: `POST
-    initialize` (this gateway's own protocol version and minimal
-    `clientInfo`), capture the `Mcp-Session-Id` response header if the
-    backend sets one, re-issue the real call carrying that header, then
-    best-effort `DELETE` the session afterward (failure logged, never
-    surfaced). A network failure, timeout, or `5xx` never triggers this
-    retry — only a response that specifically signals "missing session" is
-    worth a second attempt. This ruling was verified against all 11
+    (no session) first. A retry fires only on a narrow "you need a
+    session" signal, never on HTTP `429` (that asks for backoff, not a
+    retry): HTTP `400`/`404` triggers it for either method; a JSON-RPC-
+    level error additionally triggers it for `tools/list` unconditionally,
+    but for `tools/call` only when the error message itself mentions
+    "session" — a generic tool-level failure must not be retried, since
+    retrying could silently double-execute a non-idempotent tool that
+    already ran. On that signal: `POST initialize` (this gateway's own
+    protocol version and minimal `clientInfo`), capture the
+    `Mcp-Session-Id` response header if the backend sets one, send the MCP
+    lifecycle's own best-effort `notifications/initialized` (logged, never
+    surfaced, on failure), re-issue the real call carrying that session
+    header, then best-effort `DELETE` the session afterward (failure
+    logged, never surfaced). A network failure, timeout, or `5xx` never
+    triggers this retry either. This ruling was verified against all 11
     production MCP servers behind this gateway: 8 answer bare outright, 2
     (`readitall`, `fetch`) need exactly this handshake, and one — see
     below — needs neither because it cannot be reached this way at all.
@@ -2013,13 +2324,20 @@ plugin's config.
 ## Security notes
 
 - API keys are never retained in memory as plaintext after construction —
-  only their SHA-256 digests. Lookup is by digest, verified with
-  `crypto/subtle.ConstantTimeCompare` against the stored digest, so
-  matching does not leak timing information about a near-miss key.
+  only their SHA-256 digests. Lookup is a map lookup on the presented
+  key's SHA-256 digest, so the plaintext key is never compared byte by
+  byte against a stored secret and a near-miss key leaks no timing
+  information about the real one.
 - Provider API keys are injected server-side (native passthrough's
   `injectAuth`) and never reach the client; a client's own gateway key is
   stripped before any upstream or target request and never reaches a
-  provider, MCP server, or A2A agent.
+  provider, MCP server, or A2A agent. In the other direction, native
+  passthrough strips upstream account-identifying response headers
+  (`OpenAI-Organization`, `OpenAI-Project`, `Anthropic-Organization-Id`)
+  along with `Set-Cookie`, `Strict-Transport-Security`,
+  `Content-Security-Policy` and every `Access-Control-*` header
+  (`routes_passthrough.go`'s `dangerousResponseHeaders`), so a tenant
+  never learns which upstream account serves it.
 - Neither kind of key is ever written to a log line — the logging helpers
   (`logger.go`) carry an explicit "never log key material" contract.
   `providerHTTPError`'s `Error()` string (`providers.go`) separately omits
@@ -2096,8 +2414,12 @@ the plugin's only non-standard-library runtime dependency.
 
 ## Known limitations
 
-- **Streaming is delivered buffered, not token-by-token, under the current
-  Traefik + Yaegi combination.** The plugin's own code streams correctly
+- **Streaming is delivered buffered, not token-by-token, in the plugin
+  form, under the current Traefik + Yaegi combination.** This limitation
+  is specific to form (A); the [standalone binary](#deployment-modes)
+  streams incrementally, because a compiled `http.Flusher` assertion
+  succeeds where Yaegi's synthetic `ResponseWriter` erases the interface.
+  The plugin's own code streams correctly
   (proven by its unit tests, which drive the exact same code compiled, not
   interpreted): content is always complete and correct, but a Yaegi
   limitation strips the `http.Flusher` interface from the
@@ -2304,6 +2626,9 @@ make integration      # docker-compose: real Traefik, real Redis, mock providers
                       # stack up, waits for it, runs the suite, always tears it down after
 make integration-keep # same run, but leaves the stack up afterward for debugging —
                       # tear it down yourself with `make integration-down` when done
+make build-binary     # builds the standalone binary (form B) to bin/llmgateway
+make docker-build     # multi-arch image via buildx; override IMAGE/PLATFORMS/DOCKER_OUTPUT
+make run-local        # builds, then runs the binary against LLMGW_CONFIG
 ```
 
 `make admin-ui` needs Node (developed against v22 / npm 11) but nothing
@@ -2319,11 +2644,22 @@ files too), plus `fieldalignment ./...`
 ([`golang.org/x/tools/go/analysis/passes/fieldalignment`](https://pkg.go.dev/golang.org/x/tools/go/analysis/passes/fieldalignment)).
 All are 0-issues on this repository as of this commit.
 
-The plugin ships stdlib-only (no third-party dependencies at all, see
-`go.mod`) — a hard constraint of Yaegi interpretation, not a style
-preference. [`resp.go`](resp.go) is the clearest example: a hand-rolled,
-~400-line RESP2 client instead of `go-redis`, which proved unsuitable for
-Yaegi interpretation.
+The interpreted plugin package is effectively stdlib-only — a hard
+constraint of Yaegi interpretation, not a style preference.
+[`resp.go`](resp.go) is the clearest example: a hand-rolled, ~400-line
+RESP2 client instead of `go-redis`, which proved unsuitable for Yaegi
+interpretation. Two third-party modules exist in `go.mod` and neither
+weakens that: [oss-telemetry](https://github.com/lukaszraczylo/oss-telemetry)
+is the root package's one runtime dependency (see [Anonymous usage
+reporting](#anonymous-usage-reporting)), and `go.yaml.in/yaml/v3` is
+imported **only** by `cmd/gateway`, never by the root package.
+
+That second constraint is deliberate and load-bearing: keeping YAML out of
+the root package keeps the interpreted surface small and the catalog story
+honest. Nothing enforces it automatically — `make yaegi-check` resolves
+the module out of `vendor/` and stays green even with the import moved to
+the root — so it is a review rule, noted here and in `cmd/gateway`'s own
+package comment.
 
 ### Catalog
 
