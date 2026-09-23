@@ -57,6 +57,19 @@ const (
 	// real Yaegi interpretation; every other group/user in this suite
 	// leaves both fields unset.
 	daveKey = "sk-int-dave"
+	// erinKey belongs to "eng" like alice, but is used ONLY by
+	// TestLastSeenVisibleAcrossReplicas: last-seen writes are throttled
+	// to once per 60s per (scope, replica) IN-PROCESS (lastSeenGate,
+	// limits.go) — state flushRedis's own Redis FLUSHALL never touches,
+	// since it lives in the plugin process's own memory, not Redis. This
+	// whole suite runs in well under 60s, and alice already makes many
+	// requests through replica 1 in earlier tests, so a second alice
+	// request there would find the gate already "due" from one of those
+	// and skip the write entirely — a false negative that has nothing to
+	// do with whether last-seen itself works. A dedicated identity no
+	// other test ever touches guarantees this test's own request is
+	// genuinely alice-for-erin's first ever on replica 1.
+	erinKey = "sk-int-erin"
 )
 
 // composeFile returns the path to docker-compose.yml relative to this
@@ -1392,5 +1405,162 @@ func TestAdminDashboard(t *testing.T) {
 		if total <= 0 {
 			t.Errorf("history scope=%q: sum of all hour buckets = %v, want > 0 (this suite's own traffic)", scope, total)
 		}
+	}
+}
+
+// TestLastSeenVisibleAcrossReplicas covers plan section 5's own
+// "two-replica" bullet for the admin dashboard redesign (WP-G): a
+// request admitted through replica 1 writes an absolute last-seen SET
+// (checkAndCount's own admission batch, limits.go/redis_store.go, DECISIONS
+// Q6) to the shared Redis, so GET /admin/api/usage read THROUGH REPLICA 2
+// must report that same user's lastSeen as non-zero — proving the value
+// is fleet-wide via the shared Redis, not a per-process in-memory figure
+// each container would otherwise carry independently.
+func TestLastSeenVisibleAcrossReplicas(t *testing.T) {
+	flushRedis(t)
+
+	reqBody := map[string]any{
+		"model":    "openai/gpt-mock",
+		"messages": []map[string]any{{"role": "user", "content": "last-seen probe"}},
+	}
+	resp, body := doJSON(t, http.MethodPost, traefik1URL+"/v1/chat/completions", erinKey, reqBody)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("POST %s/v1/chat/completions: status = %d, body=%#v", traefik1URL, resp.StatusCode, body)
+	}
+
+	usageResp, usageBody := doJSON(t, http.MethodGet, traefik2URL+"/admin/api/usage", adminKey, nil)
+	if usageResp.StatusCode != http.StatusOK {
+		t.Fatalf("GET %s/admin/api/usage: status = %d, body=%#v", traefik2URL, usageResp.StatusCode, usageBody)
+	}
+	users, ok := usageBody["users"].([]any)
+	if !ok {
+		t.Fatalf("GET %s/admin/api/usage: users is not an array, body=%#v", traefik2URL, usageBody)
+	}
+	var erin map[string]any
+	for _, u := range users {
+		if entry, ok := u.(map[string]any); ok && entry["id"] == "erin" {
+			erin = entry
+		}
+	}
+	if erin == nil {
+		t.Fatalf("GET %s/admin/api/usage: no user entry for erin, body=%#v", traefik2URL, usageBody)
+	}
+	if lastSeen, _ := erin["lastSeen"].(float64); lastSeen <= 0 {
+		t.Errorf("GET %s/admin/api/usage: erin.lastSeen = %v, want a non-zero unix-seconds value read through replica 2 after a request admitted on replica 1", traefik2URL, erin["lastSeen"])
+	}
+}
+
+// performanceRowCount finds id's own "count" field within body's "rows"
+// array (GET /admin/api/performance's response shape) — TestPerformanceLatencyCountsEqualAcrossReplicas'
+// own helper.
+func performanceRowCount(t *testing.T, body map[string]any, id string) float64 {
+	t.Helper()
+	rows, ok := body["rows"].([]any)
+	if !ok {
+		t.Fatalf("performance response: rows is not an array, body=%#v", body)
+	}
+	for _, r := range rows {
+		row, ok := r.(map[string]any)
+		if ok && row["id"] == id {
+			count, _ := row["count"].(float64)
+			return count
+		}
+	}
+	t.Fatalf("performance response: no row for id %q, body=%#v", id, body)
+	return 0
+}
+
+// TestPerformanceLatencyCountsEqualAcrossReplicas covers plan section 5's
+// "two-replica" bullet for GET /admin/api/performance (admin dashboard
+// redesign): admin.stats.latency is on (dynamic.yml.tmpl), so a real chat
+// completion's accountWith call writes its duration-bucket counters
+// (ld00..ld13, limits.go) to the SAME shared Redis every other counter
+// family already uses — reading them back through either replica must
+// therefore report the IDENTICAL count, not a per-process figure.
+func TestPerformanceLatencyCountsEqualAcrossReplicas(t *testing.T) {
+	flushRedis(t)
+
+	reqBody := map[string]any{
+		"model":    "openai/gpt-mock",
+		"messages": []map[string]any{{"role": "user", "content": "performance probe"}},
+	}
+	resp, body := doJSON(t, http.MethodPost, traefik1URL+"/v1/chat/completions", aliceKey, reqBody)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("POST %s/v1/chat/completions: status = %d, body=%#v", traefik1URL, resp.StatusCode, body)
+	}
+
+	perfPath := "/admin/api/performance?kind=provider&window=day&id=openai"
+	perf1Resp, perf1Body := doJSON(t, http.MethodGet, traefik1URL+perfPath, adminKey, nil)
+	if perf1Resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET %s%s: status = %d, body=%#v", traefik1URL, perfPath, perf1Resp.StatusCode, perf1Body)
+	}
+	perf2Resp, perf2Body := doJSON(t, http.MethodGet, traefik2URL+perfPath, adminKey, nil)
+	if perf2Resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET %s%s: status = %d, body=%#v", traefik2URL, perfPath, perf2Resp.StatusCode, perf2Body)
+	}
+	if latencyEnabled, _ := perf1Body["latencyEnabled"].(bool); !latencyEnabled {
+		t.Fatalf("GET %s%s: latencyEnabled = %v, want true (admin.stats.latency is on in dynamic.yml.tmpl)", traefik1URL, perfPath, perf1Body["latencyEnabled"])
+	}
+
+	count1 := performanceRowCount(t, perf1Body, "openai")
+	count2 := performanceRowCount(t, perf2Body, "openai")
+	if count1 <= 0 {
+		t.Fatalf("GET %s%s: openai row count = %v, want > 0 after a real chat completion", traefik1URL, perfPath, count1)
+	}
+	if count1 != count2 {
+		t.Errorf("GET %s%s: count = %v, GET %s%s: count = %v, want identical (same shared Redis counter)", traefik1URL, perfPath, count1, traefik2URL, perfPath, count2)
+	}
+}
+
+// TestTargetCallerTotalsAfterMCPCall covers plan section 5's "two-replica"
+// bullet for the target x caller counter family (always-on-with-admin,
+// limits.go's countTargetRequestBy): a real MCP target-proxy call made
+// through replica 1 must be visible via GET /admin/api/usage/totals?
+// kind=targetcaller read through replica 2 — the shared Redis counter
+// again, not a per-process figure.
+func TestTargetCallerTotalsAfterMCPCall(t *testing.T) {
+	flushRedis(t)
+
+	req, err := http.NewRequest(http.MethodGet, traefik1URL+"/mcp/tool/sse", nil)
+	if err != nil {
+		t.Fatalf("new mcp request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+aliceKey)
+	mcpResp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("mcp target proxy request: %v", err)
+	}
+	defer func() { _ = mcpResp.Body.Close() }()
+	if mcpResp.StatusCode != http.StatusOK {
+		t.Fatalf("GET %s/mcp/tool/sse: status = %d", traefik1URL, mcpResp.StatusCode)
+	}
+	if _, err := io.ReadAll(mcpResp.Body); err != nil {
+		t.Fatalf("read mcp target proxy body: %v", err)
+	}
+
+	totalsResp, totalsBody := doJSON(t, http.MethodGet, traefik2URL+"/admin/api/usage/totals?kind=targetcaller&window=day&target=mcp/tool", adminKey, nil)
+	if totalsResp.StatusCode != http.StatusOK {
+		t.Fatalf("GET %s/admin/api/usage/totals?kind=targetcaller: status = %d, body=%#v", traefik2URL, totalsResp.StatusCode, totalsBody)
+	}
+	rows, ok := totalsBody["rows"].([]any)
+	if !ok {
+		t.Fatalf("GET /admin/api/usage/totals?kind=targetcaller: rows is not an array, body=%#v", totalsBody)
+	}
+	wantID := "mcp/tool/alice"
+	var found map[string]any
+	for _, r := range rows {
+		if row, ok := r.(map[string]any); ok && row["id"] == wantID {
+			found = row
+		}
+	}
+	if found == nil {
+		t.Fatalf("GET %s/admin/api/usage/totals?kind=targetcaller: no row for id %q, body=%#v", traefik2URL, wantID, totalsBody)
+	}
+	values, ok := found["values"].(map[string]any)
+	if !ok {
+		t.Fatalf("GET /admin/api/usage/totals?kind=targetcaller: row %q values is not an object, got %#v", wantID, found["values"])
+	}
+	if reqCount, _ := values["req"].(float64); reqCount < 1 {
+		t.Errorf("GET %s/admin/api/usage/totals?kind=targetcaller: %q.values.req = %v, want >= 1 after one MCP call through replica 1", traefik2URL, wantID, values["req"])
 	}
 }

@@ -136,6 +136,14 @@ http:
               - name: dave
                 group: restricted
                 apiKey: "sk-int-dave"
+              # TestLastSeenVisibleAcrossReplicas' dedicated identity
+              # (admin dashboard redesign, WP-G integration coverage) —
+              # see erinKey's own doc comment (integration_test.go) for
+              # why last-seen's 60s-per-replica in-process throttle needs
+              # an identity no other test in this suite ever touches.
+              - name: erin
+                group: eng
+                apiKey: "sk-int-erin"
             file: "/users/users.json"
           redis:
             address: "redis:6379"
@@ -167,6 +175,15 @@ http:
             ttl: "2m"
           admin:
             enabled: true
+            # admin.stats.latency (admin dashboard redesign, WP-G
+            # integration coverage): opt-in, default off (DECISIONS Q4) —
+            # turned on here so TestPerformanceLatencyCountsEqualAcrossReplicas
+            # can prove GET /admin/api/performance's latency percentiles
+            # read identically through either replica, off the SAME
+            # shared Redis every other counter family already uses.
+            # userModel stays off: nothing in this suite exercises it.
+            stats:
+              latency: true
           # Task 6 (spec §5): one alias per mock provider type, so the
           # integration suite proves the echo-behavior asymmetry under
           # real Traefik+Yaegi — openai-type forwards the upstream body

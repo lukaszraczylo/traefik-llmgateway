@@ -1007,7 +1007,15 @@ func run() error {
 	// /admin/api/events?limit=1 for the single newest entry right after
 	// producing it, so nothing after it depends on event ordering staying
 	// undisturbed.
-	return exerciseUpstreamAndTimeoutEvents(handler)
+	if err := exerciseUpstreamAndTimeoutEvents(handler); err != nil {
+		return err
+	}
+	// exerciseAdminRedesignStats (admin_redesign.go, admin dashboard
+	// redesign WP-G) runs LAST of all, against its own dedicated Gateway
+	// instance (own config, own fake Redis, own upstream) rather than the
+	// shared `handler` above — see that function's own doc comment for
+	// why.
+	return exerciseAdminRedesignStats(i, pkgName)
 }
 
 // builtinLookupModelID is a real, stable entry in the generated
