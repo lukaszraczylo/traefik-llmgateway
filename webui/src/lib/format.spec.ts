@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { formatCompactCount, formatContextWindow, formatElapsedAgo, formatLatencyMs, formatModelCostHover, formatUntil, refreshDetailLabel, refreshLabel, ZERO_TIME } from './format'
+import { formatBucketLabel, formatCompactCount, formatContextWindow, formatElapsedAgo, formatLatencyMs, formatModelCostHover, formatUntil, refreshDetailLabel, refreshLabel, ZERO_TIME } from './format'
 
 describe('refreshLabel', () => {
   it('reads "discovery off" when discovery is disabled, regardless of lastRefresh', () => {
@@ -179,6 +179,32 @@ describe('formatLatencyMs', () => {
     { ms: 12_345, want: '12.3s' },
   ])('formatLatencyMs($ms) = $want', ({ ms, want }) => {
     expect(formatLatencyMs(ms)).toBe(want)
+  })
+})
+
+// History chart bucket labels (limits.go's windowKey: hour/day/month
+// fixed-width digit strings, bucketFor always formats in UTC). Review
+// finding: the hour case previously rendered its bucket's bare hour digits
+// with no timezone indicator, reading as local time to a reader outside
+// UTC even though bucketFor never buckets in local time.
+describe('formatBucketLabel', () => {
+  it('labels an hour bucket with an explicit "UTC" suffix, not a bare local-looking hour', () => {
+    expect(formatBucketLabel('2026082114', 'hour')).toBe('14:00 UTC')
+  })
+
+  it('labels a day bucket as a calendar date, no timezone suffix needed', () => {
+    // toLocaleDateString(undefined, ...) follows the RUNNER's own default
+    // locale (e.g. "Aug 21" under en-US, "21 Aug" under en-GB) — the
+    // expectation is computed the identical way, not hardcoded, so this
+    // stays locale-independent rather than pinning one CI environment's
+    // ordering.
+    const want = new Date(2026, 7, 21).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+    expect(formatBucketLabel('20260821', 'day')).toBe(want)
+  })
+
+  it('labels a month bucket as a calendar month/year, no timezone suffix needed', () => {
+    const want = new Date(2026, 7, 1).toLocaleDateString(undefined, { month: 'short', year: 'numeric' })
+    expect(formatBucketLabel('202608', 'month')).toBe(want)
   })
 })
 

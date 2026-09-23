@@ -151,7 +151,9 @@ export function targetColumns(): ColumnDef<AdminTargetView, unknown>[] {
       accessorFn: (t) => (t.access ?? []).join(', '),
       cell: ({ row }) => {
         const access = row.original.access
-        if (!access?.length) return h('span', { class: 'text-muted-foreground' }, 'All groups')
+        // null/absent = every group; [] = no group (admin.go adminTargetView.Access).
+        if (access == null) return h('span', { class: 'text-muted-foreground' }, 'All groups')
+        if (access.length === 0) return h('span', { class: 'text-muted-foreground' }, 'No groups')
         return h(
           'div',
           { class: 'flex flex-wrap gap-1.5' },

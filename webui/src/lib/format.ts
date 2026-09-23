@@ -303,8 +303,14 @@ export function formatLimits(limits: LimitsConfig | undefined): string {
 export function formatBucketLabel(bucket: string, window: HistoryWindow): string {
   switch (window) {
     case 'hour': {
+      // bucketFor (limits.go) always buckets in UTC (t.UTC() before
+      // formatting) — labeling the bare hour digits with no timezone reads
+      // as local time to an operator outside UTC (14:xx local shows as
+      // "12:00" for a UTC+2 reader). Explicit "UTC" suffix, not a
+      // local-time conversion: day/month buckets are calendar dates with
+      // no such ambiguity, so only the hour case needs this.
       const hour = bucket.slice(8, 10)
-      return `${hour}:00`
+      return `${hour}:00 UTC`
     }
     case 'day': {
       const year = Number(bucket.slice(0, 4))

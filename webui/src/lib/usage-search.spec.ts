@@ -3,12 +3,13 @@ import { describe, expect, it } from 'vitest'
 import { groupMatches, groupNameMatches, matchingMembersOfGroup, membersOfGroup, userMatches } from './usage-search'
 import type { AdminUsageEntryView } from '@/types/api'
 
-/** entry builds a minimal AdminUsageEntryView — only id/groupName matter to this module, the rest are never read. */
-function entry(id: string, groupName?: string): AdminUsageEntryView {
+/** entry builds a minimal AdminUsageEntryView — only id/groupName/groups matter to this module, the rest are never read. */
+function entry(id: string, groupName?: string, groups?: string[]): AdminUsageEntryView {
   return {
     kind: groupName === undefined ? 'group' : 'user',
     id,
     groupName,
+    groups,
     requestsPerMinute: 0,
     requestsPerDay: 0,
     tokensInPerDay: 0,
@@ -51,6 +52,23 @@ describe('membersOfGroup', () => {
   it('joins users to a group on groupName === group.id', () => {
     expect(membersOfGroup(teamA, users)).toEqual([alice, bob])
     expect(membersOfGroup(teamB, users)).toEqual([carol])
+  })
+
+  // Multi-group support (review finding 4): a user's full membership lives
+  // in `groups` (admin.go's adminUsageEntryView.Groups); groupName alone
+  // only ever carries the FIRST one. Before this fix, membersOfGroup's
+  // `groupName === group.id` join silently dropped a multi-group user from
+  // every group but their first.
+  it('joins a multi-group user into EVERY one of their member groups via `groups`, not just groupName', () => {
+    const dave = entry('dave', 'team-a', ['team-a', 'team-b'])
+    const roster = [alice, bob, carol, dave]
+
+    expect(membersOfGroup(teamA, roster)).toEqual([alice, bob, dave])
+    expect(membersOfGroup(teamB, roster)).toEqual([carol, dave])
+  })
+
+  it('falls back to [groupName] when `groups` is absent (a single-group user, or a fixture predating the field)', () => {
+    expect(membersOfGroup(teamA, users)).toEqual([alice, bob])
   })
 })
 

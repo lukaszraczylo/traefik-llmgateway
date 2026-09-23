@@ -30,8 +30,9 @@ const memberCounts = computed<Record<string, number>>(() => {
   return out
 })
 
+/** groupNameOf renders a user's FULL group membership (multi-group support — entry.groups ?? [entry.groupName], never groupName alone, see AdminUsageEntryView.groups' own doc comment), comma-joined for the Group column. */
 function groupNameOf(entry: AdminUsageEntryView): string {
-  return entry.groupName ?? ''
+  return (entry.groups ?? (entry.groupName === undefined ? [] : [entry.groupName])).join(', ')
 }
 function memberCountOf(entry: AdminUsageEntryView): string {
   const count = memberCounts.value[entry.id]
@@ -129,7 +130,9 @@ const filteredUsers = computed<AdminUsageEntryView[]>(() => {
     groups.filter((g) => groupNameMatches(g, normalizedQuery.value)).map((g) => g.id),
   )
   return all.filter(
-    (u) => userMatches(u, normalizedQuery.value) || (u.groupName !== undefined && nameMatchedGroupIds.has(u.groupName)),
+    (u) =>
+      userMatches(u, normalizedQuery.value) ||
+      (u.groups ?? [u.groupName]).some((g) => g !== undefined && nameMatchedGroupIds.has(g)),
   )
 })
 /** usersEmptyMessage mirrors groupsEmptyMessage's three-way pattern (see its own doc comment). */

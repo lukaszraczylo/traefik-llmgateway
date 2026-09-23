@@ -232,6 +232,17 @@ export interface AdminUsageEntryView {
   id: string
   groupName?: string
   /**
+   * The user's full member group list (multi-group support, admin.go's
+   * adminUsageEntryView.Groups) — set only on a user entry, same "user-only"
+   * convention groupName above already follows. groupName keeps the FIRST
+   * group for back-compat; groups is the complete membership. Every
+   * group-membership check (search matching, the members table, the Group
+   * column) must read `entry.groups ?? [entry.groupName]`, never groupName
+   * alone — a multi-group user otherwise silently drops out of every group
+   * but their first.
+   */
+  groups?: string[]
+  /**
    * The group's configured access lists (admin.go: adminUsageEntryView's
    * Providers/Models/MCPServers/Agents) — set only on a group entry (kind
    * === 'group'), never on a user or the total entry, mirroring groupName's
@@ -357,14 +368,14 @@ export interface AdminTargetHealthView {
  * One configured MCP server's or A2A agent's row in GET /admin/api/targets
  * (admin.go: adminTargetView). Access is the group names actually allowed
  * to reach this target, computed server-side via the same matching authz
- * enforcement uses — undefined/empty means every configured group can
- * reach it ("empty meaning all", mirroring AdminUsageEntryView's own
- * providers/models/mcpServers/agents convention above).
+ * enforcement uses — null/undefined means every configured group can
+ * reach it, [] means no configured group can, and a non-empty list names
+ * the groups that can (admin.go adminTargetView.Access).
  */
 export interface AdminTargetView {
   name: string
   url: string
-  access?: string[]
+  access?: string[] | null
   counters: AdminTargetCountersView
   /** See AdminTargetHealthView's own doc comment (feat/target-health) — always present, unlike access above. */
   health: AdminTargetHealthView

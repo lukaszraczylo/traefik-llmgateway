@@ -77,11 +77,29 @@ export const WINDOW_SPAN: Record<HistoryWindow, number> = {
   month: 12,
 }
 
-/** WINDOW_LABEL is the switcher's own display text for each window. */
+/** WINDOW_LABEL is the switcher's own display text for each window, for the three TIME-SERIES tabs (requests/tokens/cost) — a real span of buckets, matching WINDOW_SPAN above. */
 export const WINDOW_LABEL: Record<HistoryWindow, string> = {
   hour: '24h',
   day: '30d',
   month: '12mo',
+}
+
+/**
+ * MODEL_WINDOW_LABEL is the Models tab's OWN window-switcher text — that
+ * tab shares the same three-way Tabs control as the time-series tabs
+ * (ChartsView.vue), but reads a fundamentally different query: modelTotals
+ * (limits.go) returns ONE counter at window's CURRENT bucket, never a span
+ * of WINDOW_SPAN buckets. Labeling that control "24h" when it actually
+ * means "since the top of the current UTC hour" understates how little
+ * data is behind it — at 14:05 UTC, "24h" would visually promise a full
+ * day while the ranking covers five minutes. "(UTC)" is explicit rather
+ * than implied, matching formatBucketLabel's own hour-bucket fix
+ * (lib/format.ts) — bucketFor (limits.go) always buckets in UTC.
+ */
+export const MODEL_WINDOW_LABEL: Record<HistoryWindow, string> = {
+  hour: 'This hour (UTC)',
+  day: 'Today (UTC)',
+  month: 'This month (UTC)',
 }
 
 /**
@@ -126,28 +144,65 @@ export const useHistoryStore = defineStore('history', {
     /** Models with non-zero traffic, for the scope picker's model entries. */
     modelOptions: [] as AdminUsageModelEntry[],
     loading: false,
+    /** True once the current selection's first fetch committed; cleared by the setters. Drives the "Loading…" line so background refreshes don't flash it over rendered data. */
+    loaded: false,
     error: '',
     timer: undefined as ReturnType<typeof setInterval> | undefined,
+    /**
+     * seriesReqId guards fetchSeries and fetchModelRanking against
+     * out-of-order responses (review finding: "latest-request-wins"). The
+     * two are mutually exclusive per refresh() call (exactly one runs,
+     * picked by `tab`), so ONE shared counter is enough — a fetch started
+     * by an OLDER selection (scope/window/tab/modelMetric) always loses to
+     * whichever fetch started most recently, never to load order. Each
+     * fetch captures the id it was issued under before its own await, then
+     * only commits its result (and clears `loading`) if that id is still
+     * the current one when it resolves.
+     */
+    seriesReqId: 0,
+    /** optionsReqId is fetchModelOptions' own independent counter (a background, parallel fetch — see that action's own doc comment for why it never touches `loading`/`error`). */
+    optionsReqId: 0,
   }),
   actions: {
     setScope(scope: string): void {
       if (scope === this.scope) return
       this.scope = scope
+      // Clear the OLD selection's series before fetching the new one (review
+      // finding: stale data must never render under the new selection's
+      // labels) — done in the setter, not inside refresh()/fetchSeries(),
+      // so the 30s auto-refresh timer (same selection, no setter involved)
+      // does not blank the chart on every tick.
+      this.seriesByMetric = {}
+      this.error = ''
+      this.loaded = false
       void this.refresh()
     },
     setWindow(window: HistoryWindow): void {
       if (window === this.window) return
       this.window = window
+      // Window changes both the time-series bucket resolution AND the
+      // Models ranking's single current bucket — clear both.
+      this.seriesByMetric = {}
+      this.modelRanking = []
+      this.error = ''
+      this.loaded = false
       void this.refresh()
     },
     setTab(tab: ChartTab): void {
       if (tab === this.tab) return
       this.tab = tab
+      this.seriesByMetric = {}
+      this.modelRanking = []
+      this.error = ''
+      this.loaded = false
       void this.refresh()
     },
     setModelMetric(metric: ModelMetric): void {
       if (metric === this.modelMetric) return
       this.modelMetric = metric
+      this.modelRanking = []
+      this.error = ''
+      this.loaded = false
       void this.refresh()
     },
     /**
@@ -162,6 +217,7 @@ export const useHistoryStore = defineStore('history', {
     async fetchSeries(): Promise<void> {
       const auth = useAuthStore()
       if (!auth.isAuthenticated) return
+      const requestId = ++this.seriesReqId
       this.loading = true
       try {
         const span = WINDOW_SPAN[this.window]
@@ -173,38 +229,51 @@ export const useHistoryStore = defineStore('history', {
             ),
           ),
         )
+        // Stale: a newer selection (or the models-tab fetch) already
+        // superseded this one — drop the result rather than overwriting
+        // whatever the current selection has since fetched or cleared.
+        if (requestId !== this.seriesReqId) return
         const next: Partial<Record<HistoryMetric, UsageHistoryPoint[]>> = {}
         metrics.forEach((metric, i) => {
           next[metric] = results[i]!.points
         })
         this.seriesByMetric = next
+        this.loaded = true
         this.error = ''
       } catch (err) {
+        if (requestId !== this.seriesReqId) return
         if (err instanceof AdminApiError && (err.status === 401 || err.status === 403)) {
           return
         }
         this.error = err instanceof Error ? err.message : String(err)
       } finally {
-        this.loading = false
+        // Only the still-current request clears `loading` — an older,
+        // already-superseded fetch settling later must not flip it back to
+        // false while the newer one it lost to is still in flight.
+        if (requestId === this.seriesReqId) this.loading = false
       }
     },
     async fetchModelRanking(): Promise<void> {
       const auth = useAuthStore()
       if (!auth.isAuthenticated) return
+      const requestId = ++this.seriesReqId
       this.loading = true
       try {
         const res = await adminFetch<AdminUsageModelsResponse>(
           `/admin/api/usage/models?metric=${this.modelMetric}&window=${this.window}&limit=${MODEL_RANKING_LIMIT}`,
         )
+        if (requestId !== this.seriesReqId) return
         this.modelRanking = res.models
+        this.loaded = true
         this.error = ''
       } catch (err) {
+        if (requestId !== this.seriesReqId) return
         if (err instanceof AdminApiError && (err.status === 401 || err.status === 403)) {
           return
         }
         this.error = err instanceof Error ? err.message : String(err)
       } finally {
-        this.loading = false
+        if (requestId === this.seriesReqId) this.loading = false
       }
     },
     /**
@@ -219,10 +288,14 @@ export const useHistoryStore = defineStore('history', {
     async fetchModelOptions(): Promise<void> {
       const auth = useAuthStore()
       if (!auth.isAuthenticated) return
+      const requestId = ++this.optionsReqId
       try {
         const res = await adminFetch<AdminUsageModelsResponse>(
           `/admin/api/usage/models?metric=req&window=${this.window}&limit=${MODEL_OPTIONS_LIMIT}`,
         )
+        // Stale: a later window change already fired its own picker-list
+        // fetch — never let an older window's model list overwrite it.
+        if (requestId !== this.optionsReqId) return
         this.modelOptions = res.models
       } catch {
         // Intentionally ignored — see the doc comment above.
@@ -230,7 +303,12 @@ export const useHistoryStore = defineStore('history', {
     },
     startAutoRefresh(): void {
       if (this.timer !== undefined) return
-      this.timer = setInterval(() => void this.refresh(), REFRESH_MS)
+      // Skip a tick while the previous fetch is still in flight: each fetch
+      // bumps seriesReqId, so an unconditional tick would supersede (and
+      // discard) any request slower than REFRESH_MS, forever.
+      this.timer = setInterval(() => {
+        if (!this.loading) void this.refresh()
+      }, REFRESH_MS)
     },
     stopAutoRefresh(): void {
       if (this.timer === undefined) return

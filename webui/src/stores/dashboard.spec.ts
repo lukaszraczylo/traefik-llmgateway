@@ -134,4 +134,29 @@ describe('useDashboardStore.refresh', () => {
 
     expect(dashboard.error).toBe('')
   })
+
+  // Review finding: the 5s poll interval had no in-flight guard, so a round
+  // trip slower than POLL_MS could stack a second refresh() on top of the
+  // first — twice the requests, free to resolve in either order.
+  it('skips a refresh() call that starts while one is already in flight', async () => {
+    let resolveOverview!: (v: AdminOverviewResponse) => void
+    mockedAdminFetch.mockImplementation((async (path: string) => {
+      if (path === '/admin/api/overview') return new Promise<AdminOverviewResponse>((resolve) => (resolveOverview = resolve))
+      if (path === '/admin/api/usage') return emptyUsage
+      if (path === '/admin/api/targets') return emptyTargets
+      throw new Error(`unexpected path ${path}`)
+    }) as typeof adminFetch)
+    const dashboard = useDashboardStore()
+
+    const first = dashboard.refresh() // overview never resolves yet — still "in flight"
+    const second = dashboard.refresh() // must skip entirely, not queue behind the first
+
+    resolveOverview(emptyOverview)
+    await Promise.all([first, second])
+
+    // One overview call for the first refresh(), none for the skipped
+    // second one — not two.
+    const overviewCalls = mockedAdminFetch.mock.calls.filter((c) => c[0] === '/admin/api/overview')
+    expect(overviewCalls).toHaveLength(1)
+  })
 })

@@ -58,6 +58,14 @@
     --radius-md: calc(var(--radius) - 2px);
     --radius-lg: var(--radius);
     --radius-xl: calc(var(--radius) + 4px);
+    /* Powers the `font-heading` utility Tailwind v4 auto-generates from any
+       --font-* @theme token — CardTitle.vue and AlertTitle.vue apply it (a
+       review fix: they previously wrote the unrecognized class
+       `cn-font-heading`, matching nothing this token or Tailwind's engine
+       generates, so it rendered as a plain no-op string with zero styling
+       effect). Same font as body today; the token exists so a future
+       distinct heading face is a one-line change here, not a find-replace
+       across every component that uses it. */
     --font-heading: var(--font-sans);
 }
 

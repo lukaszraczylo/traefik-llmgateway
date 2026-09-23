@@ -156,3 +156,31 @@ describe('targetColumns: health column', () => {
     expect(vnode.children?.default()).toBe('unknown')
   })
 })
+
+function accessCellOf(access: AdminTargetView['access']): unknown {
+  const col = targetColumns().find((c) => c.id === 'access')
+  const cell = col?.cell as (ctx: { row: { original: AdminTargetView } }) => unknown
+  return cell({ row: { original: { ...testTarget({ state: 'unknown', consecutiveFailures: 0 }), access } } })
+}
+
+describe('targetColumns: access column', () => {
+  it('renders "All groups" for null and absent access', () => {
+    for (const access of [null, undefined]) {
+      const node = accessCellOf(access)
+      expect(isVNode(node) && node.children).toBe('All groups')
+    }
+  })
+
+  it('renders "No groups" for an empty access list, not "All groups"', () => {
+    const node = accessCellOf([])
+    expect(isVNode(node) && node.children).toBe('No groups')
+  })
+
+  it('renders one Badge per group for a non-empty access list', () => {
+    const node = accessCellOf(['a', 'b'])
+    expect(isVNode(node)).toBe(true)
+    const children = (node as { children: unknown[] }).children
+    expect(children).toHaveLength(2)
+    expect(children.every((c) => isVNode(c) && c.type === Badge)).toBe(true)
+  })
+})

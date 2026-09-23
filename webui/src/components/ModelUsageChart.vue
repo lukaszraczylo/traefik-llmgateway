@@ -5,7 +5,7 @@ import { Bar } from 'vue-chartjs'
 
 import '@/lib/chart-setup'
 import { useThemeColors } from '@/composables/useThemeColors'
-import { formatCompactCount, formatExactInt } from '@/lib/format'
+import { formatCompactCount, formatCost, formatExactInt } from '@/lib/format'
 import { MODEL_METRIC_LABEL, type ModelMetric } from '@/stores/history'
 import type { AdminUsageModelEntry } from '@/types/api'
 
@@ -78,7 +78,12 @@ const chartOptions = computed<ChartOptions<'bar'>>(() => ({
       grid: { color: border.value },
       ticks: {
         color: mutedForeground.value,
-        callback: (value) => (props.metric === 'cost' ? `$${value}` : formatCompactCount(Number(value))),
+        // Reuses formatCost, same rationale as UsageChart.vue's identical
+        // fix: a raw tick float interpolated directly into "$${value}" can
+        // print unrounded binary-float noise; formatCost's .toFixed(4)
+        // resolves it, and is the same formatter every other cost figure
+        // in this app already renders through.
+        callback: (value) => (props.metric === 'cost' ? formatCost(Number(value) * 1_000_000) : formatCompactCount(Number(value))),
       },
     },
     y: {

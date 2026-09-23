@@ -14,6 +14,25 @@ export class AdminApiError extends Error {
 }
 
 /**
+ * serverErrorMessage reads the server's own error envelope off a failed
+ * response (errors.go's writeOAIError: {"error":{"message","type","code"}}),
+ * so a 503 "usage history store unavailable" or a 404 "unknown user id"
+ * reaches the UI instead of a bare "/admin/api/...: HTTP 503". Falls back to
+ * that plain path/status text whenever the body is not that shape — an
+ * empty body, a proxy error page, or any other non-JSON response — so a
+ * malformed error body can never itself throw out of adminFetch.
+ */
+async function serverErrorMessage(resp: Response, path: string): Promise<string> {
+  const fallback = `${path}: HTTP ${resp.status}`
+  try {
+    const body = (await resp.json()) as { error?: { message?: string } }
+    return body.error?.message || fallback
+  } catch {
+    return fallback
+  }
+}
+
+/**
  * adminFetch issues a GET against one of the three /admin/api/* routes with
  * the stored admin key attached as `x-api-key`, and decodes the JSON body.
  *
@@ -29,16 +48,16 @@ export async function adminFetch<T>(path: string): Promise<T> {
 
   const resp = await fetch(path, { credentials: 'same-origin', headers })
 
-  if (resp.status === 401 || resp.status === 403) {
-    // Late-401 guard: only reject the key that is STILL the one stored —
-    // see authStore.reject's own doc comment for why.
-    if (auth.apiKey === key) {
-      auth.reject('invalid key, or not an admin')
-    }
-    throw new AdminApiError(`${path}: HTTP ${resp.status}`, resp.status)
-  }
   if (!resp.ok) {
-    throw new AdminApiError(`${path}: HTTP ${resp.status}`, resp.status)
+    const message = await serverErrorMessage(resp, path)
+    if (resp.status === 401 || resp.status === 403) {
+      // Late-401 guard: only reject the key that is STILL the one stored —
+      // see authStore.reject's own doc comment for why.
+      if (auth.apiKey === key) {
+        auth.reject('invalid key, or not an admin')
+      }
+    }
+    throw new AdminApiError(message, resp.status)
   }
   return (await resp.json()) as T
 }

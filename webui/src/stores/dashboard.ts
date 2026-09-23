@@ -25,12 +25,33 @@ export const useDashboardStore = defineStore('dashboard', {
     lastUpdated: null as Date | null,
     error: '',
     timer: undefined as ReturnType<typeof setInterval> | undefined,
+    /**
+     * refreshing guards against overlapping polls (review finding): the 5s
+     * setInterval has no in-flight check on its own, so a round trip that
+     * takes longer than POLL_MS (a slow Redis behind /admin/api/overview,
+     * say) would otherwise stack a second refresh() on top of the first —
+     * two requests per section in flight at once, free to resolve in
+     * either order and briefly show older data after the newer one already
+     * landed. A tick that finds a refresh still in flight simply skips —
+     * the next tick (or the already-in-flight one finishing) catches up,
+     * so the dashboard never resorts to comparing response ordering.
+     */
+    refreshing: false,
   }),
   actions: {
     async refresh(): Promise<void> {
       const auth = useAuthStore()
       if (!auth.isAuthenticated) return
-
+      if (this.refreshing) return
+      this.refreshing = true
+      try {
+        await this.doRefresh()
+      } finally {
+        this.refreshing = false
+      }
+    },
+    /** doRefresh is refresh()'s actual body, split out so the in-flight guard above wraps it in one place rather than every early-return branch below needing its own `finally`. */
+    async doRefresh(): Promise<void> {
       const [overviewResult, usageResult, targetsResult] = await Promise.allSettled([
         adminFetch<AdminOverviewResponse>('/admin/api/overview'),
         adminFetch<AdminUsageResponse>('/admin/api/usage'),
@@ -79,11 +100,6 @@ export const useDashboardStore = defineStore('dashboard', {
       if (this.timer !== undefined) return
       void this.refresh()
       this.timer = setInterval(() => void this.refresh(), POLL_MS)
-    },
-    stopPolling(): void {
-      if (this.timer === undefined) return
-      clearInterval(this.timer)
-      this.timer = undefined
     },
   },
 })

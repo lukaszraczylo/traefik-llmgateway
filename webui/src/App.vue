@@ -41,6 +41,12 @@ type TabValue = (typeof TAB_VALUES)[number]
 // authenticated transition with no extra wiring here.
 const activeView = useTabHash<TabValue>({ validTabs: TAB_VALUES, defaultTab: 'providers' })
 
+// statusText reads dashboard.error/lastUpdated unconditionally — it is
+// correct only while the template's own `v-if="auth.isAuthenticated"` below
+// keeps it off-screen otherwise. Without that gate a 401 (which resolves
+// before touching error/lastUpdated) left the PRIOR "last updated ..." or
+// "refresh failed: ..." line showing right under the auth gate, and a first
+// load with no stored key showed "loading..." forever (review finding).
 const statusText = computed<string>(() => {
   if (dashboard.error) return `refresh failed: ${dashboard.error}`
   if (dashboard.lastUpdated) return `last updated ${dashboard.lastUpdated.toLocaleTimeString()}`
@@ -70,7 +76,7 @@ onMounted(() => {
           <FontAwesomeIcon :icon="faGithub" class="size-4" aria-hidden="true" />
         </Button>
       </div>
-      <p class="flex items-center gap-1.5 text-sm text-muted-foreground">
+      <p v-if="auth.isAuthenticated" class="flex items-center gap-1.5 text-sm text-muted-foreground">
         <FontAwesomeIcon v-if="dashboard.error" :icon="faCircleExclamation" class="size-3.5 text-destructive" />
         <span :class="dashboard.error ? 'text-destructive' : undefined">{{ statusText }}</span>
       </p>

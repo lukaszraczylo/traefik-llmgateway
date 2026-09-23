@@ -41,6 +41,20 @@ function routeFetch(handlers: { models?: () => unknown; series?: () => unknown }
   })
 }
 
+/** deferred exposes a promise's resolve function, so a test controls exactly when a mocked fetch "arrives" — the out-of-order-responses tests below depend on resolving the NEWER request before the OLDER one. */
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>((res) => {
+    resolve = res
+  })
+  return { promise, resolve }
+}
+
+/** flush drains the microtask queue — a setTimeout(0) macrotask fires only after every already-queued microtask (every chained .then/await) has run, which a plain `await Promise.resolve()` is not guaranteed to cover in one hop through fetchSeries' own multi-step await chain. */
+function flush(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0))
+}
+
 describe('useHistoryStore model ranking', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
@@ -146,5 +160,131 @@ describe('useHistoryStore model ranking', () => {
     await history.refresh()
 
     expect(history.error).toBe('ranking unavailable')
+  })
+})
+
+// Review findings 1/2/9: out-of-order responses must never overwrite a
+// newer selection, stale data must never render under the new selection's
+// labels, and `loading` must only ever be cleared by the request that is
+// still current.
+describe('useHistoryStore: latest-request-wins', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    mockedAdminFetch.mockReset()
+    useAuthStore().submit('test-admin-key')
+  })
+
+  it('drops a fetchSeries response that resolves late, after a newer scope already superseded it', async () => {
+    const alice = deferred<UsageHistoryResponse>()
+    const ops = deferred<UsageHistoryResponse>()
+    mockedAdminFetch.mockImplementation((path: string) => {
+      if (path.includes('scope=user%3Aalice')) return alice.promise
+      if (path.includes('scope=group%3Aops')) return ops.promise
+      return Promise.resolve(modelsResponse([])) // fetchModelOptions' own parallel call
+    })
+    const history = useHistoryStore()
+
+    history.setScope('user:alice') // slow — resolves LAST, below
+    history.setScope('group:ops') // fast — resolves FIRST, below; must win regardless
+
+    ops.resolve({ scope: 'group:ops', metric: 'req', window: 'hour', points: [{ bucket: '2026082012', value: 42 }] })
+    await flush()
+    alice.resolve({ scope: 'user:alice', metric: 'req', window: 'hour', points: [{ bucket: '2026082012', value: 999 }] })
+    await flush()
+
+    // The stale alice response must never land, however late it arrives.
+    expect(history.seriesByMetric.req).toEqual([{ bucket: '2026082012', value: 42 }])
+    expect(history.scope).toBe('group:ops')
+  })
+
+  it('never re-sets `loading` to true after the CURRENT request has already cleared it (a stale request resolving late)', async () => {
+    const alice = deferred<UsageHistoryResponse>()
+    const ops = deferred<UsageHistoryResponse>()
+    mockedAdminFetch.mockImplementation((path: string) => {
+      if (path.includes('scope=user%3Aalice')) return alice.promise
+      if (path.includes('scope=group%3Aops')) return ops.promise
+      return Promise.resolve(modelsResponse([]))
+    })
+    const history = useHistoryStore()
+
+    history.setScope('user:alice')
+    history.setScope('group:ops')
+
+    ops.resolve({ scope: 'group:ops', metric: 'req', window: 'hour', points: [] })
+    await flush()
+    expect(history.loading).toBe(false) // the current request has already settled
+
+    alice.resolve({ scope: 'user:alice', metric: 'req', window: 'hour', points: [] })
+    await flush()
+    expect(history.loading).toBe(false) // the stale request settling later must not flip it back on
+  })
+
+  it('clears seriesByMetric synchronously on a window change, before the new fetch resolves — no stale bucket renders under the new window\'s labels', () => {
+    routeFetch({ series: () => seriesResponse() })
+    const history = useHistoryStore()
+    history.seriesByMetric = { req: [{ bucket: '2026082012', value: 5 }] }
+
+    history.setWindow('day')
+
+    expect(history.seriesByMetric).toEqual({})
+  })
+
+  it('clears modelRanking synchronously on a model-metric change, before the new fetch resolves', () => {
+    routeFetch({})
+    const history = useHistoryStore()
+    history.tab = 'models'
+    history.modelRanking = [{ id: 'alpha/a-model-1', value: 3 }]
+
+    history.setModelMetric('req')
+
+    expect(history.modelRanking).toEqual([])
+  })
+
+  it('does not clear seriesByMetric on an auto-refresh tick (same selection) — only a selection CHANGE clears it', async () => {
+    routeFetch({ series: () => seriesResponse() })
+    const history = useHistoryStore()
+    await history.refresh()
+    expect(history.seriesByMetric.req).toHaveLength(1)
+
+    await history.refresh() // same scope/window/tab — the 30s auto-refresh's own call shape
+
+    expect(history.seriesByMetric.req).toHaveLength(1)
+  })
+
+  it('marks the selection loaded after its first fetch and keeps it loaded across refreshes, clearing it only on a selection change', async () => {
+    routeFetch({ series: () => seriesResponse() })
+    const history = useHistoryStore()
+    expect(history.loaded).toBe(false)
+    await history.refresh()
+    expect(history.loaded).toBe(true)
+
+    await history.refresh()
+    expect(history.loaded).toBe(true)
+
+    history.setWindow('day')
+    expect(history.loaded).toBe(false)
+  })
+
+  it('auto-refresh tick skips while a fetch is still in flight, so a slow request is never superseded by the timer', async () => {
+    vi.useFakeTimers()
+    try {
+      const slow = deferred<UsageHistoryResponse>()
+      mockedAdminFetch.mockImplementation((path: string) =>
+        path.startsWith('/admin/api/usage/models') ? Promise.resolve(modelsResponse([])) : slow.promise,
+      )
+      const history = useHistoryStore()
+      void history.refresh()
+      const callsBefore = mockedAdminFetch.mock.calls.length
+      history.startAutoRefresh()
+      await vi.advanceTimersByTimeAsync(90_000)
+      expect(mockedAdminFetch.mock.calls.length).toBe(callsBefore)
+
+      slow.resolve(seriesResponse())
+      await vi.advanceTimersByTimeAsync(0)
+      expect(history.seriesByMetric.req).toHaveLength(1)
+      history.stopAutoRefresh()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

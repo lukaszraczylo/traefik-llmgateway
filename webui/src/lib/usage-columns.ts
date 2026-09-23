@@ -70,6 +70,18 @@ export function usageColumns(
       id: 'secondary',
       header: secondaryColumnLabel,
       accessorFn: secondaryValue,
+      // 'alphanumeric' (not the default auto-detected sortingFn): this
+      // column's value is a plain string everywhere EXCEPT the Groups
+      // toolbar, where UsageView.vue passes memberCountOf — a numeric count
+      // rendered as a string. TanStack's getAutoSortingFn only inspects
+      // rows 11+ (flatRows.slice(10)) to decide numeric vs basic, so a
+      // groups table with 10 or fewer rows silently fell back to `basic`
+      // (plain a > b string comparison), sorting "10" before "9".
+      // 'alphanumeric' handles both cases correctly regardless of row
+      // count: numeric substrings compare numerically, and it degrades
+      // gracefully for the plain-text group-name case (secondaryValue on
+      // the Users table).
+      sortingFn: 'alphanumeric',
       cell: ({ row }) => h('span', { class: 'text-muted-foreground' }, secondaryValue(row.original)),
     },
     {

@@ -32,6 +32,24 @@ export default defineConfig({
     // polyfill has nothing to do here anyway.
     modulePreload: { polyfill: false },
   },
+  server: {
+    // `npm run dev` serves this app at :5173 (or whatever Vite picks), but
+    // every fetch('/admin/api/...') (lib/api.ts) is a same-origin, relative
+    // path — without a proxy it hits Vite itself, which has no such route
+    // and answers with a 404 or the index.html SPA fallback, so the dev
+    // build can never actually load data. Proxying just the API path (not
+    // '/admin' itself) leaves Vite serving this project's own index.html/
+    // HMR client at '/admin/' as usual. The target is env-configurable
+    // (ADMIN_API_PROXY_TARGET) rather than hardcoded, since which gateway
+    // instance a developer is pointed at varies by machine; the fallback
+    // matches this repo's own `run-local`/integration default port.
+    proxy: {
+      '/admin/api': {
+        target: process.env.ADMIN_API_PROXY_TARGET ?? 'http://localhost:8080',
+        changeOrigin: true,
+      },
+    },
+  },
   test: {
     // Deliberately narrow: lib/'s pure modules (search-expand.ts,
     // usage-search.ts) plus, since review round 2 (v0.21), stores/

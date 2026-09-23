@@ -70,6 +70,17 @@ describe('usageColumns: sorting stays on raw numeric values', () => {
     expect(rendered).toBe('?')
   })
 
+  // Review finding: TanStack's getAutoSortingFn only inspects rows 11+
+  // (RowSorting.js's own `flatRows.slice(10)`) to auto-detect numeric vs.
+  // string sorting, so a Groups table with 10 or fewer rows silently fell
+  // back to `basic` (plain string a > b comparison) for the Members
+  // column, sorting "10" before "9". An explicit sortingFn sidesteps that
+  // row-count-dependent auto-detection entirely.
+  it('the secondary (Members/Group) column declares an explicit sortingFn, not left to row-count-dependent auto-detection', () => {
+    const col = columns.find((c) => c.id === 'secondary')
+    expect(col?.sortingFn).toBe('alphanumeric')
+  })
+
   it('sorting a set of entries by reqDay orders numerically, not lexicographically (the bug this separation prevents)', () => {
     const col = columns.find((c) => c.id === 'reqDay')
     const accessor = accessorFnOf(col)

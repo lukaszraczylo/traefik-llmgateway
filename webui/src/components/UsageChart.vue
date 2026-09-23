@@ -5,7 +5,7 @@ import { Bar } from 'vue-chartjs'
 
 import '@/lib/chart-setup'
 import { useThemeColors } from '@/composables/useThemeColors'
-import { formatBucketLabel, formatCompactCount, formatExactInt } from '@/lib/format'
+import { formatBucketLabel, formatCompactCount, formatCost, formatExactInt } from '@/lib/format'
 import type { TimeSeriesTab } from '@/stores/history'
 import type { HistoryMetric, HistoryWindow, UsageHistoryPoint } from '@/types/api'
 
@@ -109,9 +109,17 @@ const chartOptions = computed<ChartOptions<'bar'>>(() => ({
         color: mutedForeground.value,
         // Axis ticks stay compact (feature v0.23 addendum) — no room for
         // the exact figure on an axis label; the tooltip below carries
-        // it. Cost keeps its existing money format, unaffected: a
-        // dollar figure is not a "count" this formatter is meant for.
-        callback: (value) => (props.tab === 'cost' ? `$${value}` : formatCompactCount(Number(value))),
+        // it. Cost reuses formatCost (the same formatter cost/day and
+        // cost/month already render through elsewhere in the app) rather
+        // than interpolating the raw tick float directly — Chart.js hands
+        // this callback whatever value it picked for gridline placement,
+        // which for a non-terminating division (e.g. cost/3) prints as
+        // "0.30000000000000004" without it. formatCost takes micro-USD, so
+        // the already-converted display value (toDisplayValue above) is
+        // scaled back up before the call — .toFixed(4) inside it then
+        // resolves any such float noise the same way the tooltip below
+        // already does by hand.
+        callback: (value) => (props.tab === 'cost' ? formatCost(Number(value) * 1_000_000) : formatCompactCount(Number(value))),
       },
     },
   },

@@ -19,6 +19,7 @@ import { useDashboardStore } from '@/stores/dashboard'
 import {
   type ChartTab,
   MODEL_METRIC_LABEL,
+  MODEL_WINDOW_LABEL,
   type ModelMetric,
   type TimeSeriesTab,
   useHistoryStore,
@@ -81,6 +82,17 @@ const windows: HistoryWindow[] = ['hour', 'day', 'month']
 const modelMetrics: ModelMetric[] = ['cost', 'req', 'tokin', 'tokout']
 
 /**
+ * windowLabel picks the right window-tab text for whichever query is
+ * actually active: the Models tab reads a single current bucket (review
+ * finding — MODEL_WINDOW_LABEL's own doc comment, stores/history.ts), the
+ * other three tabs read a real span (WINDOW_LABEL). Same Tabs control
+ * either way — only the label changes.
+ */
+function windowLabel(window: HistoryWindow): string {
+  return history.tab === 'models' ? MODEL_WINDOW_LABEL[window] : WINDOW_LABEL[window]
+}
+
+/**
  * UsageChart only ever renders on a time-series tab (the template's v-else
  * below), but a `v-else` narrows nothing for the type checker — this does.
  * The 'requests' stand-in is never displayed: it is the value handed over
@@ -121,7 +133,13 @@ watch(scopeOptions, (options) => {
     <CardHeader class="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
       <CardTitle>Usage charts</CardTitle>
       <div class="flex flex-wrap items-center gap-3">
-        <SearchInput v-model="scopeQuery" placeholder="Filter users, groups or models" class="w-56" />
+        <!-- The Models tab has no scope picker to filter (its own Select branch below is the ranking-metric picker instead) — a visible search box that silently does nothing is worse than no box at all. -->
+        <SearchInput
+          v-if="history.tab !== 'models'"
+          v-model="scopeQuery"
+          placeholder="Filter users, groups or models"
+          class="w-56"
+        />
 
         <Select
           v-if="history.tab === 'models'"
@@ -151,7 +169,7 @@ watch(scopeOptions, (options) => {
 
         <Tabs :model-value="history.window" @update:model-value="(v) => history.setWindow(v as HistoryWindow)">
           <TabsList>
-            <TabsTrigger v-for="w in windows" :key="w" :value="w">{{ WINDOW_LABEL[w] }}</TabsTrigger>
+            <TabsTrigger v-for="w in windows" :key="w" :value="w">{{ windowLabel(w) }}</TabsTrigger>
           </TabsList>
         </Tabs>
       </div>
@@ -167,6 +185,8 @@ watch(scopeOptions, (options) => {
       </Tabs>
 
       <p v-if="history.error" class="text-sm text-destructive">{{ history.error }}</p>
+      <!-- Only until the current selection's first fetch lands (history.loaded) — background refreshes never flash it over rendered data. -->
+      <p v-else-if="history.loading && !history.loaded" class="text-sm text-muted-foreground">Loading…</p>
       <template v-if="history.tab === 'models'">
         <p class="text-sm text-muted-foreground">
           Models with usage in the selected window, ranked by
