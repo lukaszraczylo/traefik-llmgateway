@@ -3,7 +3,7 @@
 # two of them concurrently would corrupt each other's containers.
 .NOTPARALLEL:
 
-.PHONY: test lint yaegi-check admin-ui pricing-sync integration integration-keep integration-up integration-wait integration-down
+.PHONY: test lint yaegi-check admin-ui pricing-sync integration integration-keep integration-up integration-wait integration-down build-binary docker-build run-local
 
 test:
 	go test ./... -count=1
@@ -102,3 +102,63 @@ integration:
 # `make integration-down` when done.
 integration-keep: integration-up integration-wait
 	go -C integration test -tags integration -count=1 ./...
+
+# ---------------------------------------------------------------------------
+# Standalone binary (deployment form B) — see README's "Deployment modes".
+#
+# The plugin form (A) needs none of these: Traefik interprets this
+# repository's source directly. Everything below builds the compiled
+# binary that runs BEHIND Traefik, which is what makes SSE stream
+# incrementally (the Yaegi ResponseWriter erases http.Flusher; a compiled
+# one does not).
+#
+# Built locally on purpose. .goreleaser.yaml stays at `builds: - skip:
+# true` because its job is publishing the plugin SOURCE tarball for the
+# Traefik catalog, and turning binary builds on there would put this on
+# the GitHub Actions release path rather than the operator's machine.
+# ---------------------------------------------------------------------------
+
+# BINARY_VERSION stamps THIS binary's own -version output. It is NOT the
+# plugin's pluginVersion, which is a const rewritten in source by
+# workflow-prepare.sh at release time — `-ldflags -X` cannot write a const
+# (verified: the build succeeds and the value never lands in the binary),
+# so the two are stamped by different mechanisms and can disagree.
+BINARY_VERSION ?= dev
+
+build-binary:
+	GOWORK=off CGO_ENABLED=0 go build -mod=vendor -trimpath \
+		-ldflags "-s -w -X main.version=$(BINARY_VERSION)" \
+		-o bin/llmgateway ./cmd/gateway
+
+# IMAGE/PLATFORMS are overridable the same way INTEGRATION_REAL_BASEURL is,
+# so this never hardcodes one operator's registry.
+IMAGE ?= llmgateway:dev
+PLATFORMS ?= linux/arm64,linux/amd64
+
+# docker-build produces a multi-arch image. --push is required rather than
+# optional: a multi-arch result CANNOT be --load-ed into the local docker
+# image store, and without either flag buildx leaves the result in the
+# build cache only — it looks like it succeeded and produces nothing
+# usable. For a single-arch image you can actually run locally, use:
+#   make docker-build PLATFORMS=linux/arm64 DOCKER_OUTPUT=--load
+DOCKER_OUTPUT ?= --push
+
+# --build-arg VERSION=$(BINARY_VERSION) (C3, review round 3, 2026-09):
+# without it the Dockerfile's own ARG VERSION=dev default applies, and
+# `llmgateway -version` inside the image always prints "dev" regardless
+# of what BINARY_VERSION was set to for this invocation — the same
+# BINARY_VERSION build-binary above stamps into bin/llmgateway, so both
+# build paths agree on one version for one invocation.
+docker-build:
+	docker buildx build --platform $(PLATFORMS) --build-arg VERSION=$(BINARY_VERSION) -t $(IMAGE) $(DOCKER_OUTPUT) .
+
+# run-local runs the binary against a config on this machine — the fastest
+# way to exercise form (B) without a cluster. Point LLMGW_CONFIG at any
+# config file; the checked-in test fixture is a real production config and
+# makes a reasonable smoke target, though its `file:` secrets and
+# in-cluster hostnames will not resolve off-cluster.
+LLMGW_CONFIG ?= cmd/gateway/testdata/llmgw-config.yaml
+LLMGW_LISTEN ?= :8080
+
+run-local: build-binary
+	./bin/llmgateway -config $(LLMGW_CONFIG) -listen $(LLMGW_LISTEN)

@@ -1,0 +1,27 @@
+# The Docker build context is the repository root, because the binary
+# build needs both go.mod and the committed vendor/ tree. Everything below
+# is irrelevant to `go build ./cmd/gateway` and would otherwise be
+# transferred on every build — webui/node_modules alone is a large tree of
+# files the Go build never reads.
+#
+# vendor/ is deliberately NOT listed: the image build runs with
+# -mod=vendor and cannot resolve a single import without it.
+.git
+.github
+.superpowers
+docs
+integration
+webui
+dist
+bin
+examples
+testdata
+
+# Tests and build tooling are not part of the runtime binary. tools/ has
+# its own separate go modules (yaegi-check, pricing-sync) that must never
+# become the gateway's dependencies.
+tools
+*_test.go
+
+Dockerfile
+.dockerignore

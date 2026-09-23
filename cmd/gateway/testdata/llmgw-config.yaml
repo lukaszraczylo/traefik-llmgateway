@@ -1,0 +1,295 @@
+admin:
+  enabled: true
+agents:
+  agentkit:
+    url: http://agentkit.mcp-servers.svc.example.invalid:8080
+  brainstorm:
+    url: http://agentkit.mcp-servers.svc.example.invalid:8080/brainstorm
+  budgeting-helper:
+    url: http://agentkit.mcp-servers.svc.example.invalid:8080/budgeting-helper
+  business-writer:
+    url: http://agentkit.mcp-servers.svc.example.invalid:8080/business-writer
+  car-advisor:
+    url: http://agentkit.mcp-servers.svc.example.invalid:8080/car-advisor
+  contract-review:
+    url: http://agentkit.mcp-servers.svc.example.invalid:8080/contract-review
+  creative:
+    url: http://agentkit.mcp-servers.svc.example.invalid:8080/creative
+  financial-research:
+    url: http://agentkit.mcp-servers.svc.example.invalid:8080/financial-research
+  fitness-coach:
+    url: http://agentkit.mcp-servers.svc.example.invalid:8080/fitness-coach
+  gift-finder:
+    url: http://agentkit.mcp-servers.svc.example.invalid:8080/gift-finder
+  health-researcher:
+    url: http://agentkit.mcp-servers.svc.example.invalid:8080/health-researcher
+  home-services-finder:
+    url: http://agentkit.mcp-servers.svc.example.invalid:8080/home-services-finder
+  job-search-assistant:
+    url: http://agentkit.mcp-servers.svc.example.invalid:8080/job-search-assistant
+  lead-research:
+    url: http://agentkit.mcp-servers.svc.example.invalid:8080/lead-research
+  local-events-finder:
+    url: http://agentkit.mcp-servers.svc.example.invalid:8080/local-events-finder
+  local-guide:
+    url: http://agentkit.mcp-servers.svc.example.invalid:8080/local-guide
+  market-research:
+    url: http://agentkit.mcp-servers.svc.example.invalid:8080/market-research
+  meal-prep-planner:
+    url: http://agentkit.mcp-servers.svc.example.invalid:8080/meal-prep-planner
+  meeting-prep:
+    url: http://agentkit.mcp-servers.svc.example.invalid:8080/meeting-prep
+  news-briefer:
+    url: http://agentkit.mcp-servers.svc.example.invalid:8080/news-briefer
+  productivity-planner:
+    url: http://agentkit.mcp-servers.svc.example.invalid:8080/productivity-planner
+  property-scout:
+    url: http://agentkit.mcp-servers.svc.example.invalid:8080/property-scout
+  recipe-finder:
+    url: http://agentkit.mcp-servers.svc.example.invalid:8080/recipe-finder
+  research:
+    url: http://agentkit.mcp-servers.svc.example.invalid:8080/research
+  researcher:
+    url: http://agentkit.mcp-servers.svc.example.invalid:8080/researcher
+  restaurant-scout:
+    url: http://agentkit.mcp-servers.svc.example.invalid:8080/restaurant-scout
+  science-tutor:
+    url: http://agentkit.mcp-servers.svc.example.invalid:8080/science-tutor
+  shopping-researcher:
+    url: http://agentkit.mcp-servers.svc.example.invalid:8080/shopping-researcher
+  study-helper:
+    url: http://agentkit.mcp-servers.svc.example.invalid:8080/study-helper
+  tech-support:
+    url: http://agentkit.mcp-servers.svc.example.invalid:8080/tech-support
+  translation:
+    url: http://agentkit.mcp-servers.svc.example.invalid:8080/translation
+  travel-planner:
+    url: http://agentkit.mcp-servers.svc.example.invalid:8080/travel-planner
+  weather-planner:
+    url: http://agentkit.mcp-servers.svc.example.invalid:8080/weather-planner
+  writer:
+    url: http://agentkit.mcp-servers.svc.example.invalid:8080/writer
+cache:
+  enabled: true
+  ttl: 5m
+groups:
+  friends:
+    agents: []
+    mcpServers: []
+    models: []
+    providers:
+    - minimax
+    - uni
+  home:
+    agents: []
+    mcpServers: []
+    models: []
+    providers: []
+  projects:
+    agents: []
+    mcpServers: []
+    models: []
+    providers:
+    - minimax
+    - uni
+    - gx10
+mcpServers:
+  brave-search:
+    url: http://mcp-brave-search.mcp-servers.svc.example.invalid:8080/mcp
+  captcha-solver:
+    url: http://mcp-captcha-solver.mcp-servers.svc.example.invalid:8085/mcp
+  fetch:
+    url: http://mcp-fetch.mcp-servers.svc.example.invalid:8088/mcp
+  google-maps:
+    url: http://mcp-google-maps.mcp-servers.svc.example.invalid:8084/mcp
+  lightpanda:
+    url: http://mcp-lightpanda.mcp-servers.svc.example.invalid:8081/mcp
+  playwright:
+    url: http://198.51.100.21:3000/sse
+  readitall:
+    url: http://mcp-readitall.mcp-servers.svc.example.invalid:8080/mcp
+  time:
+    url: http://mcp-time.mcp-servers.svc.example.invalid:8083/mcp
+  weather:
+    url: http://mcp-weather.mcp-servers.svc.example.invalid:8087/mcp
+  web-search:
+    url: http://mcp-web-search.mcp-servers.svc.example.invalid:8092/mcp
+  wikipedia:
+    url: http://mcp-wikipedia.mcp-servers.svc.example.invalid:8089/mcp
+metrics:
+  allowedCIDRs:
+  - 192.0.2.0/24
+  enabled: true
+  modelLabel: false
+modelAliases:
+  deepseek: uni/deepseek-v4-flash-0731
+  deepseek-v4-flash-vision-exp: gx10/current
+  local/current-model: gx10/current
+modelMeta:
+  badtheorylabs_btl-4:
+    free: true
+  btl-4:
+    contextTokens: 262144
+    free: true
+  btl-4-compact:
+    free: true
+  gx10-embed/text-embedding-qwen3-0.6b:
+    contextTokens: 6144
+    free: true
+  gx10/GLM-5.3-Flash-EXL3:
+    free: true
+  gx10/Qwen3.8-Flash-Next-Uncensored-FP8:
+    free: true
+  gx10/current:
+    free: true
+  gx10/deepseek-v4-flash-vision-exp:
+    free: true
+  gx10/deepseek-v4-flash-vision-exp-ablit:
+    free: true
+  gx10/deepseek-v4-flash-vision-exp-uncensored:
+    free: true
+  huihui-deepseek-v4-flash-0731-abliterated:
+    free: true
+  huihui-ornith-1.0-35b-abliterated:
+    free: true
+  huihui-qwen3.6-27b-abliterated-mtp:
+    free: true
+  huihui-qwen3.6-35b-a3b-abliterated-mtp:
+    free: true
+  ornith-1.5-35b-a3b:
+    free: true
+  ornith-397b:
+    contextTokens: 262144
+    free: true
+  qwen/qwen3.8-27b:
+    free: true
+  qwen2.5-0.5b-instruct-mlx:
+    free: true
+  qwen3.6-27b:
+    contextTokens: 262144
+    free: true
+  tiny-aya-global:
+    free: true
+  uni/deepseek-v4-flash-0731:
+    contextTokens: 524288
+    free: true
+providers:
+  alibaba:
+    apiKey: file:/llmgw/providers/alibaba
+    baseUrl: https://ws-example.eu-central-1.maas.aliyuncs.com/compatible-mode
+    discovery: true
+    models:
+    - qwen3.8-max
+    - qwen3.8-flash
+    type: openai
+  anthropic:
+    apiKey: file:/llmgw/providers/anthropic
+    discovery: true
+    type: anthropic
+  cerebras:
+    apiKey: file:/llmgw/providers/cerebras
+    baseUrl: https://api.cerebras.ai
+    discovery: true
+    type: openai
+  codex:
+    apiKey: unused
+    baseUrl: http://codex-shim.mcp-servers.svc.example.invalid:8080
+    discovery: true
+    type: openai
+  copilot:
+    apiKey: unused
+    baseUrl: http://copilot-shim.mcp-servers.svc.example.invalid:8080
+    discovery: true
+    type: openai
+  deepseek:
+    apiKey: file:/llmgw/providers/deepseek
+    baseUrl: https://api.deepseek.com
+    discovery: true
+    type: openai
+  gx10:
+    apiKey: unused
+    baseUrl: http://llm-api.llm.svc.example.invalid:8000
+    discovery: true
+    discoveryInterval: 5m
+    metadataPath: /v1/models
+    requestTimeout: 15m
+    type: openai
+  gx10-embed:
+    apiKey: unused
+    baseUrl: http://embed-qwen3.llm.svc.example.invalid:8000
+    discovery: true
+    discoveryInterval: 5m
+    metadataPath: /v1/models
+    type: openai
+  macstudio:
+    apiKey: lm-studio
+    baseUrl: http://198.51.100.127:1234
+    discovery: true
+    discoveryInterval: 5m
+    metadataPath: /api/v0/models
+    type: openai
+  macstudio-rerank:
+    apiKey: unused
+    baseUrl: http://rerank-bge.llm.svc.example.invalid:8000
+    discovery: false
+    type: openai
+  minimax:
+    apiKey: file:/llmgw/providers/minimax
+    baseUrl: https://api.minimax.io
+    discovery: true
+    type: openai
+  openai:
+    apiKey: file:/llmgw/providers/openai
+    discovery: true
+    type: openai
+  openai-audio:
+    apiKey: file:/llmgw/providers/openai
+    discovery: true
+    type: openai
+  parakeet-mlx:
+    apiKey: unused
+    baseUrl: http://198.51.100.127:8001
+    discovery: false
+    type: openai
+  piper-tts:
+    apiKey: unused
+    baseUrl: http://198.51.100.127:8002
+    discovery: false
+    type: openai
+  uni:
+    apiKey: unused
+    baseUrl: https://agentgateway.example.invalid
+    discovery: true
+    metadataPath: /v1/models
+    models:
+    - qwen3.8-flash-next
+    - qwen3.8-27b
+    - qwen3.8-27b-uncensored
+    - ornith-1.5-35b
+    - ornith-397b
+    - qwen3.6-27b
+    - deepseek-v4-flash-0731
+    requestTimeout: 15m
+    type: openai
+  xai:
+    apiKey: file:/llmgw/providers/xai
+    baseUrl: https://api.x.ai
+    discovery: true
+    type: openai
+  xiaomi:
+    apiKey: file:/llmgw/providers/xiaomi
+    baseUrl: https://token-plan.example.invalid
+    discovery: true
+    models:
+    - mimo-v2.5
+    - mimo-v2.5-pro
+    type: openai
+redis:
+  address: dragonfly-prod.shared-resources.svc.example.invalid:6379
+  db: 7
+  failOpen: true
+retry:
+  attempts: 1
+  enabled: true
+users:
+  file: /llmgw/users/users.json
