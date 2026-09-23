@@ -1881,6 +1881,18 @@ or in CI.
     client-side re-filter (`lib/model-filter.ts`) still runs afterward too
     — a harmless no-op once the server has already narrowed the set, kept
     as the one guard against a response that predates this parameter.
+  - `detail` (optional): `1` or `true` adds `requests`, `tokensIn`,
+    `tokensOut`, `costMicroUsd` and `free` to every entry, and includes a
+    model when ANY of those four totals is non-zero, not only the ranked
+    `metric`. A free model with traffic therefore appears even under
+    `metric=cost`, with `value` `0`. In detail mode ties break on
+    `requests` descending, then `id`. `free` is `true` when a `modelMeta`
+    entry marks the model free, or when its resolved price is known and
+    both per-1M prices are `0`. Empty, `0` or `false` (the default) keeps
+    the response exactly as described below; any other value is `400`.
+    The dashboard's Models tab always sends `detail=1`, ranks by requests
+    by default, and lists every column in a table under the chart, with
+    a "free" badge instead of `$0`.
 
   Response shape:
   `{"metric","window","span":1,"models":[{"id":"uni/qwen3-next","value":4100},...]}`
@@ -1900,7 +1912,10 @@ or in CI.
   counters are written after the response (that is the first point at
   which the serving model is known), which is also why a passthrough reply
   whose upstream reports no model id is counted for its user, group and
-  total but for no model.
+  total but for no model. The media routes (`/v1/images/generations`,
+  `/v1/audio/speech`, `/v1/audio/transcriptions`) write the per-model
+  request counter on a successful (2xx) response too — never tokens or
+  cost, since media calls are not token- or cost-accounted.
 - **`GET /admin/api/events`** (F3, v0.3 dashboard task) returns this
   deployment's most recent operational events — rate-limit/budget
   rejections and upstream/timeout/unpriced/capacity signals — for the
