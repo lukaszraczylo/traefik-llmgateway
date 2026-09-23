@@ -2,6 +2,7 @@ package traefikllmgateway
 
 import (
 	"bufio"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -149,6 +150,23 @@ type respClient struct {
 	addr     string
 	password string
 	db       int
+	// tls wraps every dialled connection in TLS when true, verifying the
+	// server certificate against addr's host.
+	//
+	// Security audit run-1: this client could previously ONLY speak
+	// plaintext TCP — there was no TLS field, no scheme parsing and no
+	// rediss:// handling anywhere — so the AUTH password, the counter
+	// keys (which embed principal names verbatim, windowKey in limits.go)
+	// and whole cached response bodies were unprotectable in transit by
+	// ANY operator configuration. That is what distinguishes it from an
+	// operator who merely chose plaintext: the choice was foreclosed.
+	//
+	// Off by default, so an existing deployment behaves exactly as
+	// before; set redis.tls to opt in. Not a constructor parameter
+	// because newRESPClient/newRESPClientPool have ~50 call sites across
+	// the test suite and none of them needs it — buildRedisClient
+	// (llmgateway.go) sets it directly on the constructed client.
+	tls bool
 }
 
 // newRESPClient returns a respClient for addr, sized by defaultRespPoolSize
@@ -383,6 +401,39 @@ func (c *respClient) ensureConnOn(pc *respConn, deadline time.Time) error {
 	if err != nil {
 		return fmt.Errorf("resp: dial %q: %w", c.addr, err)
 	}
+
+	// Optional TLS (security audit run-1, respClient.tls). Wrapping here
+	// rather than at a separate dial keeps one dial path: everything
+	// below — SetDeadline, the AUTH/SELECT handshake, and the caller's
+	// own command round trip — then runs over the TLS stream instead of
+	// the bare socket, with no other call site needing to know.
+	//
+	// ServerName is the host half of the configured address, so the
+	// certificate is verified against the name the operator configured.
+	// InsecureSkipVerify is deliberately left false: an opt-in TLS mode
+	// that silently skipped verification would provide confidentiality
+	// against a passive observer while giving none against the active
+	// one, which is the attacker this exists for.
+	if c.tls {
+		host, _, splitErr := net.SplitHostPort(c.addr)
+		if splitErr != nil {
+			host = c.addr
+		}
+		tlsConn := tls.Client(conn, &tls.Config{
+			ServerName: host,
+			MinVersion: tls.VersionTLS12,
+		})
+		if dlErr := tlsConn.SetDeadline(deadline); dlErr != nil {
+			_ = tlsConn.Close()
+			return fmt.Errorf("resp: set deadline: %w", dlErr)
+		}
+		if hsErr := tlsConn.Handshake(); hsErr != nil {
+			_ = tlsConn.Close()
+			return fmt.Errorf("resp: tls handshake %q: %w", c.addr, hsErr)
+		}
+		conn = tlsConn
+	}
+
 	pc.conn = conn
 	pc.r = bufio.NewReader(conn)
 

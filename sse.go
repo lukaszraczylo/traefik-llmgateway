@@ -2,6 +2,8 @@ package traefikllmgateway
 
 import (
 	"bufio"
+	"bytes"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -17,6 +19,32 @@ const sseScannerInitialBufSize = 64 * 1024
 // beyond it makes bufio.Scanner return bufio.ErrTooLong instead of
 // growing its buffer without bound.
 const sseScannerMaxLineSize = 4 * 1024 * 1024
+
+// sseMaxEventBytes caps the TOTAL data bytes readSSE will accumulate for
+// ONE event, across however many "data:" lines that event spans.
+//
+// Security audit run-1: sseScannerMaxLineSize above bounds a single LINE,
+// not an event, and readSSE's accumulator resets only on a blank line or
+// at EOF — so an upstream that emits many short "data:" lines and never
+// terminates the record grows dataLines without any bound at all, and
+// peak residency at dispatch is roughly three times that (the joined
+// string, its []byte copy, and the slice, all live at once). The per-line
+// cap never fires for that shape, because no individual line is large.
+// Under deployment form A the heap being grown is the shared Traefik
+// ingress process's, so this is not self-inflicted: it is every other
+// tenant and every unrelated route on that instance.
+//
+// The value is generous — an event legitimately carrying a base64 image
+// stays far below it — and is a backstop against unbounded growth, not a
+// tuning knob.
+const sseMaxEventBytes = 8 * 1024 * 1024
+
+// errSSEEventTooLarge is returned by readSSE when one event's accumulated
+// "data:" payload exceeds sseMaxEventBytes. It mirrors how the per-line
+// cap surfaces (bufio.ErrTooLong is returned as-is): the caller's stream
+// forwarding stops and the error propagates, rather than the gateway
+// continuing to buffer an event that will never terminate.
+var errSSEEventTooLarge = errors.New("llmgateway: sse event data exceeded the maximum accumulated size")
 
 // sseDataPrefix is the "data:" field prefix sseWriter writes before every
 // event payload, per the text/event-stream wire format.
@@ -66,6 +94,7 @@ func readSSE(r io.Reader, fn func(sseEvent) error) error {
 		event     string
 		dataLines []string
 		hasData   bool
+		dataBytes int
 	)
 	firstLine := true
 
@@ -91,6 +120,7 @@ func readSSE(r io.Reader, fn func(sseEvent) error) error {
 		event = ""
 		dataLines = nil
 		hasData = false
+		dataBytes = 0
 		if !fire {
 			return nil
 		}
@@ -119,6 +149,13 @@ func readSSE(r io.Reader, fn func(sseEvent) error) error {
 		case "event":
 			event = value
 		case "data":
+			// +1 for the "\n" this line will contribute to the joined
+			// payload. Checked BEFORE appending, so the cap bounds what is
+			// actually held rather than catching it one line late.
+			dataBytes += len(value) + 1
+			if dataBytes > sseMaxEventBytes {
+				return errSSEEventTooLarge
+			}
 			dataLines = append(dataLines, value)
 			hasData = true
 		case "id", "retry":
@@ -175,17 +212,34 @@ func newSSEWriter(w http.ResponseWriter) *sseWriter {
 	return &sseWriter{w: w, f: f}
 }
 
-// writeData writes one SSE data event, "data: " + b + "\n\n", as a
-// single Write call. It flushes when the underlying writer supports
-// that. b must not contain a newline. The text/event-stream format reads
-// everything up to the first newline as the field value, so a raw
-// newline inside b splits the frame into two malformed lines. Callers
-// must pass compact JSON, not pretty-printed JSON, as b.
+// writeData writes one SSE data event as a single Write call, flushing
+// when the underlying writer supports that.
+//
+// A newline inside b is now ENCODED rather than emitted raw: b is split
+// on "\n" and each line gets its own "data: " prefix, which is exactly
+// how the text/event-stream format represents a multi-line payload, and
+// is what a conforming client rejoins with "\n" on the other side. For
+// single-line b — every caller that passes compact JSON, which is still
+// what callers should pass — the bytes written are byte-for-byte
+// identical to before.
+//
+// Security audit run-1: this function previously DOCUMENTED that b must
+// not contain a newline and enforced nothing, while readSSE on the other
+// side is specified (and unit-tested) to JOIN multi-line data with "\n".
+// openaiAdapter.forwardStream relays readSSE's output straight here, so
+// an upstream could close the frame early and inject a complete second
+// event — carrying its own event:/id:/retry: fields, which this gateway
+// otherwise strips — into the client's stream. Encoding the newline
+// closes that by construction, with no validation branch to get wrong.
 func (s *sseWriter) writeData(b []byte) error {
-	buf := make([]byte, 0, len(sseDataPrefix)+len(b)+2)
-	buf = append(buf, sseDataPrefix...)
-	buf = append(buf, b...)
-	buf = append(buf, '\n', '\n')
+	lines := bytes.Split(b, []byte{'\n'})
+	buf := make([]byte, 0, len(b)+len(lines)*len(sseDataPrefix)+1)
+	for _, line := range lines {
+		buf = append(buf, sseDataPrefix...)
+		buf = append(buf, line...)
+		buf = append(buf, '\n')
+	}
+	buf = append(buf, '\n')
 
 	if _, err := s.w.Write(buf); err != nil {
 		return err

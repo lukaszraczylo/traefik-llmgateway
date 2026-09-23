@@ -1427,6 +1427,35 @@ func (l *limiter) account(scopes []limitScope, u usage, costMicros int64) {
 	wb := bucketsFor(now)
 	et := enforceTTLsFor()
 
+	// Security audit run-1: every figure reaching here is read verbatim
+	// out of an UPSTREAM response body (provider_openai.go's forwardJSON,
+	// the translate_*.go stream states, extractPassthroughUsage) into an
+	// int64, and is written below as an INCRBY DELTA. A negative value
+	// therefore DECREMENTS this principal's counters — and because
+	// checkAndCount admits while `used < limit`, a counter driven below
+	// zero stops every token and cost budget binding for the rest of that
+	// window. costMicros can also arrive negative from an int64 overflow
+	// in costMicros' own unguarded multiply (pricing.go) on an absurd
+	// reported token count.
+	//
+	// These counters are increment-only by contract, so a negative delta
+	// is never legitimate: drop it and say so, loudly enough that a
+	// misbehaving or hostile upstream is visible rather than silently
+	// rewriting a budget. Clamped per-component, so one bad field does not
+	// discard the other two, which may be perfectly valid.
+	if u.prompt < 0 || u.completion < 0 || costMicros < 0 {
+		l.logf("%s", fmt.Sprintf("limits: dropping negative usage reported by an upstream (prompt=%d completion=%d costMicros=%d); these counters are increment-only", u.prompt, u.completion, costMicros))
+		if u.prompt < 0 {
+			u.prompt = 0
+		}
+		if u.completion < 0 {
+			u.completion = 0
+		}
+		if costMicros < 0 {
+			costMicros = 0
+		}
+	}
+
 	entries := make([]counterIncr, 0, len(scopes)*12)
 	for _, sc := range scopes {
 		// A kindModel scope is the one scope kind checkAndCount never
@@ -1638,6 +1667,13 @@ const (
 // scope can never collide with a user, group, provider or target scope.
 const kindModel = "model"
 
+// maxModelScopeIDLen bounds the "provider/model" id withModelScope will
+// accept as a counter-scope id. Generous next to any real model id —
+// the longest in the built-in table is well under 40 bytes — and far
+// below the 4MiB an upstream response body could otherwise put there
+// (maxAccountingTeeBytes, routes_passthrough.go). Security audit run-1.
+const maxModelScopeIDLen = 256
+
 // withModelScope returns scopes plus a kindModel scope for canonical, the
 // "provider/model" id that actually SERVED the request. It copies rather
 // than appending in place: the caller's slice is the same one
@@ -1654,9 +1690,57 @@ func withModelScope(scopes []limitScope, canonical string) []limitScope {
 	if canonical == "" || canonical[len(canonical)-1] == '/' {
 		return scopes
 	}
+	// Security audit run-1: on the passthrough route the model half of
+	// canonical is read VERBATIM out of the upstream's own response body
+	// (extractPassthroughUsage, routes_passthrough.go) with no length or
+	// character-set check, and every distinct id it yields mints its own
+	// set of counter keys — up to twelve, four of them retained for
+	// monthWindowTTL (400 days). An upstream (or, where a group sets no
+	// Models restriction, a caller whose requested id an OpenAI-compatible
+	// relay echoes back) could therefore grow the counter keyspace without
+	// bound. Bounding the id here is the one chokepoint every model-scope
+	// write passes through.
+	//
+	// An id that fails these checks drops the MODEL scope only: the
+	// request still accounts to user, group and total exactly as before,
+	// which is the same "attribute what we can, invent nothing" rule the
+	// empty/trailing-slash case above already follows.
+	if len(canonical) > maxModelScopeIDLen {
+		return scopes
+	}
+	for i := 0; i < len(canonical); i++ {
+		if canonical[i] < 0x20 || canonical[i] == 0x7f {
+			return scopes
+		}
+	}
 	out := make([]limitScope, len(scopes), len(scopes)+1)
 	copy(out, scopes)
 	return append(out, limitScope{kind: kindModel, id: canonical})
+}
+
+// scopesHaveCostBudget reports whether ANY scope in scopes configures a
+// money budget — costPerDayUSD or costPerMonthUSD. A scope with nil
+// limits (the synthetic total scope, and any user/group that configured
+// none) cannot carry one.
+//
+// Security audit run-1, finding F-1 (high): this is the predicate that
+// decides whether serving a model with NO known price would silently
+// defeat a control the operator actually configured. It deliberately
+// ignores token and request limits — those accrue correctly for an
+// unpriced model and keep working; only the cost budget is the one that
+// can never fire, because its counter is never written. Matching
+// buildBudgetProbes' own `limit <= 0` rule, a zero or negative budget
+// means unlimited and so does not count as configured.
+func scopesHaveCostBudget(scopes []limitScope) bool {
+	for _, sc := range scopes {
+		if sc.limits == nil {
+			continue
+		}
+		if usdToMicros(sc.limits.CostPerDayUSD) > 0 || usdToMicros(sc.limits.CostPerMonthUSD) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // metricProvAttempt and metricProvFail are the counter metric names

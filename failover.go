@@ -76,6 +76,22 @@ type FailoverConfig struct {
 const (
 	defaultFailoverMaxAttempts = 3
 	maxFailoverMaxAttempts     = 10
+
+	// warnComposedOutboundCalls is the composed failover x retry worst
+	// case above which newGateway logs the product at construction.
+	//
+	// Security audit run-1: failover.maxAttempts and retry.attempts are
+	// each validated against their OWN ceiling and nothing validates their
+	// PRODUCT, yet they compose multiplicatively at runtime — the
+	// candidate loop in runMeteredCall wraps retryPolicy.do, so one
+	// admitted request can issue maxAttempts * (attempts+1) outbound
+	// provider calls, up to 10 * 4 = 40. Both features default off; with
+	// both merely switched on at their own defaults the product is
+	// 3 * 2 = 6. This threshold is that default-on product doubled, so an
+	// ordinary opt-in stays silent and only a deliberately wide
+	// configuration is surfaced — at config time, rather than during the
+	// upstream incident that makes it matter.
+	warnComposedOutboundCalls = 12
 )
 
 // failoverConfig is FailoverConfig, validated and defaulted once at

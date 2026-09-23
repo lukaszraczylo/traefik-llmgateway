@@ -906,7 +906,14 @@ func (m *modelRegistry) warmFill(ctx context.Context) {
 		cancel()
 		m.finishRefresh(st, m.now(), ids, err)
 		if err != nil {
-			m.log("%s", fmt.Sprintf("model registry: initial discovery for provider %q failed: %v", name, err))
+			// sanitizeProviderErr (admin.go): the error commonly embeds the
+			// dialed URL verbatim, so a baseUrl an operator misconfigured
+			// with embedded credentials would otherwise be written to
+			// stderr in clear — which m.log (g.errorf, logger.go) does
+			// unconditionally and unfiltered, against its own "Never log
+			// key material" contract. Security audit run-1, finding F-2.
+			m.log("%s", fmt.Sprintf("model registry: initial discovery for provider %q failed: %v",
+				name, sanitizeProviderErr(err.Error(), m.adapters[name].base())))
 		}
 		// Own timeout budget, review fix (SHOULD-4): fctx above is
 		// spent by listModels — reusing it here would hand the metadata
@@ -982,7 +989,12 @@ func (m *modelRegistry) captureModelMetadata(ctx context.Context, name string, a
 	}
 	meta, err := mf.fetchModelMetadata(ctx)
 	if err != nil {
-		m.log("%s", fmt.Sprintf("model registry: metadata capture for provider %q failed: %v", name, err))
+		// Scrubbed for the same reason as warmFill's own discovery-failure
+		// line: fetchModelMetadata dials adapter.base()+metadataPath, so
+		// this error carries the identical credential-bearing URL.
+		// Security audit run-1, finding F-2.
+		m.log("%s", fmt.Sprintf("model registry: metadata capture for provider %q failed: %v",
+			name, sanitizeProviderErr(err.Error(), adapter.base())))
 		return
 	}
 	if meta == nil {
@@ -1045,7 +1057,12 @@ func (m *modelRegistry) refreshProvider(name string, st *providerState, adapter 
 		}
 		m.finishRefresh(st, m.now(), ids, err)
 		if err != nil {
-			m.log("%s", fmt.Sprintf("model registry: discovery refresh for provider %q failed: %v", name, err))
+			// Scrubbed (security audit run-1, finding F-2). This line
+			// repeats on EVERY background refresh interval with no dedup,
+			// so an unreachable provider whose baseUrl embeds a credential
+			// would otherwise write it to stderr indefinitely.
+			m.log("%s", fmt.Sprintf("model registry: discovery refresh for provider %q failed: %v",
+				name, sanitizeProviderErr(err.Error(), adapter.base())))
 		}
 	}()
 

@@ -5,8 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"net/url"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -208,17 +206,14 @@ func (t *targetHealthTracker) record(kind, name, rawURL string, ok bool, err err
 // carries a password — builds net/http's exact masked form itself
 // (mirroring stripPassword's own strings.Replace call precisely) and
 // scrubs against that too.
+// (Security audit run-1, finding F-2): the URL-aware second pass this
+// function used to carry privately now lives in sanitizeProviderErr
+// (admin.go), so the target path and the provider path share ONE
+// implementation. That private copy is precisely why the provider path
+// went unprotected — this delegation is what stops the two diverging
+// again.
 func sanitizeTargetErr(msg, rawURL string) string {
-	msg = sanitizeProviderErr(msg, rawURL)
-	u, parseErr := url.Parse(rawURL)
-	if parseErr != nil || u.User == nil {
-		return msg
-	}
-	if _, hasPassword := u.User.Password(); !hasPassword {
-		return msg
-	}
-	masked := strings.Replace(u.String(), u.User.String()+"@", u.User.Username()+":***@", 1)
-	return sanitizeProviderErr(msg, masked)
+	return sanitizeProviderErr(msg, rawURL)
 }
 
 // stateOf reports (kind, name)'s current targetHealthState — see this

@@ -241,18 +241,55 @@ func sanitizeBaseURL(raw string) string {
 // back out through this field, even though adminProviderView.BaseURL
 // itself is already sanitized.
 //
-// This is best-effort, not a general URL scrubber: it looks only for
-// rawBaseURL appearing verbatim inside lastErr and replaces every such
-// occurrence with sanitizeBaseURL's cleaned form. An error naming some
-// OTHER URL — a redirect target, a differently-formatted variant of the
-// same host — is not caught; recognizing every URL shape a wrapped error
-// might embed, without risking mangling ordinary error text, is not
-// attempted here.
+// It scrubs rawBaseURL's credentials in BOTH forms a real error from a
+// call against rawBaseURL can carry them (security audit run-1, finding
+// F-2): the verbatim URL, and net/http's own password-masked rewrite of
+// it. Go's net/http builds a *url.Error via its unexported stripPassword
+// (net/http/client.go) whenever the dialed URL's userinfo reports a
+// password SET — which net/url's parseAuthority makes true for ANY
+// userinfo containing a colon, including the token-as-username form
+// "https://TOKEN:@host" whose password is empty. stripPassword rewrites
+// "user:pass@" to "user:***@" IN THE URL BEFORE the error string is ever
+// built, so for such a URL the error text never contains rawBaseURL
+// verbatim; a verbatim-only match then finds nothing to scrub, leaving
+// the USERNAME (commonly the token itself) and any query-string
+// credential riding the same URL in place.
+//
+// sanitizeTargetErr (target_health.go) delegates here rather than
+// carrying its own copy of this logic: the private copy it used to hold
+// is exactly what left this provider-side path unprotected between the
+// two changes that introduced them, so the two must never diverge again.
+//
+// Still best-effort for URLs OTHER than rawBaseURL: an error naming a
+// redirect target is not caught. Rejecting a credential-bearing baseUrl
+// at construction (providers.go) is the only complete fix; this is the
+// containment that changes no behavior.
 func sanitizeProviderErr(lastErr, rawBaseURL string) string {
-	if lastErr == "" || rawBaseURL == "" || !strings.Contains(lastErr, rawBaseURL) {
+	if lastErr == "" || rawBaseURL == "" {
 		return lastErr
 	}
-	return strings.ReplaceAll(lastErr, rawBaseURL, sanitizeBaseURL(rawBaseURL))
+	out := replaceURLForm(lastErr, rawBaseURL)
+	u, parseErr := url.Parse(rawBaseURL)
+	if parseErr != nil || u.User == nil {
+		return out
+	}
+	if _, hasPassword := u.User.Password(); !hasPassword {
+		// No password set means net/http passed the URL through
+		// unmasked, so the verbatim pass above already matched it.
+		return out
+	}
+	// net/http's exact stripPassword output, mirrored call for call.
+	masked := strings.Replace(u.String(), u.User.String()+"@", u.User.Username()+":***@", 1)
+	return replaceURLForm(out, masked)
+}
+
+// replaceURLForm replaces every occurrence of one rendering of a URL in
+// msg with sanitizeBaseURL's cleaned form of that same rendering.
+func replaceURLForm(msg, form string) string {
+	if form == "" || !strings.Contains(msg, form) {
+		return msg
+	}
+	return strings.ReplaceAll(msg, form, sanitizeBaseURL(form))
 }
 
 // adminProviderView is one provider's read-only view in GET

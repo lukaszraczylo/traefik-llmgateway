@@ -140,6 +140,24 @@ type Config struct {
 	// disable the bound entirely with an unbounded number.
 	MaxInFlightBodyRequests int  `json:"maxInFlightBodyRequests,omitempty"`
 	PassthroughUnknown      bool `json:"passthroughUnknown,omitempty"`
+	// AllowUnpricedWithCostBudget restores the pre-fix behavior for a
+	// request whose served model has NO configured price while the calling
+	// user or group DOES configure costPerDayUSD/costPerMonthUSD.
+	//
+	// Security audit run-1, finding F-1 (high): an unpriced model costs 0
+	// in accounting, a zero cost writes no cost counter (limiter.account,
+	// limits.go), and checkAndCount reads exactly that never-written
+	// counter — so the money budget can never accrue and can never fire.
+	// The gateway now REFUSES such a request (runMeteredCall,
+	// routes_unified.go) rather than serving it free against a control the
+	// operator explicitly configured.
+	//
+	// Set true to serve it anyway, accepting that the cost budget does not
+	// bound that model. This changes nothing for a deployment that
+	// configures no cost budget at all — the refusal is already scoped to
+	// callers that set one — and nothing for a model that has a price.
+	// Prefer adding the missing "pricing" entry over setting this.
+	AllowUnpricedWithCostBudget bool `json:"allowUnpricedWithCostBudget,omitempty"`
 }
 
 // ProviderConfig describes one upstream LLM provider.
@@ -359,6 +377,20 @@ type RedisConfig struct {
 	// an unbounded value would eagerly allocate that many *respConn
 	// structs at construction before a single request arrives.
 	PoolSize int `json:"poolSize,omitempty"`
+	// TLS dials Redis over TLS instead of plaintext TCP, verifying the
+	// server's certificate against the host in Address.
+	//
+	// Security audit run-1: before this field existed the hand-rolled
+	// RESP client could only speak plaintext, so the AUTH password, the
+	// per-principal counter keys and any cached response bodies were
+	// unprotectable in transit by any configuration — TLS was not merely
+	// unconfigured, it was impossible. Defaults to false, so an existing
+	// deployment is unchanged; enable it when the gateway reaches Redis
+	// over anything the operator does not already encrypt (a service mesh
+	// with mTLS, an stunnel/TLS sidecar, or a private link all satisfy
+	// the same invariant externally, in which case leaving this off is
+	// fine).
+	TLS bool `json:"tls,omitempty"`
 }
 
 // RetryConfig configures same-provider retry on transient upstream
@@ -648,6 +680,21 @@ const maxExplicitBodyAdmissionCap = 10_000
 // stays as short as possible. See adminProviderView's identical
 // convention (admin.go) for the same reasoning spelled out once; this
 // struct is the other place it applies.
+//
+// fieldalignment's 192-vs-184 pointer-bytes hint on this struct is a
+// DELIBERATE, pre-existing exception, not an oversight — see
+// targetHealthLastSweepUnixNano's own doc comment immediately below.
+// That field must stay first so sync/atomic's 64-bit operations are
+// correctly aligned on armv7 and 386, which Traefik ships builds for,
+// and sync/atomic guarantees that alignment only for the first word of
+// an allocated struct. Total struct size is unchanged either way (264
+// bytes, verified), so the exception costs no padding; moving
+// targetHealthSweeping up to close the gap was tried and made the
+// report worse (200 vs 184). Correctness on 32-bit platforms wins over
+// the linter hint, so the check is suppressed here rather than the
+// field order being "fixed".
+//
+//nolint:govet
 type Gateway struct {
 	// targetHealthLastSweepUnixNano MUST stay the first field (F7,
 	// feat/target-health review). It backs maybeSweepTargetHealth's
@@ -906,6 +953,22 @@ func newGateway(ctx context.Context, next http.Handler, config *Config, name str
 	g.failover = failoverCfg
 	g.failoverHealth = newRequestHealthTracker()
 
+	// Security audit run-1: nothing validates the PRODUCT of the two
+	// retry axes, which compose multiplicatively at runtime. Surface it
+	// once at construction rather than leaving an operator to discover it
+	// during an upstream incident — the moment the amplification actually
+	// fires, since retryPolicy.do only retries on 429/5xx.
+	if failoverCfg.enabled && config.Retry.Enabled {
+		retries := config.Retry.Attempts
+		if retries == 0 {
+			retries = defaultRetryAttempts
+		}
+		if worst := failoverCfg.maxAttempts * (retries + 1); worst > warnComposedOutboundCalls {
+			g.logf("config: failover.maxAttempts (%d) and retry.attempts (%d) compose to as many as %d outbound provider calls for ONE admitted client request; each consumes the provider quota shared by every tenant of this gateway",
+				failoverCfg.maxAttempts, retries, worst)
+		}
+	}
+
 	// feat/target-health: validated once, here — passive recording and
 	// exposure stay always-on regardless of this block; Enabled gates
 	// only maybeSweepTargetHealth's own active probe sweep
@@ -1064,10 +1127,17 @@ func buildRedisClient(rc *RedisConfig) (*respClient, error) {
 	// PoolSize left at 0 keeps newRESPClient's own self-tuned default
 	// (defaultRespPoolSize, resp.go); an explicit positive value always
 	// overrides it (RedisConfig.PoolSize's own doc comment).
+	var client *respClient
 	if rc.PoolSize > 0 {
-		return newRESPClientPool(rc.Address, password, rc.DB, rc.PoolSize), nil
+		client = newRESPClientPool(rc.Address, password, rc.DB, rc.PoolSize)
+	} else {
+		client = newRESPClient(rc.Address, password, rc.DB)
 	}
-	return newRESPClient(rc.Address, password, rc.DB), nil
+	// Set on the constructed client rather than threaded through either
+	// constructor: neither signature needs to change for it, and both
+	// have many call sites (respClient.tls's own doc comment, resp.go).
+	client.tls = rc.TLS
+	return client, nil
 }
 
 // newConfiguredLimiter builds the limiter for config, using client (nil

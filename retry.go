@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand"
 	"net/http"
 	"strconv"
 	"time"
@@ -31,6 +32,47 @@ const maxRetryAttempts = 3
 // whether computed from exponential backoff or read from an upstream's
 // Retry-After header — spec §1's "capped at 2s per wait".
 const maxRetryWait = 2 * time.Second
+
+// maxRetryAfterWait caps a wait this gateway will honour when the
+// UPSTREAM itself asked for it via a 429's Retry-After header. It is
+// deliberately far larger than maxRetryWait, which caps only the wait
+// this gateway computes for itself.
+//
+// Security audit run-1 (retry/failover fan-out record): previously a
+// Retry-After larger than maxRetryWait was DISCARDED and replaced by the
+// <=2s exponential ladder, so a saturated provider could not tell this
+// gateway to back off for longer than two seconds — the gateway answered
+// an explicit overload signal by retrying sooner than asked. Honouring it
+// up to this ceiling can only ever make the gateway wait LONGER, never
+// sooner, so it strictly reduces outbound pressure. p.waitFn is
+// ctx-aware, so a client disconnect or request deadline still aborts the
+// wait immediately rather than blocking out the full duration.
+const maxRetryAfterWait = 30 * time.Second
+
+// retryJitterFn spreads a computed backoff so that many requests failing
+// at the same instant do not retry in lockstep against the same upstream
+// — the synchronized-retry shape that turns one upstream blip into a
+// self-sustaining thundering herd (security audit run-1). It applies
+// EQUAL jitter: half the computed wait, plus a uniform random draw over
+// the other half, so a jittered wait is always at least d/2 and never
+// collapses to an immediate retry the way full jitter can.
+//
+// A package-level var, mirroring retryPolicy.waitFn's own convention, so
+// tests can substitute an identity function and keep asserting exact
+// durations. It is applied in do, not in waitBefore, so waitBefore stays
+// a pure function of (attempt, resp) and its own unit tests keep testing
+// the backoff ladder itself rather than the randomness on top of it.
+var retryJitterFn = func(d time.Duration) time.Duration {
+	if d <= 0 {
+		return d
+	}
+	half := d / 2
+	// #nosec G404 -- this randomness spreads retry timing to break up a
+	// synchronized herd; it guards no secret and gates no decision, so a
+	// predictable draw grants an attacker nothing. crypto/rand would add
+	// a syscall per retry wait and an error path, for no security gain.
+	return half + time.Duration(rand.Int63n(int64(d-half)+1))
+}
 
 // retryDrainLimit caps how much of a retried-away response's body
 // drainAndClose reads before closing it. It is generous enough to let
@@ -178,9 +220,18 @@ func (p *retryPolicy) waitBefore(attempt int, resp *http.Response) time.Duration
 	if resp != nil && resp.StatusCode == http.StatusTooManyRequests {
 		if ra := resp.Header.Get("Retry-After"); ra != "" {
 			if secs, err := strconv.Atoi(ra); err == nil && secs >= 0 {
-				if wait := time.Duration(secs) * time.Second; wait <= maxRetryWait {
-					return wait
+				// An upstream-requested cool-down is honoured up to
+				// maxRetryAfterWait, and CLAMPED to it rather than
+				// discarded, when it asks for longer (security audit
+				// run-1). Discarding it — the previous behavior — fell
+				// back to the <=2s ladder and so retried a provider that
+				// had explicitly asked for a longer pause sooner than it
+				// asked, which is backwards under overload.
+				wait := time.Duration(secs) * time.Second
+				if wait > maxRetryAfterWait {
+					wait = maxRetryAfterWait
 				}
+				return wait
 			}
 		}
 	}
@@ -239,7 +290,7 @@ func (p *retryPolicy) do(ctx context.Context, call func() (*http.Response, error
 			return resp, err
 		}
 
-		wait := p.waitBefore(attempt, resp)
+		wait := retryJitterFn(p.waitBefore(attempt, resp))
 		drainAndClose(resp)
 		if !p.waitFn(ctx, wait) {
 			return resp, err

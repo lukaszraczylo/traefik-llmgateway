@@ -45,6 +45,23 @@ func spyWait(waits *[]time.Duration) func(context.Context, time.Duration) bool {
 	}
 }
 
+// withoutRetryJitter pins retryJitterFn to the identity for one test and
+// restores it on cleanup. do() applies jitter ON TOP OF waitBefore's
+// ladder (retry.go, security audit run-1), so a test asserting the EXACT
+// ladder values neutralises the randomness here rather than loosening its
+// assertions into a range — the ladder contract is still pinned exactly,
+// and the jitter itself is pinned separately by
+// TestRetryPolicy_Do_JitterStaysWithinHalfToFullBackoff.
+//
+// Safe as a package-var swap because no test in this file calls
+// t.Parallel(); if one ever does, it must not use this helper.
+func withoutRetryJitter(t *testing.T) {
+	t.Helper()
+	prev := retryJitterFn
+	retryJitterFn = func(d time.Duration) time.Duration { return d }
+	t.Cleanup(func() { retryJitterFn = prev })
+}
+
 // callSequence returns a call func for retryPolicy.do that returns
 // results[i] on its i-th invocation (0-indexed), and counts invocations
 // into calls.
@@ -292,6 +309,7 @@ func TestRetryPolicy_Do_EnabledDefaults_CapsAtTwoTotalTries(t *testing.T) {
 // uses attempts:1 (one retry allowed) and retries exactly once, waits
 // the expected duration, and returns the second attempt's success.
 func TestRetryPolicy_Do_RetriesOnTransientThenSucceeds(t *testing.T) {
+	withoutRetryJitter(t)
 	tests := []struct {
 		name      string
 		first     func() (*http.Response, error)
@@ -341,13 +359,21 @@ func TestRetryPolicy_Do_RetriesOnTransientThenSucceeds(t *testing.T) {
 	}
 }
 
-// TestRetryPolicy_WaitBefore_RetryAfterHandling pins spec §1's
-// Retry-After handling directly: only a 429 whose Retry-After parses as
-// a non-negative whole-second count within the 2s cap wins outright.
-// Every other shape — over the cap, the HTTP-date form, negative, no
+// TestRetryPolicy_WaitBefore_RetryAfterHandling pins Retry-After
+// handling directly: a 429 whose Retry-After parses as a non-negative
+// whole-second count is HONOURED, clamped to maxRetryAfterWait when it
+// asks for longer. Every other shape — the HTTP-date form, negative, no
 // header at all, or present on a non-429 status — falls back to
-// exponential backoff (spec: ">2s -> exponential backoff", not a flat
-// 2s), verified here against attempt=1's backoff*2^0 value.
+// exponential backoff, verified here against attempt=1's backoff*2^0
+// value.
+//
+// CONTRACT CHANGE (security audit run-1): a Retry-After above the 2s
+// per-wait cap used to be DISCARDED and replaced by that ladder, so a
+// saturated provider could not ask this gateway to pause for longer than
+// two seconds — it answered an explicit overload signal by retrying
+// sooner than asked. maxRetryWait still caps the wait the gateway
+// computes for ITSELF; maxRetryAfterWait caps only what the upstream may
+// ask for, and clamping can only ever lengthen a wait, never shorten one.
 func TestRetryPolicy_WaitBefore_RetryAfterHandling(t *testing.T) {
 	p := &retryPolicy{backoff: 100 * time.Millisecond}
 	backoffFallback := 100 * time.Millisecond // attempt=1: backoff * 2^0
@@ -358,7 +384,8 @@ func TestRetryPolicy_WaitBefore_RetryAfterHandling(t *testing.T) {
 		want time.Duration
 	}{
 		{retryAfterResp(http.StatusTooManyRequests, "1"), "429 with qualifying Retry-After (1s, within cap)", time.Second},
-		{retryAfterResp(http.StatusTooManyRequests, "30"), "429 with Retry-After over the 2s cap falls back to exponential backoff", backoffFallback},
+		{retryAfterResp(http.StatusTooManyRequests, "30"), "429 with Retry-After over the 2s per-wait cap is still honoured", maxRetryAfterWait},
+		{retryAfterResp(http.StatusTooManyRequests, "3600"), "429 with Retry-After beyond maxRetryAfterWait is clamped to it, never discarded", maxRetryAfterWait},
 		{retryAfterResp(http.StatusTooManyRequests, "Wed, 21 Oct 2015 07:28:00 GMT"), "429 with HTTP-date Retry-After falls back to exponential backoff", backoffFallback},
 		{retryAfterResp(http.StatusTooManyRequests, "-5"), "429 with negative Retry-After falls back to exponential backoff", backoffFallback},
 		{fakeResp(http.StatusTooManyRequests, nil), "429 with no Retry-After header falls back to exponential backoff", backoffFallback},
@@ -446,6 +473,7 @@ func TestRetryPolicy_Do_NilPolicy_NoRetry(t *testing.T) {
 // retries after the first), waiting p.attempts times with exponential
 // backoff, capped at maxRetryWait.
 func TestRetryPolicy_Do_AttemptsCap(t *testing.T) {
+	withoutRetryJitter(t)
 	var calls int32
 	var waits []time.Duration
 	p := &retryPolicy{enabled: true, attempts: 3, backoff: time.Second, waitFn: spyWait(&waits)}
@@ -493,6 +521,51 @@ func TestRetryPolicy_Do_BackoffCappedAtMaxWait(t *testing.T) {
 		if w > maxRetryWait {
 			t.Errorf("waits[%d] = %v, exceeds cap %v", i, w, maxRetryWait)
 		}
+	}
+}
+
+// TestRetryPolicy_Do_JitterStaysWithinHalfToFullBackoff pins the jitter
+// do() applies on top of waitBefore's ladder (security audit run-1).
+// Deterministic backoff made every request that failed at the same
+// instant retry in lockstep against the same upstream — the synchronized
+// retry shape that turns one upstream blip into a self-sustaining herd.
+// Equal jitter keeps each wait within [d/2, d]: never zero, so it can
+// never collapse into an immediate retry, and never longer than the
+// ladder value it is spreading.
+func TestRetryPolicy_Do_JitterStaysWithinHalfToFullBackoff(t *testing.T) {
+	const backoff = time.Second
+	seen := make([]time.Duration, 0, 32)
+	for range 32 {
+		var calls int32
+		var waits []time.Duration
+		p := &retryPolicy{enabled: true, attempts: 1, backoff: backoff, waitFn: spyWait(&waits)}
+		call := callSequence(&calls, func() (*http.Response, error) {
+			return fakeResp(http.StatusServiceUnavailable, nil), nil
+		})
+
+		if _, err := p.do(context.Background(), call); err != nil {
+			t.Fatalf("do: %v", err)
+		}
+		if len(waits) != 1 {
+			t.Fatalf("waits = %v, want exactly 1 (attempts:1)", waits)
+		}
+		if waits[0] < backoff/2 || waits[0] > backoff {
+			t.Fatalf("waits[0] = %v, want within [%v, %v]", waits[0], backoff/2, backoff)
+		}
+		seen = append(seen, waits[0])
+	}
+
+	// Assert the spread actually exists before concluding jitter works:
+	// an identity jitter would satisfy every bound check above.
+	allEqual := true
+	for _, w := range seen {
+		if w != seen[0] {
+			allEqual = false
+			break
+		}
+	}
+	if allEqual {
+		t.Errorf("all %d jittered waits were identical (%v); jitter is not spreading them", len(seen), seen[0])
 	}
 }
 

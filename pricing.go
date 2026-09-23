@@ -77,10 +77,35 @@ var (
 // a price like 8.2 by one micro-USD due to float64 representation), and
 // each of input/output cost is tokens*priceMicrosPerM/1e6, summed.
 func costMicros(model string, u usage, overrides map[string]*ModelPricing) int64 {
+	cost, _ := costMicrosKnown(model, u, overrides)
+	return cost
+}
+
+// costMicrosKnown is costMicros plus the one bit costMicros throws away:
+// whether a price was actually FOUND. An unknown model returns (0, false)
+// — a zero that means "cannot be priced", which is NOT the same value a
+// genuinely free model produces, even though both are 0.
+//
+// Security audit run-1, finding F-1 (high): costMicros' single-int64
+// return conflated those two cases, and limiter.account's own
+// `if costMicros != 0` guard then skipped every cost-counter write for an
+// unpriced model. checkAndCount reads exactly those never-written
+// counters, so `used < limit` stayed permanently true and a configured
+// costPerDayUSD/costPerMonthUSD could never fire. Any caller gating a
+// SPEND control must use this function and handle ok == false; costMicros
+// above remains for callers that only need the number (the accounting
+// write itself, where a zero is harmless).
+//
+// This is the distinction resolvedModelMeta.CostKnown (modelmeta.go)
+// already draws for the metadata path, and the one candidateCostAllowed
+// (failover.go) already relies on to protect real money — its own comment
+// calls recording zero for an unpriced model "an accounting shortcut, not
+// proof the provider invoices zero".
+func costMicrosKnown(model string, u usage, overrides map[string]*ModelPricing) (int64, bool) {
 	price, ok := lookupPricing(model, overrides)
 	if !ok {
 		warnUnknownModel(model)
-		return 0
+		return 0, false
 	}
 
 	inputMicrosPerM := int64(math.Round(price.InputPerM * tokensPerMillion))
@@ -88,7 +113,7 @@ func costMicros(model string, u usage, overrides map[string]*ModelPricing) int64
 
 	inputCost := u.prompt * inputMicrosPerM / tokensPerMillion
 	outputCost := u.completion * outputMicrosPerM / tokensPerMillion
-	return inputCost + outputCost
+	return inputCost + outputCost, true
 }
 
 // lookupPricing resolves model's price: overrides first (a nil entry does

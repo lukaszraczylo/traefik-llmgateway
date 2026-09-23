@@ -491,6 +491,34 @@ func (g *Gateway) runMeteredCall(sw *statusTrackingWriter, r *http.Request, scop
 		// for why (F3/F6 fix, adversarial-review).
 		providerName := cand.providerName
 		upstreamModel := cand.upstreamModel
+
+		// Security audit run-1, finding F-1 (high). An unpriced model is
+		// billed 0, a zero cost writes no cost counter at all
+		// (limiter.account, limits.go), and checkAndCount then evaluates
+		// the money budget against that never-written counter — so
+		// costPerDayUSD/costPerMonthUSD can never accrue and can never
+		// fire. Serving the request would spend the operator's money
+		// against a control that provably cannot stop it.
+		//
+		// Placed HERE, not in admitRequest, because admitRequest runs
+		// before the body is decoded (runUnified's own ordering) and so
+		// before any model id exists; this is the first point where the
+		// SERVING model is known. It is before call(), so nothing has been
+		// written to the client yet and the refusal is a clean envelope.
+		//
+		// Deliberately narrow: it fires only when some scope actually
+		// configured a money budget, so a deployment with none is
+		// unaffected, and token/request budgets are untouched — those
+		// accrue correctly for an unpriced model and keep working.
+		if !g.cfg.AllowUnpricedWithCostBudget &&
+			!modelPriceKnown(cand.canonical, cand.upstreamModel, g.cfg.Pricing) &&
+			scopesHaveCostBudget(scopes) {
+			g.logf("%s: refusing model %q: it has no configured price, and a cost budget applies to this caller that cannot be enforced without one", logPrefix, cand.canonical)
+			envelope(sw, http.StatusPaymentRequired, "invalid_request_error",
+				fmt.Sprintf("model %q has no configured price, so the cost budget that applies to this request cannot be enforced; add a \"pricing\" entry for it, or set allowUnpricedWithCostBudget to serve it unbounded", cand.canonical))
+			return
+		}
+
 		ctx := withAttemptRecorder(r.Context(), func(resp *http.Response, attemptErr error) {
 			g.limiter.recordProviderAttempt(providerName, upstreamModel, resp, attemptErr)
 		})
@@ -870,10 +898,35 @@ func (g *Gateway) readAndDecodeUnifiedBody(sw *statusTrackingWriter, r *http.Req
 // computation (and its unknown-model warning, when neither id has a price)
 // runs through the one costMicros call that is actually charged.
 func unifiedCostMicros(canonical, bare string, u usage, overrides map[string]*ModelPricing) int64 {
+	cost, _ := unifiedCostMicrosKnown(canonical, bare, u, overrides)
+	return cost
+}
+
+// unifiedCostMicrosKnown is unifiedCostMicros plus whether EITHER id
+// actually had a price (security audit run-1, finding F-1). The bool is
+// false only when neither canonical nor bare is priced — exactly the case
+// where the returned 0 means "cannot be priced" rather than "free", and
+// therefore the case a spend control must not silently treat as zero
+// spend. See costMicrosKnown (pricing.go) for the full reasoning.
+func unifiedCostMicrosKnown(canonical, bare string, u usage, overrides map[string]*ModelPricing) (int64, bool) {
 	if _, ok := lookupPricing(canonical, overrides); ok {
-		return costMicros(canonical, u, overrides)
+		return costMicrosKnown(canonical, u, overrides)
 	}
-	return costMicros(bare, u, overrides)
+	return costMicrosKnown(bare, u, overrides)
+}
+
+// modelPriceKnown reports whether EITHER id this request could be billed
+// under has a configured price, using unifiedCostMicrosKnown's own
+// canonical-then-bare order. It is a pure existence probe: unlike
+// costMicrosKnown it never fires the unknown-model warning, so the
+// pre-flight check in runMeteredCall does not double-warn for a request
+// that is about to be accounted (and warned about) anyway.
+func modelPriceKnown(canonical, bare string, overrides map[string]*ModelPricing) bool {
+	if _, ok := lookupPricing(canonical, overrides); ok {
+		return true
+	}
+	_, ok := lookupPricing(bare, overrides)
+	return ok
 }
 
 // writeModelResolveErrorEnvelope maps a modelRegistry.resolve error to
