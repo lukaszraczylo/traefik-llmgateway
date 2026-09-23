@@ -1724,8 +1724,9 @@ adapter call — minus response caching and token/cost accounting (below).
 ## Admin
 
 A read-only dashboard and JSON API for operational visibility — providers,
-groups, model aliases, and per-user/per-group/total usage against
-configured limits, plus usage charts. No mutation of any kind; config
+groups, model aliases, per-user/per-group/total usage against configured
+limits, usage charts, and a fleet-wide feed of rate-limit/budget/upstream
+events. No mutation of any kind; config
 stays owned by GitOps/Traefik as usual. Off by default (`admin.enabled:
 false`, or the `admin` block omitted entirely): none of the routes below
 are registered at all, and a request to any of them falls through to the
@@ -1773,8 +1774,24 @@ or in CI.
   [Model aliases](#model-aliases)), redis/cache/retry status (`retry`'s
   `enabled`/`attempts`/`backoff` are the EFFECTIVE values after
   [Retry](#retry)'s own defaulting, not the raw config — `attempts` and
-  `backoff` are both omitted when retry is disabled), and the plugin
-  version string. Each provider entry also carries `discoveryEnabled`
+  `backoff` are both omitted when retry is disabled), the plugin version
+  string, and three process-identity/health fields: `replica` (this
+  process's own id — `os.Hostname()`, falling back to the `HOSTNAME`
+  environment variable, then the literal `"unknown"`, so it is never
+  empty; **caveat**: under Kubernetes `hostNetwork: true`, every pod on a
+  node shares the node's own hostname, so `replica` no longer uniquely
+  identifies one gateway instance), `instance` (the plugin instance name
+  Traefik passed to `New`'s own `name` argument), and `warnings` (every
+  configuration warning logged while this process was constructed —
+  `metrics.path` colliding with another route or sitting under a reserved
+  prefix, a `cache.ttl` of zero or negative, a bare model id served by
+  more than one provider, and `failover.maxAttempts` × `retry.attempts`
+  multiplying out to many outbound calls for one admitted request — always
+  an array, never `null`, capped at 50 entries with any excess counted in
+  the sibling `warningsDropped` field, omitted when nothing was dropped; a
+  warning logged after construction finishes, from ordinary request
+  handling, is never collected here, only written to the plugin's own log
+  output). Each provider entry also carries `discoveryEnabled`
   (the configured `discovery` flag, so the dashboard can tell "discovery
   is off" apart from "discovery is on but has not refreshed yet" — both
   otherwise show the identical zero `lastRefresh`), `attemptsDay`/
@@ -1793,6 +1810,12 @@ or in CI.
   alias entry carries its own `modelMeta` too. `usage`
   returns every user's and every group's
   current-window counter values — `requestsPerMinute`, `requestsPerDay`,
+  `rejectionsPerDay` (every `checkAndCount` rejection attributed to this
+  scope today — fleet-wide via the shared store, folded into the same
+  round trip the rejection itself already pays, so it costs no extra
+  read; a user's, group's, and the `total` row's own `rejectionsPerDay`
+  are all incremented together on one rejection, so the `total` row
+  answers "how many rejections today, across everyone" directly),
   `tokensInPerDay`/`tokensOutPerDay`, `tokensInPerMonth`/
   `tokensOutPerMonth`, `costPerDayMicroUsd`, `costPerMonthMicroUsd` —
   alongside their configured limits, plus one extra `total` row: the
@@ -1826,16 +1849,48 @@ or in CI.
   source for the Charts view's "Models" tab, and for the model entries in
   its scope picker. Query parameters:
   - `metric`: `req`, `tokin`, `tokout`, or `cost`.
-  - `window`: `hour`, `day`, or `month`. The ranking reads that window's
-    CURRENT bucket, not a span of them.
+  - `window`: `hour`, `day`, or `month`.
   - `limit` (optional): 1-100, default 20.
+  - `span` (optional): number of buckets, ending at and including window's
+    current (possibly partial) bucket, summed into each model's `value` —
+    the identical span convention `usage/history` uses. Empty means `1`
+    (the window's current bucket alone — this endpoint's original,
+    pre-`span` behavior, unchanged for a caller that never passes it),
+    otherwise an integer from `1` to the window's own max (`48`/`35`/`13`
+    for `hour`/`day`/`month` — see `usage/history`'s own `span` entry
+    above), and a value outside that range is `400`.
+  - `prefix` (optional): narrows the catalog to model ids that start with
+    it — applied BEFORE the store is read and before `limit` caps the
+    result, so a search narrowed to one provider's own ids (`id`s look
+    like `provider/model`) never pays a catalog-sized read for ids the
+    prefix already excludes, and `limit` caps the FILTERED set's own
+    top-N rather than silently returning fewer than `limit` matches. Up
+    to 256 bytes; longer is `400`. Empty (the default) ranks the whole
+    catalog, this endpoint's original, pre-`prefix` behavior. A prefix
+    that matches nothing is not an error, just an empty `models` array —
+    the identical shape an ordinary, unfiltered ranking already answers
+    when nothing was used yet. The dashboard's Models tab sends this
+    parameter on the ranking fetch itself whenever a provider filter is
+    active (a provider's own header link on the Providers tab, or a
+    `#charts?tab=models&filter=...` hash — either a link the dashboard
+    built itself, or one hand-edited to add `filter=`) — narrowing
+    server-side BEFORE `limit` applies, so a fleet-wide top-N ranking can
+    no longer omit, or only partially show, one provider's own models.
+    The scope picker's own
+    model list (a separate, unfiltered fetch) never sends it. A
+    client-side re-filter (`lib/model-filter.ts`) still runs afterward too
+    — a harmless no-op once the server has already narrowed the set, kept
+    as the one guard against a response that predates this parameter.
 
-  Response shape: `{"metric","window","models":[{"id":"uni/qwen3-next","value":4100},...]}`,
-  sorted by `value` descending, ties broken on `id` ascending so a ranking
-  stays stable between polls. **Only models with non-zero usage are
-  returned** — a catalog runs to hundreds of models, so an empty `models`
-  array means "nothing used in this window", never "nothing configured".
-  Validation mirrors `usage/history`: a bad `metric`/`window`/`limit` is
+  Response shape:
+  `{"metric","window","span":1,"models":[{"id":"uni/qwen3-next","value":4100},...]}`
+  (`span` echoes the resolved value — always present, even when the
+  request carried no `?span=` of its own), sorted by `value` descending,
+  ties broken on `id` ascending so a ranking stays stable between polls.
+  **Only models with non-zero usage are returned** — a catalog runs to
+  hundreds of models, so an empty `models` array means "nothing used in
+  this window", never "nothing configured". Validation mirrors
+  `usage/history`: a bad `metric`/`window`/`limit`/`span`/`prefix` is
   `400`, an unreachable store is `503`.
 
   Each `id` is the canonical `provider/model` of the provider that
@@ -1846,6 +1901,53 @@ or in CI.
   which the serving model is known), which is also why a passthrough reply
   whose upstream reports no model id is counted for its user, group and
   total but for no model.
+- **`GET /admin/api/events`** (F3, v0.3 dashboard task) returns this
+  deployment's most recent operational events — rate-limit/budget
+  rejections and upstream/timeout/unpriced/capacity signals — for the
+  dashboard's "Events" tab. Same gate as every route above; never calls
+  `checkAndCount` either. Query parameter: `limit` (optional), empty
+  means `50`, otherwise an integer from `1` to `200` inclusive, else
+  `400`.
+
+  Response shape:
+  `{"events":[{"time","replica","instance","user","group","model","provider","route","kind","message","status"},...],"source","replica","capacity":200,"degraded"}`,
+  newest first, `events` always an array, never `null`.
+  `instance`/`user`/`group`/`model`/`provider`/`status` are each omitted
+  when not applicable to the event's own kind. `kind` is one of
+  `rate_limit`/`budget` (a `checkAndCount` rejection that also increments
+  `usage`'s own `rejectionsPerDay` for the violated scope and for
+  `total`, in the same round trip), `store_down` (a rejection because the
+  configured store itself was unreachable — never counted toward
+  `rejectionsPerDay`, since there was nothing to increment it in),
+  `upstream`, `timeout`, `unpriced` (a model with no configured price,
+  cost recorded as `0`), or `capacity` (the body-admission semaphore
+  refusing a request before it is even attributed to a user — this is
+  the one event kind recorded with no `user`/`group` at all). `route` is
+  one of `chat/completions`, `embeddings`, `messages`, `images`,
+  `audio/speech`, `audio/transcriptions`, `passthrough`, `mcp`, `a2a`,
+  `mcp-federated`, `pricing`, or `capacity`.
+
+  Events are kept in two places: an in-process ring buffer (`capacity`
+  entries, oldest overwritten first — every event always lands here,
+  regardless of Redis) and, when Redis is configured and currently
+  reachable, best-effort mirrored onto a shared, capped Redis list (key
+  `llmgw:events`, one `LPUSH` of the new entry plus an `LTRIM` to
+  `capacity - 1` entries in the same pipelined round trip — no separate
+  expiry; the list is bounded by size alone) so a dashboard reading
+  through **any** replica in a multi-instance deployment sees every
+  replica's own events, not just the one it happened to poll. The mirror
+  is throttled to 50 pushes/second/replica — a rejection or failure storm
+  must never turn it into an unbounded write amplifier against the
+  shared store — the local ring is never throttled. `source` is
+  `"redis"` when this read was actually answered from that shared list,
+  or `"replica"` when it fell back to this replica's own local ring
+  instead (Redis not configured at all, currently latched down, or this
+  particular read failed); `degraded` is `true` only for the latter two
+  cases — a plain "Redis was never configured" read is ordinary
+  operation, not degradation, and stays `false`. `replica` at the
+  response's top level is always this answering replica's own id
+  (`overview.replica`, above), regardless of which replica's events are
+  actually being shown.
 - **`GET /admin/api/targets`** returns every configured MCP server and
   agent for the dashboard's "MCP & Agents" tab:
   `{"mcpServers":[...],"agents":[...]}`, each entry
@@ -1877,7 +1979,7 @@ or in CI.
   API keys (not even digests), provider keys, the Redis password, or
   users-file path contents — every secret-bearing field is redacted from
   every response.
-- **Admin traffic is never counted**: none of the five `/admin/api/*`
+- **Admin traffic is never counted**: none of the six `/admin/api/*`
   JSON routes call `checkAndCount` — admin polling never moves any
   user's or group's `requestsPerMinute`/`requestsPerDay` counters, and
   usage statistics reflect real LLM traffic only (operator directive: an
@@ -1885,18 +1987,18 @@ or in CI.
   never itself distort the numbers it displays). The direct consequence:
   an admin's own `requestsPerMinute`/`requestsPerDay` limit, if
   configured, is never enforced against admin-route traffic either — an
-  admin key holder can poll any of the four routes as fast as they like.
+  admin key holder can poll any of the six routes as fast as they like.
   This is an accepted trade-off, not an oversight: these are admin-gated,
   cheap reads, and an admin holder polling aggressively is a
   self-inflicted, not a shared, resource cost. `GET /admin` and
   `GET /admin/assets/*` count nothing either, for the simpler reason that
   they are unauthenticated — there is no identified user to count a
   request against.
-- **Response headers**: all four JSON routes set
+- **Response headers**: all six JSON routes set
   `X-Content-Type-Options: nosniff` and `Cache-Control: no-store`; every
   hashed asset sets `X-Content-Type-Options: nosniff` and its own
   immutable `Cache-Control` (above). Every one of these routes — `GET
-  /admin`, every hashed asset, and the four JSON routes — shares one
+  /admin`, every hashed asset, and the six JSON routes — shares one
   `Content-Security-Policy` header (`default-src 'none'; script-src
   'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:;
   frame-ancestors 'none'; base-uri 'none'; form-action 'none'`) — no
@@ -1910,6 +2012,90 @@ or in CI.
   admin route already sends the identical header, so there is no reason
   for asset responses to be the exception. The dashboard loads no
   external asset of any kind and works in an air-gapped cluster.
+
+### Dashboard (v0.3 additions)
+
+- **Usage-vs-limit bars**: the Usage tab's Users/Groups tables, and a
+  group's own detail grid, render a compact meter beside every numeric
+  column that has a configured limit — request-rate, tokens (in+out
+  combined, since a `tokensPerDay`/`tokensPerMonth` limit enforces
+  against their sum), and cost. A bar reads amber at 80% of its limit
+  and red at 100% or beyond (a scope's usage window can roll forward past
+  its limit before the next request is actually rejected, so "at or over
+  100%" is a real, reachable state, not a ceiling); a scope with that
+  limit left unconfigured renders no bar at all, never a fabricated 0%,
+  and a `storeDown` scope masks every bar the same way it already masks
+  its raw numbers.
+- **Cost forecast**: a card under the Usage tab's Total row projects
+  fleet-wide month-end spend by linearly extrapolating
+  `total.costPerMonthMicroUsd` against how far the current UTC calendar
+  month has elapsed — nothing is shown for the first 2% of the month
+  (`MIN_PROJECTION_FRACTION`, `lib/forecast.ts` — about 13.4h in February
+  to 14.9h in a 31-day month; too little elapsed to extrapolate
+  meaningfully from), and the projected figure reads red, with a
+  tooltip, once it would cross a configured `costPerMonthUSD` limit.
+- **Rejected/day**: a `rejected/day` column sits between `req/day` and
+  the token columns in the Users/Groups tables (and the Total row),
+  reading `usage`'s own `rejectionsPerDay` field, tinted when non-zero.
+- **CSV export**: an "Export CSV" button on the Usage tab's Users and
+  Groups table headers, and on the Charts tab's Models ranking, downloads
+  the CURRENTLY filtered-and-sorted rows as an RFC 4180 CSV file (comma
+  quoting, CRLF line endings) via a `Blob` + `<a download>` — no server
+  round trip. If the browser rejects that (an environment with no
+  `Blob`/`URL` API), it falls back to copying the CSV text to the
+  clipboard, or selecting it for a manual copy, instead of silently
+  losing the export.
+- **Click-through links to Charts**: a user/group id in the Usage tab's
+  tables, and a model id beside its `ModelChip` on the Providers tab, are
+  each a link that jumps straight to the Charts tab with that exact scope
+  already selected (switching off the scope-less Models ranking first, if
+  that was showing); a provider's own header on the Providers tab links
+  to the Charts tab's Models ranking, pre-filtered to that provider's own
+  model ids.
+- **Events tab**: the new `GET /admin/api/events`-backed tab (above) —
+  a searchable-by-user/group, filterable-by-kind table, newest first,
+  captioned with whether it is currently showing the fleet-wide feed or
+  just this replica's own (with a warning banner when it fell back to the
+  latter because Redis was configured but unreachable).
+- **Polling paused in hidden tabs**: every poll this dashboard runs
+  (Providers/Usage/Targets every 5s for the app's whole session, the
+  Charts tab's own 30s auto-refresh while open, and the Events tab's own
+  5s poll while it is the active tab) stops the instant the browser tab
+  itself is backgrounded (`document.hidden`), and catches up with an
+  immediate fetch — not a stale wait-out-the-interval — the instant it is
+  looked at again. A Redis-backed admin panel left open in a background
+  tab costs nothing while nobody can see it.
+- **URL hash state**: the current tab and its own selection round-trip
+  through `location.hash`, so a link (or a reload) restores exactly what
+  was showing — `#charts?window=<hour|day|month>&tab=<requests|tokens|cost|models>&metric=<req|tokin|tokout|cost>&scope=<total|user:{id}|group:{id}|model:{id}>&filter=<model id prefix>`,
+  `#usage?q=<search text>`, `#events?kind=<kind>&user=<search text>`. An
+  omitted field means "whatever it already defaulted to"; an unrecognized
+  tab, or an invalid value for a field that has a fixed set of valid
+  ones, is dropped rather than resetting every other, still-valid field
+  alongside it. Not every name in this hash stays in the address bar:
+  Charts' `scope` and `filter` are exactly the values `stores/history.ts`
+  sends as `scope=` and `prefix=` query parameters to this panel's own
+  admin API (`GET /admin/api/usage/history`, `GET /admin/api/usage/models`)
+  to fetch the selection they name, so a user/group id or model-id prefix
+  placed in the hash does reach a server — this panel's own, over the
+  same authenticated connection every other request on this page already
+  uses, never a third party. Usage's `q` and Events' `kind`/`user` are the
+  opposite: pure client-side filters applied to data already fetched
+  (`lib/events-filter.ts`'s `filterEvents`, and the Usage tables' own
+  search), so those three specifically never appear in any request this
+  page issues.
+- **Config warnings banner**: `GET /admin/api/overview`'s `warnings`
+  array (above) renders as a collapsible banner under the header —
+  nothing at all when the array is empty — naming the count, and, when
+  expanded, every warning's own exact text plus how many more were
+  dropped past the 50-entry cap, if any.
+- **Replica labels**: the header's own "last updated ..." status line
+  appends `· replica {overview.replica}` after a successful poll, and the
+  Providers tab's per-replica latency/provenance caption names that exact
+  replica id too — both so a reader looking at per-process figures
+  (latency and provenance are in-process, not fleet-wide — see
+  [Limits and accounting](#limits-and-accounting)) knows not just that
+  the number is replica-scoped, but which replica it came from.
 
 ## Metrics
 
