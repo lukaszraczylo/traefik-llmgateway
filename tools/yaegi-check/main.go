@@ -381,6 +381,19 @@ func run() error {
 	}))
 	defer provenanceEstUpstream.Close()
 
+	// eventsUpstreamErrorUpstream always 500s — see
+	// eventsUpstreamErrorProviderName's own doc comment for why this
+	// dedicated, single-candidate provider exists rather than reusing
+	// failoverAUpstream (which a correctly working failover loop never
+	// surfaces to the client, so its own 500 never reaches
+	// handleAdapterErrorEnvelope's client-facing write).
+	eventsUpstreamErrorUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":{"message":"eventsprobe-upstream always fails","type":"server_error"}}`))
+	}))
+	defer eventsUpstreamErrorUpstream.Close()
+
 	// mcpProbeUpstream answers federation's outbound tools/call with a
 	// body deliberately larger than mcpBackendCallResponseMaxBytes, so
 	// exerciseHandler's POST /mcp probe below drives doBackendJSONRPC's
@@ -674,6 +687,10 @@ func run() error {
 		// provenanceEstProviderName (feat: expose token-accounting
 		// provenance) — see its own const block doc comment above.
 		`"` + provenanceEstProviderName + `":{"type":"openai","baseUrl":"` + provenanceEstUpstream.URL + `","apiKey":"sk-up","models":["` + provenanceEstProviderModel + `"]},` +
+		// eventsUpstreamErrorProviderName (F3 hook 2, coordinator request)
+		// — see its own const block doc comment above for why this
+		// provider carries no failover candidate.
+		`"` + eventsUpstreamErrorProviderName + `":{"type":"openai","baseUrl":"` + eventsUpstreamErrorUpstream.URL + `","apiKey":"sk-up","models":["` + eventsUpstreamErrorProviderModel + `"]},` +
 		// "anthropic" backs the /v1/messages passthrough probes
 		// (exerciseMessagesRoute, below): a real anthropic-type provider,
 		// interpreted end to end through
@@ -797,7 +814,12 @@ func run() error {
 		// (primary, unrestricted) and round3P2FriendsGroupName
 		// (paths-restricted), plus a personal grant restricting
 		// "round3-shared" to round3PersonalModelID alone.
-		`"admin":{"enabled":true},"users":{"inline":[{"name":"tester","group":"default","apiKey":"` + testDataUserAPIKey + `"},{"name":"admin1","group":"default","apiKey":"` + attemptAccountingAdminAPIKey + `","admin":true},{"name":` + string(trickyNameJSON) + `,"group":"default","apiKey":"sk-tricky"},{"name":"bare-winner-friend","group":"` + bareWinnerGroupName + `","apiKey":"` + bareWinnerFriendAPIKey + `"},{"name":"multi-group-user","group":"` + multiGroupEngGroupName + `","groups":["` + multiGroupOpsGroupName + `"],"apiKey":"` + multiGroupUserAPIKey + `","providers":["multi-group-b"],"models":["` + multiGroupAllowedModelID + `"]},{"name":"round3-p1-user","group":"` + round3P1AGroupName + `","groups":["` + round3P1BGroupName + `"],"apiKey":"` + round3P1UserAPIKey + `"},{"name":"round3-p2-user","group":"` + round3P2HomeGroupName + `","groups":["` + round3P2FriendsGroupName + `"],"apiKey":"` + round3P2UserAPIKey + `","providers":["round3-shared"],"models":["` + round3PersonalModelID + `"]}]}}`
+		`"admin":{"enabled":true},"users":{"inline":[{"name":"tester","group":"default","apiKey":"` + testDataUserAPIKey + `"},{"name":"admin1","group":"default","apiKey":"` + attemptAccountingAdminAPIKey + `","admin":true},{"name":` + string(trickyNameJSON) + `,"group":"default","apiKey":"sk-tricky"},{"name":"bare-winner-friend","group":"` + bareWinnerGroupName + `","apiKey":"` + bareWinnerFriendAPIKey + `"},{"name":"multi-group-user","group":"` + multiGroupEngGroupName + `","groups":["` + multiGroupOpsGroupName + `"],"apiKey":"` + multiGroupUserAPIKey + `","providers":["multi-group-b"],"models":["` + multiGroupAllowedModelID + `"]},{"name":"round3-p1-user","group":"` + round3P1AGroupName + `","groups":["` + round3P1BGroupName + `"],"apiKey":"` + round3P1UserAPIKey + `"},{"name":"round3-p2-user","group":"` + round3P2HomeGroupName + `","groups":["` + round3P2FriendsGroupName + `"],"apiKey":"` + round3P2UserAPIKey + `","providers":["round3-shared"],"models":["` + round3PersonalModelID + `"]},` +
+		// The eighth inline user (eventsProbeUserAPIKey) is
+		// exerciseRateLimitEventAndRejections' own — group "default"
+		// (allow-all), but with its own requestsPerMinute:1 limit so a
+		// second call under this key alone 429s deterministically.
+		`{"name":"events-probe","group":"default","apiKey":"` + eventsProbeUserAPIKey + `","limits":{"requestsPerMinute":1}}]}}`
 	if err = json.Unmarshal([]byte(attemptAccountingOverride), cfgVal.Interface()); err != nil {
 		return fmt.Errorf("decode attempt-accounting harness override into the interpreted Config: %w", err)
 	}
@@ -935,7 +957,31 @@ func run() error {
 	// chat completion of its own, and asserts on a kindModel counter no
 	// earlier probe touches, so it can neither perturb nor be perturbed by
 	// the provider-level counters they assert on.
-	return exerciseModelUsageRanking(handler)
+	if err := exerciseModelUsageRanking(handler); err != nil {
+		return err
+	}
+	// exerciseAdminOverviewReplicaAndWarnings/exerciseUsageModelsSpan (F4/
+	// F9/F10/F2, v0.3 dashboard task) run next: both only READ admin
+	// endpoints, so neither perturbs nor is perturbed by anything above.
+	if err := exerciseAdminOverviewReplicaAndWarnings(handler); err != nil {
+		return err
+	}
+	if err := exerciseUsageModelsSpan(handler); err != nil {
+		return err
+	}
+	// exerciseRateLimitEventAndRejections (F3/F4, v0.3 dashboard task)
+	// runs next, against its own dedicated requestsPerMinute:1 user
+	// (eventsProbeUserAPIKey), so its two calls cannot perturb any earlier
+	// probe's own per-user counters.
+	if err := exerciseRateLimitEventAndRejections(handler); err != nil {
+		return err
+	}
+	// exerciseUpstreamAndTimeoutEvents (F3 hook 2, coordinator request
+	// 2026-09-23) runs LAST: each of its two assertions reads GET
+	// /admin/api/events?limit=1 for the single newest entry right after
+	// producing it, so nothing after it depends on event ordering staying
+	// undisturbed.
+	return exerciseUpstreamAndTimeoutEvents(handler)
 }
 
 // builtinLookupModelID is a real, stable entry in the generated
@@ -1068,6 +1114,26 @@ const (
 	round3P2FriendsGroupName = "round3-p2-friends"
 	round3P2UserAPIKey       = "sk-round3-p2-user" // #nosec G101 -- test fixture literal, not a real credential
 	round3PersonalModelID    = "round3-shared/m1"
+)
+
+// eventsProbeUserAPIKey authenticates exerciseRateLimitEventAndRejections'
+// own inline user (run()'s "users" override): group "default" (allow-all,
+// like every other probe user), but with its own requestsPerMinute:1
+// limit, so a SECOND call under this key alone 429s regardless of what
+// every other probe already did to testDataUserAPIKey's own counters —
+// no other probe may reuse this key.
+const eventsProbeUserAPIKey = "sk-events-probe" // #nosec G101 -- test fixture literal, not a real credential
+
+// eventsUpstreamErrorProviderName/-Model (F3 hook 2, coordinator request
+// 2026-09-23) back exerciseUpstreamAndTimeoutEvents: a SINGLE provider —
+// deliberately no failover candidate configured for this model id — whose
+// upstream always 500s, so the client-facing response IS the classified
+// *providerHTTPError handleAdapterErrorEnvelope hands to writeUpstream,
+// and recordUpstreamEvent's default branch runs on every call, not just
+// the first of a failover attempt sequence.
+const (
+	eventsUpstreamErrorProviderName  = "eventsprobe-upstream"
+	eventsUpstreamErrorProviderModel = "gpt-eventsprobe-upstream-test"
 )
 
 // mcpProbeServerName is the federated MCP server run() configures against
@@ -3377,4 +3443,243 @@ func pollModelRanking(handler http.Handler) ([]any, error) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
+}
+
+// exerciseAdminOverviewReplicaAndWarnings proves GET /admin/api/overview's
+// two new fields (F4/F9 replica id, F10 config-warnings collection, v0.3
+// dashboard task) are populated correctly under the REAL interpreter:
+// replica must be non-empty (g.replica: os.Hostname() -> $HOSTNAME ->
+// "unknown", llmgateway.go) and warnings must decode as a genuine JSON
+// array, never null (configWarningsSnapshot's own "never nil" contract,
+// logger.go) — a null here would mean noteConfigWarning's slice append
+// under the interpreter produced a nil rather than an empty slice, a
+// construct class this codebase has seen diverge before. Content is
+// fixture-dependent (this harness's own config may or may not trip a
+// warnf during construction), so only presence/type is asserted, not any
+// particular message.
+func exerciseAdminOverviewReplicaAndWarnings(handler http.Handler) error {
+	req := httptest.NewRequest(http.MethodGet, "/admin/api/overview", nil)
+	req.Header.Set("Authorization", "Bearer "+attemptAccountingAdminAPIKey)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		return fmt.Errorf("GET /admin/api/overview (replica/warnings probe): status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		return fmt.Errorf("decode GET /admin/api/overview body: %w", err)
+	}
+	replica, _ := body["replica"].(string)
+	if replica == "" {
+		return fmt.Errorf(`GET /admin/api/overview: "replica" = %q, want non-empty (F4/F9: os.Hostname() -> $HOSTNAME -> "unknown")`, replica)
+	}
+	if _, ok := body["warnings"].([]any); !ok {
+		return fmt.Errorf(`GET /admin/api/overview: "warnings" did not decode as a JSON array (want never-nil, F10): %v`, body["warnings"])
+	}
+	fmt.Println("yaegi-check: GET /admin/api/overview carries a non-empty replica id and a never-nil warnings array under the interpreter")
+	return nil
+}
+
+// exerciseUsageModelsSpan proves GET /admin/api/usage/models' optional
+// ?span= parameter (F2, v0.3 dashboard task) is parsed, validated, and
+// echoed back correctly under the REAL interpreter: modelSpanTotals'
+// per-id historyBucketKeys loop and chunkedModelSpanTotals' chunking
+// arithmetic (admin.go/limits.go) are both new, interpreter-untested
+// code this harness's own compiled test suite cannot vouch for. window
+// "hour" caps span at 48 (historyMaxSpan), so 24 is comfortably valid.
+func exerciseUsageModelsSpan(handler http.Handler) error {
+	req := httptest.NewRequest(http.MethodGet, "/admin/api/usage/models?metric=req&window=hour&span=24", nil)
+	req.Header.Set("Authorization", "Bearer "+attemptAccountingAdminAPIKey)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		return fmt.Errorf("GET /admin/api/usage/models?span=24: status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		return fmt.Errorf("decode GET /admin/api/usage/models body: %w", err)
+	}
+	if span, _ := body["span"].(float64); span != 24 {
+		return fmt.Errorf(`GET /admin/api/usage/models?span=24: "span" = %v, want 24 (F2's own echoed, resolved span)`, body["span"])
+	}
+	fmt.Println("yaegi-check: GET /admin/api/usage/models honors ?span=24 on window=hour and echoes it back under the interpreter")
+	return nil
+}
+
+// exerciseRateLimitEventAndRejections proves a real checkAndCount
+// rejection is BOTH recorded to GET /admin/api/events as a rate_limit
+// event (F3 hook 1) AND folded into GET /admin/api/usage's fleet-wide
+// total.rejectionsPerDay counter (F4, Q6: "attribute rejections to
+// total/all too") under the REAL interpreter — settleRejection's own
+// single storeIncrMulti round trip (limits.go) and recordLimitEvent's
+// event-ring append (events.go) are both new code no compiled test here
+// can vouch for. eventsProbeUserAPIKey's own dedicated
+// requestsPerMinute:1 limit (run()'s "users" override) makes the second
+// call 429 deterministically, regardless of what every other probe
+// already did to testDataUserAPIKey's own counters.
+func exerciseRateLimitEventAndRejections(handler http.Handler) error {
+	body := `{"model":"` + testDataWantModel + `","messages":[{"role":"user","content":"hi"}]}`
+
+	req1 := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	req1.Header.Set("Authorization", "Bearer "+eventsProbeUserAPIKey)
+	req1.Header.Set("Content-Type", "application/json")
+	rec1 := httptest.NewRecorder()
+	handler.ServeHTTP(rec1, req1)
+	if rec1.Code != http.StatusOK {
+		return fmt.Errorf("POST /v1/chat/completions (rate-limit-event harness, 1st call): status = %d, want 200, body=%s", rec1.Code, rec1.Body.String())
+	}
+
+	req2 := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	req2.Header.Set("Authorization", "Bearer "+eventsProbeUserAPIKey)
+	req2.Header.Set("Content-Type", "application/json")
+	rec2 := httptest.NewRecorder()
+	handler.ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusTooManyRequests {
+		return fmt.Errorf("POST /v1/chat/completions (rate-limit-event harness, 2nd call): status = %d, want 429 (over requestsPerMinute:1), body=%s", rec2.Code, rec2.Body.String())
+	}
+
+	eventsReq := httptest.NewRequest(http.MethodGet, "/admin/api/events?limit=10", nil)
+	eventsReq.Header.Set("Authorization", "Bearer "+attemptAccountingAdminAPIKey)
+	eventsRec := httptest.NewRecorder()
+	handler.ServeHTTP(eventsRec, eventsReq)
+	if eventsRec.Code != http.StatusOK {
+		return fmt.Errorf("GET /admin/api/events?limit=10: status = %d, want 200, body=%s", eventsRec.Code, eventsRec.Body.String())
+	}
+	var eventsBody map[string]any
+	if err := json.Unmarshal(eventsRec.Body.Bytes(), &eventsBody); err != nil {
+		return fmt.Errorf("decode GET /admin/api/events body: %w", err)
+	}
+	events, _ := eventsBody["events"].([]any)
+	if len(events) == 0 {
+		return fmt.Errorf("GET /admin/api/events: want at least one event, body=%s", eventsRec.Body.String())
+	}
+	first, ok := events[0].(map[string]any)
+	if !ok {
+		return fmt.Errorf("GET /admin/api/events: events[0] is not an object: %v", events[0])
+	}
+	if kind, _ := first["kind"].(string); kind != "rate_limit" {
+		return fmt.Errorf(`GET /admin/api/events: events[0] (newest first).kind = %q, want "rate_limit"`, kind)
+	}
+	if route, _ := first["route"].(string); route != "chat/completions" {
+		return fmt.Errorf(`GET /admin/api/events: events[0].route = %q, want "chat/completions"`, route)
+	}
+
+	usageReq := httptest.NewRequest(http.MethodGet, "/admin/api/usage", nil)
+	usageReq.Header.Set("Authorization", "Bearer "+attemptAccountingAdminAPIKey)
+	usageRec := httptest.NewRecorder()
+	handler.ServeHTTP(usageRec, usageReq)
+	if usageRec.Code != http.StatusOK {
+		return fmt.Errorf("GET /admin/api/usage: status = %d, want 200, body=%s", usageRec.Code, usageRec.Body.String())
+	}
+	var usageBody map[string]any
+	if err := json.Unmarshal(usageRec.Body.Bytes(), &usageBody); err != nil {
+		return fmt.Errorf("decode GET /admin/api/usage body: %w", err)
+	}
+	total, ok := usageBody["total"].(map[string]any)
+	if !ok {
+		return fmt.Errorf("GET /admin/api/usage: no total object: %s", usageRec.Body.String())
+	}
+	if rejPerDay, _ := total["rejectionsPerDay"].(float64); rejPerDay < 1 {
+		return fmt.Errorf("GET /admin/api/usage: total.rejectionsPerDay = %v, want >= 1 after a real 429 (F4)", total["rejectionsPerDay"])
+	}
+
+	fmt.Println("yaegi-check: a real 429 recorded a rate_limit event (GET /admin/api/events) and incremented total.rejectionsPerDay (GET /admin/api/usage) under the interpreter")
+	return nil
+}
+
+// exerciseUpstreamAndTimeoutEvents proves recordUpstreamEvent's own
+// classification (events.go, F3 hook 2) runs correctly under the REAL
+// interpreter. Added per a backend verifier's finding (coordinator
+// request, 2026-09-23): Yaegi v0.16.1 was found to leave kind/status
+// empty for a multi-value assignment whose right-hand side contains a
+// method call — exactly recordUpstreamEvent's own
+// `kind, status, message = eventKindTimeout, http.StatusGatewayTimeout,
+// err.Error()` shape — a construct class this codebase has repeatedly
+// seen diverge under the interpreter (this package's own doc comment).
+//
+// eventsUpstreamErrorProviderName is a single, no-failover-candidate
+// provider that always 500s, so the client-facing response IS the
+// classified *providerHTTPError and the newest event must be kind
+// "upstream" with that same 500 status. timeoutProviderName
+// (exerciseRequestTimeout's own fixture, reused here rather than adding
+// a third upstream — cheap) then makes the newest event a "timeout" one:
+// its client-facing response is 502 (exerciseRequestTimeout's own
+// assertion), but the EVENT's own Status field is independently set to
+// http.StatusGatewayTimeout (504) by recordUpstreamEvent — the two are
+// deliberately different fields of different origin, both asserted here.
+func exerciseUpstreamAndTimeoutEvents(handler http.Handler) error {
+	upstreamReq := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(
+		`{"model":"`+eventsUpstreamErrorProviderModel+`","messages":[{"role":"user","content":"hi"}]}`,
+	))
+	upstreamReq.Header.Set("Authorization", "Bearer "+testDataUserAPIKey)
+	upstreamReq.Header.Set("Content-Type", "application/json")
+	upstreamRec := httptest.NewRecorder()
+	handler.ServeHTTP(upstreamRec, upstreamReq)
+	if upstreamRec.Code != http.StatusInternalServerError {
+		return fmt.Errorf("POST /v1/chat/completions (upstream-event harness, provider %q): status = %d, want 500 (no failover candidate configured), body=%s", eventsUpstreamErrorProviderName, upstreamRec.Code, upstreamRec.Body.String())
+	}
+	kind, status, err := latestEventKindAndStatus(handler)
+	if err != nil {
+		return err
+	}
+	if kind != "upstream" {
+		return fmt.Errorf(`GET /admin/api/events: newest event kind = %q, want "upstream" after a real 500`, kind)
+	}
+	if status != http.StatusInternalServerError {
+		return fmt.Errorf("GET /admin/api/events: newest (upstream) event status = %d, want 500", status)
+	}
+
+	timeoutReq := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(
+		`{"model":"`+timeoutProviderName+`/`+timeoutProviderModel+`","messages":[{"role":"user","content":"hi"}]}`,
+	))
+	timeoutReq.Header.Set("Authorization", "Bearer "+testDataUserAPIKey)
+	timeoutReq.Header.Set("Content-Type", "application/json")
+	timeoutRec := httptest.NewRecorder()
+	handler.ServeHTTP(timeoutRec, timeoutReq)
+	if timeoutRec.Code != http.StatusBadGateway {
+		return fmt.Errorf("POST /v1/chat/completions (timeout-event harness, provider %q): status = %d, want 502 (upstream connection error, provider-attributed — exerciseRequestTimeout's own contract), body=%s", timeoutProviderName, timeoutRec.Code, timeoutRec.Body.String())
+	}
+	kind, status, err = latestEventKindAndStatus(handler)
+	if err != nil {
+		return err
+	}
+	if kind != "timeout" {
+		return fmt.Errorf(`GET /admin/api/events: newest event kind = %q, want "timeout" after a real request-timeout abort`, kind)
+	}
+	if status != http.StatusGatewayTimeout {
+		return fmt.Errorf("GET /admin/api/events: newest (timeout) event status = %d, want 504 (recordUpstreamEvent's own fixed value, distinct from the 502 the client saw)", status)
+	}
+
+	fmt.Println("yaegi-check: recordUpstreamEvent classified a real 500 as kind \"upstream\"/500 and a real request-timeout abort as kind \"timeout\"/504 under the interpreter")
+	return nil
+}
+
+// latestEventKindAndStatus reads GET /admin/api/events?limit=1 as admin
+// and returns the single newest event's kind/status — the shared read
+// exerciseUpstreamAndTimeoutEvents' two assertions both drive, limit=1
+// so each call cares only about the entry its own immediately preceding
+// request produced, never an earlier probe's.
+func latestEventKindAndStatus(handler http.Handler) (kind string, status int, err error) {
+	req := httptest.NewRequest(http.MethodGet, "/admin/api/events?limit=1", nil)
+	req.Header.Set("Authorization", "Bearer "+attemptAccountingAdminAPIKey)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		return "", 0, fmt.Errorf("GET /admin/api/events?limit=1: status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	var body map[string]any
+	if jsonErr := json.Unmarshal(rec.Body.Bytes(), &body); jsonErr != nil {
+		return "", 0, fmt.Errorf("decode GET /admin/api/events body: %w", jsonErr)
+	}
+	events, _ := body["events"].([]any)
+	if len(events) == 0 {
+		return "", 0, fmt.Errorf("GET /admin/api/events?limit=1: want at least one event, body=%s", rec.Body.String())
+	}
+	first, ok := events[0].(map[string]any)
+	if !ok {
+		return "", 0, fmt.Errorf("GET /admin/api/events?limit=1: events[0] is not an object: %v", events[0])
+	}
+	k, _ := first["kind"].(string)
+	s, _ := first["status"].(float64)
+	return k, int(s), nil
 }

@@ -564,6 +564,112 @@ func TestCrossReplicaLimits(t *testing.T) {
 	}
 }
 
+// TestCrossReplicaEventsAndOverview covers plan section 5's own
+// "two-replica" integration bullet (v0.3 dashboard task, F3/F4/F9): a
+// rate-limit rejection recorded on replica 1 must be readable through
+// replica 2's own GET /admin/api/events (source "redis" — proving the
+// shared Redis-backed mirror, not merely replica 1's own local ring,
+// answers replica 2's read), attributed to replica 1's own replica id;
+// each replica's own GET /admin/api/overview reports a DIFFERENT replica
+// id (Q9: os.Hostname() -> $HOSTNAME -> "unknown" — two distinct
+// containers); and the fleet-wide total.rejectionsPerDay counter (F4, Q6:
+// "attribute rejections to total/all too") reads identically through
+// either replica, since both read the SAME shared Redis counter, not a
+// per-process one.
+func TestCrossReplicaEventsAndOverview(t *testing.T) {
+	flushRedis(t)
+
+	overview1Resp, overview1Body := doJSON(t, http.MethodGet, traefik1URL+"/admin/api/overview", adminKey, nil)
+	if overview1Resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET %s/admin/api/overview: status = %d, body=%#v", traefik1URL, overview1Resp.StatusCode, overview1Body)
+	}
+	replica1, _ := overview1Body["replica"].(string)
+	if replica1 == "" {
+		t.Fatalf("GET %s/admin/api/overview: replica = %q, want non-empty", traefik1URL, replica1)
+	}
+
+	overview2Resp, overview2Body := doJSON(t, http.MethodGet, traefik2URL+"/admin/api/overview", adminKey, nil)
+	if overview2Resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET %s/admin/api/overview: status = %d, body=%#v", traefik2URL, overview2Resp.StatusCode, overview2Body)
+	}
+	replica2, _ := overview2Body["replica"].(string)
+	if replica2 == "" {
+		t.Fatalf("GET %s/admin/api/overview: replica = %q, want non-empty", traefik2URL, replica2)
+	}
+	if replica1 == replica2 {
+		t.Fatalf("GET /admin/api/overview: replica1 = %q, replica2 = %q, want two distinct replica ids (two separate containers)", replica1, replica2)
+	}
+
+	// Exhaust bob's shared requestsPerMinute:3 bucket, all four requests
+	// against replica 1 ONLY (unlike TestCrossReplicaLimits, above, which
+	// deliberately alternates), so the resulting rate_limit event is
+	// unambiguously attributed to replica1's own id.
+	reqBody := map[string]any{
+		"model":    "openai/gpt-mock",
+		"messages": []map[string]any{{"role": "user", "content": "hi"}},
+	}
+	var saw429 bool
+	for i := 0; i < 4; i++ {
+		resp, body := doJSON(t, http.MethodPost, traefik1URL+"/v1/chat/completions", bobKey, reqBody)
+		switch resp.StatusCode {
+		case http.StatusOK:
+		case http.StatusTooManyRequests:
+			saw429 = true
+		default:
+			t.Fatalf("unexpected status %d for bob's request %d against replica 1, body=%#v", resp.StatusCode, i, body)
+		}
+	}
+	if !saw429 {
+		t.Fatal("want at least one 429 among 4 requests against bob's requestsPerMinute:3 bucket on replica 1")
+	}
+
+	// Read GET /admin/api/events THROUGH REPLICA 2 — proving the shared
+	// Redis mirror, not just replica 1's own local ring, carries the
+	// event.
+	eventsResp, eventsBody := doJSON(t, http.MethodGet, traefik2URL+"/admin/api/events?limit=10", adminKey, nil)
+	if eventsResp.StatusCode != http.StatusOK {
+		t.Fatalf("GET %s/admin/api/events: status = %d, body=%#v", traefik2URL, eventsResp.StatusCode, eventsBody)
+	}
+	if source, _ := eventsBody["source"].(string); source != "redis" {
+		t.Fatalf(`GET %s/admin/api/events: source = %q, want "redis" (replica 2 has no local record of an event replica 1 recorded)`, traefik2URL, source)
+	}
+	events, _ := eventsBody["events"].([]any)
+	if len(events) == 0 {
+		t.Fatalf("GET %s/admin/api/events: want at least one event, body=%#v", traefik2URL, eventsBody)
+	}
+	first, ok := events[0].(map[string]any)
+	if !ok {
+		t.Fatalf("GET %s/admin/api/events: events[0] is not an object: %v", traefik2URL, events[0])
+	}
+	if kind, _ := first["kind"].(string); kind != "rate_limit" {
+		t.Fatalf(`GET %s/admin/api/events: events[0] (newest first).kind = %q, want "rate_limit"`, traefik2URL, kind)
+	}
+	if eventReplica, _ := first["replica"].(string); eventReplica != replica1 {
+		t.Fatalf("GET %s/admin/api/events: events[0].replica = %q, want %q (replica 1, where the rejection actually happened)", traefik2URL, eventReplica, replica1)
+	}
+
+	// total.rejectionsPerDay (F4) must read identically through either
+	// replica.
+	usage1Resp, usage1Body := doJSON(t, http.MethodGet, traefik1URL+"/admin/api/usage", adminKey, nil)
+	if usage1Resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET %s/admin/api/usage: status = %d, body=%#v", traefik1URL, usage1Resp.StatusCode, usage1Body)
+	}
+	usage2Resp, usage2Body := doJSON(t, http.MethodGet, traefik2URL+"/admin/api/usage", adminKey, nil)
+	if usage2Resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET %s/admin/api/usage: status = %d, body=%#v", traefik2URL, usage2Resp.StatusCode, usage2Body)
+	}
+	total1, _ := usage1Body["total"].(map[string]any)
+	total2, _ := usage2Body["total"].(map[string]any)
+	rej1, _ := total1["rejectionsPerDay"].(float64)
+	rej2, _ := total2["rejectionsPerDay"].(float64)
+	if rej1 < 1 {
+		t.Fatalf("GET %s/admin/api/usage: total.rejectionsPerDay = %v, want >= 1 after a real 429", traefik1URL, total1["rejectionsPerDay"])
+	}
+	if rej1 != rej2 {
+		t.Fatalf("total.rejectionsPerDay differs across replicas: replica1 = %v, replica2 = %v, want identical (same shared Redis counter)", rej1, rej2)
+	}
+}
+
 // TestUsersFileHotReload covers integration test 5: appending a new user
 // to the file-sourced users.json (bind-mounted read-only into both
 // Traefik containers, edited here on the host) makes their key valid
