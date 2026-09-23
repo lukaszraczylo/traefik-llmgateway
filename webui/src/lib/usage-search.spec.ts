@@ -18,6 +18,7 @@ function entry(id: string, groupName?: string, groups?: string[]): AdminUsageEnt
     tokensOutPerMonth: 0,
     costPerDayMicroUsd: 0,
     costPerMonthMicroUsd: 0,
+    rejectionsPerDay: 0,
   }
 }
 

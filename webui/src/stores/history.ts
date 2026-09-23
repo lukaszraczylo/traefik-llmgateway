@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
 
 import { AdminApiError, adminFetch } from '@/lib/api'
+import { createVisibilityPoller, type VisibilityPoller } from '@/lib/polling'
 import { useAuthStore } from '@/stores/auth'
 import type {
   AdminUsageModelEntry,
@@ -48,8 +49,13 @@ export const MODEL_METRIC_LABEL: Record<ModelMetric, string> = {
 /**
  * How many ranked models the Models tab requests. Matches the server's own
  * default (admin.go: usageModelsDefaultLimit) and stays well under its max.
+ * Exported (P3 review fix) so ChartsView.vue can show a "Top N models"
+ * note whenever the fetched ranking is exactly this long — the reader must
+ * be told the list is a truncated top-N, not the complete set, the same
+ * signal the on-screen search/filter affordances elsewhere in this panel
+ * already give for a narrowed-but-possibly-incomplete list.
  */
-const MODEL_RANKING_LIMIT = 20
+export const MODEL_RANKING_LIMIT = 20
 
 /**
  * How many models the SCOPE PICKER offers. Higher than the ranking's own
@@ -77,29 +83,19 @@ export const WINDOW_SPAN: Record<HistoryWindow, number> = {
   month: 12,
 }
 
-/** WINDOW_LABEL is the switcher's own display text for each window, for the three TIME-SERIES tabs (requests/tokens/cost) — a real span of buckets, matching WINDOW_SPAN above. */
+/**
+ * WINDOW_LABEL is the window-switcher's own display text — a real span of
+ * buckets, matching WINDOW_SPAN above, for EVERY tab including Models: the
+ * ranking endpoint now sums the same WINDOW_SPAN buckets the time-series
+ * tabs chart (F2 review fix), rather than reading modelTotals' old
+ * single-current-bucket behaviour, so "24h"/"30d"/"12mo" is accurate for
+ * it too and this is the one label every tab shares — no separate
+ * MODEL_WINDOW_LABEL needed any more.
+ */
 export const WINDOW_LABEL: Record<HistoryWindow, string> = {
   hour: '24h',
   day: '30d',
   month: '12mo',
-}
-
-/**
- * MODEL_WINDOW_LABEL is the Models tab's OWN window-switcher text — that
- * tab shares the same three-way Tabs control as the time-series tabs
- * (ChartsView.vue), but reads a fundamentally different query: modelTotals
- * (limits.go) returns ONE counter at window's CURRENT bucket, never a span
- * of WINDOW_SPAN buckets. Labeling that control "24h" when it actually
- * means "since the top of the current UTC hour" understates how little
- * data is behind it — at 14:05 UTC, "24h" would visually promise a full
- * day while the ranking covers five minutes. "(UTC)" is explicit rather
- * than implied, matching formatBucketLabel's own hour-bucket fix
- * (lib/format.ts) — bucketFor (limits.go) always buckets in UTC.
- */
-export const MODEL_WINDOW_LABEL: Record<HistoryWindow, string> = {
-  hour: 'This hour (UTC)',
-  day: 'Today (UTC)',
-  month: 'This month (UTC)',
 }
 
 /**
@@ -143,11 +139,29 @@ export const useHistoryStore = defineStore('history', {
     modelRanking: [] as AdminUsageModelEntry[],
     /** Models with non-zero traffic, for the scope picker's model entries. */
     modelOptions: [] as AdminUsageModelEntry[],
+    /**
+     * modelFilter narrows the Models tab's ranking to ids starting with
+     * this prefix (F6, dashboard-plan.md). P3 review fix: while the
+     * Models tab is active, this is now also a SERVER query param —
+     * setModelFilter sends it to /admin/api/usage/models as `prefix`
+     * (fetchModelRanking's own doc comment) and refetches, since
+     * filtering must happen before the server applies its top-N limit.
+     * lib/model-filter.ts's filterModelsByPrefix still re-slices the
+     * result client-side too (ChartsView.vue), a harmless no-op pass once
+     * the server has already narrowed the set. Set by ProvidersView.vue's
+     * provider-header link (nav.goToModels(`${p.name}/`), stores/nav.ts —
+     * WP-B1) so "view this provider's models" lands on a pre-filtered
+     * ranking instead of the reader hunting for it themselves, and it
+     * round-trips through the `#charts?tab=models&filter=` hash param
+     * (lib/hash-state.ts, composables/useHashState.ts) so a reload or a
+     * shared link restores it too. Empty string means no filter.
+     */
+    modelFilter: '',
     loading: false,
     /** True once the current selection's first fetch committed; cleared by the setters. Drives the "Loading…" line so background refreshes don't flash it over rendered data. */
     loaded: false,
     error: '',
-    timer: undefined as ReturnType<typeof setInterval> | undefined,
+    poller: undefined as VisibilityPoller | undefined,
     /**
      * seriesReqId guards fetchSeries and fetchModelRanking against
      * out-of-order responses (review finding: "latest-request-wins"). The
@@ -180,22 +194,124 @@ export const useHistoryStore = defineStore('history', {
     setWindow(window: HistoryWindow): void {
       if (window === this.window) return
       this.window = window
-      // Window changes both the time-series bucket resolution AND the
-      // Models ranking's single current bucket — clear both.
+      // Window changes the time-series bucket resolution, the Models
+      // ranking's own span, AND the picker's model list (Q1,
+      // dashboard-plan.md DECISIONS: fetchModelOptions runs only on a
+      // window change or initial load, never on the 30s auto-refresh tick)
+      // — clear/refetch all three.
       this.seriesByMetric = {}
       this.modelRanking = []
       this.error = ''
       this.loaded = false
       void this.refresh()
+      void this.fetchModelOptions()
     },
     setTab(tab: ChartTab): void {
       if (tab === this.tab) return
       this.tab = tab
       this.seriesByMetric = {}
       this.modelRanking = []
+      // A stale provider-prefix filter from an earlier nav.goToModels visit
+      // must not silently carry into a plain "Models" tab click — F6's
+      // nav.goToModels always re-applies its own setModelFilter call right
+      // after this one, so clearing here unconditionally never fights it.
+      this.modelFilter = ''
       this.error = ''
       this.loaded = false
       void this.refresh()
+    },
+    /**
+     * setModelFilter narrows the Models tab's ranking to ids starting with
+     * `prefix`.
+     *
+     * P3 review fix: this used to be a PURE client-side re-slice of
+     * already-fetched data, never a refetch (modelFilter's own state doc
+     * comment above still describes the re-slice half, lib/model-filter.ts's
+     * filterModelsByPrefix). Now that fetchModelRanking also sends `prefix`
+     * to the SERVER (see that action's own doc comment), the already-fetched
+     * ranking can be stale relative to a NEW prefix — it may have been
+     * fetched under the old prefix (or no prefix at all), so simply
+     * re-slicing it client-side no longer reflects what the server would
+     * return for the new one. Refetching only when the Models tab is
+     * actually active (the only tab that reads modelFilter at all — see
+     * filterModelsByPrefix's own call site, ChartsView.vue) keeps this a
+     * no-op fetch-wise everywhere else, and the early return on an
+     * unchanged value keeps repeated identical calls (or nav.goToModels
+     * re-applying the same prefix) from firing a redundant fetch.
+     */
+    setModelFilter(prefix: string): void {
+      if (prefix === this.modelFilter) return
+      this.modelFilter = prefix
+      if (this.tab !== 'models') return
+      this.modelRanking = []
+      this.error = ''
+      this.loaded = false
+      void this.refresh()
+    },
+    /**
+     * setSelection (P12 review fix) applies scope/window/tab/modelMetric/
+     * modelFilter as ONE atomic change, instead of the caller invoking
+     * several of the single-field setters above back to back. Each of
+     * those setters independently clears state and calls refresh() (and,
+     * for window, fetchModelOptions() too) — restoring a Charts hash with
+     * several params set at once (composables/useHashState.ts's
+     * applyFromHash) or nav.ts's goToCharts/goToModels used to call three
+     * or four of them in a row, firing that many fetches, every one but
+     * the LAST immediately discarded by seriesReqId's own
+     * latest-request-wins guard (stores/history.ts state doc comment) —
+     * wasted round trips against a Redis-backed endpoint for a result that
+     * was never going to render. setSelection instead applies every
+     * provided field directly, clears the derived state ONCE, and fires
+     * exactly one refresh() (plus one fetchModelOptions() only when
+     * `window` is part of this call) once every field has been applied.
+     *
+     * Field application order matters for one case: `tab` resets
+     * `modelFilter` to '' first (mirroring setTab's own "a stale
+     * provider-prefix filter must not silently carry into a plain tab
+     * switch" convention), and only THEN does this function's own
+     * `modelFilter` field (if provided in the SAME call) apply the real
+     * value — so `setSelection({ tab: 'models', modelFilter: prefix })`
+     * (nav.ts's goToModels) lands on the intended prefix, not '' followed
+     * by a second, separate fetch to correct it.
+     */
+    setSelection(next: {
+      scope?: string
+      window?: HistoryWindow
+      tab?: ChartTab
+      modelMetric?: ModelMetric
+      modelFilter?: string
+    }): void {
+      let changed = false
+      let windowChanged = false
+      if (next.window !== undefined && next.window !== this.window) {
+        this.window = next.window
+        changed = true
+        windowChanged = true
+      }
+      if (next.tab !== undefined && next.tab !== this.tab) {
+        this.tab = next.tab
+        this.modelFilter = ''
+        changed = true
+      }
+      if (next.scope !== undefined && next.scope !== this.scope) {
+        this.scope = next.scope
+        changed = true
+      }
+      if (next.modelMetric !== undefined && next.modelMetric !== this.modelMetric) {
+        this.modelMetric = next.modelMetric
+        changed = true
+      }
+      if (next.modelFilter !== undefined && next.modelFilter !== this.modelFilter) {
+        this.modelFilter = next.modelFilter
+        changed = true
+      }
+      if (!changed) return
+      this.seriesByMetric = {}
+      this.modelRanking = []
+      this.error = ''
+      this.loaded = false
+      void this.refresh()
+      if (windowChanged) void this.fetchModelOptions()
     },
     setModelMetric(metric: ModelMetric): void {
       if (metric === this.modelMetric) return
@@ -207,12 +323,17 @@ export const useHistoryStore = defineStore('history', {
     },
     /**
      * refresh fetches whatever the CURRENT selection needs: the ranking on
-     * the Models tab, a time series otherwise. The scope picker's model
-     * list is refreshed alongside either, so a model that has just started
-     * receiving traffic becomes selectable without a page reload.
+     * the Models tab, a time series otherwise. It deliberately does NOT
+     * also refresh the scope picker's model list any more (Q1,
+     * dashboard-plan.md DECISIONS — folded from a review finding on read
+     * amplification): fetchModelOptions is a real extra store read
+     * (modelSpanTotals, admin.go), and this action is what the 30s
+     * auto-refresh timer calls every tick — repeating that read every
+     * cycle bought the picker nothing a reader would ever notice. See
+     * fetchModelOptions' own doc comment for its two actual call sites.
      */
     async refresh(): Promise<void> {
-      await Promise.all([this.tab === 'models' ? this.fetchModelRanking() : this.fetchSeries(), this.fetchModelOptions()])
+      await (this.tab === 'models' ? this.fetchModelRanking() : this.fetchSeries())
     },
     async fetchSeries(): Promise<void> {
       const auth = useAuthStore()
@@ -259,8 +380,19 @@ export const useHistoryStore = defineStore('history', {
       const requestId = ++this.seriesReqId
       this.loading = true
       try {
+        const span = WINDOW_SPAN[this.window]
+        // P3 review fix: when a provider-prefix filter is active
+        // (modelFilter, set by ProvidersView.vue's provider-header link via
+        // nav.goToModels), send it to the server so filtering happens
+        // BEFORE the limit is applied — the client-side filterModelsByPrefix
+        // pass in ChartsView.vue stays too, as a harmless second pass (it
+        // is a no-op once the server has already narrowed the set), but
+        // without this the server's own fleet-wide top-N could omit a
+        // provider's models entirely, or return only a partial view of them
+        // (the CONFIRMED problem this fixes).
+        const prefixParam = this.modelFilter ? `&prefix=${encodeURIComponent(this.modelFilter)}` : ''
         const res = await adminFetch<AdminUsageModelsResponse>(
-          `/admin/api/usage/models?metric=${this.modelMetric}&window=${this.window}&limit=${MODEL_RANKING_LIMIT}`,
+          `/admin/api/usage/models?metric=${this.modelMetric}&window=${this.window}&limit=${MODEL_RANKING_LIMIT}&span=${span}${prefixParam}`,
         )
         if (requestId !== this.seriesReqId) return
         this.modelRanking = res.models
@@ -278,20 +410,27 @@ export const useHistoryStore = defineStore('history', {
     },
     /**
      * fetchModelOptions loads the picker's model list: models with at least
-     * one REQUEST in the current window. Requests, not the ranking's own
-     * metric, deliberately — a model can serve traffic while reporting no
-     * tokens and costing nothing, and such a model must still be
-     * selectable. A failure here is swallowed rather than surfaced: it
+     * one REQUEST across the current window's span. Requests, not the
+     * ranking's own metric, deliberately — a model can serve traffic while
+     * reporting no tokens and costing nothing, and such a model must still
+     * be selectable. A failure here is swallowed rather than surfaced: it
      * degrades the picker, and must not replace a rendered chart's own
-     * error (or clear it) on a background refresh.
+     * error (or clear it).
+     *
+     * Called only on initial load and on a window change (Q1,
+     * dashboard-plan.md DECISIONS) — never from refresh() itself, so the
+     * 30s auto-refresh tick pays for the ranking/series alone. See
+     * setWindow above and ChartsView.vue's onMounted for the two call
+     * sites.
      */
     async fetchModelOptions(): Promise<void> {
       const auth = useAuthStore()
       if (!auth.isAuthenticated) return
       const requestId = ++this.optionsReqId
       try {
+        const span = WINDOW_SPAN[this.window]
         const res = await adminFetch<AdminUsageModelsResponse>(
-          `/admin/api/usage/models?metric=req&window=${this.window}&limit=${MODEL_OPTIONS_LIMIT}`,
+          `/admin/api/usage/models?metric=req&window=${this.window}&limit=${MODEL_OPTIONS_LIMIT}&span=${span}`,
         )
         // Stale: a later window change already fired its own picker-list
         // fetch — never let an older window's model list overwrite it.
@@ -301,19 +440,31 @@ export const useHistoryStore = defineStore('history', {
         // Intentionally ignored — see the doc comment above.
       }
     },
+    /**
+     * startAutoRefresh drives refresh() through the shared
+     * createVisibilityPoller (lib/polling.ts, F5) instead of a bare
+     * setInterval: it ticks once immediately (the selection's initial
+     * fetch — see ChartsView.vue's onMounted, which no longer calls
+     * refresh() itself), then every REFRESH_MS while the tab is visible,
+     * pausing while it is hidden and catching up the moment it is looked
+     * at again. The in-flight skip is unchanged from before this move: a
+     * tick bumps seriesReqId on every real fetch, so an unconditional tick
+     * would supersede (and discard) any request slower than REFRESH_MS,
+     * forever.
+     */
     startAutoRefresh(): void {
-      if (this.timer !== undefined) return
-      // Skip a tick while the previous fetch is still in flight: each fetch
-      // bumps seriesReqId, so an unconditional tick would supersede (and
-      // discard) any request slower than REFRESH_MS, forever.
-      this.timer = setInterval(() => {
-        if (!this.loading) void this.refresh()
-      }, REFRESH_MS)
+      if (this.poller) return
+      this.poller = createVisibilityPoller({
+        intervalMs: REFRESH_MS,
+        tick: () => {
+          if (!this.loading) void this.refresh()
+        },
+      })
+      this.poller.start()
     },
     stopAutoRefresh(): void {
-      if (this.timer === undefined) return
-      clearInterval(this.timer)
-      this.timer = undefined
+      this.poller?.stop()
+      this.poller = undefined
     },
   },
 })

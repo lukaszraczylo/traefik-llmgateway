@@ -10,6 +10,7 @@ import { computed, h, reactive, watch } from 'vue'
 import DataTable from '@/components/DataTable.vue'
 import ModelChip from '@/components/ModelChip.vue'
 import ProviderRateBadge from '@/components/ProviderRateBadge.vue'
+import ScopeLink from '@/components/ScopeLink.vue'
 import SearchInput from '@/components/SearchInput.vue'
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/components/ui/accordion'
 import { Badge } from '@/components/ui/badge'
@@ -25,6 +26,7 @@ import { formatAgo, formatContextWindow, formatLatencyMs, formatUntil, refreshDe
 import { isModelDegraded } from '@/lib/provider-rate'
 import { type ExpandState, clearExpandOverrides, computeExpandedItems, toggleItemExpand } from '@/lib/search-expand'
 import { useDashboardStore } from '@/stores/dashboard'
+import { useNavStore } from '@/stores/nav'
 import type { AdminAliasView, AdminLatencyView, AdminModelMetaView, AdminModelRateView, AdminProvenanceView, AdminProviderView } from '@/types/api'
 
 // This component backs the "Providers" tab (App.vue) — a UI-label rename
@@ -34,6 +36,31 @@ import type { AdminAliasView, AdminLatencyView, AdminModelMetaView, AdminModelRa
 // API surface.
 const dashboard = useDashboardStore()
 const overview = computed(() => dashboard.overview)
+const nav = useNavStore()
+
+/**
+ * goToProviderModels navigates to the Charts Models ranking, pre-filtered
+ * to this provider's own models (F6, dashboard-plan.md: `nav.goToModels`).
+ *
+ * P2 review fix: this used to back a `<span role="link" tabindex="0">`
+ * nested INSIDE AccordionTrigger's own real `<button>` — invalid per the
+ * HTML button content model (no descendant may carry a `tabindex`
+ * attribute, not just no nested button/anchor) and effectively invisible
+ * to assistive technology (ARIA's `button` role declares "children
+ * presentational: true", so the nested span was never announced as its
+ * own link — see ScopeLink.vue's own doc comment for the identical
+ * finding there). The provider-name label is now a real `<button>`,
+ * rendered as a SIBLING of AccordionTrigger rather than nested inside it
+ * (this component's template) — a plain click handler is enough: a click
+ * on a sibling element never bubbles INTO the trigger's own listener
+ * (event bubbling only travels through actual ancestors of the click
+ * target), so the stopPropagation/Enter-only-keydown machinery this used
+ * to need is gone along with the span it protected — native `<button>`
+ * keyboard activation (Enter AND Space) is correct here for free.
+ */
+function goToProviderModels(providerName: string): void {
+  nav.goToModels(`${providerName}/`)
+}
 
 // --- provider expand/collapse (shadcn-vue Accordion) ---
 //
@@ -232,23 +259,33 @@ function latencyObservationCount(v: AdminLatencyView): string {
 }
 
 /**
- * PER_REPLICA_CAVEAT is appended to every latency badge's title (task
- * brief's correctness rule 1): this figure comes from the same
+ * perReplicaCaveat is appended to every latency/provenance badge's title
+ * (task brief's correctness rule 1): this figure comes from the same
  * in-process accumulator the rate-limit rejection counter reads, never
  * Redis, so it reflects only whichever of this deployment's several
  * Traefik replicas answered the current poll — never a fleet-wide
- * average, and a freshly restarted pod shows a short window.
+ * average, and a freshly restarted pod shows a short window. F4
+ * (dashboard-plan.md) names the CONCRETE replica (admin.go's g.replica,
+ * echoed as overview.replica) rather than the abstract warning alone — a
+ * reader can now tell not just THAT this figure is replica-scoped, but
+ * WHICH replica it came from. Falls back to the generic "this replica"
+ * phrasing for a version-skewed server build that has not shipped the
+ * field yet (undefined, never a fabricated id).
  */
-const PER_REPLICA_CAVEAT = 'Per-replica, in-process only — not a fleet-wide average across this deployment’s replicas.'
+function perReplicaCaveat(): string {
+  const replica = overview.value?.replica
+  const who = replica ? `replica ${replica}` : 'this replica'
+  return `Per-replica (${who}), in-process only — not a fleet-wide average across this deployment’s replicas.`
+}
 
 /** streamingLatencyTitle is the streaming ttfb badge's hover/title detail. */
 function streamingLatencyTitle(v: AdminLatencyView): string {
-  return `Average time to first byte, the load-sensitive reading for streaming traffic. ${latencyObservationCount(v)}. ${PER_REPLICA_CAVEAT}`
+  return `Average time to first byte, the load-sensitive reading for streaming traffic. ${latencyObservationCount(v)}. ${perReplicaCaveat()}`
 }
 
 /** nonStreamingLatencyTitle is the non-streaming avg-duration badge's hover/title detail — explicit that this is NOT a latency/ttfb reading (correctness rule 2). */
 function nonStreamingLatencyTitle(v: AdminLatencyView): string {
-  return `Average total response time, including generation — not a load-sensitive signal like streaming ttfb, since this provider buffers the whole completion before sending anything. ${latencyObservationCount(v)}. ${PER_REPLICA_CAVEAT}`
+  return `Average total response time, including generation — not a load-sensitive signal like streaming ttfb, since this provider buffers the whole completion before sending anything. ${latencyObservationCount(v)}. ${perReplicaCaveat()}`
 }
 
 // --- usage provenance (feat: expose token-accounting provenance) ---
@@ -276,13 +313,13 @@ function unbilledProvenance(p: AdminProviderView): AdminProvenanceView | undefin
 /** estimatedProvenanceTitle is the estimated-accounting badge's hover/title detail. */
 function estimatedProvenanceTitle(v: AdminProvenanceView): string {
   const plural = v.requests === 1 ? '' : 's'
-  return `${v.requests} non-streaming response${plural} carried no usage from the provider — prompt tokens were estimated from request body size instead (${v.tokens} tokens billed from the estimate), completion billed as zero. ${PER_REPLICA_CAVEAT}`
+  return `${v.requests} non-streaming response${plural} carried no usage from the provider — prompt tokens were estimated from request body size instead (${v.tokens} tokens billed from the estimate), completion billed as zero. ${perReplicaCaveat()}`
 }
 
 /** unbilledProvenanceTitle is the unbilled-accounting badge's hover/title detail — explicit about the budget-exposure implication (task brief's own framing). */
 function unbilledProvenanceTitle(v: AdminProvenanceView): string {
   const plural = v.requests === 1 ? '' : 's'
-  return `${v.requests} streaming response${plural} carried no usage from the provider — the request was counted but zero tokens were billed. If this keeps happening, this provider may be serving completions entirely free against every budget. ${PER_REPLICA_CAVEAT}`
+  return `${v.requests} streaming response${plural} carried no usage from the provider — the request was counted but zero tokens were billed. If this keeps happening, this provider may be serving completions entirely free against every budget. ${perReplicaCaveat()}`
 }
 
 // --- model aliases (sortable DataTable, operator directive) ---
@@ -331,6 +368,7 @@ const aliasEmptyMessage = computed(() =>
               :icon="overview?.redis.configured ? faCircleCheck : faCircleXmark"
               :class="overview?.redis.configured ? 'text-chart-requests' : 'text-muted-foreground'"
               class="size-3.5"
+              aria-hidden="true"
             />
             Redis
           </CardTitle>
@@ -338,7 +376,7 @@ const aliasEmptyMessage = computed(() =>
         <CardContent class="flex flex-col gap-1 text-sm">
           <p class="font-medium">{{ overview?.redis.configured ? 'Configured' : 'Not configured' }}</p>
           <p v-if="overview?.redis.lastErr" class="flex items-start gap-1.5 text-destructive">
-            <FontAwesomeIcon :icon="faTriangleExclamation" class="mt-0.5 size-3.5 shrink-0" />
+            <FontAwesomeIcon :icon="faTriangleExclamation" class="mt-0.5 size-3.5 shrink-0" aria-hidden="true" />
             <span>{{ overview.redis.lastErr }}{{ formatAgo(overview.redis.lastErrAt) }}</span>
           </p>
         </CardContent>
@@ -351,6 +389,7 @@ const aliasEmptyMessage = computed(() =>
               :icon="overview?.cache.enabled ? faCircleCheck : faCircleXmark"
               :class="overview?.cache.enabled ? 'text-chart-requests' : 'text-muted-foreground'"
               class="size-3.5"
+              aria-hidden="true"
             />
             Response cache
           </CardTitle>
@@ -368,6 +407,7 @@ const aliasEmptyMessage = computed(() =>
               :icon="overview?.retry.enabled ? faCircleCheck : faCircleXmark"
               :class="overview?.retry.enabled ? 'text-chart-requests' : 'text-muted-foreground'"
               class="size-3.5"
+              aria-hidden="true"
             />
             Retry
           </CardTitle>
@@ -398,11 +438,37 @@ const aliasEmptyMessage = computed(() =>
         >
           no providers match &quot;{{ modelQuery }}&quot;
         </p>
-        <Accordion v-else v-model="expandedProviderValues" type="multiple" class="rounded-md border px-3">
+        <template v-else>
+          <!-- F4 (dashboard-plan.md): latency/provenance badges below are per-replica, in-process figures — this caption names which replica this poll answered from, up front, instead of leaving it to each badge's own hover title. -->
+          <p class="mb-2 text-xs text-muted-foreground">{{ perReplicaCaveat() }}</p>
+          <Accordion v-model="expandedProviderValues" type="multiple" class="rounded-md border px-3">
           <AccordionItem v-for="p in filteredProviders" :key="p.name" :value="p.name">
-            <AccordionTrigger>
+            <!--
+              P2 review fix: the provider-name link moved OUTSIDE
+              AccordionTrigger — see goToProviderModels' own doc comment
+              above for why. `py-2.5` matches AccordionTrigger.vue's own
+              vertical padding so the two line up in this row.
+              `header-class="flex-1"` fills the AccordionHeader (<h3>) that
+              wraps the trigger button, since AccordionTrigger's own
+              `class` prop lands on the inner button, not the header — see
+              AccordionTrigger.vue's doc comment. Without it the header
+              shrinks to content width, so the chevron drifts left of the
+              row's right edge and the empty space to its right stops
+              being clickable. The sr-only span gives the toggle button an
+              accessible name that names the provider, since the visible
+              text beside it is just badges and counts.
+            -->
+            <div class="flex items-center gap-2">
+              <button
+                type="button"
+                class="shrink-0 cursor-pointer rounded-sm py-2.5 font-medium hover:text-primary hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+                :aria-label="`View ${p.name}'s models in Charts`"
+                :title="`View ${p.name}'s models in Charts`"
+                @click="goToProviderModels(p.name)"
+              >{{ p.name }}</button>
+              <AccordionTrigger header-class="flex-1">
+              <span class="sr-only">Provider {{ p.name }} details</span>
               <span class="flex flex-1 flex-wrap items-center gap-x-3 gap-y-1 pr-2 text-left">
-                <span class="font-medium">{{ p.name }}</span>
                 <Badge as="span" variant="secondary" class="font-normal">{{ p.type }}</Badge>
                 <span class="text-xs text-muted-foreground tabular-nums">{{ p.modelCount }} models</span>
                 <ProviderRateBadge
@@ -488,7 +554,8 @@ const aliasEmptyMessage = computed(() =>
                 />
                 <span class="text-xs text-muted-foreground">{{ refreshLabel(p.discoveryEnabled, p.lastRefresh) }}</span>
               </span>
-            </AccordionTrigger>
+              </AccordionTrigger>
+            </div>
             <AccordionContent>
               <dl class="mb-3 grid grid-cols-2 gap-x-6 gap-y-1.5 text-sm sm:grid-cols-3">
                 <div>
@@ -516,6 +583,9 @@ const aliasEmptyMessage = computed(() =>
                     :input-per-m-tok-usd="modelMetaFor(p, m).inputPerMTokUsd"
                     :output-per-m-tok-usd="modelMetaFor(p, m).outputPerMTokUsd"
                   />
+                  <!-- ScopeLink (F6): jumps to Charts, scoped to this exact model — renders here as a real <button> inside AccordionContent (not AccordionTrigger), same as the provider-name button above (P2 review fix moved both out of the trigger). -->
+
+                  <ScopeLink :label="routableModelId(p.name, m)" :scope="`model:${routableModelId(p.name, m)}`" />
                   <!--
                     Context chip, visible, muted (feature v0.23) — only
                     when known. Cost stays hover-only on ModelChip itself
@@ -550,6 +620,7 @@ const aliasEmptyMessage = computed(() =>
             </AccordionContent>
           </AccordionItem>
         </Accordion>
+        </template>
       </CardContent>
     </Card>
 

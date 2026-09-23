@@ -25,7 +25,7 @@ import type { AdminUsageModelsResponse, UsageHistoryResponse } from '@/types/api
 const mockedAdminFetch = vi.mocked(adminFetch)
 
 function modelsResponse(models: AdminUsageModelsResponse['models']): AdminUsageModelsResponse {
-  return { metric: 'cost', window: 'hour', models }
+  return { metric: 'cost', window: 'hour', span: 24, models }
 }
 function seriesResponse(): UsageHistoryResponse {
   return { scope: 'total', metric: 'req', window: 'hour', points: [{ bucket: '2026082012', value: 5 }] }
@@ -95,16 +95,20 @@ describe('useHistoryStore model ranking', () => {
     expect(rankingCall).toBeDefined()
   })
 
-  it('refreshes the picker list alongside a time series', async () => {
-    routeFetch({ models: () => modelsResponse([{ id: 'alpha/a-model-1', value: 3 }]) })
+  // F2 (dashboard-plan.md): the ranking now sums the same WINDOW_SPAN
+  // buckets the time-series tabs chart, not just window's current bucket —
+  // WINDOW_LABEL ("24h"/"30d"/"12mo") is honest for the Models tab too.
+  it('asks the ranking endpoint for the window span, not just the current bucket', async () => {
+    routeFetch({})
     const history = useHistoryStore()
+    history.tab = 'models'
 
     await history.refresh()
 
-    // A model that has just started receiving traffic becomes selectable
-    // without a reload, even while a non-Models tab is on screen.
-    expect(history.modelOptions).toEqual([{ id: 'alpha/a-model-1', value: 3 }])
-    expect(history.seriesByMetric.req).toHaveLength(1)
+    const rankingCall = mockedAdminFetch.mock.calls
+      .map((c) => String(c[0]))
+      .find((p) => p.startsWith('/admin/api/usage/models'))
+    expect(rankingCall).toContain('span=24') // WINDOW_SPAN.hour, the default window
   })
 
   it('asks the picker list for requests, so a free model is still selectable', async () => {
@@ -115,6 +119,33 @@ describe('useHistoryStore model ranking', () => {
 
     const optionsCall = mockedAdminFetch.mock.calls.map((c) => String(c[0])).find((p) => p.includes('/usage/models'))
     expect(optionsCall).toContain('metric=req')
+    expect(optionsCall).toContain('span=24') // WINDOW_SPAN.hour, the default window
+  })
+
+  // Q1 (dashboard-plan.md DECISIONS, read-amplification review finding):
+  // fetchModelOptions is a real extra store read and must NOT repeat on
+  // every refresh() call — refresh() is what both the 30s auto-refresh
+  // tick and every setScope/setTab/setModelMetric change call.
+  it('never fetches the picker list from a plain refresh() call (Q1: read amplification)', async () => {
+    routeFetch({ series: () => seriesResponse() })
+    const history = useHistoryStore()
+
+    await history.refresh()
+
+    expect(history.seriesByMetric.req).toHaveLength(1)
+    expect(history.modelOptions).toEqual([])
+    const optionsCall = mockedAdminFetch.mock.calls.map((c) => String(c[0])).some((p) => p.includes('/usage/models'))
+    expect(optionsCall).toBe(false)
+  })
+
+  it('fetches the picker list on a window change, unlike a scope/tab/modelMetric change', async () => {
+    routeFetch({ models: () => modelsResponse([{ id: 'alpha/a-model-1', value: 3 }]) })
+    const history = useHistoryStore()
+
+    history.setWindow('day')
+    await flush()
+
+    expect(history.modelOptions).toEqual([{ id: 'alpha/a-model-1', value: 3 }])
   })
 
   it('swallows a picker-list failure without touching the chart error', async () => {
@@ -135,18 +166,24 @@ describe('useHistoryStore model ranking', () => {
     expect(history.modelOptions).toEqual([])
   })
 
-  it('keeps a rendered chart intact when the picker list fails', async () => {
+  // setWindow fires refresh() (series/ranking) and fetchModelOptions
+  // (picker list) in parallel (Q1's two trigger points) — one failing must
+  // never touch the other's own state.
+  it('keeps the freshly-fetched chart intact when the picker list fails on the same window change', async () => {
     routeFetch({
+      series: () => seriesResponse(),
       models: () => {
         throw new Error('models endpoint down')
       },
     })
     const history = useHistoryStore()
 
-    await history.refresh()
+    history.setWindow('day')
+    await flush()
 
     expect(history.seriesByMetric.req).toHaveLength(1)
     expect(history.error).toBe('')
+    expect(history.modelOptions).toEqual([])
   })
 
   it('surfaces a failing ranking fetch, unlike the picker list', async () => {
@@ -160,6 +197,144 @@ describe('useHistoryStore model ranking', () => {
     await history.refresh()
 
     expect(history.error).toBe('ranking unavailable')
+  })
+})
+
+// F6 (dashboard-plan.md): modelFilter narrows the Models tab's ranking to a
+// provider/model prefix, set by ProvidersView.vue's provider-header link
+// (nav.goToModels) or a `#charts?tab=models&filter=...` hash param
+// (lib/hash-state.ts, composables/useHashState.ts). P3 review fix: while
+// the Models tab is active, setModelFilter ALSO sends the new prefix to
+// the server and refetches the ranking (fetchModelRanking's own doc
+// comment) — it is no longer a pure client-side re-slice. Setting it while
+// any OTHER tab is active stays fetch-free, since only the Models tab
+// reads modelFilter at all (ChartsView.vue).
+describe('useHistoryStore model filter (F6)', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    mockedAdminFetch.mockReset()
+    useAuthStore().submit('test-admin-key')
+  })
+
+  it('starts with no filter', () => {
+    expect(useHistoryStore().modelFilter).toBe('')
+  })
+
+  it('setModelFilter sets the prefix without fetching anything when not on the Models tab', async () => {
+    routeFetch({})
+    const history = useHistoryStore()
+    history.tab = 'requests' // explicit, not relying on the store's own default
+    const callsBefore = mockedAdminFetch.mock.calls.length
+
+    history.setModelFilter('openai/')
+    await flush()
+
+    expect(history.modelFilter).toBe('openai/')
+    expect(mockedAdminFetch.mock.calls.length).toBe(callsBefore)
+  })
+
+  it('setModelFilter refetches the ranking with the encoded prefix when the Models tab IS active', async () => {
+    routeFetch({})
+    const history = useHistoryStore()
+    history.tab = 'models'
+    const callsBefore = mockedAdminFetch.mock.calls.length
+
+    history.setModelFilter('openai/')
+    await flush()
+
+    expect(history.modelFilter).toBe('openai/')
+    expect(mockedAdminFetch.mock.calls.length).toBeGreaterThan(callsBefore)
+    const rankingCall = mockedAdminFetch.mock.calls.map((c) => String(c[0])).find((p) => p.startsWith('/admin/api/usage/models'))
+    expect(rankingCall).toContain(`prefix=${encodeURIComponent('openai/')}`)
+  })
+
+  it('setTab clears a previously-set modelFilter (a plain tab click must not carry a stale provider filter)', () => {
+    routeFetch({})
+    const history = useHistoryStore()
+    history.setModelFilter('openai/')
+
+    history.setTab('tokens')
+
+    expect(history.modelFilter).toBe('')
+  })
+
+  it('setTab(models) also clears modelFilter — nav.goToModels relies on re-applying setModelFilter AFTER this', () => {
+    routeFetch({})
+    const history = useHistoryStore()
+    history.tab = 'requests'
+    history.setModelFilter('openai/')
+
+    history.setTab('models')
+
+    expect(history.modelFilter).toBe('')
+  })
+
+  it('setTab is a no-op (including on modelFilter) when the tab does not actually change', () => {
+    routeFetch({})
+    const history = useHistoryStore()
+    history.tab = 'models'
+    history.setModelFilter('openai/')
+
+    history.setTab('models') // already on 'models' — the early return must skip the clear too
+
+    expect(history.modelFilter).toBe('openai/')
+  })
+
+  // P3 review fix: the ranking fetch now sends the active prefix to the
+  // server (filtering BEFORE the limit is applied), instead of only ever
+  // re-slicing an already-fetched, unprefixed top-N client-side.
+  it('sends &prefix=<encoded filter> on the ranking fetch when modelFilter is set', async () => {
+    routeFetch({})
+    const history = useHistoryStore()
+    history.tab = 'models'
+    history.modelFilter = 'openai/'
+
+    await history.fetchModelRanking()
+
+    const rankingCall = mockedAdminFetch.mock.calls.map((c) => String(c[0])).find((p) => p.startsWith('/admin/api/usage/models'))
+    expect(rankingCall).toContain(`prefix=${encodeURIComponent('openai/')}`)
+  })
+
+  it('omits the prefix param entirely when modelFilter is empty', async () => {
+    routeFetch({})
+    const history = useHistoryStore()
+    history.tab = 'models'
+
+    await history.fetchModelRanking()
+
+    const rankingCall = mockedAdminFetch.mock.calls.map((c) => String(c[0])).find((p) => p.startsWith('/admin/api/usage/models'))
+    expect(rankingCall).not.toContain('prefix=')
+  })
+
+  // P3 review fix: setModelFilter now refetches too, but ONLY while the
+  // Models tab is active — a stale (unprefixed, or differently-prefixed)
+  // already-fetched ranking must not linger once the filter changes, since
+  // the server-side prefix now genuinely changes what that fetch returns.
+  it('setModelFilter refetches the ranking when the Models tab is active and the prefix actually changes', async () => {
+    routeFetch({})
+    const history = useHistoryStore()
+    history.tab = 'models'
+    const callsBefore = mockedAdminFetch.mock.calls.length
+
+    history.setModelFilter('openai/')
+    await flush()
+
+    expect(mockedAdminFetch.mock.calls.length).toBeGreaterThan(callsBefore)
+    const rankingCall = mockedAdminFetch.mock.calls.map((c) => String(c[0])).find((p) => p.startsWith('/admin/api/usage/models'))
+    expect(rankingCall).toContain(`prefix=${encodeURIComponent('openai/')}`)
+  })
+
+  it('setModelFilter does NOT refetch when the value is unchanged (early return)', async () => {
+    routeFetch({})
+    const history = useHistoryStore()
+    history.tab = 'models'
+    history.setModelFilter('openai/')
+    await flush()
+    const callsBefore = mockedAdminFetch.mock.calls.length
+
+    history.setModelFilter('openai/') // same value again
+
+    expect(mockedAdminFetch.mock.calls.length).toBe(callsBefore)
   })
 })
 
@@ -265,6 +440,26 @@ describe('useHistoryStore: latest-request-wins', () => {
     expect(history.loaded).toBe(false)
   })
 
+  it('the 30s auto-refresh tick (startAutoRefresh) never re-fetches the picker list — only refresh() itself (Q1)', async () => {
+    vi.useFakeTimers()
+    try {
+      routeFetch({ series: () => seriesResponse() })
+      const history = useHistoryStore()
+
+      history.startAutoRefresh() // ticks once immediately, then every REFRESH_MS (lib/polling.ts)
+      await vi.advanceTimersByTimeAsync(0)
+      await vi.advanceTimersByTimeAsync(90_000) // three more ticks
+      await vi.advanceTimersByTimeAsync(0)
+
+      expect(history.modelOptions).toEqual([])
+      const optionsCall = mockedAdminFetch.mock.calls.map((c) => String(c[0])).some((p) => p.includes('/usage/models'))
+      expect(optionsCall).toBe(false)
+      history.stopAutoRefresh()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('auto-refresh tick skips while a fetch is still in flight, so a slow request is never superseded by the timer', async () => {
     vi.useFakeTimers()
     try {
@@ -286,5 +481,79 @@ describe('useHistoryStore: latest-request-wins', () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+})
+// P12 review fix: restoring a Charts hash with several params set at once
+// (composables/useHashState.ts's applyFromHash) or clicking through via
+// nav.ts's goToCharts/goToModels used to call several of the single-field
+// setters above back to back, each independently clearing state and
+// firing its OWN refresh() (and, for a window change, fetchModelOptions()
+// too) — every fetch but the last immediately superseded and discarded.
+// setSelection batches the whole change into ONE refresh() call.
+describe('useHistoryStore.setSelection (P12: batched, one fetch)', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    mockedAdminFetch.mockReset()
+    useAuthStore().submit('test-admin-key')
+  })
+
+  it('applying scope+window+tab+modelMetric together fires exactly one series fetch (plus one picker-list fetch for the window change) — not one per field', async () => {
+    routeFetch({ series: () => seriesResponse() })
+    const history = useHistoryStore()
+
+    // tab stays at its default ('requests', metricsForTab -> 1 metric), so
+    // the "one series fetch" below is a single adminFetch call, not the
+    // 2-call 'tokens' case — isolating the batching behavior itself from
+    // metricsForTab's own separate multi-metric fan-out.
+    history.setSelection({ scope: 'user:alice', window: 'day', tab: 'requests', modelMetric: 'req' })
+    await flush()
+
+    expect(history.scope).toBe('user:alice')
+    expect(history.window).toBe('day')
+    expect(history.modelMetric).toBe('req')
+    const calls = mockedAdminFetch.mock.calls.map((c) => String(c[0]))
+    const seriesCalls = calls.filter((p) => p.startsWith('/admin/api/usage/history'))
+    const optionsCalls = calls.filter((p) => p.startsWith('/admin/api/usage/models'))
+    expect(seriesCalls).toHaveLength(1) // one series fetch, not the 3-4 the old per-field setters would have fired
+    expect(optionsCalls).toHaveLength(1) // fetchModelOptions, fired once for the window change
+  })
+
+  it('does nothing (no state change, no fetch) when every field already matches the current selection', async () => {
+    routeFetch({})
+    const history = useHistoryStore()
+    const callsBefore = mockedAdminFetch.mock.calls.length
+
+    history.setSelection({ scope: 'total', window: 'hour', tab: 'requests', modelMetric: 'cost' }) // all defaults
+    await flush()
+
+    expect(mockedAdminFetch.mock.calls.length).toBe(callsBefore)
+  })
+
+  it('applies modelFilter AFTER tab resets it — setSelection({ tab: "models", modelFilter: prefix }) lands on the intended prefix (nav.ts goToModels\' own call shape)', async () => {
+    routeFetch({})
+    const history = useHistoryStore()
+
+    history.setSelection({ tab: 'models', modelFilter: 'openai/' })
+    await flush()
+
+    expect(history.tab).toBe('models')
+    expect(history.modelFilter).toBe('openai/')
+    const rankingCall = mockedAdminFetch.mock.calls.map((c) => String(c[0])).find((p) => p.startsWith('/admin/api/usage/models'))
+    expect(rankingCall).toContain(`prefix=${encodeURIComponent('openai/')}`)
+    // Only ONE ranking fetch — not a first unprefixed one from the tab
+    // switch followed by a second, corrective one from the filter.
+    const rankingCalls = mockedAdminFetch.mock.calls.map((c) => String(c[0])).filter((p) => p.startsWith('/admin/api/usage/models'))
+    expect(rankingCalls).toHaveLength(1)
+  })
+
+  it('only fetchModelOptions is skipped when window is not part of the call, even though other fields change', async () => {
+    routeFetch({ series: () => seriesResponse() })
+    const history = useHistoryStore()
+
+    history.setSelection({ scope: 'user:alice' })
+    await flush()
+
+    const optionsCalls = mockedAdminFetch.mock.calls.map((c) => String(c[0])).filter((p) => p.startsWith('/admin/api/usage/models'))
+    expect(optionsCalls).toHaveLength(0)
   })
 })

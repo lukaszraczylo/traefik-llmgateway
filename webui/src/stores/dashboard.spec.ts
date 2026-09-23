@@ -29,6 +29,9 @@ const mockedAdminFetch = vi.mocked(adminFetch)
 
 const emptyOverview: AdminOverviewResponse = {
   version: '1',
+  replica: 'pod-a',
+  instance: 'test-gateway',
+  warnings: [],
   providers: [],
   groups: [],
   aliases: [],
@@ -50,6 +53,7 @@ const emptyUsage: AdminUsageResponse = {
     tokensOutPerMonth: 0,
     costPerDayMicroUsd: 0,
     costPerMonthMicroUsd: 0,
+    rejectionsPerDay: 0,
   },
 }
 const emptyTargets: AdminTargetsResponse = { mcpServers: [], agents: [] }
@@ -159,4 +163,58 @@ describe('useDashboardStore.refresh', () => {
     const overviewCalls = mockedAdminFetch.mock.calls.filter((c) => c[0] === '/admin/api/overview')
     expect(overviewCalls).toHaveLength(1)
   })
+})
+
+// F5 (dashboard-plan.md): startPolling now drives refresh() through the
+// shared createVisibilityPoller (lib/polling.ts) instead of a bare
+// setInterval — same observable "fetch once, then poll" shape as before,
+// just built on the tested shared primitive.
+describe('useDashboardStore.startPolling', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    mockedAdminFetch.mockReset()
+    useAuthStore().submit('test-admin-key')
+    mockRoutes({})
+  })
+
+  it('fetches immediately on startPolling, then again every POLL_MS', async () => {
+    vi.useFakeTimers()
+    try {
+      const dashboard = useDashboardStore()
+
+      dashboard.startPolling()
+      await vi.advanceTimersByTimeAsync(0)
+      expect(dashboard.lastUpdated).not.toBeNull()
+
+      const callsAfterFirst = mockedAdminFetch.mock.calls.length
+      await vi.advanceTimersByTimeAsync(5000) // POLL_MS
+      expect(mockedAdminFetch.mock.calls.length).toBeGreaterThan(callsAfterFirst)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('startPolling is idempotent — a second call does not double the interval', async () => {
+    vi.useFakeTimers()
+    try {
+      const dashboard = useDashboardStore()
+
+      dashboard.startPolling()
+      dashboard.startPolling()
+      await vi.advanceTimersByTimeAsync(0)
+      const callsAfterFirst = mockedAdminFetch.mock.calls.length
+
+      await vi.advanceTimersByTimeAsync(5000)
+      // One additional round of three requests (overview/usage/targets),
+      // not two.
+      expect(mockedAdminFetch.mock.calls.length - callsAfterFirst).toBe(3)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+  // P11 review fix: a `stopPolling` test used to live here too — the
+  // action itself was dead application-facing API surface (nothing outside
+  // this spec ever called it, App.vue polls this store for the app's whole
+  // session) and has been removed from stores/dashboard.ts; see that
+  // file's own comment.
 })

@@ -1,15 +1,22 @@
-import type { Ref } from 'vue'
-import { onMounted, onUnmounted, ref, watch } from 'vue'
-
-// Feature C (v0.22): syncs the active dashboard tab to the URL hash
-// (#providers, #usage, #charts, #targets — App.vue's own TabsTrigger
-// value strings, unchanged) with no router dependency: App.vue's Tabs
-// component already just needs a plain string ref, and a full router is
-// overkill for one hash-backed value. hashToTab/tabToHash are the pure
-// mapping this module's own spec exercises directly (vite.config.ts's
-// `test` block runs in a Node environment — no `window`, no component
-// mount), so every `window`/`history`/`location` touch below is guarded
-// and lives only inside useTabHash itself, never at module scope.
+// Feature C (v0.22) introduced hashToTab/tabToHash below, plus a
+// useTabHash() composable wrapping them. F9 (dashboard-plan.md) supersedes
+// that composable with useHashState() (composables/useHashState.ts):
+// App.vue now needs a single hash that carries BOTH the active tab AND
+// each tab's own query-string state (scope/window/tab/metric for Charts, q
+// for Usage, kind/user for Events — lib/hash-state.ts), not the tab alone,
+// so useTabHash() itself was removed as the now-superseded, unreachable
+// half of this file. hashToTab/tabToHash stay: useHashState.ts still
+// builds the OUTER "#<tab>" portion of the combined hash directly on top
+// of these same two pure functions, and this module's own spec exercises
+// them directly (vite.config.ts's `test` block runs in a Node environment
+// — no `window`, no component mount).
+//
+// TAB_VALUES/TabValue also live here — the single source of truth for the
+// app's tab union (vue.md: "share types once, import everywhere"):
+// stores/nav.ts's `activeTab`, composables/useHashState.ts, and App.vue's
+// own Tabs all import the SAME union rather than each redeclaring it.
+export const TAB_VALUES = ['providers', 'usage', 'charts', 'targets', 'events'] as const
+export type TabValue = (typeof TAB_VALUES)[number]
 
 /**
  * hashToTab maps a raw location.hash string (with or without its leading
@@ -28,10 +35,11 @@ import { onMounted, onUnmounted, ref, watch } from 'vue'
  *    by hand with different casing is treated as invalid, not corrected.
  * 2. An invalid or absent hash is normalized only in memory (this
  *    function's own return value), never in the address bar itself:
- *    useTabHash's initial read below never calls history.replaceState —
- *    only a LATER tab change does (see its own doc comment) — so loading
- *    "#bogus" shows the Providers tab while the address bar still reads
- *    "#bogus" until the reader switches tabs at least once.
+ *    useHashState's initial read (composables/useHashState.ts) never
+ *    calls history.replaceState on its own — only a LATER state change
+ *    does (see its own doc comment) — so loading "#bogus" shows the
+ *    Providers tab while the address bar still reads "#bogus" until the
+ *    reader switches tabs, or something else changes, at least once.
  */
 export function hashToTab<T extends string>(hash: string, validTabs: readonly T[], defaultTab: T): T {
   const raw = hash.startsWith('#') ? hash.slice(1) : hash
@@ -41,59 +49,4 @@ export function hashToTab<T extends string>(hash: string, validTabs: readonly T[
 /** tabToHash is hashToTab's inverse: the URL hash (leading "#" included) one tab value maps to. */
 export function tabToHash(tab: string): string {
   return `#${tab}`
-}
-
-export interface UseTabHashOptions<T extends string> {
-  /** The full set of recognized tab values — App.vue's Tabs value strings. */
-  validTabs: readonly T[]
-  /** The tab an absent or unrecognized hash falls back to. */
-  defaultTab: T
-}
-
-/**
- * useTabHash returns a ref<T> wired bidirectionally to the URL hash:
- *
- * - On creation, it reads the CURRENT hash (hashToTab) as its initial
- *   value — the "on load: read hash -> select tab" half of the spec.
- * - On every ref change (a Tabs v-model update from a user click), it
- *   writes the hash back via history.replaceState — never pushState or a
- *   bare `location.hash =` assignment, both of which would grow browser
- *   history with one entry per tab click and, for the latter, jump
- *   scroll position to any element whose id matches the new hash. A
- *   no-op write (the hash already matches) is skipped so a rapid
- *   double-toggle does not spam replaceState.
- * - It listens for the browser's own `hashchange` event (back/forward
- *   navigation, or a hand-edited URL) and updates the ref to match —
- *   invalid/unrecognized hands back defaultTab, exactly like the initial
- *   read.
- *
- * Guarded for a `window`-less environment (vitest's node test
- * environment, vite.config.ts): every DOM/history/location access is
- * behind a single hasWindow check computed once, so importing or calling
- * this module never throws there — though the composable itself, being a
- * real Vue lifecycle hook user, is exercised through App.vue in the real
- * browser, not unit-tested directly; hashToTab/tabToHash above are what
- * this module's own spec covers.
- */
-export function useTabHash<T extends string>({ validTabs, defaultTab }: UseTabHashOptions<T>): Ref<T> {
-  const hasWindow = typeof window !== 'undefined'
-  const activeTab = ref(hasWindow ? hashToTab(window.location.hash, validTabs, defaultTab) : defaultTab) as Ref<T>
-
-  watch(activeTab, (tab) => {
-    if (!hasWindow) return
-    const nextHash = tabToHash(tab)
-    if (window.location.hash === nextHash) return
-    window.history.replaceState(null, '', nextHash)
-  })
-
-  function onHashChange(): void {
-    activeTab.value = hashToTab(window.location.hash, validTabs, defaultTab)
-  }
-
-  if (hasWindow) {
-    onMounted(() => window.addEventListener('hashchange', onHashChange))
-    onUnmounted(() => window.removeEventListener('hashchange', onHashChange))
-  }
-
-  return activeTab
 }

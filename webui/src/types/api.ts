@@ -218,6 +218,28 @@ export interface AdminAliasView {
 /** GET /admin/api/overview (admin.go: adminOverviewResponse). */
 export interface AdminOverviewResponse {
   version: string
+  /**
+   * replica identifies WHICH of this deployment's Traefik replicas
+   * answered this poll (admin.go: os.Hostname(), falling back to
+   * $HOSTNAME then "unknown"). Every per-replica, in-process figure this
+   * panel already renders (provider latency, provenance, discovery
+   * health — see AdminProviderView.latency's own doc comment) has always
+   * been silently replica-scoped; this field is the first place that
+   * scoping becomes visible to the reader, rather than a caveat they
+   * have to take on faith.
+   */
+  replica: string
+  /** instance is the gateway's own configured name (g.name), distinct from replica — the deployment's logical identity vs. which pod happened to answer. */
+  instance: string
+  /**
+   * warnings holds the configuration warnings this replica logged while
+   * the middleware was being constructed (llmgateway.go's
+   * collectingWarnings window) — runtime warnings are not kept. Never nil;
+   * an empty array when there is nothing to report.
+   */
+  warnings: string[]
+  /** warningsDropped counts warnings beyond the server's own cap (configWarningsCap) that were logged but not kept — omitted entirely when nothing was dropped. */
+  warningsDropped?: number
   providers: AdminProviderView[]
   groups: AdminGroupView[]
   aliases: AdminAliasView[]
@@ -263,6 +285,15 @@ export interface AdminUsageEntryView {
   tokensOutPerMonth: number
   costPerDayMicroUsd: number
   costPerMonthMicroUsd: number
+  /**
+   * rejectionsPerDay is this scope's fleet-wide (Redis-backed, like every
+   * other counter on this view) count of requests DENIED by a limit
+   * check today — never the in-process Prometheus rejection counter,
+   * which is per-replica and not exposed here (admin.go: settleRejection
+   * folds this into the SAME storeIncrMulti round trip the rejection
+   * path already paid, so this field costs nothing extra to read).
+   */
+  rejectionsPerDay: number
   storeDown?: boolean
 }
 
@@ -317,6 +348,15 @@ export interface AdminUsageModelEntry {
 export interface AdminUsageModelsResponse {
   metric: string
   window: string
+  /**
+   * span is how many of `window`'s buckets, ending now, this ranking
+   * summed (admin.go: parseUsageModelsSpan — empty request query means 1,
+   * today's original single-current-bucket behaviour). Always echoed back,
+   * never omitted, so a caller reading a cached/stale response can tell
+   * which span it was fetched under without re-deriving it from the query
+   * string.
+   */
+  span: number
   models: AdminUsageModelEntry[]
 }
 
@@ -385,4 +425,70 @@ export interface AdminTargetView {
 export interface AdminTargetsResponse {
   mcpServers: AdminTargetView[]
   agents: AdminTargetView[]
+}
+
+/**
+ * AdminEventKind is one gatewayEvent's classification (admin.go/events.go:
+ * eventKindRateLimit/eventKindBudget/eventKindStoreDown/eventKindUpstream/
+ * eventKindTimeout/eventKindUnpriced/eventKindCapacity). Typed as a union
+ * with `| string` on AdminEventView.kind below, not this type alone: a
+ * server build newer than this client could add a kind this webui does
+ * not yet recognize, and the Events view must still render its raw text
+ * rather than fail to compile/render it.
+ */
+export type AdminEventKind =
+  | 'rate_limit'
+  | 'budget'
+  | 'store_down'
+  | 'upstream'
+  | 'timeout'
+  | 'unpriced'
+  | 'capacity'
+
+/**
+ * One row in GET /admin/api/events (admin.go/events.go: gatewayEvent — the
+ * SAME shape stored as JSON in the eventRing/Redis list, never
+ * re-projected). user/group/model/provider are the scope the event
+ * happened against; every one of them, like message, is either a fixed
+ * string or sanitizeProviderErr/sanitizeTargetErr output (admin.go) —
+ * never a raw body, header, or credential (see events.go's own risk note,
+ * dashboard-plan.md section 6). route is one of the fixed route-name
+ * strings admin.go documents (chat/completions, embeddings, messages,
+ * images, audio/speech, audio/transcriptions, passthrough, mcp, a2a,
+ * mcp-federated, pricing, capacity) — kept as a bare `string` rather than a union
+ * here since this view only ever displays it, never branches on it.
+ */
+export interface AdminEventView {
+  time: string
+  /** Which replica recorded this event — admin.go's g.replica, same value AdminOverviewResponse.replica carries for this replica's own poll. */
+  replica: string
+  instance?: string
+  user?: string
+  group?: string
+  model?: string
+  provider?: string
+  route: string
+  kind: AdminEventKind | string
+  message: string
+  status?: number
+}
+
+/**
+ * GET /admin/api/events?limit=N (admin.go/events.go: adminEventsResponse —
+ * new, F3). `source` tells the Events view whether `events` is the
+ * fleet-wide Redis-backed list ('redis') or this replica's own in-memory
+ * ring, read because Redis was unreachable or unconfigured ('replica') —
+ * the view must caption this, never present a replica-only fallback as if
+ * it were fleet-wide. `degraded` is set only in the 'replica' case where
+ * Redis IS configured but the read failed (as opposed to Redis simply not
+ * being configured at all) — omitted otherwise.
+ */
+export interface AdminEventsResponse {
+  /** Newest first, never nil — an empty array means no events recorded (or capacity 0), never "the read failed" (a failed read still falls back to the ring, see `source`). */
+  events: AdminEventView[]
+  source: 'redis' | 'replica'
+  replica: string
+  /** The ring's fixed capacity (events.go: eventRingCap) — lets the view show "showing N of capacity" rather than a bare list length. */
+  capacity: number
+  degraded?: boolean
 }

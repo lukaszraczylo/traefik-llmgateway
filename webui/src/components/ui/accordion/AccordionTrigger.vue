@@ -10,13 +10,25 @@ import {
 } from 'reka-ui'
 import { cn } from '@/lib/utils'
 
-const props = defineProps<AccordionTriggerProps & { class?: HTMLAttributes['class'] }>()
+const props = defineProps<AccordionTriggerProps & {
+  class?: HTMLAttributes['class']
+  /**
+   * Class applied to the AccordionHeader (the <h3> wrapper), not the
+   * trigger button. Reka-ui's AccordionTrigger declares its own `class`
+   * prop, so a `class` passed to this component lands on the inner
+   * button, never on the header — pass `flex-1` here (not to `class`)
+   * when the trigger sits next to a sibling in a flex row, so the header
+   * (and the button it wraps) fills the remaining row width instead of
+   * shrinking to content width.
+   */
+  headerClass?: HTMLAttributes['class']
+}>()
 
-const delegatedProps = reactiveOmit(props, 'class')
+const delegatedProps = reactiveOmit(props, 'class', 'headerClass')
 </script>
 
 <template>
-  <AccordionHeader class="flex">
+  <AccordionHeader :class="cn('flex', props.headerClass)">
     <AccordionTrigger
       data-slot="accordion-trigger"
       v-bind="delegatedProps"

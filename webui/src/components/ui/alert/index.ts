@@ -10,6 +10,15 @@ export const alertVariants = cva('grid gap-0.5 rounded-lg border px-2.5 py-2 tex
     variant: {
       default: 'bg-card text-card-foreground',
       destructive: 'text-destructive bg-card *:data-[slot=alert-description]:text-destructive/90 *:[svg]:text-current',
+      /**
+       * warn: a non-destructive "worth a look, not broken" tier —
+       * reuses the panel's shared --status-warn token (main.css,
+       * already the Providers tab's degraded badge and the usage-bar
+       * amber threshold) instead of `destructive`'s red, which implies
+       * a hard failure. Same structure as `destructive` above, only the
+       * color changes.
+       */
+      warn: 'text-status-warn bg-card *:data-[slot=alert-description]:text-status-warn/90 *:[svg]:text-current',
     },
   },
   defaultVariants: {

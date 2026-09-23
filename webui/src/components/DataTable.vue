@@ -12,7 +12,6 @@ import {
   TableHead,
   TableHeader,
   TableRow,
-  valueUpdater,
 } from '@/components/ui/table'
 
 /**
@@ -39,9 +38,24 @@ const props = defineProps<{
   rowClass?: (row: TData) => string | undefined
   /** Shown in the empty-state row when data is empty. */
   emptyMessage?: string
+  /**
+   * Optional CONTROLLED sort state (P6, `v-model:sorting`). Omitted (the
+   * default) keeps every existing call site's original UNCONTROLLED
+   * behavior unchanged — this component owns `internalSorting` itself and
+   * a caller has no way to read the current sort. Passed, a caller (e.g.
+   * UsageView.vue's Users export, which needs to export rows in the
+   * table's own current sort order — the plan's own "exports
+   * filtered+sorted rows" requirement) instead owns the ref: every header
+   * click emits `update:sorting` with the new state rather than mutating
+   * anything locally here.
+   */
+  sorting?: SortingState
 }>()
 
-const sorting = ref<SortingState>([])
+const emit = defineEmits<{ 'update:sorting': [value: SortingState] }>()
+
+/** internalSorting is read only when props.sorting is undefined (uncontrolled mode) — see the `sorting` prop's own doc comment above. */
+const internalSorting = ref<SortingState>([])
 
 const table = useVueTable({
   get data() {
@@ -52,10 +66,15 @@ const table = useVueTable({
   },
   getCoreRowModel: getCoreRowModel(),
   getSortedRowModel: getSortedRowModel(),
-  onSortingChange: (updater) => valueUpdater(updater, sorting),
+  onSortingChange: (updater) => {
+    const current = props.sorting ?? internalSorting.value
+    const next = typeof updater === 'function' ? updater(current) : updater
+    if (props.sorting !== undefined) emit('update:sorting', next)
+    else internalSorting.value = next
+  },
   state: {
     get sorting() {
-      return sorting.value
+      return props.sorting ?? internalSorting.value
     },
   },
 })

@@ -54,6 +54,7 @@
     --color-chart-tokens-out: var(--chart-tokens-out);
     --color-chart-cost: var(--chart-cost);
     --color-status-warn: var(--status-warn);
+    --color-bar-amber: var(--bar-amber);
     --radius-sm: calc(var(--radius) - 4px);
     --radius-md: calc(var(--radius) - 2px);
     --radius-lg: var(--radius);
@@ -109,6 +110,27 @@
      * light --card measures ~5.06:1.
      */
     --status-warn: #a35c00;
+
+    /*
+     * --bar-amber: F1 (usage-vs-limit bars, UsageBar.vue) — the filled
+     * amber segment of a budget bar at BAR_AMBER_THRESHOLD (lib/usage-
+     * bars.ts). The track it fills against is --muted (UsageBar.vue's
+     * `bg-muted` on the bar's own background span) — WCAG 1.4.11 non-text
+     * contrast requires 3:1 against that ADJACENT color.
+     *
+     * P8 review fix: this used to match --chart-tokens-out's hue/value
+     * (#e69f00) on the reasoning that it was "already proven legible at
+     * small UI sizes on both --card and --muted" — that reasoning was
+     * never actually checked against --muted specifically, and #e69f00
+     * measures (WCAG relative-luminance formula, oklch(0.95 0.006 75)
+     * --muted as the track) 1.95:1 there, well under the 3:1 this comment
+     * itself claimed. Reusing --status-warn's own light-mode value
+     * (#a35c00) instead measures 4.44:1 against --muted — comfortably
+     * clears 3:1, and keeps every semantic amber in this panel visually
+     * consistent (same value already used for the "degraded" badge tier,
+     * ProviderRateBadge.vue) rather than adding a third amber shade.
+     */
+    --bar-amber: #a35c00;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -147,6 +169,9 @@
            reader auditing this block sees every semantic-color token's
            dark value in one place. */
         --status-warn: #f0ac1f;
+
+        /* Same reasoning as --chart-tokens-out's own dark-mode comment above — legible as-is, redefined here anyway so every semantic-color token's dark value lives in one place. */
+        --bar-amber: #f0ac1f;
     }
 }
 

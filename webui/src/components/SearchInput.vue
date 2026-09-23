@@ -72,7 +72,7 @@ function onClear(): void {
       class="absolute top-1/2 right-1 -translate-y-1/2 text-muted-foreground hover:text-foreground"
       @click="onClear"
     >
-      <FontAwesomeIcon :icon="faXmark" class="size-3.5" />
+      <FontAwesomeIcon :icon="faXmark" class="size-3.5" aria-hidden="true" />
     </Button>
   </div>
 </template>

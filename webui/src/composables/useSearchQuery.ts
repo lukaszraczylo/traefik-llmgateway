@@ -1,3 +1,4 @@
+import type { Ref } from 'vue'
 import { computed, ref } from 'vue'
 
 /**
@@ -16,9 +17,19 @@ import { computed, ref } from 'vue'
  * clear button emitting `update:modelValue('')` through the `v-model`
  * binding, so a separate clear function would be dead API surface no
  * caller needs.
+ *
+ * `external` (F9, hash-state) lets a caller supply the ref this composable
+ * reads and writes instead of owning a private local one — UsageView.vue
+ * binds `nav.usageQuery` (stores/nav.ts) so the Usage tab's own search
+ * text round-trips through the URL hash (lib/hash-state.ts's `q` param)
+ * the same way ChartsView's scope/window/tab selection already does.
+ * Every OTHER caller (ProvidersView, ChartsView's own scope-picker search,
+ * EventsView) omits it and keeps its private, hash-independent ref exactly
+ * as before — passing `external` changes nothing about `normalized`/
+ * `hasQuery`'s own derivation, only where the raw value itself lives.
  */
-export function useSearchQuery() {
-  const query = ref('')
+export function useSearchQuery(external?: Ref<string>) {
+  const query = external ?? ref('')
   const normalized = computed(() => query.value.trim().toLowerCase())
   const hasQuery = computed(() => normalized.value.length > 0)
 

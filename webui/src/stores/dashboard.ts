@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
 
 import { AdminApiError, adminFetch } from '@/lib/api'
+import { createVisibilityPoller, type VisibilityPoller } from '@/lib/polling'
 import { useAuthStore } from '@/stores/auth'
 import type { AdminOverviewResponse, AdminTargetsResponse, AdminUsageResponse } from '@/types/api'
 
@@ -24,7 +25,7 @@ export const useDashboardStore = defineStore('dashboard', {
     targets: null as AdminTargetsResponse | null,
     lastUpdated: null as Date | null,
     error: '',
-    timer: undefined as ReturnType<typeof setInterval> | undefined,
+    poller: undefined as VisibilityPoller | undefined,
     /**
      * refreshing guards against overlapping polls (review finding): the 5s
      * setInterval has no in-flight check on its own, so a round trip that
@@ -95,11 +96,26 @@ export const useDashboardStore = defineStore('dashboard', {
         .map(({ label, reason }) => `${label}: ${reason instanceof Error ? reason.message : String(reason)}`)
         .join('; ')
     },
-    /** startPolling is idempotent and safe to call before a key is stored — refresh() no-ops until then. */
+    /**
+     * startPolling is idempotent and safe to call before a key is stored —
+     * refresh() no-ops until then. Driven by the shared
+     * createVisibilityPoller (lib/polling.ts, F5) rather than a bare
+     * setInterval: an immediate tick (the same "fetch once, then poll"
+     * shape this action already had), then every POLL_MS while the tab is
+     * visible, pausing while it is hidden and catching up the moment it is
+     * looked at again.
+     */
     startPolling(): void {
-      if (this.timer !== undefined) return
-      void this.refresh()
-      this.timer = setInterval(() => void this.refresh(), POLL_MS)
+      if (this.poller) return
+      this.poller = createVisibilityPoller({ intervalMs: POLL_MS, tick: () => void this.refresh() })
+      this.poller.start()
     },
+    // P11 review fix: a stopPolling action mirroring history.ts/events.ts's
+    // own stop() used to live here too, but nothing outside its OWN spec
+    // ever called it — App.vue mounts this store's poller once, for the
+    // app's whole session, and never unmounts it (unlike history.ts/
+    // events.ts, whose stores are torn down when ChartsView/EventsView
+    // unmount). Dead application-facing API surface, removed; `poller`
+    // itself stays (startPolling's own idempotency guard still needs it).
   },
 })
