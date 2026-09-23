@@ -568,6 +568,14 @@ gates only the background probe sweep.
 | Field | Type | Default | Semantics |
 |---|---|---|---|
 | `enabled` | `bool` | `false` | `false`: the `/admin*` routes are not registered at all — a request to any of them falls through to the plugin's existing 404/`passthroughUnknown` handling like any other unrecognized path. `true`: the read-only dashboard per [Admin](#admin) below. |
+| `stats` | `*AdminStatsConfig` | `nil` | Opts into two counter families that are NOT part of the always-on-with-admin set — see [Statistics: always-on vs opt-in](#statistics-always-on-vs-opt-in). `AdminStatsConfig` has no `enabled` field of its own; the block is either present (with each family opted in individually below) or omitted entirely. Omitted (`nil`, the zero value — not an empty `{}` block): both opt-in families stay off, byte-identical to a deployment predating this feature. |
+
+### `AdminStatsConfig` (`admin.stats`)
+
+| Field | Type | Default | Semantics |
+|---|---|---|---|
+| `userModel` | `bool` | `false` | Per-(user, model) usage breakdown (the `umodel` counter family). Cardinality grows with users × models actually used, unlike every always-on family — an operator opts in explicitly. Gates `GET /admin/api/usage/totals?kind=usermodel\|modeluser` (`404` when off) and the Spend page's attribution drill-down past group→user. |
+| `latency` | `bool` | `false` | Per-bucket upstream latency histograms (the `ld00`..`ld13`/`lt00`..`lt13` counter families), riding the existing per-request write batch. Gates the percentile fields on `GET /admin/api/performance` (present only when on; `attempts`/`failures` are always present regardless). |
 
 ### `MetricsConfig`
 
@@ -1277,7 +1285,19 @@ never a second candidate to try.
   request against `requestsPerMinute`/`requestsPerDay` — never once per
   attempt. Per-provider attempt/failure counters (the admin dashboard's
   success-rate badge) attribute every attempt to the provider that
-  actually made it.
+  actually made it. **Fixed (admin dashboard redesign):** the per-model
+  request counter (`GET /admin/api/usage/models`, `/usage/series?scope=
+  model:...`) used to increment for EVERY candidate a failover chain ran,
+  including one that failed before writing anything — a 3-candidate chain
+  where only the last succeeded used to inflate that model's served-request
+  count by 2 phantom attempts. It now only counts a candidate that either
+  actually served something (a genuine response, even a zero-usage
+  streaming one) or reported nonzero usage (a mid-stream failure that
+  still delivered content) — a candidate that failed with nothing to show
+  for it no longer touches the model counter at all (`routes_unified.go`).
+  Token/cost counters were never affected by this defect: they were
+  already gated on nonzero usage independently. A failed candidate is
+  still visible on its own terms — via `fover`/`attempt`/`fail`, below.
 - **Caching**: a cacheable response produced by a failover provider is
   stored under that provider's own cache key, never the first candidate's.
   Each candidate's own cache entry is checked immediately before that
@@ -1528,8 +1548,9 @@ one.
   discovery health independently — a latency optimization, not a
   correctness guarantee. Three replicas disagreeing briefly after a
   provider starts failing is expected, not a bug.
-- **Dashboard**: the Providers tab shows a provider's current state and,
-  while open, when it will next be probed — see [Admin](#admin).
+- **Dashboard**: the Models page's provider health panel shows a
+  provider's current state and, while open, when it will next be
+  probed — see [Admin](#admin).
 
 ## Unified vs. passthrough
 
@@ -1817,17 +1838,36 @@ or in CI.
   are all incremented together on one rejection, so the `total` row
   answers "how many rejections today, across everyone" directly),
   `tokensInPerDay`/`tokensOutPerDay`, `tokensInPerMonth`/
-  `tokensOutPerMonth`, `costPerDayMicroUsd`, `costPerMonthMicroUsd` —
+  `tokensOutPerMonth`, `costPerDayMicroUsd`, `costPerMonthMicroUsd`,
+  `lastSeen` (unix seconds of this scope's most recent admitted request;
+  `0` when never seen or unknown — see [Statistics: always-on vs
+  opt-in](#statistics-always-on-vs-opt-in) for the write side) —
   alongside their configured limits, plus one extra `total` row: the
   synthetic all-traffic scope (see [Limits and accounting](
   #limits-and-accounting)), limits always `null`. A group row also carries
   its configured `providers`/`models`/`mcpServers`/`agents` access lists,
-  omitted when unrestricted. The dashboard's Providers and Usage views
-  poll both every 5 seconds while open.
+  omitted when unrestricted. `overview` also carries `features`
+  (`{"userModelStats","latencyStats","cacheStats","lastSeen","failover"}`,
+  every value a `bool` — which of the new statistics families this
+  Gateway currently exposes; `GET /admin/api/config` and every
+  `stats_read.go` endpoint's own feature-gated `404` echo the identical
+  struct, so the dashboard gates a whole page section on one flag without
+  guessing at a second endpoint's availability) and `pricing`
+  (`{"override","builtin","litellm","free","unpriced"}`, every value an
+  `int` — the live model catalog's row count by billing price source,
+  summing to the catalog's total model count; a one-glance "how much of
+  my fleet is actually priced" figure for the dashboard's Home page,
+  without a second round trip to `GET /admin/api/catalog`). Polled every
+  5 seconds by the dashboard's shared background store (`stores/
+  dashboard.ts`) for as long as the app is open — a single poll behind
+  every page, not scoped to whichever one is showing (the redesign
+  renamed the old flat "Providers"/"Usage" tabs — see
+  [Dashboard](#dashboard)).
 - **`GET /admin/api/usage/history`** returns a bucketed series for one
-  scope/metric/window — the data source for the dashboard's Charts view
-  (per-user/per-group/per-model/total, stacked tokens-in/tokens-out, with
-  a 24h/30d/12mo window switcher). Query parameters:
+  scope/metric/window. Predates the admin dashboard redesign; kept for
+  API stability, but the dashboard itself no longer calls it — `GET
+  /admin/api/usage/series` (below) superseded it as the redesigned
+  dashboard's own multi-scope time-series source. Query parameters:
   - `scope`: `user:{id}`, `group:{id}`, `model:{provider}/{model}`, or the
     literal `total`.
   - `metric`: `req`, `tokin`, `tokout`, or `cost`.
@@ -1843,11 +1883,9 @@ or in CI.
   being unreachable is `503` (a chart must never read an outage as "zero
   usage"). Response shape:
   `{"scope","metric","window","points":[{"bucket":"2026082114","value":123},...]}`.
-  The Charts view fetches this once per selection change, plus a 30s
-  auto-refresh of the current selection.
 - **`GET /admin/api/usage/models`** ranks models by usage — the data
-  source for the Charts view's "Models" tab, and for the model entries in
-  its scope picker. Query parameters:
+  source for the Spend page's model breakdown and the Models page's
+  catalog table. Query parameters:
   - `metric`: `req`, `tokin`, `tokout`, or `cost`.
   - `window`: `hour`, `day`, or `month`.
   - `limit` (optional): 1-100, default 20.
@@ -1865,22 +1903,16 @@ or in CI.
     like `provider/model`) never pays a catalog-sized read for ids the
     prefix already excludes, and `limit` caps the FILTERED set's own
     top-N rather than silently returning fewer than `limit` matches. Up
-    to 256 bytes; longer is `400`. Empty (the default) ranks the whole
-    catalog, this endpoint's original, pre-`prefix` behavior. A prefix
-    that matches nothing is not an error, just an empty `models` array —
-    the identical shape an ordinary, unfiltered ranking already answers
-    when nothing was used yet. The dashboard's Models tab sends this
-    parameter on the ranking fetch itself whenever a provider filter is
-    active (a provider's own header link on the Providers tab, or a
-    `#charts?tab=models&filter=...` hash — either a link the dashboard
-    built itself, or one hand-edited to add `filter=`) — narrowing
-    server-side BEFORE `limit` applies, so a fleet-wide top-N ranking can
-    no longer omit, or only partially show, one provider's own models.
-    The scope picker's own
-    model list (a separate, unfiltered fetch) never sends it. A
-    client-side re-filter (`lib/model-filter.ts`) still runs afterward too
-    — a harmless no-op once the server has already narrowed the set, kept
-    as the one guard against a response that predates this parameter.
+    to 256 bytes; longer is `400`. Empty (the default, and what the
+    redesigned dashboard always sends — it filters client-side instead,
+    below) ranks the whole catalog. A prefix that matches nothing is not
+    an error, just an empty `models` array. The Models page's own search
+    box (`q`) and provider narrowing instead filter the already-fetched,
+    unfiltered response client-side (`lib/model-filter.ts`, joined
+    against `GET /admin/api/catalog` and `GET /admin/api/performance` in
+    `ModelCatalogTable.vue`) — a harmless server round trip either way at
+    the fleet sizes this plugin targets, and simpler than keeping a
+    second server-side query in sync with the global scope filter.
   - `detail` (optional): `1` or `true` adds `requests`, `tokensIn`,
     `tokensOut`, `costMicroUsd` and `free` to every entry, and includes a
     model when ANY of those four totals is non-zero, not only the ranked
@@ -1890,20 +1922,46 @@ or in CI.
     entry marks the model free, or when its resolved price is known and
     both per-1M prices are `0`. Empty, `0` or `false` (the default) keeps
     the response exactly as described below; any other value is `400`.
-    The dashboard's Models tab always sends `detail=1`, ranks by requests
-    by default, and lists every column in a table under the chart, with
-    a "free" badge instead of `$0`.
+    Detail mode (admin dashboard redesign) also adds `priceSource`
+    (`billingPriceSource`'s own `"override"`/`"builtin"`/`"litellm"`/
+    `"free"`/`"unpriced"` classification — the same vocabulary `GET
+    /admin/api/catalog`'s `priceSource` uses) and `r402` (how many
+    requests for this model were refused as unpriced under a caller's
+    cost budget over the requested span) — `r402` is ALWAYS present in
+    detail mode, regardless of whether the response cache is configured
+    (it has nothing to do with caching), and is read over the SAME
+    `window` the request asked for: model-scoped `r402` counters exist at
+    both `hour` and `day`, so `window=hour`/`window=day` read it exactly;
+    `window=month` has no `r402` bucket of its own and converts to the
+    exact covering `day` buckets instead (calendar-aligned, so this is
+    exact, not an approximation — bounded by `day`'s own retention).
+    `cacheHits` and `cacheSavedMicroUsd` are added too, but only when
+    `features.cacheStats` (the response cache is configured) AND `window`
+    is `day` or `month` — omitted for `window=hour` as well as when the
+    cache is unconfigured: a model's cache counters only ever have a
+    `day` bucket (never `hour`), so an hour-window value cannot be
+    recovered without also counting hours outside the requested range: no
+    exact answer exists, so none is given. `window=month` converts to the
+    covering `day` buckets, the same way `r402` does. The dashboard's
+    Models tab always sends `detail=1`, ranks by requests by default, and
+    lists every column in a table under the chart, with a "free" badge
+    instead of `$0`.
+  - `offset` (optional): shifts the span this many whole window-steps
+    back from now, for a period-over-period comparison read — `0`
+    (default) is this endpoint's original, pre-`offset` behavior
+    unchanged; the resolved value is echoed back as `offset` (an integer
+    from `0` to the window's own max minus `span`, else `400`).
 
   Response shape:
-  `{"metric","window","span":1,"models":[{"id":"uni/qwen3-next","value":4100},...]}`
-  (`span` echoes the resolved value — always present, even when the
-  request carried no `?span=` of its own), sorted by `value` descending,
-  ties broken on `id` ascending so a ranking stays stable between polls.
-  **Only models with non-zero usage are returned** — a catalog runs to
-  hundreds of models, so an empty `models` array means "nothing used in
-  this window", never "nothing configured". Validation mirrors
-  `usage/history`: a bad `metric`/`window`/`limit`/`span`/`prefix` is
-  `400`, an unreachable store is `503`.
+  `{"metric","window","span":1,"offset":0,"models":[{"id":"uni/qwen3-next","value":4100},...]}`
+  (`span`/`offset` echo the resolved values — always present, even when
+  the request carried no `?span=`/`?offset=` of its own), sorted by
+  `value` descending, ties broken on `id` ascending so a ranking stays
+  stable between polls. **Only models with non-zero usage are returned**
+  — a catalog runs to hundreds of models, so an empty `models` array means
+  "nothing used in this window", never "nothing configured". Validation
+  mirrors `usage/history`: a bad `metric`/`window`/`limit`/`span`/
+  `prefix`/`offset` is `400`, an unreachable store is `503`.
 
   Each `id` is the canonical `provider/model` of the provider that
   actually **served** the request, so a request that failed over is
@@ -1916,6 +1974,160 @@ or in CI.
   `/v1/audio/speech`, `/v1/audio/transcriptions`) write the per-model
   request counter on a successful (2xx) response too — never tokens or
   cost, since media calls are not token- or cost-accounted.
+- **`GET /admin/api/usage/series`** (admin dashboard redesign) is the
+  redesigned dashboard's own time-series source — one or more scopes'
+  bucketed history for a single metric/window/span/offset, in one
+  batched store read, replacing per-scope charting with a single request
+  the Spend/Consumers/Models/Reliability pages all share. Query
+  parameters:
+  - `scope` (repeated, 1-100): `total`, `user:{id}`, `group:{id}`,
+    `model:{canonical}`, `provider:{name}`, or `provmodel:{canonical}`.
+    An unrecognized scope, or one naming an entity that does not exist,
+    is skipped and listed in the response's `unknown` array rather than
+    failing the whole request; absent entirely is `400`, more than 100 is
+    `400`.
+  - `metric`: which metric is valid depends on the scope kind —
+    `user`/`group`/`total` accept `req`/`tokin`/`tokout`/`cost` (any
+    window) plus `rej` (hour/day only); `total` additionally accepts
+    `chit`/`cmiss`/`csave`/`r402` (hour/day only); `model` accepts
+    `req`/`tokin`/`tokout`/`cost` (any window) plus `chit`/`csave`/`r402`
+    (day only); `provider` accepts `attempt`/`fail`/`timeout`/`fover`
+    (hour/day); `provmodel` accepts `attempt`/`fail` (hour/day). A
+    metric outside its scope kind's own set is `400 "unknown metric for
+    scope kind"`.
+  - `window`: `hour`, `day`, or `month`.
+  - `span`/`offset`: the same convention `usage/models` uses above.
+
+  Response shape: `{"metric","window","span","offset","buckets":[...],
+  "series":[{"scope","points":[...]}],"unknown":[...]}` — `buckets` is
+  oldest-first bucket labels shared by every series; `unknown` is always
+  an array, never `null`. A key-count estimate over `adminMaxKeysPerRequest`
+  (below) is `400` before any store read; an unreachable store is `503`.
+- **`GET /admin/api/usage/totals`** (admin dashboard redesign) ranks
+  entities of one kind by their totals over a span — the Home page's
+  top-users/top-models cards, and the Spend page's group→user attribution
+  drill-down. Query parameters:
+  - `kind`: `user`, `group`, `usermodel`, `modeluser`, or `targetcaller`.
+  - `window` (default `day`): `user`/`group` accept `hour`/`day`/`month`;
+    `usermodel`/`modeluser`/`targetcaller` accept only `day`/`month`.
+  - `span` (default `1`), `offset` (default `0`): the same convention
+    `usage/models` uses above.
+  - `metrics` (optional, comma list): defaults to every metric `kind`
+    allows — `req`/`tokin`/`tokout`/`cost` for `user`/`group`/`usermodel`/
+    `modeluser`, `req` only for `targetcaller` (target requests carry no
+    token/cost dimension — see [MCP and A2A](#mcp-and-a2a)); an unknown or
+    duplicate entry is `400`.
+  - `limit` (optional, default 200, 1-1000): rows beyond it are dropped,
+    with `truncated: true` on the response.
+  - `group` (optional, `kind=user` only): narrows to one group's members.
+  - `user` (required for `kind=usermodel`), `model` (required for
+    `kind=modeluser`), `target` (optional for `kind=targetcaller`, either
+    `mcp/{name}` or `agent/{name}` — omitted ranks every configured
+    target × every user).
+  - `usermodel`/`modeluser` answer `404 "per-user-model statistics are
+    not enabled (admin.stats.userModel)"` when that stat is off — checked
+    only AFTER every other parameter is already known valid, so a
+    malformed request always reports what is actually wrong with it
+    rather than a blanket "feature disabled". A `usermodel` read narrows
+    the model catalog down to models with ANY recent usage first (a
+    single-metric read over covering month buckets), before ever reading
+    a per-user counter for one — the catalog can run to hundreds of
+    models, while a real user typically used only a handful.
+
+  Response shape: `{"kind","window","span","offset","metrics":[...],
+  "rows":[{"id","values":{"req":123,...}}],"truncated"}` — an all-zero
+  row (across every requested metric) is dropped before ranking; rows
+  sort by the first requested metric descending, ties by `id` ascending.
+  `id` is a plain name for `user`/`group`, a canonical `provider/model`
+  id for `usermodel`, a user name for `modeluser`, or
+  `"mcp/{target}/{caller}"`/`"agent/{target}/{caller}"` for
+  `targetcaller`. A key-count estimate over `adminMaxKeysPerRequest` is
+  `400`; an unreachable store is `503`.
+- **`GET /admin/api/performance`** (admin dashboard redesign) reports
+  provider/model availability and, when `admin.stats.latency` is on,
+  latency percentiles — the Models page's per-row p50/p95 columns and the
+  Reliability page's fleet-wide provider panel. Query parameters:
+  - `kind`: `provider` or `model`.
+  - `window`: `hour` or `day` only (a latency percentile over a month is
+    not actionable enough to justify the extra retention this endpoint
+    would need).
+  - `span`/`offset`: the same convention `usage/models` uses above.
+  - `id` (repeated, optional, up to 50): which entities to report.
+    Omitted defaults to every configured provider (`kind=provider`) or
+    the top 50 models by request count over the span (`kind=model`).
+  - `series` (optional, `0` or `1`): `1` returns bucket-by-bucket figures
+    for exactly one `id` instead of one summed row per `id` — `400` when
+    `series=1` and `id` does not name exactly one entity.
+
+  `rows` is always present in the response, never `null` — one row per
+  `id` in the default (`series=0`) mode, or an empty array in `series=1`
+  mode (whose own figures land in `buckets`/`points` instead).
+  `attempts`/`failures` (and, for `kind=provider`, `timeouts`/
+  `failovers`) are always present; `count` is also always present (`0`
+  means no recorded sample, whether because `admin.stats.latency` is off
+  or the entity simply has none in the span — its JSON field carries no
+  `omitempty`). `p50Ms`/`p95Ms`/`p99Ms`/`ttfbP50Ms`/`ttfbP95Ms` are the
+  ones present only when `admin.stats.latency` is on AND that entity has
+  at least one recorded sample in the span (a `nil` percentile is "no
+  data", never a fabricated `0`) — computed
+  server-side by linear interpolation within a latency histogram bucket
+  (the same 13 bounds `latencyBucketBounds`, [Metrics](#metrics), uses,
+  0.1s to 600s, plus one overflow bucket); an observation that landed in
+  the overflow bucket reports `overflow: true` with its percentile
+  clamped to `600000` (the largest bound in milliseconds — a true value
+  past that point is unknown by construction). `latencyEnabled` on the
+  response echoes whether `admin.stats.latency` is on, so the dashboard
+  can render "latency not enabled" once rather than per row. A key-count
+  estimate over `adminMaxKeysPerRequest` is `400`; an unreachable store
+  is `503`.
+- **`GET /admin/api/catalog`** (admin dashboard redesign, on-demand —
+  the Models and Reliability pages' own 5-minute-stale data source, not
+  polled with `overview`) returns every configured provider's full model
+  catalog: id, context window, per-1M-token prices, `priceSource`
+  (`billingPriceSource`'s own `"override"`/`"builtin"`/`"litellm"`/
+  `"free"`/`"unpriced"` classification — the actual billing resolution a
+  real request gets, distinct from the display metadata `overview`'s
+  `modelMeta` already carries: a model can have a discovery-captured
+  context window with no configured price at all), `displayFree` (a
+  `":free"`-suffixed model id with no configured price — billing
+  unchanged, display-only), and its configured aliases — plus the same
+  alias table `overview` carries. Needs no counterStore round trip at
+  all: every field is either static configuration or the registry's own
+  discovery state, read from the identical snapshot `overview` reads.
+- **`GET /admin/api/consumers`** (admin dashboard redesign, on-demand)
+  returns every active user and every configured group for the Consumers
+  page's directory and access-matrix views. A user row's `source` is
+  `"inline"` or `"file"` (which config block actually defined this user —
+  see [Users file format](#users-file-format)); `providers`/`models` are
+  that user's own personal grant, when configured (see [Model
+  routing](#model-routing)); `admin` is that user's own `admin: true`
+  flag. A group row carries its configured access lists (`providers`/
+  `models`/`mcpServers`/`agents`/`passthroughPaths`) AS CONFIGURED, plus
+  two RESOLVED views against the live catalog: `allowedProviders` (every
+  currently catalogued provider name this group can reach at all, never
+  `null`) and `modelAccess` (per provider, `{"allowed","total"}` model
+  counts — computed via the identical `allowsProvider`/
+  `allowsProviderModel` check a real request's own authorization uses, so
+  this view can never disagree with what the proxy actually enforces).
+  `usersFile` names the configured users-file PATH only — its contents
+  are never read or exposed here (see [Users file format](
+  #users-file-format)).
+- **`GET /admin/api/config`** (admin dashboard redesign, on-demand) is
+  the Config page's own read-only source: the live configuration,
+  redacted, plus the same `warnings` array `overview` carries and the
+  same `features` flags every stats endpoint echoes. `config` is `g.cfg`
+  round-tripped through JSON and walked recursively — every `apiKey`/
+  `password` JSON key redacted (an `"env:NAME"`/`"file:/path"` indirection
+  is kept verbatim, since it names WHERE the secret is, not the secret
+  itself; any literal value is replaced with `"[redacted]"`), every
+  `baseUrl`/`url` JSON key passed through the same userinfo/query-string
+  stripping `overview`'s own provider `baseUrl` already applies. A
+  redaction failure (not expected on any real running Gateway) degrades
+  to an empty `config` map with a warning appended, never a `500`. The
+  Config page renders this as read-only YAML (`lib/yaml-emit.ts`) — see
+  [Dashboard](#dashboard) below for the change-helper that turns an
+  intended edit into a paste-ready config snippet; this endpoint itself
+  has no write counterpart of any kind.
 - **`GET /admin/api/events`** (F3, v0.3 dashboard task) returns this
   deployment's most recent operational events — rate-limit/budget
   rejections and upstream/timeout/unpriced/capacity signals — for the
@@ -1990,11 +2202,13 @@ or in CI.
 - **What's exposed**: provider names, types, base URLs (with any
   userinfo/query string stripped before it's ever echoed), model counts,
   discovery status, group/user names, membership, limits, MCP/agent
-  target names/URLs/access, and live usage counters. **Never exposed**:
-  API keys (not even digests), provider keys, the Redis password, or
-  users-file path contents — every secret-bearing field is redacted from
-  every response.
-- **Admin traffic is never counted**: none of the six `/admin/api/*`
+  target names/URLs/access, live usage counters, and — via `GET
+  /admin/api/config` — the redacted config tree itself. **Never
+  exposed**: API keys (not even digests), provider keys, the Redis
+  password, or users-file path contents — every secret-bearing field is
+  redacted from every response (see `GET /admin/api/config`'s own
+  redaction rules above).
+- **Admin traffic is never counted**: none of the twelve `/admin/api/*`
   JSON routes call `checkAndCount` — admin polling never moves any
   user's or group's `requestsPerMinute`/`requestsPerDay` counters, and
   usage statistics reflect real LLM traffic only (operator directive: an
@@ -2002,18 +2216,18 @@ or in CI.
   never itself distort the numbers it displays). The direct consequence:
   an admin's own `requestsPerMinute`/`requestsPerDay` limit, if
   configured, is never enforced against admin-route traffic either — an
-  admin key holder can poll any of the six routes as fast as they like.
-  This is an accepted trade-off, not an oversight: these are admin-gated,
-  cheap reads, and an admin holder polling aggressively is a
+  admin key holder can poll any of the twelve routes as fast as they
+  like. This is an accepted trade-off, not an oversight: these are
+  admin-gated, cheap reads, and an admin holder polling aggressively is a
   self-inflicted, not a shared, resource cost. `GET /admin` and
   `GET /admin/assets/*` count nothing either, for the simpler reason that
   they are unauthenticated — there is no identified user to count a
   request against.
-- **Response headers**: all six JSON routes set
+- **Response headers**: all twelve JSON routes set
   `X-Content-Type-Options: nosniff` and `Cache-Control: no-store`; every
   hashed asset sets `X-Content-Type-Options: nosniff` and its own
   immutable `Cache-Control` (above). Every one of these routes — `GET
-  /admin`, every hashed asset, and the six JSON routes — shares one
+  /admin`, every hashed asset, and the twelve JSON routes — shares one
   `Content-Security-Policy` header (`default-src 'none'; script-src
   'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:;
   frame-ancestors 'none'; base-uri 'none'; form-action 'none'`) — no
@@ -2028,89 +2242,217 @@ or in CI.
   for asset responses to be the exception. The dashboard loads no
   external asset of any kind and works in an air-gapped cluster.
 
-### Dashboard (v0.3 additions)
+### Statistics: always-on vs opt-in
 
-- **Usage-vs-limit bars**: the Usage tab's Users/Groups tables, and a
-  group's own detail grid, render a compact meter beside every numeric
-  column that has a configured limit — request-rate, tokens (in+out
-  combined, since a `tokensPerDay`/`tokensPerMonth` limit enforces
-  against their sum), and cost. A bar reads amber at 80% of its limit
-  and red at 100% or beyond (a scope's usage window can roll forward past
-  its limit before the next request is actually rejected, so "at or over
-  100%" is a real, reachable state, not a ceiling); a scope with that
-  limit left unconfigured renders no bar at all, never a fabricated 0%,
-  and a `storeDown` scope masks every bar the same way it already masks
-  its raw numbers.
-- **Cost forecast**: a card under the Usage tab's Total row projects
-  fleet-wide month-end spend by linearly extrapolating
-  `total.costPerMonthMicroUsd` against how far the current UTC calendar
-  month has elapsed — nothing is shown for the first 2% of the month
-  (`MIN_PROJECTION_FRACTION`, `lib/forecast.ts` — about 13.4h in February
-  to 14.9h in a 31-day month; too little elapsed to extrapolate
-  meaningfully from), and the projected figure reads red, with a
-  tooltip, once it would cross a configured `costPerMonthUSD` limit.
-- **Rejected/day**: a `rejected/day` column sits between `req/day` and
-  the token columns in the Users/Groups tables (and the Total row),
-  reading `usage`'s own `rejectionsPerDay` field, tinted when non-zero.
-- **CSV export**: an "Export CSV" button on the Usage tab's Users and
-  Groups table headers, and on the Charts tab's Models ranking, downloads
-  the CURRENTLY filtered-and-sorted rows as an RFC 4180 CSV file (comma
-  quoting, CRLF line endings) via a `Blob` + `<a download>` — no server
-  round trip. If the browser rejects that (an environment with no
-  `Blob`/`URL` API), it falls back to copying the CSV text to the
-  clipboard, or selecting it for a manual copy, instead of silently
-  losing the export.
-- **Click-through links to Charts**: a user/group id in the Usage tab's
-  tables, and a model id beside its `ModelChip` on the Providers tab, are
-  each a link that jumps straight to the Charts tab with that exact scope
-  already selected (switching off the scope-less Models ranking first, if
-  that was showing); a provider's own header on the Providers tab links
-  to the Charts tab's Models ranking, pre-filtered to that provider's own
-  model ids.
-- **Events tab**: the new `GET /admin/api/events`-backed tab (above) —
-  a searchable-by-user/group, filterable-by-kind table, newest first,
-  captioned with whether it is currently showing the fleet-wide feed or
-  just this replica's own (with a warning banner when it fell back to the
-  latter because Redis was configured but unreachable).
-- **Polling paused in hidden tabs**: every poll this dashboard runs
-  (Providers/Usage/Targets every 5s for the app's whole session, the
-  Charts tab's own 30s auto-refresh while open, and the Events tab's own
-  5s poll while it is the active tab) stops the instant the browser tab
-  itself is backgrounded (`document.hidden`), and catches up with an
-  immediate fetch — not a stale wait-out-the-interval — the instant it is
-  looked at again. A Redis-backed admin panel left open in a background
-  tab costs nothing while nobody can see it.
-- **URL hash state**: the current tab and its own selection round-trip
-  through `location.hash`, so a link (or a reload) restores exactly what
-  was showing — `#charts?window=<hour|day|month>&tab=<requests|tokens|cost|models>&metric=<req|tokin|tokout|cost>&scope=<total|user:{id}|group:{id}|model:{id}>&filter=<model id prefix>`,
-  `#usage?q=<search text>`, `#events?kind=<kind>&user=<search text>`. An
-  omitted field means "whatever it already defaulted to"; an unrecognized
-  tab, or an invalid value for a field that has a fixed set of valid
-  ones, is dropped rather than resetting every other, still-valid field
-  alongside it. Not every name in this hash stays in the address bar:
-  Charts' `scope` and `filter` are exactly the values `stores/history.ts`
-  sends as `scope=` and `prefix=` query parameters to this panel's own
-  admin API (`GET /admin/api/usage/history`, `GET /admin/api/usage/models`)
-  to fetch the selection they name, so a user/group id or model-id prefix
-  placed in the hash does reach a server — this panel's own, over the
-  same authenticated connection every other request on this page already
-  uses, never a third party. Usage's `q` and Events' `kind`/`user` are the
-  opposite: pure client-side filters applied to data already fetched
-  (`lib/events-filter.ts`'s `filterEvents`, and the Usage tables' own
-  search), so those three specifically never appear in any request this
-  page issues.
-- **Config warnings banner**: `GET /admin/api/overview`'s `warnings`
-  array (above) renders as a collapsible banner under the header —
-  nothing at all when the array is empty — naming the count, and, when
-  expanded, every warning's own exact text plus how many more were
-  dropped past the 50-entry cap, if any.
-- **Replica labels**: the header's own "last updated ..." status line
-  appends `· replica {overview.replica}` after a successful poll, and the
-  Providers tab's per-replica latency/provenance caption names that exact
-  replica id too — both so a reader looking at per-process figures
-  (latency and provenance are in-process, not fleet-wide — see
-  [Limits and accounting](#limits-and-accounting)) knows not just that
-  the number is replica-scoped, but which replica it came from.
+The admin dashboard redesign adds several new counter families on top of
+the ones [Limits and accounting](#limits-and-accounting) already
+describes. Every one of them is gated on `admin.enabled` — none is
+written at all with the admin dashboard off — and each is either
+**always-on-with-admin** (zero/near-zero cost, rides an EXISTING
+`counterStore` round trip, no config needed beyond `admin.enabled: true`)
+or **opt-in** (`admin.stats.userModel`/`admin.stats.latency`, both
+default `false`, each its own cardinality/cost trade-off an operator
+chooses explicitly).
+
+- **Always-on-with-admin**: last-seen, hourly provider attempt/fail/
+  timeout, failover (`fover`), rejections/hour, unpriced refusals
+  (`r402`), target × caller totals, and cache hit/miss/saved counters
+  (the last three additionally need the response cache itself
+  configured — `features.cacheStats` on `GET /admin/api/overview`/
+  `/admin/api/config` reports whether it is).
+- **Opt-in**: `admin.stats.userModel` (per-(user, model) usage
+  breakdown) and `admin.stats.latency` (per-bucket upstream latency
+  histograms) — see [`AdminStatsConfig`](#adminstatsconfig-adminstats)
+  above.
+
+**Redis cost — measured, not estimated** (`stats_write_test.go`, a real
+`Gateway` driven through one single-group chat request, counting calls to
+its `counterStore`; a `redisStore` call always pipelines its whole batch
+into ONE network round trip regardless of how many entries it carries, so
+counting calls is exactly counting round trips):
+
+| Configuration | `counterStore` round trips per request |
+|---|---|
+| `admin.enabled: false` | 3 (2 sync — `checkAndCount`, `accountWith` — + 1 async — `recordProviderAttempt`) — `l.statsAdmin` (`adminEnabled(cfg)`, `newConfiguredLimiter`) is false, so no "always-on-with-admin" family, last-seen included, ever writes (`TestRoundTrips_SingleGroupChat_Defaults_TwoSyncOneAsync`, `stats_write_test.go`) |
+| `admin.enabled: true` (`admin.stats.userModel`/`latency` on or off — **both default off, and neither changes this row**: `l.statsAdmin` is `adminEnabled(cfg)` alone, so last-seen and the rest of the always-on family are gated on `admin.enabled` by itself), cache miss or no cache, this scope's last-seen already written within `lastSeenGateThrottle` by this replica | 3 — every new counter family except last-seen rides one of the two existing sync batches above, never a new round trip; `userModel`/`latency`, when on, add entries to those SAME batches, never a new call |
+| Same as above, but this scope's last-seen is DUE (its first admitted request ever, or `lastSeenGateThrottle` — 60s — has elapsed since this replica's last write for it) | 4 — adds `recordLastSeen`'s own async write (P9 fix, moved off `checkAndCount`'s own batch — see [Limits and accounting](#limits-and-accounting)). This is the common case for a request from a SCOPE'S FIRST admitted request under a fresh limiter, `admin.enabled: true` regardless of the opt-in stats (`TestRoundTrips_SingleGroupChat_AdminEnabledStatsOff_FourRoundTripsWhenLastSeenDue`, `TestRoundTrips_SingleGroupChat_AllStatsOn_NoNewSyncRoundTrips`, `stats_write_test.go`) |
+| Cache hit (`cache.enabled: true`, `admin.enabled: true`), last-seen already throttled | 2 (`checkAndCount` + `recordCacheHit`'s async write) — `accountWith`/`recordProviderAttempt` never run at all, since the hit branch returns before either is reached |
+| Cache hit, last-seen due | 3 — adds `recordLastSeen`'s own async write, same condition as the row above |
+
+Two exceptions to "round trip count never changes with load": a
+response-cache hit trades away the two calls a miss would have paid
+(`accountWith`, `recordProviderAttempt`) for one (`recordCacheHit`) — a
+net DECREASE versus a miss, not an increase — and a `402` refusal under a
+cost budget adds one FURTHER async round trip of its own
+(`recordUnpriced402` via `countAsync`, `events.go`) on top of whatever
+`checkAndCount` already paid to admit the request.
+
+With every stat on, the EXISTING `checkAndCount`/`accountWith` round
+trips each carry more `counterIncr` entries per batch: a failover
+candidate that also misses its own cache lookup can add up to 5 entries
+to `accountWith`'s own batch (`cmiss`: up to 3 — 2 total + 1 model day —
+plus `fover`: 2), never a new round trip for either. Last-seen no longer
+rides `checkAndCount`'s admission batch at all (P9 fix): it is its own
+fire-and-forget `SET`, one per `user`/`group` scope in the request (never
+the synthetic `total` scope, and never more than one per scope per
+`lastSeenGateThrottle` per replica) — which is why it appears as its own
+table row above instead of as extra entries on an existing one.
+
+**Key vocabulary** (`llmgw:{kind}:{id}:{metric}:{window}:{bucket}`,
+[Limits and accounting](#limits-and-accounting)'s own key format, except
+last-seen, below, which carries no window/bucket at all):
+
+| Vocabulary | Meaning | TTL |
+|---|---|---|
+| `umodel` (kind) | Per-(user, model) breakdown scope (`admin.stats.userModel`) — id is `strconv.Itoa(len(user)) + ":" + user + canonical` (length-prefixed so a user name containing any character can never collide with the canonical model id immediately after it) | 35d (day) / 400d (month) |
+| `tcaller` (kind) | Per-(target, caller) breakdown scope — id is `"{mcp\|agent}/{target}/{caller}"` | 35d (day) / 400d (month) |
+| `llmgw:seen:{kind}:{id}` | Last-seen absolute key (below) — fixed key, no window/bucket, `kind` is `"user"` or `"group"` | 400d |
+| `timeout` (metric) | Provider-level "did not answer within budget" counter (`isDeadlineExceeded(err) \|\| matchesSentinel(err, errProviderTimeout)`) | 48h (hour) / 35d (day) |
+| `fover` (metric) | Failover counter — `prov/{from}`, incremented for every candidate after the first, keyed by the PREVIOUS candidate's provider name | 48h (hour) / 35d (day) |
+| `r402` (metric) | Unpriced-refusal counter — `total/all` and `model/{canonical}` | 48h (hour) / 35d (day) |
+| `rej` hour (metric+window) | Rejection counter, now also at hour granularity (day already existed) — same scopes as the existing `rej`/day | 48h |
+| `chit` / `csave` / `cmiss` (metric) | Cache hit / saved-µUSD / miss counters — `total/all` gets hour AND day; `model/{canonical}` gets day only, for all three | 48h (hour) / 35d (day) |
+| `ld00`..`ld13` (metric) | Per-bucket upstream call-duration histogram (`admin.stats.latency`) — 13 configured bounds (`latencyBucketBounds`, [Metrics](#metrics), 0.1s–600s) plus one overflow bucket, `%02d`-padded | 48h (hour) / 35d (day) |
+| `lt00`..`lt13` (metric) | Per-bucket upstream time-to-first-byte histogram (`admin.stats.latency`, only when the candidate reported a TTFB) | 48h (hour) / 35d (day) |
+
+**Last-seen** (`llmgw:seen:{kind}:{id}`, DECISIONS Q6) is written as an
+ABSOLUTE `SET key <unix seconds> EX <ttl>` — not an `INCRBY` — via its own
+fire-and-forget async write (`recordLastSeen`, `countAsync`), for every
+`user`/`group` scope in the request (never the synthetic `total` scope: a
+fleet-wide "when was anyone last seen" has no meaning). Called ONLY once
+`checkAndCount` has already reported the request admitted, never for one
+it refuses: `lastSeen` genuinely tracks a scope's most recent ADMITTED
+request, matching `GET /admin/api/usage`'s own field doc below — an
+earlier version appended this to `checkAndCount`'s own pre-admission
+batch, which moved a scope's last-seen timestamp forward even for a
+request that turned out to be rejected. **Throttled to once per 60
+seconds per (scope, replica)**: each replica tracks, in an in-process map
+starting at a 4,096-entry rotation threshold (rotating to a fresh
+generation past that, with the previous generation still consulted on
+lookup so an active scope's own throttle survives the rotation), the
+last instant IT wrote a last-seen SET for that scope, and skips the
+write entirely if less than 60s has passed — so a busy scope's last-seen
+key gets at most one `SET` per minute per replica, for up to roughly
+8,192 concurrently active `user`+`group` scopes (2x the base threshold,
+current and previous generations both full). Above that, the rotation
+threshold itself DOUBLES each time a generation refills within one
+throttle window of the previous rotation — direct evidence the live
+scope population outgrew it — capped at 65,536 (`lastSeenGateMapCapMax`,
+`limits.go`), so the throttle keeps holding for populations up to
+roughly 131,072 concurrently active scopes (2x the ceiling) before it
+degrades back to the same fixed-size rotate/discard behaviour a
+below-ceiling gate always had; it never grows further, and never
+shrinks. This still bounds one replica's last-seen throttle memory to at
+most two generations' worth of entries (int64 key + value, tens of MB at
+the ceiling) rather than one entry per distinct scope ever seen — a
+displaced or never-revisited scope's entry is simply dropped on the next
+rotation, matching `rejectionCounter`'s own trade-off. `GET
+/admin/api/usage`'s own `lastSeen` field (unix seconds, `0` for
+never/unknown) is this key, read back.
+
+**`adminMaxKeysPerRequest` (64000)** is the hard cap on how many
+`counterStore` keys any single stats-read endpoint (`usage/models`,
+`usage/series`, `usage/totals`, `performance`) may read in one request —
+a caller whose scope/span/offset/metric combination would exceed it gets
+`400 "range too large; narrow span or filter"` before any store read is
+attempted, rather than an unbounded pipeline against the shared store.
+
+**404 when a feature is off**: `GET /admin/api/usage/totals?kind=
+usermodel` or `?kind=modeluser` answers `404 "per-user-model statistics
+are not enabled (admin.stats.userModel)"` when that stat is off — checked
+only AFTER every other query parameter is already known valid, so a
+malformed request always reports what is actually wrong with it, never a
+blanket "feature disabled" for an unrelated mistake. Every other endpoint
+degrades instead of erroring: `admin.stats.latency` off simply omits the
+percentile fields from `GET /admin/api/performance` (`latencyEnabled:
+false` on the response says so); `features.cacheStats` off simply omits
+`cacheHits`/`cacheSavedMicroUsd` from `GET /admin/api/usage/models`'
+detail mode.
+
+### Dashboard
+
+The dashboard was redesigned around a left sidebar of seven pages
+(`webui/src/lib/pages.ts`) replacing the earlier flat-tab shell
+(`ChartsView.vue`/`UsageChart.vue`/`UsageView.vue`/`ProvidersView.vue`,
+and `composables/useTabHash.ts`, all deleted): a request only needs to
+answer one question ("what does this page show"), instead of a tab whose
+own content changed shape depending on a second `tab=` sub-parameter.
+
+- **Sidebar pages** (`SidebarNav.vue`, horizontal-scrolling on narrow
+  screens): **Home** (spend today/MTD vs. budget, projected month-end,
+  req/min, fleet error rate, open breakers, top 5 users/models, latest
+  events, config warnings + unpriced-model count), **Spend** (stacked
+  time-series with optional dashed period-over-period comparison,
+  burn-down vs. budget with a projected run-out date, group→user→model
+  attribution drill-down, a pricing-health table surfacing unpriced
+  served models first, and a cost-avoided card for free-tier usage
+  against a reference paid model), **Consumers** (the user/group
+  directory — reusing the usage table/bars this section already
+  documented — an access matrix of group × provider/MCP/agent, and a
+  per-user detail view with its own timeline and recent errors),
+  **Models** (the model catalog joined with usage and p50/p95/error-rate
+  performance, and the provider health panel moved from the old
+  Providers tab), **Reliability** (per-provider error-rate/failover/
+  timeout/402 time series, plus the events feed), **Config** (the
+  redacted config tree and the change helper, below), and **MCP &
+  Agents** (unchanged target list, now with a per-caller breakdown card).
+- **Global filter bar** (`GlobalFilterBar.vue`, under the header, applies
+  to every page except MCP & Agents): a `range` preset — `24h`, `48h`,
+  `7d` (default), `14d`, `30d`, `3mo`, `6mo`, or `12mo`, each a fixed
+  `(window, span)` pair (`lib/range.ts`) matching `GET /admin/api/usage/
+  series`'s own `window`/`span` parameters exactly — a `cmp` toggle
+  ("vs previous period", `none` by default), and a `scope` filter (`all`,
+  `group:{id}`, `user:{id}`, or `provider:{name}`). **Comparison
+  availability depends on the range**: a period-over-period comparison
+  reads the SAME span twice (the current period and the one immediately
+  before it), so it needs `2 × span` buckets total against a window's own
+  retention ceiling (`historyMaxSpan` — 48 hourly / 35 daily / 13 monthly
+  buckets) — the `48h` preset (span 48 of 48), `30d` (span 30 of 35 —
+  `2×30=60` already exceeds it), and `12mo` (span 12 of 13) cannot be
+  compared (the toggle disables itself with a "retention limit" reason);
+  the other five ranges can.
+- **Hash schema**: `#<page>?range=7d&cmp=prev&scope=group:friends&<page
+  params>` — global filters and page-specific params share one
+  `location.hash`, so a link or a reload restores exactly what was
+  showing; a default value is always OMITTED from the hash rather than
+  written out explicitly. Per-page params: Spend `by=provider|model|group`,
+  `metric=cost|req|tokin|tokout`, `ref=<canonical>` (cost-avoided
+  reference model), `drill=group:x|user:x` (attribution breadcrumb);
+  Consumers `q`, `view=directory|matrix`, `user=<name>`; Models `q`,
+  `model=<canonical>`; Reliability `provider`, `kind`, `user`; Config
+  `helper=limits|grant|pricing|model|user`; MCP & Agents `q`,
+  `target=mcp/x`. **Legacy mapping** (`LEGACY_PAGE_MAP`,
+  `lib/hash-state.ts`): a bookmark or shared link built against the old
+  shell still lands somewhere sensible — `#providers`→`models`,
+  `#usage`→`consumers`, `#charts`→`spend`, `#events`→`reliability`;
+  `#targets` keeps its own name (the one page that did not move). A
+  legacy hash's own query params never carry over — none of the old
+  names (`#charts`'s `tab=models&metric=cost`, for instance) map cleanly
+  onto the new page's own param names, so a legacy link lands on a clean
+  instance of its mapped page rather than misapplying a stale param.
+- **Config page's change helper** (`ChangeHelper.vue`) is five forms —
+  limits, an access grant, pricing, model metadata, and a new user — each
+  producing a paste-ready YAML or `users.json` snippet
+  (`lib/snippets.ts`/`lib/yaml-emit.ts`) in the exact shape the
+  production config repo actually uses (nested at
+  `spec.plugin.llmgateway.<section>` for YAML; `users.json`'s own fixed
+  key order for a user line). **It emits snippets only — there is no
+  write API of any kind.** `GET /admin/api/config` (above) is, and stays,
+  read-only; an operator copies the generated snippet into their own
+  GitOps-managed config and applies it the normal way. Client-side
+  validation (`isValidName`, `isValidNonNegative`, and a personal-grant
+  rejection mirroring `auth.go`'s own "models without providers" check)
+  catches a malformed value before it is ever rendered into a snippet,
+  but nothing here ever mutates a running Gateway.
+- **Still true from the earlier dashboard**: usage-vs-limit bars (amber
+  at 80% of a configured limit, red at 100%+), the cost forecast card
+  (`lib/forecast.ts`, nothing shown for the first 2% of the UTC calendar
+  month), CSV export (RFC 4180, client-side, clipboard fallback with no
+  `Blob`/`URL` API), the config-warnings banner, replica labels on
+  per-process figures, and polling pausing the instant a browser tab is
+  backgrounded (`lib/polling.ts`, `document.hidden`) with an immediate
+  catch-up fetch when it is looked at again — all carried over into their
+  new pages rather than dropped.
 
 ## Metrics
 
