@@ -2484,6 +2484,8 @@ func TestAdminUsageModels_ValidatesParameters(t *testing.T) {
 		{"limit not a number", "?metric=cost&window=day&limit=lots"},
 		// item 6, v0.3 dashboard task round 2: prefix over usageModelsPrefixMaxLen.
 		{"prefix over max length", "?metric=cost&window=day&prefix=" + strings.Repeat("a", usageModelsPrefixMaxLen+1)},
+		// free-models feature: detail must be "1"/"true"/""/"0"/"false", nothing else.
+		{"invalid detail", "?metric=cost&window=day&detail=yes"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rec := httptest.NewRecorder()
@@ -2772,6 +2774,221 @@ func TestChunkedModelSpanTotals_SplitsIntoMultipleRoundTrips(t *testing.T) {
 	}
 	if got[n-1] != int64(n-1) {
 		t.Errorf("got[%d] = %d, want %d", n-1, got[n-1], n-1)
+	}
+}
+
+// TestChunkedModelSpanTotalsMulti_SplitsIntoMultipleRoundTrips is
+// TestChunkedModelSpanTotals_SplitsIntoMultipleRoundTrips' own detail=1
+// counterpart (free-models feature): a span- AND metrics-multiplied
+// catalog read still stays chunked to at most usageModelsChunkKeys keys
+// per storeGetMulti round trip. wantCalls is derived from the SAME
+// perChunk/ceil-division formula chunkedModelSpanTotalsMulti itself
+// applies (span*len(metrics) per id instead of span alone), so this
+// asserts the real chunk boundary, not a hand-picked number.
+func TestChunkedModelSpanTotalsMulti_SplitsIntoMultipleRoundTrips(t *testing.T) {
+	t.Parallel()
+	fixedNow := time.Date(2026, 9, 23, 10, 0, 0, 0, time.UTC)
+	const n = 200
+	const span = 6
+	metrics := []string{metricReq, metricTokIn, metricTokOut, metricCost}
+
+	store := &countingMultiStore{values: make(map[string]int64, n)}
+	ids := make([]string, n)
+	for i := 0; i < n; i++ {
+		ids[i] = fmt.Sprintf("provider/model-%d", i)
+		// Only the req metric's current bucket is seeded, and only with
+		// this id's own index — a direct probe of per-metric, per-id
+		// positional ordering across the chunk boundary.
+		store.values[windowKey(kindModel, ids[i], metricReq, windowDay, fixedNow)] = int64(i)
+	}
+
+	l := newLimiter(store, true)
+	l.nowFn = func() time.Time { return fixedNow }
+	gw := &Gateway{limiter: l}
+
+	got, ok := gw.chunkedModelSpanTotalsMulti(ids, metrics, windowDay, fixedNow, span)
+	if !ok {
+		t.Fatal("want ok=true")
+	}
+	if len(got) != len(metrics) {
+		t.Fatalf("len(got) = %d, want %d metric rows", len(got), len(metrics))
+	}
+	if len(got[0]) != n {
+		t.Fatalf("len(got[0]) = %d, want %d", len(got[0]), n)
+	}
+
+	perChunk := usageModelsChunkKeys / (span * len(metrics))
+	wantCalls := (n + perChunk - 1) / perChunk
+	if store.getMultiCalls != wantCalls {
+		t.Errorf("getMultiCalls = %d, want %d (%d ids, %d ids/chunk, each chunk <= %d keys = ids/chunk * span * len(metrics))", store.getMultiCalls, wantCalls, n, perChunk, usageModelsChunkKeys)
+	}
+	// req (metric index 0) preserves order/value across the chunk boundary.
+	if got[0][perChunk] != int64(perChunk) {
+		t.Errorf("got[0][%d] = %d, want %d (order preserved across the chunk boundary)", perChunk, got[0][perChunk], perChunk)
+	}
+	if got[0][n-1] != int64(n-1) {
+		t.Errorf("got[0][%d] = %d, want %d", n-1, got[0][n-1], n-1)
+	}
+	// Every other metric was never seeded, so its span sum must be 0.
+	for m := 1; m < len(metrics); m++ {
+		if got[m][0] != 0 {
+			t.Errorf("got[%d][0] = %d, want 0 (metric %q was never seeded)", m, got[m][0], metrics[m])
+		}
+	}
+}
+
+// --- usage/models: detail=1 (free-models feature) ---
+
+// TestAdminUsageModels_Detail_OffKeepsLegacyByteShape proves detail=0,
+// detail=false and an absent detail parameter all produce the exact same
+// bytes — the endpoint's contract before this feature existed — and that
+// none of the detail-only JSON keys ever appear in that shape.
+func TestAdminUsageModels_Detail_OffKeepsLegacyByteShape(t *testing.T) {
+	t.Parallel()
+	cfg := newAdminTestConfig()
+	h, gw := newAdminGatewayHandle(t, cfg)
+
+	fixedNow := time.Date(2026, 8, 20, 12, 30, 0, 0, time.UTC)
+	gw.limiter.nowFn = func() time.Time { return fixedNow }
+	seedModelCounter(gw, "alpha/a-model-1", metricCost, windowDay, fixedNow, 900)
+	seedModelCounter(gw, "zeta/z-model", metricCost, windowDay, fixedNow, 4_100)
+
+	base := adminUsageModelsPath + "?metric=cost&window=day"
+	var bodies [][]byte
+	for _, query := range []string{base, base + "&detail=0", base + "&detail=false"} {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, adminRequest(http.MethodGet, query, "sk-admin1"))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("query=%s: status = %d, want 200, body=%s", query, rec.Code, rec.Body.String())
+		}
+		bodies = append(bodies, rec.Body.Bytes())
+	}
+	for i := 1; i < len(bodies); i++ {
+		if string(bodies[i]) != string(bodies[0]) {
+			t.Errorf("body for query %d = %q, want byte-identical to the absent-detail response %q", i, bodies[i], bodies[0])
+		}
+	}
+	body := string(bodies[0])
+	for _, key := range []string{`"detail"`, `"requests"`, `"tokensIn"`, `"tokensOut"`, `"costMicroUsd"`, `"free"`} {
+		if strings.Contains(body, key) {
+			t.Errorf("legacy (detail off) body unexpectedly contains %s: %s", key, body)
+		}
+	}
+}
+
+// TestAdminUsageModels_Detail_FreeModel_ZeroMetricStillIncluded_ViaModelMeta
+// proves the problem this feature exists to fix: a free model with real
+// request traffic but zero cost is invisible to the non-detail path
+// (metric=cost drops any zero total) and visible, at Value=0, with
+// Free=true, once detail=1 is set.
+func TestAdminUsageModels_Detail_FreeModel_ZeroMetricStillIncluded_ViaModelMeta(t *testing.T) {
+	t.Parallel()
+	cfg := newAdminTestConfig()
+	cfg.ModelMeta = map[string]*ModelMetaConfig{
+		"alpha/a-model-1": {Free: true},
+	}
+	h, gw := newAdminGatewayHandle(t, cfg)
+
+	fixedNow := time.Date(2026, 8, 20, 12, 30, 0, 0, time.UTC)
+	gw.limiter.nowFn = func() time.Time { return fixedNow }
+	seedModelCounter(gw, "alpha/a-model-1", metricReq, windowDay, fixedNow, 5)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, adminRequest(http.MethodGet, adminUsageModelsPath+"?metric=cost&window=day&detail=1", "sk-admin1"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	var got adminUsageModelsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !got.Detail {
+		t.Error("Detail = false, want true")
+	}
+	if len(got.Models) != 1 || got.Models[0].ID != "alpha/a-model-1" {
+		t.Fatalf("models = %+v, want exactly alpha/a-model-1 (the only id with any nonzero metric)", got.Models)
+	}
+	entry := got.Models[0]
+	if entry.Value != 0 {
+		t.Errorf("Value = %d, want 0 (metric=cost, and cost is genuinely 0)", entry.Value)
+	}
+	if entry.Requests == nil || *entry.Requests != 5 {
+		t.Errorf("Requests = %v, want 5", entry.Requests)
+	}
+	if entry.CostMicroUSD == nil || *entry.CostMicroUSD != 0 {
+		t.Errorf("CostMicroUSD = %v, want a present 0, not omitted", entry.CostMicroUSD)
+	}
+	if !entry.Free {
+		t.Error("Free = false, want true (modelMeta Free:true)")
+	}
+}
+
+// TestAdminUsageModels_Detail_FreeViaZeroPriceOverride proves Free also
+// follows from a KNOWN price of exactly 0 (a Pricing override, here),
+// with no modelMeta entry involved at all — the plan's second free
+// condition, distinct from modelMetaFree.
+func TestAdminUsageModels_Detail_FreeViaZeroPriceOverride(t *testing.T) {
+	t.Parallel()
+	cfg := newAdminTestConfig()
+	cfg.Pricing = map[string]*ModelPricing{
+		"zeta/z-model": {InputPerM: 0, OutputPerM: 0},
+	}
+	h, gw := newAdminGatewayHandle(t, cfg)
+
+	fixedNow := time.Date(2026, 8, 20, 12, 30, 0, 0, time.UTC)
+	gw.limiter.nowFn = func() time.Time { return fixedNow }
+	seedModelCounter(gw, "zeta/z-model", metricReq, windowDay, fixedNow, 3)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, adminRequest(http.MethodGet, adminUsageModelsPath+"?metric=cost&window=day&detail=1", "sk-admin1"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	var got adminUsageModelsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(got.Models) != 1 || got.Models[0].ID != "zeta/z-model" {
+		t.Fatalf("models = %+v, want exactly zeta/z-model", got.Models)
+	}
+	if !got.Models[0].Free {
+		t.Error("Free = false, want true (a known price of 0/0 must render as free)")
+	}
+}
+
+// TestAdminUsageModels_Detail_SortTieBreaksOnRequestsThenID proves the
+// detail=1 sort order: value desc, THEN requests desc, THEN id asc. All
+// three seeded models tie on cost (0); zeta/z-model's higher request
+// count must rank it first despite "z" sorting after "a", and the
+// remaining tie between the two alpha models falls through to id asc.
+func TestAdminUsageModels_Detail_SortTieBreaksOnRequestsThenID(t *testing.T) {
+	t.Parallel()
+	cfg := newAdminTestConfig()
+	h, gw := newAdminGatewayHandle(t, cfg)
+
+	fixedNow := time.Date(2026, 8, 20, 12, 30, 0, 0, time.UTC)
+	gw.limiter.nowFn = func() time.Time { return fixedNow }
+	seedModelCounter(gw, "zeta/z-model", metricReq, windowDay, fixedNow, 10)
+	seedModelCounter(gw, "alpha/a-model-1", metricReq, windowDay, fixedNow, 5)
+	seedModelCounter(gw, "alpha/a-model-2", metricReq, windowDay, fixedNow, 5)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, adminRequest(http.MethodGet, adminUsageModelsPath+"?metric=cost&window=day&detail=1", "sk-admin1"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	var got adminUsageModelsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	wantOrder := []string{"zeta/z-model", "alpha/a-model-1", "alpha/a-model-2"}
+	if len(got.Models) != len(wantOrder) {
+		t.Fatalf("models = %+v, want %d entries", got.Models, len(wantOrder))
+	}
+	for i, wantID := range wantOrder {
+		if got.Models[i].ID != wantID {
+			t.Errorf("models[%d].ID = %q, want %q (full order = %+v)", i, got.Models[i].ID, wantID, got.Models)
+		}
 	}
 }
 

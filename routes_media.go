@@ -137,7 +137,9 @@ func (g *Gateway) handleImagesGenerations(w http.ResponseWriter, r *http.Request
 	if _, err := adapter.imagesGeneration(ctx, sw, req); err != nil {
 		g.recordUpstreamEvent(scopes, upstreamModel, adapter.name(), routeImages, err)
 		g.handleAdapterError(sw, err, adapter.name())
+		return
 	}
+	g.recordMediaModelUsage(adapter.name(), upstreamModel)
 }
 
 // handleAudioSpeech implements POST /v1/audio/speech (spec §3): an
@@ -204,7 +206,9 @@ func (g *Gateway) handleAudioSpeech(w http.ResponseWriter, r *http.Request, u *u
 	if _, err := adapter.audioSpeech(ctx, sw, body, "application/json"); err != nil {
 		g.recordUpstreamEvent(scopes, upstreamModel, adapter.name(), routeAudioSpeech, err)
 		g.handleAdapterError(sw, err, adapter.name())
+		return
 	}
+	g.recordMediaModelUsage(adapter.name(), upstreamModel)
 }
 
 // handleAudioTranscriptions implements POST /v1/audio/transcriptions
@@ -310,7 +314,39 @@ func (g *Gateway) handleAudioTranscriptions(w http.ResponseWriter, r *http.Reque
 	if _, err := adapter.audioTranscription(ctx, sw, uploadBody, uploadContentType); err != nil {
 		g.recordUpstreamEvent(scopes, upstreamModel, adapter.name(), routeAudioTranscriptions, err)
 		g.handleAdapterError(sw, err, adapter.name())
+		return
 	}
+	g.recordMediaModelUsage(adapter.name(), upstreamModel)
+}
+
+// recordMediaModelUsage writes ONLY the kindModel scope's own request
+// counter for a media route (images/generations, audio/speech, audio/
+// transcriptions) that has just been served successfully — a nil error
+// from the adapter call means the upstream answered 2xx and its body was
+// already forwarded to the client (openaiAdapter.imagesGeneration/
+// audioSpeech/audioTranscription, provider_openai.go, translate a
+// non-2xx upstream response into a non-nil error via
+// newProviderHTTPError BEFORE writing anything to the client, and every
+// other adapter's media methods either forward a genuine 2xx or return a
+// *translateError with no upstream call at all — so err == nil is
+// exactly "2xx was forwarded to the client" for all three routes).
+//
+// Unlike runUnified/handlePassthrough's own account call, this passes NO
+// user/group/total scopes: admitRequestForRoute's checkAndCount already
+// wrote their request counters at admission, and images/audio are never
+// token- or cost-accounted (spec §3) — the only new counter a media
+// route needs is the per-model request count GET
+// /admin/api/usage/models ranks over (free-models feature), which
+// nothing wrote for these routes before it. usage{} and cost 0 keep
+// account's own tokin/tokout/cost writes skipped (account only writes a
+// direction whose value is nonzero), so this is exactly one store batch
+// containing the model scope's req counter at all three chart windows —
+// the same single-round-trip account already batches for every other
+// scope, called synchronously here, the same as every other account call
+// site (routes_unified.go, routes_passthrough.go).
+func (g *Gateway) recordMediaModelUsage(providerName, upstreamModel string) {
+	canonical := providerModelScopeID(providerName, upstreamModel)
+	g.limiter.account(withModelScope(nil, canonical), usage{}, 0)
 }
 
 // readAdmittedCapped claims a body-admission slot (acquireBodyAdmission),

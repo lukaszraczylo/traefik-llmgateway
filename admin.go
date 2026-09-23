@@ -1223,6 +1223,36 @@ func parseUsageModelsSpan(raw, window string) (span int, ok bool) {
 	return n, true
 }
 
+// usageModelsDetailOn and usageModelsDetailOff enumerate GET
+// /admin/api/usage/models' optional "detail" query parameter's accepted
+// values (free-models feature): "1"/"true" turn detail on, ""/"0"/
+// "false" leave it off (the byte-identical legacy response shape).
+// Anything else is a 400, mirroring this endpoint's own
+// validate-before-reading shape for every other parameter.
+const (
+	usageModelsDetailOn1    = "1"
+	usageModelsDetailOn2    = "true"
+	usageModelsDetailOff0   = "0"
+	usageModelsDetailOff1   = "false"
+	usageModelsDetailOffRaw = ""
+)
+
+// parseUsageModelsDetail parses GET /admin/api/usage/models' optional
+// "detail" query parameter: empty, "0" or "false" means off (today's
+// byte-identical response — no Requests/TokensIn/TokensOut/CostMicroUSD/
+// Free fields, no "detail" key at all thanks to its own omitempty); "1"
+// or "true" means on. ok is false for anything else.
+func parseUsageModelsDetail(raw string) (detail bool, ok bool) {
+	switch raw {
+	case usageModelsDetailOffRaw, usageModelsDetailOff0, usageModelsDetailOff1:
+		return false, true
+	case usageModelsDetailOn1, usageModelsDetailOn2:
+		return true, true
+	default:
+		return false, false
+	}
+}
+
 // catalogModelScopeIDs returns every catalogued (provider, model) pair's
 // canonical kindModel scope id, in the registry snapshot's own order. It
 // is the enumeration GET /admin/api/usage/models ranks over, and the same
@@ -1242,20 +1272,43 @@ func (g *Gateway) catalogModelScopeIDs() []string {
 // adminUsageModelEntryView is one ranked model in GET
 // /admin/api/usage/models: its canonical "provider/model" id and its
 // total for the requested metric over the requested window's CURRENT
-// bucket.
+// bucket. detail=1 (free-models feature) additionally populates
+// Requests/TokensIn/TokensOut/CostMicroUSD — pointers so a genuinely
+// zero total is still emitted rather than indistinguishable from "not
+// requested" — and Free. Every detail-only field is omitted (not
+// zeroed) in the non-detail response, keeping it byte-identical to
+// before this feature existed.
 type adminUsageModelEntryView struct {
-	ID    string `json:"id"`
-	Value int64  `json:"value"`
+	// Requests, TokensIn, TokensOut and CostMicroUSD are populated only
+	// by serveAdminUsageModelsDetail (detail=1); the non-detail path
+	// never sets them, so they stay nil and omitempty drops them.
+	// Ordered ahead of ID/Value/Free for fieldalignment (govet: minimal
+	// GC pointer-scan prefix) — JSON names are what's binding, not Go
+	// field order or the JSON key order it produces (the plan's own
+	// ruling, free-models plan's "Response" section).
+	Requests     *int64 `json:"requests,omitempty"`
+	TokensIn     *int64 `json:"tokensIn,omitempty"`
+	TokensOut    *int64 `json:"tokensOut,omitempty"`
+	CostMicroUSD *int64 `json:"costMicroUsd,omitempty"`
+	ID           string `json:"id"`
+	Value        int64  `json:"value"`
+	// Free is populated only by serveAdminUsageModelsDetail too; false
+	// (the non-detail zero value) is dropped by its own omitempty.
+	Free bool `json:"free,omitempty"`
 }
 
 // adminUsageModelsResponse is GET /admin/api/usage/models' body. Span
 // (F2, v0.3 dashboard task) echoes the resolved span (1 when the request
 // carried no ?span= parameter — parseUsageModelsSpan's own default).
+// Detail (free-models feature) echoes whether the request carried
+// detail=1 (parseUsageModelsDetail) — omitted (false) via its own
+// omitempty for the legacy, byte-identical detail=0/absent response.
 type adminUsageModelsResponse struct {
 	Metric string                     `json:"metric"`
 	Window string                     `json:"window"`
 	Models []adminUsageModelEntryView `json:"models"`
 	Span   int                        `json:"span"`
+	Detail bool                       `json:"detail,omitempty"`
 }
 
 // usageModelsChunkKeys bounds how many counterStore keys
@@ -1300,16 +1353,59 @@ func (g *Gateway) chunkedModelSpanTotals(ids []string, metric, window string, no
 	return out, true
 }
 
+// chunkedModelSpanTotalsMulti is chunkedModelSpanTotals generalized to
+// several metrics read together (GET /admin/api/usage/models' detail=1
+// mode, free-models feature: it needs all four metrics —
+// req/tokin/tokout/cost — for every candidate id, not just the one the
+// ranking sorts by). Each chunk's own key count is
+// len(chunk)*span*len(metrics), so perChunk divides usageModelsChunkKeys
+// by span*len(metrics) instead of span alone — chunkedModelSpanTotals'
+// own reasoning, extended for the extra metrics dimension. now is
+// resolved once by the caller and threaded through every chunk, exactly
+// like chunkedModelSpanTotals, and any chunk that fails fails the whole
+// call for the identical reason: a detail ranking silently missing an
+// arbitrary subset of models is worse than a 503.
+func (g *Gateway) chunkedModelSpanTotalsMulti(ids, metrics []string, window string, now time.Time, span int) ([][]int64, bool) {
+	if len(metrics) == 0 || span < 1 {
+		return nil, true
+	}
+	perChunk := usageModelsChunkKeys / (span * len(metrics))
+	if perChunk < 1 {
+		perChunk = 1
+	}
+	out := make([][]int64, len(metrics))
+	for m := range out {
+		out[m] = make([]int64, 0, len(ids))
+	}
+	for len(ids) > 0 {
+		n := perChunk
+		if n > len(ids) {
+			n = len(ids)
+		}
+		totals, ok := g.limiter.modelSpanTotalsMulti(ids[:n], metrics, window, now, span)
+		if !ok {
+			return nil, false
+		}
+		for m := range out {
+			out[m] = append(out[m], totals[m]...)
+		}
+		ids = ids[n:]
+	}
+	return out, true
+}
+
 // serveAdminUsageModels writes GET /admin/api/usage/models' ranking of the
 // most-used models for one metric/window (the Charts view's "Models"
 // tab): "metric"=req|tokin|tokout|cost, "window"=hour|day|month, optional
 // "limit"=N (default and max per the constants above), optional
 // "prefix"=STRING (item 6, v0.3 dashboard task round 2: the Charts
 // view's model search box) narrowing the catalog to ids that start with
-// it before anything is ranked — see below. Every parameter is validated
-// before the store is touched — 400 for an unrecognized metric or
-// window, an out-of-range limit, or a prefix over
-// usageModelsPrefixMaxLen.
+// it before anything is ranked — see below, optional "detail"=1|true
+// (free-models feature; parseUsageModelsDetail) switching to
+// serveAdminUsageModelsDetail below. Every parameter is validated before
+// the store is touched — 400 for an unrecognized metric or window, an
+// out-of-range limit, a prefix over usageModelsPrefixMaxLen, or an
+// unrecognized detail value.
 //
 // ONLY NON-ZERO models are returned, by explicit operator requirement: the
 // catalog runs to hundreds of models and a ranking padded with zeroes is
@@ -1334,6 +1430,13 @@ func (g *Gateway) chunkedModelSpanTotals(ids []string, metric, window string, no
 // answers 503, never a silently-empty ranking — the same rule
 // serveAdminUsageHistory applies, and for the same reason: "the store was
 // unreachable" must never render as "no model was used".
+//
+// detail=0 (or an absent detail parameter) is byte-identical to this
+// endpoint's behavior before the free-models feature existed — the
+// branch below never runs, and adminUsageModelsResponse's own Detail
+// field and every adminUsageModelEntryView detail-only field stay at
+// their zero value, which their shared omitempty tag drops from the
+// JSON entirely.
 func (g *Gateway) serveAdminUsageModels(sw *statusTrackingWriter, r *http.Request) {
 	q := r.URL.Query()
 
@@ -1362,6 +1465,11 @@ func (g *Gateway) serveAdminUsageModels(sw *statusTrackingWriter, r *http.Reques
 		writeOAIError(sw, http.StatusBadRequest, "invalid_request_error", "invalid prefix")
 		return
 	}
+	detail, ok := parseUsageModelsDetail(q.Get("detail"))
+	if !ok {
+		writeOAIError(sw, http.StatusBadRequest, "invalid_request_error", "invalid detail")
+		return
+	}
 
 	ids := g.catalogModelScopeIDs()
 	if prefix != "" {
@@ -1373,6 +1481,12 @@ func (g *Gateway) serveAdminUsageModels(sw *statusTrackingWriter, r *http.Reques
 		}
 		ids = filtered
 	}
+
+	if detail {
+		g.serveAdminUsageModelsDetail(sw, ids, metric, window, span, limit)
+		return
+	}
+
 	totals, storeOK := g.chunkedModelSpanTotals(ids, metric, window, g.limiter.now(), span)
 	if !storeOK {
 		writeOAIError(sw, http.StatusServiceUnavailable, "server_error", "usage history store unavailable")
@@ -1398,6 +1512,114 @@ func (g *Gateway) serveAdminUsageModels(sw *statusTrackingWriter, r *http.Reques
 
 	setAdminJSONHeaders(sw)
 	_ = json.NewEncoder(sw).Encode(adminUsageModelsResponse{Metric: metric, Window: window, Span: span, Models: models})
+}
+
+// usageModelsDetailMetrics is the fixed metric read/unpack order
+// serveAdminUsageModelsDetail uses: req, tokin, tokout, cost — matching
+// adminUsageModelEntryView's own field order (Requests, TokensIn,
+// TokensOut, CostMicroUSD). Built fresh per call rather than as a
+// package-level var (go.md: no mutable package-level state) — the cost
+// of one 4-element slice literal per detail request is immaterial next
+// to the storeGetMulti round trip it drives.
+func usageModelsDetailMetrics() []string {
+	return []string{metricReq, metricTokIn, metricTokOut, metricCost}
+}
+
+// usageModelsMetricIndex maps metric — already validated by
+// validHistoryMetric, so always one of the four cases below — to its
+// position in usageModelsDetailMetrics, picking out the "value" column
+// GET /admin/api/usage/models' detail=1 mode ranks by: whichever metric
+// the caller actually asked for, even though detail mode always reads
+// all four.
+func usageModelsMetricIndex(metric string) int {
+	switch metric {
+	case metricReq:
+		return 0
+	case metricTokIn:
+		return 1
+	case metricTokOut:
+		return 2
+	default: // metricCost: the only case validHistoryMetric still allows through
+		return 3
+	}
+}
+
+// adminUsageModelFree reports whether canonical (a catalogued
+// "provider/model" id, bare its part after the first "/") is free for
+// GET /admin/api/usage/models' detail=1 mode: either an operator
+// modelMeta entry marks it Free (modelMetaFree, modelmeta.go — the SAME
+// two-key lookup billing itself uses, so this view and actual billing
+// can never disagree), or its resolved price (resolveUnifiedPricing,
+// failover.go — the identical resolution unifiedCostMicros itself uses)
+// is KNOWN and both per-token prices are exactly 0. The second check
+// matters on its own: a configured or built-in price table entry that
+// happens to bill nothing is just as "free" to an operator reading this
+// ranking as an explicit modelMeta:{free:true}, but a genuinely UNKNOWN
+// price must never render as free — resolveUnifiedPricing's own ok
+// return keeps the two cases apart.
+func adminUsageModelFree(canonical, bare string, overrides map[string]*ModelPricing, meta map[string]*ModelMetaConfig) bool {
+	if modelMetaFree(canonical, bare, meta) {
+		return true
+	}
+	price, known := resolveUnifiedPricing(canonical, bare, overrides)
+	return known && price.InputPerM == 0 && price.OutputPerM == 0
+}
+
+// serveAdminUsageModelsDetail is serveAdminUsageModels' detail=1 branch
+// (free-models feature): ids (already prefix-filtered), metric, window,
+// span and limit are all already validated by the caller. Unlike the
+// non-detail path, an id is included when ANY of its four metrics is
+// nonzero, not just the requested one — so a free model with real
+// request traffic but zero cost still appears in a metric=cost ranking,
+// at Value=0, instead of being dropped the way the non-detail path would
+// drop it. Ties break on value desc, then requests desc, then id asc:
+// once two free models tie on the requested metric (typically cost, both
+// zero), requests is the natural next signal, ahead of the id fallback
+// every ranking already uses to stay stable across polls.
+func (g *Gateway) serveAdminUsageModelsDetail(sw *statusTrackingWriter, ids []string, metric, window string, span, limit int) {
+	metrics := usageModelsDetailMetrics()
+	totalsByMetric, storeOK := g.chunkedModelSpanTotalsMulti(ids, metrics, window, g.limiter.now(), span)
+	if !storeOK {
+		writeOAIError(sw, http.StatusServiceUnavailable, "server_error", "usage history store unavailable")
+		return
+	}
+	valueIdx := usageModelsMetricIndex(metric)
+
+	models := make([]adminUsageModelEntryView, 0, len(ids))
+	for i, id := range ids {
+		req := totalsByMetric[0][i]
+		tokIn := totalsByMetric[1][i]
+		tokOut := totalsByMetric[2][i]
+		cost := totalsByMetric[3][i]
+		if req == 0 && tokIn == 0 && tokOut == 0 && cost == 0 {
+			continue
+		}
+		_, bare, _ := strings.Cut(id, "/")
+		models = append(models, adminUsageModelEntryView{
+			ID:           id,
+			Value:        totalsByMetric[valueIdx][i],
+			Requests:     &req,
+			TokensIn:     &tokIn,
+			TokensOut:    &tokOut,
+			CostMicroUSD: &cost,
+			Free:         adminUsageModelFree(id, bare, g.cfg.Pricing, g.cfg.ModelMeta),
+		})
+	}
+	sort.Slice(models, func(i, j int) bool {
+		if models[i].Value != models[j].Value {
+			return models[i].Value > models[j].Value
+		}
+		if *models[i].Requests != *models[j].Requests {
+			return *models[i].Requests > *models[j].Requests
+		}
+		return models[i].ID < models[j].ID
+	})
+	if len(models) > limit {
+		models = models[:limit]
+	}
+
+	setAdminJSONHeaders(sw)
+	_ = json.NewEncoder(sw).Encode(adminUsageModelsResponse{Metric: metric, Window: window, Span: span, Models: models, Detail: true})
 }
 
 // parseEventsLimit parses GET /admin/api/events' "limit" query parameter

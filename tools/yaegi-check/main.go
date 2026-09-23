@@ -762,7 +762,18 @@ func run() error {
 		// builtinModelMetaTable map literal, proving that specific path
 		// runs correctly under Yaegi too, not just the config-override
 		// one testDataWantModel already exercises.
-		`"modelMeta":{"` + testDataWantModel + `":{"contextTokens":` + yaegiMetaContextTokens + `,"inputCostPerMTokMicroUsd":1250000,"outputCostPerMTokMicroUsd":10000000}},` +
+		// provenanceEstProviderModel additionally carries a modelMeta
+		// free:true override (free-models feature) — it has no
+		// configured price at all (unifiedCostMicros already bills it 0
+		// via the "unknown price, warn" path, exerciseUsageProvenance's
+		// own assertions above never check its cost value, so this adds
+		// no regression there), so free:true here is the ONLY reason
+		// adminUsageModelFree (admin.go) marks it free: exactly the
+		// modelMeta path exerciseFreeModelUsageDetail (below) exists to
+		// exercise interpreted, as opposed to the OTHER free path (a
+		// KNOWN price of exactly 0), which carries no fixture of its own
+		// here — both are already covered compiled (admin_test.go).
+		`"modelMeta":{"` + testDataWantModel + `":{"contextTokens":` + yaegiMetaContextTokens + `,"inputCostPerMTokMicroUsd":1250000,"outputCostPerMTokMicroUsd":10000000},"` + provenanceEstProviderModel + `":{"free":true}},` +
 		`"mcpServers":{"` + mcpProbeServerName + `":{"url":"` + mcpProbeUpstream.URL + `"},"` + targetHealthDownServerName + `":{"url":"` + targetHealthDownURL + `"},"` + targetHealthProbeOnlyServerName + `":{"url":"` + targetHealthProbeOnlyUpstream.URL + `"}},` +
 		// targetHealth (feat/target-health): enabled. probeInterval is
 		// deliberately well ABOVE the floor (10s): exerciseTargetHealthProbeWarmup
@@ -958,6 +969,21 @@ func run() error {
 	// earlier probe touches, so it can neither perturb nor be perturbed by
 	// the provider-level counters they assert on.
 	if err := exerciseModelUsageRanking(handler); err != nil {
+		return err
+	}
+	// exerciseFreeModelUsageDetail/exerciseMediaModelUsage (free-models
+	// feature) run right after: the first only READS admin endpoints
+	// (detail=1), the second sends one real POST /v1/images/generations
+	// that adds exactly 1 to modelUsageCanonicalID's own req counter — a
+	// perturbation exerciseModelUsageRanking's own assertions (above,
+	// already run) never re-check, and nothing below depends on that
+	// counter's exact value either (exerciseUsageModelsSpan only checks
+	// the echoed span; exerciseRateLimitEventAndRejections uses its own
+	// dedicated principal).
+	if err := exerciseFreeModelUsageDetail(handler); err != nil {
+		return err
+	}
+	if err := exerciseMediaModelUsage(handler); err != nil {
 		return err
 	}
 	// exerciseAdminOverviewReplicaAndWarnings/exerciseUsageModelsSpan (F4/
@@ -3443,6 +3469,154 @@ func pollModelRanking(handler http.Handler) ([]any, error) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
+}
+
+// freeModelDetailCanonicalID is the kindModel scope id
+// exerciseFreeModelUsageDetail expects to find, with Free=true, in GET
+// /admin/api/usage/models' detail=1 response: provenanceEstProviderModel
+// already carries one real request (exerciseUsageProvenance's own chat
+// completion, above) but no configured price at all — see its own
+// modelMeta:{"free":true} override's doc comment (attemptAccountingOverride)
+// for why free:true there is the ONLY reason this shows up free here.
+const freeModelDetailCanonicalID = provenanceEstProviderName + "/" + provenanceEstProviderModel
+
+// pollUsageModelsDetail is pollModelRanking's own detail=1 counterpart
+// (free-models feature): GET /admin/api/usage/models?metric=cost&window=day&detail=1,
+// polled the identical way — a single immediate read can outrun the
+// accounting write an immediately preceding request triggered, under the
+// slower interpreted path.
+func pollUsageModelsDetail(handler http.Handler) ([]any, error) {
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		req := httptest.NewRequest(http.MethodGet, "/admin/api/usage/models?metric=cost&window=day&detail=1", nil)
+		req.Header.Set("Authorization", "Bearer "+attemptAccountingAdminAPIKey)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			return nil, fmt.Errorf("GET /admin/api/usage/models?detail=1: status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+		}
+		var body map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			return nil, fmt.Errorf("decode GET /admin/api/usage/models?detail=1 body: %w", err)
+		}
+		models, ok := body["models"].([]any)
+		if !ok {
+			return nil, fmt.Errorf("admin usage/models?detail=1 body has no models array: %s", rec.Body.String())
+		}
+		if len(models) > 0 || time.Now().After(deadline) {
+			return models, nil
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// exerciseFreeModelUsageDetail drives GET /admin/api/usage/models'
+// detail=1 mode (free-models feature) under the INTERPRETER: a
+// modelMeta-declared free model with real request traffic but a
+// genuinely unpriced (hence zero-cost) model must still appear in a
+// metric=cost ranking once detail=1 is set — the non-detail path drops
+// any zero-value entry entirely, which is exactly the gap this feature
+// closes. Reached through serveAdminUsageModelsDetail's own sort.Slice
+// closure, its pointer-typed struct fields, and adminUsageModelFree's
+// two-source free() check — none of which any earlier probe in this
+// harness exercises.
+func exerciseFreeModelUsageDetail(handler http.Handler) error {
+	models, err := pollUsageModelsDetail(handler)
+	if err != nil {
+		return err
+	}
+	for _, raw := range models {
+		entry, ok := raw.(map[string]any)
+		if !ok {
+			return fmt.Errorf("GET /admin/api/usage/models?detail=1: entry is not an object: %v", raw)
+		}
+		if id, _ := entry["id"].(string); id != freeModelDetailCanonicalID {
+			continue
+		}
+		value, _ := entry["value"].(float64)
+		if value != 0 {
+			return fmt.Errorf("detail=1 entry %q: value = %v, want 0 (metric=cost, and its price is genuinely unknown)", freeModelDetailCanonicalID, value)
+		}
+		free, _ := entry["free"].(bool)
+		if !free {
+			return fmt.Errorf("detail=1 entry %q: free = %v, want true (modelMeta free:true override)", freeModelDetailCanonicalID, entry["free"])
+		}
+		requests, _ := entry["requests"].(float64)
+		if requests <= 0 {
+			return fmt.Errorf("detail=1 entry %q: requests = %v, want > 0", freeModelDetailCanonicalID, entry["requests"])
+		}
+		fmt.Println("yaegi-check: GET /admin/api/usage/models detail=1 lists a modelMeta-free model at value 0 with its real request count, under the interpreter")
+		return nil
+	}
+	return fmt.Errorf("GET /admin/api/usage/models?detail=1 did not list %q: %v", freeModelDetailCanonicalID, models)
+}
+
+// modelUsageDetailRequests reads GET /admin/api/usage/models' detail=1
+// "requests" count for id right now. No poll: account()'s own store
+// write (limits.go) is synchronous — unlike recordProviderAttempt, it
+// never goes through limiter.spawn — so by the time ServeHTTP returns
+// for the request that triggered it, the counter this reads is already
+// current; pollUsageModelsDetail's own poll loop exists for a DIFFERENT
+// reason (an empty response, not a stale one) and still applies here
+// unchanged. An id with no traffic at all yet is legitimately absent
+// from the response (only a nonzero metric total is listed even under
+// detail=1), so a miss reports 0, not an error.
+func modelUsageDetailRequests(handler http.Handler, id string) (int64, error) {
+	models, err := pollUsageModelsDetail(handler)
+	if err != nil {
+		return 0, err
+	}
+	for _, raw := range models {
+		entry, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		if entry["id"] != id {
+			continue
+		}
+		reqs, _ := entry["requests"].(float64)
+		return int64(reqs), nil
+	}
+	return 0, nil
+}
+
+// exerciseMediaModelUsage drives POST /v1/images/generations (free-
+// models feature: media-route model request counters) under the
+// INTERPRETER, reusing the existing "openai"/testDataWantModel provider/
+// model pair — upstream answers 200 for any request path (its own doc
+// comment, above), so no new fixture provider is needed here. It reads
+// modelUsageCanonicalID's own kindModel req counter (via GET
+// /admin/api/usage/models detail=1) before and after the request:
+// recordMediaModelUsage (routes_media.go) must have added exactly 1,
+// reached through withModelScope called with an empty scope list — a
+// construct no earlier media-route probe in this harness exercises.
+func exerciseMediaModelUsage(handler http.Handler) error {
+	before, err := modelUsageDetailRequests(handler, modelUsageCanonicalID)
+	if err != nil {
+		return err
+	}
+
+	imgReq := httptest.NewRequest(http.MethodPost, "/v1/images/generations", strings.NewReader(
+		`{"model":"`+testDataWantModel+`","prompt":"a cat"}`,
+	))
+	imgReq.Header.Set("Authorization", "Bearer "+testDataUserAPIKey)
+	imgReq.Header.Set("Content-Type", "application/json")
+	imgRec := httptest.NewRecorder()
+	handler.ServeHTTP(imgRec, imgReq)
+	if imgRec.Code != http.StatusOK {
+		return fmt.Errorf("POST /v1/images/generations (media-model-usage harness): status = %d, want 200, body=%s", imgRec.Code, imgRec.Body.String())
+	}
+
+	after, err := modelUsageDetailRequests(handler, modelUsageCanonicalID)
+	if err != nil {
+		return err
+	}
+	if after != before+1 {
+		return fmt.Errorf("GET /admin/api/usage/models detail=1 requests for %q = %d, want exactly %d (before=%d, one served media request must add exactly one)", modelUsageCanonicalID, after, before+1, before)
+	}
+
+	fmt.Println("yaegi-check: a served media route (POST /v1/images/generations) incremented its model's own per-model request counter, under the interpreter")
+	return nil
 }
 
 // exerciseAdminOverviewReplicaAndWarnings proves GET /admin/api/overview's

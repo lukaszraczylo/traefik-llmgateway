@@ -1129,3 +1129,123 @@ func TestHandleImagesGenerations_LimitExceeded_429WithRetryAfter(t *testing.T) {
 	assert.Equal(t, http.StatusTooManyRequests, rec2.Code, "body=%s", rec2.Body.String())
 	assert.NotEmpty(t, rec2.Header().Get("Retry-After"))
 }
+
+// ---- recordMediaModelUsage: the per-model request counter (free-models feature) ----
+
+// TestHandleImagesGenerations_RecordsMediaModelUsage proves
+// recordMediaModelUsage (routes_media.go) writes the served model's own
+// kindModel request counter on a successful (2xx) upstream call, and
+// that a failed upstream call writes nothing at all for that scope — the
+// same 2xx/failure boundary handleAdapterError's own err != nil branch
+// already uses. images.generations is the representative route here,
+// mirroring TestHandleImagesGenerations_UnknownModel_404/
+// _LimitExceeded_429WithRetryAfter's own "one representative caller for
+// a shared code path" convention above.
+func TestHandleImagesGenerations_RecordsMediaModelUsage(t *testing.T) {
+	t.Run("2xx writes the model scope's req counter", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"created":1,"data":[{"b64_json":"xyz"}]}`))
+		}))
+		defer srv.Close()
+
+		gw := newMediaTestGateway(t, newMediaTestConfig(srv.URL, "img-test"))
+		body := map[string]any{"model": "img-test", "prompt": "a cat"}
+		req := newUnifiedRequest(t, http.MethodPost, imagesGenerationsPath, "sk-alice", body)
+		rec := httptest.NewRecorder()
+		gw.ServeHTTP(rec, req)
+		require.Equal(t, http.StatusOK, rec.Code, "body=%s", rec.Body.String())
+
+		modelReq, ok := gw.limiter.getCounter(kindModel, "openai/img-test", metricReq, windowDay, time.Now())
+		assert.True(t, ok)
+		assert.Equal(t, int64(1), modelReq, "kindModel req counter")
+
+		// Only the model scope is new here — admission (checkAndCount)
+		// already wrote the user's own req counter, and this call must
+		// not add a second one on top of it.
+		userReq, ok := gw.limiter.getCounter("user", "alice", metricReq, windowMin, time.Now())
+		assert.True(t, ok)
+		assert.Equal(t, int64(1), userReq, "user scope req counter must still be exactly 1 (written once, by admission)")
+
+		// Images are never token/cost-accounted (spec §3) — the model
+		// scope's own tokin/tokout/cost must stay unwritten too, matching
+		// account's own "usage{}, cost 0 writes nothing beyond req" contract.
+		if tokIn, okIn := gw.limiter.getCounter(kindModel, "openai/img-test", metricTokIn, windowDay, time.Now()); okIn && tokIn != 0 {
+			t.Errorf("model scope tokin counter = %d, want 0", tokIn)
+		}
+		if cost, okCost := gw.limiter.getCounter(kindModel, "openai/img-test", metricCost, windowDay, time.Now()); okCost && cost != 0 {
+			t.Errorf("model scope cost counter = %d, want 0", cost)
+		}
+	})
+
+	t.Run("non-2xx writes no model scope counter at all", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusInternalServerError)
+		}))
+		defer srv.Close()
+
+		gw := newMediaTestGateway(t, newMediaTestConfig(srv.URL, "img-test"))
+		body := map[string]any{"model": "img-test", "prompt": "a cat"}
+		req := newUnifiedRequest(t, http.MethodPost, imagesGenerationsPath, "sk-alice", body)
+		rec := httptest.NewRecorder()
+		gw.ServeHTTP(rec, req)
+		require.NotEqual(t, http.StatusOK, rec.Code, "the upstream 500 must surface as a client-visible error, not 200")
+
+		modelReq, ok := gw.limiter.getCounter(kindModel, "openai/img-test", metricReq, windowDay, time.Now())
+		if ok && modelReq != 0 {
+			t.Errorf("model scope req counter = %d, want 0 (a failed upstream call must write no model-scope counter)", modelReq)
+		}
+	})
+}
+
+// TestHandleAudioSpeech_RecordsMediaModelUsage is
+// TestHandleImagesGenerations_RecordsMediaModelUsage's audio/speech
+// counterpart, proving the same model-scope counter lands through the
+// binary-streaming forward path (openaiAdapter.audioSpeech) too.
+func TestHandleAudioSpeech_RecordsMediaModelUsage(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "audio/mpeg")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("fake-audio-bytes"))
+	}))
+	defer srv.Close()
+
+	gw := newMediaTestGateway(t, newMediaTestConfig(srv.URL, "tts-test"))
+	body := map[string]any{"model": "tts-test", "input": "hello", "voice": "alloy"}
+	req := newUnifiedRequest(t, http.MethodPost, audioSpeechPath, "sk-alice", body)
+	rec := httptest.NewRecorder()
+	gw.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code, "body=%s", rec.Body.String())
+
+	modelReq, ok := gw.limiter.getCounter(kindModel, "openai/tts-test", metricReq, windowDay, time.Now())
+	assert.True(t, ok)
+	assert.Equal(t, int64(1), modelReq, "kindModel req counter")
+}
+
+// TestHandleAudioTranscriptions_RecordsMediaModelUsage is
+// TestHandleImagesGenerations_RecordsMediaModelUsage's audio/
+// transcriptions counterpart, proving the same model-scope counter lands
+// through the multipart-replay forward path
+// (openaiAdapter.audioTranscription) too.
+func TestHandleAudioTranscriptions_RecordsMediaModelUsage(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"text":"hello world"}`))
+	}))
+	defer srv.Close()
+
+	gw := newMediaTestGateway(t, newMediaTestConfig(srv.URL, "whisper-test"))
+	origBody, contentType := buildMultipartTranscription(t, "whisper-test")
+	req := httptest.NewRequest(http.MethodPost, audioTranscriptionsPath, bytes.NewReader(origBody))
+	req.Header.Set("Content-Type", contentType)
+	req.Header.Set("Authorization", "Bearer sk-alice")
+	rec := httptest.NewRecorder()
+	gw.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code, "body=%s", rec.Body.String())
+
+	modelReq, ok := gw.limiter.getCounter(kindModel, "openai/whisper-test", metricReq, windowDay, time.Now())
+	assert.True(t, ok)
+	assert.Equal(t, int64(1), modelReq, "kindModel req counter")
+}

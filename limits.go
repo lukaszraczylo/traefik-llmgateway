@@ -2300,6 +2300,52 @@ func (l *limiter) modelTotals(ids []string, metric, window string) ([]int64, boo
 	return l.modelSpanTotals(ids, metric, window, l.now(), 1)
 }
 
+// modelSpanTotalsMulti is modelSpanTotals generalized to several metrics
+// read in ONE storeGetMulti round trip — GET /admin/api/usage/models'
+// detail=1 mode (free-models feature) needs all four metrics
+// (req/tokin/tokout/cost) for every candidate id, not just the one the
+// ranking sorts by, and a per-metric modelSpanTotals call would cost 4
+// round trips instead of 1. Keys are built id-major, metric second, span
+// innermost — out[m][i] is metrics[m]'s span-sum for ids[i], positional
+// in both dimensions, mirroring modelSpanTotals' own result[i] contract.
+// ok is false on any store read failure, exactly like modelSpanTotals —
+// a detail read that only partially succeeds is never presented as
+// complete data. An empty ids slice is not a store read at all, matching
+// modelSpanTotals' own contract.
+func (l *limiter) modelSpanTotalsMulti(ids, metrics []string, window string, now time.Time, span int) ([][]int64, bool) {
+	if len(ids) == 0 {
+		return nil, true
+	}
+	allKeys := make([]string, 0, len(ids)*len(metrics)*span)
+	for _, id := range ids {
+		for _, metric := range metrics {
+			keys, _ := historyBucketKeys(kindModel, id, metric, window, now, span)
+			allKeys = append(allKeys, keys...)
+		}
+	}
+	vals, ok := l.storeGetMulti(allKeys)
+	if !ok || len(vals) != len(allKeys) || l.configuredStoreDown() {
+		return nil, false
+	}
+	out := make([][]int64, len(metrics))
+	for m := range out {
+		out[m] = make([]int64, len(ids))
+	}
+	stride := len(metrics) * span
+	for i := range ids {
+		base := i * stride
+		for m := range metrics {
+			mBase := base + m*span
+			var sum int64
+			for _, v := range vals[mBase : mBase+span] {
+				sum += v
+			}
+			out[m][i] = sum
+		}
+	}
+	return out, true
+}
+
 // historyStepBack returns the instant window's bucket was current i steps
 // before now: i=0 is now's own (current, possibly partial) bucket, i=1
 // the previous one, and so on. hour and day step by a fixed duration/day
