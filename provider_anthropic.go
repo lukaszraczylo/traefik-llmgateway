@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -270,10 +271,17 @@ type anthropicModelsPayload struct {
 // anthropicListModelsPageCap bounds how many pages listModels follows
 // (M7 fix): a misbehaving upstream that never reports has_more:false, or
 // whose last_id never advances, would otherwise page forever. 20 pages
-// at Anthropic's own default page size (20 per page) covers 400 models —
-// comfortably above any real catalog as of this writing — without
-// risking an unbounded discovery loop against a single provider.
+// at anthropicListModelsPageSize covers far more models than any real
+// catalog without risking an unbounded discovery loop against a single
+// provider.
 const anthropicListModelsPageCap = 20
+
+// anthropicListModelsPageSize is the `limit` sent on every /v1/models
+// page: Anthropic's documented maximum (default 20, range 1-1000). At the
+// default page size a full catalog took several sequential requests, which
+// could overrun registry.go's warmFillTimeout at pod start; one request
+// at the maximum returns the whole catalog.
+const anthropicListModelsPageSize = 1000
 
 // listModels implements providerAdapter: GET {base}/v1/models, following
 // Anthropic's has_more/last_id cursor pagination (M7 fix) via the
@@ -307,10 +315,12 @@ func (a *anthropicAdapter) listModels(ctx context.Context) ([]string, error) {
 // model ids alongside has_more/last_id for listModels' own pagination
 // loop above.
 func (a *anthropicAdapter) listModelsPage(ctx context.Context, afterID string) (ids []string, hasMore bool, lastID string, err error) {
-	endpoint := a.baseURL + anthropicModelsPath
+	query := url.Values{}
+	query.Set("limit", strconv.Itoa(anthropicListModelsPageSize))
 	if afterID != "" {
-		endpoint += "?after_id=" + url.QueryEscape(afterID)
+		query.Set("after_id", afterID)
 	}
+	endpoint := a.baseURL + anthropicModelsPath + "?" + query.Encode()
 	resp, err := upstreamJSON(ctx, a.client, http.MethodGet, endpoint, a.requestHeaders(false), nil, a.retry, a.timeout, a.adapterName)
 	if err != nil {
 		return nil, false, "", err

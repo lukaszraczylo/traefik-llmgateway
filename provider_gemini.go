@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -386,6 +387,13 @@ type geminiModelsListPayload struct {
 // provider.
 const geminiListModelsPageCap = 20
 
+// geminiListModelsPageSize is the pageSize sent on every models.list page:
+// the documented maximum (default 50, at most 1000 per page). Gemini
+// requires the same parameters on every page of one listing, so it is sent
+// with the pageToken too. One request at the maximum returns the whole
+// catalog within registry.go's warmFillTimeout.
+const geminiListModelsPageSize = 1000
+
 // listModels implements providerAdapter: GET {base}/v1beta/models,
 // stripping the "models/" prefix off each entry's "name" to return bare
 // model ids, matching the shape openai-type and anthropic-type adapters
@@ -414,10 +422,12 @@ func (a *geminiAdapter) listModels(ctx context.Context) ([]string, error) {
 // model ids alongside nextPageToken for listModels' own pagination loop
 // above.
 func (a *geminiAdapter) listModelsPage(ctx context.Context, pageToken string) (ids []string, nextPageToken string, err error) {
-	endpoint := a.baseURL + "/v1beta/models"
+	query := url.Values{}
+	query.Set("pageSize", strconv.Itoa(geminiListModelsPageSize))
 	if pageToken != "" {
-		endpoint += "?pageToken=" + url.QueryEscape(pageToken)
+		query.Set("pageToken", pageToken)
 	}
+	endpoint := a.baseURL + "/v1beta/models?" + query.Encode()
 	resp, err := upstreamJSON(ctx, a.client, http.MethodGet, endpoint, a.requestHeaders(false), nil, a.retry, a.timeout, a.adapterName)
 	if err != nil {
 		return nil, "", err

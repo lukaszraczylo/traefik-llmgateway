@@ -688,9 +688,10 @@ func TestGeminiAdapter_ListModels(t *testing.T) {
 // test: a non-empty nextPageToken must make listModels fetch a second
 // page via ?pageToken=<token> and return the union of both pages.
 func TestGeminiAdapter_ListModels_FollowsPagination(t *testing.T) {
-	var gotPageTokens []string
+	var gotPageTokens, gotPageSizes []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPageTokens = append(gotPageTokens, r.URL.Query().Get("pageToken"))
+		gotPageSizes = append(gotPageSizes, r.URL.Query().Get("pageSize"))
 		w.Header().Set("Content-Type", "application/json")
 		if r.URL.Query().Get("pageToken") == "" {
 			_, _ = w.Write([]byte(`{"models":[{"name":"models/gemini-2.5-pro"},{"name":"models/gemini-2.5-flash"}],"nextPageToken":"page2"}`))
@@ -720,6 +721,13 @@ func TestGeminiAdapter_ListModels_FollowsPagination(t *testing.T) {
 	}
 	if len(gotPageTokens) != 2 || gotPageTokens[0] != "" || gotPageTokens[1] != "page2" {
 		t.Errorf("pageToken sequence = %#v, want [\"\", \"page2\"] (first page unqualified, second page's pageToken = first page's nextPageToken)", gotPageTokens)
+	}
+	// Gemini requires identical parameters on every page of one listing,
+	// so pageSize must ride along with the pageToken too.
+	for i, s := range gotPageSizes {
+		if s != "1000" {
+			t.Errorf("page %d pageSize = %q, want \"1000\"", i, s)
+		}
 	}
 }
 

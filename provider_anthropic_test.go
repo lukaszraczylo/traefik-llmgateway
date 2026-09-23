@@ -471,9 +471,10 @@ func TestAnthropicAdapter_ListModels(t *testing.T) {
 // page via ?after_id=<last_id> and return the union of both pages, not
 // just the first page's 20 (Anthropic's own default page size).
 func TestAnthropicAdapter_ListModels_FollowsPagination(t *testing.T) {
-	var gotAfterIDs []string
+	var gotAfterIDs, gotLimits []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotAfterIDs = append(gotAfterIDs, r.URL.Query().Get("after_id"))
+		gotLimits = append(gotLimits, r.URL.Query().Get("limit"))
 		w.Header().Set("Content-Type", "application/json")
 		if r.URL.Query().Get("after_id") == "" {
 			_, _ = w.Write([]byte(`{"data":[{"id":"claude-opus-5"},{"id":"claude-sonnet-5"}],"has_more":true,"last_id":"claude-sonnet-5"}`))
@@ -503,6 +504,13 @@ func TestAnthropicAdapter_ListModels_FollowsPagination(t *testing.T) {
 	}
 	if len(gotAfterIDs) != 2 || gotAfterIDs[0] != "" || gotAfterIDs[1] != "claude-sonnet-5" {
 		t.Errorf("after_id sequence = %#v, want [\"\", \"claude-sonnet-5\"] (first page unqualified, second page's after_id = first page's last_id)", gotAfterIDs)
+	}
+	// Every page asks for Anthropic's maximum page size, so a real catalog
+	// arrives in one request inside warmFillTimeout.
+	for i, l := range gotLimits {
+		if l != "1000" {
+			t.Errorf("page %d limit = %q, want \"1000\"", i, l)
+		}
 	}
 }
 
