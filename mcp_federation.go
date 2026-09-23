@@ -335,12 +335,21 @@ func writeJSONRPCErrorResponse(w http.ResponseWriter, format mcpResponseFormat, 
 // unreachable in practice, and "don't exclude" is the safe default for an
 // unreachable branch — the same convention sanitizeBaseURL applies to its
 // own unparsable-URL case (admin.go).
+//
+// The trailing slash is trimmed before the suffix check (F9, review round
+// 3, 2026-09): a server configured as "http://host/sse/" is the identical
+// legacy-SSE endpoint as "http://host/sse" — trailing slashes are common
+// in operator-typed URLs and carry no transport meaning here — but the
+// bare HasSuffix check missed it, leaving such a server IN the fan-out
+// where every tools/list call wasted a semaphore slot, failed, and marked
+// the target unhealthy for a transport this file was never built to
+// speak at all.
 func isLegacySSETransportURL(rawURL string) bool {
 	u, err := url.Parse(rawURL)
 	if err != nil {
 		return false
 	}
-	return strings.HasSuffix(u.Path, "/sse")
+	return strings.HasSuffix(strings.TrimSuffix(u.Path, "/"), "/sse")
 }
 
 // allowedMCPServerNames returns the sorted names of every MCP server BOTH
@@ -549,9 +558,13 @@ func (g *Gateway) mcpFederatedInitialize(w http.ResponseWriter, format mcpRespon
 	})
 }
 
-// mcpTool is one tool entry in an MCP "tools/list" result, either as read
-// back from a backend server's own response or as re-emitted (name
-// prefixed) in this gateway's federated aggregate.
+// mcpTool is a convenience literal type this repository's own tests use
+// to build a canned backend tools/list response (newMockJSONRPCServer,
+// sessionRequiredMockServer) — name/description/inputSchema are the three
+// fields every such test fixture actually needs to set. Production code
+// no longer round-trips a real tool through this fixed-field shape (F2,
+// review round 3, 2026-09) — see mcpToolsListResult's own doc comment for
+// why.
 type mcpTool struct {
 	Name        string          `json:"name"`
 	Description string          `json:"description,omitempty"`
@@ -559,9 +572,118 @@ type mcpTool struct {
 }
 
 // mcpToolsListResult is the "result" object of an MCP "tools/list"
-// response, both a backend's own and this gateway's federated one.
+// response, both a backend's own (decoded, in mcpFederatedToolsList's own
+// per-server fan-out) and this gateway's federated one (re-encoded from
+// the merged tools, mcpFederatedToolsList's own final writeJSONRPCResult
+// call).
+//
+// Tools decodes as []map[string]json.RawMessage, not the fixed mcpTool
+// struct above (F2, review round 3, 2026-09): the earlier fixed-field
+// struct kept only name/description/inputSchema and silently dropped
+// every OTHER field a real tool object carries on the round trip through
+// this gateway — title, annotations (destructiveHint, readOnlyHint, ...),
+// outputSchema, _meta. A federated client that relies on annotations to
+// decide whether a tool needs user confirmation before a call, or on
+// outputSchema to validate structuredContent, silently lost that signal.
+// Decoding into a raw map per tool and rewriting only "name"
+// (prefixMCPTool, below) passes every other field through unchanged,
+// byte-for-byte, exactly as the backend sent it. One side effect: a Go
+// map's keys marshal back out in SORTED order (encoding/json's own
+// documented behavior), not the backend's original field order — a
+// cosmetic reordering, never a content change.
+//
+// NextCursor is the MCP pagination cursor a backend sets when it has more
+// tools than fit in one response (F3, review round 3, 2026-09) —
+// mcpFederatedToolsList's own per-server loop follows it, bounded by
+// mcpToolsListMaxPagesPerServer, until a page comes back with none.
 type mcpToolsListResult struct {
-	Tools []mcpTool `json:"tools"`
+	NextCursor string                       `json:"nextCursor,omitempty"`
+	Tools      []map[string]json.RawMessage `json:"tools"`
+}
+
+// mcpToolsListParams is one "tools/list" request's own params. Cursor is
+// omitted (its zero value, "") for a server's first page; a non-empty
+// value echoes back exactly the nextCursor that same server's own
+// previous page reported (F3) — never a cursor minted by this gateway or
+// borrowed from another server, since MCP's cursor is an opaque,
+// per-server token.
+type mcpToolsListParams struct {
+	Cursor string `json:"cursor,omitempty"`
+}
+
+// mcpToolsListMaxPagesPerServer bounds how many pages
+// mcpFederatedToolsList will follow via nextCursor for any ONE server
+// (F3, review round 3, 2026-09) — independent of, and in addition to,
+// the fan-out's own shared toolsListBackendTimeout budget (fanoutCtx in
+// mcpFederatedToolsList), which already bounds total wall-clock
+// regardless of page count. This cap exists so a misbehaving backend
+// that always sets nextCursor (an unbounded pagination loop) cannot hold
+// this goroutine's semaphore slot for the fan-out's entire timeout
+// budget one page at a time. 20 is chosen generously above any real MCP
+// server's tool catalog this codebase has seen (the largest production
+// tools/list this gateway federates today is a single, unpaginated
+// page), so it is never expected to actually trim a legitimate server's
+// results — reaching it degrades to a partial tool list for that one
+// server plus a logged note, the same "partial, not a hard failure"
+// shape the fan-out's own timeout budget already uses.
+const mcpToolsListMaxPagesPerServer = 20
+
+// prefixMCPTool returns a shallow copy of tool (F2, review round 3,
+// 2026-09) with only its "name" field rewritten to
+// "<serverName>_<original name>" — the merge's own established
+// server-prefix convention (mcpFederatedToolsList's own doc comment) —
+// and every other field passed through unchanged. fullName is that same
+// rewritten name, returned separately so a caller building an
+// mcpMergedTool for the final sort/dedupe (F4) never has to decode it back
+// out of raw. ok is false when tool carries no "name" field at all, "name"
+// is not a JSON string, or "name" is null or the empty string (P3, review
+// round 4: json.Unmarshal("null", &toolName) succeeds and leaves toolName
+// as "", indistinguishable from an explicit "name":"" without this check)
+// — none a valid MCP tool object, skipped by the caller like any other
+// malformed entry from that server, without failing the whole server's
+// contribution.
+func prefixMCPTool(serverName string, tool map[string]json.RawMessage) (out map[string]json.RawMessage, fullName string, ok bool) {
+	rawName, present := tool["name"]
+	if !present {
+		return nil, "", false
+	}
+	var toolName string
+	if err := json.Unmarshal(rawName, &toolName); err != nil {
+		return nil, "", false
+	}
+	// P3 (review round 4): "name":null unmarshals into toolName's zero
+	// value ("") with no error, same as an explicit "name":"" — either
+	// way there is no real tool name to prefix, so this would otherwise
+	// mint and list a bare "<serverName>_" tool nothing can ever call by
+	// a meaningful name. Treated exactly like the missing-field and
+	// non-string cases above: skipped, not emitted.
+	if toolName == "" {
+		return nil, "", false
+	}
+	fullName = serverName + "_" + toolName
+	prefixedRaw, err := json.Marshal(fullName)
+	if err != nil {
+		return nil, "", false
+	}
+	out = make(map[string]json.RawMessage, len(tool))
+	for k, v := range tool {
+		out[k] = v
+	}
+	out["name"] = json.RawMessage(prefixedRaw)
+	return out, fullName, true
+}
+
+// mcpMergedTool pairs one server's already-prefixed tool object (raw map,
+// F2) with the two fields mcpFederatedToolsList's own final sort and
+// collision check (F4, review round 3, 2026-09) need without re-decoding
+// "name" out of raw on every comparison: its own prefixed name, and the
+// server it came from — the deterministic tiebreak the collision check
+// below uses, so the outcome never depends on which goroutine's fan-out
+// happened to finish first.
+type mcpMergedTool struct {
+	raw    map[string]json.RawMessage
+	name   string
+	server string
 }
 
 // doBackendJSONRPC issues one JSON-RPC 2.0 POST to targetURL — an MCP
@@ -708,18 +830,115 @@ func (g *Gateway) mcpBackendCloseSession(ctx context.Context, targetURL, session
 
 	resp, err := g.targetClient.Do(req)
 	if err != nil {
-		g.logf("federated mcp: best-effort session close failed for %q: %v", targetURL, err)
+		// P4 (review round 4): targetURL is this gateway's own credential
+		// channel (buildUpstreamTargetURL's doc comment, mcp_a2a.go), and
+		// err here is commonly a *url.Error wrapping it verbatim — logged
+		// through the same sanitizeBaseURL/sanitizeProviderErr pair every
+		// other target-URL-bearing log line in this codebase uses (e.g.
+		// adminTargetView.URL, admin.go).
+		g.logf("federated mcp: best-effort session close failed for %q: %v", sanitizeBaseURL(targetURL), sanitizeProviderErr(err.Error(), targetURL))
 		return
 	}
 	_ = resp.Body.Close() //nolint:errcheck // read-side close; nothing actionable on failure
 }
 
+// mcpBackendSendInitializedNotification best-effort POSTs the MCP
+// lifecycle's own "notifications/initialized" to targetURL, carrying
+// sessionID (mcpBackendHandshake's own Mcp-Session-Id, when the backend
+// set one) as the session header — the client-side half of the
+// initialize handshake the MCP spec requires before any OTHER request on
+// that session (F5, review round 3, 2026-09). mcpBackendCall's own
+// handshake fallback previously sent "initialize" and went straight to
+// the retried real call, skipping this notification entirely; a server
+// that also gates its OTHER methods on having received it (not just on
+// having answered "initialize") would still reject the retry.
+//
+// A notification carries no "id" (jsonrpcRequest's own zero value already
+// omits it, ID being omitempty) and gets no JSON-RPC response body to
+// interpret — the MCP Streamable HTTP transport answers a notification
+// POST with 202 and nothing else — so there is nothing here to act on
+// besides logging a transport-level failure; never surfaced to the
+// caller, matching mcpBackendCloseSession's own best-effort convention
+// right above. ctx is the same context the handshake and retry share:
+// this call must not outlive the operation it is a step of, unlike the
+// deliberately-separate mcpSessionCloseTimeout the best-effort DELETE
+// runs under afterward (that one runs only once the real response has
+// already been read and returned, so it alone needs its own budget).
+func (g *Gateway) mcpBackendSendInitializedNotification(ctx context.Context, targetURL, sessionID string) {
+	body, err := json.Marshal(jsonrpcRequest{JSONRPC: jsonrpcVersion, Method: "notifications/initialized"})
+	if err != nil {
+		return
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, bytes.NewReader(body)) //nolint:gosec // same operator-configured target URL as doBackendJSONRPC
+	if err != nil {
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	if sessionID != "" {
+		req.Header.Set(mcpSessionHeader, sessionID)
+	}
+
+	resp, err := g.targetClient.Do(req)
+	if err != nil {
+		// P4 (review round 4): same targetURL-is-a-credential-channel
+		// scrub as mcpBackendCloseSession's identical log line above.
+		g.logf("federated mcp: best-effort notifications/initialized failed for %q: %v", sanitizeBaseURL(targetURL), sanitizeProviderErr(err.Error(), targetURL))
+		return
+	}
+	_ = resp.Body.Close() //nolint:errcheck // read-side close; nothing actionable on failure
+}
+
+// mcpSessionRequiredSignal decides whether the bare (session-less)
+// attempt's own outcome — status, the parsed response when there is one,
+// and err — specifically signals "this backend requires a session", the
+// ONLY case mcpBackendCall's handshake-fallback retry may fire for (F1,
+// review round 3, 2026-09). The PRIOR rule ("any JSON-RPC error OR any
+// HTTP 4xx") mistook two different things for a session problem: a
+// genuine tool-level failure a backend answers as an ordinary JSON-RPC
+// error — retrying THAT silently double-executes whatever side effect a
+// non-idempotent tools/call already ran, since the backend already did
+// the work before reporting its own error — and a 429 (rate-limited,
+// the opposite of what warrants a retry: it adds more load to a backend
+// that already asked to be slowed down).
+//
+// method distinguishes the two call shapes mcpBackendCall is ever used
+// for. tools/list's own params are the fixed, always-valid struct{}{}
+// (mcpFederatedToolsList) and it has no side effect to double-run, so ANY
+// JSON-RPC error there is still treated as session-missing — this is the
+// exact behavior verified live against readitall ("method tools/list is
+// invalid during...") and fetch (-32602 with or without params), neither
+// of which literally names "session" in its own wording (mcpBackendCall's
+// own doc comment covers the full live probe). tools/call gets the
+// narrow rule instead: a JSON-RPC error must itself mention "session"
+// (case-insensitive) to retry — any OTHER JSON-RPC error there is
+// presumed to be the tool's own real failure, not a protocol-state
+// problem.
+//
+// HTTP 400 and 404 are the only statuses ever eligible, for either
+// method — narrowed from the prior "any 400-499", which is what let a
+// 429 through; 401/403/409/422/etc. are real authorization/validation
+// outcomes a retry cannot fix and must not paper over.
+func mcpSessionRequiredSignal(method string, status int, resp *jsonrpcResponse, err error) bool {
+	if status == http.StatusBadRequest || status == http.StatusNotFound {
+		return true
+	}
+	if err != nil || resp == nil || resp.Error == nil {
+		return false
+	}
+	if method == "tools/list" {
+		return true
+	}
+	return strings.Contains(strings.ToLower(resp.Error.Message), "session")
+}
+
 // mcpBackendCall issues a JSON-RPC 2.0 request for method to targetURL —
 // bare first, matching the per-request "no persisted CLIENT session"
 // design (handleMCPFederated's own doc comment) — and falls back to a
-// ONE-SHOT initialize/retry/close handshake ONLY when the bare attempt
-// signals the server actually requires a session: a JSON-RPC-level error
-// response, or an HTTP 4xx status.
+// ONE-SHOT initialize/retry/close handshake ONLY when the bare attempt's
+// own outcome narrowly signals a missing session (mcpSessionRequiredSignal,
+// its own doc comment covers exactly what qualifies and why it was
+// narrowed, F1).
 //
 // This ruling is backed by a live probe against all 11 production servers
 // behind this gateway (review round 2, 2026-08-21): 8 answer a bare,
@@ -754,9 +973,16 @@ func (g *Gateway) mcpBackendCall(ctx context.Context, targetURL, method string, 
 		return resp, nil
 	}
 
-	retryEligible := (err == nil && resp.Error != nil) || (status >= 400 && status < 500)
-	if !retryEligible {
-		return nil, err
+	if !mcpSessionRequiredSignal(method, status, resp, err) {
+		// Not a session-required signal: relay the bare attempt's own
+		// outcome as-is — a JSON-RPC error response when the backend gave
+		// one (err is nil in that case; resp carries it), otherwise the
+		// transport-level err — and never retry. Retrying here is exactly
+		// what F1 fixes: a tools/call retry against an arbitrary tool-level
+		// error could silently double-execute a non-idempotent tool, and a
+		// 429 retry only adds load to a backend that is already
+		// rate-limiting.
+		return resp, err
 	}
 
 	sessionID, initErr := g.mcpBackendHandshake(ctx, targetURL, maxBytes)
@@ -772,6 +998,16 @@ func (g *Gateway) mcpBackendCall(ctx context.Context, targetURL, method string, 
 		}
 		return resp, nil
 	}
+	// F5, review round 3, 2026-09: the MCP lifecycle requires the client
+	// to send notifications/initialized once it has the initialize
+	// result, before any other request — a step this handshake fallback
+	// previously skipped entirely, going straight from "initialize" to
+	// the retried real call. Best-effort, matching mcpBackendCloseSession's
+	// own convention right below: a notification gets no JSON-RPC
+	// response to interpret (a 202 and nothing else), so a failure here
+	// is logged, never surfaced — the retry that follows is what actually
+	// decides whether the handshake as a whole succeeded.
+	g.mcpBackendSendInitializedNotification(ctx, targetURL, sessionID)
 	if sessionID != "" {
 		defer func() {
 			closeCtx, cancel := context.WithTimeout(context.Background(), mcpSessionCloseTimeout)
@@ -821,18 +1057,29 @@ func parseBackendJSONRPC(contentType string, body []byte) (*jsonrpcResponse, err
 	return &out, nil
 }
 
-// lastSSEDataLine returns the payload of the last "data:" line in an SSE
-// body — body itself, unchanged, if it contains no such line at all (so
-// the caller's own json.Unmarshal fails informatively on whatever body
-// actually was, rather than this function silently swallowing a
-// malformed stream into an empty byte slice).
+// lastSSEDataLine returns the payload of the last COMPLETE SSE event's
+// "data:" field in an SSE body — body itself, unchanged, if it contains
+// no "data:" line at all (so the caller's own json.Unmarshal fails
+// informatively on whatever body actually was, rather than this function
+// silently swallowing a malformed stream into an empty byte slice).
+//
+// An SSE event's own multi-line "data:" field is joined with "\n" per the
+// wire format (F6, review round 3, 2026-09; this gateway's own
+// sseWriter.writeData, sse.go, emits exactly this shape for a multi-line
+// payload) — every "data:" line up to the event's
+// terminating blank line ("\n\n") is one logical field, not a separate
+// one. A PRIOR revision of this function took only the single, textually
+// LAST "data:" line in the whole body, which misread a backend's own
+// pretty-printed or line-split JSON payload (each physical line
+// individually invalid JSON on its own) as a parse failure, misdiagnosing
+// a perfectly well-formed backend as failed.
 //
 // This does NOT implement per-request id correlation across multiple
-// concurrent SSE-delivered messages the way a real MCP client's
+// concurrent SSE-delivered EVENTS the way a real MCP client's
 // Streamable-HTTP transport layer would (matching a specific response to
 // the request that triggered it by id, ignoring unrelated
 // server-initiated notifications interleaved on the same stream) — it
-// takes the textually LAST "data:" line, full stop. This is a deliberate,
+// takes the LAST complete event, full stop. This is a deliberate,
 // documented limitation, acceptable for mcpBackendCall's own one-request-
 // in-flight-at-a-time usage of this stream (it never has two outstanding
 // calls sharing one SSE response to correlate between): a backend that
@@ -840,19 +1087,23 @@ func parseBackendJSONRPC(contentType string, body []byte) (*jsonrpcResponse, err
 // same stream would be misread by this function. No production server
 // probed for this round exhibited that behavior.
 func lastSSEDataLine(body []byte) []byte {
-	var last []byte
-	for _, line := range bytes.Split(body, []byte("\n")) {
-		line = bytes.TrimRight(line, "\r")
-		if data, ok := bytes.CutPrefix(line, []byte("data: ")); ok {
-			last = data
-		} else if data, ok := bytes.CutPrefix(line, []byte("data:")); ok {
-			last = bytes.TrimSpace(data)
+	normalized := bytes.ReplaceAll(body, []byte("\r\n"), []byte("\n"))
+	events := bytes.Split(normalized, []byte("\n\n"))
+	for i := len(events) - 1; i >= 0; i-- {
+		var dataLines [][]byte
+		for _, line := range bytes.Split(events[i], []byte("\n")) {
+			line = bytes.TrimRight(line, "\r")
+			if data, ok := bytes.CutPrefix(line, []byte("data: ")); ok {
+				dataLines = append(dataLines, data)
+			} else if data, ok := bytes.CutPrefix(line, []byte("data:")); ok {
+				dataLines = append(dataLines, bytes.TrimSpace(data))
+			}
+		}
+		if dataLines != nil {
+			return bytes.Join(dataLines, []byte("\n"))
 		}
 	}
-	if last == nil {
-		return body
-	}
-	return last
+	return body
 }
 
 // mcpFederatedFanoutConcurrency bounds how many of names' backend servers
@@ -883,38 +1134,72 @@ func lastSSEDataLine(body []byte) []byte {
 const mcpFederatedFanoutConcurrency = 8
 
 // mcpFederatedToolsList implements the federated "tools/list": it fans
-// out one mcpBackendCall per server in names (handleMCPFederated's own
-// allowedMCPServerNames(grp) call, made once there so the exact set
+// out one per-server fetch (below) per server in names (handleMCPFederated's
+// own allowedMCPServerNames(grp) call, made once there so the exact set
 // contacted is always the one the client actually asked to reach), at
 // most mcpFederatedFanoutConcurrency at a time — every backend sharing
 // ONE overall toolsListBackendTimeout deadline (fanoutCtx, below) — then
 // merges every reachable server's own tools into one result,
-// each tool's name prefixed "<serverName>_<toolName>", the exact
-// underscore-separator convention the old agentgateway this plugin
-// replaces used, and the one pugbot's mcpclient and agentkit have already
-// persisted into their own tool-id databases (e.g.
-// "brave-search_brave_web_search" — verified live). A server that errors,
-// times out, panics, or returns an unparsable/invalid result is logged
-// and skipped, not surfaced as a whole-call failure — UNLESS every single
-// attempted server failed, in which case an empty tools list would
-// misleadingly look like "this caller's group has no MCP access" — see
-// the loud-failure branch below.
+// each tool's name prefixed "<serverName>_<toolName>" (prefixMCPTool; F2's
+// own doc comment covers why every OTHER field of the tool object passes
+// through unchanged), the exact underscore-separator convention the old
+// agentgateway this plugin replaces used, and the one pugbot's mcpclient
+// and agentkit have already persisted into their own tool-id databases
+// (e.g. "brave-search_brave_web_search" — verified live). Per server, a
+// paginated backend is followed via nextCursor up to
+// mcpToolsListMaxPagesPerServer pages (F3, review round 3, 2026-09) — all
+// still inside that one server's share of fanoutCtx's shared budget, never
+// a fresh timeout per page. A server that errors, times out, panics, or
+// returns an unparsable/invalid result is logged and skipped, not
+// surfaced as a whole-call failure — UNLESS every single attempted server
+// failed, in which case an empty tools list would misleadingly look like
+// "this caller's group has no MCP access" — see the loud-failure branch
+// below.
 //
-// countTargetRequests (limits.go) attributes one request to EVERY server
-// ATTEMPTED here, in ONE batched call after wg.Wait() — "attempted", not
-// "reached" or "succeeded": a server this gateway dialed and got a
-// response (or a timeout, a connection refusal, or a panic) from still had
-// a real request sent to it and a real slot of this gateway's outbound
-// capacity spent on it, which is what these counters exist to track. A
-// single federated tools/list call can move several targets' own
-// counters, not just one — unlike handleTargetProxy's always-exactly-
-// one-target shape (mcp_a2a.go).
+// countTargetRequests (limits.go) attributes one request to every server
+// actually DIALED here, in ONE batched call after wg.Wait() — "dialed",
+// not "attempted" in the looser sense the prior revision used (F10,
+// review round 3, 2026-09): a goroutine that was still waiting on the
+// fan-out's own semaphore when fanoutCtx expired never sent a byte to
+// its server and must not move that server's own per-target counter —
+// only a server this gateway actually opened a connection to (and got a
+// response, a timeout, a connection refusal, or a panic from) spent a
+// real slot of this gateway's outbound capacity, which is what these
+// counters exist to track. A single federated tools/list call can move
+// several targets' own counters, not just one — unlike
+// handleTargetProxy's always-exactly-one-target shape (mcp_a2a.go).
+//
+// Two servers can legitimately mint the identical final prefixed name —
+// e.g. server "a" has tool "b_c" and server "a_b" has tool "c", both
+// producing "a_b_c" (F4, review round 3, 2026-09) — resolveFederatedTool's
+// own longest-prefix rule can only ever route such a name to ONE of them,
+// so shipping both in tools/list would advertise a tool the client can
+// never actually reach as advertised, and some client-side LLM tool APIs
+// reject a duplicate name outright. The final merge below detects this by
+// sorting on (name, server) — for a stable, deterministic grouping that
+// never depends on which goroutine's fan-out happened to finish first —
+// then, for every colliding name, keeps the entry whose server is the one
+// resolveFederatedTool would ACTUALLY route a tools/call for that name to
+// (P2, review round 4: the prior revision instead kept whichever server
+// sorted first alphabetically, which is a different server whenever the
+// alphabetically-first name is not also the longest-prefix match —
+// advertising a schema/description tools/list never lets the caller
+// reach, because every call for that name is routed elsewhere). Logs
+// exactly which server's tool was dropped and which server tools/call
+// actually routes this name to.
 func (g *Gateway) mcpFederatedToolsList(w http.ResponseWriter, format mcpResponseFormat, r *http.Request, req jsonrpcRequest, names []string) {
 	var (
 		mu     sync.Mutex
 		wg     sync.WaitGroup
-		merged = make([]mcpTool, 0, len(names))
+		merged = make([]mcpMergedTool, 0, len(names))
 		failed []string
+		// dialed is the F10 fix's own accounting list — every name a
+		// goroutine actually won the semaphore for (and so is about to
+		// call mcpBackendCall for), kept separate from failed: a server
+		// starved out by fanoutCtx before ever winning the semaphore
+		// belongs in failed (the client-visible degradation log) but NOT
+		// in dialed (the per-target request counters below).
+		dialed []string
 	)
 	// fanoutCtx bounds the WHOLE fan-out to toolsListBackendTimeout from
 	// when THIS call started — not each individual backend's own start
@@ -992,18 +1277,81 @@ func (g *Gateway) mcpFederatedToolsList(w http.ResponseWriter, format mcpRespons
 			}
 			defer func() { <-sem }()
 
+			// F10: this goroutine won the semaphore, so it is about to
+			// actually dial the server — recorded now, unconditionally,
+			// regardless of what the paginated fetch below returns, so
+			// countTargetRequests below reflects real outbound requests
+			// sent, never a server that only ever waited on the
+			// semaphore.
+			mu.Lock()
+			dialed = append(dialed, name)
+			mu.Unlock()
+
 			targetURL := g.cfg.MCPServers[name].URL
-			// feat/target-health: passive recording (target_health.go) —
-			// err != nil is a failure; a JSON-RPC-level resp.Error is NOT
-			// (the server answered, it just reported its own error). The
-			// record call right below already covers both: it reads ok
-			// from err == nil alone, so a non-nil resp.Error alongside a
-			// nil err still records success here — the failed-list
-			// append further down (used only for the merged tools/list
-			// result and the loud-failure short-circuit) is a separate
-			// concern and never touches targetHealth itself.
 			probeStart := time.Now()
-			resp, err := g.mcpBackendCall(fanoutCtx, targetURL, "tools/list", struct{}{}, mcpBackendResponseMaxBytes)
+
+			// F3: follow nextCursor up to mcpToolsListMaxPagesPerServer
+			// pages, all sharing fanoutCtx's one already-ticking budget —
+			// never a fresh per-page timeout. transportErr and appFailed
+			// are kept separate deliberately: transportErr is a real
+			// mcpBackendCall failure (network, non-2xx, the size cap) and
+			// is what targetHealth below treats as unhealthy; appFailed
+			// is "the backend answered but this fan-out cannot use what
+			// it said" (a JSON-RPC error, or a page that fails to
+			// unmarshal) — the server is still reachable and healthy, it
+			// just has nothing usable to contribute this call, matching
+			// the pre-F3 rule that a JSON-RPC-level resp.Error never
+			// marks a server unhealthy.
+			var (
+				pageTools    []map[string]json.RawMessage
+				cursor       string
+				transportErr error
+				appFailed    bool
+				// appFailedErr names WHY appFailed was set (a JSON-RPC
+				// error object carries no Go error to reuse), so the F3
+				// partial-keep log below can say something more useful
+				// than "it failed". No wrapped url — a JSON-RPC error
+				// message and a json.Unmarshal error never carry
+				// targetURL, unlike transportErr, so this never needs the
+				// sanitizeProviderErr treatment transportErr gets below.
+				appFailedErr error
+			)
+			page := 0
+			for ; page < mcpToolsListMaxPagesPerServer; page++ {
+				resp, err := g.mcpBackendCall(fanoutCtx, targetURL, "tools/list", mcpToolsListParams{Cursor: cursor}, mcpBackendResponseMaxBytes)
+				if err != nil {
+					transportErr = err
+					break
+				}
+				if resp.Error != nil {
+					appFailed = true
+					appFailedErr = fmt.Errorf("%s (code %d)", resp.Error.Message, resp.Error.Code)
+					break
+				}
+				var result mcpToolsListResult
+				if err := json.Unmarshal(resp.Result, &result); err != nil {
+					appFailed = true
+					appFailedErr = err
+					break
+				}
+				pageTools = append(pageTools, result.Tools...)
+				if result.NextCursor == "" {
+					cursor = ""
+					break
+				}
+				cursor = result.NextCursor
+			}
+			// F3 (review round 4): the loop above has no other way to
+			// tell "stopped because the server said no more pages"
+			// (cursor == "" here) from "stopped because
+			// mcpToolsListMaxPagesPerServer ran out while the server's
+			// last fetched page still set a NextCursor" — the latter
+			// silently truncates a legitimately larger catalog unless
+			// logged.
+			if page == mcpToolsListMaxPagesPerServer && cursor != "" {
+				g.logf("federated tools/list: server %q hit the %d-page cap; results truncated", name, mcpToolsListMaxPagesPerServer)
+			}
+
 			// G4: this goroutine WON the select above, so it was actually
 			// dialed — only a client hang-up (context.Canceled,
 			// propagating from r.Context() into fanoutCtx) says nothing
@@ -1013,34 +1361,58 @@ func (g *Gateway) mcpFederatedToolsList(w http.ResponseWriter, format mcpRespons
 			// shared toolsListBackendTimeout fired while THIS dialed
 			// server was still in flight — it did not answer within the
 			// fan-out's own budget, which is a real failure worth
-			// recording, not a client artifact (F2 over-suppressed this
-			// case; a genuinely hung server used to read "unknown"
-			// forever under federation-only traffic).
-			if err == nil || !errors.Is(err, context.Canceled) {
-				g.targetHealth.record(targetKindMCP, name, targetURL, err == nil, err, time.Since(probeStart), targetHealthSourceTraffic)
+			// recording, not a client artifact. Measured across every
+			// page this server's own loop actually ran, not just the
+			// first: a server that answers its first few pages fine and
+			// then times out on a later one is genuinely unhealthy, not
+			// a client artifact.
+			if transportErr == nil || !errors.Is(transportErr, context.Canceled) {
+				g.targetHealth.record(targetKindMCP, name, targetURL, transportErr == nil, transportErr, time.Since(probeStart), targetHealthSourceTraffic)
 			}
 
 			mu.Lock()
 			defer mu.Unlock()
-			if err != nil || resp.Error != nil {
+			// F3 (review round 4): a failure on the very FIRST page (page
+			// == 0) leaves nothing to salvage, so the server is still
+			// reported failed exactly as before this fix. A failure on a
+			// LATER page — this server answered one or more pages fine
+			// and only broke partway through pagination — now keeps the
+			// tools already fetched instead of discarding the whole
+			// server's contribution; a warning names what was lost so the
+			// degradation is still visible, matching this fan-out's own
+			// "partial, not silent" convention for the page-cap case
+			// above.
+			if page == 0 && (transportErr != nil || appFailed) {
 				failed = append(failed, name)
 				return
 			}
-			var result mcpToolsListResult
-			if err := json.Unmarshal(resp.Result, &result); err != nil {
-				failed = append(failed, name)
-				return
+			if transportErr != nil || appFailed {
+				failErr := appFailedErr
+				if transportErr != nil {
+					// P4: transportErr can be a *url.Error wrapping
+					// targetURL verbatim (an operator-configured target
+					// URL's query string is this gateway's own credential
+					// channel, buildUpstreamTargetURL's doc comment,
+					// mcp_a2a.go) — scrubbed the same way every other
+					// target-URL-bearing log line in this file is.
+					failErr = errors.New(sanitizeProviderErr(transportErr.Error(), targetURL))
+				}
+				g.logf("federated tools/list: server %q: page %d failed: %v; keeping %d tool(s) already fetched from earlier pages", name, page, failErr, len(pageTools))
 			}
-			for _, tool := range result.Tools {
-				merged = append(merged, mcpTool{Name: name + "_" + tool.Name, Description: tool.Description, InputSchema: tool.InputSchema})
+			for _, tool := range pageTools {
+				prefixed, fullName, ok := prefixMCPTool(name, tool)
+				if !ok {
+					continue // malformed tool entry from this server; skip just that one, not the whole server
+				}
+				merged = append(merged, mcpMergedTool{name: fullName, server: name, raw: prefixed})
 			}
 		}(name)
 	}
 	wg.Wait()
 
-	if len(names) > 0 {
-		attempted := make([]limitScope, len(names))
-		for i, name := range names {
+	if len(dialed) > 0 {
+		attempted := make([]limitScope, len(dialed))
+		for i, name := range dialed {
 			attempted[i] = limitScope{kind: targetKindMCP, id: name}
 		}
 		g.limiter.countTargetRequests(attempted)
@@ -1063,16 +1435,77 @@ func (g *Gateway) mcpFederatedToolsList(w http.ResponseWriter, format mcpRespons
 		return
 	}
 
-	sort.Slice(merged, func(i, j int) bool { return merged[i].Name < merged[j].Name })
-	writeJSONRPCResult(w, format, req.ID, mcpToolsListResult{Tools: merged})
+	// F4: sort by (name, server) so a collision's outcome is deterministic
+	// — never "whichever goroutine happened to append first" — then group
+	// every entry sharing a name and pick the survivor below.
+	sort.Slice(merged, func(i, j int) bool {
+		if merged[i].name != merged[j].name {
+			return merged[i].name < merged[j].name
+		}
+		return merged[i].server < merged[j].server
+	})
+	deduped := make([]map[string]json.RawMessage, 0, len(merged))
+	for i := 0; i < len(merged); {
+		j := i + 1
+		for j < len(merged) && merged[j].name == merged[i].name {
+			j++
+		}
+		group := merged[i:j]
+		survivor := group[0]
+		if len(group) > 1 {
+			// P2 (review round 4): the survivor must be the server
+			// resolveFederatedTool would actually route a tools/call for
+			// this name to (longest matching server-name prefix) — the
+			// SAME rule, called against the SAME names this fan-out was
+			// given, so tools/list can never advertise a schema/
+			// description the caller then cannot reach through
+			// tools/call. Every candidate server here is by construction
+			// one of names (mcpMergedTool.server, set from the fan-out's
+			// own per-server loop) and a valid prefix of group[i].name
+			// (prefixMCPTool's own "<serverName>_<toolName>" convention),
+			// so resolveFederatedTool always resolves to one of them; the
+			// !ok branch below is unreachable in practice and only keeps
+			// group[0] as the same safe default the rest of this file
+			// uses for its own unreachable branches.
+			if routedServer, _, ok := resolveFederatedTool(group[0].name, names); ok {
+				for _, m := range group {
+					if m.server == routedServer {
+						survivor = m
+						break
+					}
+				}
+			}
+			for _, m := range group {
+				if m.server == survivor.server {
+					continue
+				}
+				g.logf("federated tools/list: tool %q from server %q dropped: tools/call routes this name to server %q instead", m.name, m.server, survivor.server)
+			}
+		}
+		deduped = append(deduped, survivor.raw)
+		i = j
+	}
+
+	writeJSONRPCResult(w, format, req.ID, mcpToolsListResult{Tools: deduped})
 }
 
 // mcpToolCallParams is one "tools/call" request's params: name is the
 // caller-facing, server-prefixed tool id federation itself minted in
-// tools/list ("<serverName>_<toolName>").
+// tools/list ("<serverName>_<toolName>"). Meta carries the request's own
+// "_meta" object verbatim — MCP's out-of-band per-request extension
+// point, whose only field this gateway's own callers have actually used
+// is progressToken (F11, review round 3, 2026-09) — forwarded to the
+// resolved backend unchanged (mcpFederatedToolsCall) so a caller that
+// expects progress correlated by that token at least reaches a backend
+// that might honor it. This gateway itself never relays a progress
+// notification back to the client (mcpFederatedToolsCall's own doc
+// comment covers what it does and does not relay), so a caller depending
+// on the notification arriving still needs a direct connection to the
+// backend for that half.
 type mcpToolCallParams struct {
 	Name      string          `json:"name"`
 	Arguments json.RawMessage `json:"arguments,omitempty"`
+	Meta      json.RawMessage `json:"_meta,omitempty"`
 }
 
 // resolveFederatedTool finds which of allowedNames is fullName's own
@@ -1140,7 +1573,9 @@ func (g *Gateway) mcpFederatedToolsCall(w http.ResponseWriter, format mcpRespons
 	// out above: err != nil is a failure, a JSON-RPC-level resp.Error is
 	// not.
 	probeStart := time.Now()
-	resp, err := g.mcpBackendCall(ctx, targetURL, "tools/call", mcpToolCallParams{Name: toolName, Arguments: params.Arguments}, mcpBackendCallResponseMaxBytes)
+	// Meta: params.Meta (F11) — the client's own "_meta" (progressToken
+	// included, when set) forwarded verbatim to the resolved backend.
+	resp, err := g.mcpBackendCall(ctx, targetURL, "tools/call", mcpToolCallParams{Name: toolName, Arguments: params.Arguments, Meta: params.Meta}, mcpBackendCallResponseMaxBytes)
 	// G4: same dialed-server rule as mcpFederatedToolsList's own fan-out,
 	// above — ctx here derives from r.Context() too, so a client cancel
 	// (context.Canceled) must record nothing. Unlike the fan-out,
@@ -1154,7 +1589,12 @@ func (g *Gateway) mcpFederatedToolsCall(w http.ResponseWriter, format mcpRespons
 	}
 	g.limiter.countTargetRequest(targetKindMCP, serverName)
 	if err != nil {
-		g.logf("federated tools/call: server %q: %v", serverName, err)
+		// P4 (review round 4): err here is commonly a *url.Error wrapping
+		// targetURL verbatim, including its query string (this gateway's
+		// own credential channel for a target — mcp_a2a.go) — scrubbed
+		// the same way as every other target-URL-bearing log line in
+		// this file.
+		g.logf("federated tools/call: server %q: %v", serverName, sanitizeProviderErr(err.Error(), targetURL))
 		// A response that hit mcpBackendCallResponseMaxBytes gets its own
 		// specific message, not the generic "upstream error" a truncated-
 		// then-unparsable body would otherwise produce (security review

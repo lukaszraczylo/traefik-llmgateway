@@ -160,9 +160,16 @@ func TestHandleMCPFederated_DefaultFraming_ByteIdenticalToBaseline(t *testing.T)
 			},
 		},
 		{
+			// F2, review round 3, 2026-09: each tool now round-trips
+			// through map[string]json.RawMessage (mcpToolsListResult's
+			// own doc comment) rather than the earlier fixed-field
+			// struct, so its own keys marshal back out in SORTED order —
+			// encoding/json's own documented behavior for a map — not
+			// the struct-declared "name" then "description" order the
+			// prior baseline pinned. Cosmetic only: content is identical.
 			name:     "tools/list two-server aggregate, Accept: application/json",
 			accept:   "application/json",
-			wantBody: `{"jsonrpc":"2.0","result":{"tools":[{"name":"alpha_lookup","description":"alpha's tool"},{"name":"beta_search","description":"beta's tool"}]},"id":42}` + "\n",
+			wantBody: `{"jsonrpc":"2.0","result":{"tools":[{"description":"alpha's tool","name":"alpha_lookup"},{"description":"beta's tool","name":"beta_search"}]},"id":42}` + "\n",
 			buildTest: func(t *testing.T) (http.Handler, *http.Request) {
 				alpha := newMockJSONRPCServer(t, []mcpTool{{Name: "lookup", Description: "alpha's tool"}})
 				beta := newMockJSONRPCServer(t, []mcpTool{{Name: "search", Description: "beta's tool"}})

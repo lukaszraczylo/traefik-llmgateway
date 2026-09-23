@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/url"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -211,12 +212,14 @@ func (g *Gateway) handleTargetProxy(w http.ResponseWriter, r *http.Request, u *u
 	}
 	g.limiter.countTargetRequest(targetScopeKind(kind), name)
 
-	upstreamURL := targetURL
-	if rest != "" {
-		upstreamURL += "/" + rest
-	}
-	if r.URL.RawQuery != "" {
-		upstreamURL += "?" + r.URL.RawQuery
+	upstreamURL, err := buildUpstreamTargetURL(targetURL, rest, r.URL.RawQuery)
+	if err != nil {
+		// targetURL is operator-configured and already validated at
+		// construction (validateTargetURLs) — unreachable in practice,
+		// kept as an explicit guard rather than trusting that invariant
+		// silently.
+		writeOAIError(w, http.StatusInternalServerError, "invalid_request_error", "invalid target configuration")
+		return
 	}
 
 	// feat/target-health: passive recording (target_health.go) — latency
@@ -227,6 +230,70 @@ func (g *Gateway) handleTargetProxy(w http.ResponseWriter, r *http.Request, u *u
 	start := time.Now()
 	result, ok := g.proxyUpstream(w, r, upstreamURL, g.targetClient, nil, nil, false, kind+" target (name "+name+")", g.targetTimeout)
 	g.recordTargetProxyHealth(kind, name, targetURL, result, ok, time.Since(start))
+}
+
+// buildUpstreamTargetURL joins targetURL (an MCP server or A2A agent's own
+// configured base, already validated at construction by
+// validateTargetURL) with rest (handleTargetProxy's own path remainder,
+// already checked for a traversal segment by its caller) using
+// url.URL.JoinPath rather than plain string concatenation (F7, review
+// round 3, 2026-09): the prior "+ \"/\" + rest" produced a doubled slash
+// whenever targetURL's own path already ended in "/" (e.g. configured as
+// "http://x/mcp/"), and, worse, a targetURL carrying its own query string
+// — the only way TargetConfig/AgentConfig can pass a credential to an
+// upstream today, since neither carries a header field — got that query
+// glued onto the wrong side of "?" + the request's own RawQuery,
+// producing something like "...?token=abc/foo" or two "?" characters and
+// corrupting the token federation was relying on. The target's own query
+// string is preserved (JoinPath never touches RawQuery) and merged with
+// the incoming request's own query (mergeQueryStrings, below) — neither
+// silently overwrites the other.
+func buildUpstreamTargetURL(targetURL, rest, requestRawQuery string) (string, error) {
+	base, err := url.Parse(targetURL)
+	if err != nil {
+		return "", err
+	}
+	joined := base
+	if rest != "" {
+		joined = base.JoinPath(rest)
+	}
+	joined.RawQuery = mergeQueryStrings(joined.RawQuery, requestRawQuery)
+	return joined.String(), nil
+}
+
+// mergeQueryStrings combines targetQuery (the configured target URL's own
+// query string, returned verbatim when it stands alone) with
+// requestQuery (the incoming client request's own), so neither silently
+// discards the other (F7). A request query that fails to parse is
+// dropped, not treated as a whole-request failure: the request's own
+// method/body may still be perfectly valid, and the target's own query —
+// a credential, per this file's own TargetConfig/AgentConfig doc
+// comments — is the one half of this that must never be lost silently.
+func mergeQueryStrings(targetQuery, requestQuery string) string {
+	if targetQuery == "" {
+		return requestQuery
+	}
+	if requestQuery == "" {
+		return targetQuery
+	}
+	merged, err := url.ParseQuery(targetQuery)
+	if err != nil {
+		// targetQuery came from an already-parsed url.URL's own RawQuery,
+		// so this is unreachable in practice — falls back to the
+		// request's own query alone rather than panicking or silently
+		// dropping both.
+		return requestQuery
+	}
+	reqValues, err := url.ParseQuery(requestQuery)
+	if err != nil {
+		return targetQuery
+	}
+	for k, vs := range reqValues {
+		for _, v := range vs {
+			merged.Add(k, v)
+		}
+	}
+	return merged.Encode()
 }
 
 // validateTargetURLs checks every configured MCP-server and agent entry at
@@ -260,6 +327,17 @@ func validateTargetURLs(cfg *Config) error {
 		}
 		if err := validateTargetURL(ac.URL); err != nil {
 			return fmt.Errorf("llmgateway: agents %q: %w", name, err)
+		}
+		// F8, review round 3, 2026-09: handleAgents builds the card URL as
+		// "/a2a/" + name + cardPath (its own doc comment) with no
+		// separator of its own — a Card that does not start with "/"
+		// (e.g. "agent.json") concatenates straight onto the agent name
+		// instead of starting a new path segment, producing something
+		// like "/a2a/myagentagent.json": a 404, or a completely different
+		// route, never the card the operator configured. Empty (the
+		// default, defaultAgentCardPath applies) is always valid.
+		if ac.Card != "" && !strings.HasPrefix(ac.Card, "/") {
+			return fmt.Errorf("llmgateway: agents %q: card %q must start with \"/\"", name, ac.Card)
 		}
 	}
 	return nil

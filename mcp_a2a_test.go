@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -544,6 +545,112 @@ func TestHandleTargetProxy_EmptyRest_ProxiesToRoot(t *testing.T) {
 	}
 }
 
+// --- F7 (review round 3, 2026-09): URL joining, not string concatenation ---
+
+// TestBuildUpstreamTargetURL covers buildUpstreamTargetURL directly:
+// good (ordinary join), bad (a target whose own path already ends in
+// "/", the doubled-slash bug), and edge (a target carrying its own query
+// string, which must survive alongside the request's own).
+func TestBuildUpstreamTargetURL(t *testing.T) {
+	cases := []struct {
+		name            string
+		targetURL       string
+		rest            string
+		requestRawQuery string
+		want            string
+	}{
+		{
+			name:      "ordinary join",
+			targetURL: "http://x.internal/mcp",
+			rest:      "foo",
+			want:      "http://x.internal/mcp/foo",
+		},
+		{
+			name:      "target path already ends in / no longer doubles the slash",
+			targetURL: "http://x.internal/mcp/",
+			rest:      "foo",
+			want:      "http://x.internal/mcp/foo",
+		},
+		{
+			name:      "empty rest proxies to the target root unchanged",
+			targetURL: "http://x.internal/mcp",
+			rest:      "",
+			want:      "http://x.internal/mcp",
+		},
+		{
+			name:            "target's own query survives alongside the request's own",
+			targetURL:       "http://x.internal/mcp?token=abc",
+			rest:            "foo",
+			requestRawQuery: "q=1",
+			want:            "http://x.internal/mcp/foo?q=1&token=abc",
+		},
+		{
+			name:      "target's own query survives with no request query at all",
+			targetURL: "http://x.internal/mcp?token=abc",
+			rest:      "foo",
+			want:      "http://x.internal/mcp/foo?token=abc",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := buildUpstreamTargetURL(tc.targetURL, tc.rest, tc.requestRawQuery)
+			if err != nil {
+				t.Fatalf("buildUpstreamTargetURL: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("buildUpstreamTargetURL(%q, %q, %q) = %q, want %q", tc.targetURL, tc.rest, tc.requestRawQuery, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestHandleTargetProxy_TargetQueryString_MergedWithRequestQuery is the
+// F7 end-to-end regression test: a target URL configured with its own
+// query string (the only way TargetConfig can carry a credential today)
+// must reach the upstream intact, merged with — not overwritten or
+// corrupted by — the caller's own request query.
+func TestHandleTargetProxy_TargetQueryString_MergedWithRequestQuery(t *testing.T) {
+	var gotURL string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotURL = r.URL.String()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{"openai": {Type: "openai", APIKey: "k"}}
+	cfg.MCPServers = map[string]*TargetConfig{"alpha": {URL: srv.URL + "/mcp?token=secret"}}
+	cfg.Groups = map[string]*GroupConfig{"default": {}}
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{{Name: "alice", Group: "default", APIKey: "sk-alice"}}}
+	h, err := New(context.Background(), http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/mcp/alpha/tools?q=1", nil)
+	req.Header.Set("Authorization", "Bearer sk-alice")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	u, err := url.Parse(gotURL)
+	if err != nil {
+		t.Fatalf("parse upstream-observed URL %q: %v", gotURL, err)
+	}
+	if u.Path != "/mcp/tools" {
+		t.Errorf("upstream path = %q, want %q", u.Path, "/mcp/tools")
+	}
+	got := u.Query()
+	if got.Get("token") != "secret" {
+		t.Errorf("upstream query token = %q, want %q (the target's own configured query must survive)", got.Get("token"), "secret")
+	}
+	if got.Get("q") != "1" {
+		t.Errorf("upstream query q = %q, want %q (the request's own query must survive too)", got.Get("q"), "1")
+	}
+}
+
 // --- dead upstream maps to 502, same as native passthrough ---
 
 func TestHandleTargetProxy_DeadUpstream_Returns502(t *testing.T) {
@@ -814,6 +921,26 @@ func TestNewGateway_TargetURLValidation(t *testing.T) {
 			name:       "mcpServers name with invalid character is a constructor error",
 			mcpServers: map[string]*TargetConfig{"has a space": {URL: "http://mcp-alpha.internal:8080"}},
 			wantErr:    true,
+		},
+		{
+			// F8, review round 3, 2026-09: handleAgents builds the card
+			// URL as "/a2a/" + name + cardPath with no separator of its
+			// own — a Card that does not start with "/" concatenates
+			// straight onto the agent name instead of starting a new
+			// path segment.
+			name:    "agent card not starting with / is a constructor error",
+			agents:  map[string]*AgentConfig{"agent1": {URL: "https://agent1.internal", Card: "agent.json"}},
+			wantErr: true,
+		},
+		{
+			name:    "agent card starting with / is valid",
+			agents:  map[string]*AgentConfig{"agent1": {URL: "https://agent1.internal", Card: "/custom-card.json"}},
+			wantErr: false,
+		},
+		{
+			name:    "agent card empty (default applies) is valid",
+			agents:  map[string]*AgentConfig{"agent1": {URL: "https://agent1.internal", Card: ""}},
+			wantErr: false,
 		},
 	}
 	for _, tt := range tests {

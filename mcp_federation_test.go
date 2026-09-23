@@ -114,6 +114,20 @@ func TestParseBackendJSONRPC(t *testing.T) {
 			wantResult:  `{"stage":2}`,
 		},
 		{
+			// F6, review round 3, 2026-09: a single event's own "data:"
+			// field can legitimately span several physical lines (this
+			// gateway's own sseWriter.writeData emits exactly this shape
+			// for a multi-line payload) — the SSE wire format joins them
+			// with "\n" into one logical payload, not two separate
+			// events. Split right after the "result" key's colon, where
+			// JSON permits whitespace (including a newline) before the
+			// value.
+			name:        "SSE event with one data field split across two data: lines, joined with newline",
+			contentType: "text/event-stream",
+			body:        "data: {\"jsonrpc\":\"2.0\",\"id\":\"federated\",\"result\":\ndata: {\"ok\":true}}\n\n",
+			wantResult:  `{"ok":true}`,
+		},
+		{
 			name:        "malformed JSON",
 			contentType: "application/json",
 			body:        `not json`,
@@ -147,6 +161,84 @@ func TestParseBackendJSONRPC(t *testing.T) {
 
 // --- end-to-end: POST /mcp ---
 
+// mcpToolsToRaw converts the test-fixture []mcpTool shape into the
+// []map[string]json.RawMessage wire shape mcpToolsListResult.Tools
+// actually decodes/encodes as (F2, review round 3, 2026-09) — every mock
+// server in this file builds its own canned tools/list response through
+// this, so a test still writes the compact mcpTool{Name: ...} literal
+// while the bytes on the wire (and so what mcpFederatedToolsList's own
+// F2 field-passthrough sees) match a real backend's shape.
+func mcpToolsToRaw(t *testing.T, tools []mcpTool) []map[string]json.RawMessage {
+	t.Helper()
+	if tools == nil {
+		return nil
+	}
+	out := make([]map[string]json.RawMessage, len(tools))
+	for i, tool := range tools {
+		b, err := json.Marshal(tool)
+		if err != nil {
+			t.Fatalf("marshal mcpTool: %v", err)
+		}
+		var m map[string]json.RawMessage
+		if err := json.Unmarshal(b, &m); err != nil {
+			t.Fatalf("unmarshal mcpTool: %v", err)
+		}
+		out[i] = m
+	}
+	return out
+}
+
+// mustToolName decodes tool's own "name" field, failing the test if it is
+// missing or not a JSON string — used everywhere a test needs to compare
+// mcpFederatedToolsList's own merged output (now []map[string]json.RawMessage,
+// F2) against an expected name string.
+func mustToolName(t *testing.T, tool map[string]json.RawMessage) string {
+	t.Helper()
+	var name string
+	if err := json.Unmarshal(tool["name"], &name); err != nil {
+		t.Fatalf("tool has no valid \"name\" field: %+v (%v)", tool, err)
+	}
+	return name
+}
+
+// TestPrefixMCPTool_SkipsInvalidName is the P3 regression test (review
+// round 4): json.Unmarshal("null", &toolName) succeeds and leaves
+// toolName as its zero value (""), identical to an explicit "name":"" —
+// without the fix, either one mints and lists a bare "<server>_" tool
+// with no real name behind it, rather than being skipped like the
+// already-handled missing-field and non-string-name cases.
+func TestPrefixMCPTool_SkipsInvalidName(t *testing.T) {
+	cases := []struct {
+		tool map[string]json.RawMessage
+		name string
+	}{
+		{name: "missing name field", tool: map[string]json.RawMessage{"x": json.RawMessage(`1`)}},
+		{name: "null name", tool: map[string]json.RawMessage{"name": json.RawMessage(`null`)}},
+		{name: "empty string name", tool: map[string]json.RawMessage{"name": json.RawMessage(`""`)}},
+		{name: "non-string name", tool: map[string]json.RawMessage{"name": json.RawMessage(`42`)}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out, fullName, ok := prefixMCPTool("srv", tc.tool)
+			if ok || out != nil || fullName != "" {
+				t.Errorf("prefixMCPTool(%+v) = (%+v, %q, %v), want (nil, \"\", false)", tc.tool, out, fullName, ok)
+			}
+		})
+	}
+	// Good case, alongside the bad ones above (table style): a real name
+	// still prefixes normally.
+	t.Run("valid name", func(t *testing.T) {
+		out, fullName, ok := prefixMCPTool("srv", map[string]json.RawMessage{"name": json.RawMessage(`"search"`)})
+		if !ok || fullName != "srv_search" {
+			t.Fatalf("prefixMCPTool = (%+v, %q, %v), want ok=true, fullName=\"srv_search\"", out, fullName, ok)
+		}
+		var gotName string
+		if err := json.Unmarshal(out["name"], &gotName); err != nil || gotName != "srv_search" {
+			t.Errorf("out[\"name\"] = %s, want \"srv_search\"", out["name"])
+		}
+	})
+}
+
 // mockJSONRPCServer is a minimal MCP-shaped backend for federation tests:
 // it answers "tools/list" with a fixed tool set and "tools/call" by
 // echoing back the resolved (prefix-stripped) name/arguments it was
@@ -172,7 +264,7 @@ func newMockJSONRPCServer(t *testing.T, tools []mcpTool) *mockJSONRPCServer {
 		w.Header().Set("Content-Type", "application/json")
 		switch req.Method {
 		case "tools/list":
-			result, _ := json.Marshal(mcpToolsListResult{Tools: m.tools})
+			result, _ := json.Marshal(mcpToolsListResult{Tools: mcpToolsToRaw(t, m.tools)})
 			_ = json.NewEncoder(w).Encode(jsonrpcResponse{ID: req.ID, Result: result})
 		case "tools/call":
 			var params mcpToolCallParams
@@ -244,7 +336,7 @@ func newSessionRequiredMockServer(t *testing.T, tools []mcpTool) *sessionRequire
 		}
 		switch req.Method {
 		case "tools/list":
-			result, _ := json.Marshal(mcpToolsListResult{Tools: m.tools})
+			result, _ := json.Marshal(mcpToolsListResult{Tools: mcpToolsToRaw(t, m.tools)})
 			_ = json.NewEncoder(w).Encode(jsonrpcResponse{ID: req.ID, Result: result})
 		case "tools/call":
 			var params mcpToolCallParams
@@ -523,7 +615,7 @@ func TestHandleMCPFederated_ToolsList_AggregatesPrefixesAndRespectsGroupAccess(t
 
 			gotNames := make([]string, len(result.Tools))
 			for i, tool := range result.Tools {
-				gotNames[i] = tool.Name
+				gotNames[i] = mustToolName(t, tool)
 			}
 			if len(gotNames) != len(tc.wantToolNames) {
 				t.Fatalf("tools = %v, want %v", gotNames, tc.wantToolNames)
@@ -581,8 +673,246 @@ func TestHandleMCPFederated_ToolsList_UnreachableServerDegradesNotFails(t *testi
 	if err := json.Unmarshal(got.Result, &result); err != nil {
 		t.Fatalf("decode result: %v", err)
 	}
-	if len(result.Tools) != 1 || result.Tools[0].Name != "alpha_lookup" {
+	if len(result.Tools) != 1 || mustToolName(t, result.Tools[0]) != "alpha_lookup" {
 		t.Errorf("tools = %+v, want exactly alpha_lookup (beta unreachable, skipped)", result.Tools)
+	}
+}
+
+// TestHandleMCPFederated_ToolsList_FollowsNextCursor is the F3 regression
+// test (review round 3, 2026-09): a paginated backend's tools all arrive
+// in the federated aggregate, not just the first page, and the cursor
+// each successive request carries is exactly the previous page's own
+// nextCursor.
+func TestHandleMCPFederated_ToolsList_FollowsNextCursor(t *testing.T) {
+	var calls []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req jsonrpcRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		var params mcpToolsListParams
+		_ = json.Unmarshal(req.Params, &params)
+		calls = append(calls, "cursor="+params.Cursor)
+
+		var page mcpToolsListResult
+		switch params.Cursor {
+		case "":
+			page = mcpToolsListResult{Tools: mcpToolsToRaw(t, []mcpTool{{Name: "one"}}), NextCursor: "page2"}
+		case "page2":
+			page = mcpToolsListResult{Tools: mcpToolsToRaw(t, []mcpTool{{Name: "two"}})} // no NextCursor: last page
+		default:
+			t.Fatalf("unexpected cursor %q", params.Cursor)
+		}
+		result, _ := json.Marshal(page)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(jsonrpcResponse{ID: req.ID, Result: result})
+	}))
+	defer srv.Close()
+
+	cfg := newFederationTestConfig(srv.URL, "http://beta.invalid", true) // alphaOnly
+	h, err := New(context.Background(), http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, newFederatedRequest(t, "sk-alice", jsonrpcRequest{JSONRPC: jsonrpcVersion, Method: "tools/list", ID: json.RawMessage("1")}))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	var got jsonrpcResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Error != nil {
+		t.Fatalf("error = %+v, want nil", got.Error)
+	}
+	var result mcpToolsListResult
+	if err := json.Unmarshal(got.Result, &result); err != nil {
+		t.Fatalf("decode result: %v", err)
+	}
+	gotNames := make([]string, len(result.Tools))
+	for i, tool := range result.Tools {
+		gotNames[i] = mustToolName(t, tool)
+	}
+	wantNames := []string{"alpha_one", "alpha_two"}
+	if len(gotNames) != len(wantNames) || gotNames[0] != wantNames[0] || gotNames[1] != wantNames[1] {
+		t.Fatalf("tools = %v, want %v (both pages merged)", gotNames, wantNames)
+	}
+	if len(calls) != 2 || calls[0] != "cursor=" || calls[1] != "cursor=page2" {
+		t.Errorf("calls = %v, want [\"cursor=\" \"cursor=page2\"] (first page bare, second page echoing the first page's own nextCursor)", calls)
+	}
+}
+
+// TestHandleMCPFederated_ToolsList_LaterPageFailure_KeepsEarlierPages is
+// the F3 partial-keep regression test (review round 4): page 1 succeeds
+// and sets a NextCursor, page 2 fails with a JSON-RPC error. Before this
+// fix, ANY page failure discarded the whole server's contribution,
+// including the tools from pages already fetched successfully; now only
+// page 0 (the very first page) failing does that — a later page failing
+// keeps what came before and logs a warning naming what was lost.
+func TestHandleMCPFederated_ToolsList_LaterPageFailure_KeepsEarlierPages(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req jsonrpcRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		var params mcpToolsListParams
+		_ = json.Unmarshal(req.Params, &params)
+		w.Header().Set("Content-Type", "application/json")
+		switch params.Cursor {
+		case "":
+			result, _ := json.Marshal(mcpToolsListResult{Tools: mcpToolsToRaw(t, []mcpTool{{Name: "one"}}), NextCursor: "page2"})
+			_ = json.NewEncoder(w).Encode(jsonrpcResponse{ID: req.ID, Result: result})
+		case "page2":
+			_ = json.NewEncoder(w).Encode(jsonrpcResponse{ID: req.ID, Error: &jsonrpcError{Code: -32000, Message: "backend broke mid-pagination"}})
+		default:
+			t.Fatalf("unexpected cursor %q", params.Cursor)
+		}
+	}))
+	defer srv.Close()
+
+	cfg := newFederationTestConfig(srv.URL, "http://beta.invalid", true) // alphaOnly
+	h, err := New(context.Background(), http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	var rec *httptest.ResponseRecorder
+	logOutput := captureStderr(t, func() {
+		rec = httptest.NewRecorder()
+		h.ServeHTTP(rec, newFederatedRequest(t, "sk-alice", jsonrpcRequest{JSONRPC: jsonrpcVersion, Method: "tools/list", ID: json.RawMessage("1")}))
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	var got jsonrpcResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Error != nil {
+		t.Fatalf("error = %+v, want nil — page 1's tool must still be served, not turned into a total failure", got.Error)
+	}
+	var result mcpToolsListResult
+	if err := json.Unmarshal(got.Result, &result); err != nil {
+		t.Fatalf("decode result: %v", err)
+	}
+	if len(result.Tools) != 1 || mustToolName(t, result.Tools[0]) != "alpha_one" {
+		t.Fatalf("tools = %+v, want exactly [alpha_one] (page 1's tool kept despite page 2 failing)", result.Tools)
+	}
+	if !strings.Contains(logOutput, "page 1 failed") || !strings.Contains(logOutput, "keeping 1 tool") {
+		t.Errorf("log output = %q, want a warning naming the failed page and how many tools were kept", logOutput)
+	}
+}
+
+// TestHandleMCPFederated_ToolsList_NextCursorLoop_BoundedByPageCap proves
+// a backend that ALWAYS sets nextCursor (an unbounded pagination loop, by
+// bug or by design) cannot hold the fan-out hostage forever — F3's own
+// mcpToolsListMaxPagesPerServer cap stops it, degrading to a partial tool
+// list rather than exhausting the fan-out's shared timeout budget one
+// page at a time. Also covers F3's page-cap warning (review round 4): a
+// truncation this silent otherwise gives an operator no signal a
+// legitimately larger catalog got cut off.
+func TestHandleMCPFederated_ToolsList_NextCursorLoop_BoundedByPageCap(t *testing.T) {
+	var pageCount atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := pageCount.Add(1)
+		var req jsonrpcRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		page := mcpToolsListResult{
+			Tools:      mcpToolsToRaw(t, []mcpTool{{Name: fmt.Sprintf("tool%d", n)}}),
+			NextCursor: fmt.Sprintf("next%d", n), // never empty: an infinite pagination loop
+		}
+		result, _ := json.Marshal(page)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(jsonrpcResponse{ID: req.ID, Result: result})
+	}))
+	defer srv.Close()
+
+	cfg := newFederationTestConfig(srv.URL, "http://beta.invalid", true)
+	h, err := New(context.Background(), http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	var rec *httptest.ResponseRecorder
+	logOutput := captureStderr(t, func() {
+		rec = httptest.NewRecorder()
+		h.ServeHTTP(rec, newFederatedRequest(t, "sk-alice", jsonrpcRequest{JSONRPC: jsonrpcVersion, Method: "tools/list", ID: json.RawMessage("1")}))
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(logOutput, "hit the") || !strings.Contains(logOutput, "page cap") {
+		t.Errorf("log output = %q, want a warning naming the page-cap truncation", logOutput)
+	}
+
+	if got := pageCount.Load(); got != int32(mcpToolsListMaxPagesPerServer) {
+		t.Errorf("pages fetched = %d, want exactly mcpToolsListMaxPagesPerServer (%d)", got, mcpToolsListMaxPagesPerServer)
+	}
+}
+
+// TestHandleMCPFederated_ToolsList_CollisionDropsLaterDeterministically is
+// the F4 regression test (review round 3, 2026-09), extended for P2
+// (review round 4): two configured, allowed servers whose names collide
+// under the "<server>_<tool>" prefix convention (server "a" has tool
+// "b_c"; server "a_b" has tool "c"; both mint "a_b_c") must not both
+// appear in the merged list — one wins, deterministically, and the drop
+// is logged. The survivor must be server "a_b", not "a": resolveFederatedTool
+// resolves "a_b_c" against allowed names ["a","a_b"] by LONGEST matching
+// prefix, which is "a_b" — the OLD alphabetical tiebreak instead kept "a"
+// (it sorts first), which would advertise a tool description tools/call
+// could never actually reach, since every call for "a_b_c" is routed to
+// "a_b" regardless of which one tools/list lists. Each server's tool
+// carries its own description so the assertion below proves the LISTED
+// description is the ROUTED server's own, not just that a name survived.
+func TestHandleMCPFederated_ToolsList_CollisionDropsLaterDeterministically(t *testing.T) {
+	a := newMockJSONRPCServer(t, []mcpTool{{Name: "b_c", Description: "FROM_A"}})
+	ab := newMockJSONRPCServer(t, []mcpTool{{Name: "c", Description: "FROM_A_B"}})
+
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{"openai": {Type: "openai", APIKey: "k"}}
+	cfg.MCPServers = map[string]*TargetConfig{
+		"a":   {URL: a.srv.URL},
+		"a_b": {URL: ab.srv.URL},
+	}
+	cfg.Groups = map[string]*GroupConfig{"default": {}}
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{{Name: "alice", Group: "default", APIKey: "sk-alice"}}}
+	h, err := New(context.Background(), http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, newFederatedRequest(t, "sk-alice", jsonrpcRequest{JSONRPC: jsonrpcVersion, Method: "tools/list", ID: json.RawMessage("1")}))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	var got jsonrpcResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	var result mcpToolsListResult
+	if err := json.Unmarshal(got.Result, &result); err != nil {
+		t.Fatalf("decode result: %v", err)
+	}
+	// Exactly one "a_b_c" survives — never two entries sharing one name,
+	// which some client-side LLM tool APIs reject outright, and never
+	// zero (the collision must resolve to a deterministic winner, not
+	// drop both).
+	if len(result.Tools) != 1 || mustToolName(t, result.Tools[0]) != "a_b_c" {
+		t.Fatalf("tools = %+v, want exactly one entry named a_b_c", result.Tools)
+	}
+	// P2: the listed description must belong to server "a_b" (FROM_A_B) —
+	// the one resolveFederatedTool actually routes "a_b_c" calls to —
+	// never server "a"'s (FROM_A), which the old alphabetical tiebreak
+	// would have kept despite tools/call never reaching it under that
+	// name.
+	var desc string
+	if err := json.Unmarshal(result.Tools[0]["description"], &desc); err != nil {
+		t.Fatalf("tool has no valid \"description\" field: %+v (%v)", result.Tools[0], err)
+	}
+	if desc != "FROM_A_B" {
+		t.Errorf("description = %q, want %q (the routed server a_b's own, not a's)", desc, "FROM_A_B")
+	}
+	if routedServer, _, ok := resolveFederatedTool("a_b_c", []string{"a", "a_b"}); !ok || routedServer != "a_b" {
+		t.Fatalf("sanity check failed: resolveFederatedTool(%q) = (%q, ok=%v), want (\"a_b\", true) — the test's own premise is wrong if this fails", "a_b_c", routedServer, ok)
 	}
 }
 
@@ -652,6 +982,46 @@ func TestHandleMCPFederated_ToolsCall_RoutesToCorrectServer_StripsPrefix(t *test
 	alphaReq, ok := gw.limiter.getCounter(targetKindMCP, "alpha", metricReq, windowDay, time.Now())
 	if !ok || alphaReq != 1 {
 		t.Errorf("mcp/alpha req:day counter = %d (ok=%v), want 1 (the resolved target)", alphaReq, ok)
+	}
+}
+
+// TestHandleMCPFederated_ToolsCall_ForwardsMeta is the F11 regression test
+// (review round 3, 2026-09): a client's own "_meta" object on tools/call —
+// progressToken included — reaches the resolved backend verbatim,
+// alongside the usual prefix-stripped name and forwarded arguments.
+func TestHandleMCPFederated_ToolsCall_ForwardsMeta(t *testing.T) {
+	var gotMeta json.RawMessage
+	alpha := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req jsonrpcRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		var params mcpToolCallParams
+		_ = json.Unmarshal(req.Params, &params)
+		gotMeta = params.Meta
+		w.Header().Set("Content-Type", "application/json")
+		result, _ := json.Marshal(map[string]any{"ok": true})
+		_ = json.NewEncoder(w).Encode(jsonrpcResponse{ID: req.ID, Result: result})
+	}))
+	defer alpha.Close()
+
+	cfg := newFederationTestConfig(alpha.URL, "http://beta.invalid", true) // alphaOnly
+	h, err := New(context.Background(), http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	callParams, _ := json.Marshal(mcpToolCallParams{
+		Name: "alpha_lookup",
+		Meta: json.RawMessage(`{"progressToken":"tok-1"}`),
+	})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, newFederatedRequest(t, "sk-alice", jsonrpcRequest{
+		JSONRPC: jsonrpcVersion, Method: "tools/call", ID: json.RawMessage("1"), Params: callParams,
+	}))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	if string(gotMeta) != `{"progressToken":"tok-1"}` {
+		t.Errorf("backend saw _meta = %s, want the client's own _meta forwarded verbatim", gotMeta)
 	}
 }
 
@@ -978,14 +1348,25 @@ func TestHandleMCPFederated_ToolsCall_BackendEmptyEnvelope_ConvertsToInternalErr
 // shapes and the one non-trigger shape (a network failure is covered
 // separately below, since it needs a different mock shape entirely: no
 // server to answer at all).
+// TestMcpBackendCall_HandshakeFallbackTrigger covers mcpSessionRequiredSignal's
+// narrowed rule (F1, review round 3, 2026-09) end to end through
+// mcpBackendCall: only a narrow session-missing signal may trigger the
+// handshake retry, never an arbitrary tools/call error and never a 429 —
+// the exact over-eager-retry bug F1 fixes, where a non-idempotent
+// tools/call could be silently double-executed. method defaults to
+// "tools/list" when empty, matching the broader "any JSON-RPC error is a
+// session signal" rule that method gets (mcpSessionRequiredSignal's own
+// doc comment); the "tool called once" cases below explicitly exercise
+// "tools/call" to prove the narrower rule that method gets instead.
 func TestMcpBackendCall_HandshakeFallbackTrigger(t *testing.T) {
 	cases := []struct {
 		bareHandler   http.HandlerFunc
 		name          string
+		method        string
 		wantHandshake bool
 	}{
 		{
-			name: "bare JSON-RPC error triggers the handshake",
+			name: "bare JSON-RPC error triggers the handshake (tools/list: any error is a session signal)",
 			bareHandler: func(w http.ResponseWriter, r *http.Request) {
 				var req jsonrpcRequest
 				_ = json.NewDecoder(r.Body).Decode(&req)
@@ -995,11 +1376,25 @@ func TestMcpBackendCall_HandshakeFallbackTrigger(t *testing.T) {
 			wantHandshake: true,
 		},
 		{
-			name: "HTTP 403 with no JSON-RPC body triggers the handshake",
+			name: "HTTP 404 with no JSON-RPC body triggers the handshake",
+			bareHandler: func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusNotFound)
+			},
+			wantHandshake: true,
+		},
+		{
+			name: "HTTP 403 with no JSON-RPC body does NOT trigger the handshake (F1: narrowed from any 4xx to just 400/404)",
 			bareHandler: func(w http.ResponseWriter, r *http.Request) {
 				w.WriteHeader(http.StatusForbidden)
 			},
-			wantHandshake: true,
+			wantHandshake: false,
+		},
+		{
+			name: "HTTP 429 never triggers the handshake (F1: rate-limited, retrying only adds load)",
+			bareHandler: func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusTooManyRequests)
+			},
+			wantHandshake: false,
 		},
 		{
 			name: "HTTP 500 never triggers the handshake",
@@ -1008,9 +1403,43 @@ func TestMcpBackendCall_HandshakeFallbackTrigger(t *testing.T) {
 			},
 			wantHandshake: false,
 		},
+		{
+			// The F1 scenario itself: a tools/call answered with an
+			// ordinary, unrelated JSON-RPC error (a real tool-level
+			// failure, e.g. bad arguments) must be called exactly ONCE —
+			// retrying it could silently double-execute a non-idempotent
+			// tool's side effect.
+			name:   "tools/call: arbitrary JSON-RPC error does not trigger the handshake (tool called once)",
+			method: "tools/call",
+			bareHandler: func(w http.ResponseWriter, r *http.Request) {
+				var req jsonrpcRequest
+				_ = json.NewDecoder(r.Body).Decode(&req)
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(jsonrpcResponse{ID: req.ID, Error: &jsonrpcError{Code: -32602, Message: "invalid arguments: missing required field \"query\""}})
+			},
+			wantHandshake: false,
+		},
+		{
+			// The narrow allow-case for tools/call: the SAME JSON-RPC
+			// error shape, but its own message clearly names a session
+			// problem, still gets the handshake.
+			name:   "tools/call: JSON-RPC error naming a session problem still triggers the handshake",
+			method: "tools/call",
+			bareHandler: func(w http.ResponseWriter, r *http.Request) {
+				var req jsonrpcRequest
+				_ = json.NewDecoder(r.Body).Decode(&req)
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(jsonrpcResponse{ID: req.ID, Error: &jsonrpcError{Code: -32000, Message: "Session required: call initialize first"}})
+			},
+			wantHandshake: true,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			method := tc.method
+			if method == "" {
+				method = "tools/list"
+			}
 			var callCount atomic.Int32
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if callCount.Add(1) == 1 {
@@ -1040,14 +1469,14 @@ func TestMcpBackendCall_HandshakeFallbackTrigger(t *testing.T) {
 				t.Fatal("handler is not *Gateway")
 			}
 
-			_, _ = gw.mcpBackendCall(context.Background(), srv.URL, "tools/list", struct{}{}, mcpBackendResponseMaxBytes)
+			_, _ = gw.mcpBackendCall(context.Background(), srv.URL, method, struct{}{}, mcpBackendResponseMaxBytes)
 
 			gotCalls := callCount.Load()
 			if tc.wantHandshake && gotCalls < 2 {
 				t.Errorf("calls = %d, want >=2 (bare attempt + initialize handshake)", gotCalls)
 			}
 			if !tc.wantHandshake && gotCalls != 1 {
-				t.Errorf("calls = %d, want exactly 1 (bare attempt only, no handshake retry against a 5xx)", gotCalls)
+				t.Errorf("calls = %d, want exactly 1 (bare attempt only, no handshake retry)", gotCalls)
 			}
 		})
 	}
@@ -1227,13 +1656,15 @@ func TestHandleMCPFederated_ToolsList_HandshakeFallback_SucceedsAfterSessionRetr
 	if err := json.Unmarshal(got.Result, &result); err != nil {
 		t.Fatalf("decode result: %v", err)
 	}
-	if len(result.Tools) != 1 || result.Tools[0].Name != "alpha_search" {
+	if len(result.Tools) != 1 || mustToolName(t, result.Tools[0]) != "alpha_search" {
 		t.Fatalf("tools = %+v, want exactly alpha_search", result.Tools)
 	}
 
 	seq := strict.callSequence()
-	if len(seq) != 4 {
-		t.Fatalf("call sequence = %v, want exactly 4 calls (bare attempt, initialize, retried real call, best-effort close — the DELETE runs synchronously inside mcpBackendCall's own defer, before it returns)", seq)
+	// F5, review round 3, 2026-09: notifications/initialized is now sent
+	// between the handshake and the retry, one more call than before.
+	if len(seq) != 5 {
+		t.Fatalf("call sequence = %v, want exactly 5 calls (bare attempt, initialize, notifications/initialized, retried real call, best-effort close — the DELETE runs synchronously inside mcpBackendCall's own defer, before it returns)", seq)
 	}
 	if seq[0] != "tools/list:session=" {
 		t.Errorf("call[0] = %q, want a bare tools/list attempt with no session header", seq[0])
@@ -1241,11 +1672,98 @@ func TestHandleMCPFederated_ToolsList_HandshakeFallback_SucceedsAfterSessionRetr
 	if seq[1] != "initialize:session=" {
 		t.Errorf("call[1] = %q, want an initialize handshake with no session header", seq[1])
 	}
-	if seq[2] != "tools/list:session=sess-1" {
-		t.Errorf("call[2] = %q, want the retried tools/list carrying the session header the handshake returned", seq[2])
+	if seq[2] != "notifications/initialized:session=sess-1" {
+		t.Errorf("call[2] = %q, want the lifecycle's own notifications/initialized, carrying the session header the handshake returned", seq[2])
 	}
-	if seq[3] != "DELETE:session=sess-1" {
-		t.Errorf("call[3] = %q, want the best-effort session close carrying the same session header", seq[3])
+	if seq[3] != "tools/list:session=sess-1" {
+		t.Errorf("call[3] = %q, want the retried tools/list carrying the session header the handshake returned", seq[3])
+	}
+	if seq[4] != "DELETE:session=sess-1" {
+		t.Errorf("call[4] = %q, want the best-effort session close carrying the same session header", seq[4])
+	}
+}
+
+// TestMcpBackendCall_SendsNotificationsInitialized_AfterHandshake is the
+// F5 regression test (review round 3, 2026-09), pinning the notification's
+// own exact wire shape directly: no "id" field at all (it is a JSON-RPC
+// notification, not a request awaiting a reply), method
+// "notifications/initialized", and the session header carrying the
+// handshake's own Mcp-Session-Id. A backend that answers it with an
+// error (as this one deliberately does, mirroring a real server that
+// does not implement this endpoint) must never surface as a failure of
+// the call this handshake serves — fire-and-forget, as documented.
+func TestMcpBackendCall_SendsNotificationsInitialized_AfterHandshake(t *testing.T) {
+	var (
+		mu                 sync.Mutex
+		sawNotification    bool
+		notificationHasID  bool
+		notificationSessID string
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		body, _ := io.ReadAll(r.Body)
+		var raw map[string]json.RawMessage
+		_ = json.Unmarshal(body, &raw)
+		var req jsonrpcRequest
+		_ = json.Unmarshal(body, &req)
+		w.Header().Set("Content-Type", "application/json")
+
+		switch req.Method {
+		case "initialize":
+			w.Header().Set(mcpSessionHeader, "sess-f5")
+			result, _ := json.Marshal(map[string]any{})
+			_ = json.NewEncoder(w).Encode(jsonrpcResponse{ID: req.ID, Result: result})
+		case "notifications/initialized":
+			mu.Lock()
+			sawNotification = true
+			_, notificationHasID = raw["id"]
+			notificationSessID = r.Header.Get(mcpSessionHeader)
+			mu.Unlock()
+			// Deliberately answer with an error, to prove this response
+			// is never inspected by the caller.
+			_ = json.NewEncoder(w).Encode(jsonrpcResponse{ID: req.ID, Error: &jsonrpcError{Code: jsonrpcMethodNotFound, Message: "not implemented"}})
+		default:
+			if r.Header.Get(mcpSessionHeader) == "sess-f5" {
+				// The retried real call, now carrying the session the
+				// handshake returned: succeeds.
+				result, _ := json.Marshal(mcpToolsListResult{})
+				_ = json.NewEncoder(w).Encode(jsonrpcResponse{ID: req.ID, Result: result})
+				return
+			}
+			// The bare attempt: reject with a session-required signal so
+			// the handshake fires.
+			_ = json.NewEncoder(w).Encode(jsonrpcResponse{ID: req.ID, Error: &jsonrpcError{Code: -32000, Message: "session required"}})
+		}
+	}))
+	defer srv.Close()
+
+	cfg := newFederationTestConfig("http://alpha.invalid", "http://beta.invalid", false)
+	h, err := New(context.Background(), http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	gw, ok := h.(*Gateway)
+	if !ok {
+		t.Fatal("handler is not *Gateway")
+	}
+
+	if _, err := gw.mcpBackendCall(context.Background(), srv.URL, "tools/list", struct{}{}, mcpBackendResponseMaxBytes); err != nil {
+		t.Fatalf("mcpBackendCall: %v, want the retry to succeed despite the notification's own error response", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if !sawNotification {
+		t.Fatal("backend never received notifications/initialized")
+	}
+	if notificationHasID {
+		t.Error("notifications/initialized carried an \"id\" field; want none (it is a notification, not a request)")
+	}
+	if notificationSessID != "sess-f5" {
+		t.Errorf("notifications/initialized session header = %q, want %q", notificationSessID, "sess-f5")
 	}
 }
 
@@ -1506,7 +2024,7 @@ func TestHandleMCPFederated_ToolsList_PanickingBackendDegradesNotCrashes(t *test
 	if err := json.Unmarshal(got.Result, &result); err != nil {
 		t.Fatalf("decode result: %v", err)
 	}
-	if len(result.Tools) != 1 || result.Tools[0].Name != "alpha_lookup" {
+	if len(result.Tools) != 1 || mustToolName(t, result.Tools[0]) != "alpha_lookup" {
 		t.Errorf("tools = %+v, want exactly alpha_lookup (beta panicked, skipped)", result.Tools)
 	}
 }
@@ -1624,8 +2142,13 @@ func TestIsLegacySSETransportURL(t *testing.T) {
 	}{
 		{"http://playwright.internal:8080/sse", true},
 		{"http://playwright.internal:8080/sse?foo=bar", true},
+		// F9, review round 3, 2026-09: a trailing slash is the identical
+		// legacy-SSE endpoint, not a different path shape.
+		{"http://playwright.internal:8080/sse/", true},
+		{"http://playwright.internal:8080/sse/?foo=bar", true},
 		{"http://mcp.internal:8080", false},
 		{"http://mcp.internal:8080/mcp", false},
+		{"http://mcp.internal:8080/mcp/", false},
 		{"http://mcp.internal:8080/sse/extra", false},
 		{"://not a valid url", false}, // malformed -> safe default: not excluded
 	}
@@ -1683,7 +2206,7 @@ func TestHandleMCPFederated_ToolsList_ExcludesLegacySSEServer_NeverContacted(t *
 	if err := json.Unmarshal(got.Result, &result); err != nil {
 		t.Fatalf("decode result: %v", err)
 	}
-	if len(result.Tools) != 1 || result.Tools[0].Name != "alpha_lookup" {
+	if len(result.Tools) != 1 || mustToolName(t, result.Tools[0]) != "alpha_lookup" {
 		t.Fatalf("tools = %+v, want exactly alpha_lookup (playwright excluded)", result.Tools)
 	}
 	if legacy.called.Load() != 0 {
@@ -1849,7 +2372,7 @@ func TestMcpBackendCall_SessionCloseFailure_NeverSurfacedToCaller(t *testing.T) 
 		case req.Method == "tools/list" && r.Header.Get(mcpSessionHeader) == "":
 			_ = json.NewEncoder(w).Encode(jsonrpcResponse{ID: req.ID, Error: &jsonrpcError{Code: -32000, Message: "session required"}})
 		default:
-			result, _ := json.Marshal(mcpToolsListResult{Tools: []mcpTool{{Name: "search"}}})
+			result, _ := json.Marshal(mcpToolsListResult{Tools: mcpToolsToRaw(t, []mcpTool{{Name: "search"}})})
 			_ = json.NewEncoder(w).Encode(jsonrpcResponse{ID: req.ID, Result: result})
 		}
 	}))
@@ -1877,8 +2400,36 @@ func TestMcpBackendCall_SessionCloseFailure_NeverSurfacedToCaller(t *testing.T) 
 	if err := json.Unmarshal(got.Result, &result); err != nil {
 		t.Fatalf("decode result: %v", err)
 	}
-	if len(result.Tools) != 1 || result.Tools[0].Name != "alpha_search" {
+	if len(result.Tools) != 1 || mustToolName(t, result.Tools[0]) != "alpha_search" {
 		t.Fatalf("tools = %+v, want alpha_search despite the session-close failure", result.Tools)
+	}
+}
+
+// TestMcpBackendCloseSession_LogScrubsCredentialFromTargetURL is the P4
+// regression test (review round 4): a configured target URL's query
+// string is this gateway's own credential channel for an MCP target
+// (buildUpstreamTargetURL's doc comment, mcp_a2a.go), and a failed Do()
+// against it commonly returns a *url.Error wrapping that URL verbatim.
+// Before this fix, mcpBackendCloseSession's best-effort failure log
+// printed both the raw targetURL and the raw err, leaking the credential
+// straight to stderr; both must now come out scrubbed.
+func TestMcpBackendCloseSession_LogScrubsCredentialFromTargetURL(t *testing.T) {
+	gw := newTestGatewayForLogger(t)
+	// 127.0.0.1:1 is a reserved, always-refused port — Do() fails fast
+	// with a real *url.Error wrapping this exact URL, no network flake
+	// risk and no server to stand up for a pure "the log scrubs its own
+	// error text" assertion.
+	const targetURL = "http://127.0.0.1:1/mcp?api-key=SUPERSECRET123"
+
+	logOutput := captureStderr(t, func() {
+		gw.mcpBackendCloseSession(context.Background(), targetURL, "sess-1")
+	})
+
+	if strings.Contains(logOutput, "SUPERSECRET123") {
+		t.Errorf("log output = %q, want the api-key query value scrubbed", logOutput)
+	}
+	if !strings.Contains(logOutput, "127.0.0.1") {
+		t.Errorf("log output = %q, want the target host still present (only credentials must be stripped)", logOutput)
 	}
 }
 
@@ -2186,6 +2737,31 @@ func TestHandleMCPFederated_ToolsList_NeverDialedSemaphoreStarved_RecordsNothing
 	}
 	if neverDialed != 1 {
 		t.Errorf("neverDialed = %d, want exactly 1", neverDialed)
+	}
+
+	// F10, review round 3, 2026-09: countTargetRequests must attribute a
+	// request to every DIALED server only — the one server target_health
+	// above confirms was never dialed (snap.observed == false) must show
+	// ZERO on its per-target request counter, even though it was one of
+	// the "allowed" servers this call named. Before the fix, EVERY name
+	// in the allowed set moved this counter regardless of whether a
+	// goroutine ever won the semaphore for it. getCounter's own "ok"
+	// return is not useful here — the in-process fallback store this test
+	// runs against (no Redis configured) reports ok=true unconditionally,
+	// even for a key that was never incremented (limiter.storeGet's own
+	// doc, limits.go) — so the count itself is the only signal that
+	// matters.
+	now := time.Now()
+	for _, name := range names {
+		snap := gw.targetHealth.snapshot(targetKindMCP, name)
+		got, _ := gw.limiter.getCounter(targetKindMCP, name, metricReq, windowDay, now)
+		want := int64(0)
+		if snap.observed {
+			want = 1
+		}
+		if got != want {
+			t.Errorf("mcp/%s req:day counter = %d, want %d (dialed=%v)", name, got, want, snap.observed)
+		}
 	}
 }
 
