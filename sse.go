@@ -64,13 +64,58 @@ type sseEvent struct {
 	data  []byte
 }
 
+// scanSSELines is readSSE's bufio.Scanner split function (finding 3 fix,
+// review-routes.md): it recognizes every line terminator the WHATWG
+// EventSource specification does — CRLF, a lone LF, and a lone CR — where
+// bufio.ScanLines (the previous, default split function; in regexp
+// notation, `\r?\n`) recognizes only CRLF and a lone LF. A lone "\r"
+// previously stayed embedded in a line's own content instead of ending
+// it, so an upstream sending CR-only line endings (or a malicious one
+// exploiting exactly this gap) parsed as one giant line instead of the
+// several the specification requires (https://html.spec.whatwg.org/
+// multipage/server-sent-events.html#event-stream-interpretation).
+// Structured like bufio.ScanLines itself: find the next terminator, or
+// ask for more data:
+//   - data[i] == '\n': an ordinary (or CRLF-preceded, since IndexAny
+//     finds whichever of \r/\n comes first — a lone '\r' immediately
+//     before is handled by its own branch below, not reached here) LF
+//     terminator.
+//   - data[i] == '\r' as the LAST currently-buffered byte, with more
+//     input possibly still to come (!atEOF): request more data first, so
+//     a CRLF pair split across two Read calls is never misread as a lone
+//     CR followed by a separate, spurious empty line.
+//   - data[i] == '\r' followed by '\n': CRLF, one terminator, not two.
+//   - data[i] == '\r' otherwise: a lone CR, its own terminator.
+func scanSSELines(data []byte, atEOF bool) (advance int, token []byte, err error) {
+	if atEOF && len(data) == 0 {
+		return 0, nil, nil
+	}
+	if i := bytes.IndexAny(data, "\r\n"); i >= 0 {
+		if data[i] == '\n' {
+			return i + 1, data[:i], nil
+		}
+		if i+1 == len(data) && !atEOF {
+			return 0, nil, nil
+		}
+		if i+1 < len(data) && data[i+1] == '\n' {
+			return i + 2, data[:i], nil
+		}
+		return i + 1, data[:i], nil
+	}
+	if atEOF {
+		return len(data), data, nil
+	}
+	return 0, nil, nil
+}
+
 // readSSE parses r as a text/event-stream body and calls fn once per
 // event. It accumulates "event:" and "data:" field lines. Multiple
 // "data:" lines join with "\n". It dispatches fn on a blank line, then
 // resets the accumulated fields. Comment lines that start with ":", and
 // "id:"/"retry:" fields, are recognized and silently ignored. Line
-// endings can be "\n" or "\r\n": bufio.ScanLines, the scanner's split
-// function, strips an optional trailing "\r" itself. A leading UTF-8
+// endings can be "\n", "\r\n", or a lone "\r" (scanSSELines, above,
+// replaces bufio.ScanLines as the scanner's split function so all three
+// are recognized — finding 3 fix, review-routes.md). A leading UTF-8
 // byte-order mark on the stream's first line is stripped before field
 // parsing.
 //
@@ -89,6 +134,7 @@ type sseEvent struct {
 func readSSE(r io.Reader, fn func(sseEvent) error) error {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, sseScannerInitialBufSize), sseScannerMaxLineSize)
+	scanner.Split(scanSSELines)
 
 	var (
 		event     string
@@ -212,16 +258,39 @@ func newSSEWriter(w http.ResponseWriter) *sseWriter {
 	return &sseWriter{w: w, f: f}
 }
 
+// splitSSELines splits b on every line terminator scanSSELines (above)
+// recognizes on the read side — CRLF, a lone LF, and a lone CR — kept in
+// lockstep so this gateway's own OUTPUT can never itself carry the exact
+// injection scanSSELines exists to catch on input (finding 3 fix,
+// review-routes.md): the terminator consumed by each split is dropped
+// from the returned line, never left embedded in it.
+func splitSSELines(b []byte) [][]byte {
+	var lines [][]byte
+	for {
+		i := bytes.IndexAny(b, "\r\n")
+		if i < 0 {
+			return append(lines, b)
+		}
+		lines = append(lines, b[:i])
+		if b[i] == '\r' && i+1 < len(b) && b[i+1] == '\n' {
+			i++
+		}
+		b = b[i+1:]
+	}
+}
+
 // writeData writes one SSE data event as a single Write call, flushing
 // when the underlying writer supports that.
 //
-// A newline inside b is now ENCODED rather than emitted raw: b is split
-// on "\n" and each line gets its own "data: " prefix, which is exactly
-// how the text/event-stream format represents a multi-line payload, and
-// is what a conforming client rejoins with "\n" on the other side. For
-// single-line b — every caller that passes compact JSON, which is still
-// what callers should pass — the bytes written are byte-for-byte
-// identical to before.
+// Every line terminator inside b is now ENCODED rather than emitted raw:
+// b is split on every terminator scanSSELines recognizes — CRLF, a lone
+// LF, and a lone CR (splitSSELines, below; finding 3 fix, review-
+// routes.md) — and each resulting line gets its own "data: " prefix,
+// which is exactly how the text/event-stream format represents a
+// multi-line payload, and is what a conforming client rejoins with "\n"
+// on the other side. For single-line b — every caller that passes
+// compact JSON, which is still what callers should pass — the bytes
+// written are byte-for-byte identical to before.
 //
 // Security audit run-1: this function previously DOCUMENTED that b must
 // not contain a newline and enforced nothing, while readSSE on the other
@@ -231,8 +300,22 @@ func newSSEWriter(w http.ResponseWriter) *sseWriter {
 // event — carrying its own event:/id:/retry: fields, which this gateway
 // otherwise strips — into the client's stream. Encoding the newline
 // closes that by construction, with no validation branch to get wrong.
+//
+// Finding 3 fix (review-routes.md): the ORIGINAL version of this
+// encoding split on "\n" alone (bytes.Split(b, []byte{'\n'})), which left
+// a raw, embedded "\r" untouched inside whatever "line" it fell in — and
+// a spec-conforming EventSource client treats a lone CR as its own line
+// terminator, so that raw "\r" let an upstream (relayed here verbatim by
+// forwardStream) smuggle an attacker-chosen "event:"/"data:" pair past
+// this gateway's own readSSE (which, before its own finding-3 fix,
+// parsed CR-only sequences as ordinary line content) and have the
+// DOWNSTREAM client parse it as a second, spoofed event — the exact
+// injection this function's doc comment above already claimed was
+// "closed by construction". splitSSELines closes the other half: no raw
+// "\r" of any kind ever reaches the wire from here, regardless of what
+// readSSE upstream of this call did or did not already split it on.
 func (s *sseWriter) writeData(b []byte) error {
-	lines := bytes.Split(b, []byte{'\n'})
+	lines := splitSSELines(b)
 	buf := make([]byte, 0, len(b)+len(lines)*len(sseDataPrefix)+1)
 	for _, line := range lines {
 		buf = append(buf, sseDataPrefix...)

@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 
@@ -62,8 +63,15 @@ type Config struct {
 	// — distinct from Pricing above, which drives request cost
 	// ACCOUNTING (costMicros); ModelMeta drives metadata EXPOSURE
 	// (GET /v1/models' context_window/pricing extension fields, the
-	// admin dashboard) and never affects billing. nil/omitted preserves
-	// prior behavior exactly: every model's metadata falls through to
+	// admin dashboard). The one exception (verify-core fix, round 4):
+	// an entry marked Free is ALSO honoured by billing itself
+	// (unifiedCostMicros, via modelMetaFree) — cost is 0 and known,
+	// never a real price the model's bare id happens to share with the
+	// built-in table, so the 402 cost-budget guard (priceKnown, which
+	// already treated Free the same way) and actual billing can never
+	// disagree about the same model. Every other ModelMeta field still
+	// only drives exposure, never billing. nil/omitted preserves prior
+	// behavior exactly: every model's metadata falls through to
 	// discovery/builtin/absent, same as before this feature existed.
 	// Validated at construction (validateModelMeta, modelmeta.go).
 	ModelMeta map[string]*ModelMetaConfig `json:"modelMeta,omitempty"`
@@ -607,14 +615,13 @@ const (
 // A 256 ceiling therefore does not prevent the OOM this semaphore exists
 // to prevent: it is above any realistic pod budget. It is still strictly
 // better than the unbounded base (25GB on the same burst), but "better
-// than unbounded" was never the goal. The reference deployment runs
-// Traefik with resources.limits.memory: 512Mi, where even the 8-slot
-// floor is the binding constraint, not the ceiling.
+// than unbounded" was never the goal.
 //
 // So the bounds are cut to [8, 64]: 64 keeps a large-memory host from
-// being throttled below what it can actually serve, 8 keeps a small pod
-// from admitting more concurrent decodes than its heap can hold. This
-// costs legitimate throughput almost nothing because the slot is now
+// being throttled below what it can actually serve, 8 sets a floor for
+// the self-tuned VALUE on a degenerate host (see the correction below for
+// why that floor is not actually the binding constraint on a real one).
+// This costs legitimate throughput almost nothing because the slot is now
 // held ONLY across read+decode (round-3 fix) — microseconds to low
 // milliseconds — not across the upstream call; an operator whose host
 // genuinely wants more sets Config.MaxInFlightBodyRequests explicitly,
@@ -623,6 +630,28 @@ const (
 // via goMemLimitPercentage) is the better long-term shape and is left as
 // a follow-up: it needs its own Yaegi-interpreted verification, since
 // runtime/debug's availability under the interpreter is unproven here.
+//
+// CORRECTION (review-auth finding F3, 2026-09 review — the paragraph
+// above, and the reference-deployment claim it used to carry, both
+// overstated what the 8-slot floor actually protects): defaultBodyAdmissionCap
+// computes n = GOMAXPROCS(0) * bodyAdmissionCapPerCPU (24, below) and only
+// clamps DOWN to minBodyAdmissionCap when n itself is smaller than 8.
+// Since GOMAXPROCS is always >= 1 on any real process, n is always >= 24
+// — the 8-slot floor can therefore never actually bind on a real host; it
+// only guards a degenerate GOMAXPROCS<1 read defaultBodyAdmissionCap has
+// no other reason to expect. The reference deployment's real self-tuned
+// cap, at 1 vCPU, is 24, not 8: linearly interpolating the measured table
+// above between its 16 and 32 points (not separately measured) puts a
+// 24-slot worst case around ~2.4GB peak HeapInuse — five times the
+// resources.limits.memory: 512Mi the earlier text claimed this floor kept
+// the pod within. Preserving today's actual numeric behavior (house rule:
+// additive and default-preserving — lowering bodyAdmissionCapPerCPU or
+// minBodyAdmissionCap here would be a real throughput regression for
+// every existing deployment, not a comment fix), this correction changes
+// no constant: an operator who needs the semaphore to actually hold a
+// small pod within 512Mi under this worst case must set
+// Config.MaxInFlightBodyRequests explicitly (for example 4-6), which
+// always wins over the self-tuned value regardless of GOMAXPROCS.
 
 // bodyAdmissionCapPerCPU is defaultBodyAdmissionCap's GOMAXPROCS
 // multiplier (revised round 3 — see minBodyAdmissionCap's own doc
@@ -696,144 +725,28 @@ const maxExplicitBodyAdmissionCap = 10_000
 //
 //nolint:govet
 type Gateway struct {
-	// targetHealthLastSweepUnixNano MUST stay the first field (F7,
-	// feat/target-health review). It backs maybeSweepTargetHealth's
-	// single-flight gate (target_health.go) and is read/written only via
-	// sync/atomic's 64-bit functions (atomic.LoadInt64/StoreInt64) — the
-	// sync/atomic package documents that "on ARM, x86-32, and 32-bit
-	// MIPS, it is the caller's responsibility to arrange for 64-bit
-	// alignment of 64-bit words accessed atomically," and guarantees
-	// that alignment only for "the first word in an allocated struct,
-	// array, or slice." Traefik ships armv7 and 386 builds alongside
-	// amd64/arm64, so this is not a hypothetical: any field placed
-	// ahead of this one could silently misalign it on those platforms.
-	// Every field below is ordered by golangci-lint's fieldalignment
-	// linter (pointer-containing fields grouped first, for GC scan
-	// efficiency, then the rest) — this one field is the sole, deliberate
-	// exception. Total struct size stays 264 bytes either way
-	// (unsafe.Sizeof(Gateway{}), verified before and after this field was
-	// pinned first), so the exception costs no padding. It does cost
-	// fieldalignment's separate pointer-bytes hint: `fieldalignment
-	// ./...` reports "Gateway has 192 leading bytes of pointer data but
-	// optimal value is 184" with this field first, against a clean
-	// report at the commit before it moved. Moving targetHealthSweeping
-	// (below) to sit directly after this field, to try to close that
-	// gap, was tried and makes the report worse, not better (200 vs
-	// 184), so targetHealthSweeping stays with the rest of the plain
-	// scalars. The 8-byte pointer-bytes gap is accepted deliberately:
-	// the atomic-alignment requirement below wins over the linter hint.
-	targetHealthLastSweepUnixNano int64
 	next                          http.Handler
-	// redisClient is the same instance newGateway hands to both the
-	// limiter's redisStore and the response cache (its own doc comment,
-	// below, explains why it's built once and shared) — kept here too,
-	// on Gateway itself, purely so Close (below) has something to release
-	// pooled connections through. nil when config.Redis is absent, same
-	// as buildRedisClient's own nil-for-unconfigured contract.
-	redisClient *respClient
-	// failoverHealth is feat/failover's own per-pod, in-memory
-	// request-path health signal (failover.go), built once, here, by
-	// newGateway. Every method on it is nil-receiver-safe, so a Gateway
-	// assembled directly (bypassing newGateway, as a few older tests do)
-	// degrades to "failover never skips a candidate for request health"
-	// rather than a nil-pointer panic.
-	failoverHealth *requestHealthTracker
-	// targetHealth is feat/target-health's own per-pod, in-memory health
-	// tracker for MCP servers and A2A agents (target_health.go) — always
-	// constructed, here, regardless of Config.TargetHealth.Enabled:
-	// passive recording (handleTargetProxy, mcp_a2a.go;
-	// mcpFederatedToolsList/mcpFederatedToolsCall, mcp_federation.go) and
-	// exposure (GET /admin/api/targets, llmgateway_target_healthy) both
-	// stay on unconditionally, mirroring g.latency/g.provenance's own
-	// "always-present, usually-empty, nil-receiver-safe" convention
-	// below. Enabled gates only maybeSweepTargetHealth's own active
-	// probe sweep.
-	targetHealth *targetHealthTracker
-	limiter      *limiter
-	registry     *modelRegistry
-	adapters     map[string]providerAdapter
-	cfg          *Config
-	auth         *authStore
-	// provenance is the in-process usage-accounting-provenance accumulator
-	// (feat: expose token-accounting provenance, metrics.go's
-	// provenanceStore) — recordUsageProvenance's only write target, and
-	// writeProvenanceMetrics/buildAdminProvenanceViews' (admin.go) own
-	// read source. Always constructed, here, by newGateway, even when
-	// Config.Metrics is nil or disabled, mirroring g.latency's own
-	// identical "always-present, usually-empty, nil-receiver-safe"
-	// convention immediately below — see that field's own doc comment for
-	// the full reasoning, which applies here unchanged.
-	provenance *provenanceStore
-	// cache is nil whenever response caching is not configured or not
-	// usable (cfg.Cache.Enabled is false, or true with no config.Redis —
-	// see buildResponseCache, cache.go). Every call site checks for nil
-	// before using it, rather than responseCache having its own
-	// always-disabled zero value.
-	cache *responseCache
-	// targetClient is the shared, connection-pooled *http.Client the
-	// MCP/A2A target proxy (mcp_a2a.go) issues every upstream request
-	// through — built once via newAdapterHTTPClient, the same constructor
-	// each provider adapter uses for its own client.
-	targetClient *http.Client
-	// latency is the in-process upstream-latency accumulator (feat:
-	// instrument upstream latency, metrics.go's latencyStore) —
-	// recordLatency's only write target, and writeLatencyMetrics/
-	// buildAdminOverview's (admin.go) own read source. Always
-	// constructed, here, by newGateway, even when Config.Metrics is nil
-	// or disabled: g.latency simply never receives anything to
-	// accumulate in that case (every withLatencyRecorder call site gates
-	// its own wiring on metricsEnabled(g.cfg), not this field's
-	// existence) — every method on it is also nil-receiver-safe
-	// (latencyStore's own doc comment), matching failoverHealth's
-	// identical "safe even off a bare &Gateway{} literal" convention
-	// above.
-	latency *latencyStore
-	// bodyAdmission is the buffered-channel semaphore acquireBodyAdmission
-	// (routes_unified.go) claims from and releases: security review
-	// finding 1b, 2026-08-22. Sized once, here, by newGateway (see
-	// defaultBodyAdmissionCap/Config.MaxInFlightBodyRequests) — never
-	// resized afterward, matching a Go channel's own fixed-capacity
-	// contract.
-	bodyAdmission chan struct{}
-	name          string
-	// failoverLogGate rate-limits runMeteredCall's generic "failing over"
-	// log line (routes_unified.go) to once per storeErrorLogEvery
-	// (adversarial-review fix, F10) — reuses auth.go's own logGate type,
-	// the identical technique shouldLogAuthFailure/logStoreError already
-	// apply elsewhere in this package. Zero-value-usable: the first call
-	// on a fresh Gateway always logs. Deliberately does NOT gate the 404
-	// loud-log line (operator ruling: that one must always log).
-	failoverLogGate logGate
-	// metricsNets is Config.Metrics.AllowedCIDRs, parsed once at
-	// construction (parseMetricsCIDRs, metrics.go) so the request path
-	// never re-parses a CIDR string per scrape. nil when Metrics is
-	// unconfigured or carries no AllowedCIDRs entries.
-	metricsNets []*net.IPNet
-	// targetHealthCfg is Config.TargetHealth, validated and resolved once
-	// by validateTargetHealthConfig (target_health.go) — maybeSweepTargetHealth
-	// reads probeInterval/enabled from this, never the raw Config.
-	targetHealthCfg targetHealthConfig
-	// failover is Config.Failover, validated and resolved once by
-	// newGateway (validateFailoverConfig, failover.go).
-	failover failoverConfig
-	// targetTimeout is targetClient's own resolved request timeout —
-	// Config.RequestTimeout only; an MCP/A2A target has no per-target
-	// override the way a provider does. proxyUpstream's own callers
-	// (mcp_a2a.go's handleTargetProxy) pass this through so its
-	// idle-progress body watchdog (timeout.go) matches the
-	// ResponseHeaderTimeout already set on targetClient's Transport.
-	targetTimeout time.Duration
-	// targetHealthSweeping is maybeSweepTargetHealth's own single-flight
-	// CAS flag (target_health.go) — its sibling, the UnixNano timestamp
-	// this same gate reads, is targetHealthLastSweepUnixNano, kept as
-	// this struct's FIRST field instead (see that field's own doc
-	// comment, top of this struct, for why). Both are atomic rather than
-	// mutex-guarded, since every caller (serveMetrics, serveAdminTargets,
-	// handleMCPServers, handleAgents) reaches maybeSweepTargetHealth on a
-	// live request path and must never block behind a lock another such
-	// call already holds. A plain int32 needs no special alignment
-	// treatment the way its int64 sibling does.
-	targetHealthSweeping int32
+	provenance                    *provenanceStore
+	targetClient                  *http.Client
+	failoverHealth                *requestHealthTracker
+	targetHealth                  *targetHealthTracker
+	limiter                       *limiter
+	registry                      *modelRegistry
+	adapters                      map[string]providerAdapter
+	cfg                           *Config
+	auth                          *authStore
+	bodyAdmission                 chan struct{}
+	redisClient                   *respClient
+	latency                       *latencyStore
+	cache                         *responseCache
+	name                          string
+	failoverLogGate               logGate
+	metricsNets                   []*net.IPNet
+	targetHealthCfg               targetHealthConfig
+	failover                      failoverConfig
+	targetHealthLastSweepUnixNano int64
+	targetTimeout                 time.Duration
+	targetHealthSweeping          int32
 }
 
 // telemetryStartupOnce keeps the anonymous "plugin loaded" ping to one per
@@ -936,6 +849,17 @@ func newGateway(ctx context.Context, next http.Handler, config *Config, name str
 	if err := validateTargetURLs(config); err != nil {
 		return nil, err
 	}
+	// Finding F4, 2026-09 review: validate every Config.Pricing override
+	// at construction — non-nil, finite, >= 0 — rather than letting a
+	// negative/NaN/Inf entry reach costMicrosKnownFor (pricing.go), where it
+	// would still pass the "is this model priced" check yet silently
+	// disable that model's costPerDayUSD/costPerMonthUSD budget forever.
+	// See validatePricing's own doc comment for the full reasoning; the
+	// returned map is intentionally discarded — validatePricing returns
+	// raw unchanged on success, so there is nothing to assign back.
+	if _, err := validatePricing(config.Pricing); err != nil {
+		return nil, err
+	}
 	auth, err := newAuthStore(config)
 	if err != nil {
 		return nil, err
@@ -1000,6 +924,42 @@ func newGateway(ctx context.Context, next http.Handler, config *Config, name str
 	}
 	g.metricsNets = metricsNets
 
+	// review-auth finding F9, 2026-09 review: metrics.path was never
+	// validated at all. A value with no leading "/" can never match
+	// ServeHTTP's exact r.URL.Path comparison for the metrics route
+	// (metrics.go's metricsPath/handleMetrics), silently making the
+	// endpoint unreachable — kept as a hard construction error, below.
+	//
+	// verify-core fix (round 4): a value inside one of the gateway's
+	// other fixed route namespaces (reservedRoutePrefix, below) used to
+	// be a hard construction error too, but that broke real, previously
+	// WORKING configs on upgrade: ServeHTTP matches the exact metrics
+	// path (a GET, handleMetrics) before it ever reaches the /v1, /mcp,
+	// /a2a or admin dispatch branches — see ServeHTTP's own routing
+	// order — so "/v1/metrics" (and any other path merely sitting under
+	// one of those prefixes) already routed correctly and only ever
+	// shadows THAT one exact path, never the reverse. Refusing to build
+	// the middleware for a config that worked yesterday violates the
+	// house rule that an upgrade with no config change preserves prior
+	// behavior. This now only warns, so an operator who genuinely wants
+	// "/v1/metrics" keeps it working, while still being told it shadows
+	// the real /v1/... route at that one path.
+	if config.Metrics != nil && config.Metrics.Enabled && config.Metrics.Path != "" {
+		if !strings.HasPrefix(config.Metrics.Path, "/") {
+			return nil, fmt.Errorf("llmgateway: metrics: path must start with \"/\", got %q", config.Metrics.Path)
+		}
+		// ServeHTTP matches GET /v1/models and the admin GET paths BEFORE
+		// the metrics route, so a metrics.path equal to one of those is
+		// unreachable; any other path under a reserved prefix is reached
+		// first by metrics and shadows that one route instead.
+		switch {
+		case config.Metrics.Path == "/v1/models" || (adminEnabled(config) && isAdminPath(config.Metrics.Path)):
+			g.warnf("config: metrics.path %q is matched earlier by another GET route; the metrics endpoint is unreachable at this path", config.Metrics.Path)
+		case reservedRoutePrefix(config.Metrics.Path):
+			g.warnf("config: metrics.path %q sits at or under a reserved route prefix (%s); metrics is served at this exact path instead of the route normally there — confirm it is intentional", config.Metrics.Path, strings.Join(reservedRoutePrefixes, ", "))
+		}
+	}
+
 	// bodyAdmissionCap: an explicit MaxInFlightBodyRequests always wins
 	// over the self-tuned default (house rule: explicit override always
 	// wins) — see Config.MaxInFlightBodyRequests' own doc comment. 0 (the
@@ -1040,7 +1000,7 @@ func newGateway(ctx context.Context, next http.Handler, config *Config, name str
 	lim.logf = g.errorf
 	g.limiter = lim
 
-	cache, err := buildResponseCache(config.Cache, redisClient, g.logf, g.errorf)
+	cache, err := buildResponseCache(config.Cache, redisClient, g.logf, g.warnf, g.errorf)
 	if err != nil {
 		return nil, err
 	}
@@ -1085,15 +1045,32 @@ func newGateway(ctx context.Context, next http.Handler, config *Config, name str
 	registry.warmFill(ctx)
 	g.registry = registry
 
-	setPricingWarnFn(func(msg string) {
-		if msg == warnCapMessage {
-			g.logf("%s", msg)
-			return
-		}
-		g.logf("pricing: no price configured for model %q; cost will be recorded as 0", msg)
-	})
-
 	return g, nil
+}
+
+// reservedRoutePrefixes are the path namespaces ServeHTTP already fixes:
+// the admin dashboard (adminPagePath, admin.go), the OpenAI-compatible
+// "/v1/..." routes, the MCP federation/target-proxy "/mcp/..." routes
+// (mcp_federation.go/mcp_a2a.go), and the A2A target-proxy "/a2a/..."
+// routes (mcp_a2a.go). reservedConfigNames (providers.go) already
+// reserves "v1"/"mcp"/"a2a" as PROVIDER names for the identical
+// collision reason; this is metrics.path's own counterpart of that check
+// (review-auth finding F9, 2026-09 review — newGateway, above). Used only
+// to WARN, not to refuse construction (verify-core fix, round 4):
+// ServeHTTP matches the exact metrics path before dispatching into any of
+// these namespaces, so a metrics.path sitting under one only ever shadows
+// that one exact path — not a hazard worth breaking a working config over.
+var reservedRoutePrefixes = []string{adminPagePath, "/v1", "/mcp", "/a2a"}
+
+// reservedRoutePrefix reports whether path equals, or sits under, one of
+// reservedRoutePrefixes.
+func reservedRoutePrefix(path string) bool {
+	for _, prefix := range reservedRoutePrefixes {
+		if path == prefix || strings.HasPrefix(path, prefix+"/") {
+			return true
+		}
+	}
+	return false
 }
 
 // buildRedisClient validates rc and returns a respClient for it, or nil

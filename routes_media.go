@@ -40,6 +40,9 @@ const maxMultipartModelFieldBytes = 4096
 // audio-speech routes, whose request bodies are both single JSON objects
 // carrying a top-level "model" field, unlike audio-transcriptions'
 // multipart body. A read failure or invalid/missing JSON is a 400,
+// an oversize body is a 413 (finding 14 fix, review-routes.md — see
+// readAndDecodeUnifiedBody's identical fix, routes_unified.go, for why
+// readCapped replaces a plain io.LimitReader-and-decode here too), both
 // already written to sw; ok reports whether the caller may proceed.
 func (g *Gateway) decodeMediaJSONRequest(sw *statusTrackingWriter, r *http.Request) (req map[string]any, model string, ok bool) {
 	release, admitted := g.acquireBodyAdmission(sw, writeOAIError)
@@ -48,9 +51,13 @@ func (g *Gateway) decodeMediaJSONRequest(sw *statusTrackingWriter, r *http.Reque
 		return nil, "", false
 	}
 
-	body, err := io.ReadAll(io.LimitReader(r.Body, maxRequestBytes))
+	body, oversize, err := readCapped(r.Body, maxRequestBytes)
 	if err != nil {
 		writeOAIError(sw, http.StatusBadRequest, "invalid_request_error", "cannot read request body")
+		return nil, "", false
+	}
+	if oversize {
+		writeOAIError(sw, http.StatusRequestEntityTooLarge, "invalid_request_error", "request body too large")
 		return nil, "", false
 	}
 	if err = json.Unmarshal(body, &req); err != nil {

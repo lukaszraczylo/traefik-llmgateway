@@ -5,7 +5,9 @@ import (
 	"compress/gzip"
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -621,6 +623,57 @@ func TestHandlePassthrough_DangerousResponseHeadersStripped(t *testing.T) {
 	}
 }
 
+// TestHandlePassthrough_AccountIdentityResponseHeadersStripped is the
+// review-routes finding 17 (2026-09 review) regression test: an upstream
+// echoing its own account-identifying headers — OpenAI's
+// Openai-Organization/Openai-Project, Anthropic's
+// Anthropic-Organization-Id — must never have those reach the client. The
+// request side already treats these as sensitive
+// (providerCredentialRetargetHeaders strips a tenant's own attempt to SET
+// them); this proves the matching response-side strip, so the operator's
+// real upstream org/project ids never round-trip back out to the tenant
+// either. An ordinary response header must still pass through unchanged.
+func TestHandlePassthrough_AccountIdentityResponseHeadersStripped(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Openai-Organization", "org-secret123")
+		w.Header().Set("Openai-Project", "proj-secret456")
+		w.Header().Set("Anthropic-Organization-Id", "org-secret789")
+		w.Header().Set("X-Upstream-Custom", "keep-me")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{
+		"openai": {Type: "openai", BaseURL: srv.URL, APIKey: "sk-up"},
+	}
+	cfg.Groups = map[string]*GroupConfig{"default": {}}
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{{Name: "alice", Group: "default", APIKey: "sk-alice"}}}
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/openai/v1/thing", nil)
+	req.Header.Set("Authorization", "Bearer sk-alice")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	for _, hdr := range []string{"Openai-Organization", "Openai-Project", "Anthropic-Organization-Id"} {
+		if v := rec.Header().Get(hdr); v != "" {
+			t.Errorf("client saw account-identity response header %s = %q, want stripped", hdr, v)
+		}
+	}
+	if rec.Header().Get("X-Upstream-Custom") != "keep-me" {
+		t.Error("client must still see an ordinary upstream response header — the strip must not be a full allowlist inversion")
+	}
+}
+
 // TestHandlePassthrough_NonStreamJSON_AccountsUsage proves a non-streaming
 // application/json response's usage is extracted and accounted against
 // the caller's own limiter counters.
@@ -1010,11 +1063,16 @@ func TestHandlePassthrough_EncodedSlashSegment_PreservedAtUpstream(t *testing.T)
 	}
 }
 
-// TestHandlePassthrough_OversizedJSONBody_ClientGetsFullBody_RequestOnlyAccounting
+// TestHandlePassthrough_OversizedJSONBody_ClientGetsFullBody_EstimatedAccounting
 // proves a JSON response body larger than maxAccountingTeeBytes still
-// reaches the client in full, while the accounting parse is skipped —
-// only the request itself was already accounted, by checkAndCount.
-func TestHandlePassthrough_OversizedJSONBody_ClientGetsFullBody_RequestOnlyAccounting(t *testing.T) {
+// reaches the client in full, while the accounting PARSE is skipped (the
+// tee never captured the "usage" field, which sits past the cap) — but
+// (finding 2 fix, review-routes.md, supersedes this test's own former
+// "request only" name and assertions) the request is no longer billed
+// zero usage just because its response happened to be too large to
+// parse: it falls back to the same request-body-size estimate a
+// streamed response with no usable usage now also gets.
+func TestHandlePassthrough_OversizedJSONBody_ClientGetsFullBody_EstimatedAccounting(t *testing.T) {
 	// Pad well past maxAccountingTeeBytes (4MiB) with an oversized field
 	// ahead of "usage", so the tee's cap is hit before "usage" is reached.
 	padding := strings.Repeat("x", maxAccountingTeeBytes+1024)
@@ -1057,17 +1115,773 @@ func TestHandlePassthrough_OversizedJSONBody_ClientGetsFullBody_RequestOnlyAccou
 		t.Errorf("client body = %d bytes, want the full %d bytes (client copy must never truncate)", rec.Body.Len(), len(respBody))
 	}
 
+	// The request body here is `{}` (2 bytes): ceil(2/4) = 1 estimated
+	// prompt token, 0 completion (finding 2's estimate has no basis for a
+	// completion-side number, matching the unified route's own identical
+	// estimate, routes_unified.go).
 	tokIn, ok := gw.limiter.getCounter("user", "alice", metricTokIn, windowDay, time.Now())
-	if !ok || tokIn != 0 {
-		t.Errorf("user tokin/day counter = %d (ok=%v), want 0 — usage accounting must be skipped over the tee cap", tokIn, ok)
+	if !ok || tokIn != 1 {
+		t.Errorf("user tokin/day counter = %d (ok=%v), want 1 (estimated from the 2-byte request body)", tokIn, ok)
 	}
 	tokOut, ok := gw.limiter.getCounter("user", "alice", metricTokOut, windowDay, time.Now())
 	if !ok || tokOut != 0 {
-		t.Errorf("user tokout/day counter = %d (ok=%v), want 0 — usage accounting must be skipped over the tee cap", tokOut, ok)
+		t.Errorf("user tokout/day counter = %d (ok=%v), want 0", tokOut, ok)
 	}
 	reqCount, ok := gw.limiter.getCounter("user", "alice", metricReq, windowMin, time.Now())
 	if !ok || reqCount != 1 {
 		t.Errorf("user request/min counter = %d (ok=%v), want 1 — the request itself is still accounted", reqCount, ok)
+	}
+}
+
+// TestCappedBodyReader is the direct unit test of cappedBodyReader
+// (finding 8 fix, review-routes.md), mirroring TestReadCapped's own
+// under/exactly-at/over-limit style (routes_media_test.go): a body
+// exactly at the limit still completes normally (the underlying
+// reader's own clean EOF ends it), and a body over the limit errors
+// instead of silently truncating.
+func TestCappedBodyReader(t *testing.T) {
+	t.Run("under limit", func(t *testing.T) {
+		c := &cappedBodyReader{r: strings.NewReader("hello"), limit: 10}
+		got, err := io.ReadAll(c)
+		if err != nil || string(got) != "hello" {
+			t.Errorf("ReadAll = (%q, %v), want (\"hello\", nil)", got, err)
+		}
+		if c.bytesRead() != 5 {
+			t.Errorf("bytesRead() = %d, want 5", c.bytesRead())
+		}
+	})
+	t.Run("exactly at limit", func(t *testing.T) {
+		c := &cappedBodyReader{r: strings.NewReader("0123456789"), limit: 10}
+		got, err := io.ReadAll(c)
+		if err != nil || string(got) != "0123456789" {
+			t.Errorf("ReadAll = (%q, %v), want (\"0123456789\", nil)", got, err)
+		}
+		if c.bytesRead() != 10 {
+			t.Errorf("bytesRead() = %d, want 10", c.bytesRead())
+		}
+	})
+	t.Run("over limit", func(t *testing.T) {
+		c := &cappedBodyReader{r: strings.NewReader("01234567890"), limit: 10}
+		_, err := io.ReadAll(c)
+		if !errors.Is(err, errPassthroughBodyTooLarge) {
+			t.Errorf("ReadAll err = %v, want errPassthroughBodyTooLarge", err)
+		}
+	})
+}
+
+// TestHandlePassthrough_BodyOverLimit_KnownContentLength_Returns413 proves
+// finding 8 (review-routes.md): a request whose declared Content-Length
+// already exceeds maxPassthroughBytes is rejected up front with 413,
+// before the upstream is ever called.
+func TestHandlePassthrough_BodyOverLimit_KnownContentLength_Returns413(t *testing.T) {
+	var upstreamCalled bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalled = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{"openai": {Type: "openai", BaseURL: srv.URL, APIKey: "sk-up"}}
+	cfg.Groups = map[string]*GroupConfig{"default": {}}
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{{Name: "alice", Group: "default", APIKey: "sk-alice"}}}
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	body := strings.Repeat("a", maxPassthroughBytes+1)
+	req := httptest.NewRequest(http.MethodPost, "/openai/v1/native-endpoint", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer sk-alice")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want 413, body=%s", rec.Code, rec.Body.String())
+	}
+	if upstreamCalled {
+		t.Error("upstream must never be called for a body already over the cap via a known Content-Length")
+	}
+}
+
+// TestHandlePassthrough_BodyOverLimit_ChunkedContentLength_Returns413
+// proves finding 8's other half: an unknown/understated Content-Length
+// (chunked transfer, or a client that lies) is caught mid-copy by
+// cappedBodyReader instead of silently truncating — this exercises the
+// SAME real maxPassthroughBytes cap the production code path uses,
+// bypassing the upfront ContentLength check by setting it to -1.
+func TestHandlePassthrough_BodyOverLimit_ChunkedContentLength_Returns413(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{"openai": {Type: "openai", BaseURL: srv.URL, APIKey: "sk-up"}}
+	cfg.Groups = map[string]*GroupConfig{"default": {}}
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{{Name: "alice", Group: "default", APIKey: "sk-alice"}}}
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	body := strings.Repeat("a", maxPassthroughBytes+1024)
+	req := httptest.NewRequest(http.MethodPost, "/openai/v1/native-endpoint", strings.NewReader(body))
+	req.ContentLength = -1 // simulate chunked transfer / unknown length, bypassing the upfront check
+	req.Header.Set("Authorization", "Bearer sk-alice")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want 413 (cappedBodyReader must catch this mid-copy), body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestExtractPassthroughSSEUsage covers finding 2's own documented
+// provider shapes directly: OpenAI's final-chunk "usage" object,
+// Anthropic's message_start + message_delta pair (folding in prompt-
+// cache counters), Gemini's deliberately-unhandled convention, and a
+// malformed/empty stream — each falls back to the "unknown/"+provider
+// model sentinel and zero usage when nothing usable was found.
+func TestExtractPassthroughSSEUsage(t *testing.T) {
+	tests := []struct {
+		name         string
+		typeName     string
+		providerName string
+		raw          string
+		wantModel    string
+		wantUsage    usage
+	}{
+		{
+			name:         "openai: usage on final chunk before DONE",
+			typeName:     providerTypeOpenAI,
+			providerName: "openai",
+			raw: "data: {\"id\":\"c1\",\"model\":\"gpt-native\",\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n" +
+				"data: {\"id\":\"c1\",\"model\":\"gpt-native\",\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":3}}\n\n" +
+				"data: [DONE]\n\n",
+			wantUsage: usage{prompt: 7, completion: 3},
+			wantModel: "gpt-native",
+		},
+		{
+			name:         "openai: no usage chunk at all",
+			typeName:     providerTypeOpenAI,
+			providerName: "openai",
+			raw:          "data: {\"id\":\"c1\",\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\ndata: [DONE]\n\n",
+			wantUsage:    usage{},
+			wantModel:    "unknown/openai",
+		},
+		{
+			name:         "anthropic: message_start + message_delta",
+			typeName:     providerTypeAnthropic,
+			providerName: "anthropic",
+			raw: "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-native\",\"usage\":{\"input_tokens\":20,\"cache_creation_input_tokens\":5,\"cache_read_input_tokens\":3,\"output_tokens\":0}}}\n\n" +
+				"event: message_delta\ndata: {\"delta\":{},\"usage\":{\"output_tokens\":11}}\n\n",
+			wantUsage: usage{prompt: 28, completion: 11},
+			wantModel: "claude-native",
+		},
+		{
+			name:         "anthropic: message_start only, no message_delta yet",
+			typeName:     providerTypeAnthropic,
+			providerName: "anthropic",
+			raw:          "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-native\",\"usage\":{\"input_tokens\":9,\"output_tokens\":0}}}\n\n",
+			wantUsage:    usage{prompt: 9, completion: 0},
+			wantModel:    "claude-native",
+		},
+		{
+			name:         "gemini: deliberately unhandled, falls back to unknown",
+			typeName:     providerTypeGemini,
+			providerName: "gemini",
+			raw:          "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"hi\"}]}}]}\n\n",
+			wantUsage:    usage{},
+			wantModel:    "unknown/gemini",
+		},
+		{
+			name:         "malformed data ignored",
+			typeName:     providerTypeOpenAI,
+			providerName: "openai",
+			raw:          "data: not json at all\n\n",
+			wantUsage:    usage{},
+			wantModel:    "unknown/openai",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotUsage, gotModel := extractPassthroughSSEUsage(tt.typeName, tt.providerName, []byte(tt.raw), []byte(tt.raw))
+			if gotUsage != tt.wantUsage {
+				t.Errorf("usage = %+v, want %+v", gotUsage, tt.wantUsage)
+			}
+			if gotModel != tt.wantModel {
+				t.Errorf("model = %q, want %q", gotModel, tt.wantModel)
+			}
+		})
+	}
+}
+
+// TestHandlePassthrough_SSEStream_OpenAIUsageChunk_Accounted is the
+// end-to-end regression for finding 2 (review-routes.md): a native SSE
+// passthrough response carrying OpenAI's own final-chunk "usage" object
+// is teed, parsed, and billed with the REPORTED usage — not an estimate
+// — while the client still receives the stream byte-for-byte unchanged.
+func TestHandlePassthrough_SSEStream_OpenAIUsageChunk_Accounted(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		fl, ok := w.(http.Flusher)
+		if !ok {
+			t.Fatal("fake upstream ResponseWriter does not support Flush")
+		}
+		_, _ = fmt.Fprint(w, "data: {\"id\":\"c1\",\"choices\":[{\"delta\":{\"content\":\"Hi\"}}]}\n\n")
+		fl.Flush()
+		_, _ = fmt.Fprint(w, "data: {\"id\":\"c1\",\"choices\":[],\"usage\":{\"prompt_tokens\":42,\"completion_tokens\":9}}\n\n")
+		fl.Flush()
+		_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
+		fl.Flush()
+	}))
+	defer srv.Close()
+
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{"openai": {Type: "openai", BaseURL: srv.URL, APIKey: "sk-up"}}
+	cfg.Groups = map[string]*GroupConfig{"default": {}}
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{{Name: "alice", Group: "default", APIKey: "sk-alice", Limits: &LimitsConfig{}}}}
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	gw, ok := h.(*Gateway)
+	if !ok {
+		t.Fatal("handler is not *Gateway")
+	}
+	gw.limiter.spawn = func(f func()) { f() }
+
+	req := httptest.NewRequest(http.MethodPost, "/openai/v1/native-endpoint", strings.NewReader(`{"model":"gpt-native","messages":[]}`))
+	req.Header.Set("Authorization", "Bearer sk-alice")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "[DONE]") {
+		t.Errorf("body = %q, want the stream to reach the client unchanged, including [DONE]", rec.Body.String())
+	}
+
+	tokIn, ok := gw.limiter.getCounter("user", "alice", metricTokIn, windowDay, time.Now())
+	if !ok || tokIn != 42 {
+		t.Errorf("user tokin/day counter = %d (ok=%v), want 42 (the reported usage, not an estimate)", tokIn, ok)
+	}
+	tokOut, ok := gw.limiter.getCounter("user", "alice", metricTokOut, windowDay, time.Now())
+	if !ok || tokOut != 9 {
+		t.Errorf("user tokout/day counter = %d (ok=%v), want 9", tokOut, ok)
+	}
+}
+
+// TestHandlePassthrough_SSEStream_AnthropicUsageEvents_Accounted is
+// finding 2's Anthropic-shaped counterpart: message_start.message.usage
+// (including its prompt-cache counters) plus message_delta.usage.
+// output_tokens together are billed, matching extractPassthroughUsage's
+// own non-streaming Anthropic accounting exactly.
+func TestHandlePassthrough_SSEStream_AnthropicUsageEvents_Accounted(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		fl, ok := w.(http.Flusher)
+		if !ok {
+			t.Fatal("fake upstream ResponseWriter does not support Flush")
+		}
+		_, _ = fmt.Fprint(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-native\",\"usage\":{\"input_tokens\":20,\"cache_creation_input_tokens\":5,\"cache_read_input_tokens\":3,\"output_tokens\":0}}}\n\n")
+		fl.Flush()
+		_, _ = fmt.Fprint(w, "event: content_block_delta\ndata: {\"delta\":{\"text\":\"hi\"}}\n\n")
+		fl.Flush()
+		_, _ = fmt.Fprint(w, "event: message_delta\ndata: {\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":11}}\n\n")
+		fl.Flush()
+	}))
+	defer srv.Close()
+
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{"anthropic": {Type: "anthropic", BaseURL: srv.URL, APIKey: "sk-up"}}
+	cfg.Groups = map[string]*GroupConfig{"default": {}}
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{{Name: "alice", Group: "default", APIKey: "sk-alice", Limits: &LimitsConfig{}}}}
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	gw, ok := h.(*Gateway)
+	if !ok {
+		t.Fatal("handler is not *Gateway")
+	}
+	gw.limiter.spawn = func(f func()) { f() }
+
+	req := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(`{"model":"claude-native","messages":[]}`))
+	req.Header.Set("Authorization", "Bearer sk-alice")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+
+	tokIn, ok := gw.limiter.getCounter("user", "alice", metricTokIn, windowDay, time.Now())
+	if !ok || tokIn != 28 { // 20 input + 5 cache_creation + 3 cache_read
+		t.Errorf("user tokin/day counter = %d (ok=%v), want 28 (input + cache tokens folded in)", tokIn, ok)
+	}
+	tokOut, ok := gw.limiter.getCounter("user", "alice", metricTokOut, windowDay, time.Now())
+	if !ok || tokOut != 11 {
+		t.Errorf("user tokout/day counter = %d (ok=%v), want 11 (from message_delta)", tokOut, ok)
+	}
+}
+
+// TestHandlePassthrough_SSEStream_OverFourMiB_UsageStillAccounted is the
+// verify-core round-4 regression test (finding 6): before the head+tail
+// sseAccountingBuffer fix, a single front-loaded 4MiB
+// cappedAccountingBuffer teed the whole SSE stream, so a stream over
+// 4MiB lost its usage event entirely the moment that event landed past
+// the cap — exactly what a long completion (well within reach of a
+// reasoning model) does. This stream is ~6.8MB, deliberately mirroring
+// scratchpad/vcopy/zz_verify2_test.go's TestVerify_PassthroughLongSSE_
+// UsageLost repro, with its real usage (prompt=100, completion=25000) on
+// the final SSE event — long past both the old 4MiB cap and comfortably
+// past the new sseAccountingTailBytes (64KiB) cap too, proving the tail
+// window, not just a larger head, is what recovers it.
+func TestHandlePassthrough_SSEStream_OverFourMiB_UsageStillAccounted(t *testing.T) {
+	chunk := "data: {\"id\":\"c1\",\"model\":\"gpt-native\",\"choices\":[{\"delta\":{\"content\":\"" + strings.Repeat("x", 200) + "\"}}]}\n\n"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		fl, ok := w.(http.Flusher)
+		if !ok {
+			t.Fatal("fake upstream ResponseWriter does not support Flush")
+		}
+		for i := 0; i < 25000; i++ { // ~6.8MB, well over the old 4MiB cap
+			_, _ = io.WriteString(w, chunk)
+		}
+		fl.Flush()
+		_, _ = fmt.Fprint(w, "data: {\"id\":\"c1\",\"model\":\"gpt-native\",\"choices\":[],\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":25000}}\n\ndata: [DONE]\n\n")
+		fl.Flush()
+	}))
+	defer srv.Close()
+
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{"openai": {Type: "openai", BaseURL: srv.URL, APIKey: "sk-up"}}
+	cfg.Groups = map[string]*GroupConfig{"default": {}}
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{{Name: "alice", Group: "default", APIKey: "sk-alice", Limits: &LimitsConfig{}}}}
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	gw, ok := h.(*Gateway)
+	if !ok {
+		t.Fatal("handler is not *Gateway")
+	}
+	gw.limiter.spawn = func(f func()) { f() }
+
+	req := httptest.NewRequest(http.MethodPost, "/openai/v1/native-endpoint", strings.NewReader(`{"model":"gpt-native","stream":true,"stream_options":{"include_usage":true},"messages":[]}`))
+	req.Header.Set("Authorization", "Bearer sk-alice")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	tokIn, ok := gw.limiter.getCounter("user", "alice", metricTokIn, windowDay, time.Now())
+	if !ok || tokIn != 100 {
+		t.Errorf("user tokin/day counter = %d (ok=%v), want 100 (the reported usage, not lost past the old 4MiB cap)", tokIn, ok)
+	}
+	tokOut, ok := gw.limiter.getCounter("user", "alice", metricTokOut, windowDay, time.Now())
+	if !ok || tokOut != 25000 {
+		t.Errorf("user tokout/day counter = %d (ok=%v), want 25000", tokOut, ok)
+	}
+}
+
+// TestHandlePassthrough_SSEStream_NoUsageReported_EstimatedFallback
+// proves finding 2's fallback: a clean SSE stream whose provider never
+// sent a usage object falls back to the request-body-size estimate,
+// instead of being billed zero.
+func TestHandlePassthrough_SSEStream_NoUsageReported_EstimatedFallback(t *testing.T) {
+	const reqBody = `{"model":"gpt-native","messages":[{"role":"user","content":"a body long enough that its estimate is clearly nonzero"}]}`
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		fl, ok := w.(http.Flusher)
+		if !ok {
+			t.Fatal("fake upstream ResponseWriter does not support Flush")
+		}
+		_, _ = fmt.Fprint(w, "data: {\"id\":\"c1\",\"choices\":[{\"delta\":{\"content\":\"Hi\"}}]}\n\n")
+		fl.Flush()
+		_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
+		fl.Flush()
+	}))
+	defer srv.Close()
+
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{"openai": {Type: "openai", BaseURL: srv.URL, APIKey: "sk-up"}}
+	cfg.Groups = map[string]*GroupConfig{"default": {}}
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{{Name: "alice", Group: "default", APIKey: "sk-alice", Limits: &LimitsConfig{}}}}
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	gw, ok := h.(*Gateway)
+	if !ok {
+		t.Fatal("handler is not *Gateway")
+	}
+	gw.limiter.spawn = func(f func()) { f() }
+
+	req := httptest.NewRequest(http.MethodPost, "/openai/v1/native-endpoint", strings.NewReader(reqBody))
+	req.Header.Set("Authorization", "Bearer sk-alice")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+
+	wantEstimate := int64(math.Ceil(float64(len(reqBody)) / 4))
+	tokIn, ok := gw.limiter.getCounter("user", "alice", metricTokIn, windowDay, time.Now())
+	if !ok || tokIn != wantEstimate {
+		t.Errorf("user tokin/day counter = %d (ok=%v), want %d (estimated from request body size)", tokIn, ok, wantEstimate)
+	}
+}
+
+// TestHandlePassthrough_JSONResponse_AbortedMidCopy_EstimatedFallback
+// proves finding 2's other fallback: a non-streaming JSON response that
+// aborts mid-copy (the upstream connection resets partway through the
+// body) still reaches the client with exactly the partial bytes it
+// managed to write, and the request falls back to the request-body-size
+// estimate instead of being billed zero because the partial body could
+// not be parsed as usage.
+func TestHandlePassthrough_JSONResponse_AbortedMidCopy_EstimatedFallback(t *testing.T) {
+	const reqBody = `{"model":"gpt-native","messages":[{"role":"user","content":"abort mid copy test body"}]}`
+	const partial = `{"model":"gpt-native","choices":[{"delta"`
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		fl, ok := w.(http.Flusher)
+		if !ok {
+			t.Fatal("fake upstream ResponseWriter does not support Flush")
+		}
+		_, _ = w.Write([]byte(partial))
+		fl.Flush()
+
+		hj, ok := w.(http.Hijacker)
+		if !ok {
+			t.Fatal("fake upstream ResponseWriter does not support Hijack")
+		}
+		conn, _, hjErr := hj.Hijack()
+		if hjErr == nil {
+			_ = conn.Close()
+		}
+	}))
+	defer srv.Close()
+
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{"openai": {Type: "openai", BaseURL: srv.URL, APIKey: "sk-up"}}
+	cfg.Groups = map[string]*GroupConfig{"default": {}}
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{{Name: "alice", Group: "default", APIKey: "sk-alice", Limits: &LimitsConfig{}}}}
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	gw, ok := h.(*Gateway)
+	if !ok {
+		t.Fatal("handler is not *Gateway")
+	}
+	gw.limiter.spawn = func(f func()) { f() }
+
+	req := httptest.NewRequest(http.MethodPost, "/openai/v1/native-endpoint", strings.NewReader(reqBody))
+	req.Header.Set("Authorization", "Bearer sk-alice")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (headers already committed before the drop)", rec.Code)
+	}
+	if rec.Body.String() != partial {
+		t.Errorf("client body = %q, want exactly the partial bytes written before the drop", rec.Body.String())
+	}
+
+	wantEstimate := int64(math.Ceil(float64(len(reqBody)) / 4))
+	tokIn, ok := gw.limiter.getCounter("user", "alice", metricTokIn, windowDay, time.Now())
+	if !ok || tokIn != wantEstimate {
+		t.Errorf("user tokin/day counter = %d (ok=%v), want %d (estimated: the truncated body could not be parsed)", tokIn, ok, wantEstimate)
+	}
+}
+
+// TestHandlePassthrough_NonStreamJSON_NoUsageField_LargeBody_ZeroAccounted
+// is the negative counterpart to the estimate fallback: a COMPLETE 200
+// application/json response that simply carries no "usage" object at all
+// (the shape of an OpenAI /v1/files upload response, or any other
+// non-chat endpoint) must account exactly zero prompt/completion tokens,
+// never the request-body-size estimate — the request body here is a
+// large-ish 200KB payload specifically so a body-size estimate, if the
+// fallback wrongly fired, would be unmistakably nonzero (canEstimate in
+// handlePassthrough requires is2xx AND (isSSE || tee.truncated ||
+// copyAborted); a complete, untruncated JSON body meets none of those,
+// so this must stay a true accounting no-op).
+func TestHandlePassthrough_NonStreamJSON_NoUsageField_LargeBody_ZeroAccounted(t *testing.T) {
+	const respBody = `{"id":"file-abc123","object":"file","bytes":204800,"created_at":1699999999,"filename":"upload.bin","purpose":"fine-tune"}`
+	reqBody := strings.Repeat("a", 200*1024) // 200KB, large enough that a wrongly-fired estimate would be unmistakably nonzero
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(respBody))
+	}))
+	defer srv.Close()
+
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{"openai": {Type: "openai", BaseURL: srv.URL, APIKey: "sk-up"}}
+	cfg.Groups = map[string]*GroupConfig{"default": {}}
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{{Name: "alice", Group: "default", APIKey: "sk-alice", Limits: &LimitsConfig{}}}}
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	gw, ok := h.(*Gateway)
+	if !ok {
+		t.Fatal("handler is not *Gateway")
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/openai/v1/files", strings.NewReader(reqBody))
+	req.Header.Set("Authorization", "Bearer sk-alice")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	if rec.Body.String() != respBody {
+		t.Errorf("body = %q, want verbatim upstream body %q", rec.Body.String(), respBody)
+	}
+
+	tokIn, ok := gw.limiter.getCounter("user", "alice", metricTokIn, windowDay, time.Now())
+	if !ok || tokIn != 0 {
+		t.Errorf("user tokin/day counter = %d (ok=%v), want exactly 0 (2xx JSON with no usage field must never estimate)", tokIn, ok)
+	}
+	tokOut, ok := gw.limiter.getCounter("user", "alice", metricTokOut, windowDay, time.Now())
+	if !ok || tokOut != 0 {
+		t.Errorf("user tokout/day counter = %d (ok=%v), want exactly 0", tokOut, ok)
+	}
+}
+
+// TestHandlePassthrough_UpstreamJSONError429_ZeroAccounted proves a
+// non-2xx JSON error body (the upstream billed nothing for a rejected
+// request) is never charged the request-body-size estimate either: the
+// upstream is not is2xx, so handlePassthrough's canEstimate gate must
+// stay false regardless of the fact that the body is JSON with no usage.
+func TestHandlePassthrough_UpstreamJSONError429_ZeroAccounted(t *testing.T) {
+	const reqBody = `{"model":"gpt-native","messages":[{"role":"user","content":"a request that gets rate limited"}]}`
+	const respBody = `{"error":{"message":"rate limit exceeded","type":"rate_limit_error","code":"rate_limit_exceeded"}}`
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(respBody))
+	}))
+	defer srv.Close()
+
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{"openai": {Type: "openai", BaseURL: srv.URL, APIKey: "sk-up"}}
+	cfg.Groups = map[string]*GroupConfig{"default": {}}
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{{Name: "alice", Group: "default", APIKey: "sk-alice", Limits: &LimitsConfig{}}}}
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	gw, ok := h.(*Gateway)
+	if !ok {
+		t.Fatal("handler is not *Gateway")
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/openai/v1/native-endpoint", strings.NewReader(reqBody))
+	req.Header.Set("Authorization", "Bearer sk-alice")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want 429, body=%s", rec.Code, rec.Body.String())
+	}
+	if rec.Body.String() != respBody {
+		t.Errorf("body = %q, want verbatim upstream body %q", rec.Body.String(), respBody)
+	}
+
+	tokIn, ok := gw.limiter.getCounter("user", "alice", metricTokIn, windowDay, time.Now())
+	if !ok || tokIn != 0 {
+		t.Errorf("user tokin/day counter = %d (ok=%v), want exactly 0 (a 429 must never be charged the request-size estimate)", tokIn, ok)
+	}
+	tokOut, ok := gw.limiter.getCounter("user", "alice", metricTokOut, windowDay, time.Now())
+	if !ok || tokOut != 0 {
+		t.Errorf("user tokout/day counter = %d (ok=%v), want exactly 0", tokOut, ok)
+	}
+}
+
+// TestHandlePassthrough_UpstreamNonJSONError500_ZeroAccounted covers the
+// OTHER early-return branch in handlePassthrough (result.status == 0 ||
+// (!result.isJSON && !result.isSSE)): a 500 whose Content-Type is
+// neither application/json nor text/event-stream — a plain-text upstream
+// error, which this gateway never parses for usage at all — must also
+// account exactly zero tokens, never an estimate. This is deliberately
+// NOT an SSE stream (contrast with the SSE-no-usage estimated-fallback
+// test), and deliberately NOT the JSON-error shape already covered by
+// the 429 test above, so it exercises the isJSON==false && isSSE==false
+// short-circuit specifically.
+func TestHandlePassthrough_UpstreamNonJSONError500_ZeroAccounted(t *testing.T) {
+	const reqBody = `{"model":"gpt-native","messages":[{"role":"user","content":"a request that hits a plain-text 500"}]}`
+	const respBody = "internal server error"
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(respBody))
+	}))
+	defer srv.Close()
+
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{"openai": {Type: "openai", BaseURL: srv.URL, APIKey: "sk-up"}}
+	cfg.Groups = map[string]*GroupConfig{"default": {}}
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{{Name: "alice", Group: "default", APIKey: "sk-alice", Limits: &LimitsConfig{}}}}
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	gw, ok := h.(*Gateway)
+	if !ok {
+		t.Fatal("handler is not *Gateway")
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/openai/v1/native-endpoint", strings.NewReader(reqBody))
+	req.Header.Set("Authorization", "Bearer sk-alice")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500, body=%s", rec.Code, rec.Body.String())
+	}
+	if rec.Body.String() != respBody {
+		t.Errorf("body = %q, want verbatim upstream body %q", rec.Body.String(), respBody)
+	}
+
+	tokIn, ok := gw.limiter.getCounter("user", "alice", metricTokIn, windowDay, time.Now())
+	if !ok || tokIn != 0 {
+		t.Errorf("user tokin/day counter = %d (ok=%v), want exactly 0 (non-JSON, non-SSE response must never be accounted)", tokIn, ok)
+	}
+	tokOut, ok := gw.limiter.getCounter("user", "alice", metricTokOut, windowDay, time.Now())
+	if !ok || tokOut != 0 {
+		t.Errorf("user tokout/day counter = %d (ok=%v), want exactly 0", tokOut, ok)
+	}
+}
+
+// TestHandlePassthrough_UnpricedModelCostBudget_Returns402 covers
+// finding 6 (review-routes.md): a passthrough request for a model with
+// no configured price is refused (402) exactly like the unified route's
+// own F-1 gate, but ONLY when (a) a cost budget actually applies to the
+// caller and (b) the model is determinable from the request body at all
+// — a binary content type (whose "model" this gateway never even tries
+// to read) is let through unpriced, since there is no basis to refuse a
+// value the gateway never had.
+func TestHandlePassthrough_UnpricedModelCostBudget_Returns402(t *testing.T) {
+	tests := []struct {
+		name                        string
+		body                        string
+		contentType                 string
+		costBudget                  float64
+		wantCode                    int
+		allowUnpricedWithCostBudget bool
+		wantUpstreamCalled          bool
+	}{
+		{
+			name:               "unpriced model, cost budget configured: refused",
+			body:               `{"model":"totally-unpriced-model","messages":[]}`,
+			contentType:        "application/json",
+			costBudget:         5,
+			wantCode:           http.StatusPaymentRequired,
+			wantUpstreamCalled: false,
+		},
+		{
+			name:               "unpriced model, no cost budget: passes",
+			body:               `{"model":"totally-unpriced-model","messages":[]}`,
+			contentType:        "application/json",
+			costBudget:         0,
+			wantCode:           http.StatusOK,
+			wantUpstreamCalled: true,
+		},
+		{
+			name:                        "unpriced model, cost budget configured but AllowUnpricedWithCostBudget set: passes",
+			body:                        `{"model":"totally-unpriced-model","messages":[]}`,
+			contentType:                 "application/json",
+			costBudget:                  5,
+			allowUnpricedWithCostBudget: true,
+			wantCode:                    http.StatusOK,
+			wantUpstreamCalled:          true,
+		},
+		{
+			name:               "priced (builtin) model, cost budget configured: passes",
+			body:               `{"model":"gpt-5","messages":[]}`,
+			contentType:        "application/json",
+			costBudget:         5,
+			wantCode:           http.StatusOK,
+			wantUpstreamCalled: true,
+		},
+		{
+			name:               "unpriced model, cost budget configured, but model unreadable (binary content type): passes",
+			body:               "raw-audio-bytes-not-json",
+			contentType:        "audio/mpeg",
+			costBudget:         5,
+			wantCode:           http.StatusOK,
+			wantUpstreamCalled: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var upstreamCalled bool
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				upstreamCalled = true
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer srv.Close()
+
+			cfg := CreateConfig()
+			cfg.AllowUnpricedWithCostBudget = tt.allowUnpricedWithCostBudget
+			cfg.Providers = map[string]*ProviderConfig{
+				"openai": {Type: "openai", BaseURL: srv.URL, APIKey: "sk-up"},
+			}
+			cfg.Groups = map[string]*GroupConfig{"default": {}}
+			limits := &LimitsConfig{}
+			if tt.costBudget > 0 {
+				limits.CostPerDayUSD = tt.costBudget
+			}
+			cfg.Users = &UsersConfig{Inline: []*UserConfig{{Name: "alice", Group: "default", APIKey: "sk-alice", Limits: limits}}}
+			next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+			h, err := New(context.Background(), next, cfg, "llmgw")
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+
+			req := httptest.NewRequest(http.MethodPost, "/openai/v1/native-endpoint", strings.NewReader(tt.body))
+			req.Header.Set("Authorization", "Bearer sk-alice")
+			req.Header.Set("Content-Type", tt.contentType)
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+
+			if rec.Code != tt.wantCode {
+				t.Fatalf("status = %d, want %d, body=%s", rec.Code, tt.wantCode, rec.Body.String())
+			}
+			if upstreamCalled != tt.wantUpstreamCalled {
+				t.Errorf("upstreamCalled = %v, want %v", upstreamCalled, tt.wantUpstreamCalled)
+			}
+		})
 	}
 }
 
@@ -2412,5 +3226,33 @@ func TestHandlePassthrough_UnrestrictedGroup_PaddedDuplicateModel_NeverPeeked(t 
 	}
 	if string(gotBody) != body {
 		t.Error("upstream body must be forwarded byte-for-byte unchanged for an unrestricted group")
+	}
+}
+
+// TestSSEAccountingBuffer_TailBoundedAndExact: many small writes keep the
+// tail buffer under 2x its cap, and tailBytes always returns exactly the
+// last sseAccountingTailBytes written.
+func TestSSEAccountingBuffer_TailBoundedAndExact(t *testing.T) {
+	b := &sseAccountingBuffer{}
+	var all []byte
+	chunk := make([]byte, 58)
+	for i := 0; i < 20000; i++ {
+		for j := range chunk {
+			chunk[j] = byte((i + j) % 256)
+		}
+		if _, err := b.Write(chunk); err != nil {
+			t.Fatalf("Write: %v", err)
+		}
+		all = append(all, chunk...)
+		if len(b.tail) >= 2*sseAccountingTailBytes {
+			t.Fatalf("tail grew to %d bytes, want < %d", len(b.tail), 2*sseAccountingTailBytes)
+		}
+	}
+	want := all[len(all)-sseAccountingTailBytes:]
+	if !bytes.Equal(b.tailBytes(), want) {
+		t.Fatal("tailBytes() != last sseAccountingTailBytes written")
+	}
+	if !bytes.Equal(b.head.Bytes(), all[:sseAccountingHeadBytes]) {
+		t.Fatal("head != first sseAccountingHeadBytes written")
 	}
 }

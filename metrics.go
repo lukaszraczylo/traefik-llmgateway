@@ -629,26 +629,37 @@ func (g *Gateway) writeProviderMetrics(m *metricWriter) {
 	counters := g.limiter.providerUsage(scopes)
 	providerCounts := counters[:len(snaps)]
 
+	// A storeDown counter is a failed-closed read (limits.go's
+	// providerUsage), not a real zero (review fix, adversarial
+	// verification 2026-08-23): emitting it as a hard 0 here is exactly
+	// the bug writeUsageMetrics' own storeDown guard above already avoids
+	// for the request/token/cost families — a Redis blip would otherwise
+	// paint a phantom counter-reset spike the instant the store recovers
+	// and this value jumps back to its real total. Skip the series
+	// entirely; a temporary gap is the honest signal, a fabricated 0 is
+	// not.
+	//
+	// Each family below is written as its own complete pass over snaps
+	// (L7 fix): llmgateway_provider_attempts_total's samples must not
+	// interleave with llmgateway_provider_failures_total's — the
+	// exposition format requires one metric's lines to form a single
+	// contiguous group.
 	m.family("llmgateway_provider_attempts_total", "counter",
 		"Total upstream attempts today (UTC calendar day; resets at UTC midnight), by provider."+aggregationNoteStoreBacked)
-	m.family("llmgateway_provider_failures_total", "counter",
-		"Total upstream attempts today classified as a provider fault (transport error, 429, or 5xx — the same classification recordProviderAttempt/isTransient apply), by provider."+aggregationNoteStoreBacked)
 	for i, s := range snaps {
-		// A storeDown counter is a failed-closed read (limits.go's
-		// providerUsage), not a real zero (review fix, adversarial
-		// verification 2026-08-23): emitting it as a hard 0 here is
-		// exactly the bug writeUsageMetrics' own storeDown guard above
-		// already avoids for the request/token/cost families — a Redis
-		// blip would otherwise paint a phantom counter-reset spike the
-		// instant the store recovers and this value jumps back to its
-		// real total. Skip the series entirely; a temporary gap is the
-		// honest signal, a fabricated 0 is not.
 		if providerCounts[i].storeDown {
 			continue
 		}
-		labels := []metricLabel{{"provider", s.name}}
-		m.sampleInt("llmgateway_provider_attempts_total", labels, providerCounts[i].attemptsDay)
-		m.sampleInt("llmgateway_provider_failures_total", labels, providerCounts[i].failuresDay)
+		m.sampleInt("llmgateway_provider_attempts_total", []metricLabel{{"provider", s.name}}, providerCounts[i].attemptsDay)
+	}
+
+	m.family("llmgateway_provider_failures_total", "counter",
+		"Total upstream attempts today classified as a provider fault (transport error, 429, or 5xx — the same classification recordProviderAttempt/isTransient apply), by provider."+aggregationNoteStoreBacked)
+	for i, s := range snaps {
+		if providerCounts[i].storeDown {
+			continue
+		}
+		m.sampleInt("llmgateway_provider_failures_total", []metricLabel{{"provider", s.name}}, providerCounts[i].failuresDay)
 	}
 
 	m.family("llmgateway_provider_healthy", "gauge",
@@ -666,10 +677,10 @@ func (g *Gateway) writeProviderMetrics(m *metricWriter) {
 	}
 	modelCounts := counters[len(snaps):]
 
+	// Each family below is again its own complete pass over snaps/models
+	// (L7 fix), same reasoning as the provider-level pair above.
 	m.family("llmgateway_provider_model_attempts_total", "counter",
 		"Total upstream attempts today (UTC calendar day; resets at UTC midnight), by provider and model. Opt-in via metrics.modelLabel — see MetricsConfig's own doc comment for the cardinality trade-off."+aggregationNoteStoreBacked)
-	m.family("llmgateway_provider_model_failures_total", "counter",
-		"Total upstream attempts today classified as a provider fault, by provider and model. Opt-in via metrics.modelLabel."+aggregationNoteStoreBacked)
 	mi := 0
 	for _, s := range snaps {
 		for _, model := range s.models {
@@ -678,9 +689,21 @@ func (g *Gateway) writeProviderMetrics(m *metricWriter) {
 			if mc.storeDown { // same fabricated-reset hazard as the provider-level loop above
 				continue
 			}
-			labels := []metricLabel{{"provider", s.name}, {"model", model}}
-			m.sampleInt("llmgateway_provider_model_attempts_total", labels, mc.attemptsDay)
-			m.sampleInt("llmgateway_provider_model_failures_total", labels, mc.failuresDay)
+			m.sampleInt("llmgateway_provider_model_attempts_total", []metricLabel{{"provider", s.name}, {"model", model}}, mc.attemptsDay)
+		}
+	}
+
+	m.family("llmgateway_provider_model_failures_total", "counter",
+		"Total upstream attempts today classified as a provider fault, by provider and model. Opt-in via metrics.modelLabel."+aggregationNoteStoreBacked)
+	mi = 0
+	for _, s := range snaps {
+		for _, model := range s.models {
+			mc := modelCounts[mi]
+			mi++
+			if mc.storeDown {
+				continue
+			}
+			m.sampleInt("llmgateway_provider_model_failures_total", []metricLabel{{"provider", s.name}, {"model", model}}, mc.failuresDay)
 		}
 	}
 }
@@ -975,12 +998,35 @@ func (g *Gateway) recordLatency(provider, model string, sample latencySample) {
 
 // writeLatencyMetrics emits llmgateway_upstream_ttfb_seconds and
 // llmgateway_upstream_duration_seconds — this feature's own two
-// histograms. Absent entirely (no # HELP/TYPE lines even emitted) when
-// g.latency has recorded nothing yet — a fresh process, or a deployment
-// with metrics collection gated off at every wiring site — mirroring how
-// a brand-new histogram with zero observations would look on any real
-// Prometheus exporter too: no series until the first observation, not a
-// family of all-zero ones.
+// always-on histograms (provider+stream labels only) — plus, when
+// Config.Metrics.ModelLabel is on and at least one sample carries a
+// model, the opt-in llmgateway_upstream_model_ttfb_seconds and
+// llmgateway_upstream_model_duration_seconds (provider+stream+model
+// labels). These are DISTINCT metric names, not the same name emitted
+// twice under different label sets (M4 fix): recordLatency dual-writes
+// every sample into both the bare (provider, streaming) key and, when
+// ModelLabel is on, the (provider, streaming, model) key, so the two
+// snapshot groups below cover the identical underlying requests —
+// rendering both under one metric name would make sum()/
+// histogram_quantile() over that name double-count every request,
+// exactly like llmgateway_provider_model_attempts_total staying a
+// separate name from llmgateway_provider_attempts_total avoids for the
+// counter families above.
+//
+// Each family's own HELP/TYPE line is followed by ALL of that family's
+// samples before the next family starts (L7 fix: the exposition format
+// requires one metric's lines to form a single contiguous group) — the
+// four families here are written as four back-to-back blocks, never
+// interleaved.
+//
+// Absent entirely (no # HELP/TYPE lines even emitted) when g.latency has
+// recorded nothing yet — a fresh process, or a deployment with metrics
+// collection gated off at every wiring site — mirroring how a brand-new
+// histogram with zero observations would look on any real Prometheus
+// exporter too: no series until the first observation, not a family of
+// all-zero ones. The same applies independently to the model-labeled
+// pair: absent when ModelLabel is off, or on but no sample yet carries a
+// model.
 //
 // snaps is sorted (provider, then streaming, then model) purely for
 // deterministic output across repeated scrapes of identical underlying
@@ -1003,21 +1049,65 @@ func (g *Gateway) writeLatencyMetrics(m *metricWriter) {
 		return a.model < b.model
 	})
 
-	m.family("llmgateway_upstream_ttfb_seconds", "histogram",
-		"Time to first successful byte read from an upstream response body, in seconds, measured from just before the request was sent (watchdogBody, timeout.go). Meaningful as a distinct \"how fast did the provider start responding\" signal only for stream=\"true\": a non-streaming provider buffers its whole completion before sending anything, so its own TTFB is approximately equal to its own llmgateway_upstream_duration_seconds and carries the same output-length contamination duration does — always split by the stream label before comparing across requests of different lengths, never averaged across it."+aggregationNoteLatency)
-	m.family("llmgateway_upstream_duration_seconds", "histogram",
-		"Total upstream response body duration, in seconds, from just before the request was sent to the last successful read or Close (watchdogBody, timeout.go) — covers the whole body, not just headers. Roughly TTFB + output_tokens/tokens_per_sec: a long generation legitimately takes longer than a short one on an equally healthy provider, so a raw average across requests of very different output length is not by itself a \"provider degraded\" signal — llmgateway_tokens_total's completion direction (this file) gives the token side of that ratio for the non-streaming population, where duration approximates total generation time."+aggregationNoteLatency)
-
+	// base/withModel split (M4 fix): a snapshot with an empty key.model
+	// is the always-on (provider, streaming) write; a non-empty one is
+	// the opt-in (provider, streaming, model) write recordLatency also
+	// made for the SAME sample. Rendering each group under its own metric
+	// name, instead of both under the same one, is what stops the two
+	// from double-counting once aggregated.
+	var base, withModel []latencySnapshot
 	for _, s := range snaps {
+		if s.key.model == "" {
+			base = append(base, s)
+		} else {
+			withModel = append(withModel, s)
+		}
+	}
+
+	writeUpstreamLatencyFamily(m, "llmgateway_upstream_ttfb_seconds",
+		"Time to first successful byte read from an upstream response body, in seconds, measured from just before the request was sent (watchdogBody, timeout.go). Meaningful as a distinct \"how fast did the provider start responding\" signal only for stream=\"true\": a non-streaming provider buffers its whole completion before sending anything, so its own TTFB is approximately equal to its own llmgateway_upstream_duration_seconds and carries the same output-length contamination duration does — always split by the stream label before comparing across requests of different lengths, never averaged across it."+aggregationNoteLatency,
+		"llmgateway_upstream_duration_seconds",
+		"Total upstream response body duration, in seconds, from just before the request was sent to the last successful read or Close (watchdogBody, timeout.go) — covers the whole body, not just headers. Roughly TTFB + output_tokens/tokens_per_sec: a long generation legitimately takes longer than a short one on an equally healthy provider, so a raw average across requests of very different output length is not by itself a \"provider degraded\" signal — llmgateway_tokens_total's completion direction (this file) gives the token side of that ratio for the non-streaming population, where duration approximates total generation time."+aggregationNoteLatency,
+		base, false)
+
+	if len(withModel) == 0 {
+		return
+	}
+	writeUpstreamLatencyFamily(m, "llmgateway_upstream_model_ttfb_seconds",
+		"Time to first successful byte read from an upstream response body, in seconds, by provider, stream, and model. Opt-in via metrics.modelLabel — see MetricsConfig's own doc comment for the cardinality trade-off. A separate metric name from llmgateway_upstream_ttfb_seconds (M4 fix), not the same series with an extra label, so summing one family never double-counts the other's requests."+aggregationNoteLatency,
+		"llmgateway_upstream_model_duration_seconds",
+		"Total upstream response body duration, in seconds, by provider, stream, and model. Opt-in via metrics.modelLabel. A separate metric name from llmgateway_upstream_duration_seconds (M4 fix), not the same series with an extra label, so summing one family never double-counts the other's requests."+aggregationNoteLatency,
+		withModel, true)
+}
+
+// writeUpstreamLatencyFamily writes one pair of upstream-latency
+// histogram families (ttfb, then duration) for snaps, each family's
+// HELP/TYPE line followed immediately by all of its own samples (L7
+// fix) — ttfbName's block never interleaves with durationName's.
+// includeModel controls whether each sample's label set carries a
+// "model" label; snaps' own key.model is otherwise unused here since the
+// caller (writeLatencyMetrics) has already partitioned snaps into a
+// model-less and a model-carrying group before calling this twice.
+func writeUpstreamLatencyFamily(m *metricWriter, ttfbName, ttfbHelp, durationName, durationHelp string, snaps []latencySnapshot, includeModel bool) {
+	labelsFor := func(s latencySnapshot) []metricLabel {
 		labels := []metricLabel{{"provider", s.key.provider}, {"stream", strconv.FormatBool(s.key.streaming)}}
-		if s.key.model != "" {
+		if includeModel {
 			labels = append(labels, metricLabel{"model", s.key.model})
 		}
+		return labels
+	}
+
+	m.family(ttfbName, "histogram", ttfbHelp)
+	for _, s := range snaps {
 		if s.ttfbCount > 0 {
-			m.histogram("llmgateway_upstream_ttfb_seconds", labels, s.ttfbBuckets, s.ttfbOverflow, s.ttfbSum)
+			m.histogram(ttfbName, labelsFor(s), s.ttfbBuckets, s.ttfbOverflow, s.ttfbSum)
 		}
+	}
+
+	m.family(durationName, "histogram", durationHelp)
+	for _, s := range snaps {
 		if s.durationCount > 0 {
-			m.histogram("llmgateway_upstream_duration_seconds", labels, s.durationBuckets, s.durationOverflow, s.durationSum)
+			m.histogram(durationName, labelsFor(s), s.durationBuckets, s.durationOverflow, s.durationSum)
 		}
 	}
 }
@@ -1169,14 +1259,23 @@ func (g *Gateway) writeProvenanceMetrics(m *metricWriter) {
 		return a.provenance < b.provenance
 	})
 
+	// Each family below is its own complete pass over snaps (L7 fix):
+	// llmgateway_usage_provenance_requests_total's samples must not
+	// interleave with llmgateway_usage_provenance_tokens_total's — the
+	// exposition format requires one metric's lines to form a single
+	// contiguous group.
 	m.family("llmgateway_usage_provenance_requests_total", "counter",
 		"Total accounted candidate outcomes (a successful upstream response, callErr == nil, that reached usage accounting in runUnified, routes_unified.go), by provider and provenance. provenance is \"reported\" (the provider returned real usage), \"estimated\" (a non-streaming response carried none, so prompt was substituted with ceil(len(body)/4) and completion billed as zero — usage.estimated, limits.go), or \"unbilled\" (a streaming response carried none, so the request is counted but zero tokens are billed). This family only reports how an already-billed number was arrived at; it never changes what gets billed."+aggregationNotePerProcess)
+	for _, s := range snaps {
+		m.sampleInt("llmgateway_usage_provenance_requests_total",
+			[]metricLabel{{"provider", s.key.provider}, {"provenance", s.key.provenance}}, s.requests)
+	}
+
 	m.family("llmgateway_usage_provenance_tokens_total", "counter",
 		"Total tokens billed under each provenance (the SAME result.total() runUnified already passed to accounting, routes_unified.go — never a second, independent count), by provider and provenance. sum(...{provenance=\"reported\"}) / sum(...) across every provenance is the fraction of billed tokens that came from real provider-reported usage."+aggregationNotePerProcess)
 	for _, s := range snaps {
-		labels := []metricLabel{{"provider", s.key.provider}, {"provenance", s.key.provenance}}
-		m.sampleInt("llmgateway_usage_provenance_requests_total", labels, s.requests)
-		m.sampleInt("llmgateway_usage_provenance_tokens_total", labels, s.tokens)
+		m.sampleInt("llmgateway_usage_provenance_tokens_total",
+			[]metricLabel{{"provider", s.key.provider}, {"provenance", s.key.provenance}}, s.tokens)
 	}
 }
 

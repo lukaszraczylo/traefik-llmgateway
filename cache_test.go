@@ -213,6 +213,37 @@ func TestValidateCacheConfig_MalformedTTL_ReturnsError(t *testing.T) {
 	}
 }
 
+// TestValidateCacheConfig_NonPositiveTTL_AcceptedUnclamped is finding
+// F8's own regression (2026-09 review) corrected by the verify-core
+// round-4 fix: F8 made cache.ttl<=0 a hard construction error, matching
+// groupCacheTTL's own per-group-override validation
+// (TestNewAuthStore_GroupCacheTTL_ConstructorErrors, auth_test.go) — but
+// that broke a config that worked before F8 existed: "0s" (or a negative
+// duration string) always silently passed through to setEx (resp.go),
+// which floors it to a 1-second cache rather than "off"/"no expiry".
+// Restored to accept-and-return-unclamped (buildResponseCache, below,
+// carries the warning — this function has no logf to call).
+func TestValidateCacheConfig_NonPositiveTTL_AcceptedUnclamped(t *testing.T) {
+	cases := []struct {
+		ttl  string
+		want time.Duration
+	}{
+		{"0s", 0},
+		{"-1s", -time.Second},
+	}
+	for _, c := range cases {
+		t.Run(c.ttl, func(t *testing.T) {
+			ttl, _, err := validateCacheConfig(CacheConfig{Enabled: true, TTL: c.ttl})
+			if err != nil {
+				t.Fatalf("validateCacheConfig: %v, want cache.ttl = %q accepted", err, c.ttl)
+			}
+			if ttl != c.want {
+				t.Errorf("ttl = %v, want %v (returned unclamped; setEx applies the 1s floor at write time)", ttl, c.want)
+			}
+		})
+	}
+}
+
 func TestValidateCacheConfig_NegativeMaxBodyBytes_ReturnsError(t *testing.T) {
 	if _, _, err := validateCacheConfig(CacheConfig{Enabled: true, MaxBodyBytes: -1}); err == nil {
 		t.Fatal("want an error for a negative maxBodyBytes")
@@ -237,7 +268,7 @@ func TestBuildResponseCache_Disabled_ReturnsNilNoError(t *testing.T) {
 	var logged []string
 	logf := func(format string, args ...any) { logged = append(logged, fmt.Sprintf(format, args...)) }
 
-	c, err := buildResponseCache(CacheConfig{Enabled: false}, nil, logf, logf)
+	c, err := buildResponseCache(CacheConfig{Enabled: false}, nil, logf, logf, logf)
 	if err != nil {
 		t.Fatalf("buildResponseCache: %v", err)
 	}
@@ -257,7 +288,7 @@ func TestBuildResponseCache_EnabledNoRedis_WarnsAndDisables(t *testing.T) {
 	logf := func(format string, args ...any) { logged = append(logged, fmt.Sprintf(format, args...)) }
 	errorf := func(format string, args ...any) { t.Errorf("unexpected errorf call: "+format, args...) }
 
-	c, err := buildResponseCache(CacheConfig{Enabled: true}, nil, logf, errorf)
+	c, err := buildResponseCache(CacheConfig{Enabled: true}, nil, logf, logf, errorf)
 	if err != nil {
 		t.Fatalf("buildResponseCache: %v, want no error (warn-and-disable, not a constructor error)", err)
 	}
@@ -271,8 +302,41 @@ func TestBuildResponseCache_EnabledNoRedis_WarnsAndDisables(t *testing.T) {
 
 func TestBuildResponseCache_EnabledInvalidTTL_ReturnsConstructorError(t *testing.T) {
 	noop := func(string, ...any) {}
-	if _, err := buildResponseCache(CacheConfig{Enabled: true, TTL: "nope"}, nil, noop, noop); err == nil {
+	if _, err := buildResponseCache(CacheConfig{Enabled: true, TTL: "nope"}, nil, noop, noop, noop); err == nil {
 		t.Fatal("want a construction error for an invalid TTL, even with no Redis configured")
+	}
+}
+
+// TestBuildResponseCache_NonPositiveTTL_WarnsAndAccepts is the verify-
+// core round-4 regression: cache.ttl<=0 must build a working cache (not
+// a construction error — TestValidateCacheConfig_NonPositiveTTL_
+// AcceptedUnclamped's own doc comment explains why) while still warning
+// once, so an operator who meant "0s" as "off" is told it instead runs as
+// a 1-second cache.
+func TestBuildResponseCache_NonPositiveTTL_WarnsAndAccepts(t *testing.T) {
+	ln := newFakeListener(t)
+	runFakeRESPServer(t, ln, []respStep{
+		{wantArgs: []string{"SELECT", "0"}, reply: []byte("+OK\r\n")},
+	})
+	client := newRESPClient(ln.Addr().String(), "", 0)
+
+	var warned []string
+	logf := func(format string, args ...any) {}
+	warnf := func(format string, args ...any) { warned = append(warned, fmt.Sprintf(format, args...)) }
+	errorf := func(format string, args ...any) { t.Errorf("unexpected errorf call: "+format, args...) }
+
+	c, err := buildResponseCache(CacheConfig{Enabled: true, TTL: "0s"}, client, logf, warnf, errorf)
+	if err != nil {
+		t.Fatalf("buildResponseCache: %v, want no error (warn-and-accept, not a constructor error)", err)
+	}
+	if c == nil {
+		t.Fatal("want a non-nil, working *responseCache even for cache.ttl = \"0s\"")
+	}
+	if c.ttl != 0 {
+		t.Errorf("c.ttl = %v, want 0 (unclamped; setEx applies the 1s floor at write time)", c.ttl)
+	}
+	if len(warned) != 1 {
+		t.Fatalf("warned = %d lines, want exactly 1 warning, got %v", len(warned), warned)
 	}
 }
 
@@ -284,7 +348,7 @@ func TestBuildResponseCache_EnabledWithRedis_ReturnsWorkingCache(t *testing.T) {
 	client := newRESPClient(ln.Addr().String(), "", 0)
 
 	noop := func(string, ...any) {}
-	c, err := buildResponseCache(CacheConfig{Enabled: true, TTL: "1m"}, client, noop, noop)
+	c, err := buildResponseCache(CacheConfig{Enabled: true, TTL: "1m"}, client, noop, noop, noop)
 	if err != nil {
 		t.Fatalf("buildResponseCache: %v", err)
 	}

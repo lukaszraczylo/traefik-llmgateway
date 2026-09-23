@@ -6,10 +6,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"math"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -336,6 +336,19 @@ func (g *Gateway) runMeteredCall(sw *statusTrackingWriter, r *http.Request, scop
 		pristineReq["model"] = candidates[0].upstreamModel
 	}
 
+	// preFailoverHeaders snapshots sw.Header() ONCE, before the loop below
+	// ever runs (finding 7 fix, review-routes.md): every header present
+	// here was staged by something OTHER than this loop — an earlier,
+	// unrelated Traefik middleware (CORS, HSTS, request-id, ...) running
+	// before this plugin, on the default, non-failover path — and a
+	// failover iteration's own header cleanup (below) restores exactly
+	// this snapshot instead of wiping every header unconditionally, which
+	// deleted those staged headers too, not just the gateway's own. Clone
+	// is a real copy (http.Header.Clone's own contract), so later
+	// mutations of sw.Header() by this loop can never retroactively
+	// change what gets restored.
+	preFailoverHeaders := sw.Header().Clone()
+
 	var lastErr error
 	var lastProviderName string
 	for i, cand := range candidates {
@@ -394,13 +407,30 @@ func (g *Gateway) runMeteredCall(sw *statusTrackingWriter, r *http.Request, scop
 			// written, and if THAT PRIOR candidate then failed before
 			// writing (still safe to fail over, THE HARD CONSTRAINT
 			// below), those staged headers must not survive into a
-			// plain-JSON response from THIS candidate. Safe to clear
+			// plain-JSON response from THIS candidate. Safe to run
 			// unconditionally once i > 0: this loop only ever reaches a
 			// new iteration while sw.wroteHeader is false, so nothing
-			// committed is ever at risk of being wiped.
+			// committed is ever at risk of being touched.
+			//
+			// Finding 7 fix (review-routes.md): RESTORE preFailoverHeaders
+			// rather than delete every key outright — the round-2 fix
+			// above correctly scoped the wipe to i > 0 only, but still
+			// deleted EVERY header present at that point, including
+			// whatever the earlier Traefik middleware staged before this
+			// plugin ever ran, on the FAILOVER path specifically (the
+			// round-2 fix's own proof only covered i == 0, the
+			// non-failover path). Deleting first, then copying the
+			// snapshot back, leaves exactly the pre-loop set in place —
+			// any earlier candidate's own staged headers (X-Llmgw-Cache,
+			// Content-Type, ...) are gone, and anything Traefik itself
+			// set before this plugin ran survives a failover exactly as
+			// it already did on the non-failover path.
 			hdr := sw.Header()
 			for k := range hdr {
-				hdr.Del(k)
+				delete(hdr, k)
+			}
+			for k, v := range preFailoverHeaders {
+				hdr[k] = v
 			}
 		}
 
@@ -510,8 +540,13 @@ func (g *Gateway) runMeteredCall(sw *statusTrackingWriter, r *http.Request, scop
 		// configured a money budget, so a deployment with none is
 		// unaffected, and token/request budgets are untouched — those
 		// accrue correctly for an unpriced model and keep working.
+		// review-auth finding F1 fix: priceKnown (modelmeta.go) — not a
+		// bare pricing-overrides/built-in-table lookup — also recognizes
+		// an operator's own modelMeta entry marking the model explicitly
+		// Free, so a locally-hosted/free model already declared that way
+		// is never refused here as though its price were unrecorded.
 		if !g.cfg.AllowUnpricedWithCostBudget &&
-			!modelPriceKnown(cand.canonical, cand.upstreamModel, g.cfg.Pricing) &&
+			!priceKnown(cand.canonical, cand.upstreamModel, g.cfg.Pricing, g.cfg.ModelMeta) &&
 			scopesHaveCostBudget(scopes) {
 			g.logf("%s: refusing model %q: it has no configured price, and a cost budget applies to this caller that cannot be enforced without one", logPrefix, cand.canonical)
 			envelope(sw, http.StatusPaymentRequired, "invalid_request_error",
@@ -547,8 +582,21 @@ func (g *Gateway) runMeteredCall(sw *statusTrackingWriter, r *http.Request, scop
 		// healthy()), so recording it there was dead work plus a new
 		// global-mutex contention point (requestHealthTracker.stateFor's
 		// own t.mu) on EVERY metered request, disabled or not.
+		//
+		// requestHealthOutcome (finding 16 fix, review-routes.md) — not a
+		// bare !failoverEligible(callErr) — decides both WHETHER to
+		// record at all and, when it does, what outcome: a client cancel
+		// or a gateway-side translation error is recorded as NEITHER
+		// success nor failure, since neither says anything about this
+		// provider's own health, and the previous shape's implicit
+		// "not eligible for failover" == "success" conflation let a
+		// provider mixed with impatient or misconfigured clients never
+		// reach requestBreakerFailureThreshold, so failover never routed
+		// around it.
 		if g.failover.enabled {
-			g.failoverHealth.record(providerName, !failoverEligible(callErr))
+			if success, ok := requestHealthOutcome(callErr); ok {
+				g.failoverHealth.record(providerName, success)
+			}
 		}
 
 		// Usage is accounted before the error branch below runs, not
@@ -562,23 +610,57 @@ func (g *Gateway) runMeteredCall(sw *statusTrackingWriter, r *http.Request, scop
 		// translateError, or a connection failure before any write)
 		// always carries zero usage by contract, so accounting it here
 		// is a no-op — account skips every write once both total tokens
-		// and cost are zero. routes_messages.go's
-		// callTranslatedMessages/callAnthropicMessagesPassthrough follow
-		// the identical contract for their own error paths (item 1 fix,
-		// 2026-08-22 review). This still runs exactly once per
-		// CANDIDATE, including a candidate that goes on to fail over —
-		// its own (zero, by contract) usage is billed as a no-op, never
+		// and cost are zero. A STREAMING failure with zero reported usage
+		// is the one exception (finding 1 fix, review-routes.md, the
+		// switch below): it gets the same body-size estimate a
+		// non-streaming zero-usage response already did, rather than
+		// being billed zero purely because the connection dropped or the
+		// client walked away before the trailing usage chunk arrived.
+		// routes_messages.go's callTranslatedMessages/
+		// callAnthropicMessagesPassthrough follow the identical contract
+		// for their own error paths (item 1 fix, 2026-08-22 review). This
+		// still runs exactly once per CANDIDATE, including a candidate
+		// that goes on to fail over — its own usage is billed as a no-op
+		// only when it is genuinely zero (a non-streaming failure), never
 		// skipped, so a later successful candidate's real usage is never
 		// silently doubled with a phantom first entry either.
-		if callErr == nil && result.total() == 0 {
-			if streaming {
+		if result.total() == 0 {
+			switch {
+			case streaming && callErr != nil && sw.wroteHeader:
+				// Finding 1 fix (review-routes.md): a streaming response
+				// that fails or is canceled before its usage chunk
+				// arrives — most commonly the client itself disconnecting
+				// right after the last content chunk, before the
+				// trailing usage frame — must still be billed something,
+				// or an attentive client can dodge every token/cost
+				// budget on every request just by hanging up early once
+				// it has read what it wanted. Apply the same body-size
+				// prompt estimate the non-streaming zero-usage branch
+				// below already uses.
+				//
+				// Verify-core fix (round 4): gated on sw.wroteHeader —
+				// the stream must actually have started reaching the
+				// client — so a pre-send failure (providerHTTPError,
+				// translateError, a dial failure, or errRequestBuildFailed,
+				// none of which ever wrote a byte to the client) is never
+				// estimated here. Those fall through to the "streaming"
+				// case below with no estimate, exactly like a non-
+				// streaming failure. A candidate that fails over after
+				// writing nothing must cost the SAME zero as one that
+				// never streamed at all, or a failover pair is double-
+				// billed: the failed candidate's phantom estimate plus
+				// the next candidate's real usage.
+				result.prompt = int64(math.Ceil(float64(len(body)) / 4))
+				result.estimated = true
+				g.logf("%s: streaming response from model %q failed or was canceled after starting to write to the client with zero usage reported; accounting an estimate derived from request body size", logPrefix, cand.canonical)
+			case streaming:
 				g.logf("%s: zero usage reported for a streaming response from model %q; accounting the request only", logPrefix, cand.canonical)
-			} else {
+			case callErr == nil:
 				result.prompt = int64(math.Ceil(float64(len(body)) / 4))
 				result.estimated = true
 			}
 		}
-		g.limiter.account(withModelScope(scopes, cand.canonical), result, unifiedCostMicros(cand.canonical, cand.upstreamModel, result, g.cfg.Pricing))
+		g.limiter.account(withModelScope(scopes, cand.canonical), result, unifiedCostMicros(cand.canonical, cand.upstreamModel, result, g.cfg.Pricing, g.cfg.ModelMeta, g.pricingWarn))
 		if result.estimated {
 			g.logf("%s: usage for model %q logged as estimated (%d prompt tokens derived from request body size, not the provider's reported usage)", logPrefix, cand.canonical, result.prompt)
 		}
@@ -857,17 +939,28 @@ func (g *Gateway) acquireBodyAdmission(sw *statusTrackingWriter, envelope envelo
 // readAndDecodeUnifiedBody claims a body-admission slot (acquireBodyAdmission),
 // reads r's body capped at maxUnifiedRequestBytes, decodes it as a JSON
 // object, and releases the slot before returning — on every path: a
-// successful decode, a read failure, a decode failure, or admission
-// exhaustion itself (security review finding 1b, round 3, 2026-08-22).
-// This is deliberately the ENTIRE scope of what the semaphore guards for
-// the unified/messages routes: by the time this returns, req is fully
-// decoded and nothing further re-amplifies memory the way the decode
-// itself does, so model resolution, the cache lookup, and the upstream
-// round trip all run after the slot is already released. A read or
-// decode failure has already written its 400 to sw, through envelope
-// (item 7 fix, 2026-08-22 review — routes_messages.go passes
-// writeAnthropicError here so this shared step answers in this route's
-// own error shape); ok reports whether the caller may proceed.
+// successful decode, a read failure, an oversize body, a decode failure,
+// or admission exhaustion itself (security review finding 1b, round 3,
+// 2026-08-22). This is deliberately the ENTIRE scope of what the
+// semaphore guards for the unified/messages routes: by the time this
+// returns, req is fully decoded and nothing further re-amplifies memory
+// the way the decode itself does, so model resolution, the cache lookup,
+// and the upstream round trip all run after the slot is already
+// released. A read failure or a decode failure has already written its
+// 400 to sw, through envelope (item 7 fix, 2026-08-22 review — routes_
+// messages.go passes writeAnthropicError here so this shared step
+// answers in this route's own error shape); ok reports whether the
+// caller may proceed.
+//
+// Finding 14 fix (review-routes.md): readCapped (routes_media.go),
+// already used by handleAudioTranscriptions to distinguish "the body was
+// larger than the cap" from "the body was valid JSON, just malformed",
+// replaces the plain io.LimitReader-and-decode this used before —
+// io.LimitReader alone silently truncates an oversized body mid-token,
+// so a request that was genuinely just too big (a 4.5MiB inline image
+// against the 4MiB maxUnifiedRequestBytes cap) got the misleading
+// "invalid JSON body" 400 instead of 413, giving the caller no way to
+// tell "your body is too large" apart from "your JSON is malformed".
 func (g *Gateway) readAndDecodeUnifiedBody(sw *statusTrackingWriter, r *http.Request, envelope envelopeWriter) (body []byte, req map[string]any, ok bool) {
 	release, admitted := g.acquireBodyAdmission(sw, envelope)
 	defer release()
@@ -875,9 +968,13 @@ func (g *Gateway) readAndDecodeUnifiedBody(sw *statusTrackingWriter, r *http.Req
 		return nil, nil, false
 	}
 
-	body, err := io.ReadAll(io.LimitReader(r.Body, maxUnifiedRequestBytes))
+	body, oversize, err := readCapped(r.Body, maxUnifiedRequestBytes)
 	if err != nil {
 		envelope(sw, http.StatusBadRequest, "invalid_request_error", "cannot read request body")
+		return nil, nil, false
+	}
+	if oversize {
+		envelope(sw, http.StatusRequestEntityTooLarge, "invalid_request_error", "request body too large")
 		return nil, nil, false
 	}
 
@@ -891,42 +988,36 @@ func (g *Gateway) readAndDecodeUnifiedBody(sw *statusTrackingWriter, r *http.Req
 // unifiedCostMicros resolves the price to charge one request's usage
 // against: canonical ("provider/model") first, falling back to bare — the
 // upstream model id alone — only when canonical has no configured price at
-// all, in either overrides or the built-in table. This extends
-// costMicros' single-id lookup to the two-id order ruling (d) requires,
-// without changing costMicros' own signature: lookupPricing is used purely
-// as a side-effect-free existence probe on canonical, and the real
+// all, in either overrides or the built-in table. lookupPricing is used
+// purely as a side-effect-free existence probe on canonical, and the real
 // computation (and its unknown-model warning, when neither id has a price)
-// runs through the one costMicros call that is actually charged.
-func unifiedCostMicros(canonical, bare string, u usage, overrides map[string]*ModelPricing) int64 {
-	cost, _ := unifiedCostMicrosKnown(canonical, bare, u, overrides)
+// runs through the one costMicrosKnownFor call that is actually charged.
+//
+// meta is checked FIRST, via modelMetaFree (modelmeta.go) — the exact
+// same two-key lookup priceKnown itself uses to decide the 402 cost-
+// budget guard — so a model an operator declared modelMeta:{free:true}
+// bills 0 and never falls through to a real price it happens to share a
+// bare id with in the built-in LiteLLM table (verify-core fix, round 4:
+// before this, priceKnown treated such a model as priced, but billing
+// never consulted modelMeta at all and charged the table's real price
+// for it anyway — the 402 guard and billing disagreeing about the same
+// model). This is the one exception to Pricing/ModelMeta's normal
+// layering (Config.ModelMeta's own doc comment, llmgateway.go): every
+// OTHER modelMeta field still only drives metadata exposure, never cost.
+//
+// warn is the caller's own per-instance pricing-warning sink (every call
+// site passes g.pricingWarn, logger.go), so an unknown-model warning logs
+// under this Gateway instance's own `llmgw[name]` prefix.
+func unifiedCostMicros(canonical, bare string, u usage, overrides map[string]*ModelPricing, meta map[string]*ModelMetaConfig, warn func(string)) int64 {
+	if modelMetaFree(canonical, bare, meta) {
+		return 0
+	}
+	if _, ok := lookupPricing(canonical, overrides); ok {
+		cost, _ := costMicrosKnownFor(canonical, u, overrides, warn)
+		return cost
+	}
+	cost, _ := costMicrosKnownFor(bare, u, overrides, warn)
 	return cost
-}
-
-// unifiedCostMicrosKnown is unifiedCostMicros plus whether EITHER id
-// actually had a price (security audit run-1, finding F-1). The bool is
-// false only when neither canonical nor bare is priced — exactly the case
-// where the returned 0 means "cannot be priced" rather than "free", and
-// therefore the case a spend control must not silently treat as zero
-// spend. See costMicrosKnown (pricing.go) for the full reasoning.
-func unifiedCostMicrosKnown(canonical, bare string, u usage, overrides map[string]*ModelPricing) (int64, bool) {
-	if _, ok := lookupPricing(canonical, overrides); ok {
-		return costMicrosKnown(canonical, u, overrides)
-	}
-	return costMicrosKnown(bare, u, overrides)
-}
-
-// modelPriceKnown reports whether EITHER id this request could be billed
-// under has a configured price, using unifiedCostMicrosKnown's own
-// canonical-then-bare order. It is a pure existence probe: unlike
-// costMicrosKnown it never fires the unknown-model warning, so the
-// pre-flight check in runMeteredCall does not double-warn for a request
-// that is about to be accounted (and warned about) anyway.
-func modelPriceKnown(canonical, bare string, overrides map[string]*ModelPricing) bool {
-	if _, ok := lookupPricing(canonical, overrides); ok {
-		return true
-	}
-	_, ok := lookupPricing(bare, overrides)
-	return ok
 }
 
 // writeModelResolveErrorEnvelope maps a modelRegistry.resolve error to
@@ -991,14 +1082,65 @@ func writeLimitViolation(w http.ResponseWriter, v *limitViolation) {
 	writeLimitViolationEnvelope(w, v, writeOAIError)
 }
 
+// midStreamErrorMessage derives the client-safe (message, errType) pair
+// an OpenAI-style `data: {"error":{...}}` SSE event carries when a
+// stream fails after headers were already sent (finding 15 fix, review-
+// routes.md) — the SAME classification handleAdapterErrorEnvelope's own
+// type-switch below applies for the not-yet-committed case, reused here
+// for TEXT only, since no HTTP status can be sent once headers are
+// already on the wire: providerHTTPError's message and errType match
+// writeProviderUpstreamError's own "providerName upstream error"/
+// "upstream_error" (its upstream body is not re-embedded here — this is
+// a best-effort terminal marker on an already-partially-delivered
+// stream, not a second full error envelope); translateError reuses its
+// own terr.msg under "invalid_request_error", exactly as the
+// non-streamed envelope(...) call for it does; responseTranslationError
+// and every other error share the identical "server_error" text the
+// non-streamed generic branches below already use. ok is false only for
+// context.Canceled — the client is gone, and the non-streamed branch
+// below already treats that as log-only with no envelope either, so
+// there is nothing useful to write to a connection nobody is reading.
+func midStreamErrorMessage(err error, providerName string) (msg, errType string, ok bool) {
+	if errors.Is(err, context.Canceled) {
+		return "", "", false
+	}
+	if _, isPerr := err.(*providerHTTPError); isPerr {
+		return providerName + " upstream error", "upstream_error", true
+	}
+	if terr, isTerr := err.(*translateError); isTerr {
+		return terr.msg, "invalid_request_error", true
+	}
+	if _, isRTerr := err.(*responseTranslationError); isRTerr {
+		return "failed to translate provider response", "server_error", true
+	}
+	return "upstream connection error", "server_error", true
+}
+
 // handleAdapterErrorEnvelope is the shared adapter-error classification
 // every metered route goes through (item 7 fix, 2026-08-22 review):
 // sw.wroteHeader is checked first, ahead of every other case, since an
 // error surfacing after the adapter already started writing a response
 // (a mid-stream connection drop) must never get a second, conflicting
-// envelope appended, whatever kind of error it is. envelope/writeUpstream
-// pick the client-facing shape; logPrefix names the route in every log
-// line.
+// STATUS-CARRYING envelope appended, whatever kind of error it is.
+// envelope/writeUpstream pick the client-facing shape; logPrefix names
+// the route in every log line.
+//
+// Finding 15 fix (review-routes.md): when that already-started response
+// was itself an SSE stream (Content-Type: text/event-stream, set by
+// newSSEWriter before the first byte and still readable off sw.Header()
+// here even though WriteHeader has already run), a mid-stream failure
+// now emits one OpenAI-style `data: {"error":{...}}` event — and
+// deliberately never a trailing "data: [DONE]\n\n" afterward, since this
+// is not a clean completion — before returning. Every provider adapter's
+// own forwardStream (provider_openai.go/provider_anthropic.go/
+// provider_gemini.go) writes [DONE] only once its OWN upstream read loop
+// finishes without error, so a dropped connection previously left the
+// client's stream simply ending with no terminal signal at all: an SDK
+// that does not strictly require [DONE] returned a silently truncated
+// completion as an apparent success. A non-streaming response that wrote
+// a partial body before failing gets no such event — there is no
+// text/event-stream framing to append an event onto, and doing so would
+// only corrupt an already-partial JSON body further.
 func (g *Gateway) handleAdapterErrorEnvelope(sw *statusTrackingWriter, err error, providerName, logPrefix string, envelope envelopeWriter, writeUpstream providerUpstreamErrorWriter) {
 	// A cacheable request's miss path pre-sets X-Llmgw-Cache: miss before
 	// call() runs (runMeteredCall), so headers precede a successful body —
@@ -1012,6 +1154,13 @@ func (g *Gateway) handleAdapterErrorEnvelope(sw *statusTrackingWriter, err error
 
 	if sw.wroteHeader {
 		g.errorf("%s: adapter error after response started (provider %q): %v", logPrefix, providerName, err)
+		if msg, errType, ok := midStreamErrorMessage(err, providerName); ok &&
+			strings.Contains(strings.ToLower(sw.Header().Get("Content-Type")), "text/event-stream") {
+			errBody, _ := json.Marshal(map[string]any{ // json.Marshal on a literal map[string]any of strings never fails
+				"error": map[string]any{"message": msg, "type": errType},
+			})
+			_ = newSSEWriter(sw).writeData(errBody) // best-effort: the connection may already be gone
+		}
 		return
 	}
 

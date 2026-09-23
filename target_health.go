@@ -216,24 +216,13 @@ func sanitizeTargetErr(msg, rawURL string) string {
 	return sanitizeProviderErr(msg, rawURL)
 }
 
-// stateOf reports (kind, name)'s current targetHealthState — see this
-// type's own doc comment for the exact unknown/healthy/unhealthy rule.
-func (t *targetHealthTracker) stateOf(kind, name string) targetHealthState {
-	if t == nil {
-		return targetHealthUnknown
-	}
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	e, ok := t.entries[targetHealthKey{kind: kind, name: name}]
-	if !ok {
-		return targetHealthUnknown
-	}
-	return t.stateForLocked(e)
-}
-
 // stateForLocked derives e's targetHealthState. Caller must hold t.mu.
-// Split out of stateOf/snapshot so both apply the identical rule. The
-// threshold check runs first and always wins (F4): a target that has
+// Split out so every reader applies the identical rule: production reads
+// go through snapshot (below), and the test-only stateOf helper (finding
+// 18 fix, review-routes.md — moved to target_health_test.go, since it
+// has zero production call sites; snapshot already covers every real
+// reader) shares this same derivation rather than a second copy of it.
+// The threshold check runs first and always wins (F4): a target that has
 // failed failureThreshold times straight reads unhealthy whether or not
 // it has ever succeeded. Below threshold, a target that has never once
 // succeeded reads unknown rather than healthy — see targetHealthUnknown's

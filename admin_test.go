@@ -1575,17 +1575,12 @@ func TestAdminOverview_BaseURLStripsCredentials(t *testing.T) {
 // limiter.currentUsage flattens every scope's usageKeysPerScope counter
 // reads into ONE getMulti call total (v0.2 final review wave,
 // 2026-08-20), rather than usageKeysPerScope separate get calls or even
-// one getMulti call per scope. incrBy/get are never exercised by
-// currentUsage and just return zero values.
+// one getMulti call per scope.
 type countingMultiStore struct {
 	values        map[string]int64
 	getMultiCalls int
 }
 
-func (s *countingMultiStore) incrBy(string, int64, time.Duration) (int64, error) {
-	return 0, nil
-}
-func (s *countingMultiStore) get(string) (int64, error) { return 0, nil }
 func (s *countingMultiStore) getMulti(keys []string) ([]int64, error) {
 	s.getMultiCalls++
 	out := make([]int64, len(keys))
@@ -2181,6 +2176,70 @@ func TestAdminTargets_AccessListsMatchEnforcement_AndCountersReflectTraffic(t *t
 	bot2 := got.Agents[1]
 	if want := []string{"admingroup", "wide"}; !slices.Equal(bot2.Access, want) {
 		t.Errorf("bot2.Access = %v, want %v (restricted's own agents list excludes it)", bot2.Access, want)
+	}
+}
+
+// TestAdminTargets_Access_NoGroupDistinctFromAllGroups is review-auth
+// finding F2, 2026-09 review: a target NO configured group can reach must
+// serialize as "access":[] (present, zero-length) — distinguishable from
+// "access":null, which means every group can reach it. Before this fix
+// (adminTargetView.Access's "omitempty" tag), both cases serialized
+// identically — simply absent from the JSON body — so the webui's
+// dashboard rendered an unreachable target as open to everyone.
+func TestAdminTargets_Access_NoGroupDistinctFromAllGroups(t *testing.T) {
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{"openai": {Type: "openai", APIKey: "k"}}
+	cfg.Admin = &AdminConfig{Enabled: true}
+	cfg.MCPServers = map[string]*TargetConfig{
+		"locked": {URL: "http://mcp-locked.internal"}, // no group's own list ever names it
+		"open":   {URL: "http://mcp-open.internal"},   // every group's own list names it
+	}
+	// Both groups restrict their MCPServers glob to "open" only — neither
+	// ever names "locked", so no configured group can reach it.
+	cfg.Groups = map[string]*GroupConfig{
+		"g1":         {MCPServers: []string{"open"}},
+		"g2":         {MCPServers: []string{"open"}},
+		"admingroup": {MCPServers: []string{"open"}},
+	}
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{
+		{Name: "admin1", Group: "admingroup", APIKey: "sk-admin1", Admin: true},
+	}}
+	h, _ := newAdminGatewayHandle(t, cfg)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, adminRequest(http.MethodGet, adminTargetsPath, "sk-admin1"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, `"access":[]`) {
+		t.Errorf("body does not contain a literal empty-array access field; got %s", body)
+	}
+
+	var got adminTargetsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(got.MCPServers) != 2 {
+		t.Fatalf("len(MCPServers) = %d, want 2", len(got.MCPServers))
+	}
+	var locked, open adminTargetView
+	for _, s := range got.MCPServers {
+		switch s.Name {
+		case "locked":
+			locked = s
+		case "open":
+			open = s
+		}
+	}
+	if locked.Access == nil {
+		t.Error(`"locked".Access = nil, want a non-nil, zero-length slice (no group can reach it — distinct from "all groups")`)
+	}
+	if len(locked.Access) != 0 {
+		t.Errorf(`"locked".Access = %v, want empty`, locked.Access)
+	}
+	if open.Access != nil {
+		t.Errorf(`"open".Access = %v, want nil ("empty meaning all" — every configured group can reach it)`, open.Access)
 	}
 }
 

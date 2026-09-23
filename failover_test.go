@@ -491,6 +491,40 @@ func TestFailoverEligible(t *testing.T) {
 	}
 }
 
+// TestRequestHealthOutcome is the verify-core round-4 regression:
+// errRequestBuildFailed must classify the same way context.Canceled and
+// the translation errors already do — record=false (skip: this says
+// nothing about the provider's own availability, requestHealthOutcome's
+// own doc comment) — not success=true, which the pre-fix
+// !failoverEligible(callErr) fallthrough produced (failoverEligible
+// reports false for it for the OPPOSITE reason: retrying an identically
+// malformed request wastes attempts, not because it is evidence the
+// provider is healthy).
+func TestRequestHealthOutcome(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		err         error
+		name        string
+		wantSuccess bool
+		wantRecord  bool
+	}{
+		{name: "nil error is a success", err: nil, wantSuccess: true, wantRecord: true},
+		{name: "500 records a failure", err: &providerHTTPError{status: http.StatusInternalServerError}, wantSuccess: false, wantRecord: true},
+		{name: "400 records a success (not eligible for failover, but the provider DID answer, so it is healthy)", err: &providerHTTPError{status: http.StatusBadRequest}, wantSuccess: true, wantRecord: true},
+		{name: "client canceled is skipped, not a success", err: fmt.Errorf("%w: %w", errUpstream, context.Canceled), wantSuccess: false, wantRecord: false},
+		{name: "request build failure is skipped, not a success", err: fmt.Errorf("%w: %w: build request", errUpstream, errRequestBuildFailed), wantSuccess: false, wantRecord: false},
+		{name: "translateError is skipped, not a success", err: &translateError{msg: "bad field"}, wantSuccess: false, wantRecord: false},
+		{name: "responseTranslationError is skipped, not a success", err: &responseTranslationError{err: errors.New("boom")}, wantSuccess: false, wantRecord: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			success, record := requestHealthOutcome(tt.err)
+			assert.Equal(t, tt.wantSuccess, success, "success")
+			assert.Equal(t, tt.wantRecord, record, "record")
+		})
+	}
+}
+
 func TestIsProviderNotFoundError(t *testing.T) {
 	t.Parallel()
 	assert.True(t, isProviderNotFoundError(&providerHTTPError{status: http.StatusNotFound}))
@@ -942,8 +976,13 @@ func TestHandleChat_Failover_400_DoesNotFallThrough(t *testing.T) {
 // TestHandleChat_Failover_MidStream_DoesNotFailOver_NoCorruption is the
 // regression test for THE HARD CONSTRAINT: once anything has reached the
 // client, failover must never happen and the response must never be
-// corrupted with a second envelope. Would FAIL if the loop checked
-// failoverEligible before sw.wroteHeader.
+// corrupted with a second, conflicting HTTP envelope — beta must never
+// be called once alpha has started writing. Would FAIL if the loop
+// checked failoverEligible before sw.wroteHeader. The response body DOES
+// carry one trailing SSE error event (finding 15 fix, review-routes.md),
+// which is not a second envelope in that sense — it is the in-stream
+// terminal signal an OpenAI-compatible client expects, appended to
+// alpha's own partial output, never beta's.
 func TestHandleChat_Failover_MidStream_DoesNotFailOver_NoCorruption(t *testing.T) {
 	const firstChunk = "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"delta\":{\"content\":\"Hi\"}}]}\n\n"
 
@@ -976,8 +1015,9 @@ func TestHandleChat_Failover_MidStream_DoesNotFailOver_NoCorruption(t *testing.T
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 
+	const wantErrEvent = "data: {\"error\":{\"message\":\"upstream connection error\",\"type\":\"server_error\"}}\n\n"
 	assert.Equal(t, http.StatusOK, rec.Code, "headers already committed before the drop")
-	assert.Equal(t, firstChunk, rec.Body.String(), "no trailing envelope, no failover content appended")
+	assert.Equal(t, firstChunk+wantErrEvent, rec.Body.String(), "alpha's own partial output plus its own trailing error event, no failover content appended")
 	assert.Equal(t, int64(0), atomic.LoadInt64(&betaCalls), "beta must never be called once alpha has started writing")
 }
 

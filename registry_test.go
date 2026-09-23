@@ -156,6 +156,73 @@ func TestModelRegistry_Resolve_BareIDContainingSlash_UnconfiguredPrefix_Resolves
 	}
 }
 
+// TestModelRegistry_ListFor_DiscoveredIDPrefixMatchesConfiguredProvider_NeverListedBare
+// is the H3 regression test. "openrouter" discovers a model id that
+// itself begins with another configured provider's own name — the real
+// OpenRouter convention, where upstream ids look like "openai/gpt-4o".
+// splitConfiguredProvider (registry.go), used by BOTH resolve and
+// listFor, peels a "configuredProvider/rest" prefix off any id string
+// shaped that way, with no way to tell "this happens to start with a
+// provider's name" apart from "a client addressed this id with an
+// explicit provider/ prefix". Listing "openai/gpt-4o" bare (attributed
+// to openrouter) would hand a client an id that resolve(), given that
+// same id back, routes to provider "openai" instead — the wrong
+// provider, or a 404 if "openai" never heard of "gpt-4o". listFor must
+// list it ONLY in its "provider/id" disambiguating form, and resolve
+// must route that form back to the provider that actually owns it.
+func TestModelRegistry_ListFor_DiscoveredIDPrefixMatchesConfiguredProvider_NeverListedBare(t *testing.T) {
+	t.Parallel()
+	adapters := map[string]providerAdapter{
+		"openrouter": newFakeAdapter("openrouter"),
+		"openai":     newFakeAdapter("openai"),
+	}
+	cfg := &Config{Providers: map[string]*ProviderConfig{
+		"openrouter": {Models: []string{"openai/gpt-4o"}},
+		"openai":     {Models: []string{"gpt-4o-mini"}},
+	}}
+	reg, err := newModelRegistry(adapters, cfg, func(string, ...any) {})
+	if err != nil {
+		t.Fatalf("newModelRegistry: %v", err)
+	}
+
+	grp := allowAllGroup()
+	got := reg.listFor(grp)
+
+	var bareEntry, prefixedEntry map[string]any
+	for _, entry := range got {
+		switch entry["id"] {
+		case "openai/gpt-4o":
+			bareEntry = entry
+		case "openrouter/openai/gpt-4o":
+			prefixedEntry = entry
+		}
+	}
+	if bareEntry != nil {
+		t.Errorf(`listFor listed %v bare as "openai/gpt-4o" — resolve("openai/gpt-4o") would route to provider "openai", not the "openrouter" that actually owns it`, bareEntry)
+	}
+	if prefixedEntry == nil || prefixedEntry["owned_by"] != "openrouter" {
+		t.Fatalf(`listFor = %v, want an "openrouter/openai/gpt-4o" entry owned_by "openrouter"`, got)
+	}
+
+	// resolve() must agree with the listing: the exact id listFor emitted
+	// must resolve back to the provider it named as owner, carrying the
+	// original discovered id (itself containing a "/") as the upstream
+	// model unchanged.
+	adapter, upstreamModel, canonical, err := reg.resolve("openrouter/openai/gpt-4o", grp)
+	if err != nil {
+		t.Fatalf("resolve(%q): %v", "openrouter/openai/gpt-4o", err)
+	}
+	if adapter != adapters["openrouter"] {
+		t.Errorf("adapter = %v, want openrouter adapter", adapter)
+	}
+	if upstreamModel != "openai/gpt-4o" {
+		t.Errorf("upstreamModel = %q, want %q", upstreamModel, "openai/gpt-4o")
+	}
+	if canonical != "openrouter/openai/gpt-4o" {
+		t.Errorf("canonical = %q, want %q", canonical, "openrouter/openai/gpt-4o")
+	}
+}
+
 func TestModelRegistry_Resolve_UnknownModel_ReturnsErrModelUnknown(t *testing.T) {
 	t.Parallel()
 	adapters := map[string]providerAdapter{"openai": newFakeAdapter("openai")}
@@ -246,8 +313,9 @@ func TestModelRegistry_Resolve_AllowedByBothProviderAndModel_Succeeds(t *testing
 // (fix(registry) ruling 3) ---
 
 // TestModelRegistry_Resolve_BareIDWithSlash_ModelGlobMustNotMatchViaSpuriousStrip
-// is the regression: allowsModel used to strip at any first slash, so a
-// pattern like "deepseek-*" would spuriously match a bare model id that
+// is the regression: grp's model-glob matching (now allowsProviderModel,
+// auth.go) used to strip at any first slash, so a pattern like
+// "deepseek-*" would spuriously match a bare model id that
 // merely contains a slash — an upstream's own "uni/deepseek-v4-flash-0731"
 // naming, where "uni" is not a configured provider and there is no
 // legitimate prefix to strip at all. resolveAgainst must not invent that
@@ -279,7 +347,8 @@ func TestModelRegistry_Resolve_BareIDWithSlash_ModelGlobMustNotMatchViaSpuriousS
 // TestModelRegistry_Resolve_ProviderPrefixed_ModelGlobMatchesViaBareCandidate
 // is the positive half of the same ruling: a provider-prefixed request's
 // bare suffix is still checked against the model glob — resolveAgainst
-// generates that candidate itself now that allowsModel no longer strips.
+// generates that candidate itself now that allowsProviderModel's
+// model-matching no longer strips.
 func TestModelRegistry_Resolve_ProviderPrefixed_ModelGlobMatchesViaBareCandidate(t *testing.T) {
 	t.Parallel()
 	adapters := map[string]providerAdapter{"openai": newFakeAdapter("openai")}
@@ -696,6 +765,28 @@ func TestNewModelRegistry_InvalidDiscoveryInterval_ReturnsConstructorError(t *te
 	cfg := &Config{Providers: map[string]*ProviderConfig{"openai": {DiscoveryInterval: "not-a-duration"}}}
 	if _, err := newModelRegistry(adapters, cfg, func(string, ...any) {}); err == nil {
 		t.Fatal("want constructor error for an invalid discoveryInterval")
+	}
+}
+
+// TestNewModelRegistry_NonPositiveDiscoveryInterval_ReturnsConstructorError
+// is the L5 regression test: "0s" and a negative value both parse
+// successfully via time.ParseDuration, so without an explicit d<=0 check
+// they would silently pass through as the refresh interval. With
+// interval<=0, tryBeginRefresh's own throttle gate (registry.go) never
+// suppresses a same-window re-probe, so every request would spawn a new
+// listModels the instant the previous one finishes — the config must be
+// rejected at construction instead.
+func TestNewModelRegistry_NonPositiveDiscoveryInterval_ReturnsConstructorError(t *testing.T) {
+	t.Parallel()
+	for _, interval := range []string{"0s", "0", "-1h", "-30s"} {
+		t.Run(interval, func(t *testing.T) {
+			t.Parallel()
+			adapters := map[string]providerAdapter{"openai": newFakeAdapter("openai")}
+			cfg := &Config{Providers: map[string]*ProviderConfig{"openai": {DiscoveryInterval: interval}}}
+			if _, err := newModelRegistry(adapters, cfg, func(string, ...any) {}); err == nil {
+				t.Fatalf("want constructor error for discoveryInterval %q, got nil", interval)
+			}
+		})
 	}
 }
 

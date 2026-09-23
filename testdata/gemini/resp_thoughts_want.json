@@ -1,0 +1,14 @@
+{
+  "id": "chatcmpl-resp_THINK1",
+  "object": "chat.completion",
+  "created": 1734000000,
+  "model": "gw-gemini-model",
+  "choices": [
+    {
+      "index": 0,
+      "message": {"role": "assistant", "content": "The answer is 42."},
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {"prompt_tokens": 10, "completion_tokens": 506, "total_tokens": 516}
+}

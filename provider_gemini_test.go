@@ -318,6 +318,120 @@ func TestGeminiAdapter_ChatCompletion_Streaming(t *testing.T) {
 	}
 }
 
+// TestGeminiAdapter_ChatCompletion_Streaming_IncludeUsage_EmitsFinalUsageChunk
+// is the M1 regression test: a client that sets
+// stream_options.include_usage on a request routed to a gemini-type
+// provider must still get a final usage-only chunk on the wire, the same
+// way an OpenAI-type provider's own forwardStream relays it from a real
+// upstream usage chunk (provider_openai.go) — Gemini's own stream has no
+// such chunk, so the adapter must synthesize one from the
+// last-usageMetadata-wins total it already accumulated.
+func TestGeminiAdapter_ChatCompletion_Streaming_IncludeUsage_EmitsFinalUsageChunk(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		f, ok := w.(http.Flusher)
+		if !ok {
+			t.Fatalf("httptest ResponseWriter does not implement http.Flusher")
+		}
+		for _, data := range geminiStreamFrames {
+			fmt.Fprintf(w, "data: %s\n\n", data)
+			f.Flush()
+		}
+	}))
+	defer srv.Close()
+
+	a, err := newGeminiAdapter("p1", srv.URL, "AIza-test")
+	if err != nil {
+		t.Fatalf("newGeminiAdapter: %v", err)
+	}
+	rec := newRecordingResponseWriter()
+
+	req := map[string]any{
+		"model":          "gemini-2.5-pro",
+		"stream":         true,
+		"stream_options": map[string]any{"include_usage": true},
+		"messages":       []any{map[string]any{"role": "user", "content": "hello"}},
+	}
+	u, err := a.chatCompletion(context.Background(), rec, req)
+	if err != nil {
+		t.Fatalf("chatCompletion: %v", err)
+	}
+	if u.prompt != 6 || u.completion != 3 {
+		t.Fatalf("usage = %+v, want {prompt:6 completion:3}", u)
+	}
+
+	chunks := sseDataChunks(t, rec.body.String())
+	if len(chunks) < 2 {
+		t.Fatalf("got %d SSE frames, want at least a usage chunk followed by [DONE]", len(chunks))
+	}
+	if chunks[len(chunks)-1] != "[DONE]" {
+		t.Fatalf("last SSE frame = %q, want [DONE]", chunks[len(chunks)-1])
+	}
+	usageFrame := chunks[len(chunks)-2]
+	var got struct {
+		Usage *struct {
+			PromptTokens     int64 `json:"prompt_tokens"`
+			CompletionTokens int64 `json:"completion_tokens"`
+			TotalTokens      int64 `json:"total_tokens"`
+		} `json:"usage"`
+		Choices []any `json:"choices"`
+	}
+	if err := json.Unmarshal([]byte(usageFrame), &got); err != nil {
+		t.Fatalf("decode usage chunk %q: %v", usageFrame, err)
+	}
+	if len(got.Choices) != 0 {
+		t.Errorf("usage chunk choices = %v, want empty", got.Choices)
+	}
+	if got.Usage == nil {
+		t.Fatalf("usage chunk has no usage object: %q", usageFrame)
+	}
+	if got.Usage.PromptTokens != 6 || got.Usage.CompletionTokens != 3 || got.Usage.TotalTokens != 9 {
+		t.Errorf("usage chunk = %+v, want {prompt_tokens:6 completion_tokens:3 total_tokens:9}", *got.Usage)
+	}
+}
+
+// TestGeminiAdapter_ChatCompletion_Streaming_NoIncludeUsage_NoFinalUsageChunk
+// proves the M1 fix is opt-in: a client that never sets
+// stream_options.include_usage gets the stream unchanged from before the
+// fix — no extra usage-only chunk on the wire.
+func TestGeminiAdapter_ChatCompletion_Streaming_NoIncludeUsage_NoFinalUsageChunk(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		f, ok := w.(http.Flusher)
+		if !ok {
+			t.Fatalf("httptest ResponseWriter does not implement http.Flusher")
+		}
+		for _, data := range geminiStreamFrames {
+			fmt.Fprintf(w, "data: %s\n\n", data)
+			f.Flush()
+		}
+	}))
+	defer srv.Close()
+
+	a, err := newGeminiAdapter("p1", srv.URL, "AIza-test")
+	if err != nil {
+		t.Fatalf("newGeminiAdapter: %v", err)
+	}
+	rec := newRecordingResponseWriter()
+
+	req := map[string]any{
+		"model":    "gemini-2.5-pro",
+		"stream":   true,
+		"messages": []any{map[string]any{"role": "user", "content": "hello"}},
+	}
+	if _, err := a.chatCompletion(context.Background(), rec, req); err != nil {
+		t.Fatalf("chatCompletion: %v", err)
+	}
+
+	for _, chunk := range sseDataChunks(t, rec.body.String()) {
+		if strings.Contains(chunk, `"usage"`) {
+			t.Errorf("SSE frame %q carries a usage field though the client never set stream_options.include_usage", chunk)
+		}
+	}
+}
+
 // TestGeminiAdapter_ChatCompletion_Streaming_CaseInsensitiveContentType
 // proves the streaming-vs-JSON-fallback gate matches an upstream's
 // Content-Type case-insensitively, per lesson (g) — tested with
@@ -567,6 +681,76 @@ func TestGeminiAdapter_ListModels(t *testing.T) {
 	want := []string{"gemini-2.5-pro", "gemini-2.5-flash"}
 	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
 		t.Errorf("got %#v, want %#v", got, want)
+	}
+}
+
+// TestGeminiAdapter_ListModels_FollowsPagination is the M7 regression
+// test: a non-empty nextPageToken must make listModels fetch a second
+// page via ?pageToken=<token> and return the union of both pages.
+func TestGeminiAdapter_ListModels_FollowsPagination(t *testing.T) {
+	var gotPageTokens []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPageTokens = append(gotPageTokens, r.URL.Query().Get("pageToken"))
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Query().Get("pageToken") == "" {
+			_, _ = w.Write([]byte(`{"models":[{"name":"models/gemini-2.5-pro"},{"name":"models/gemini-2.5-flash"}],"nextPageToken":"page2"}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"models":[{"name":"models/gemini-2.0-flash"}]}`))
+	}))
+	defer srv.Close()
+
+	a, err := newGeminiAdapter("p1", srv.URL, "AIza-test")
+	if err != nil {
+		t.Fatalf("newGeminiAdapter: %v", err)
+	}
+
+	got, err := a.listModels(context.Background())
+	if err != nil {
+		t.Fatalf("listModels: %v", err)
+	}
+	want := []string{"gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash"}
+	if len(got) != len(want) {
+		t.Fatalf("got %#v, want %#v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("got[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+	if len(gotPageTokens) != 2 || gotPageTokens[0] != "" || gotPageTokens[1] != "page2" {
+		t.Errorf("pageToken sequence = %#v, want [\"\", \"page2\"] (first page unqualified, second page's pageToken = first page's nextPageToken)", gotPageTokens)
+	}
+}
+
+// TestGeminiAdapter_ListModels_PageCapStopsRunawayPagination proves the
+// M7 fix's other half: an upstream that always returns a nextPageToken
+// does not page forever — listModels stops after
+// geminiListModelsPageCap requests and returns successfully with
+// whatever it accumulated.
+func TestGeminiAdapter_ListModels_PageCapStopsRunawayPagination(t *testing.T) {
+	var requests int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"models":[{"name":"models/model-%d"}],"nextPageToken":"tok-%d"}`, requests, requests)
+	}))
+	defer srv.Close()
+
+	a, err := newGeminiAdapter("p1", srv.URL, "AIza-test")
+	if err != nil {
+		t.Fatalf("newGeminiAdapter: %v", err)
+	}
+
+	got, err := a.listModels(context.Background())
+	if err != nil {
+		t.Fatalf("listModels: %v", err)
+	}
+	if requests != geminiListModelsPageCap {
+		t.Errorf("upstream received %d requests, want exactly %d (the page cap)", requests, geminiListModelsPageCap)
+	}
+	if len(got) != geminiListModelsPageCap {
+		t.Errorf("got %d ids, want %d (one per page up to the cap)", len(got), geminiListModelsPageCap)
 	}
 }
 

@@ -1,0 +1,8 @@
+{
+  "model": "claude-opus-5",
+  "messages": [
+    {"role": "developer", "content": "Always answer in one sentence."},
+    {"role": "user", "content": "Hello, how are you?"}
+  ],
+  "max_tokens": 100
+}

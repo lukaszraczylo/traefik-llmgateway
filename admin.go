@@ -1272,12 +1272,27 @@ type adminTargetCountersView struct {
 // group.allowsMCP/allowsAgent themselves delegate to (auth.go) against
 // each group's own cloned mcpServers/agents pattern list (groupSummary,
 // authStore.snapshot), so this view can never disagree with what
-// handleTargetProxy actually enforces. Access is omitted (nil) when every
-// configured group can reach this target — "empty meaning all", mirroring
-// groupSummary's own providers/models/mcpServers/agents omitempty
-// convention (adminUsageEntryView) — rather than always listing every
-// group name, which would grow with the group catalog for no reason once
-// nothing is actually restricted.
+// handleTargetProxy actually enforces.
+//
+// Access's JSON contract (review-auth finding F2, 2026-09 review — fixed
+// from a prior "omitempty" tag): "access":null means every configured
+// group can reach this target ("empty meaning all" — adminTargetAccess
+// returns a nil slice for that case); "access":[] (present, zero-length)
+// means NO configured group can reach it; "access":["g1",...] lists the
+// groups that can. The prior omitempty tag made the first two cases
+// serialize identically (both simply absent from the JSON body), so a
+// target restricted to zero groups rendered in the webui exactly like an
+// unrestricted one — the opposite of what its own access rule enforces.
+// No omitempty here specifically because that distinction depends on nil
+// vs. non-nil-but-empty, which omitempty collapses. adminTargetAccess's
+// own return value is unchanged by this fix (it already returned nil for
+// "all" and a non-nil, possibly zero-length, slice otherwise) — only this
+// struct's serialization of that value changes. The webui (webui/src/
+// types/api.ts's AdminTargetView.access, webui/src/lib/target-columns.ts)
+// must be updated to treat null/undefined and a zero-length array as
+// DIFFERENT states, distinct from today's "!access?.length means All
+// groups" check that treats both alike; report this contract to whoever
+// owns that file.
 //
 // Health is feat/target-health's own readout (targetHealthView, below).
 // Field order (Health first, the struct-typed field, then the strings/
@@ -1288,7 +1303,7 @@ type adminTargetView struct {
 	Health   adminTargetHealthView   `json:"health"`
 	Name     string                  `json:"name"`
 	URL      string                  `json:"url"`
-	Access   []string                `json:"access,omitempty"`
+	Access   []string                `json:"access"`
 	Counters adminTargetCountersView `json:"counters"`
 }
 

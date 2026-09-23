@@ -1,0 +1,6 @@
+{
+  "systemInstruction": {"parts": [{"text": "Always answer in one sentence."}]},
+  "contents": [
+    {"role": "user", "parts": [{"text": "Hello there"}]}
+  ]
+}

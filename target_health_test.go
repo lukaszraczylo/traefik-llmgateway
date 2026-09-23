@@ -15,6 +15,31 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// stateOf reports (kind, name)'s current targetHealthState — see
+// targetHealthState's own doc comment (target_health.go) for the exact
+// unknown/healthy/unhealthy rule. Test-only (finding 18 fix, review-
+// routes.md): it has zero production call sites — every production
+// reader goes through snapshot (admin.go's targets view, metrics.go),
+// which already applies the identical stateForLocked rule this helper
+// reuses — so it was moved here from target_health.go rather than kept
+// as unused production API surface. Every test in this package that
+// wants a bare state value (not snapshot's fuller struct) uses this,
+// including mcp_a2a_test.go and mcp_federation_test.go, which reach it
+// as an ordinary package-scoped method the same way they would if it
+// still lived in the non-test file.
+func (t *targetHealthTracker) stateOf(kind, name string) targetHealthState {
+	if t == nil {
+		return targetHealthUnknown
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	e, ok := t.entries[targetHealthKey{kind: kind, name: name}]
+	if !ok {
+		return targetHealthUnknown
+	}
+	return t.stateForLocked(e)
+}
+
 // --- targetHealthTracker: state machine ---
 
 func TestTargetHealthTracker_NeverRecorded_ReadsUnknown(t *testing.T) {

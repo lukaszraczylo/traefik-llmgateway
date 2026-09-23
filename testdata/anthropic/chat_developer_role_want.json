@@ -1,0 +1,8 @@
+{
+  "model": "claude-opus-5",
+  "system": "Always answer in one sentence.",
+  "messages": [
+    {"role": "user", "content": "Hello, how are you?"}
+  ],
+  "max_tokens": 100
+}

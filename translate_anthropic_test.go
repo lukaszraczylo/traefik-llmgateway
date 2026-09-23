@@ -667,7 +667,7 @@ func TestOpenAIMessagesFromAnthropic_PreservesToolResultThenTextOrder(t *testing
 		map[string]any{"type": "text", "text": "thanks"},
 	}
 
-	out, err := openAIMessagesFromAnthropic("user", content)
+	out, _, err := openAIMessagesFromAnthropic("user", content)
 	if err != nil {
 		t.Fatalf("openAIMessagesFromAnthropic: %v", err)
 	}
@@ -702,7 +702,7 @@ func TestOpenAIMessagesFromAnthropic_InterspersedToolResults(t *testing.T) {
 		map[string]any{"type": "tool_result", "tool_use_id": "call_B", "content": "b"},
 	}
 
-	out, err := openAIMessagesFromAnthropic("user", content)
+	out, _, err := openAIMessagesFromAnthropic("user", content)
 	if err != nil {
 		t.Fatalf("openAIMessagesFromAnthropic: %v", err)
 	}
@@ -801,6 +801,105 @@ func TestOpenAIRequestFromAnthropic_ThinkingAbsent_NothingDropped(t *testing.T) 
 	}
 	if len(dropped) != 0 {
 		t.Errorf("dropped = %v, want none", dropped)
+	}
+}
+
+// TestOpenAIRequestFromAnthropic_TopKReportedAsDropped is the L9
+// regression test: "top_k" has no OpenAI equivalent, and — unlike
+// "thinking", already covered above — was previously discarded with no
+// entry in the dropped-fields return at all.
+func TestOpenAIRequestFromAnthropic_TopKReportedAsDropped(t *testing.T) {
+	req := map[string]any{
+		"model":    "claude-x",
+		"top_k":    float64(40),
+		"messages": []any{map[string]any{"role": "user", "content": "hi"}},
+	}
+
+	_, dropped, err := openAIRequestFromAnthropic(req)
+	if err != nil {
+		t.Fatalf("openAIRequestFromAnthropic: %v", err)
+	}
+	if len(dropped) != 1 || dropped[0] != "top_k" {
+		t.Errorf("dropped = %v, want [\"top_k\"]", dropped)
+	}
+}
+
+// TestOpenAIRequestFromAnthropic_ToolChoiceNoneReportedAsDropped is the
+// L9 regression test for tool_choice: Anthropic's tool_choice
+// {"type":"none"} has no OpenAI equivalent (openAIToolChoiceFromAnthropic
+// simply omits the field), and was previously dropped with no entry in
+// the dropped-fields return.
+func TestOpenAIRequestFromAnthropic_ToolChoiceNoneReportedAsDropped(t *testing.T) {
+	req := map[string]any{
+		"model":       "claude-x",
+		"tool_choice": map[string]any{"type": "none"},
+		"messages":    []any{map[string]any{"role": "user", "content": "hi"}},
+	}
+
+	out, dropped, err := openAIRequestFromAnthropic(req)
+	if err != nil {
+		t.Fatalf("openAIRequestFromAnthropic: %v", err)
+	}
+	if _, hasToolChoice := out["tool_choice"]; hasToolChoice {
+		t.Errorf(`out["tool_choice"] = %v, want absent (no OpenAI equivalent for Anthropic tool_choice:{type:none})`, out["tool_choice"])
+	}
+	if len(dropped) != 1 || dropped[0] != "tool_choice:none" {
+		t.Errorf(`dropped = %v, want ["tool_choice:none"]`, dropped)
+	}
+}
+
+// TestOpenAIRequestFromAnthropic_DroppedContentBlockTypesReported is the
+// L9 regression test for the content-block half of the fix: a "thinking"
+// block and a "document" block inside message content both have no
+// OpenAI equivalent (translate_anthropic.go's openAIMessagesFromAnthropic
+// switch has no case for either) and must be named in the dropped-fields
+// return, not silently skipped the way they were before this fix.
+func TestOpenAIRequestFromAnthropic_DroppedContentBlockTypesReported(t *testing.T) {
+	req := map[string]any{
+		"model": "claude-x",
+		"messages": []any{
+			map[string]any{"role": "user", "content": []any{
+				map[string]any{"type": "text", "text": "hi"},
+				map[string]any{"type": "document", "source": map[string]any{"type": "base64", "media_type": "application/pdf", "data": "AAAA"}},
+			}},
+			map[string]any{"role": "assistant", "content": []any{
+				map[string]any{"type": "thinking", "thinking": "reasoning...", "signature": "sig"},
+				map[string]any{"type": "text", "text": "the answer"},
+			}},
+		},
+	}
+
+	_, dropped, err := openAIRequestFromAnthropic(req)
+	if err != nil {
+		t.Fatalf("openAIRequestFromAnthropic: %v", err)
+	}
+	sort.Strings(dropped)
+	want := []string{"document", "thinking"}
+	if len(dropped) != len(want) || dropped[0] != want[0] || dropped[1] != want[1] {
+		t.Errorf("dropped = %v, want %v", dropped, want)
+	}
+}
+
+// TestOpenAIRequestFromAnthropic_DroppedFieldsDeduped proves repeated
+// occurrences of the same dropped content-block type across several
+// messages log once, not once per occurrence — a transcript with five
+// "thinking" blocks must not flood the log with five identical warnings.
+func TestOpenAIRequestFromAnthropic_DroppedFieldsDeduped(t *testing.T) {
+	thinkingBlock := map[string]any{"type": "thinking", "thinking": "...", "signature": "sig"}
+	req := map[string]any{
+		"model": "claude-x",
+		"messages": []any{
+			map[string]any{"role": "assistant", "content": []any{thinkingBlock, thinkingBlock}},
+			map[string]any{"role": "assistant", "content": []any{thinkingBlock}},
+		},
+	}
+
+	_, dropped, err := openAIRequestFromAnthropic(req)
+	if err != nil {
+		t.Fatalf("openAIRequestFromAnthropic: %v", err)
+	}
+	if len(dropped) != 1 || dropped[0] != "thinking" {
+		t.Errorf("dropped = %v, want exactly one [\"thinking\"] entry despite 3 occurrences", dropped)
 	}
 }
 

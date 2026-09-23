@@ -1,0 +1,14 @@
+{
+  "id": "chatcmpl-msg_01REFUSE",
+  "object": "chat.completion",
+  "created": 1734000000,
+  "model": "gw-anthropic-model",
+  "choices": [
+    {
+      "index": 0,
+      "message": {"role": "assistant", "content": "I can't help with that."},
+      "finish_reason": "content_filter"
+    }
+  ],
+  "usage": {"prompt_tokens": 9, "completion_tokens": 6, "total_tokens": 15}
+}

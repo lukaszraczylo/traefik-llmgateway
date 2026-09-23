@@ -794,8 +794,8 @@ func TestNewGateway_RedisPassword_ResolvedViaSecret(t *testing.T) {
 	if !ok {
 		t.Fatalf("gw.limiter.store = %#v (%T), want *redisStore", gw.limiter.store, gw.limiter.store)
 	}
-	if _, err := store.get("k"); err != nil {
-		t.Fatalf("store.get: %v (want the resolved password to authenticate against the fake server)", err)
+	if _, err := getOne(store, "k"); err != nil {
+		t.Fatalf("store.getMulti: %v (want the resolved password to authenticate against the fake server)", err)
 	}
 }
 
@@ -813,10 +813,87 @@ func TestNewGateway_RedisPassword_UnresolvableSecret_ReturnsConstructorError(t *
 	}
 }
 
-// TestNewGateway_SetsPricingWarnFn is carried-item (d)'s pricing wiring:
-// New must call setPricingWarnFn so an unpriced model's warning reaches
-// the gateway's own log, not pricing.go's default no-op.
-func TestNewGateway_SetsPricingWarnFn(t *testing.T) {
+// TestNewGateway_InvalidPricingOverride_ReturnsConstructorError is finding
+// F4, 2026-09 review: New must reject a negative Config.Pricing entry at
+// construction (validatePricing, pricing.go) rather than letting it reach
+// costMicrosKnown and silently disable that model's cost budget forever.
+func TestNewGateway_InvalidPricingOverride_ReturnsConstructorError(t *testing.T) {
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{"openai": {Type: "openai", APIKey: "k"}}
+	cfg.Pricing = map[string]*ModelPricing{"gpt-5": {InputPerM: -1, OutputPerM: 1}}
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	if _, err := New(context.Background(), next, cfg, "llmgw"); err == nil {
+		t.Fatal("want a constructor error for a negative pricing.inputPerM")
+	}
+}
+
+// TestNewGateway_MetricsPath_Validation is review-auth finding F9,
+// 2026-09 review, corrected by the verify-core round-4 fix: metrics.path
+// must still start with "/" (a hard construction error — a value with no
+// leading "/" can never match ServeHTTP's route comparison, silently
+// making the endpoint unreachable), but a path sitting at or under a
+// reserved route prefix (/admin, /v1, /mcp, /a2a) is no longer refused.
+// ServeHTTP matches the metrics route by exact path before it ever
+// dispatches into those namespaces, so a config like "/v1/metrics"
+// already routed correctly before finding F9's fix existed at all —
+// refusing to build the middleware for it broke a previously working
+// config on upgrade. It now only logs a WARN line naming the shadowed
+// prefix.
+func TestNewGateway_MetricsPath_Validation(t *testing.T) {
+	cases := []struct {
+		path     string
+		wantErr  bool
+		wantWarn bool
+	}{
+		{"/internal/metrics", false, false},
+		{"", false, false},                // empty resolves to the default "/metrics"
+		{"metrics", true, false},          // no leading "/": still a hard error
+		{"/admin", false, true},           // exact collision: now just a warning
+		{"/admin/api/usage", false, true}, // under the admin namespace
+		{"/v1/metrics", false, true},      // under the OpenAI-compatible namespace — previously working; must still build
+		{"/mcp/prometheus", false, true},  // under the MCP target-proxy namespace
+		{"/a2a/prometheus", false, true},  // under the A2A target-proxy namespace
+		{"/administrivia", false, false},  // string prefix only, not a path-segment collision
+		{"/v1/models", false, true},       // GET /v1/models is matched before metrics: unreachable
+	}
+	for _, c := range cases {
+		t.Run(c.path, func(t *testing.T) {
+			cfg := CreateConfig()
+			cfg.Providers = map[string]*ProviderConfig{"openai": {Type: "openai", APIKey: "k"}}
+			cfg.Metrics = &MetricsConfig{Enabled: true, Path: c.path}
+			next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+
+			origStderr := os.Stderr
+			r, w, _ := os.Pipe()
+			os.Stderr = w
+
+			_, err := New(context.Background(), next, cfg, "llmgw")
+
+			_ = w.Close() // closing the pipe write end to unblock the read; error not actionable in a test
+			os.Stderr = origStderr
+			var buf bytes.Buffer
+			if _, copyErr := io.Copy(&buf, r); copyErr != nil {
+				t.Fatalf("io.Copy: %v", copyErr)
+			}
+
+			if (err != nil) != c.wantErr {
+				t.Errorf("New with metrics.path = %q: err = %v, wantErr %v", c.path, err, c.wantErr)
+			}
+			if gotWarn := strings.Contains(buf.String(), "llmgw[llmgw] WARN config: metrics.path"); gotWarn != c.wantWarn {
+				t.Errorf("New with metrics.path = %q: shadow warning logged = %v, want %v (stderr: %q)", c.path, gotWarn, c.wantWarn, buf.String())
+			}
+			wantUnreachable := c.path == "/v1/models"
+			if gotUnreachable := strings.Contains(buf.String(), "unreachable"); gotUnreachable != wantUnreachable {
+				t.Errorf("New with metrics.path = %q: unreachable warning = %v, want %v (stderr: %q)", c.path, gotUnreachable, wantUnreachable, buf.String())
+			}
+		})
+	}
+}
+
+// TestGateway_PricingWarn_LogsUnderOwnInstance: an unpriced model's
+// warning routed through g.pricingWarn reaches that gateway's own log
+// prefix (finding F11 / review-auth F8: no package-global warn func).
+func TestGateway_PricingWarn_LogsUnderOwnInstance(t *testing.T) {
 	warnedModelsMu.Lock()
 	prevWarned, prevCapNotified := warnedModels, warnCapNotified
 	warnedModels = map[string]bool{}
@@ -826,7 +903,6 @@ func TestNewGateway_SetsPricingWarnFn(t *testing.T) {
 		warnedModelsMu.Lock()
 		warnedModels, warnCapNotified = prevWarned, prevCapNotified
 		warnedModelsMu.Unlock()
-		setPricingWarnFn(func(string) {})
 	})
 
 	cfg := CreateConfig()
@@ -836,13 +912,13 @@ func TestNewGateway_SetsPricingWarnFn(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	_ = h.(*Gateway)
+	gw := h.(*Gateway)
 
 	origStderr := os.Stderr
 	r, w, _ := os.Pipe()
 	os.Stderr = w
 
-	costMicros("totally-unpriced-model-for-newgateway-test", usage{prompt: 1}, nil)
+	costMicrosKnownFor("totally-unpriced-model-for-newgateway-test", usage{prompt: 1}, nil, gw.pricingWarn)
 
 	_ = w.Close() // closing the pipe write end to unblock the read; error not actionable in a test
 	os.Stderr = origStderr

@@ -297,6 +297,73 @@ func TestAuthStore_MaybeReload_MalformedJSON_KeepsLastGoodSetAndLogsError(t *tes
 	}
 }
 
+// TestAuthStore_MaybeReload_BrokenFile_ErrorLogDedupedUntilMtimeOrTextChanges
+// is review-auth finding F11, 2026-09 audit: a users file left broken
+// must not re-log the identical failure on every reloadEvery throttle
+// window for as long as it stays broken — before this fix, lastModTime
+// was never advanced on a failed reload, so every throttle window saw
+// the mtime as still different from the last observed one and retried
+// AND re-logged, unbounded (~17k lines/day at the default 5s throttle).
+func TestAuthStore_MaybeReload_BrokenFile_ErrorLogDedupedUntilMtimeOrTextChanges(t *testing.T) {
+	a, fp, log, clock := newReloadableAuthStore(t, nil, []*UserConfig{{Name: "f1", Group: "eng", APIKey: "sk-f1"}})
+
+	if err := os.WriteFile(fp, []byte("{not json"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	broken := time.Now().Add(time.Hour)
+	if err := os.Chtimes(fp, broken, broken); err != nil {
+		t.Fatalf("Chtimes: %v", err)
+	}
+
+	// 3 throttle windows, same broken file, same mtime: only the FIRST
+	// attempt may log.
+	for i := 0; i < 3; i++ {
+		clock.Advance(reloadEvery + time.Second)
+		a.maybeReload()
+	}
+	if got := log.errorCount(); got != 1 {
+		t.Fatalf("errorCount = %d after 3 identical-failure attempts, want 1 (deduped)", got)
+	}
+
+	// Rewrite the SAME broken content at a NEW mtime (an operator edited
+	// the file, even to an identically broken state) — this must log
+	// again, once.
+	broken2 := broken.Add(time.Hour)
+	if err := os.Chtimes(fp, broken2, broken2); err != nil {
+		t.Fatalf("Chtimes: %v", err)
+	}
+	clock.Advance(reloadEvery + time.Second)
+	a.maybeReload()
+	if got := log.errorCount(); got != 2 {
+		t.Fatalf("errorCount = %d after the mtime changed, want 2 (a new attempt against a new mtime logs again)", got)
+	}
+
+	// Fix the file: a successful reload clears the dedup key.
+	writeUsersDoc(t, fp, []*UserConfig{{Name: "f2", Group: "eng", APIKey: "sk-f2"}}, broken2.Add(time.Hour))
+	clock.Advance(reloadEvery + time.Second)
+	if !a.maybeReload() {
+		t.Fatal("want the reload to succeed once the file is valid again")
+	}
+	if got := log.errorCount(); got != 2 {
+		t.Fatalf("errorCount = %d after a successful reload, want unchanged at 2", got)
+	}
+
+	// Break it again, differently: after a success, the very next failure
+	// must log immediately, not stay suppressed by the earlier dedup key.
+	if err := os.WriteFile(fp, []byte("{also not json"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	broken3 := broken2.Add(2 * time.Hour)
+	if err := os.Chtimes(fp, broken3, broken3); err != nil {
+		t.Fatalf("Chtimes: %v", err)
+	}
+	clock.Advance(reloadEvery + time.Second)
+	a.maybeReload()
+	if got := log.errorCount(); got != 3 {
+		t.Fatalf("errorCount = %d after a fresh failure post-success, want 3 (dedup key was cleared on success)", got)
+	}
+}
+
 func TestAuthStore_MaybeReload_UnchangedMtime_DoesNotReload(t *testing.T) {
 	a, fp, log, clock := newReloadableAuthStore(t, nil, []*UserConfig{{Name: "f1", Group: "eng", APIKey: "sk-f1"}})
 	_ = fp

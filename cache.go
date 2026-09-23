@@ -39,6 +39,20 @@ func validateCacheConfig(cc CacheConfig) (time.Duration, int, error) {
 	if err != nil {
 		return 0, 0, fmt.Errorf("llmgateway: cache.ttl: %w", err)
 	}
+	// verify-core fix (round 4): F8 (2026-09 review) turned a zero/
+	// negative ttl into a hard construction error here, matching
+	// groupCacheTTL's own per-group-override validation below — but that
+	// broke a previously WORKING config on upgrade: setEx (resp.go)
+	// already floors a non-positive TTL to 1s rather than erroring, so a
+	// "0s" cache.ttl silently ran as a 1-second cache before F8 existed,
+	// not as "off". Refusing to build the whole middleware over a config
+	// that merely caches less usefully than the operator probably
+	// intended violates the house rule that an upgrade with no config
+	// change preserves prior behavior. Restored to accept-and-warn:
+	// buildResponseCache (below) logs a warning naming the effective 1s
+	// floor once client (the constructed logf) is available; ttl itself
+	// is returned here exactly as parsed, unclamped — newResponseCache/
+	// setEx's own floor is what actually takes effect at write time.
 
 	maxBody := cc.MaxBodyBytes
 	if maxBody == 0 {
@@ -78,13 +92,24 @@ type cacheStore interface {
 //     is deliberately NOT a construction error, unlike the case above.
 //   - cc.Enabled is true and valid and client is non-nil: a working
 //     *responseCache over client.
-func buildResponseCache(cc CacheConfig, client *respClient, logf, errorf func(format string, args ...any)) (*responseCache, error) {
+func buildResponseCache(cc CacheConfig, client *respClient, logf, warnf, errorf func(format string, args ...any)) (*responseCache, error) {
 	if !cc.Enabled {
 		return nil, nil
 	}
 	ttl, maxBody, err := validateCacheConfig(cc)
 	if err != nil {
 		return nil, err
+	}
+	// verify-core fix (round 4): a zero/negative cache.ttl is accepted
+	// (validateCacheConfig's own doc comment above explains why this was
+	// restored from a hard error), but it is not silently free of
+	// consequence either — setEx (resp.go) floors it to a 1-second TTL,
+	// so entries expire almost immediately and every lookup effectively
+	// misses while still paying a SET. Warn once at construction so an
+	// operator who meant "0s" as "disable the cache" notices, rather than
+	// silently running a cache that never actually caches anything.
+	if ttl <= 0 {
+		warnf("cache: ttl %q is zero or negative; every cached entry will expire after 1 second (the store's own floor), not stay disabled — set cache.enabled=false to actually turn caching off", cc.TTL)
 	}
 	if client == nil {
 		logf("cache: enabled but redis is not configured; response caching disabled")

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -109,6 +110,18 @@ func (a *anthropicAdapter) chatCompletion(ctx context.Context, w http.ResponseWr
 	}
 	delete(req, gatewayAliasKey)
 	streaming, _ := req["stream"].(bool)
+	// clientAskedUsage (M1 fix): stream_options.include_usage is an
+	// OpenAI-wire field with no Anthropic equivalent, so
+	// anthropicRequestFromOpenAI never forwards it upstream — it must be
+	// read here, before translation, so forwardStream knows whether to
+	// synthesize the final usage-only chunk OpenAI-compatible clients
+	// expect.
+	clientAskedUsage := false
+	if streaming {
+		if so, ok := req["stream_options"].(map[string]any); ok {
+			clientAskedUsage = isTruthy(so["include_usage"])
+		}
+	}
 
 	body, err := anthropicRequestFromOpenAI(req)
 	if err != nil {
@@ -133,7 +146,7 @@ func (a *anthropicAdapter) chatCompletion(ctx context.Context, w http.ResponseWr
 	}
 
 	if streaming && strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "text/event-stream") {
-		return a.forwardStream(w, resp.Body, gatewayModel)
+		return a.forwardStream(w, resp.Body, gatewayModel, clientAskedUsage)
 	}
 	// Either a non-streaming request, or a streaming one whose upstream
 	// ignored stream=true and answered with a normal JSON body.
@@ -180,7 +193,15 @@ func (a *anthropicAdapter) forwardJSON(w http.ResponseWriter, resp *http.Respons
 // stream read error), forwardStream returns without writing "[DONE]" —
 // the caller already saw the connection fail or an explicit upstream
 // error chunk.
-func (a *anthropicAdapter) forwardStream(w http.ResponseWriter, body io.Reader, gatewayModel string) (usage, error) {
+//
+// clientAskedUsage (M1 fix), when true, makes forwardStream write one
+// extra chunk — st.usageChunk(), empty "choices" plus the accumulated
+// usage — right before "[DONE]", the same final shape an OpenAI-type
+// upstream sends when stream_options.include_usage is set
+// (provider_openai.go's forwardStream). Anthropic's own stream never
+// carries such a chunk, so this adapter synthesizes it instead of
+// relying on anything upstream.
+func (a *anthropicAdapter) forwardStream(w http.ResponseWriter, body io.Reader, gatewayModel string, clientAskedUsage bool) (usage, error) {
 	st := newAnthropicStreamState(gatewayModel, time.Now().Unix())
 	sw := newSSEWriter(w)
 
@@ -195,6 +216,11 @@ func (a *anthropicAdapter) forwardStream(w http.ResponseWriter, body io.Reader, 
 	})
 	if err != nil {
 		return st.usage(), fmt.Errorf("%w: stream: %w", errUpstream, err)
+	}
+	if clientAskedUsage {
+		if werr := sw.writeData(st.usageChunk()); werr != nil {
+			return st.usage(), fmt.Errorf("%w: stream: %w", errUpstream, werr)
+		}
 	}
 	sw.writeDone()
 	return st.usage(), nil
@@ -228,37 +254,86 @@ func (a *anthropicAdapter) audioTranscription(_ context.Context, _ http.Response
 	return usage{}, &translateError{msg: "audio transcription not supported for anthropic models", notSupported: true}
 }
 
-// listModels implements providerAdapter: GET {base}/v1/models, parsing
-// the same "data": [{"id": ...}] shape OpenAI's endpoint uses (Anthropic's
-// 2026 Models API responds in the same shape). A non-2xx response —
-// including a 404 from an older Anthropic API version that predates this
-// endpoint — returns a *providerHTTPError as-is; the registry (Task 11)
-// falls back to a provider's explicitly configured models on error rather
-// than this adapter guessing at a fallback itself.
+// anthropicModelsPayload is Anthropic's /v1/models response shape: the
+// same {"data":[{"id"}]} list modelsPayload (provider_openai.go) reads,
+// plus the cursor-pagination fields (M7 fix) Anthropic's Models API adds
+// on top of it — has_more/last_id, paired with the after_id query
+// parameter the next page's request carries.
+type anthropicModelsPayload struct {
+	LastID string `json:"last_id"`
+	Data   []struct {
+		ID string `json:"id"`
+	} `json:"data"`
+	HasMore bool `json:"has_more"`
+}
+
+// anthropicListModelsPageCap bounds how many pages listModels follows
+// (M7 fix): a misbehaving upstream that never reports has_more:false, or
+// whose last_id never advances, would otherwise page forever. 20 pages
+// at Anthropic's own default page size (20 per page) covers 400 models —
+// comfortably above any real catalog as of this writing — without
+// risking an unbounded discovery loop against a single provider.
+const anthropicListModelsPageCap = 20
+
+// listModels implements providerAdapter: GET {base}/v1/models, following
+// Anthropic's has_more/last_id cursor pagination (M7 fix) via the
+// after_id query parameter, up to anthropicListModelsPageCap pages —
+// without it, models past the first page never entered the registry and
+// silently 404ed unless explicitly listed in config. A non-2xx response
+// on any page — including a 404 from an older Anthropic API version that
+// predates this endpoint — returns a *providerHTTPError as-is; the
+// registry (Task 11) falls back to a provider's explicitly configured
+// models on error rather than this adapter guessing at a fallback
+// itself.
 func (a *anthropicAdapter) listModels(ctx context.Context) ([]string, error) {
-	resp, err := upstreamJSON(ctx, a.client, http.MethodGet, a.baseURL+anthropicModelsPath, a.requestHeaders(false), nil, a.retry, a.timeout, a.adapterName)
+	var ids []string
+	afterID := ""
+	for page := 0; page < anthropicListModelsPageCap; page++ {
+		pageIDs, hasMore, lastID, err := a.listModelsPage(ctx, afterID)
+		if err != nil {
+			return nil, err
+		}
+		ids = append(ids, pageIDs...)
+		if !hasMore || lastID == "" {
+			break
+		}
+		afterID = lastID
+	}
+	return ids, nil
+}
+
+// listModelsPage fetches one page of Anthropic's /v1/models, starting
+// after afterID (empty for the first page), and returns that page's
+// model ids alongside has_more/last_id for listModels' own pagination
+// loop above.
+func (a *anthropicAdapter) listModelsPage(ctx context.Context, afterID string) (ids []string, hasMore bool, lastID string, err error) {
+	endpoint := a.baseURL + anthropicModelsPath
+	if afterID != "" {
+		endpoint += "?after_id=" + url.QueryEscape(afterID)
+	}
+	resp, err := upstreamJSON(ctx, a.client, http.MethodGet, endpoint, a.requestHeaders(false), nil, a.retry, a.timeout, a.adapterName)
 	if err != nil {
-		return nil, err
+		return nil, false, "", err
 	}
 	defer resp.Body.Close() //nolint:errcheck
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, newProviderHTTPError(resp)
+		return nil, false, "", newProviderHTTPError(resp)
 	}
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
 	if err != nil {
-		return nil, fmt.Errorf("%w: read response body: %w", errUpstream, err)
+		return nil, false, "", fmt.Errorf("%w: read response body: %w", errUpstream, err)
 	}
 
-	var payload modelsPayload
+	var payload anthropicModelsPayload
 	if err := json.Unmarshal(body, &payload); err != nil {
-		return nil, fmt.Errorf("%w: decode models response: %w", errUpstream, err)
+		return nil, false, "", fmt.Errorf("%w: decode models response: %w", errUpstream, err)
 	}
 
-	ids := make([]string, len(payload.Data))
+	ids = make([]string, len(payload.Data))
 	for i, d := range payload.Data {
 		ids[i] = d.ID
 	}
-	return ids, nil
+	return ids, payload.HasMore, payload.LastID, nil
 }

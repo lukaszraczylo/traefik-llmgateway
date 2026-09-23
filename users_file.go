@@ -57,9 +57,11 @@ type gatewayLogger interface {
 // from the last observed mtime (forward or backward). It runs on the request
 // path (ServeHTTP calls it at entry), so it must stay cheap when nothing
 // changed and must never panic: on any error — stat, load, or
-// replaceFileUsers rejecting the new set — it logs via a.log.errorf and
-// keeps the last good set. A successful reload that changes the
-// file-sourced user count logs via a.log.logf.
+// replaceFileUsers rejecting the new set — it logs via logReloadError (rate-
+// limited to once per distinct error/mtime pair, finding F11) and keeps the
+// last good set. A successful reload that changes the file-sourced user
+// count logs via a.log.logf, unconditionally — that line is inherently rare
+// (only on an actual reload, itself throttled), unlike the error path above.
 //
 // Returns true only when a reload actually replaced the user set (review
 // fix, adversarial verification 2026-08-23) — every early-return path
@@ -96,9 +98,13 @@ func (a *authStore) maybeReload() bool {
 	}
 	a.lastCheck = now
 
-	info, err := os.Stat(a.usersFile.path)
-	if err != nil {
-		a.log.errorf("llmgateway: cannot stat users file %q: %v", a.usersFile.path, err)
+	info, statErr := os.Stat(a.usersFile.path)
+	if statErr != nil {
+		// A stat failure has no fresh mtime to dedup against — use the
+		// zero time.Time as that half of the key, so this branch's own
+		// dedup is driven by the error TEXT changing alone (see
+		// logReloadError's own doc comment).
+		a.logReloadError(time.Time{}, "llmgateway: cannot stat users file %q: %v", a.usersFile.path, statErr)
 		return false
 	}
 	// Equal, not After: an After-only check misses a backward mtime move —
@@ -111,7 +117,7 @@ func (a *authStore) maybeReload() bool {
 
 	users, err := a.usersFile.load()
 	if err != nil {
-		a.log.errorf("llmgateway: users file %q reload failed: %v", a.usersFile.path, err)
+		a.logReloadError(info.ModTime(), "llmgateway: users file %q reload failed: %v", a.usersFile.path, err)
 		return false
 	}
 
@@ -120,13 +126,40 @@ func (a *authStore) maybeReload() bool {
 	a.mu.RUnlock()
 
 	if err := a.replaceFileUsers(users); err != nil {
-		a.log.errorf("llmgateway: users file %q reload rejected: %v", a.usersFile.path, err)
+		a.logReloadError(info.ModTime(), "llmgateway: users file %q reload rejected: %v", a.usersFile.path, err)
 		return false
 	}
 	a.lastModTime = info.ModTime()
+	// The file is good again — clear the dedup key so a LATER failure
+	// (after this success) logs immediately rather than staying
+	// suppressed by a stale key from a much earlier failure episode.
+	a.lastReloadErrMsg = ""
+	a.lastReloadErrModTime = time.Time{}
 
 	if len(users) != prevCount {
 		a.log.logf("llmgateway: users file %q reload: user count changed from %d to %d", a.usersFile.path, prevCount, len(users))
 	}
 	return true
+}
+
+// logReloadError logs a maybeReload failure via a.log.errorf, but only
+// when it is NEW: a distinct message from the last one logged, or the
+// same message attempted against a distinct file mtime (review-auth
+// finding F11, 2026-09 audit — "once per distinct error / mtime change").
+// Without this, a users file left broken gets re-attempted AND re-logged
+// every reloadEvery for as long as it stays broken — retrying is
+// intentional (the operator may fix it any second), but the identical log
+// line every 5s is not: roughly 17k lines/day at the default throttle,
+// unbounded like every other log line in this package already is not
+// (logStoreError, limits.go; the failure/throttle logGates, auth.go).
+// modTime is compared with Equal, matching maybeReload's own mtime-change
+// convention immediately above.
+func (a *authStore) logReloadError(modTime time.Time, format string, args ...any) {
+	msg := fmt.Sprintf(format, args...)
+	if msg == a.lastReloadErrMsg && modTime.Equal(a.lastReloadErrModTime) {
+		return
+	}
+	a.lastReloadErrMsg = msg
+	a.lastReloadErrModTime = modTime
+	a.log.errorf("%s", msg)
 }

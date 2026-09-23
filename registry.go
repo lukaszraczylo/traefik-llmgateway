@@ -55,9 +55,20 @@ const defaultBreakerOpenDuration = time.Minute
 // two ever binds. An earlier value here (30m, shorter than the 1h
 // interval) made the breaker cadence-neutral under stock config — exactly
 // as strict an interval-only gate would already produce, with none of the
-// suppression this feature exists to provide. At 6h, a permanently broken
-// provider under every default backs off 1h, 2h, 4h, 6h, 6h, ... — roughly
-// 5 attempts a day instead of 24.
+// suppression this feature exists to provide.
+//
+// L6 fix — corrected cadence: openBreakerLocked (below) doubles from
+// defaultBreakerOpenDuration (1m), not from this constant, so the backoff
+// stays UNDER the 1h interval gate — and therefore fully masked by it,
+// per tryBeginRefresh's "whichever of the two is longer wins" rule — for
+// its first ~6 doublings (1m, 2m, 4m, 8m, 16m, 32m): those probes still
+// run once per hour, exactly as an interval-only gate would. Only once
+// the backoff itself exceeds 1h does it start to govern: 64m, 128m,
+// 256m, then capped at this constant's 360m (6h) from then on. A
+// permanently broken provider sees roughly 13 discovery attempts on the
+// day the breaker trips (the hourly-gated ramp plus the first few
+// backoff-governed probes), settling to a steady state of 24h/360m =
+// roughly 4 attempts a day thereafter, not 5.
 const defaultBreakerMaxOpenDuration = 6 * time.Hour
 
 // maxBreakerOpenDuration bounds BreakerConfig.MaxOpenDuration — the same
@@ -723,6 +734,19 @@ func newModelRegistry(adapters map[string]providerAdapter, cfg *Config, log func
 			if parseErr != nil {
 				return nil, fmt.Errorf("llmgateway: provider %q: invalid discoveryInterval %q: %w", name, pc.DiscoveryInterval, parseErr)
 			}
+			// L5 fix: a non-positive discoveryInterval ("0s", or a
+			// negative value ParseDuration itself does not reject) is a
+			// misconfiguration, not a valid "always refresh" setting —
+			// tryBeginRefresh's own throttle gate (below) never suppresses
+			// a same-window re-probe when the interval is <= 0, so every
+			// request would spawn a new listModels the instant the
+			// previous one finishes, hammering the upstream back-to-back.
+			// Mirrors resolveRequestTimeout's identical "%s must be
+			// positive" rejection (timeout.go) for the same class of
+			// field.
+			if d <= 0 {
+				return nil, fmt.Errorf("llmgateway: provider %q: discoveryInterval must be positive, got %q", name, pc.DiscoveryInterval)
+			}
 			interval = d
 		}
 
@@ -1235,10 +1259,10 @@ func (m *modelRegistry) bareWinner(id string, grp *group, extraIDs ...string) (s
 // global sorted-first owner only when grp is authorized for none of them
 // (bareWinner's own doc comment) — whose known model set contains it,
 // ruling (g)'s collision rule as revised 2026-08-27 for group-awareness.
-// Either way, authorization requires both grp.allowsModel and
-// grp.allowsProvider for the resolved provider (ruling (c)); a model that
-// exists but fails authorization returns errModelDenied, distinct from
-// errModelUnknown for a model no configured provider knows at all.
+// Either way, authorization requires grp.allowsProviderModel for the
+// resolved provider (ruling (c)); a model that exists but fails
+// authorization returns errModelDenied, distinct from errModelUnknown for
+// a model no configured provider knows at all.
 func (m *modelRegistry) resolve(id string, grp *group) (providerAdapter, string, string, error) {
 	if target, isAlias := m.aliases[id]; isAlias {
 		// Warned-set checked FIRST (review fix): bareWinner is an
@@ -1370,8 +1394,10 @@ func (m *modelRegistry) warnAliasShadowsDiscoveredOnce(alias string) {
 // authorization, in that order — so a real model behind a provider the
 // group cannot use reports errModelDenied, not errModelUnknown.
 //
-// allowsModel is an exact glob match (auth.go) with no prefix-stripping of
-// its own, so resolveAgainst generates both candidate strings itself:
+// allowsProviderModel matches each candidate model id against grp's model
+// globs with an exact glob match (matchesGlob, auth.go) — no prefix-
+// stripping of its own — so resolveAgainst generates both candidate
+// strings itself:
 // requestedID (the provider-prefixed form for a direct request, e.g.
 // "openai/gpt-test") and upstreamModel (its bare suffix, e.g. "gpt-test"),
 // and allows if either matches — that is what lets a pattern like "gpt-*"
@@ -1383,7 +1409,7 @@ func (m *modelRegistry) warnAliasShadowsDiscoveredOnce(alias string) {
 // "uni/deepseek-v4-flash-0731", when "uni" is not a configured provider).
 //
 // extraModelName is a further authorization candidate checked via
-// grp.allowsModel, alongside requestedID and upstreamModel: empty ("") for
+// grp.allowsProviderModel, alongside requestedID and upstreamModel: empty ("") for
 // a direct (non-alias) resolution, or an alias's own id when resolveAliasTarget
 // (spec §5, v0.2) is resolving that alias's target — "a group may use an
 // alias when its model globs match the ALIAS name OR the resolved target
@@ -1552,9 +1578,9 @@ func (m *modelRegistry) modelsJSON(grp *group) []byte {
 // cannot use is never a candidate for the bare id and never gets a
 // "provider/id" entry either: a prefix that only disambiguates against an
 // invisible provider is noise, not information, to this group. Each listed
-// entry is independently filtered by grp.allowsModel; grp.allowsProvider
-// filtering happens once, up front, when the group-visible owner subset is
-// built, rather than per candidate entry.
+// entry is independently filtered by grp.allowsProviderModel;
+// grp.allowsProvider filtering happens once, up front, when the
+// group-visible owner subset is built, rather than per candidate entry.
 func (m *modelRegistry) listFor(grp *group) []map[string]any {
 	owners := make(map[string][]string)
 	for _, name := range m.providerNames {
@@ -1613,6 +1639,21 @@ func (m *modelRegistry) listFor(grp *group) []map[string]any {
 		// also cover id, in favor of a later visible owner whose grant
 		// covers both — never silently dropping a model the principal can
 		// actually reach through some other visible provider.
+		// ambiguousBareID (H3 fix): id itself takes the "configuredProvider/
+		// rest" shape splitConfiguredProvider's resolve-side parser peels a
+		// prefix from. A discovered id like "openai/gpt-4o" surfaced by
+		// provider "openrouter" (owners[id]==["openrouter"]) is exactly this
+		// case when "openai" also happens to be configured: listing it bare
+		// would hand a client an id that resolve(), given that same id back,
+		// routes to provider "openai" instead of the "openrouter" that
+		// actually owns it (or 404s if "openai" doesn't know it). So this id
+		// is never listed bare — only under its true owner's own
+		// "provider/id" disambiguating form below, which resolve parses
+		// unambiguously (splitConfiguredProvider only ever inspects the
+		// FIRST "/", so "openrouter/openai/gpt-4o" always resolves against
+		// "openrouter").
+		_, _, ambiguousBareID := m.splitConfiguredProvider(id)
+
 		groupWinner, gwOK := bareEntryWinner(visible, grp, id)
 		// allowsProviderModel (multi-group/personal-grant feature,
 		// auth.go), checked against groupWinner specifically — the
@@ -1623,19 +1664,19 @@ func (m *modelRegistry) listFor(grp *group) []map[string]any {
 		// that branch (harmless — matchesGlob is cheap), but still
 		// REQUIRED for the single-grant fast path, which never consults
 		// id at all.
-		if gwOK && grp.allowsProviderModel(groupWinner, id) && !shadowed {
+		if gwOK && grp.allowsProviderModel(groupWinner, id) && !shadowed && !ambiguousBareID {
 			out = append(out, modelObject(id, groupWinner, m.resolveMetaFor(groupWinner, id)))
 		}
-		if len(visible) < 2 && !shadowed {
+		if len(visible) < 2 && !shadowed && !ambiguousBareID {
 			continue // only one provider serving id is visible to grp: no disambiguating prefix to add
 		}
 		for _, p := range visible {
 			pid := p + "/" + id
-			// allowsModel does no prefix-stripping (auth.go): check both the
-			// prefixed form and its bare suffix, same as resolveAgainst does
-			// for the equivalent client request — allowsProviderModel(p, ...)
-			// requires BOTH candidates come from a grant that also allows p
-			// itself (no cross-grant leak).
+			// allowsProviderModel's model-matching does no prefix-stripping
+			// (auth.go): check both the prefixed form and its bare suffix,
+			// same as resolveAgainst does for the equivalent client request
+			// — allowsProviderModel(p, ...) requires BOTH candidates come
+			// from a grant that also allows p itself (no cross-grant leak).
 			if grp.allowsProviderModel(p, pid, id) {
 				out = append(out, modelObject(pid, p, m.resolveMetaFor(p, id)))
 			}

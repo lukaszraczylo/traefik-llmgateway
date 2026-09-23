@@ -518,6 +518,110 @@ func TestRESPClient_ReconnectsOnceOnMidCommandClose(t *testing.T) {
 	}
 }
 
+// TestRESPClient_Pipeline_RetriesIncrByOnStaleConnZeroReplyBytes is the
+// verify-core round-4 regression test: finding 5's original fix (below)
+// assumed a stale pooled connection the peer already closed always fails
+// on the WRITE. That assumption is wrong — a write into an already
+// half-closed TCP connection commonly still succeeds into the kernel send
+// buffer, and the failure only surfaces on the READ, as an immediate EOF
+// with zero reply bytes ever received. That is indistinguishable from "the
+// server genuinely saw INCRBY and closed before replying" at the wire
+// level, but it is overwhelmingly the MUCH more common case in production
+// (an idle-timeout close, a restart, a conntrack reap on a pooled slot
+// that sat unused), and the old fix silently ate its own retry for
+// exactly this case, opening the store-down failOpen/failClosed latch on
+// every occurrence. Zero reply bytes read must still retry, the same as a
+// pre-write failure already does — see TestRESPClient_Pipeline_
+// DoesNotRetryIncrByAfterReplyBytesRead directly below for the case that
+// correctly still refuses to retry.
+func TestRESPClient_Pipeline_RetriesIncrByOnStaleConnZeroReplyBytes(t *testing.T) {
+	ln := newFakeListener(t)
+	runFakeRESPServer(t, ln, []respStep{
+		// First connection: handshake succeeds, INCRBY is read, but the
+		// server closes without writing a single reply byte back — the
+		// stale-pooled-connection signature this fix targets.
+		{wantArgs: []string{"SELECT", "0"}, reply: []byte("+OK\r\n")},
+		{wantArgs: []string{"INCRBY", "k", "1"}, closeConn: true},
+		// Second connection: the client must redo the handshake, then
+		// resend INCRBY and this time get a reply.
+		{wantArgs: []string{"SELECT", "0"}, reply: []byte("+OK\r\n")},
+		{wantArgs: []string{"INCRBY", "k", "1"}, reply: []byte(":1\r\n")},
+	})
+
+	c := newRESPClient(ln.Addr().String(), "", 0)
+	replies, err := c.pipeline([][]string{{"INCRBY", "k", "1"}})
+	if err != nil {
+		t.Fatalf("pipeline: %v (want the client to retry a zero-reply-bytes failure, even for a mutating command)", err)
+	}
+	if len(replies) != 1 || replies[0] != int64(1) {
+		t.Errorf("replies = %#v, want [int64(1)]", replies)
+	}
+}
+
+// TestRESPClient_Pipeline_DoesNotRetryIncrByAfterReplyBytesRead is finding
+// 5's regression test (2026-09 review), corrected by the verify-core
+// round-4 fix above: once at least one reply BYTE has actually been read
+// back — proving the server has genuinely started answering, so it may
+// already have applied a mutating command that came before the one whose
+// reply was lost — a further read failure must be surfaced directly, with
+// NO retry. Resending the pipeline would risk double-applying INCRBY
+// (false 429s on a rate/token counter, doubled recorded spend on a cost
+// counter). Uses a two-command pipeline (INCRBY+EXPIRE, matching
+// redis_store.go's real incrBy usage): INCRBY's reply arrives in full
+// first, proving readAny before EXPIRE's own reply is ever attempted.
+//
+// The fake server closes the listener the instant it accepts the one
+// connection it expects, well before it even reads SELECT — not racing
+// the client's own read failure — so a WRONGLY-attempted retry's dial
+// fails immediately with "connection refused" instead of reproducing the
+// read-reply error the first attempt actually produced. Asserting on the
+// error's own content (containing "read reply 2/2", attemptEncodedOn's
+// read-phase wrapper naming the SECOND reply — not merely that SOME error
+// came back) is what proves no second attempt was ever made.
+func TestRESPClient_Pipeline_DoesNotRetryIncrByAfterReplyBytesRead(t *testing.T) {
+	ln := newFakeListener(t)
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		_ = ln.Close() // no further connections accepted, from here on
+		defer func() { _ = conn.Close() }()
+
+		r := bufio.NewReader(conn)
+		if args, err := readRESPCommand(r); err != nil || !equalStrSlices(args, []string{"SELECT", "0"}) {
+			t.Errorf("fake RESP server: SELECT: args=%v err=%v", args, err)
+			return
+		}
+		if _, err := conn.Write([]byte("+OK\r\n")); err != nil {
+			t.Errorf("fake RESP server: write SELECT reply: %v", err)
+			return
+		}
+		if args, err := readRESPCommand(r); err != nil || !equalStrSlices(args, []string{"INCRBY", "k", "1"}) {
+			t.Errorf("fake RESP server: INCRBY: args=%v err=%v", args, err)
+			return
+		}
+		if args, err := readRESPCommand(r); err != nil || !equalStrSlices(args, []string{"EXPIRE", "k", "60"}) {
+			t.Errorf("fake RESP server: EXPIRE: args=%v err=%v", args, err)
+			return
+		}
+		// The server answers INCRBY in full (proving readAny becomes
+		// true) but then drops the connection before replying to
+		// EXPIRE — finding 5's exact double-apply risk, now correctly
+		// gated on readAny rather than on wroteRequest alone.
+		if _, err := conn.Write([]byte(":1\r\n")); err != nil {
+			t.Errorf("fake RESP server: write INCRBY reply: %v", err)
+			return
+		}
+	}()
+
+	c := newRESPClient(ln.Addr().String(), "", 0)
+	_, err := c.pipeline([][]string{{"INCRBY", "k", "1"}, {"EXPIRE", "k", "60"}})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "read reply 2/2",
+		"pipeline retried an INCRBY+EXPIRE pipeline after INCRBY's own reply bytes were already read (double-apply risk) instead of surfacing the first attempt's own error")
+}
+
 // TestRESPClient_ReconnectFailsTwice_ReturnsError asserts a client gives
 // up (rather than retrying forever) once the retried attempt also fails:
 // dialing a dead address never succeeds, so both the first attempt and the
@@ -897,7 +1001,7 @@ func TestRESPClient_WriteError_BrokenPipe(t *testing.T) {
 		{
 			name: "attemptEncodedOn: payload write fails",
 			run: func(c *respClient, pc *respConn) error {
-				_, err := c.attemptEncodedOn(pc, encodeCommands([][]string{{"GET", "k"}}), 1, time.Now().Add(time.Second))
+				_, _, _, err := c.attemptEncodedOn(pc, encodeCommands([][]string{{"GET", "k"}}), 1, time.Now().Add(time.Second))
 				return err
 			},
 			wantErrContains: "write",
@@ -943,7 +1047,7 @@ func TestRESPClient_AuthHandshakeFailure_ErrorReplySurfaces(t *testing.T) {
 	deadline := time.Now().Add(2 * time.Second)
 	pc, err := c.acquire(deadline)
 	require.NoError(t, err)
-	_, err = c.attemptEncodedOn(pc, encodeCommands([][]string{{"GET", "k"}}), 1, deadline)
+	_, _, _, err = c.attemptEncodedOn(pc, encodeCommands([][]string{{"GET", "k"}}), 1, deadline)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "AUTH failed")
 }

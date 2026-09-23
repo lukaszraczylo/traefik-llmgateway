@@ -246,7 +246,7 @@ func (c *respClient) do(args ...string) (any, error) {
 // decoded replies in the same order. It encodes cmds once and hands off to
 // pipelineEncoded, which owns the connection/retry logic.
 func (c *respClient) pipeline(cmds [][]string) ([]any, error) {
-	return c.pipelineEncoded(encodeCommands(cmds), len(cmds))
+	return c.pipelineEncoded(encodeCommands(cmds), len(cmds), pipelineMutates(cmds))
 }
 
 // pipelineEncoded runs pipeline's connection/retry logic over an
@@ -257,20 +257,63 @@ func (c *respClient) pipeline(cmds [][]string) ([]any, error) {
 // One absolute deadline is computed here, at call entry, and shared by
 // acquiring a connection, the first attempt, and (if it happens) the one
 // retry — not a fresh respCallTimeout for each. On a non-timeout I/O error
-// (connection reset, EOF from a peer that closed mid-command) it closes
-// the connection and retries the whole pipeline once against the same
-// deadline, on the SAME pooled slot (a fresh dial reusing that slot, not a
-// second slot acquired from the pool). On a timeout specifically, it does
-// not retry: a server that accepted the connection and then went silent
-// would just be given the same non-answer a second time, doubling the
-// caller's wait for nothing. Either way, a failure leaves that connection
-// closed (closeConn) so the next call to acquire this slot lazily
-// reconnects fresh rather than reusing a connection already known bad —
-// the slot itself always returns to the pool via the deferred send below,
-// whether or not its connection survived the call. payload is encoded once
-// by the caller, so the retry re-sends the identical bytes without
-// re-encoding cmds a second time.
-func (c *respClient) pipelineEncoded(payload []byte, n int) ([]any, error) {
+// it closes the connection and retries the whole pipeline once against the
+// same deadline, on the SAME pooled slot (a fresh dial reusing that slot,
+// not a second slot acquired from the pool) — but ONLY when doing so is
+// known safe (finding 5, 2026-09 review, fixing a double-apply bug; the
+// wroteRequest-alone gate was itself corrected by the verify-core round-4
+// fix below):
+//
+//   - The failure happened before any byte of the request was written
+//     (attemptEncodedOn's wroteRequest is false — a dial failure, an
+//     ensureConnOn handshake failure, or the command write itself
+//     erroring). This is one stale-pooled-connection case: a connection
+//     idle in the pool that the peer silently closed sometimes fails on
+//     this very first write, before the server has seen anything from
+//     this attempt at all, so resending the identical pipeline against a
+//     freshly dialled connection cannot duplicate an effect that never
+//     happened.
+//   - Or the request was written and a reply was awaited, but no reply
+//     byte at all was ever read (attemptEncodedOn's readAny is false).
+//     A write into an already half-closed TCP connection commonly still
+//     succeeds into the kernel send buffer — the peer's close only
+//     surfaces on the READ, as an immediate EOF with zero bytes
+//     received. This is the OTHER, more common stale-pooled-connection
+//     case, and is exactly as safe to retry as the write-side one above:
+//     nothing was ever seen or applied server-side.
+//   - Or the request WAS written, some reply reading happened, but cmds
+//     contains no mutating command (pipelineMutates) — e.g. a pure
+//     getBatch/setEx/getBytes call. GET/SET/EXPIRE/AUTH/SELECT are
+//     idempotent: replaying one after a reply was lost (the connection
+//     reset mid-read, after the server already processed and answered)
+//     reproduces the same end state, so retrying is still safe even
+//     though the request definitely reached the wire.
+//
+// Once at least one reply byte has actually been read AND cmds contains a
+// mutating command (INCRBY/INCRBYFLOAT — redisStore's incrMulti/
+// incrAndGetMulti), a non-timeout failure is surfaced directly, with NO
+// retry: the server has demonstrably started answering, so it may already
+// have applied that INCRBY before the connection reset (a proxy failover,
+// or the backend restarting mid-reply) — resending the whole pipeline in
+// that case would apply it a second time, double-counting a rate/token/
+// cost counter into a false 429 or doubled recorded spend. The caller's
+// own failOpen/failClosed policy (limits.go) decides what happens to THIS
+// attempt's failure; it must never see a duplicated increment instead.
+//
+// On a timeout specifically, it never retries either way: a server that
+// accepted the connection and then went silent would just be given the
+// same non-answer a second time, doubling the caller's wait for nothing.
+// Any failure leaves that connection closed (closeConn) so the next call
+// to acquire this slot lazily reconnects fresh rather than reusing a
+// connection already known bad — the slot itself always returns to the
+// pool via the deferred send below, whether or not its connection
+// survived the call.
+//
+// payload is encoded once by the caller, so the retry re-sends the
+// identical bytes without re-encoding cmds a second time. mutates is the
+// caller's pipelineMutates verdict for the commands payload encodes —
+// pipelineEncoded never sees the []string form, so the caller supplies it.
+func (c *respClient) pipelineEncoded(payload []byte, n int, mutates bool) ([]any, error) {
 	deadline := time.Now().Add(respCallTimeout)
 
 	pc, err := c.acquire(deadline)
@@ -279,7 +322,7 @@ func (c *respClient) pipelineEncoded(payload []byte, n int) ([]any, error) {
 	}
 	defer func() { c.free <- pc }()
 
-	replies, err := c.attemptEncodedOn(pc, payload, n, deadline)
+	replies, wrote, readAny, err := c.attemptEncodedOn(pc, payload, n, deadline)
 	if err == nil {
 		return replies, nil
 	}
@@ -287,13 +330,47 @@ func (c *respClient) pipelineEncoded(payload []byte, n int) ([]any, error) {
 	if isTimeout(err) {
 		return nil, err
 	}
+	if wrote && readAny && mutates {
+		return nil, err
+	}
 
-	replies, err = c.attemptEncodedOn(pc, payload, n, deadline)
+	replies, _, _, err = c.attemptEncodedOn(pc, payload, n, deadline)
 	if err != nil {
 		closeConn(pc)
 		return nil, err
 	}
 	return replies, nil
+}
+
+// pipelineMutatingCommands names every RESP command this client ever sends
+// that is NOT safe to blindly resend: each already changes server state on
+// success, so replaying it after an ambiguous failure (the request bytes
+// were written, but the reply for it — or a later command in the same
+// pipeline — never came back) can double-apply it, unlike a GET/SET/
+// EXPIRE/AUTH/SELECT retry, which merely reproduces the same end state.
+// INCRBYFLOAT is not currently sent by this client (only INCRBY is —
+// redis_store.go), but is listed for the same reason INCRBY is: an
+// operator or a future caller adding it must not have to rediscover this
+// gate.
+var pipelineMutatingCommands = map[string]bool{
+	"INCRBY":      true,
+	"INCRBYFLOAT": true,
+}
+
+// pipelineMutates reports whether any command in cmds is one of
+// pipelineMutatingCommands — pipeline's own gate (finding 5, 2026-09
+// review) for whether a failure discovered AFTER the request was already
+// written to the wire is still safe to retry.
+func pipelineMutates(cmds [][]string) bool {
+	for _, args := range cmds {
+		if len(args) == 0 {
+			continue
+		}
+		if pipelineMutatingCommands[args[0]] {
+			return true
+		}
+	}
+	return false
 }
 
 // acquire takes one idle connection slot from c.free, waiting no longer
@@ -360,24 +437,67 @@ func (respDeadlineExceededErr) Temporary() bool { return true }
 // payload representing n commands over pc, connecting first if needed,
 // with every read and write bound by deadline. Callers own pc exclusively
 // for the duration of this call (acquired from c.free).
-func (c *respClient) attemptEncodedOn(pc *respConn, payload []byte, n int, deadline time.Time) ([]any, error) {
+//
+// wroteRequest is true as soon as every command has been fully written to
+// pc.conn, regardless of what happens afterward (a reply read failing does
+// not unset it) — pipeline's own retry gate (finding 5, 2026-09 review)
+// uses this to tell "failed before the server could have seen anything"
+// from "failed after the server may already have applied a mutating
+// command", since only the first case is unconditionally safe to retry.
+//
+// readAny (verify-core fix, round 4) is true once at least one byte of
+// the FIRST reply was actually consumed off pc.conn. Finding 5's original
+// gate assumed a stale pooled connection the peer already closed always
+// fails on the WRITE — wrong: a write into an already-half-closed TCP
+// connection commonly still succeeds into the kernel send buffer, and
+// the failure only surfaces on the read as an immediate EOF with zero
+// bytes ever received. That is the stale-connection signature and it
+// must still retry, even for a mutating pipeline, exactly like a
+// pre-write failure does — nothing was ever seen or applied server-side.
+// Once even one reply byte has arrived, the server has demonstrably
+// started answering, so pipeline's caller no longer knows whether a
+// mutating command already landed and must not resend it.
+func (c *respClient) attemptEncodedOn(pc *respConn, payload []byte, n int, deadline time.Time) (replies []any, wroteRequest bool, readAny bool, err error) {
 	if err := c.ensureConnOn(pc, deadline); err != nil {
-		return nil, err
+		return nil, false, false, err
 	}
 
 	if _, err := pc.conn.Write(payload); err != nil {
-		return nil, fmt.Errorf("resp: write: %w", err)
+		return nil, false, false, fmt.Errorf("resp: write: %w", err)
 	}
 
-	replies := make([]any, n)
+	replies = make([]any, n)
 	for i := 0; i < n; i++ {
+		if !readAny {
+			// Peek the very first byte of the very first reply before
+			// handing off to decodeReply: this is the one read whose
+			// outcome pipeline's retry gate needs isolated from every
+			// later one. ReadByte+UnreadByte consumes nothing overall —
+			// the byte goes straight back for decodeReply below — it
+			// only distinguishes "the connection had nothing left to
+			// give at all" (stale pooled conn, safe to retry) from
+			// "some reply data has started arriving" (readAny=true for
+			// the rest of this call, whatever happens next).
+			if _, peekErr := pc.r.ReadByte(); peekErr != nil {
+				return nil, true, false, fmt.Errorf("resp: read reply %d/%d: %w", i+1, n, peekErr)
+			}
+			if unreadErr := pc.r.UnreadByte(); unreadErr != nil {
+				// bufio.Reader.UnreadByte only fails when the preceding
+				// op was not itself a successful ReadByte, which cannot
+				// happen here — kept as a hard error rather than
+				// silently mis-tracking readAny, which the mutating-
+				// pipeline retry decision depends on for correctness.
+				return nil, true, true, fmt.Errorf("resp: read reply %d/%d: unread byte: %w", i+1, n, unreadErr)
+			}
+			readAny = true
+		}
 		v, err := decodeReply(pc.r, 0)
 		if err != nil {
-			return nil, fmt.Errorf("resp: read reply %d/%d: %w", i+1, n, err)
+			return nil, true, readAny, fmt.Errorf("resp: read reply %d/%d: %w", i+1, n, err)
 		}
 		replies[i] = v
 	}
-	return replies, nil
+	return replies, true, true, nil
 }
 
 // ensureConnOn dials, authenticates, and selects the database if pc has no
@@ -643,7 +763,7 @@ func decodeArray(r *bufio.Reader, lenField string, depth int) (any, error) {
 // setEx sets key to val with an expiry of ttl via RESP2 "SET key val EX
 // seconds", used by the response cache (cache.go) to store a cached
 // response. ttl is rounded up to whole seconds and floored at 1s — Redis's
-// EX argument is whole seconds only — matching redisStore.incrBy's EXPIRE
+// EX argument is whole seconds only — matching redisStore.incrMulti's EXPIRE
 // rounding exactly. The payload is built directly with fmt.Appendf rather
 // than going through do/encodeCommands: val (a cached response, often tens
 // of KB) is framed straight from its own bytes — "%s" on a []byte writes
@@ -660,7 +780,9 @@ func (c *respClient) setEx(key string, val []byte, ttl time.Duration) error {
 
 	ttlArg := strconv.FormatInt(ttlSeconds, 10)
 	payload := fmt.Appendf(nil, "*5\r\n$3\r\nSET\r\n$%d\r\n%s\r\n$%d\r\n%s\r\n$2\r\nEX\r\n$%d\r\n%s\r\n", len(key), key, len(val), val, len(ttlArg), ttlArg)
-	replies, err := c.pipelineEncoded(payload, 1)
+	// SET is idempotent (not in pipelineMutatingCommands), so a retry after
+	// a lost reply reproduces the same end state.
+	replies, err := c.pipelineEncoded(payload, 1, false)
 	if err != nil {
 		return fmt.Errorf("resp: setEx %q: %w", key, err)
 	}
@@ -672,7 +794,7 @@ func (c *respClient) setEx(key string, val []byte, ttl time.Duration) error {
 }
 
 // getBytes reads key's value as a bulk reply. found is false for a missing
-// key (RESP null bulk, "$-1") — not an error — mirroring redisStore.get's
+// key (RESP null bulk, "$-1") — not an error — mirroring redisStore.getMulti's
 // treatment of a missing counter key.
 func (c *respClient) getBytes(key string) ([]byte, bool, error) {
 	reply, err := c.do("GET", key)
@@ -698,7 +820,7 @@ func (c *respClient) getBytes(key string) ([]byte, bool, error) {
 // for GET /admin/api/usage otherwise serializing 6 GETs per user/group
 // scope on the single shared connection). It returns one value per key,
 // in the same order, with a missing key (RESP null bulk) mapped to 0,
-// matching getBytes/redisStore.get's convention for a single key. Any
+// matching getBytes/redisStore.getMulti's convention for a single key. Any
 // reply that is a RESP error, an unexpected reply type, or a non-integer
 // value fails the whole batch — mirrored by the limiter's
 // storeGetMulti/currentUsage as one fail-open/fail-closed decision for

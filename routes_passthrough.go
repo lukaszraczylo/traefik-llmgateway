@@ -5,10 +5,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -25,6 +28,23 @@ const maxPassthroughBytes = 32 << 20
 // while the client-facing io.Copy streams every byte of the response —
 // of any size — without ever waiting for the full body to buffer first.
 const maxAccountingTeeBytes = 4 << 20
+
+// sseAccountingHeadBytes/sseAccountingTailBytes cap sseAccountingBuffer
+// (verify-core fix, round 4): an SSE stream used to be teed through the
+// same 4MiB-capped cappedAccountingBuffer as a JSON body, which held
+// every stream's first 4MiB in memory for its whole life AND — the worse
+// half of the same bug — silently lost usage entirely for any stream
+// whose final event (OpenAI's trailing usage chunk, Anthropic's last
+// message_delta) arrived past that cap, which a long completion reaches
+// easily. 64KiB of head is far more than message_start or the first
+// content-bearing chunk ever needs; 64KiB of tail is far more than the
+// one small trailing usage event ever needs — together, ~128KiB per
+// concurrent SSE stream instead of up to 4MiB, and the final usage event
+// is never dropped no matter how long the stream runs in between.
+const (
+	sseAccountingHeadBytes = 64 << 10
+	sseAccountingTailBytes = 64 << 10
+)
 
 // maxModelPeekBytes caps how much of a passthrough request body
 // peekPassthroughModel reads to find a top-level "model" field: 64KiB
@@ -183,21 +203,30 @@ var providerCredentialRetargetHeaders = map[string]bool{
 
 // dangerousResponseHeaders lists exact-match upstream RESPONSE headers
 // stripped before being relayed to the client (security review finding
-// 5, round 3, 2026-08-22) — additive to hopByHopHeaders, which
+// 5, round 3, 2026-08-22; account-identity headers added, review-routes
+// finding 17, 2026-09 review) — additive to hopByHopHeaders, which
 // proxyUpstream already strips from both directions; this is the
 // RESPONSE-side counterpart to dangerousClientHeaders/
 // providerCredentialRetargetHeaders above, which already hardened the
 // REQUEST side. proxyUpstream copies every OTHER upstream response
 // header verbatim to the client — a raw reverse-proxy contract, not a
-// translation layer — but three of them let the upstream act on THIS
-// gateway's own origin, an origin that also serves the WAN-exposed
-// /admin dashboard (admin.go): an upstream provider, or an in-cluster
-// MCP/A2A target reached with no credential trust boundary of its own
-// (handleTargetProxy's own doc comment, mcp_a2a.go — this strip applies
-// there too, since both callers share this one function), could
-// otherwise plant a Set-Cookie under the gateway's own domain, or
-// rewrite the browser's security policy toward that domain via
-// Strict-Transport-Security/Content-Security-Policy, merely by
+// translation layer — but these let the upstream act on THIS gateway's
+// own origin, or leak the operator's own upstream account identity to
+// the tenant that made the request, an origin that also serves the
+// WAN-exposed /admin dashboard (admin.go): an upstream provider, or an
+// in-cluster MCP/A2A target reached with no credential trust boundary of
+// its own (handleTargetProxy's own doc comment, mcp_a2a.go — this strip
+// applies there too, since both callers share this one function), could
+// otherwise plant a Set-Cookie under the gateway's own domain, rewrite
+// the browser's security policy toward that domain via
+// Strict-Transport-Security/Content-Security-Policy, or — Openai-
+// Organization/Openai-Project/Anthropic-Organization-Id — echo the
+// operator's own upstream org/project id straight back to a tenant who
+// was never meant to see which account the gateway is billing against
+// (the request side already treats these same identifiers as sensitive:
+// providerCredentialRetargetHeaders above strips a tenant's own attempt
+// to SET them; this is the matching response-side strip so the
+// operator's real ids never round-trip back out either), merely by
 // returning it in a response this gateway was only ever asked to relay.
 //
 // Deliberately a DENY-list, not an allowlist (unlike the request-side
@@ -213,11 +242,15 @@ var providerCredentialRetargetHeaders = map[string]bool{
 // this gateway but commonly read by an external client's own SDK. An
 // allowlist would silently break that transparency for every header this
 // package does not already know to name; this narrow deny-list closes
-// exactly the origin-integrity holes named above without that cost.
+// exactly the origin-integrity and account-identity holes named above
+// without that cost.
 var dangerousResponseHeaders = map[string]bool{
 	"Set-Cookie":                true,
 	"Strict-Transport-Security": true,
 	"Content-Security-Policy":   true,
+	"Openai-Organization":       true,
+	"Openai-Project":            true,
+	"Anthropic-Organization-Id": true,
 }
 
 // dangerousResponseHeaderPrefixes strips every Access-Control-* header
@@ -415,6 +448,68 @@ func (c *cappedAccountingBuffer) Write(p []byte) (int, error) {
 	return n, nil
 }
 
+// sseAccountingBuffer is an io.Writer that keeps a bounded HEAD (the
+// first sseAccountingHeadBytes, never overwritten once full — mirrors
+// cappedAccountingBuffer's own cap-then-discard behavior) alongside a
+// bounded, rolling TAIL (the last sseAccountingTailBytes seen so far,
+// updated on every write for as long as the stream runs) of an SSE
+// response body (verify-core fix, round 4 — see sseAccountingHeadBytes'
+// own doc comment for why a stream needs both ends kept, not just a
+// single front-loaded cap). Like cappedAccountingBuffer, Write always
+// reports success for the full input length: it drives an io.TeeReader
+// wrapped around the real, client-facing copy, and must never make that
+// copy fail just because this accounting side-buffer discarded bytes
+// outside its two windows.
+type sseAccountingBuffer struct {
+	tail []byte
+	head bytes.Buffer
+}
+
+// Write implements io.Writer. head fills once, like
+// cappedAccountingBuffer.Write; tail is maintained as a plain rolling
+// window — appended to, then trimmed back down to sseAccountingTailBytes
+// from the front only once it reaches twice that cap, so each byte is
+// copied O(1) times amortized (a trim moves at most
+// sseAccountingTailBytes bytes and happens once per
+// sseAccountingTailBytes appended) rather than on every small write.
+// Chosen over a circular-index ring buffer for simplicity.
+func (b *sseAccountingBuffer) Write(p []byte) (int, error) {
+	n := len(p)
+	if remaining := sseAccountingHeadBytes - b.head.Len(); remaining > 0 {
+		head := p
+		if len(head) > remaining {
+			head = head[:remaining]
+		}
+		b.head.Write(head) //nolint:errcheck // bytes.Buffer.Write never errors
+	}
+	b.appendTail(p)
+	return n, nil
+}
+
+// appendTail keeps b.tail holding at least the last sseAccountingTailBytes
+// written so far (up to twice that before a trim; read it via tailBytes). When p alone is already at or past the cap, the tail becomes
+// simply p's own last sseAccountingTailBytes — the fast path for the
+// (rare) single oversized write, and what keeps memory bounded even if a
+// caller ever writes one huge chunk instead of many small ones.
+func (b *sseAccountingBuffer) appendTail(p []byte) {
+	if len(p) >= sseAccountingTailBytes {
+		b.tail = append(b.tail[:0], p[len(p)-sseAccountingTailBytes:]...)
+		return
+	}
+	b.tail = append(b.tail, p...)
+	if len(b.tail) >= 2*sseAccountingTailBytes {
+		b.tail = append(b.tail[:0], b.tail[len(b.tail)-sseAccountingTailBytes:]...)
+	}
+}
+
+// tailBytes returns the last (at most) sseAccountingTailBytes written.
+func (b *sseAccountingBuffer) tailBytes() []byte {
+	if len(b.tail) > sseAccountingTailBytes {
+		return b.tail[len(b.tail)-sseAccountingTailBytes:]
+	}
+	return b.tail
+}
+
 // passthroughUsagePayload captures every shape the three provider types'
 // native non-streaming JSON responses report token usage in, plus the
 // optional top-level "model" field OpenAI- and Anthropic-shaped responses
@@ -477,6 +572,144 @@ func extractPassthroughUsage(typeName, providerName string, body []byte) (usage,
 	default:
 		return usage{}, model, err
 	}
+}
+
+// extractPassthroughSSEUsage best-effort parses head and tail — the
+// bounded first/last windows an sseAccountingBuffer captured, teed
+// alongside the client-facing copy (verify-core fix, round 4: a single
+// front-loaded 4MiB cap, the previous shape, silently lost the trailing
+// usage event on any stream longer than that — see sseAccountingHeadBytes'
+// own doc comment) — for one of the two documented native streaming usage
+// shapes (finding 2 fix, review-routes.md): OpenAI's own final chunk (the
+// identical top-level "usage" object extractPassthroughUsage already
+// parses out of a non-streaming OpenAI response, just carried on the LAST
+// SSE data event instead of the whole body — present only when the client
+// itself asked for it via stream_options.include_usage, which native
+// passthrough never forces the way the unified route's own
+// chatCompletion does) and Anthropic's own two-event shape:
+// message_start.message.usage for the prompt side (folding in its own
+// prompt-cache counters, matching extractPassthroughUsage's
+// providerTypeAnthropic case) and the LAST message_delta.usage.
+// output_tokens for the completion side. Gemini's own SSE convention is
+// not documented here and is deliberately left unhandled — the returned
+// usage simply stays zero for it, exactly like any other unrecognized or
+// empty stream, and the caller's own request-body-size estimate covers
+// the rest. model falls back to "unknown/"+providerName when neither
+// window named one, matching extractPassthroughUsage's own convention.
+//
+// head and tail are parsed independently (parseSSEUsageChunk, below),
+// then merged field-by-field: prompt/completion each take the tail's own
+// value when it is non-zero, otherwise the head's — tail wins because it
+// is closer to the stream's actual end (OpenAI's one usage chunk and
+// Anthropic's last message_delta both land there), while Anthropic's
+// prompt tokens (message_start, always the first event) still come from
+// head on any stream long enough that message_start has already scrolled
+// out of the tail window. model prefers tail, then head, over the
+// "unknown/"+providerName fallback, applied once here rather than inside
+// parseSSEUsageChunk so a real model name found in EITHER window is never
+// masked by the other window's own fallback.
+func extractPassthroughSSEUsage(typeName, providerName string, head, tail []byte) (usage, string) {
+	headUsage, headModel := parseSSEUsageChunk(typeName, head)
+	tailUsage, tailModel := parseSSEUsageChunk(typeName, tail)
+
+	u := headUsage
+	if tailUsage.prompt > 0 {
+		u.prompt = tailUsage.prompt
+	}
+	if tailUsage.completion > 0 {
+		u.completion = tailUsage.completion
+	}
+
+	model := tailModel
+	if model == "" {
+		model = headModel
+	}
+	if model == "" {
+		model = "unknown/" + providerName
+	}
+	return u, model
+}
+
+// parseSSEUsageChunk best-effort parses raw — one captured window (head
+// or tail) of a text/event-stream byte buffer — for the usage/model
+// shapes extractPassthroughSSEUsage documents above. It returns a bare
+// (usage, model) pair with no "unknown/"+providerName fallback applied:
+// that fallback is the caller's job, once, after merging both windows.
+//
+// readSSE (sse.go) is reused verbatim rather than re-implemented: this is
+// the identical event-stream framing the unified route's own
+// forwardStream implementations already parse, so any CR-handling or
+// injection-safety fix to readSSE (finding 3, review-routes.md) covers
+// this path automatically, with nothing to keep in sync by hand. Every
+// readSSE/json.Unmarshal error is swallowed deliberately — best-effort
+// parsing of a possibly-truncated buffer (raw's own leading or trailing
+// bytes may cut an event in half at the window boundary), not a hard
+// requirement.
+func parseSSEUsageChunk(typeName string, raw []byte) (usage, string) {
+	var u usage
+	var model string
+
+	switch typeName {
+	case providerTypeOpenAI:
+		_ = readSSE(bytes.NewReader(raw), func(ev sseEvent) error {
+			if string(ev.data) == "[DONE]" {
+				return nil
+			}
+			var chunk passthroughUsagePayload
+			if json.Unmarshal(ev.data, &chunk) != nil {
+				return nil
+			}
+			if chunk.Usage.PromptTokens > 0 || chunk.Usage.CompletionTokens > 0 {
+				u = usage{prompt: chunk.Usage.PromptTokens, completion: chunk.Usage.CompletionTokens}
+			}
+			if chunk.Model != "" {
+				model = chunk.Model
+			}
+			return nil
+		})
+	case providerTypeAnthropic:
+		_ = readSSE(bytes.NewReader(raw), func(ev sseEvent) error {
+			switch ev.event {
+			case "message_start":
+				var payload struct {
+					Message struct {
+						Model string `json:"model"`
+						Usage struct {
+							InputTokens              int64 `json:"input_tokens"`
+							OutputTokens             int64 `json:"output_tokens"`
+							CacheCreationInputTokens int64 `json:"cache_creation_input_tokens"`
+							CacheReadInputTokens     int64 `json:"cache_read_input_tokens"`
+						} `json:"usage"`
+					} `json:"message"`
+				}
+				if json.Unmarshal(ev.data, &payload) != nil {
+					return nil
+				}
+				u.prompt = payload.Message.Usage.InputTokens + payload.Message.Usage.CacheCreationInputTokens + payload.Message.Usage.CacheReadInputTokens
+				if payload.Message.Usage.OutputTokens > 0 {
+					u.completion = payload.Message.Usage.OutputTokens
+				}
+				if payload.Message.Model != "" {
+					model = payload.Message.Model
+				}
+			case "message_delta":
+				var payload struct {
+					Usage struct {
+						OutputTokens int64 `json:"output_tokens"`
+					} `json:"usage"`
+				}
+				if json.Unmarshal(ev.data, &payload) != nil {
+					return nil
+				}
+				if payload.Usage.OutputTokens > 0 {
+					u.completion = payload.Usage.OutputTokens
+				}
+			}
+			return nil
+		})
+	}
+
+	return u, model
 }
 
 // peekPassthroughModel reads at most maxModelPeekBytes of a passthrough
@@ -967,6 +1200,38 @@ func (g *Gateway) handlePassthrough(w http.ResponseWriter, r *http.Request, u *u
 	// already confirmed it is a key of g.adapters before calling in.
 	adapter := g.adapters[providerName]
 
+	// Finding 6 fix (review-routes.md): the same unpriced-model-under-a-
+	// cost-budget refusal runMeteredCall applies to /v1/chat/completions
+	// (routes_unified.go's own F-1 gate) must also cover native
+	// passthrough, or a tenant whose cost budget is exhausted on the
+	// unified routes can keep spending without limit simply by calling
+	// the identical model through "/{provider}/...". Passthrough has no
+	// resolved canonical/upstream model id the way the unified route
+	// does — only whatever "model" the CLIENT's OWN request body names,
+	// peeked the same bounded way model authorization above already does
+	// — so this only ever fires when that model is actually determinable
+	// from the body; a request this gateway cannot price at all (Gemini
+	// passthrough, whose model id lives in the URL, never the body; a
+	// binary content type; or a body whose "model" sits beyond the peek
+	// window) is let through unpriced, exactly as before this fix,
+	// rather than fail-closed on a value it never had. peekPassthroughModel
+	// is called again here even when the model-restriction branches above
+	// already called it (a second bounded, cheap 64KiB re-peek — r.Body
+	// was already restored via io.MultiReader after that first call) so
+	// this check runs independently of whether the group restricts
+	// models at all.
+	if !g.cfg.AllowUnpricedWithCostBudget && scopesHaveCostBudget(scopes) {
+		if model, hasModel, _, peekErr := peekPassthroughModel(r); peekErr == nil && hasModel {
+			canonical := providerName + "/" + model
+			if !priceKnown(canonical, model, g.cfg.Pricing, g.cfg.ModelMeta) {
+				g.logf("passthrough: refusing model %q: it has no configured price, and a cost budget applies to this caller that cannot be enforced without one", model)
+				writeOAIError(w, http.StatusPaymentRequired, "invalid_request_error",
+					fmt.Sprintf("model %q has no configured price, so the cost budget that applies to this request cannot be enforced; add a \"pricing\" entry for it, or set allowUnpricedWithCostBudget to serve it unbounded", model))
+				return
+			}
+		}
+	}
+
 	upstreamURL := adapter.base() + "/" + rest
 	if r.URL.RawQuery != "" {
 		upstreamURL += "?" + r.URL.RawQuery
@@ -991,30 +1256,79 @@ func (g *Gateway) handlePassthrough(w http.ResponseWriter, r *http.Request, u *u
 		}))
 	}
 
-	result, ok := g.proxyUpstream(w, r, upstreamURL, adapter.httpClient(), adapter.injectAuth, providerCredentialRetargetHeaders, true, "passthrough (provider "+providerName+")", adapter.requestTimeout())
-	if !ok || !result.isJSON {
-		// A build/connection/copy failure already wrote its own response
-		// (or, for a canceled client context, wrote nothing at all — see
-		// proxyUpstream); a non-JSON response has nothing more to account
-		// than the request itself, already counted by checkAndCount above.
-		return
-	}
-	if result.tee.truncated {
-		g.logf("passthrough: response body exceeded %d bytes; skipping usage accounting (provider %q)", maxAccountingTeeBytes, providerName)
+	result, complete := g.proxyUpstream(w, r, upstreamURL, adapter.httpClient(), adapter.injectAuth, providerCredentialRetargetHeaders, true, "passthrough (provider "+providerName+")", adapter.requestTimeout())
+
+	// Finding 2 fix (review-routes.md): a build/dial failure that never
+	// produced any response at all (result.status == 0 — proxyUpstream
+	// returned before ever writing headers to the client: a connection
+	// failure, or the client canceling before the request was even sent)
+	// has nothing to account beyond the request itself, already counted
+	// by checkAndCount above — the same "a connection failure before any
+	// write always carries zero usage by contract" rule runMeteredCall
+	// applies (routes_unified.go). Every OTHER outcome below — a complete
+	// or truncated JSON body, a complete or aborted SSE stream — now
+	// falls through to at least the request-body-size estimate, so a
+	// streamed or malformed response can no longer be billed zero just by
+	// never finishing cleanly. A binary/other response (audio, image, a
+	// content type this gateway does not parse at all) is unchanged from
+	// before this finding: it never carries a token-shaped usage object
+	// and this gateway has no basis to estimate one for it.
+	if result.status == 0 || (!result.isJSON && !result.isSSE) {
 		return
 	}
 
-	// respModel: the RESPONSE body's own reported model id (extractPassthroughUsage
-	// reads it, when present, from the upstream's reply) — never named
-	// "model" here, so it can never be confused with (or shadow) the
-	// REQUEST body's "model" field the enforcement block above already
-	// consumed via peekPassthroughModel (review fix, 2026-08-22, round 2).
-	respUsage, respModel, unmarshalErr := extractPassthroughUsage(adapter.typeName(), providerName, result.tee.buf.Bytes())
-	if unmarshalErr != nil {
-		g.logf("passthrough: response body did not decode as JSON for usage accounting (provider %q): %v", providerName, unmarshalErr)
+	var respUsage usage
+	var respModel string
+	switch {
+	case result.isJSON && !result.tee.truncated:
+		// respModel: the RESPONSE body's own reported model id
+		// (extractPassthroughUsage reads it, when present, from the
+		// upstream's reply) — never named "model" here, so it can never
+		// be confused with (or shadow) the REQUEST body's "model" field
+		// the enforcement block above already consumed via
+		// peekPassthroughModel (review fix, 2026-08-22, round 2).
+		var unmarshalErr error
+		respUsage, respModel, unmarshalErr = extractPassthroughUsage(adapter.typeName(), providerName, result.tee.buf.Bytes())
+		if unmarshalErr != nil {
+			g.logf("passthrough: response body did not decode as JSON for usage accounting (provider %q): %v", providerName, unmarshalErr)
+		}
+	case result.isJSON:
+		g.logf("passthrough: response body exceeded %d bytes; falling back to an estimate (provider %q)", maxAccountingTeeBytes, providerName)
+	default: // result.isSSE
+		respUsage, respModel = extractPassthroughSSEUsage(adapter.typeName(), providerName, result.sseTee.head.Bytes(), result.sseTee.tailBytes())
 	}
+
+	if respUsage.total() == 0 {
+		// Verify-core fix (round 4): the estimate below is only a valid
+		// stand-in for real usage when the upstream actually accepted
+		// the request (2xx) AND either the response is SSE (whose usage
+		// event may simply not have arrived yet in the parsed window) or
+		// the JSON body was cut short — by the tee cap (result.tee.
+		// truncated) or by the copy itself aborting (!complete: a client
+		// cancel mid-copy, or a watchdog/transport error after headers
+		// were already written). A complete 2xx JSON body that simply
+		// has no usage field (file uploads, audio transcriptions,
+		// moderations, batches, assistants) must stay a true accounting
+		// no-op, exactly as before this fix — estimating from its body
+		// size charged a 4 MiB upload roughly 1M phantom prompt tokens.
+		// A 4xx/5xx JSON error body must never be estimated either: the
+		// upstream billed nothing for a rejected request, so neither
+		// should this gateway.
+		is2xx := result.status >= 200 && result.status < 300
+		copyAborted := !complete
+		canEstimate := is2xx && (result.isSSE || (result.isJSON && (result.tee.truncated || copyAborted)))
+		if !canEstimate || result.requestBytes <= 0 {
+			return
+		}
+		respUsage = usage{prompt: int64(math.Ceil(float64(result.requestBytes) / 4)), estimated: true}
+		if respModel == "" {
+			respModel = "unknown/" + providerName
+		}
+		g.logf("passthrough: usage for provider %q logged as estimated (%d prompt tokens derived from request body size, not the provider's reported usage)", providerName, respUsage.prompt)
+	}
+
 	canonical := providerName + "/" + respModel
-	cost := unifiedCostMicros(canonical, respModel, respUsage, g.cfg.Pricing)
+	cost := unifiedCostMicros(canonical, respModel, respUsage, g.cfg.Pricing, g.cfg.ModelMeta, g.pricingWarn)
 	// withModelScope drops the model scope when respModel is empty (the
 	// upstream reported no model id), so a passthrough reply the gateway
 	// cannot attribute still accounts to user/group/total as before.
@@ -1023,12 +1337,16 @@ func (g *Gateway) handlePassthrough(w http.ResponseWriter, r *http.Request, u *u
 
 // proxyResult is what proxyUpstream reports back to its caller once it has
 // streamed a response to the client: enough for a caller that wants
-// best-effort JSON usage accounting (handlePassthrough) to run it, without
-// proxyUpstream itself knowing anything about usage or pricing. tee is
-// nil unless accountJSON was true and the response's Content-Type was
-// application/json.
+// best-effort JSON/SSE usage accounting (handlePassthrough) to run it,
+// without proxyUpstream itself knowing anything about usage or pricing.
+// tee is nil unless accountJSON was true and the response's Content-Type
+// was application/json (finding 2 fix, review-routes.md). sseTee is its
+// SSE counterpart (verify-core fix, round 4): non-nil exactly when isSSE
+// is true, nil whenever tee is non-nil and vice versa — a response is
+// teed through at most one of the two buffer types, never both.
 type proxyResult struct {
-	tee *cappedAccountingBuffer
+	tee    *cappedAccountingBuffer
+	sseTee *sseAccountingBuffer
 	// status is the upstream response's own status code, once headers
 	// were actually written to w — 0 when proxyUpstream returned before
 	// ever writing them (a build/connection failure, or a client cancel
@@ -1037,10 +1355,29 @@ type proxyResult struct {
 	// target_health.go): ok=false alone conflates "the upstream never
 	// answered at all" with "it answered with a 5xx", which that
 	// feature's failure rule needs to distinguish. Field order (pointer,
-	// then int, then the two bools) is fieldalignment-sensitive, the same
-	// convention this package's other structs already follow.
+	// then the int fields, then the bools last) is fieldalignment-
+	// sensitive, the same convention this package's other structs
+	// already follow.
 	status int
-	isJSON bool
+	// requestBytes is the total number of bytes actually read from the
+	// client's own request body while forwarding it upstream (finding 2
+	// fix, review-routes.md) — cappedBodyReader's own running count,
+	// captured once the upstream call completes. It is the best
+	// available proxy for the client's own request size: proxyUpstream
+	// never buffers the request body into memory the way the unified
+	// routes' own decode step does, so there is no other length signal
+	// to derive a zero-usage response's own prompt-token estimate from.
+	// 0 whenever the request never had a body, or the upstream call
+	// failed before any of it was sent.
+	requestBytes int64
+	isJSON       bool
+	// isSSE mirrors isJSON for a text/event-stream response (finding 2
+	// fix): a streamed response is teed into result.tee the identical
+	// way a non-streaming JSON one already was, so handlePassthrough can
+	// parse usage out of the captured raw SSE bytes once the copy ends,
+	// instead of never accounting a streamed passthrough response at
+	// all.
+	isSSE bool
 	// clientCanceled is true exactly when either of proxyUpstream's own
 	// errors.Is(err, context.Canceled) branches fired — the CLIENT, not
 	// the upstream, ended the request, whether before the upstream call
@@ -1049,6 +1386,70 @@ type proxyResult struct {
 	// this case (handleTargetProxy's own doc comment, mcp_a2a.go): a
 	// client hanging up says nothing about the target's own health.
 	clientCanceled bool
+}
+
+// errPassthroughBodyTooLarge is cappedBodyReader's (below) terminal
+// error, surfacing through client.Do once a passthrough request body
+// delivers more than maxPassthroughBytes total (finding 8 fix, review-
+// routes.md): io.LimitReader, the previous mechanism, truncates silently
+// at its cap and reports a clean EOF regardless of whether the
+// underlying reader actually had more to give — so an oversized body
+// with unknown Content-Length (chunked transfer) previously completed as
+// a valid, silently-truncated upstream request instead of failing
+// loudly. A multipart audio upload over the cap, for instance, still
+// parsed a valid, truncated prefix and got transcribed with no error at
+// all.
+var errPassthroughBodyTooLarge = errors.New("llmgateway: passthrough request body exceeds the configured limit")
+
+// cappedBodyReader wraps r, tracking every byte actually read (via
+// bytesRead) and erroring with errPassthroughBodyTooLarge once more than
+// limit bytes have been delivered (finding 8 fix). It deliberately
+// requests one byte beyond limit from the underlying reader before
+// erroring — limit+1, not limit — so a body of EXACTLY limit bytes still
+// completes normally: the underlying reader's own clean EOF is what ends
+// it, never this cap, while a body with anything left beyond limit is
+// caught here as an error instead of a silent truncation.
+//
+// read is accessed via atomic.AddInt64/LoadInt64, not a bare field
+// (matching this package's own established convention — see
+// watchdogBody's identical reasoning, timeout.go): proxyUpstream reads
+// bytesRead() from a different goroutine's perspective than Read() runs
+// in, in the sense that Go's http.Transport can still be finishing a
+// request-body write in its own internal goroutine at the exact moment
+// client.Do returns and proxyUpstream inspects the total (verified
+// empirically: Go's Transport does not guarantee the body write
+// goroutine has fully synchronized before RoundTrip returns for every
+// response-arrives-early shape), so every access goes through atomic
+// operations to guarantee the caller sees the true final count.
+type cappedBodyReader struct {
+	r     io.Reader
+	limit int64
+	read  int64
+}
+
+// Read implements io.Reader.
+func (c *cappedBodyReader) Read(p []byte) (int, error) {
+	already := atomic.LoadInt64(&c.read)
+	if already > c.limit {
+		return 0, errPassthroughBodyTooLarge
+	}
+	if allowed := c.limit + 1 - already; int64(len(p)) > allowed {
+		p = p[:allowed]
+	}
+	n, err := c.r.Read(p)
+	total := atomic.AddInt64(&c.read, int64(n))
+	if total > c.limit && err == nil {
+		return n, errPassthroughBodyTooLarge
+	}
+	return n, err
+}
+
+// bytesRead reports the total number of bytes read so far, capped
+// implicitly at limit+1 by Read's own contract above — proxyUpstream's
+// own best-effort request-size signal (finding 2 fix) for
+// handlePassthrough's zero-usage estimate fallback.
+func (c *cappedBodyReader) bytesRead() int64 {
+	return atomic.LoadInt64(&c.read)
 }
 
 // proxyUpstream is the shared reverse-proxy core behind both native
@@ -1079,13 +1480,16 @@ type proxyResult struct {
 // no injected credential at all.
 //
 // The RESPONSE side is hardened too (security review finding 5, round 3,
-// 2026-08-22): every hop-by-hop header AND dangerousResponseHeaders
-// (Set-Cookie, Strict-Transport-Security, Content-Security-Policy) plus
+// 2026-08-22; account-identity headers added, review-routes finding 17,
+// 2026-09 review): every hop-by-hop header AND dangerousResponseHeaders
+// (Set-Cookie, Strict-Transport-Security, Content-Security-Policy,
+// Openai-Organization, Openai-Project, Anthropic-Organization-Id) plus
 // dangerousResponseHeaderPrefixes (Access-Control-*) are stripped before
 // the upstream's response headers reach the client, for BOTH callers —
 // an upstream provider or an in-cluster MCP/A2A target must never get to
-// plant a cookie or dictate a security/CORS policy on this gateway's own
-// origin merely by setting it on a response this function was only ever
+// plant a cookie, dictate a security/CORS policy on this gateway's own
+// origin, or leak the operator's own upstream account identity to the
+// tenant, merely by setting it on a response this function was only ever
 // asked to relay. See dangerousResponseHeaders' own doc comment for why
 // this is a narrow deny-list, not an allowlist.
 //
@@ -1113,8 +1517,25 @@ type proxyResult struct {
 // timeout at all), so both are covered the same way. The Transport-level
 // half (ResponseHeaderTimeout) is already set on client itself and needs
 // no separate wiring here.
+//
+// BODY SIZE (finding 8 fix, review-routes.md): a request whose declared
+// Content-Length already exceeds maxPassthroughBytes is rejected up
+// front with 413, before any request is even built — the cheapest
+// possible rejection. An unknown length (chunked transfer) is caught
+// mid-copy instead (net/http never reads past a declared Content-Length,
+// so an understated length cannot reach here), by cappedBodyReader (below): unlike the previous plain
+// io.LimitReader, which silently truncates at the cap and reports a
+// clean EOF regardless of whether more data actually existed, it errors
+// once more than the cap has been delivered, aborting the upstream
+// request instead of completing it against a silently truncated prefix
+// (a multipart audio upload over the cap previously still parsed a
+// valid, truncated body and got transcribed with no error at all).
 func (g *Gateway) proxyUpstream(w http.ResponseWriter, r *http.Request, upstreamURL string, client *http.Client, injectAuth func(*http.Request), extraStrip map[string]bool, accountJSON bool, logPrefix string, timeout time.Duration) (result proxyResult, ok bool) {
-	bodyReader := io.LimitReader(r.Body, maxPassthroughBytes)
+	if r.ContentLength > maxPassthroughBytes {
+		writeOAIError(w, http.StatusRequestEntityTooLarge, "invalid_request_error", "request body exceeds the maximum allowed size")
+		return proxyResult{}, false
+	}
+	body := &cappedBodyReader{r: r.Body, limit: maxPassthroughBytes}
 	// gosec G704 (SSRF via taint analysis) flags upstreamURL as
 	// request-derived: it is, by design — this is a reverse proxy, and its
 	// whole job is to forward a client-supplied path/query onto the
@@ -1138,20 +1559,18 @@ func (g *Gateway) proxyUpstream(w http.ResponseWriter, r *http.Request, upstream
 	// released either by watchdogBody (once resp.Body exists) or directly
 	// below, on a build/send failure that never produced a body to wrap.
 	reqCtx, cancel := context.WithCancel(r.Context())
-	upstreamReq, err := http.NewRequestWithContext(reqCtx, r.Method, upstreamURL, bodyReader) //nolint:gosec // operator-fixed host, rest is traversal-checked and forwarded escaped; see comment above
+	upstreamReq, err := http.NewRequestWithContext(reqCtx, r.Method, upstreamURL, body) //nolint:gosec // operator-fixed host, rest is traversal-checked and forwarded escaped; see comment above
 	if err != nil {
 		cancel()
 		g.errorf("%s: build upstream request: %v", logPrefix, err)
 		writeOAIError(w, http.StatusBadGateway, "server_error", "upstream connection error")
 		return proxyResult{}, false
 	}
+	// r.ContentLength is already <= maxPassthroughBytes here (the known-
+	// oversize case returned 413 above) or -1/unknown, so it is forwarded
+	// verbatim — no further adjustment needed now that cappedBodyReader,
+	// not a truncating io.LimitReader, is what actually bounds the body.
 	upstreamReq.ContentLength = r.ContentLength
-	if r.ContentLength < 0 || r.ContentLength > maxPassthroughBytes {
-		// Unknown or over-cap length: let the transport negotiate chunked
-		// transfer instead of advertising a Content-Length the capped
-		// bodyReader above may not actually deliver.
-		upstreamReq.ContentLength = -1
-	}
 	copyHeadersExcept(upstreamReq.Header, r.Header, hopByHopHeaders, gatewayCredentialHeaders, clientNegotiationHeaders, dangerousClientHeaders, extraStrip)
 	stripHeaderPrefixes(upstreamReq.Header, dangerousClientHeaderPrefixes)
 	if injectAuth != nil {
@@ -1187,13 +1606,40 @@ func (g *Gateway) proxyUpstream(w http.ResponseWriter, r *http.Request, upstream
 	if rec != nil {
 		rec(resp, err)
 	}
+	// requestBytes is captured now, regardless of how this call resolves:
+	// client.Do fully drains a request body with a Content-Length (or
+	// hits the reader's own terminal error/EOF for a chunked one) before
+	// it can return at all, so cappedBodyReader's running count is
+	// already final by this point (finding 2 fix, review-routes.md —
+	// this is proxyUpstream's own best-effort request-size signal for
+	// handlePassthrough's zero-usage estimate fallback).
+	requestBytes := body.bytesRead()
 	if err != nil {
 		cancel()
 		if errors.Is(err, context.Canceled) {
 			g.logf("%s: client canceled request: %v", logPrefix, err)
 			return proxyResult{clientCanceled: true}, false
 		}
-		g.errorf("%s: upstream connection error: %v", logPrefix, err)
+		if errors.Is(err, errPassthroughBodyTooLarge) {
+			// Finding 8 fix (review-routes.md): the client's body exceeded
+			// maxPassthroughBytes with an unknown (chunked)
+			// Content-Length — cappedBodyReader's own error aborted the
+			// upstream request before it could complete against a
+			// silently truncated prefix. 413, not the generic 502 the
+			// branch below would otherwise answer with.
+			g.logf("%s: request body exceeded %d bytes; rejecting", logPrefix, maxPassthroughBytes)
+			writeOAIError(w, http.StatusRequestEntityTooLarge, "invalid_request_error", "request body exceeds the maximum allowed size")
+			return proxyResult{}, false
+		}
+		// P4 (review round 4): upstreamURL carries the merged target
+		// query string — this gateway's own credential channel for an
+		// MCP/A2A target (mcp_a2a.go), and for a provider it is
+		// adapter.base() plus the client's own path/query — and err
+		// here is commonly a *url.Error wrapping it verbatim. Scrubbed
+		// the same way every other target/upstream-URL-bearing log line
+		// in this codebase is (sanitizeBaseURL/sanitizeProviderErr,
+		// admin.go).
+		g.errorf("%s: upstream connection error: %v", logPrefix, sanitizeProviderErr(err.Error(), upstreamURL))
 		writeOAIError(w, http.StatusBadGateway, "server_error", "upstream connection error")
 		return proxyResult{}, false
 	}
@@ -1213,17 +1659,33 @@ func (g *Gateway) proxyUpstream(w http.ResponseWriter, r *http.Request, upstream
 	w.WriteHeader(resp.StatusCode)
 	fw := newFlushWriter(w)
 
-	// Only a non-streaming JSON response gets teed off for best-effort
-	// accounting, and only when the caller wants that at all (accountJSON);
-	// every other response streams straight through fw with no extra
-	// buffering — a large or slow upstream body must never sit waiting for
-	// full receipt before the client sees its first byte.
+	// A non-streaming JSON response, or an SSE stream (isSSE — finding 2
+	// fix, review-routes.md: previously only isJSON was teed at all, so a
+	// streamed passthrough response was never accounted for anything past
+	// the request itself), gets teed off for best-effort accounting, and
+	// only when the caller wants that at all (accountJSON); every other
+	// response streams straight through fw with no extra buffering — a
+	// large or slow upstream body must never sit waiting for full receipt
+	// before the client sees its first byte. Bytes reaching the CLIENT
+	// are unaffected either way: the tee only ever observes a copy of
+	// what fw already wrote. JSON keeps the flat, 4MiB-capped
+	// cappedAccountingBuffer; SSE uses the bounded head+tail
+	// sseAccountingBuffer instead (verify-core fix, round 4 —
+	// sseAccountingHeadBytes' own doc comment), since a streamed usage
+	// event arrives at the very END and a single front-loaded cap loses
+	// it on any stream longer than that cap.
 	isJSON := accountJSON && strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "application/json")
+	isSSE := accountJSON && strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "text/event-stream")
 	var tee *cappedAccountingBuffer
+	var sseTee *sseAccountingBuffer
 	var reader io.Reader = resp.Body
-	if isJSON {
+	switch {
+	case isJSON:
 		tee = &cappedAccountingBuffer{}
 		reader = io.TeeReader(resp.Body, tee)
+	case isSSE:
+		sseTee = &sseAccountingBuffer{}
+		reader = io.TeeReader(resp.Body, sseTee)
 	}
 
 	if _, err := io.Copy(fw, reader); err != nil {
@@ -1236,10 +1698,10 @@ func (g *Gateway) proxyUpstream(w http.ResponseWriter, r *http.Request, upstream
 		// — the latter falls through to the errorf below, unchanged.
 		if errors.Is(err, context.Canceled) {
 			g.logf("%s: client canceled request: %v", logPrefix, err)
-			return proxyResult{isJSON: isJSON, tee: tee, status: resp.StatusCode, clientCanceled: true}, false
+			return proxyResult{isJSON: isJSON, isSSE: isSSE, tee: tee, sseTee: sseTee, status: resp.StatusCode, clientCanceled: true, requestBytes: requestBytes}, false
 		}
 		g.errorf("%s: stream response body: %v", logPrefix, err)
-		return proxyResult{isJSON: isJSON, tee: tee, status: resp.StatusCode}, false
+		return proxyResult{isJSON: isJSON, isSSE: isSSE, tee: tee, sseTee: sseTee, status: resp.StatusCode, requestBytes: requestBytes}, false
 	}
-	return proxyResult{isJSON: isJSON, tee: tee, status: resp.StatusCode}, true
+	return proxyResult{isJSON: isJSON, isSSE: isSSE, tee: tee, sseTee: sseTee, status: resp.StatusCode, requestBytes: requestBytes}, true
 }

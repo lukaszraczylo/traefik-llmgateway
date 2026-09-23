@@ -114,6 +114,18 @@ func (a *geminiAdapter) chatCompletion(ctx context.Context, w http.ResponseWrite
 	}
 	delete(req, gatewayAliasKey)
 	streaming, _ := req["stream"].(bool)
+	// clientAskedUsage (M1 fix): stream_options.include_usage is an
+	// OpenAI-wire field with no Gemini equivalent, so
+	// geminiRequestFromOpenAI never forwards it upstream — it must be read
+	// here, before translation, so forwardStream knows whether to
+	// synthesize the final usage-only chunk OpenAI-compatible clients
+	// expect.
+	clientAskedUsage := false
+	if streaming {
+		if so, ok := req["stream_options"].(map[string]any); ok {
+			clientAskedUsage = isTruthy(so["include_usage"])
+		}
+	}
 
 	body, err := geminiRequestFromOpenAI(req)
 	if err != nil {
@@ -146,7 +158,7 @@ func (a *geminiAdapter) chatCompletion(ctx context.Context, w http.ResponseWrite
 	}
 
 	if streaming && strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "text/event-stream") {
-		return a.forwardStream(w, resp.Body, responseModel)
+		return a.forwardStream(w, resp.Body, responseModel, clientAskedUsage)
 	}
 	// Either a non-streaming request, or a streaming one whose upstream
 	// ignored stream=true and answered with a normal JSON body.
@@ -191,7 +203,15 @@ func (a *geminiAdapter) forwardJSON(w http.ResponseWriter, resp *http.Response, 
 // signals the stream ended. On a translate error (a malformed chunk, or a
 // genuine stream read error), forwardStream returns without writing
 // "[DONE]".
-func (a *geminiAdapter) forwardStream(w http.ResponseWriter, body io.Reader, gatewayModel string) (usage, error) {
+//
+// clientAskedUsage (M1 fix), when true, makes forwardStream write one
+// extra chunk — st.usageChunk(), empty "choices" plus the accumulated
+// usage — right before "[DONE]", the same final shape an OpenAI-type
+// upstream sends when stream_options.include_usage is set
+// (provider_openai.go's forwardStream). Gemini's own stream never carries
+// such a chunk, so this adapter synthesizes it instead of relying on
+// anything upstream.
+func (a *geminiAdapter) forwardStream(w http.ResponseWriter, body io.Reader, gatewayModel string, clientAskedUsage bool) (usage, error) {
 	st := newGeminiStreamState(gatewayModel, time.Now().Unix())
 	sw := newSSEWriter(w)
 
@@ -206,6 +226,11 @@ func (a *geminiAdapter) forwardStream(w http.ResponseWriter, body io.Reader, gat
 	})
 	if err != nil {
 		return st.usage(), fmt.Errorf("%w: stream: %w", errUpstream, err)
+	}
+	if clientAskedUsage {
+		if werr := sw.writeData(st.usageChunk()); werr != nil {
+			return st.usage(), fmt.Errorf("%w: stream: %w", errUpstream, werr)
+		}
 	}
 	sw.writeDone()
 	return st.usage(), nil
@@ -343,41 +368,79 @@ func (a *geminiAdapter) audioTranscription(_ context.Context, _ http.ResponseWri
 
 // geminiModelsListPayload is the "models": [{"name": "models/..."}, ...]
 // shape Gemini's models.list endpoint returns (its "name" field is the
-// full "models/{model}" resource name, unlike OpenAI's bare "id").
+// full "models/{model}" resource name, unlike OpenAI's bare "id"), plus
+// the cursor-pagination field (M7 fix) the endpoint adds on top —
+// nextPageToken, paired with the pageToken query parameter the next
+// page's request carries.
 type geminiModelsListPayload struct {
-	Models []struct {
+	NextPageToken string `json:"nextPageToken"`
+	Models        []struct {
 		Name string `json:"name"`
 	} `json:"models"`
 }
 
+// geminiListModelsPageCap bounds how many pages listModels follows (M7
+// fix): a misbehaving upstream that always returns a non-empty
+// nextPageToken would otherwise page forever. 20 pages covers a large
+// catalog without risking an unbounded discovery loop against a single
+// provider.
+const geminiListModelsPageCap = 20
+
 // listModels implements providerAdapter: GET {base}/v1beta/models,
 // stripping the "models/" prefix off each entry's "name" to return bare
 // model ids, matching the shape openai-type and anthropic-type adapters
-// both return.
+// both return, following Gemini's nextPageToken cursor pagination (M7
+// fix) via the pageToken query parameter, up to geminiListModelsPageCap
+// pages.
 func (a *geminiAdapter) listModels(ctx context.Context) ([]string, error) {
-	resp, err := upstreamJSON(ctx, a.client, http.MethodGet, a.baseURL+"/v1beta/models", a.requestHeaders(false), nil, a.retry, a.timeout, a.adapterName)
+	var ids []string
+	pageToken := ""
+	for page := 0; page < geminiListModelsPageCap; page++ {
+		pageIDs, nextPageToken, err := a.listModelsPage(ctx, pageToken)
+		if err != nil {
+			return nil, err
+		}
+		ids = append(ids, pageIDs...)
+		if nextPageToken == "" {
+			break
+		}
+		pageToken = nextPageToken
+	}
+	return ids, nil
+}
+
+// listModelsPage fetches one page of Gemini's /v1beta/models, starting
+// at pageToken (empty for the first page), and returns that page's bare
+// model ids alongside nextPageToken for listModels' own pagination loop
+// above.
+func (a *geminiAdapter) listModelsPage(ctx context.Context, pageToken string) (ids []string, nextPageToken string, err error) {
+	endpoint := a.baseURL + "/v1beta/models"
+	if pageToken != "" {
+		endpoint += "?pageToken=" + url.QueryEscape(pageToken)
+	}
+	resp, err := upstreamJSON(ctx, a.client, http.MethodGet, endpoint, a.requestHeaders(false), nil, a.retry, a.timeout, a.adapterName)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	defer resp.Body.Close() //nolint:errcheck
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, newProviderHTTPError(resp)
+		return nil, "", newProviderHTTPError(resp)
 	}
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
 	if err != nil {
-		return nil, fmt.Errorf("%w: read response body: %w", errUpstream, err)
+		return nil, "", fmt.Errorf("%w: read response body: %w", errUpstream, err)
 	}
 
 	var payload geminiModelsListPayload
 	if err := json.Unmarshal(body, &payload); err != nil {
-		return nil, fmt.Errorf("%w: decode models response: %w", errUpstream, err)
+		return nil, "", fmt.Errorf("%w: decode models response: %w", errUpstream, err)
 	}
 
-	ids := make([]string, len(payload.Models))
+	ids = make([]string, len(payload.Models))
 	for i, m := range payload.Models {
 		ids[i] = strings.TrimPrefix(m.Name, "models/")
 	}
-	return ids, nil
+	return ids, payload.NextPageToken, nil
 }

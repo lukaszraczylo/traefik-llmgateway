@@ -934,7 +934,9 @@ func TestValidateConfigName(t *testing.T) {
 		{"provider", "v1", true},          // reserved: unified API namespace
 		{"provider", "mcp", true},         // reserved: MCP target-proxy prefix
 		{"provider", "a2a", true},         // reserved: A2A target-proxy prefix
+		{"provider", "admin", true},       // reserved: admin dashboard's own fixed routes (review-auth.md F9)
 		{"mcpServers", "v1", true},        // same reserved set applies to every kind
+		{"mcpServers", "admin", true},
 		{"agents", "a2a", true},
 		{"provider", ".", true},    // dot-only: matches configNamePattern's character class but rejected anyway
 		{"provider", "..", true},   // dot-only: same
@@ -962,6 +964,7 @@ func TestBuildAdapters_RejectsReservedOrInvalidProviderName(t *testing.T) {
 		{"v1"},
 		{"mcp"},
 		{"a2a"},
+		{"admin"},
 		{"has a space"},
 	}
 	for _, tt := range tests {

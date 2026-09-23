@@ -31,6 +31,24 @@ func (g *Gateway) errorf(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, "llmgw[%s] ERROR %s\n", g.name, fmt.Sprintf(format, args...))
 }
 
+// pricingWarn is g's own per-instance pricing-warning sink, passed to
+// costMicrosKnownFor (pricing.go) so an unpriced-model warning always logs
+// under this instance's `llmgw[name]` prefix (finding F11 / review-auth
+// F8, 2026-09 review: a package-level warn func replaced on every New()
+// call made the most recently constructed instance log every other
+// instance's warnings).
+//
+// A plain method, not a stored closure field: it reads g.name fresh on
+// every call, exactly like logf/warnf/errorf above, so there is nothing
+// new to keep in sync across a config reload that rebuilds g.
+func (g *Gateway) pricingWarn(msg string) {
+	if msg == warnCapMessage {
+		g.logf("%s", msg)
+		return
+	}
+	g.logf("pricing: no price configured for model %q; cost will be recorded as 0", msg)
+}
+
 // logAuthEvent logs one authentication attempt, at the point one of
 // authStore.identify's six call sites resolves it. A success logs the
 // resolved user's name alongside the request's method and path. Neither

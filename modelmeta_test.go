@@ -388,3 +388,71 @@ func TestValidateModelMeta(t *testing.T) {
 		}
 	})
 }
+
+// TestPriceKnown covers priceKnown's own layering (review-auth finding
+// F1, 2026-09 audit): a pricing override or the built-in tables (via
+// lookupPricing) count as known, and — the fix itself — a modelMeta entry
+// marked Free counts as known too, checked by canonical id first and bare
+// id second, matching modelPriceKnown's own two-id order
+// (routes_unified.go).
+func TestPriceKnown(t *testing.T) {
+	t.Run("no pricing and no modelMeta is unknown", func(t *testing.T) {
+		if priceKnown("openai/totally-unpriced", "totally-unpriced", nil, nil) {
+			t.Error("want unknown")
+		}
+	})
+
+	t.Run("builtin pricing table via bare id counts as known", func(t *testing.T) {
+		if !priceKnown("openai/gpt-5", "gpt-5", nil, nil) {
+			t.Error("want known: gpt-5 is in builtinPricing")
+		}
+	})
+
+	t.Run("pricing override via canonical id counts as known", func(t *testing.T) {
+		overrides := map[string]*ModelPricing{"local/my-model": {InputPerM: 1, OutputPerM: 1}}
+		if !priceKnown("local/my-model", "my-model", overrides, nil) {
+			t.Error("want known: override keyed on the canonical id")
+		}
+	})
+
+	t.Run("modelMeta free:true via canonical id counts as known (the fix)", func(t *testing.T) {
+		meta := map[string]*ModelMetaConfig{"local/free-model": {Free: true}}
+		if !priceKnown("local/free-model", "free-model", nil, meta) {
+			t.Error("want known: modelMeta declares this model free")
+		}
+	})
+
+	t.Run("modelMeta free:true via bare id counts as known", func(t *testing.T) {
+		meta := map[string]*ModelMetaConfig{"free-model": {Free: true}}
+		if !priceKnown("local/free-model", "free-model", nil, meta) {
+			t.Error("want known: bare-id modelMeta entry applies wherever the id resolves")
+		}
+	})
+
+	t.Run("modelMeta entry without free:true does not count as known on its own", func(t *testing.T) {
+		meta := map[string]*ModelMetaConfig{"local/ctx-only": {ContextTokens: 8000}}
+		if priceKnown("local/ctx-only", "ctx-only", nil, meta) {
+			t.Error("want unknown: a context-only modelMeta entry says nothing about price")
+		}
+	})
+
+	t.Run("provider/model entry decides over a bare free:true entry, matching /v1/models display", func(t *testing.T) {
+		meta := map[string]*ModelMetaConfig{
+			"gpt-oss-120b":      {Free: true},
+			"groq/gpt-oss-120b": {ContextTokens: 131072},
+		}
+		if modelMetaFree("groq/gpt-oss-120b", "gpt-oss-120b", meta) {
+			t.Error("want not free: the exact provider/model entry wins, as lookupModelMetaConfig does for display")
+		}
+		if !modelMetaFree("local/gpt-oss-120b", "gpt-oss-120b", meta) {
+			t.Error("want free: no provider/model entry, so the bare free:true entry applies")
+		}
+	})
+
+	t.Run("nil modelMeta entry pointer is not dereferenced", func(t *testing.T) {
+		meta := map[string]*ModelMetaConfig{"local/nil-entry": nil}
+		if priceKnown("local/nil-entry", "nil-entry", nil, meta) {
+			t.Error("want unknown: a nil map entry must not be treated as free")
+		}
+	})
+}

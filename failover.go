@@ -222,11 +222,16 @@ func (m *modelRegistry) resolvePrimaryOnly(id string, grp *group) (resolveCandid
 // Only grp.allowsProvider is re-checked per candidate FOR A SINGLE-GRANT
 // PRINCIPAL (grp.grantCount() == 1 — the overwhelmingly common case,
 // unchanged from before the multi-group/personal-grant feature existed):
-// grp.allowsModel is already known true from the primary winner's own
-// successful resolve call, and — for the identical bare id string every
-// candidate here shares by construction — allowsModel's result does not
-// vary by provider (auth.go's allowsModel takes no provider argument),
-// so re-checking it per candidate would be redundant work, not a
+// the bare id's own model-glob match is already known true from the
+// primary winner's own successful resolve call (which goes through
+// grp.allowsProviderModel, auth.go — the standalone group.allowsModel
+// this comment used to name was removed as dead code, review-auth
+// finding F6: every production model check already went through a
+// per-grant method), and — for the identical bare id string every
+// candidate here shares by construction — a single grant's model-glob
+// match does not vary by provider (allowsProviderModel matches grp.
+// providers and grp.models independently for the single-grant case), so
+// re-checking it per candidate would be redundant work, not a
 // correctness gap.
 //
 // A MULTI-GRANT principal (more than one member group and/or a personal
@@ -501,6 +506,51 @@ func failoverEligible(callErr error) bool {
 	return true
 }
 
+// requestHealthOutcome classifies callErr for requestHealthTracker.record
+// (finding 16 fix, review-routes.md): record is boolean (success/
+// failure), but !failoverEligible(callErr) alone — the previous call-site
+// shape — conflates two different meanings of "not eligible for
+// failover" into one "success". A context.Canceled means the CLIENT
+// walked away; it says nothing about whether the provider would have
+// succeeded, so recording it as a provider success can reset
+// consecutiveFailures and close an open breaker for a provider that is,
+// in fact, still failing every request an attentive client stays around
+// for. A *translateError or *responseTranslationError is this GATEWAY's
+// own code failing on an already-decoded/already-received request — not
+// a signal about the provider's availability at all, per
+// failoverEligible's own doc comment. errRequestBuildFailed (verify-core
+// fix, round 4) is the SAME "says nothing about the provider" shape:
+// http.NewRequestWithContext rejecting this candidate's own configured
+// base URL/method is a construction-time defect in THIS gateway's config
+// for that candidate, not a network round trip the provider ever saw —
+// before this fix, !failoverEligible(callErr) below returned true for
+// it (failoverEligible itself reports false — not eligible for
+// failover — for the OPPOSITE reason: retrying an identically malformed
+// request wastes attempts, not because it is evidence of health),
+// inverting to record it as a provider SUCCESS and resetting
+// consecutiveFailures/closing an open breaker for a candidate that
+// never actually got called. record reports false, meaning "do not
+// record anything" (a tri-state without a third bool: the caller skips
+// the record call entirely), for all three cases; every other outcome
+// keeps using failoverEligible's existing classification unchanged,
+// since a genuine HTTP 400 (or a candidate that succeeded outright)
+// legitimately says something about the provider.
+func requestHealthOutcome(callErr error) (success, record bool) {
+	if callErr == nil {
+		return true, true
+	}
+	if errors.Is(callErr, context.Canceled) || errors.Is(callErr, errRequestBuildFailed) {
+		return false, false
+	}
+	if _, ok := callErr.(*translateError); ok {
+		return false, false
+	}
+	if _, ok := callErr.(*responseTranslationError); ok {
+		return false, false
+	}
+	return !failoverEligible(callErr), true
+}
+
 // isProviderNotFoundError reports whether err is a *providerHTTPError
 // carrying HTTP 404 — routes_unified.go's runMeteredCall uses this to
 // decide when a failover needs its own loud, non-suppressed log line
@@ -597,24 +647,30 @@ func (t *requestHealthTracker) stateFor(provider string) *requestHealthState {
 // exactly once per candidate per client request, after call() has
 // already exhausted whatever same-provider retries retryPolicy.do
 // performed internally (routes_unified.go's runMeteredCall), never once
-// per raw upstream attempt. success=false must be
-// !failoverEligible(callErr) (routes_unified.go/failover.go's own
-// classification of the FINAL adapter-level error) — adversarial-review
-// ruling (F3/F6): an EARLIER version fed this from isTransient(resp,
-// err) || isDeadlineExceeded(err), limits.go/retry.go's own
-// retry-shaped classification, once per RAW attempt inside
-// retryPolicy.do. That was wrong on two counts. isTransient treats a
-// non-429 4xx as "the provider answered correctly to a request it did
-// not like" — correct for deciding whether retrying the SAME provider
-// is worth it, wrong for deciding whether the POOL should route around
-// it: a provider whose API key is dead answers 401 to every request and
-// must eventually be skipped, not retried forever, which is exactly the
-// "masking a broken provider key" risk this feature exists to reduce.
-// And recording per raw attempt let ONE client request with
-// retry.enabled (attempts: 3) report FOUR failures against a threshold
-// documented as three REQUESTS. failoverEligible already classifies
-// "everything except HTTP 400" as a failure, matching what this gate
-// needs with no separate function required.
+// per raw upstream attempt. Callers derive success from
+// requestHealthOutcome(callErr), above (finding 16 fix, review-
+// routes.md): that helper's own success return is
+// !failoverEligible(callErr) — adversarial-review ruling (F3/F6): an
+// EARLIER version fed this from isTransient(resp, err) ||
+// isDeadlineExceeded(err), limits.go/retry.go's own retry-shaped
+// classification, once per RAW attempt inside retryPolicy.do. That was
+// wrong on two counts. isTransient treats a non-429 4xx as "the provider
+// answered correctly to a request it did not like" — correct for
+// deciding whether retrying the SAME provider is worth it, wrong for
+// deciding whether the POOL should route around it: a provider whose API
+// key is dead answers 401 to every request and must eventually be
+// skipped, not retried forever, which is exactly the "masking a broken
+// provider key" risk this feature exists to reduce. And recording per
+// raw attempt let ONE client request with retry.enabled (attempts: 3)
+// report FOUR failures against a threshold documented as three REQUESTS.
+// failoverEligible already classifies "everything except HTTP 400" as a
+// failure, matching what this gate needs with no separate function
+// required — requestHealthOutcome's own additional filtering (skip a
+// client cancel or a gateway-side translation error entirely, rather
+// than recording either as a provider success) is what THIS record
+// method must never see: it trusts success at face value and has no way
+// to tell "the provider genuinely succeeded" apart from "the caller
+// decided not to blame the provider" on its own.
 //
 // requestBreakerFailureThreshold consecutive failures opens the breaker
 // for requestBreakerOpenDuration. While open, healthy (below) reports

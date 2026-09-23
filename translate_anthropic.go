@@ -147,8 +147,16 @@ func anthropicImageSourceFromDataURI(uri string) (map[string]any, error) {
 	if !ok {
 		return nil, &translateError{msg: "malformed data: URI in image_url"}
 	}
-	mediaType, ok := strings.CutSuffix(header, ";base64")
-	if !ok {
+	// L2 fix: media_type is everything before the FIRST ";" after
+	// "data:" — any further parameters are stripped rather than left
+	// attached, mirroring geminiInlineDataFromDataURI's identical parsing
+	// (translate_gemini.go) and reusing its dataURIHasBase64Param helper.
+	// The previous strings.CutSuffix(header, ";base64") only stripped a
+	// trailing ";base64" token, so a header carrying an earlier parameter
+	// too ("image/png;charset=x;base64") left media_type as
+	// "image/png;charset=x" — a value Anthropic rejects.
+	mediaType, rawParams, _ := strings.Cut(header, ";")
+	if !dataURIHasBase64Param(rawParams) {
 		return nil, &translateError{msg: "data: URI in image_url must be base64-encoded"}
 	}
 	return map[string]any{"type": "base64", "media_type": mediaType, "data": data}, nil
@@ -295,17 +303,20 @@ func systemTextFromContentParts(parts []any) (string, error) {
 }
 
 // anthropicToolChoiceFromOpenAI maps OpenAI's "tool_choice" to Anthropic's
-// tool_choice object, and reports whether "tools" must be dropped from the
-// request. Per the mapping table, tool_choice:"none" has no valid
-// Anthropic {"type":"none"} equivalent for this translator to use, so
-// "none" is expressed by omitting "tools" (and "tool_choice") entirely
-// instead.
+// tool_choice object, and reports whether "tools" should be dropped from
+// the request. tool_choice:"none" maps to Anthropic's own
+// {"type":"none"} (M2 fix — Anthropic does support it) and requests
+// "tools" be dropped by default; the caller (anthropicRequestFromOpenAI)
+// overrides that back to false when the conversation history carries
+// tool_use/tool_result blocks, since Anthropic requires the tools those
+// blocks reference to still be defined even while tool_choice forbids
+// calling them again.
 func anthropicToolChoiceFromOpenAI(tc any) (choice map[string]any, dropTools bool) {
 	switch t := tc.(type) {
 	case string:
 		switch t {
 		case "none":
-			return nil, true
+			return map[string]any{"type": "none"}, true
 		case "auto":
 			return map[string]any{"type": "auto"}, false
 		case "required":
@@ -382,6 +393,13 @@ func anthropicRequestFromOpenAI(req map[string]any) (map[string]any, error) {
 	// messages must collapse into one Anthropic user turn carrying N
 	// tool_result blocks, not N separate user turns.
 	var pendingToolResults []any
+	// historyHasToolBlocks (M2 fix) latches true when any message in this
+	// request carries a tool_use/tool_result-shaped block once translated
+	// — an assistant message with tool_calls, or any role:"tool" message.
+	// anthropicRequestFromOpenAI reads this after the loop to decide
+	// whether tool_choice:"none" may still drop "tools" from the outgoing
+	// request; see anthropicToolChoiceFromOpenAI's doc comment.
+	historyHasToolBlocks := false
 	flushPendingToolResults := func() {
 		if len(pendingToolResults) == 0 {
 			return
@@ -395,7 +413,10 @@ func anthropicRequestFromOpenAI(req map[string]any) (map[string]any, error) {
 			continue
 		}
 		switch role, _ := msg["role"].(string); role {
-		case "system":
+		case "system", "developer":
+			// "developer" is the OpenAI o-series/gpt-5 replacement for
+			// "system" — Anthropic has no separate developer role, so it
+			// folds into the same top-level "system" text field.
 			switch c := msg["content"].(type) {
 			case string:
 				systemParts = append(systemParts, c)
@@ -408,12 +429,18 @@ func anthropicRequestFromOpenAI(req map[string]any) (map[string]any, error) {
 			}
 		case "user", "assistant":
 			flushPendingToolResults()
+			if role == "assistant" {
+				if tc, _ := msg["tool_calls"].([]any); len(tc) > 0 {
+					historyHasToolBlocks = true
+				}
+			}
 			am, err := anthropicMessageFromOpenAI(msg, role)
 			if err != nil {
 				return nil, err
 			}
 			anthMsgs = append(anthMsgs, am)
 		case "tool":
+			historyHasToolBlocks = true
 			pendingToolResults = append(pendingToolResults, anthropicToolResultBlock(msg))
 		}
 	}
@@ -459,7 +486,21 @@ func anthropicRequestFromOpenAI(req map[string]any) (map[string]any, error) {
 	if tc, ok := req["tool_choice"]; ok {
 		var choice map[string]any
 		choice, dropTools = anthropicToolChoiceFromOpenAI(tc)
-		if choice != nil {
+		// M2 fix: tool_choice:"none" only drops "tools" when the history
+		// has no tool_use/tool_result blocks of its own — see
+		// anthropicToolChoiceFromOpenAI's doc comment.
+		if dropTools && historyHasToolBlocks {
+			dropTools = false
+		}
+		// M2 fix (review round 4): tool_choice must be omitted too,
+		// whenever tools end up dropped — Anthropic's API rejects a
+		// tool_choice sent without "tools" in the same request. This
+		// restores the pre-M2 wire shape (both fields absent) for the
+		// common case, a "none" request whose history never used a
+		// tool; {"type":"none"} is sent — alongside "tools", never
+		// without it — only when the history's own tool_use/tool_result
+		// blocks forced dropTools back to false just above.
+		if choice != nil && !dropTools {
 			out["tool_choice"] = choice
 		}
 	}
@@ -528,15 +569,30 @@ type anthropicResponseBody struct {
 
 // anthropicFinishReason maps an Anthropic stop_reason to an OpenAI
 // finish_reason: max_tokens -> "length", tool_use -> "tool_calls",
-// end_turn and stop_sequence both -> "stop". An unrecognized value
-// defaults to "stop", the OpenAI-safe default for a completed turn.
+// refusal -> "content_filter" (L1 fix). end_turn, stop_sequence,
+// pause_turn, and any unrecognized value all default to "stop", the
+// OpenAI-safe default for a completed turn.
 func anthropicFinishReason(stopReason string) string {
 	switch stopReason {
 	case "max_tokens":
 		return "length"
 	case "tool_use":
 		return "tool_calls"
+	case "refusal":
+		// L1 fix: Anthropic's "refusal" stop_reason (the model declined to
+		// continue, e.g. a safety refusal) has no dedicated OpenAI
+		// finish_reason — "content_filter" is the closest existing one and
+		// keeps a refusal from being reported as an ordinary successful
+		// completion.
+		return "content_filter"
 	default:
+		// "pause_turn" (a long-running server-side tool call paused, not
+		// finished) falls through here along with "end_turn"/
+		// "stop_sequence" and anything unrecognized — left as "stop" per
+		// review: there is no OpenAI finish_reason that means "paused, the
+		// client is expected to continue the turn", so mapping it to
+		// anything more specific than "stop" would not be a clear
+		// improvement.
 		return "stop"
 	}
 }
@@ -681,6 +737,35 @@ func (st *anthropicStreamState) chunk(delta map[string]any, finishReason *string
 		// delta is always built from this file's own map[string]any/string/
 		// int64 literals — never a value that can fail to marshal.
 		panic(fmt.Sprintf("llmgateway: anthropic stream chunk failed to marshal: %v", err))
+	}
+	return b
+}
+
+// usageChunk builds the final usage-only "chat.completion.chunk" payload —
+// empty "choices" plus a populated "usage" — mirroring the shape
+// provider_openai.go's forwardStream relays from a native OpenAI upstream
+// when stream_options.include_usage is set (M1 fix). Anthropic's own
+// stream has no equivalent chunk, so the adapter calls this once, after
+// the stream ends, only when the client asked for usage; st.u already
+// holds the message_start/message_delta totals by then.
+func (st *anthropicStreamState) usageChunk() []byte {
+	b, err := json.Marshal(map[string]any{
+		"id":      chatCompletionIDPrefix + st.id,
+		"object":  "chat.completion.chunk",
+		"created": st.created,
+		"model":   st.model,
+		"choices": []any{},
+		"usage": map[string]any{
+			"prompt_tokens":     st.u.prompt,
+			"completion_tokens": st.u.completion,
+			"total_tokens":      st.u.total(),
+		},
+	})
+	if err != nil {
+		// Built entirely from this file's own map[string]any/string/int64
+		// literals plus st.u's int64 fields — never a value that can fail
+		// to marshal.
+		panic(fmt.Sprintf("llmgateway: anthropic stream usage chunk failed to marshal: %v", err))
 	}
 	return b
 }
@@ -1015,9 +1100,16 @@ func openAIToolResultContentString(content any) string {
 // getting a 400 from OpenAI ("messages with role 'tool' must be a
 // response to a preceding message with 'tool_calls'"). Preserving
 // original order fixes both shapes without special-casing either.
-func openAIMessagesFromAnthropic(role string, content any) ([]any, error) {
+//
+// The second return value names every content-block "type" this function
+// saw but has no OpenAI equivalent for — "document", "thinking", and
+// "redacted_thinking" (L9 fix) — one entry per block TYPE encountered in
+// this message, matching the granularity openAIRequestFromAnthropic's own
+// "thinking"/"top_k" request-field checks use; the caller dedupes across
+// a whole request's messages before logging.
+func openAIMessagesFromAnthropic(role string, content any) ([]any, []string, error) {
 	if s, ok := content.(string); ok {
-		return []any{map[string]any{"role": role, "content": s}}, nil
+		return []any{map[string]any{"role": role, "content": s}}, nil, nil
 	}
 
 	blocksRaw, ok := content.([]any)
@@ -1025,10 +1117,11 @@ func openAIMessagesFromAnthropic(role string, content any) ([]any, error) {
 		// Absent or unrecognized content shape: an empty message rather
 		// than an error — mirrors anthropicMessageFromOpenAI's own
 		// tolerance of a missing "content" field above.
-		return []any{map[string]any{"role": role, "content": ""}}, nil
+		return []any{map[string]any{"role": role, "content": ""}}, nil, nil
 	}
 
 	var out []any
+	var dropped []string
 	var pendingContent []any
 	var pendingToolCalls []any
 	flushPending := func() {
@@ -1061,22 +1154,32 @@ func openAIMessagesFromAnthropic(role string, content any) ([]any, error) {
 		case "image":
 			part, err := openAIContentPartFromAnthropicImage(bm)
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			pendingContent = append(pendingContent, part)
 		case "tool_use":
 			tc, err := openAIToolCallFromAnthropic(bm)
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			pendingToolCalls = append(pendingToolCalls, tc)
 		case "tool_result":
 			flushPending()
 			out = append(out, openAIToolMessageFromAnthropic(bm))
+		default:
+			// L9 fix: "document", "thinking", "redacted_thinking", and any
+			// other block type this translator does not recognize — dropped
+			// silently before this fix, exactly like "thinking" at the
+			// request-field level was before item 11's own fix. bt=="" (no
+			// "type" field at all) is not reported: that is a malformed
+			// block, not a recognized-but-unsupported one.
+			if bt != "" {
+				dropped = append(dropped, bt)
+			}
 		}
 	}
 	flushPending()
-	return out, nil
+	return out, dropped, nil
 }
 
 // openAIToolsFromAnthropic maps Anthropic's tools[]{name, description,
@@ -1157,12 +1260,15 @@ func isOpenAIReasoningModel(model string) bool {
 // convention — for a content block this translator cannot map (an
 // unsupported image source type).
 //
-// The second return value lists request fields this translator
-// recognizes but has no OpenAI equivalent for and therefore dropped
-// (item 11 fix, 2026-08-22 review) — currently only "thinking"
-// (Anthropic's extended-thinking/reasoning-budget config). The caller
+// The second return value lists request fields (and, per L9's fix,
+// content-block types) this translator recognizes but has no OpenAI
+// equivalent for and therefore dropped (item 11 fix, 2026-08-22 review):
+// the top-level "thinking" and "top_k" fields, plus any "document"/
+// "thinking"/"redacted_thinking" content block openAIMessagesFromAnthropic
+// encountered — deduplicated across every message in the request, so a
+// transcript carrying ten thinking blocks still logs it once. The caller
 // (routes_messages.go's callTranslatedMessages) logs a warning per
-// dropped field rather than this function logging directly: every other
+// dropped entry rather than this function logging directly: every other
 // function in this file is a pure, Gateway-free translator, callable and
 // testable without a *Gateway instance, and this keeps it that way.
 func openAIRequestFromAnthropic(req map[string]any) (map[string]any, []string, error) {
@@ -1170,6 +1276,19 @@ func openAIRequestFromAnthropic(req map[string]any) (map[string]any, []string, e
 	modelStr, _ := req["model"].(string)
 	if modelStr != "" {
 		out["model"] = modelStr
+	}
+
+	// droppedSeen dedupes addDropped's calls (L9 fix): a block type
+	// appended once per message by openAIMessagesFromAnthropic, or a
+	// top-level field checked once below, must still log only once per
+	// request regardless of how many times it recurs.
+	var dropped []string
+	droppedSeen := map[string]bool{}
+	addDropped := func(name string) {
+		if !droppedSeen[name] {
+			droppedSeen[name] = true
+			dropped = append(dropped, name)
+		}
 	}
 
 	msgs := make([]any, 0, 1)
@@ -1190,11 +1309,14 @@ func openAIRequestFromAnthropic(req map[string]any) (map[string]any, []string, e
 			continue
 		}
 		role, _ := msg["role"].(string)
-		converted, err := openAIMessagesFromAnthropic(role, msg["content"])
+		converted, droppedBlocks, err := openAIMessagesFromAnthropic(role, msg["content"])
 		if err != nil {
 			return nil, nil, err
 		}
 		msgs = append(msgs, converted...)
+		for _, bt := range droppedBlocks {
+			addDropped(bt)
+		}
 	}
 	out["messages"] = msgs
 
@@ -1220,9 +1342,15 @@ func openAIRequestFromAnthropic(req map[string]any) (map[string]any, []string, e
 	if seqs, ok := req["stop_sequences"].([]any); ok && len(seqs) > 0 {
 		out["stop"] = seqs
 	}
-	if v, ok := req["stream"]; ok {
-		out["stream"] = v
-	}
+	// L10 fix: no "stream" copy here — routes_messages.go's
+	// isStreamingRequested check (its own doc comment) rejects any
+	// streaming /v1/messages request with a 400 before
+	// openAIRequestFromAnthropic ever runs, so req["stream"] reaching
+	// this point can only be absent, false, or null. Copying it through
+	// was dead code with no observable effect (the downstream adapter's
+	// own `streaming, _ := req["stream"].(bool)` treats all three
+	// identically to omitting the field outright) — removed rather than
+	// left in place, per this repo's dead-code-hygiene rule.
 
 	if toolsRaw, ok := req["tools"].([]any); ok {
 		out["tools"] = openAIToolsFromAnthropic(toolsRaw)
@@ -1230,6 +1358,13 @@ func openAIRequestFromAnthropic(req map[string]any) (map[string]any, []string, e
 	if tc, ok := req["tool_choice"]; ok {
 		if choice := openAIToolChoiceFromAnthropic(tc); choice != nil {
 			out["tool_choice"] = choice
+		} else if tm, ok := tc.(map[string]any); ok && tm["type"] == "none" {
+			// L9 fix: Anthropic's tool_choice {"type":"none"} has no
+			// OpenAI equivalent (openAIToolChoiceFromAnthropic's own doc
+			// comment) and was silently dropped — reported the same way
+			// "thinking"/"top_k" are, rather than left the one dropped
+			// field with no warning.
+			addDropped("tool_choice:none")
 		}
 	}
 
@@ -1239,9 +1374,15 @@ func openAIRequestFromAnthropic(req map[string]any) (map[string]any, []string, e
 		}
 	}
 
-	var dropped []string
 	if _, ok := req["thinking"]; ok {
-		dropped = append(dropped, "thinking")
+		addDropped("thinking")
+	}
+	// L9 fix: "top_k" was silently dropped, unlike "thinking", which
+	// already had this same reporting since item 11 (2026-08-22 review) —
+	// there is no OpenAI equivalent for Anthropic's top_k sampling
+	// parameter, so it is reported the identical way.
+	if _, ok := req["top_k"]; ok {
+		addDropped("top_k")
 	}
 
 	return out, dropped, nil

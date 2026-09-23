@@ -320,7 +320,10 @@ func geminiRequestFromOpenAI(req map[string]any) (map[string]any, error) {
 			continue
 		}
 		switch role, _ := msg["role"].(string); role {
-		case "system":
+		case "system", "developer":
+			// "developer" is the OpenAI o-series/gpt-5 replacement for
+			// "system" — Gemini has no separate developer role, so it
+			// folds into the same systemInstruction text.
 			switch c := msg["content"].(type) {
 			case string:
 				systemParts = append(systemParts, c)
@@ -451,9 +454,14 @@ type geminiCandidate struct {
 
 // geminiUsageMetadata is the "usageMetadata" object on a Gemini
 // GenerateContentResponse, non-streaming or streaming alike.
+// ThoughtsTokenCount is Gemini's reasoning/thinking token spend (2.5+
+// thinking models) — it is billed as output but is not included in
+// CandidatesTokenCount, so safeCompletion folds it into the completion
+// total rather than leaving it undercounted.
 type geminiUsageMetadata struct {
 	PromptTokenCount     int64 `json:"promptTokenCount"`
 	CandidatesTokenCount int64 `json:"candidatesTokenCount"`
+	ThoughtsTokenCount   int64 `json:"thoughtsTokenCount"`
 }
 
 // geminiGenerateContentResponse is the subset of a Gemini
@@ -627,12 +635,14 @@ func (m *geminiUsageMetadata) safePrompt() int64 {
 	return m.PromptTokenCount
 }
 
-// safeCompletion returns m.CandidatesTokenCount, or 0 when m is nil.
+// safeCompletion returns m.CandidatesTokenCount plus m.ThoughtsTokenCount
+// (thinking-model reasoning tokens, billed as output but reported
+// separately from CandidatesTokenCount), or 0 when m is nil.
 func (m *geminiUsageMetadata) safeCompletion() int64 {
 	if m == nil {
 		return 0
 	}
-	return m.CandidatesTokenCount
+	return m.CandidatesTokenCount + m.ThoughtsTokenCount
 }
 
 // geminiStreamState is one streaming chat completion's translation state:
@@ -707,6 +717,35 @@ func (st *geminiStreamState) chunk(delta map[string]any, finishReason *string) [
 	return b
 }
 
+// usageChunk builds the final usage-only "chat.completion.chunk" payload —
+// empty "choices" plus a populated "usage" — mirroring the shape
+// provider_openai.go's forwardStream relays from a native OpenAI upstream
+// when stream_options.include_usage is set (M1 fix). Gemini's own stream
+// has no equivalent chunk, so the adapter calls this once, after the
+// stream ends, only when the client asked for usage; st.u already holds
+// the last-usageMetadata-wins totals by then.
+func (st *geminiStreamState) usageChunk() []byte {
+	b, err := json.Marshal(map[string]any{
+		"id":      chatCompletionIDPrefix + st.id,
+		"object":  "chat.completion.chunk",
+		"created": st.created,
+		"model":   st.model,
+		"choices": []any{},
+		"usage": map[string]any{
+			"prompt_tokens":     st.u.prompt,
+			"completion_tokens": st.u.completion,
+			"total_tokens":      st.u.total(),
+		},
+	})
+	if err != nil {
+		// Built entirely from this file's own map[string]any/string/int64
+		// literals plus st.u's int64 fields — never a value that can fail
+		// to marshal.
+		panic(fmt.Sprintf("llmgateway: gemini stream usage chunk failed to marshal: %v", err))
+	}
+	return b
+}
+
 // translate maps one upstream Gemini SSE event to zero or more
 // OpenAI-shaped "chat.completion.chunk" payloads, per this file's stream
 // mapping table. Every event's data is a full GenerateContentResponse
@@ -747,7 +786,7 @@ func (st *geminiStreamState) translate(ev sseEvent) ([][]byte, error) {
 	}
 
 	if resp.UsageMetadata != nil {
-		st.u = usage{prompt: resp.UsageMetadata.PromptTokenCount, completion: resp.UsageMetadata.CandidatesTokenCount}
+		st.u = usage{prompt: resp.UsageMetadata.safePrompt(), completion: resp.UsageMetadata.safeCompletion()}
 	}
 
 	var chunks [][]byte

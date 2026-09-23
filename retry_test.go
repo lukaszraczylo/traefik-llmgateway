@@ -362,10 +362,10 @@ func TestRetryPolicy_Do_RetriesOnTransientThenSucceeds(t *testing.T) {
 // TestRetryPolicy_WaitBefore_RetryAfterHandling pins Retry-After
 // handling directly: a 429 whose Retry-After parses as a non-negative
 // whole-second count is HONOURED, clamped to maxRetryAfterWait when it
-// asks for longer. Every other shape — the HTTP-date form, negative, no
-// header at all, or present on a non-429 status — falls back to
-// exponential backoff, verified here against attempt=1's backoff*2^0
-// value.
+// asks for longer, and reports fromRetryAfter=true. Every other shape —
+// the HTTP-date form, negative, no header at all, or present on a
+// non-429 status — falls back to exponential backoff (fromRetryAfter=
+// false), verified here against attempt=1's backoff*2^0 value.
 //
 // CONTRACT CHANGE (security audit run-1): a Retry-After above the 2s
 // per-wait cap used to be DISCARDED and replaced by that ladder, so a
@@ -374,29 +374,75 @@ func TestRetryPolicy_Do_RetriesOnTransientThenSucceeds(t *testing.T) {
 // sooner than asked. maxRetryWait still caps the wait the gateway
 // computes for ITSELF; maxRetryAfterWait caps only what the upstream may
 // ask for, and clamping can only ever lengthen a wait, never shorten one.
+//
+// fromRetryAfter (finding 4 fix, review-routes.md) is what do uses to
+// decide whether retryJitterFn may touch the wait at all — jittering a
+// Retry-After value could shorten it, retrying sooner than the upstream
+// asked.
 func TestRetryPolicy_WaitBefore_RetryAfterHandling(t *testing.T) {
 	p := &retryPolicy{backoff: 100 * time.Millisecond}
 	backoffFallback := 100 * time.Millisecond // attempt=1: backoff * 2^0
 
 	tests := []struct {
-		resp *http.Response
-		name string
-		want time.Duration
+		resp               *http.Response
+		name               string
+		want               time.Duration
+		wantFromRetryAfter bool
 	}{
-		{retryAfterResp(http.StatusTooManyRequests, "1"), "429 with qualifying Retry-After (1s, within cap)", time.Second},
-		{retryAfterResp(http.StatusTooManyRequests, "30"), "429 with Retry-After over the 2s per-wait cap is still honoured", maxRetryAfterWait},
-		{retryAfterResp(http.StatusTooManyRequests, "3600"), "429 with Retry-After beyond maxRetryAfterWait is clamped to it, never discarded", maxRetryAfterWait},
-		{retryAfterResp(http.StatusTooManyRequests, "Wed, 21 Oct 2015 07:28:00 GMT"), "429 with HTTP-date Retry-After falls back to exponential backoff", backoffFallback},
-		{retryAfterResp(http.StatusTooManyRequests, "-5"), "429 with negative Retry-After falls back to exponential backoff", backoffFallback},
-		{fakeResp(http.StatusTooManyRequests, nil), "429 with no Retry-After header falls back to exponential backoff", backoffFallback},
-		{retryAfterResp(http.StatusServiceUnavailable, "1"), "503 with a Retry-After header is ignored (not 429)", backoffFallback},
+		{retryAfterResp(http.StatusTooManyRequests, "1"), "429 with qualifying Retry-After (1s, within cap)", time.Second, true},
+		{retryAfterResp(http.StatusTooManyRequests, "30"), "429 with Retry-After over the 2s per-wait cap is still honoured", maxRetryAfterWait, true},
+		{retryAfterResp(http.StatusTooManyRequests, "3600"), "429 with Retry-After beyond maxRetryAfterWait is clamped to it, never discarded", maxRetryAfterWait, true},
+		{retryAfterResp(http.StatusTooManyRequests, "Wed, 21 Oct 2015 07:28:00 GMT"), "429 with HTTP-date Retry-After falls back to exponential backoff", backoffFallback, false},
+		{retryAfterResp(http.StatusTooManyRequests, "-5"), "429 with negative Retry-After falls back to exponential backoff", backoffFallback, false},
+		{fakeResp(http.StatusTooManyRequests, nil), "429 with no Retry-After header falls back to exponential backoff", backoffFallback, false},
+		{retryAfterResp(http.StatusServiceUnavailable, "1"), "503 with a Retry-After header is ignored (not 429)", backoffFallback, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := p.waitBefore(1, tt.resp); got != tt.want {
-				t.Errorf("waitBefore(1, ...) = %v, want %v", got, tt.want)
+			got, fromRetryAfter := p.waitBefore(1, tt.resp)
+			if got != tt.want {
+				t.Errorf("waitBefore(1, ...) wait = %v, want %v", got, tt.want)
+			}
+			if fromRetryAfter != tt.wantFromRetryAfter {
+				t.Errorf("waitBefore(1, ...) fromRetryAfter = %v, want %v", fromRetryAfter, tt.wantFromRetryAfter)
 			}
 		})
+	}
+}
+
+// TestRetryPolicy_Do_JitterNotAppliedToRetryAfter proves finding 4
+// (review-routes.md): jitter is applied ONLY to the exponential backoff
+// ladder, never to an upstream Retry-After value. Honouring an explicit
+// overload signal and then retrying earlier than asked, via equal
+// jitter's own downward half, would contradict the whole point of
+// maxRetryAfterWait (its own doc comment: honouring Retry-After "can
+// only ever make the gateway wait LONGER, never sooner"). Run several
+// times: an un-jittered wait is deterministic, where a jittered one
+// would (eventually) vary — see
+// TestRetryPolicy_Do_JitterStaysWithinHalfToFullBackoff's own comment
+// for why that observation matters.
+func TestRetryPolicy_Do_JitterNotAppliedToRetryAfter(t *testing.T) {
+	const retryAfterSeconds = "4"
+	for range 32 {
+		var calls int32
+		var waits []time.Duration
+		p := &retryPolicy{enabled: true, attempts: 1, backoff: time.Millisecond, waitFn: spyWait(&waits)}
+		call := callSequence(&calls,
+			func() (*http.Response, error) {
+				return retryAfterResp(http.StatusTooManyRequests, retryAfterSeconds), nil
+			},
+			func() (*http.Response, error) { return fakeResp(http.StatusOK, nil), nil },
+		)
+
+		if _, err := p.do(context.Background(), call); err != nil {
+			t.Fatalf("do: %v", err)
+		}
+		if len(waits) != 1 {
+			t.Fatalf("waits = %v, want exactly 1", waits)
+		}
+		if waits[0] != 4*time.Second {
+			t.Fatalf("waits[0] = %v, want exactly 4s (a Retry-After wait must never be jittered)", waits[0])
+		}
 	}
 }
 
@@ -572,7 +618,12 @@ func TestRetryPolicy_Do_JitterStaysWithinHalfToFullBackoff(t *testing.T) {
 // TestRetryPolicy_Do_CtxAlreadyCanceled_NoRetry asserts a context
 // canceled before do() even starts stops the loop after the first
 // attempt: the real (ctx-aware) defaultWaitFn resolves the already-closed
-// ctx.Done() case rather than blocking out the backoff.
+// ctx.Done() case rather than blocking out the backoff. Finding 9 fix
+// (review-routes.md): because the wait never actually completed, do
+// returns the context's own error, not the first attempt's
+// already-drained-and-closed response — returning that response let a
+// caller's newProviderHTTPError (providers.go) read an already-closed
+// body and silently produce an error with an empty upstream body.
 func TestRetryPolicy_Do_CtxAlreadyCanceled_NoRetry(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // canceled before do() ever runs
@@ -582,21 +633,23 @@ func TestRetryPolicy_Do_CtxAlreadyCanceled_NoRetry(t *testing.T) {
 	call := callSequence(&calls, func() (*http.Response, error) { return fakeResp(http.StatusServiceUnavailable, nil), nil })
 
 	resp, err := p.do(ctx, call)
-	if err != nil {
-		t.Fatalf("do: %v", err)
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("err = %v, want errors.Is(err, context.Canceled)", err)
+	}
+	if resp != nil {
+		t.Errorf("resp = %v, want nil (must not return the already-drained/closed first attempt)", resp)
 	}
 	if got := atomic.LoadInt32(&calls); got != 1 {
 		t.Errorf("calls = %d, want 1 (ctx already done, no retry)", got)
-	}
-	if resp.StatusCode != http.StatusServiceUnavailable {
-		t.Errorf("resp.StatusCode = %d, want 503", resp.StatusCode)
 	}
 }
 
 // TestRetryPolicy_Do_CtxCanceledDuringWait_ReturnsPromptly proves the
 // ctx-aware waitFn aborts an in-progress backoff wait the moment ctx
 // ends, rather than blocking out the full duration: a 2s backoff against
-// a 20ms context deadline must return in well under 2s.
+// a 20ms context deadline must return in well under 2s, and (finding 9
+// fix, review-routes.md) returns the context's own error rather than the
+// first attempt's already-drained-and-closed response.
 func TestRetryPolicy_Do_CtxCanceledDuringWait_ReturnsPromptly(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
@@ -609,8 +662,11 @@ func TestRetryPolicy_Do_CtxCanceledDuringWait_ReturnsPromptly(t *testing.T) {
 	resp, err := p.do(ctx, call)
 	elapsed := time.Since(start)
 
-	if err != nil {
-		t.Fatalf("do: %v", err)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("err = %v, want errors.Is(err, context.DeadlineExceeded)", err)
+	}
+	if resp != nil {
+		t.Errorf("resp = %v, want nil (must not return the already-drained/closed first attempt)", resp)
 	}
 	if elapsed > 500*time.Millisecond {
 		t.Errorf("do took %v, want well under the 2s backoff (ctx should abort the wait promptly)", elapsed)
@@ -618,8 +674,37 @@ func TestRetryPolicy_Do_CtxCanceledDuringWait_ReturnsPromptly(t *testing.T) {
 	if got := atomic.LoadInt32(&calls); got != 1 {
 		t.Errorf("calls = %d, want 1 (ctx canceled during the wait, no further attempt)", got)
 	}
-	if resp.StatusCode != http.StatusServiceUnavailable {
-		t.Errorf("resp.StatusCode = %d, want 503 (last attempt's result)", resp.StatusCode)
+}
+
+// TestRetryPolicy_Do_CtxCanceledDuringWait_ReturnsCtxErrNotDrainedResp
+// (finding 9, review-routes.md) directly proves the mechanism the two
+// tests above exercise end to end: when the client disconnects while
+// do() is backing off before a retry, do must return the context's own
+// error, not the previous attempt's already-drained-and-closed
+// *http.Response. Returning that response let a caller's
+// newProviderHTTPError (providers.go) read an already-closed body and
+// silently produce an error with an empty upstream body, hiding the real
+// failure (the wait was aborted, not that the upstream answered with
+// nothing).
+func TestRetryPolicy_Do_CtxCanceledDuringWait_ReturnsCtxErrNotDrainedResp(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	p := &retryPolicy{enabled: true, attempts: 2, backoff: time.Millisecond, waitFn: func(waitCtx context.Context, d time.Duration) bool {
+		cancel() // simulate the client disconnecting mid-wait
+		<-waitCtx.Done()
+		return false
+	}}
+	var calls int32
+	call := callSequence(&calls, func() (*http.Response, error) { return fakeResp(http.StatusServiceUnavailable, nil), nil })
+
+	resp, err := p.do(ctx, call)
+	if resp != nil {
+		t.Errorf("resp = %v, want nil (must not return an already-drained/closed response)", resp)
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("err = %v, want errors.Is(err, context.Canceled)", err)
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Errorf("calls = %d, want 1 (the wait was aborted before a second attempt)", got)
 	}
 }
 

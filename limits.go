@@ -166,7 +166,7 @@ func (lc *LimitsConfig) validate() error {
 
 // counterIncr is one entry in an incrMulti batch: increment key by delta,
 // creating it with an expiry of ttl from now if it does not exist or has
-// expired — the same per-entry contract incrBy applies to a single key.
+// expired.
 type counterIncr struct {
 	key   string
 	delta int64
@@ -187,21 +187,17 @@ type counterIncr struct {
 // counterStore is the storage backend the limiter uses for atomic windowed
 // counters. memoryStore (below) is the in-process fallback; a distributed
 // (e.g. Redis-backed) implementation is wired in a later task.
+//
+// counterStore had single-key incrBy/get methods until the 2026-09 deadcode
+// audit: checkAndCount/account moved onto the batched incrMulti/getMulti/
+// incrAndGetMulti below in the 2026-08-21/22 perf reviews, which left
+// incrBy/get with no production caller of any kind — every remaining call
+// site was a test exercising a store implementation directly. They were
+// removed from the interface and from memoryStore/redisStore; the tests
+// that needed a single-key call now build a one-entry incrMulti batch or a
+// one-key getMulti read instead (see limits_helpers_test.go and
+// redis_store_test.go's incrOne/getOne).
 type counterStore interface {
-	// incrBy adds n to key's counter, creating it with an expiry of ttl
-	// from now if it does not exist or has expired, and returns the
-	// counter's new value. incrBy has no production caller since
-	// checkAndCount/account moved to the batched incrMulti below (perf
-	// review, 2026-08-21) — it is exercised directly by 11 test call
-	// sites (memoryStore.incrBy and redisStore.incrBy, across
-	// limits_test.go and redis_store_test.go) and kept for counterStore
-	// interface conformance. The limiter-level single-key seeding helper
-	// is incrCounter (5 call sites, all in admin_test.go's
-	// TestAdminUsage_MathAgainstSeededCounters).
-	incrBy(key string, n int64, ttl time.Duration) (int64, error)
-	// get returns key's current counter value, or 0 if it does not exist
-	// or has expired.
-	get(key string) (int64, error)
 	// getMulti reads every key in keys in one round trip where the
 	// backend supports it (redisStore pipelines via respClient.getBatch;
 	// memoryStore's in-process map needs no such optimization but
@@ -211,7 +207,7 @@ type counterStore interface {
 	// whole batch (mirrored by the limiter's storeGetMulti as a single
 	// fail-open/fail-closed decision), never a partial result.
 	getMulti(keys []string) ([]int64, error)
-	// incrMulti applies incrBy's own per-entry contract to every entry in
+	// incrMulti applies counterIncr's per-entry contract to every entry in
 	// entries in one round trip where the backend supports it (redisStore
 	// pipelines one INCRBY+EXPIRE pair per entry into a single pipeline
 	// call; memoryStore's in-process map needs no such optimization but
@@ -257,12 +253,12 @@ type memoryEntry struct {
 	value  int64
 }
 
-// sweepEvery is the minimum real time between incrBy's opportunistic
+// sweepEvery is the minimum real time between memoryStore's opportunistic
 // expired-entry sweeps, regardless of how many keys memoryStore holds. A
 // size-gated sweep (only above N keys) was measured to scan the whole map
-// on every incrBy once live keys exceeded that threshold, since a sweep
+// on every increment once live keys exceeded that threshold, since a sweep
 // that frees nothing (all keys still live) never brings the count back
-// down — a 167x incrBy cliff. Gating on elapsed time instead bounds sweep
+// down — a 167x increment cliff. Gating on elapsed time instead bounds sweep
 // frequency independent of key count: worst case is one full-map scan
 // every 30s.
 const sweepEvery = 30 * time.Second
@@ -343,11 +339,11 @@ func clampTTL(ttl, enforceTTL time.Duration) time.Duration {
 // instance is rebuilt on every config reload, and any ticker or goroutine
 // started here would leak on rebuild instead of being collected with the
 // rest of the old instance. Expired entries are instead swept
-// opportunistically from incrBy, at most once every sweepEvery.
+// opportunistically from applyIncr, at most once every sweepEvery.
 type memoryStore struct {
 	data      map[string]*memoryEntry
 	nowFn     func() time.Time // injected for tests; defaults to time.Now
-	lastSweep time.Time        // guarded by mu; zero value sweeps on the first incrBy
+	lastSweep time.Time        // guarded by mu; zero value sweeps on the first applyIncr
 	mu        sync.Mutex
 }
 
@@ -361,26 +357,17 @@ func (m *memoryStore) now() time.Time {
 	return m.nowFn()
 }
 
-// incrBy implements counterStore. ttl is clamped by clampTTL with no
-// enforcement floor (enforceTTL=0) — incrBy has no window to derive one
-// from, since it takes a bare key rather than a (kind, id, metric,
-// window) tuple. incrBy has had no production caller since checkAndCount/
-// account moved to the batched incrMulti below (perf review,
-// 2026-08-21); it is exercised directly by 11 test call sites (across
-// limits_test.go and redis_store_test.go's own store.incrBy calls) and
-// kept for counterStore interface conformance. incrCounter (below) is
-// the limiter-level single-key seeding helper tests use instead (5 call
-// sites, all in admin_test.go's TestAdminUsage_MathAgainstSeededCounters).
-func (m *memoryStore) incrBy(key string, n int64, ttl time.Duration) (int64, error) {
-	return m.applyIncr(key, n, clampTTL(ttl, 0)), nil
-}
-
 // applyIncr increments key by n — creating it fresh, expiring at
 // now+ttl, if absent or already expired — and returns its new value. ttl
-// must already be clamped by the caller: incrBy clamps with no
-// enforcement floor, incrMulti clamps per entry with that entry's own
-// enforceTTL floor (see clampTTL). Sharing this one map-mutation-plus-
-// opportunistic-sweep implementation between both callers means the
+// must already be clamped by the caller: incrMulti clamps per entry with
+// that entry's own enforceTTL floor (see clampTTL); the test-only incrBy
+// helper (limits_helpers_test.go, restoring the single-key API removed
+// from production in the 2026-09 deadcode audit — checkAndCount/account
+// moved onto the batched incrMulti below in the 2026-08-21 perf review,
+// leaving incrBy with no production caller) clamps with no enforcement
+// floor, since a bare key carries no (kind, id, metric, window) tuple to
+// derive one from. Sharing this one map-mutation-plus-opportunistic-sweep
+// implementation between both callers means the
 // sweep logic, and the "already expired counts as absent" rule, exist
 // exactly once.
 func (m *memoryStore) applyIncr(key string, n int64, ttl time.Duration) int64 {
@@ -785,7 +772,25 @@ const providerAttemptSpawnCap = 64
 // sharing counters across Traefik instances. failOpen governs what happens
 // when a non-nil store errors: true silently falls back to the in-process
 // memoryStore for that operation, false refuses the request (see
-// storeIncrBy / storeGet).
+// storeIncrMulti / storeGetMulti).
+//
+// Known limitation, documented rather than fixed (verify-core review,
+// round 4, finding 8 — accepted as a cost too high for the benefit): with
+// failOpen=true, EVERY Traefik instance running this plugin falls back to
+// its OWN private, unshared memoryStore for the whole duration of a
+// configured store outage (storeLatched's 5s latch, re-opened on each new
+// failure). Two instances behind the same load balancer therefore each
+// enforce limits against a DIFFERENT count for the same scope during that
+// window — user/group/total totals visibly drift apart across backends —
+// and neither fallback's counts are reconciled back into the shared store
+// once it recovers; each instance's fallback simply stops being read
+// again. This under-enforces (each instance only sees its own share of
+// traffic against the full limit) rather than over-enforces, and is
+// bounded to the outage window itself, so it is accepted as a fail-open
+// trade-off rather than fixed — a cross-instance reconciliation pass
+// would need either a persistent pending-delta queue replayed into the
+// store on recovery, or a broadcast mechanism between instances, either
+// of which is a materially larger change than this review's scope.
 func newLimiter(store counterStore, failOpen bool) *limiter {
 	l := &limiter{
 		store:       store,
@@ -865,8 +870,9 @@ func (l *limiter) logStoreError(err error) {
 }
 
 // storeLatched reports whether l is within storeDownLatchFor of its last
-// recorded store failure. When true, storeIncrBy/storeGet must skip the
-// network call entirely and go straight to the fail-open/fail-closed
+// recorded store failure. When true, storeIncrMulti/storeGetMulti/
+// storeIncrAndGetMulti must skip the network call entirely and go straight
+// to the fail-open/fail-closed
 // policy — the same outcome a fresh call would reach anyway, just without
 // paying respCallTimeout again to find out. Guarded by logMu, the same
 // mutex lastLogAt already uses for this kind of small timestamp state.
@@ -900,9 +906,9 @@ func (l *limiter) configuredStoreDown() bool {
 }
 
 // recordStoreFailure logs err (rate-limited, see logStoreError) and opens
-// the store-down latch: every storeIncrBy/storeGet call for the next
-// storeDownLatchFor skips the network call and applies the fail-open/
-// fail-closed policy directly.
+// the store-down latch: every storeIncrMulti/storeGetMulti/
+// storeIncrAndGetMulti call for the next storeDownLatchFor skips the
+// network call and applies the fail-open/fail-closed policy directly.
 func (l *limiter) recordStoreFailure(err error) {
 	l.logStoreError(err)
 	l.logMu.Lock()
@@ -927,77 +933,11 @@ func (l *limiter) redisStatus() (configured bool, lastErr string, lastErrAt time
 	return l.store != nil, l.lastErrMsg, l.lastStoreFailure
 }
 
-// storeIncrBy increments key by n with the given ttl, applying the
-// limiter's fail-open/fail-closed policy when a configured store errors
-// or when the store-down latch (storeLatched) is already open from a
-// recent failure. ok is false only in the fail-closed case — a caller
-// must refuse the request for that, rather than treating a zero value as
-// a real counter reading. storeIncrBy has no production caller since
-// checkAndCount/account moved to the batched storeIncrMulti (perf review,
-// 2026-08-21) — its only caller, incrCounter below, is itself only
-// called from tests, for direct counter seeding.
-func (l *limiter) storeIncrBy(key string, n int64, ttl time.Duration) (v int64, ok bool) {
-	if l.store == nil {
-		v, _ = l.fallback.incrBy(key, n, ttl) // fallback never errors
-		return v, true
-	}
-	if l.storeLatched() {
-		return l.failPolicyIncrBy(key, n, ttl)
-	}
-	v, err := l.store.incrBy(key, n, ttl)
-	if err == nil {
-		return v, true
-	}
-	l.recordStoreFailure(err)
-	return l.failPolicyIncrBy(key, n, ttl)
-}
-
-// storeGet mirrors storeIncrBy for a read: it applies the same fail-open/
-// fail-closed/latched handling on a configured store's error.
-func (l *limiter) storeGet(key string) (v int64, ok bool) {
-	if l.store == nil {
-		v, _ = l.fallback.get(key)
-		return v, true
-	}
-	if l.storeLatched() {
-		return l.failPolicyGet(key)
-	}
-	v, err := l.store.get(key)
-	if err == nil {
-		return v, true
-	}
-	l.recordStoreFailure(err)
-	return l.failPolicyGet(key)
-}
-
-// failPolicyIncrBy applies the limiter's fail-open/fail-closed policy for
-// an incrBy the caller has decided not to attempt against the configured
-// store (it just failed, or the store-down latch is open): failOpen=true
-// counts key in the fallback instead; failOpen=false reports the
-// operation as failed.
-func (l *limiter) failPolicyIncrBy(key string, n int64, ttl time.Duration) (int64, bool) {
-	if !l.failOpen {
-		return 0, false
-	}
-	v, _ := l.fallback.incrBy(key, n, ttl)
-	return v, true
-}
-
-// failPolicyGet mirrors failPolicyIncrBy for a read.
-func (l *limiter) failPolicyGet(key string) (int64, bool) {
-	if !l.failOpen {
-		return 0, false
-	}
-	v, _ := l.fallback.get(key)
-	return v, true
-}
-
-// storeGetMulti mirrors storeGet for a batch of keys: one round trip
-// against the configured store (or the in-process fallback) for the
-// whole slice, applying the identical fail-open/fail-closed/latched
-// policy storeGet applies per key. ok is false only in the fail-closed
-// case, matching storeGet's contract — a caller must not read the
-// returned slice as real values when ok is false.
+// storeGetMulti applies the limiter's fail-open/fail-closed/latched
+// policy to a batch read: one round trip against the configured store (or
+// the in-process fallback) for the whole slice of keys. ok is false only
+// in the fail-closed case — a caller must not read the returned slice as
+// real values when ok is false.
 func (l *limiter) storeGetMulti(keys []string) (v []int64, ok bool) {
 	if l.store == nil {
 		v, _ = l.fallback.getMulti(keys) // fallback never errors
@@ -1014,7 +954,11 @@ func (l *limiter) storeGetMulti(keys []string) (v []int64, ok bool) {
 	return l.failPolicyGetMulti(keys)
 }
 
-// failPolicyGetMulti mirrors failPolicyGet for a batch read.
+// failPolicyGetMulti applies the limiter's fail-open/fail-closed policy
+// for a batch read the caller has decided not to attempt against the
+// configured store (it just failed, or the store-down latch is open):
+// failOpen=true reads through to the fallback instead; failOpen=false
+// reports the operation as failed.
 func (l *limiter) failPolicyGetMulti(keys []string) ([]int64, bool) {
 	if !l.failOpen {
 		return nil, false
@@ -1023,10 +967,10 @@ func (l *limiter) failPolicyGetMulti(keys []string) ([]int64, bool) {
 	return v, true
 }
 
-// storeIncrMulti mirrors storeIncrBy for a batch of increments: one round
+// storeIncrMulti mirrors storeGetMulti for a batch of increments: one round
 // trip against the configured store (or the in-process fallback) for the
 // whole slice, applying the identical fail-open/fail-closed/latched
-// policy storeIncrBy applies per key. ok is false only in the fail-closed
+// policy storeGetMulti applies per batch. ok is false only in the fail-closed
 // case — a caller must drop the sample (account) or skip the write
 // (countTargetRequests, recordProviderAttempt) for that, rather than
 // treating a nil/short slice as real counter readings. checkAndCount's own
@@ -1048,7 +992,7 @@ func (l *limiter) storeIncrMulti(entries []counterIncr) (v []int64, ok bool) {
 	return l.failPolicyIncrMulti(entries)
 }
 
-// failPolicyIncrMulti mirrors failPolicyIncrBy for a batch increment.
+// failPolicyIncrMulti mirrors failPolicyGetMulti for a batch increment.
 func (l *limiter) failPolicyIncrMulti(entries []counterIncr) ([]int64, bool) {
 	if !l.failOpen {
 		return nil, false
@@ -1209,26 +1153,6 @@ func retryAfterSeconds(t time.Time, window string) int {
 	return int(math.Ceil(windowEnd(t, window).Sub(t.UTC()).Seconds()))
 }
 
-// incrCounter increments the (kind, id, metric, window) counter at t by n
-// and returns its new value, together with whether the operation
-// succeeded under the limiter's fail-open/fail-closed policy (see
-// storeIncrBy). ok is false only in the fail-closed case: a configured
-// store errored and failOpen is false. incrCounter has no production
-// caller since checkAndCount/account moved to the batched incrMulti
-// (perf review, 2026-08-21) — it is kept for direct counter seeding in
-// tests (5 call sites, all in admin_test.go's
-// TestAdminUsage_MathAgainstSeededCounters).
-func (l *limiter) incrCounter(kind, id, metric, window string, t time.Time, n int64, ttl time.Duration) (int64, bool) {
-	return l.storeIncrBy(windowKey(kind, id, metric, window, t), n, ttl)
-}
-
-// getCounter returns the (kind, id, metric, window) counter's value at t,
-// together with whether the read succeeded under the limiter's fail-open/
-// fail-closed policy (see storeGet).
-func (l *limiter) getCounter(kind, id, metric, window string, t time.Time) (int64, bool) {
-	return l.storeGet(windowKey(kind, id, metric, window, t))
-}
-
 // checkAndCountKeysPerScope is the number of counterIncr entries
 // checkAndCount builds per scope (req:min, req:day, req:hour), and the
 // stride storeIncrAndGetMulti's flat incrVals result is sliced back into
@@ -1291,14 +1215,25 @@ func buildBudgetProbes(scopes []limitScope, now time.Time) (probes []budgetProbe
 }
 
 // checkAndCount increments every scope's req:min, req:day, and req:hour
-// counters — unconditionally, before any evaluation, so a request that
-// ultimately gets refused by one scope's limit still counts toward every
-// other scope's rate tracking — then evaluates each scope's set limits, in
-// order, and returns the first violation found, or nil if the request may
-// proceed. If the round trip fails closed (a configured store errored and
-// failOpen is false), it returns a storeDownViolation immediately — the
-// request is refused rather than evaluated against partial or
-// fallback-only counters.
+// counters — unconditionally, before any evaluation — then evaluates each
+// scope's set limits, in order, and returns the first violation found, or
+// nil if the request may proceed. If the round trip fails closed (a
+// configured store errored and failOpen is false), it returns a
+// storeDownViolation immediately — the request is refused rather than
+// evaluated against partial or fallback-only counters.
+//
+// On a violation, rollbackOtherScopeCounts (finding F1, 2026-09 review)
+// compensates the increments made above for every scope OTHER than the
+// one that actually violated: the violating scope's own counter still
+// reflects a real admission attempt against ITS OWN limit — unchanged,
+// intentional — but WITHOUT the rollback, every OTHER scope (a user's
+// group, the synthetic total scope) would also count that same rejected
+// request toward ITS rate tracking, even though it never had anything to
+// do with the rejection. Left unrolled-back, a single user hammering past
+// their own requests-per-minute limit drives their group's identical
+// counter up on every one of those 429s too, and can lock out every
+// OTHER member of the group once the group's own limit is reached from
+// traffic that was never actually admitted.
 //
 // Every scope's three increments AND every scope's token/cost budget reads
 // ride ONE storeIncrAndGetMulti round trip (perf review round 3,
@@ -1367,10 +1302,12 @@ func (l *limiter) checkAndCount(scopes []limitScope) *limitViolation {
 		// stats-only, deliberately never read here.
 		if v := requestLimitViolation(sc, "requests-per-minute", sc.limits.RequestsPerMinute, minCount, windowMin, now); v != nil {
 			l.rejections.increment(sc.kind, sc.id)
+			l.rollbackOtherScopeCounts(entries, i, len(scopes))
 			return v
 		}
 		if v := requestLimitViolation(sc, "requests-per-day", sc.limits.RequestsPerDay, dayCount, windowDay, now); v != nil {
 			l.rejections.increment(sc.kind, sc.id)
+			l.rollbackOtherScopeCounts(entries, i, len(scopes))
 			return v
 		}
 		for _, p := range probes {
@@ -1385,6 +1322,7 @@ func (l *limiter) checkAndCount(scopes []limitScope) *limitViolation {
 				continue
 			}
 			l.rejections.increment(sc.kind, sc.id)
+			l.rollbackOtherScopeCounts(entries, i, len(scopes))
 			return &limitViolation{
 				message:    fmt.Sprintf("%s %q exceeded %s budget", sc.kind, sc.id, p.name),
 				retryAfter: retryAfterSeconds(now, p.window),
@@ -1392,6 +1330,55 @@ func (l *limiter) checkAndCount(scopes []limitScope) *limitViolation {
 		}
 	}
 	return nil
+}
+
+// rollbackOtherScopeCounts compensates the req:min/req:day/req:hour
+// increments checkAndCount already made for every scope OTHER than
+// violatedIdx, in ONE further batched store call (finding F1, 2026-09
+// review — the group-lockout bug): checkAndCount counts every scope
+// UNCONDITIONALLY before evaluating any of them, by design, so that a
+// request refused by one scope's own limit still counts toward every
+// other scope's rate tracking (see checkAndCount's own doc comment) — but
+// that means a user hammering past THEIR OWN requests-per-minute limit
+// also drives up their group's identical counter on every one of those
+// rejected attempts, and can lock out every other member of the group
+// once the group's own limit is reached too, entirely from traffic that
+// was never admitted.
+//
+// The scope that actually violated (violatedIdx) keeps its own
+// increment — that counter reflecting a real admission attempt against
+// ITS OWN limit is exactly the existing, intentional behavior; only the
+// OTHER scopes' counts, which had nothing to do with this rejection, are
+// undone. Sent as negative-delta counterIncr entries through the same
+// storeIncrMulti path every other write in this file already uses — one
+// extra round trip, only on rejection, never on the (overwhelmingly more
+// common) admitted path.
+//
+// Best-effort: a failed rollback batch is logged and otherwise ignored —
+// the request is being rejected either way, and a failed rollback only
+// ever leaves an extra +1 on an unrelated scope's counter, which is
+// exactly this bug's own pre-fix behavior for that one counter, not a new
+// hazard.
+func (l *limiter) rollbackOtherScopeCounts(entries []counterIncr, violatedIdx, numScopes int) {
+	if numScopes <= 1 {
+		return
+	}
+	comp := make([]counterIncr, 0, (numScopes-1)*checkAndCountKeysPerScope)
+	for i := 0; i < numScopes; i++ {
+		if i == violatedIdx {
+			continue
+		}
+		for k := 0; k < checkAndCountKeysPerScope; k++ {
+			e := entries[i*checkAndCountKeysPerScope+k]
+			comp = append(comp, counterIncr{key: e.key, delta: -e.delta, ttl: e.ttl, enforceTTL: e.enforceTTL})
+		}
+	}
+	if len(comp) == 0 {
+		return
+	}
+	if _, ok := l.storeIncrMulti(comp); !ok {
+		l.logf("limits: rollback of other-scope request counters failed after a rejection; those scopes' req:min/day/hour counters may be over-counted by 1 for the current window")
+	}
 }
 
 // requestLimitViolation reports a violation when count (already
@@ -1416,7 +1403,7 @@ func requestLimitViolation(sc limitScope, name string, limit, count int64, windo
 // Every scope's writes are collected into ONE storeIncrMulti call (perf
 // review, 2026-08-21): a 3-scope request (user, group, total) with all
 // three metrics nonzero previously paid up to 9 round trips per scope —
-// 27 total — one incrCounter call each. account's return-value discipline
+// 27 total — one single-key store write each. account's return-value discipline
 // is unchanged by the batching: it has no error return, and a sample that
 // hits a fail-closed batch (see storeIncrMulti) is dropped in full,
 // silently, rather than counting it in the fallback — dropping avoids
@@ -1609,6 +1596,18 @@ type targetCounters struct {
 // because a target scope carries no limit: nothing downstream ever treats
 // this zero as "confirmed no traffic" the way scopeUsage.storeDown guards
 // against for a limited scope.
+//
+// configuredStoreDown is checked in addition to storeGetMulti's own ok
+// (finding F5, 2026-09 review, applying currentUsage/providerUsage's own
+// fix here too): with the default failOpen=true, storeGetMulti's ok stays
+// true during a store outage — it silently reads the in-process fallback
+// instead, which never saw this target's real traffic — so ok alone
+// cannot tell a real reading apart from a fail-open one served from an
+// empty fallback. The output is identical either way (the same
+// zero-value targetCounters this doc comment already describes for the
+// fail-closed case), so this only changes what happens during a fail-open
+// outage, matching the sibling reads' own behavior instead of silently
+// serving fabricated zeros as though they were confirmed current usage.
 func (l *limiter) targetUsage(scopes []limitScope) []targetCounters {
 	out := make([]targetCounters, len(scopes))
 	if len(scopes) == 0 {
@@ -1622,7 +1621,7 @@ func (l *limiter) targetUsage(scopes []limitScope) []targetCounters {
 	}
 
 	vals, ok := l.storeGetMulti(allKeys)
-	if !ok || len(vals) != len(allKeys) {
+	if !ok || len(vals) != len(allKeys) || l.configuredStoreDown() {
 		return out // zero-value counters; see doc comment above
 	}
 
@@ -1880,16 +1879,18 @@ func isDeadlineExceeded(err error) bool {
 // countTargetRequests/-Request already apply to target scopes (mcp_a2a.go
 // callers), consistent with those counters' own attempt/request semantics.
 //
-// Both counters are written at minute AND day granularity, for both the
-// provider scope and the (provider, model) scope — the write side is
-// unaffected by SHOULD-2's read-side change to providerUsage/
-// providerCounterKeys below: writing both windows costs nothing extra
-// (already one batched storeIncrMulti call either way), and it leaves
-// the model-level minute counters available in the store for a future
-// caller even though GET /admin/api/overview no longer reads them today.
-// No month window: provider health is a now-and-today question (the
-// Providers tab's success-rate badge, webui), not a billing one, so there
-// is nothing here for a month-long retention window to serve.
+// The PROVIDER scope's counters are written at minute AND day
+// granularity; the (provider, model) scope is written at DAY granularity
+// only (finding, dead-code sweep, 2026-09 review: this file used to also
+// write provmodel:*:attempt|fail:min every attempt, but providerCounterKeys
+// below has never read a kindProviderModel scope's minute keys at all —
+// SHOULD-2, v0.22 review round, its own doc comment — so those writes were
+// 2-4 pure-cost INCRBY+EXPIRE commands per attempt with no reader anywhere
+// in this codebase, admin.go, metrics.go, or webui/src; grepped again
+// before removing them here). No month window for either scope: provider
+// health is a now-and-today question (the Providers tab's success-rate
+// badge, webui), not a billing one, so there is nothing here for a
+// month-long retention window to serve.
 //
 // The store write itself is fire-and-forget (l.spawn — SHOULD-5, v0.22
 // review round): entries is finished being built before spawn is called,
@@ -1905,7 +1906,7 @@ func (l *limiter) recordProviderAttempt(provider, model string, resp *http.Respo
 	et := enforceTTLsFor()
 	fail := isTransient(resp, err) || isDeadlineExceeded(err)
 
-	entries := make([]counterIncr, 0, 8)
+	entries := make([]counterIncr, 0, 6)
 	entries = append(entries,
 		counterIncr{key: windowKeyForBucket(kindProvider, provider, metricProvAttempt, windowMin, wb.min), delta: 1, ttl: minWindowTTL, enforceTTL: et.min},
 		counterIncr{key: windowKeyForBucket(kindProvider, provider, metricProvAttempt, windowDay, wb.day), delta: 1, ttl: dayWindowTTL, enforceTTL: et.day},
@@ -1917,14 +1918,16 @@ func (l *limiter) recordProviderAttempt(provider, model string, resp *http.Respo
 		)
 	}
 	if model != "" {
+		// Day granularity only — see this function's own doc comment
+		// (dead-code sweep, 2026-09 review) for why a minute-window pair
+		// was removed here: providerCounterKeys never reads one for a
+		// kindProviderModel scope.
 		id := providerModelScopeID(provider, model)
 		entries = append(entries,
-			counterIncr{key: windowKeyForBucket(kindProviderModel, id, metricProvAttempt, windowMin, wb.min), delta: 1, ttl: minWindowTTL, enforceTTL: et.min},
 			counterIncr{key: windowKeyForBucket(kindProviderModel, id, metricProvAttempt, windowDay, wb.day), delta: 1, ttl: dayWindowTTL, enforceTTL: et.day},
 		)
 		if fail {
 			entries = append(entries,
-				counterIncr{key: windowKeyForBucket(kindProviderModel, id, metricProvFail, windowMin, wb.min), delta: 1, ttl: minWindowTTL, enforceTTL: et.min},
 				counterIncr{key: windowKeyForBucket(kindProviderModel, id, metricProvFail, windowDay, wb.day), delta: 1, ttl: dayWindowTTL, enforceTTL: et.day},
 			)
 		}
@@ -2226,6 +2229,16 @@ type historyPoint struct {
 // caller answers 503 rather than presenting an all-zero ranking as though
 // no model had been used. An empty ids slice is not a store read at all:
 // it returns an empty result and ok, never a round trip.
+//
+// configuredStoreDown is checked alongside storeGetMulti's own ok
+// (finding F5, 2026-09 review, applying currentUsage/providerUsage's own
+// fix here too): with the default failOpen=true, ok alone stays true
+// during a store outage — storeGetMulti silently reads the in-process
+// fallback instead, which was never the ranking's real per-model source
+// of truth — so without this check GET /admin/api/usage/models would
+// present a fail-open read of near-empty fallback data as a genuine
+// "these models were barely used" ranking instead of the 503 this
+// function's own doc comment already promises for a store failure.
 func (l *limiter) modelTotals(ids []string, metric, window string) ([]int64, bool) {
 	if len(ids) == 0 {
 		return nil, true
@@ -2236,7 +2249,7 @@ func (l *limiter) modelTotals(ids []string, metric, window string) ([]int64, boo
 		keys[i] = windowKey(kindModel, id, metric, window, now)
 	}
 	vals, ok := l.storeGetMulti(keys)
-	if !ok || len(vals) != len(keys) {
+	if !ok || len(vals) != len(keys) || l.configuredStoreDown() {
 		return nil, false
 	}
 	return vals, true
@@ -2289,12 +2302,18 @@ func historyBucketKeys(kind, id, metric, window string, now time.Time, span int)
 // discipline currentUsage already applies to a scope's current-window
 // keys, scaled here to a whole span of one metric/window instead of a
 // fixed set of usageKeysPerScope. ok is false only in the fail-closed
-// case (storeGetMulti's own contract): a caller must not present the
-// returned points as real data then.
+// case (storeGetMulti's own contract) OR when configuredStoreDown reports
+// a fail-open outage in progress (finding F5, 2026-09 review, applying
+// currentUsage/providerUsage's own fix here too — with the default
+// failOpen=true, storeGetMulti's ok alone stays true while silently
+// reading the in-process fallback, which a Redis blip empties out to
+// near-zero, painting a false drop on the usage-history charts instead of
+// the 503 this doc comment already promises for a store failure): a
+// caller must not present the returned points as real data then.
 func (l *limiter) history(kind, id, metric, window string, now time.Time, span int) ([]historyPoint, bool) {
 	keys, buckets := historyBucketKeys(kind, id, metric, window, now, span)
 	vals, ok := l.storeGetMulti(keys)
-	if !ok || len(vals) != len(keys) {
+	if !ok || len(vals) != len(keys) || l.configuredStoreDown() {
 		return nil, false
 	}
 	points := make([]historyPoint, span)

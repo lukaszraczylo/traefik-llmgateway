@@ -28,9 +28,13 @@ const (
 // maximum makes four tries total, not three.
 const maxRetryAttempts = 3
 
-// maxRetryWait caps every wait retryPolicy.do performs between attempts,
-// whether computed from exponential backoff or read from an upstream's
-// Retry-After header — spec §1's "capped at 2s per wait".
+// maxRetryWait caps the wait retryPolicy.do computes for ITSELF — the
+// exponential backoff ladder — between attempts. spec §1's "capped at 2s
+// per wait". An upstream's own explicit Retry-After request is a
+// separate case with its own, much larger cap (finding 12 fix,
+// review-routes.md: this comment previously and incorrectly claimed
+// maxRetryWait also caps a Retry-After-derived wait) — see
+// maxRetryAfterWait, below.
 const maxRetryWait = 2 * time.Second
 
 // maxRetryAfterWait caps a wait this gateway will honour when the
@@ -49,13 +53,25 @@ const maxRetryWait = 2 * time.Second
 // wait immediately rather than blocking out the full duration.
 const maxRetryAfterWait = 30 * time.Second
 
-// retryJitterFn spreads a computed backoff so that many requests failing
+// retryJitterFn spreads a COMPUTED backoff so that many requests failing
 // at the same instant do not retry in lockstep against the same upstream
 // — the synchronized-retry shape that turns one upstream blip into a
 // self-sustaining thundering herd (security audit run-1). It applies
 // EQUAL jitter: half the computed wait, plus a uniform random draw over
 // the other half, so a jittered wait is always at least d/2 and never
 // collapses to an immediate retry the way full jitter can.
+//
+// Finding 4 fix (review-routes.md): do, below, applies this ONLY to
+// waitBefore's exponential-backoff branch, never to a wait that came
+// from an upstream's own Retry-After header. Jittering a Retry-After
+// value can shorten it (equal jitter draws anywhere in [d/2, d]), which
+// would retry a saturated provider SOONER than it explicitly asked —
+// exactly the backwards-under-overload behavior maxRetryAfterWait's own
+// doc comment says honouring Retry-After exists to prevent ("can only
+// ever make the gateway wait LONGER, never sooner"). waitBefore's second
+// return value tells do which branch produced the wait, so this
+// function itself needs no such distinction — it always jitters
+// unconditionally; the caller decides whether to call it at all.
 //
 // A package-level var, mirroring retryPolicy.waitFn's own convention, so
 // tests can substitute an identity function and keep asserting exact
@@ -207,16 +223,27 @@ func isTransient(resp *http.Response, err error) bool {
 
 // waitBefore returns how long do should wait before the attempt after
 // attempt (1-based) — the one that just produced resp (nil on a network
-// error). Only a 429 response carrying a Retry-After header that parses
-// as a non-negative whole-second count no greater than maxRetryWait wins
-// outright: the upstream said exactly how long to back off. Every other
-// case falls back to exponential backoff (p.backoff * 2^(attempt-1)),
-// capped at maxRetryWait — that covers a 429 with no Retry-After header,
-// one that fails to parse as whole seconds (for example the HTTP-date
-// form), one that parses negative, one whose value exceeds maxRetryWait,
-// a Retry-After header present on a non-429 5xx (ignored: Retry-After is
-// only meaningful on 429 here), and every network-error retry.
-func (p *retryPolicy) waitBefore(attempt int, resp *http.Response) time.Duration {
+// error) — and whether that wait came from the upstream's own
+// Retry-After header (fromRetryAfter) rather than this gateway's own
+// exponential backoff ladder. do uses fromRetryAfter to decide whether
+// retryJitterFn may touch the wait at all (finding 4 fix, review-
+// routes.md — see retryJitterFn's own doc comment for why jittering a
+// Retry-After value is wrong).
+//
+// A 429 response carrying a Retry-After header that parses as a
+// non-negative whole-second count wins outright, clamped to
+// maxRetryAfterWait (NOT maxRetryWait — an upstream's own explicit
+// cool-down request is honoured far longer than this gateway's own
+// ladder; see maxRetryAfterWait's own doc comment): the upstream said
+// exactly how long to back off, and this gateway waits at least that
+// long, up to the 30s ceiling. Every other case falls back to
+// exponential backoff (p.backoff * 2^(attempt-1)), capped at
+// maxRetryWait — that covers a 429 with no Retry-After header, one that
+// fails to parse as whole seconds (for example the HTTP-date form), one
+// that parses negative, a Retry-After header present on a non-429 5xx
+// (ignored: Retry-After is only meaningful on 429 here), and every
+// network-error retry.
+func (p *retryPolicy) waitBefore(attempt int, resp *http.Response) (wait time.Duration, fromRetryAfter bool) {
 	if resp != nil && resp.StatusCode == http.StatusTooManyRequests {
 		if ra := resp.Header.Get("Retry-After"); ra != "" {
 			if secs, err := strconv.Atoi(ra); err == nil && secs >= 0 {
@@ -227,20 +254,20 @@ func (p *retryPolicy) waitBefore(attempt int, resp *http.Response) time.Duration
 				// back to the <=2s ladder and so retried a provider that
 				// had explicitly asked for a longer pause sooner than it
 				// asked, which is backwards under overload.
-				wait := time.Duration(secs) * time.Second
-				if wait > maxRetryAfterWait {
-					wait = maxRetryAfterWait
+				raWait := time.Duration(secs) * time.Second
+				if raWait > maxRetryAfterWait {
+					raWait = maxRetryAfterWait
 				}
-				return wait
+				return raWait, true
 			}
 		}
 	}
 
-	wait := p.backoff * time.Duration(int64(1)<<uint(attempt-1))
+	wait = p.backoff * time.Duration(int64(1)<<uint(attempt-1))
 	if wait > maxRetryWait {
 		wait = maxRetryWait
 	}
-	return wait
+	return wait, false
 }
 
 // drainAndClose discards a retried-away response's remaining body
@@ -263,9 +290,24 @@ func drainAndClose(resp *http.Response) {
 // body, then waits per waitBefore via p.waitFn — ctx-aware, so a context
 // canceled or timed out during that wait aborts the remaining attempts
 // immediately rather than blocking out the wait in full. do returns the
-// last attempt's (resp, err) as-is either way: on success, on a
-// still-transient failure once tries are exhausted, on a non-transient
-// failure at any attempt, or on a wait ctx aborted early.
+// last attempt's (resp, err) as-is on success, on a still-transient
+// failure once tries are exhausted, or on a non-transient failure at any
+// attempt.
+//
+// Finding 9 fix (review-routes.md): when the wait itself is aborted
+// early (p.waitFn returns false — ctx was canceled or its deadline
+// passed while do was backing off, most commonly the CLIENT
+// disconnecting during a now-up-to-30s Retry-After wait), do returns
+// ctx.Err() instead of the just-drained-and-closed resp/err pair. The
+// previous behavior returned that resp as-is: drainAndClose (below) had
+// already fully read and closed its body by that point, so a caller
+// building an error from it (newProviderHTTPError, providers.go) read a
+// closed body and silently produced an error with an EMPTY upstream
+// body — the real failure (the wait was aborted, not that the upstream
+// answered with nothing) was lost. ctx.Err() is always non-nil here:
+// waitFn returning false is p.waitFn's own documented contract for "ctx
+// ended the wait early" (defaultWaitFn's doc comment), so this never
+// masks a wait that genuinely completed.
 //
 // Feature A (v0.22) attempt-accounting: every call() invocation — not just
 // the final one — is reported to ctx's attemptRecorder, if it carries one
@@ -290,9 +332,20 @@ func (p *retryPolicy) do(ctx context.Context, call func() (*http.Response, error
 			return resp, err
 		}
 
-		wait := retryJitterFn(p.waitBefore(attempt, resp))
+		// Finding 4 fix (review-routes.md): jitter is applied ONLY to the
+		// exponential-backoff branch (fromRetryAfter == false), never to a
+		// wait the upstream itself requested via Retry-After — see
+		// retryJitterFn's own doc comment for why jittering that value
+		// would be backwards under overload.
+		wait, fromRetryAfter := p.waitBefore(attempt, resp)
+		if !fromRetryAfter {
+			wait = retryJitterFn(wait)
+		}
 		drainAndClose(resp)
 		if !p.waitFn(ctx, wait) {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return nil, ctxErr
+			}
 			return resp, err
 		}
 	}

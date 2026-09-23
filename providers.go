@@ -506,11 +506,18 @@ var configNamePattern = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
 // own fixed top-level routes: "v1" is the unified API namespace
 // (/v1/chat/completions, /v1/models, /v1/embeddings, /v1/mcp/servers,
 // /v1/agents), "mcp" and "a2a" are the MCP/A2A target-proxy prefixes
-// (/mcp/{name}/..., /a2a/{name}/...). ServeHTTP checks those fixed routes
-// ahead of passthrough/target routing (llmgateway.go), so a provider, MCP
-// server, or agent configured under one of these names would never be
-// reachable — reject it here instead of silently shadowing it.
-var reservedConfigNames = map[string]bool{"v1": true, "mcp": true, "a2a": true}
+// (/mcp/{name}/..., /a2a/{name}/...), and "admin" for the dashboard's own
+// fixed /admin, /admin/assets/*, and /admin/api/* routes (review-auth.md
+// finding F9: a provider literally named "admin" would otherwise shadow
+// every one of those, an easy config typo away). ServeHTTP checks those
+// fixed routes ahead of passthrough/target routing (llmgateway.go), so a
+// provider, MCP server, or agent configured under one of these names
+// would never be reachable — reject it here instead of silently
+// shadowing it. Reserved unconditionally, the same as "v1"/"mcp"/"a2a"
+// already are, rather than only when admin.enabled: a provider named
+// "admin" configured before the dashboard is turned on would otherwise
+// silently lose its own routes the moment someone later enables it.
+var reservedConfigNames = map[string]bool{"v1": true, "mcp": true, "a2a": true, "admin": true}
 
 // dotOnlyConfigNames are the two names configNamePattern's character class
 // permits (it allows ".") but that are rejected anyway: "." and ".." read

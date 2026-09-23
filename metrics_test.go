@@ -504,6 +504,94 @@ func TestMetrics_OutputParsesAsValidExposition(t *testing.T) {
 	}
 }
 
+// TestMetrics_Exposition_FamiliesAreContiguous is the L7 regression test:
+// the Prometheus text-exposition format requires every metric's sample
+// lines to form a single contiguous group — one family's samples must
+// not start, get interrupted by a different family's samples, then
+// resume. This drives the same real traffic
+// TestMetrics_OutputParsesAsValidExposition does (so every family in
+// this file actually has multiple label sets to interleave, the bug
+// this test would have caught), then walks the raw response body
+// line by line and fails if any family's base metric name is seen
+// again after a DIFFERENT family's samples started — the exact shape a
+// strict OpenMetrics-style parser rejects even though promparse/expfmt
+// tolerate it.
+func TestMetrics_Exposition_FamiliesAreContiguous(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"id":"c1","object":"chat.completion","model":"gpt-test","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`))
+	}))
+	defer srv.Close()
+
+	cfg := newMetricsTestConfig()
+	cfg.Metrics.ModelLabel = true
+	cfg.Providers["openai"].BaseURL = srv.URL
+	cfg.Users.Inline[0].Limits = &LimitsConfig{RequestsPerMinute: 1}
+	h, gw := newMetricsGatewayHandle(t, cfg)
+	gw.limiter.store = newMemoryStore()
+	// A directly-seeded model-labeled latency sample (M4's own scenario)
+	// so llmgateway_upstream_model_duration_seconds also has a series to
+	// check for contiguity, the same way it does against
+	// llmgateway_upstream_duration_seconds — two histogram families with
+	// several suffixed sample names each are exactly the shape most
+	// likely to interleave if writeLatencyMetrics regressed.
+	gw.recordLatency("openai", "gpt-test", latencySample{duration: 200 * time.Millisecond, streaming: false})
+
+	body := map[string]any{"model": "gpt-test", "messages": []any{map[string]any{"role": "user", "content": "hi"}}}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, newUnifiedRequest(t, http.MethodPost, "/v1/chat/completions", "sk-alice", body))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("seed request status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, newUnifiedRequest(t, http.MethodPost, "/v1/chat/completions", "sk-alice", body))
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("second request status = %d, want 429 (RequestsPerMinute:1 exhausted)", rec.Code)
+	}
+
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, metricsRequest(http.MethodGet, metricsPathDefault, "sk-admin1"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /metrics status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+
+	types, _ := parsePrometheusText(t, rec.Body.Bytes())
+
+	familyOf := func(name string) string {
+		for _, suffix := range []string{"_bucket", "_sum", "_count"} {
+			if trimmed, ok := strings.CutSuffix(name, suffix); ok {
+				if k, ok := types[trimmed]; ok && k == "histogram" {
+					return trimmed
+				}
+			}
+		}
+		return name
+	}
+
+	seenAndClosed := map[string]bool{} // families whose contiguous block has already ended
+	current := ""                      // the family the sample block currently in progress belongs to
+	for _, line := range strings.Split(rec.Body.String(), "\n") {
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue // HELP/TYPE lines and blank lines carry no sample, so they don't affect contiguity
+		}
+		s := parsePromSample(t, line)
+		fam := familyOf(s.name)
+		if fam == current {
+			continue // still inside the same family's block
+		}
+		if seenAndClosed[fam] {
+			t.Fatalf("family %q is not contiguous: its samples resume after family %q's block started, "+
+				"violating the exposition format's one-group-per-metric rule", fam, current)
+		}
+		if current != "" {
+			seenAndClosed[current] = true
+		}
+		current = fam
+	}
+}
+
 // --- label escaping: the correctness requirement, not a nicety ---
 
 func TestEscapeLabelValue(t *testing.T) {
@@ -1334,6 +1422,70 @@ func TestMetrics_LatencyHistogram_StreamingAndNonStreaming_DistinctLabelSets(t *
 	}
 	if !sawStreamFalse {
 		t.Error(`no llmgateway_upstream_duration_seconds_count{provider="openai",stream="false"} sample — the non-streaming request must land in the stream="false" label set`)
+	}
+}
+
+// TestMetrics_LatencyHistogram_ModelLabel_DistinctMetricName_NoDoubleCount
+// is the M4 regression test: recordLatency dual-writes one observation
+// into both the always-on (provider, streaming) key and, when
+// ModelLabel is on and model is known, the (provider, streaming, model)
+// key — the SAME underlying request. Before the fix both writes rendered
+// under the identical metric name "llmgateway_upstream_duration_seconds",
+// so summing that one family over all its label sets counted the single
+// request twice. This asserts the always-on family's own series never
+// carries a "model" label at all (so it cannot combine with the
+// model-labeled write under one name/aggregation) and that the
+// model-labeled write instead lands under the distinct
+// "llmgateway_upstream_model_duration_seconds" family, each family's own
+// _count summing to exactly 1 — the true number of requests observed —
+// rather than 2.
+func TestMetrics_LatencyHistogram_ModelLabel_DistinctMetricName_NoDoubleCount(t *testing.T) {
+	t.Parallel()
+	cfg := newMetricsTestConfig()
+	cfg.Metrics.ModelLabel = true
+	h, gw := newMetricsGatewayHandle(t, cfg)
+
+	gw.recordLatency("openai", "gpt-test", latencySample{duration: 400 * time.Millisecond, streaming: false})
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, metricsRequest(http.MethodGet, metricsPathDefault, "sk-admin1"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	types, samples := parsePrometheusText(t, rec.Body.Bytes())
+
+	if _, ok := types["llmgateway_upstream_model_duration_seconds"]; !ok {
+		t.Fatal(`expected a distinct "llmgateway_upstream_model_duration_seconds" TYPE line — the model-labeled write must not share a name with the base family`)
+	}
+
+	var baseCount, modelCount int64
+	for _, s := range samples {
+		switch s.name {
+		case "llmgateway_upstream_duration_seconds_count":
+			if _, hasModel := s.labels["model"]; hasModel {
+				t.Errorf(`llmgateway_upstream_duration_seconds_count carries a "model" label (%v) — the always-on family must never carry one, or a naive sum() over it double-counts against the model-labeled family`, s.labels)
+			}
+			v, err := strconv.ParseInt(s.value, 10, 64)
+			if err != nil {
+				t.Fatalf("bucket value %q does not parse: %v", s.value, err)
+			}
+			baseCount += v
+		case "llmgateway_upstream_model_duration_seconds_count":
+			if s.labels["model"] != "gpt-test" {
+				t.Errorf(`llmgateway_upstream_model_duration_seconds_count model label = %q, want "gpt-test"`, s.labels["model"])
+			}
+			v, err := strconv.ParseInt(s.value, 10, 64)
+			if err != nil {
+				t.Fatalf("bucket value %q does not parse: %v", s.value, err)
+			}
+			modelCount += v
+		}
+	}
+	if baseCount != 1 {
+		t.Errorf("llmgateway_upstream_duration_seconds_count total = %d, want 1 (one real request)", baseCount)
+	}
+	if modelCount != 1 {
+		t.Errorf("llmgateway_upstream_model_duration_seconds_count total = %d, want 1 (one real request)", modelCount)
 	}
 }
 

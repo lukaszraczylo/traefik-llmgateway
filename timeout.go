@@ -180,7 +180,16 @@ type watchdogBody struct {
 	timedOut        int32
 	ttfbRecorded    int32
 	latencyRecorded int32
-	streaming       bool
+	// done is set once Read observes a clean io.EOF (finding 11 fix,
+	// review-routes.md) — see Read's own doc comment for why the timer
+	// must be stopped THERE, not left armed until Close eventually calls
+	// Stop; fire checks this before doing anything, so a fire() goroutine
+	// already mid-flight the instant EOF arrives (Stop cannot retract a
+	// time.AfterFunc goroutine already started) still cannot record a
+	// spurious failure for an upstream that, in fact, just finished
+	// cleanly.
+	done      int32
+	streaming bool
 }
 
 // newWatchdogBody returns a watchdogBody wrapping rc, arming its watchdog
@@ -264,6 +273,15 @@ func isEventStreamResponse(resp *http.Response) bool {
 // provider-health accounting sees the failure even though no caller will
 // ever read a body byte past this point.
 func (wb *watchdogBody) fire() {
+	// Finding 11 fix (review-routes.md): once Read has already seen a
+	// clean EOF, this watchdog is done — a fire() goroutine that was
+	// already scheduled the instant EOF arrived (time.AfterFunc's own
+	// timer cannot be retracted once its goroutine has started, only
+	// prevented from starting via Stop) must not record a spurious
+	// provider failure for an upstream that, in fact, finished cleanly.
+	if atomic.LoadInt32(&wb.done) == 1 {
+		return
+	}
 	atomic.StoreInt32(&wb.timedOut, 1)
 	wb.cancel()
 	if wb.onTimeout != nil {
@@ -320,6 +338,18 @@ func (wb *watchdogBody) timeoutError() error {
 // fixes that without touching the timer-reset semantics those tests
 // pin: a self-contained top-of-function check that only ever WRITES
 // wb.ttfb/wb.ttfbRecorded, never wb.timer or any error path.
+//
+// Finding 11 fix (review-routes.md): a clean io.EOF stops the timer HERE,
+// immediately, rather than leaving it armed until the caller's own,
+// possibly much later, Close call. Before this fix, forwardJSON
+// (provider_openai.go) reads the upstream body to EOF and then spends
+// time WRITING up to 32MiB of it to the client before its deferred
+// Close runs — if that client write took longer than timeout, the
+// still-armed timer fired and recorded a spurious provider failure for
+// an upstream that had, in fact, already finished successfully. done
+// additionally guards the fire() side of this same race (see its own
+// doc comment): Stop cannot retract a fire() goroutine that started
+// firing the instant before this branch runs.
 func (wb *watchdogBody) Read(p []byte) (int, error) {
 	n, err := wb.rc.Read(p)
 	if n > 0 && wb.onLatency != nil && atomic.LoadInt32(&wb.ttfbRecorded) == 0 {
@@ -327,6 +357,10 @@ func (wb *watchdogBody) Read(p []byte) (int, error) {
 		atomic.StoreInt32(&wb.ttfbRecorded, 1)
 	}
 	if err != nil {
+		if err == io.EOF { //nolint:errorlint // io.EOF is returned bare per its own doc comment; wrapped by no known caller
+			atomic.StoreInt32(&wb.done, 1)
+			wb.timer.Stop()
+		}
 		if atomic.LoadInt32(&wb.timedOut) == 1 {
 			return n, wb.timeoutError()
 		}

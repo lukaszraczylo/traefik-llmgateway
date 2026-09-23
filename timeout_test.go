@@ -849,6 +849,53 @@ func TestWatchdogBody_ZeroByteRead_DoesNotResetTimer(t *testing.T) {
 	}
 }
 
+// eofReadCloser always returns (0, io.EOF), simulating an upstream body
+// that has already been fully, successfully read — used by
+// TestWatchdogBody_Read_EOF_StopsTimer_FireNeverRuns (finding 11) to
+// prove Read stops the watchdog timer itself, rather than waiting for
+// the caller's own, possibly much later, Close call.
+type eofReadCloser struct{}
+
+func (eofReadCloser) Read([]byte) (int, error) { return 0, io.EOF }
+func (eofReadCloser) Close() error             { return nil }
+
+// TestWatchdogBody_Read_EOF_StopsTimer_FireNeverRuns proves finding 11
+// (review-routes.md): a Read returning io.EOF must stop the watchdog
+// timer immediately, not leave it armed until the caller's eventual
+// Close. Without this, a caller that reads the upstream body to
+// completion and then spends time WRITING it out to a slow client
+// (forwardJSON copies up to 32MiB before its deferred Close runs) races
+// the still-armed timer, which can fire and record a spurious provider
+// failure for an upstream that, in fact, finished cleanly. Close is
+// deliberately NOT called until after the assertion below, mirroring
+// TestWatchdogBody_Close_StopsTimer_FireNeverRuns' own "prove it without
+// relying on Close" shape.
+//
+// MUTATION VERIFIED: removing the `if err == io.EOF { ...; wb.timer.
+// Stop() }` branch from watchdogBody.Read (timeout.go) made this test
+// fail — wb.timedOut read back as 1 after the sleep, since the un-stopped
+// timer still fired on schedule.
+func TestWatchdogBody_Read_EOF_StopsTimer_FireNeverRuns(t *testing.T) {
+	const timeout = 30 * time.Millisecond
+	frc := eofReadCloser{}
+	_, cancel := context.WithCancel(context.Background())
+	wb := newWatchdogBody(frc, cancel, timeout, "p1", nil)
+
+	if _, err := wb.Read(make([]byte, 16)); err != io.EOF { //nolint:errorlint // io.EOF returned bare by the fixture above
+		t.Fatalf("Read: err = %v, want io.EOF", err)
+	}
+	if got := atomic.LoadInt32(&wb.done); got != 1 {
+		t.Fatalf("wb.done = %d after a Read returning io.EOF, want 1", got)
+	}
+
+	time.Sleep(3 * timeout) // well past when an un-stopped timer would fire
+
+	if got := atomic.LoadInt32(&wb.timedOut); got != 0 {
+		t.Errorf("wb.timedOut = %d after a Read returning io.EOF, want 0 — the timer must be stopped at EOF, not left armed until Close", got)
+	}
+	_ = wb.Close()
+}
+
 // TestWatchdogBody_TimeoutError_UsesCallerLabel_NotHardcodedProvider
 // proves finding F9 (coordinator adversarial review, 2026-08-23):
 // proxyUpstream (routes_passthrough.go) previously passed logPrefix as a

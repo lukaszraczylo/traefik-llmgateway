@@ -354,8 +354,6 @@ type historyCountingStore struct {
 	getMultiCalls int
 }
 
-func (s *historyCountingStore) incrBy(string, int64, time.Duration) (int64, error) { return 0, nil }
-func (s *historyCountingStore) get(string) (int64, error)                          { return 0, nil }
 func (s *historyCountingStore) getMulti(keys []string) ([]int64, error) {
 	s.getMultiCalls++
 	out := make([]int64, len(keys))
@@ -384,6 +382,27 @@ func TestLimiterHistory_StoreDown(t *testing.T) {
 	}
 	if points != nil {
 		t.Errorf("points = %+v, want nil on a storeDown read", points)
+	}
+}
+
+// TestLimiterHistory_ConfiguredStoreDown_FailOpen_ReturnsNotOK is finding
+// F5, 2026-09 review: with the default failOpen=true, storeGetMulti's own
+// ok stays true during a store outage — it silently serves the in-process
+// fallback instead — so history must ALSO check configuredStoreDown, not
+// just ok, or a Redis blip would present the fallback's near-empty data
+// as a genuine drop on the usage-history chart instead of the 503 this
+// function's own doc comment promises. alwaysErrStore's first call opens
+// the store-down latch (recordStoreFailure) synchronously, before
+// configuredStoreDown is checked below, so this single call already
+// exercises the fail-open-AND-latched path.
+func TestLimiterHistory_ConfiguredStoreDown_FailOpen_ReturnsNotOK(t *testing.T) {
+	l := newLimiter(alwaysErrStore{}, true) // failOpen: true, unlike TestLimiterHistory_StoreDown above
+	points, ok := l.history("total", "all", "req", windowDay, time.Now(), 5)
+	if ok {
+		t.Fatal("want ok=false: the store is down even though failOpen silently served the fallback")
+	}
+	if points != nil {
+		t.Errorf("points = %+v, want nil", points)
 	}
 }
 
@@ -789,10 +808,8 @@ type erroringStore struct {
 	err error
 }
 
-func (s *erroringStore) incrBy(string, int64, time.Duration) (int64, error) { return 0, s.err }
-func (s *erroringStore) get(string) (int64, error)                          { return 0, s.err }
-func (s *erroringStore) getMulti([]string) ([]int64, error)                 { return nil, s.err }
-func (s *erroringStore) incrMulti([]counterIncr) ([]int64, error)           { return nil, s.err }
+func (s *erroringStore) getMulti([]string) ([]int64, error)       { return nil, s.err }
+func (s *erroringStore) incrMulti([]counterIncr) ([]int64, error) { return nil, s.err }
 func (s *erroringStore) incrAndGetMulti([]counterIncr, []string) ([]int64, []int64, error) {
 	return nil, nil, s.err
 }
@@ -839,9 +856,9 @@ func TestLimiter_FailClosed_StoreErrorReturnsStoreDownViolation(t *testing.T) {
 	}
 }
 
-// succeedIncrFailGetStore is a counterStore stub whose incrBy/incrMulti
-// always succeed and whose get/getMulti/incrAndGetMulti always error. Its
-// incrMulti/get/getMulti stay independently overridable (used by any
+// succeedIncrFailGetStore is a counterStore stub whose incrMulti always
+// succeeds and whose getMulti/incrAndGetMulti always error. Its
+// incrMulti/getMulti stay independently overridable (used by any
 // OTHER caller — account, currentUsage, and so on — that still calls them
 // separately) even though checkAndCount itself, since the round-3 fusion
 // (2026-08-22), calls incrAndGetMulti exclusively: a store that cannot
@@ -852,10 +869,6 @@ type succeedIncrFailGetStore struct {
 	getErr error
 }
 
-func (s *succeedIncrFailGetStore) incrBy(string, int64, time.Duration) (int64, error) {
-	return 1, nil
-}
-func (s *succeedIncrFailGetStore) get(string) (int64, error) { return 0, s.getErr }
 func (s *succeedIncrFailGetStore) getMulti([]string) ([]int64, error) {
 	return nil, s.getErr
 }
@@ -962,16 +975,6 @@ type countingErrorStore struct {
 	err       error
 	incrCalls int
 	getCalls  int
-}
-
-func (s *countingErrorStore) incrBy(string, int64, time.Duration) (int64, error) {
-	s.incrCalls++
-	return 0, s.err
-}
-
-func (s *countingErrorStore) get(string) (int64, error) {
-	s.getCalls++
-	return 0, s.err
 }
 
 func (s *countingErrorStore) getMulti([]string) ([]int64, error) {
@@ -1145,19 +1148,31 @@ func TestLimiter_FailPolicyIncrBy(t *testing.T) {
 	}
 }
 
-// fixedStore is a counterStore stub whose incrBy/get always succeed with a
-// fixed value, independent of key/n/ttl — used to prove storeIncrBy/
-// storeGet return the STORE's own reported value on success, rather than
-// silently substituting the in-process fallback's.
+// fixedStore is a counterStore stub whose incrMulti/getMulti always
+// succeed with a fixed value per entry/key, independent of key/n/ttl —
+// used to prove storeIncrBy/storeGet (limits_helpers_test.go, built on
+// the batched storeIncrMulti/storeGetMulti production paths) return the
+// STORE's own reported value on success, rather than silently
+// substituting the in-process fallback's.
 type fixedStore struct {
 	incrVal int64
 	getVal  int64
 }
 
-func (s *fixedStore) incrBy(string, int64, time.Duration) (int64, error) { return s.incrVal, nil }
-func (s *fixedStore) get(string) (int64, error)                          { return s.getVal, nil }
-func (s *fixedStore) getMulti([]string) ([]int64, error)                 { return nil, nil }
-func (s *fixedStore) incrMulti([]counterIncr) ([]int64, error)           { return nil, nil }
+func (s *fixedStore) getMulti(keys []string) ([]int64, error) {
+	out := make([]int64, len(keys))
+	for i := range out {
+		out[i] = s.getVal
+	}
+	return out, nil
+}
+func (s *fixedStore) incrMulti(entries []counterIncr) ([]int64, error) {
+	out := make([]int64, len(entries))
+	for i := range out {
+		out[i] = s.incrVal
+	}
+	return out, nil
+}
 func (s *fixedStore) incrAndGetMulti([]counterIncr, []string) ([]int64, []int64, error) {
 	return nil, nil, nil
 }
@@ -1345,22 +1360,12 @@ func TestLimiter_LogSpawnDrop_RateLimited(t *testing.T) {
 // directly; checkAndCount, since the round-3 fusion (2026-08-22, perf
 // review), calls incrAndGetMulti exclusively — so the two counters below
 // track genuinely different callers, not the same round trip under two
-// names. incrBy is never exercised by either caller and just returns a
-// zero value.
+// names.
 type countingIncrStore struct {
 	values               map[string]int64
 	incrMultiCalls       int
 	incrAndGetMultiCalls int
 	getMultiCalls        int
-}
-
-func (s *countingIncrStore) incrBy(string, int64, time.Duration) (int64, error) { return 0, nil }
-
-func (s *countingIncrStore) get(key string) (int64, error) {
-	if s.values == nil {
-		return 0, nil
-	}
-	return s.values[key], nil
 }
 
 func (s *countingIncrStore) getMulti(keys []string) ([]int64, error) {
@@ -1412,9 +1417,18 @@ func (s *countingIncrStore) incrAndGetMulti(entries []counterIncr, reads []strin
 // batched reply must still drive correct evaluation — a real
 // requestsPerMinute violation on the 3rd call, with the exact right
 // counter value. Supersedes the pre-fusion incrMulti-only version of this
-// test (perf review, 2026-08-21): checkAndCount no longer calls incrMulti
-// at all, only incrAndGetMulti (account still does, covered separately
-// below by TestAccount_OneIncrMultiCallRegardlessOfScopeOrMetricCount).
+// test (perf review, 2026-08-21): checkAndCount's own ADMISSION path no
+// longer calls incrMulti at all, only incrAndGetMulti (account still
+// does, covered separately below by
+// TestAccount_OneIncrMultiCallRegardlessOfScopeOrMetricCount).
+//
+// Updated (finding F1, 2026-09 review): a REJECTION now costs one further
+// incrMulti call — rollbackOtherScopeCounts' own compensating batch,
+// undoing the increments the fused round trip above already made for
+// every scope OTHER than the one that actually violated. See
+// TestCheckAndCount_RejectionRollsBackOtherScopes_MemoryFallback for the
+// dedicated group-lockout regression this fixes; this test's own
+// assertions below were updated to match the corrected counter values.
 func TestCheckAndCount_OneIncrAndGetMultiCallRegardlessOfScopeCount(t *testing.T) {
 	store := &countingIncrStore{}
 	l := newLimiter(store, true)
@@ -1441,6 +1455,10 @@ func TestCheckAndCount_OneIncrAndGetMultiCallRegardlessOfScopeCount(t *testing.T
 		t.Errorf("incrAndGetMultiCalls after 2nd checkAndCount = %d, want 2 (one call per checkAndCount, not per scope or per counter)", store.incrAndGetMultiCalls)
 	}
 
+	if store.incrMultiCalls != 0 {
+		t.Errorf("incrMultiCalls after 2nd checkAndCount = %d, want 0 (no rollback — nothing violated yet)", store.incrMultiCalls)
+	}
+
 	v := l.checkAndCount(scopes)
 	if v == nil {
 		t.Fatal("3rd call should violate u's requestsPerMinute:2")
@@ -1451,23 +1469,30 @@ func TestCheckAndCount_OneIncrAndGetMultiCallRegardlessOfScopeCount(t *testing.T
 	if store.incrAndGetMultiCalls != 3 {
 		t.Errorf("incrAndGetMultiCalls after 3rd checkAndCount = %d, want 3", store.incrAndGetMultiCalls)
 	}
-	if store.incrMultiCalls != 0 {
-		t.Errorf("incrMultiCalls = %d, want 0 (checkAndCount must never call the separate incrMulti after fusion)", store.incrMultiCalls)
+	// Finding F1, 2026-09 review: a violation now fires ONE compensating
+	// incrMulti call (rollbackOtherScopeCounts) to undo the OTHER
+	// scopes' increments for this rejected request — see this test's own
+	// updated value assertions below for why.
+	if store.incrMultiCalls != 1 {
+		t.Errorf("incrMultiCalls after the violation = %d, want 1 (rollbackOtherScopeCounts' own compensating batch)", store.incrMultiCalls)
 	}
 
 	// Values correct: batching three scopes into one call must not
-	// corrupt any one scope's own counter.
+	// corrupt any one scope's own counter, AND (finding F1) the group and
+	// total scopes' req:min/day/hour counters must be rolled back to what
+	// they were before this rejected 3rd request — only the VIOLATING
+	// scope ("user") keeps counting a request that was never admitted.
 	uMin, ok := l.getCounter("user", "u", metricReq, windowMin, now)
 	if !ok || uMin != 3 {
-		t.Errorf("user req:min = %d, ok=%v, want 3", uMin, ok)
+		t.Errorf("user req:min = %d, ok=%v, want 3 (the violating scope's own count is not rolled back)", uMin, ok)
 	}
 	totalMin, ok := l.getCounter(totalScopeKind, totalScopeID, metricReq, windowMin, now)
-	if !ok || totalMin != 3 {
-		t.Errorf("total req:min = %d, ok=%v, want 3", totalMin, ok)
+	if !ok || totalMin != 2 {
+		t.Errorf("total req:min = %d, ok=%v, want 2 (rolled back — the total scope had nothing to do with user u's own violation)", totalMin, ok)
 	}
 	gDay, ok := l.getCounter("group", "g", metricReq, windowDay, now)
-	if !ok || gDay != 3 {
-		t.Errorf("group req:day = %d, ok=%v, want 3", gDay, ok)
+	if !ok || gDay != 2 {
+		t.Errorf("group req:day = %d, ok=%v, want 2 (rolled back)", gDay, ok)
 	}
 }
 
@@ -1712,6 +1737,64 @@ func TestCheckAndCount_FusedRoundTrip_MemoryFallback(t *testing.T) {
 	assert.Contains(t, v.message, "tokens-per-day")
 }
 
+// TestCheckAndCount_RejectionRollsBackOtherScopes_MemoryFallback is
+// finding F1, 2026-09 review, the group-lockout bug: a user hammering
+// past THEIR OWN requests-per-minute limit must not also drive up their
+// group's identical counter on every rejected attempt — before this fix,
+// checkAndCount's unconditional per-scope counting had no rollback, so
+// enough rejected user-scope requests could push the group's own limit
+// past its threshold too, locking out every OTHER member of the group
+// from traffic that was never actually admitted.
+func TestCheckAndCount_RejectionRollsBackOtherScopes_MemoryFallback(t *testing.T) {
+	l := newLimiter(nil, true) // nil store -> every operation uses the in-process fallback
+	now := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	l.nowFn = func() time.Time { return now }
+
+	scopes := []limitScope{
+		{kind: "user", id: "u", limits: &LimitsConfig{RequestsPerMinute: 1}},
+		{kind: "group", id: "g", limits: &LimitsConfig{RequestsPerMinute: 100}},
+	}
+
+	// 1st call: user count 1 <= its own limit of 1, group count 1 <= its
+	// own limit of 100 — admitted.
+	if v := l.checkAndCount(scopes); v != nil {
+		t.Fatalf("1st call: want no violation, got %+v", v)
+	}
+	// 2nd call: user count reaches 2, over its own limit of 1 — rejected.
+	// Without the fix, the group's own req:min counter would also land at
+	// 2 here and stay there, even though the group never actually
+	// admitted a 2nd request.
+	v := l.checkAndCount(scopes)
+	if v == nil {
+		t.Fatal("2nd call: want a requests-per-minute violation on the user scope")
+	}
+	assert.Contains(t, v.message, "requests-per-minute")
+
+	groupMin, ok := l.getCounter("group", "g", metricReq, windowMin, now)
+	if !ok || groupMin != 1 {
+		t.Errorf("group req:min after the user's rejection = %d, ok=%v, want 1 (rolled back)", groupMin, ok)
+	}
+	groupDay, ok := l.getCounter("group", "g", metricReq, windowDay, now)
+	if !ok || groupDay != 1 {
+		t.Errorf("group req:day after the user's rejection = %d, ok=%v, want 1 (rolled back)", groupDay, ok)
+	}
+	userMin, ok := l.getCounter("user", "u", metricReq, windowMin, now)
+	if !ok || userMin != 2 {
+		t.Errorf("user req:min after its own rejection = %d, ok=%v, want 2 (the violating scope's own count is not rolled back)", userMin, ok)
+	}
+
+	// A 3rd request, from a DIFFERENT user in the SAME group, must still
+	// be admitted — proving the group is not locked out by the first
+	// user's rejected attempts.
+	otherUserScopes := []limitScope{
+		{kind: "user", id: "other", limits: &LimitsConfig{RequestsPerMinute: 1}},
+		{kind: "group", id: "g", limits: &LimitsConfig{RequestsPerMinute: 100}},
+	}
+	if v := l.checkAndCount(otherUserScopes); v != nil {
+		t.Fatalf("a different user in the same group: want no violation (group must not be locked out), got %+v", v)
+	}
+}
+
 // --- review round 2, 2026-08-21: enforcement-aware fallback TTL clamp ---
 
 // TestClampTTL_ExactMathTable pins clampTTL's ceiling-vs-floor precedence
@@ -1912,6 +1995,20 @@ func TestRecordProviderAttempt_ClassifiesUsingIsTransient(t *testing.T) {
 			modelFails, _ := l.getCounter(kindProviderModel, "openai/gpt-4o", metricProvFail, windowDay, now)
 			if modelFails != wantFails {
 				t.Errorf("model fails/day = %d, want %d", modelFails, wantFails)
+			}
+
+			// Dead-code sweep, 2026-09 review: recordProviderAttempt no
+			// longer writes a (provider, model) scope's MINUTE-window
+			// counters — providerCounterKeys has never read one
+			// (SHOULD-2, v0.22 review round), so those writes were pure
+			// cost with no reader anywhere in this codebase.
+			modelAttemptsMin, _ := l.getCounter(kindProviderModel, "openai/gpt-4o", metricProvAttempt, windowMin, now)
+			if modelAttemptsMin != 0 {
+				t.Errorf("model attempts/min = %d, want 0 (no longer written)", modelAttemptsMin)
+			}
+			modelFailsMin, _ := l.getCounter(kindProviderModel, "openai/gpt-4o", metricProvFail, windowMin, now)
+			if modelFailsMin != 0 {
+				t.Errorf("model fails/min = %d, want 0 (no longer written)", modelFailsMin)
 			}
 		})
 	}
@@ -2454,8 +2551,6 @@ type recordingStore struct {
 	entries []counterIncr
 }
 
-func (s *recordingStore) incrBy(string, int64, time.Duration) (int64, error) { return 0, nil }
-func (s *recordingStore) get(string) (int64, error)                          { return 0, nil }
 func (s *recordingStore) getMulti(keys []string) ([]int64, error) {
 	return make([]int64, len(keys)), nil
 }
@@ -2514,5 +2609,39 @@ func TestCounterIncrEntries_WindowBucketTTLInvariant(t *testing.T) {
 				assert.Truef(t, strings.HasSuffix(e.key, wantBucket), "entry %q does not end with bucketFor(now, %q) = %q", e.key, window, wantBucket)
 			}
 		})
+	}
+}
+
+// TestModelTotals_ConfiguredStoreDown_FailOpen_ReturnsNotOK is finding
+// F5, 2026-09 review — modelTotals' own counterpart of
+// TestLimiterHistory_ConfiguredStoreDown_FailOpen_ReturnsNotOK above: with
+// failOpen=true, a store outage must still report ok=false via
+// configuredStoreDown rather than silently presenting the empty fallback
+// as a genuine "these models were barely used" ranking.
+func TestModelTotals_ConfiguredStoreDown_FailOpen_ReturnsNotOK(t *testing.T) {
+	l := newLimiter(alwaysErrStore{}, true)
+	got, ok := l.modelTotals([]string{"a/one"}, metricCost, windowDay)
+	if ok {
+		t.Fatal("want ok=false: the store is down even though failOpen silently served the fallback")
+	}
+	if got != nil {
+		t.Errorf("got = %+v, want nil", got)
+	}
+}
+
+// TestTargetUsage_ConfiguredStoreDown_FailOpen_ReturnsZeroCounters is
+// finding F5, 2026-09 review — targetUsage's own counterpart: with
+// failOpen=true, a store outage must fall back to the same zero-value
+// targetCounters this function's own doc comment already promises for
+// the fail-closed case, rather than presenting the empty in-process
+// fallback's data as confirmed current usage.
+func TestTargetUsage_ConfiguredStoreDown_FailOpen_ReturnsZeroCounters(t *testing.T) {
+	l := newLimiter(alwaysErrStore{}, true)
+	got := l.targetUsage([]limitScope{{kind: targetKindMCP, id: "alpha"}})
+	if len(got) != 1 {
+		t.Fatalf("len(got) = %d, want 1", len(got))
+	}
+	if got[0] != (targetCounters{}) {
+		t.Errorf("got[0] = %+v, want the zero value", got[0])
 	}
 }

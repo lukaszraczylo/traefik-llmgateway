@@ -1,0 +1,7 @@
+{
+  "model": "gemini-2.5-pro",
+  "messages": [
+    {"role": "developer", "content": "Always answer in one sentence."},
+    {"role": "user", "content": "Hello there"}
+  ]
+}

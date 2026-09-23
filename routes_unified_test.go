@@ -72,14 +72,6 @@ type alwaysErrStore struct{}
 
 var errStoreDownStub = errors.New("stub: store down")
 
-func (alwaysErrStore) incrBy(string, int64, time.Duration) (int64, error) {
-	return 0, errStoreDownStub
-}
-
-func (alwaysErrStore) get(string) (int64, error) {
-	return 0, errStoreDownStub
-}
-
 func (alwaysErrStore) getMulti([]string) ([]int64, error) {
 	return nil, errStoreDownStub
 }
@@ -1107,11 +1099,18 @@ func TestHandleChat_UpstreamNon2xx_WrapsProviderErrorEnvelope(t *testing.T) {
 	}
 }
 
-// TestHandleChat_MidStreamUpstreamDrop_NoTrailingEnvelope proves an
-// adapter error arriving after the response has already started streaming
-// gets logged, not turned into a second, conflicting envelope appended to
-// a body the client already started receiving (ruling c).
-func TestHandleChat_MidStreamUpstreamDrop_NoTrailingEnvelope(t *testing.T) {
+// TestHandleChat_MidStreamUpstreamDrop_EmitsErrorEventNoDone proves an
+// adapter error arriving after an SSE response has already started
+// streaming is logged AND turned into exactly one trailing OpenAI-style
+// `data: {"error":{...}}` event (finding 15 fix, review-routes.md —
+// supersedes this test's own former "no trailing envelope" ruling c: a
+// client stream that just ends, with no terminal signal at all, is
+// indistinguishable from a silently truncated success to any SDK that
+// does not strictly require "data: [DONE]"). It is never a second,
+// conflicting HTTP status/envelope — no second WriteHeader is possible
+// once headers are already committed — and it is never followed by
+// "data: [DONE]\n\n", since this is not a clean completion.
+func TestHandleChat_MidStreamUpstreamDrop_EmitsErrorEventNoDone(t *testing.T) {
 	const firstChunk = "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"delta\":{\"content\":\"Hi\"}}]}\n\n"
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1167,11 +1166,87 @@ func TestHandleChat_MidStreamUpstreamDrop_NoTrailingEnvelope(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (headers already committed before the drop)", rec.Code)
 	}
-	if got := rec.Body.String(); got != firstChunk {
-		t.Errorf("body = %q, want exactly the one chunk written before the drop (no trailing error envelope)", got)
+	const wantErrEvent = "data: {\"error\":{\"message\":\"upstream connection error\",\"type\":\"server_error\"}}\n\n"
+	if got := rec.Body.String(); got != firstChunk+wantErrEvent {
+		t.Errorf("body = %q, want the first chunk plus one trailing error event %q", got, wantErrEvent)
+	}
+	if strings.Contains(rec.Body.String(), "[DONE]") {
+		t.Errorf("body = %q, must not contain [DONE] — a mid-stream failure is not a clean completion", rec.Body.String())
 	}
 	if !strings.Contains(logBuf.String(), "llmgw[llmgw] ERROR") {
 		t.Errorf("want the mid-stream error logged, got %q", logBuf.String())
+	}
+}
+
+// TestMidStreamErrorMessage covers every branch of midStreamErrorMessage
+// (finding 15 fix, review-routes.md): the message/type pair handed to a
+// mid-stream SSE error event mirrors exactly what the equivalent
+// non-streamed envelope(...) call would have shown for the same error
+// type, and a context.Canceled produces ok=false — nothing to write to a
+// client that is already gone.
+func TestMidStreamErrorMessage(t *testing.T) {
+	tests := []struct {
+		err         error
+		name        string
+		wantMsg     string
+		wantErrType string
+		wantOK      bool
+	}{
+		{
+			name:        "providerHTTPError",
+			err:         &providerHTTPError{status: 503, body: []byte(`{"error":"down"}`)},
+			wantMsg:     "openai upstream error",
+			wantErrType: "upstream_error",
+			wantOK:      true,
+		},
+		{
+			name:        "translateError",
+			err:         &translateError{msg: "n>1 is not supported"},
+			wantMsg:     "n>1 is not supported",
+			wantErrType: "invalid_request_error",
+			wantOK:      true,
+		},
+		{
+			name:        "responseTranslationError",
+			err:         &responseTranslationError{err: errors.New("boom")},
+			wantMsg:     "failed to translate provider response",
+			wantErrType: "server_error",
+			wantOK:      true,
+		},
+		{
+			name:        "generic upstream error",
+			err:         fmt.Errorf("%w: connection reset", errUpstream),
+			wantMsg:     "upstream connection error",
+			wantErrType: "server_error",
+			wantOK:      true,
+		},
+		{
+			name:   "context.Canceled: nothing to write",
+			err:    context.Canceled,
+			wantOK: false,
+		},
+		{
+			name:   "wrapped context.Canceled: nothing to write",
+			err:    fmt.Errorf("%w: %w", errUpstream, context.Canceled),
+			wantOK: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			msg, errType, ok := midStreamErrorMessage(tt.err, "openai")
+			if ok != tt.wantOK {
+				t.Fatalf("ok = %v, want %v", ok, tt.wantOK)
+			}
+			if !ok {
+				return
+			}
+			if msg != tt.wantMsg {
+				t.Errorf("msg = %q, want %q", msg, tt.wantMsg)
+			}
+			if errType != tt.wantErrType {
+				t.Errorf("errType = %q, want %q", errType, tt.wantErrType)
+			}
+		})
 	}
 }
 
@@ -2130,6 +2205,7 @@ func TestUnifiedCostMicros(t *testing.T) {
 
 	cases := []struct {
 		overrides map[string]*ModelPricing
+		meta      map[string]*ModelMetaConfig
 		name      string
 		canonical string
 		bare      string
@@ -2160,10 +2236,24 @@ func TestUnifiedCostMicros(t *testing.T) {
 			overrides: nil,
 			want:      0,
 		},
+		{
+			// verify-core round-4 regression: gpt-oss-120b is a real bare
+			// id in the generated builtinModelMetaTable (a common self-
+			// hosted model name). An operator declaring it free:true under
+			// a self-hosted canonical id must bill 0, never the table's
+			// real price — priceKnown already treats this model as priced
+			// (modelMetaFree, modelmeta.go); billing must agree.
+			name:      "modelMeta free:true bills zero even though bare id has a built-in table price",
+			canonical: "gx10/gpt-oss-120b",
+			bare:      "gpt-oss-120b",
+			overrides: nil,
+			meta:      map[string]*ModelMetaConfig{"gx10/gpt-oss-120b": {Free: true}},
+			want:      0,
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			assert.Equal(t, c.want, unifiedCostMicros(c.canonical, c.bare, u, c.overrides))
+			assert.Equal(t, c.want, unifiedCostMicros(c.canonical, c.bare, u, c.overrides, c.meta, func(string) {}))
 		})
 	}
 }
@@ -2543,9 +2633,11 @@ func TestHandleChat_ZeroConfig_ConcurrentAboveDefaultCap_NoThrottling_SlotsRelea
 // unified routes now enforce maxUnifiedRequestBytes (4MiB), narrower than
 // the general maxRequestBytes (10MiB) media/MCP-federation routes still
 // use (finding 1c): a body whose valid JSON only closes past 4MiB is
-// silently truncated by the LimitReader and fails to decode, exactly the
-// existing "invalid JSON body" contract an oversized body has always hit
-// — no new status code, just a lower threshold.
+// caught by readCapped and reported as 413, not the misleading "invalid
+// JSON body" 400 an oversized body used to get (finding 14 fix, review-
+// routes.md — see readAndDecodeUnifiedBody's own doc comment): a caller
+// whose body is genuinely too large has no way to tell that apart from a
+// genuinely malformed one under the old status code.
 func TestHandleChat_OversizedBody_TruncatedByNarrowerUnifiedCap(t *testing.T) {
 	cfg := CreateConfig()
 	cfg.Providers = map[string]*ProviderConfig{"openai": {Type: "openai", APIKey: "k", Models: []string{"gpt-test"}}}
@@ -2557,8 +2649,8 @@ func TestHandleChat_OversizedBody_TruncatedByNarrowerUnifiedCap(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 
-	// A padding field alone bigger than maxUnifiedRequestBytes, so the
-	// LimitReader cap lands before the object closes.
+	// A padding field alone bigger than maxUnifiedRequestBytes, so
+	// readCapped's own cap lands before the object closes.
 	padding := strings.Repeat("A", maxUnifiedRequestBytes+1024)
 	body := `{"model":"gpt-test","padding":"` + padding + `","messages":[]}`
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
@@ -2567,8 +2659,8 @@ func TestHandleChat_OversizedBody_TruncatedByNarrowerUnifiedCap(t *testing.T) {
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400 (body silently truncated, invalid JSON), body=%s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want 413 (oversize body reported explicitly, not misreported as invalid JSON), body=%s", rec.Code, rec.Body.String())
 	}
 }
 

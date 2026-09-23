@@ -13,10 +13,10 @@ import (
 type redisStore struct {
 	client *respClient
 	// expireSeen and expireOrder implement needsExpire/commitExpire/
-	// forgetExpire's bounded, process-lifetime "does this key already
+	// forgetExpireLocked's bounded, process-lifetime "does this key already
 	// have a confirmed EXPIRE on Redis" tracker (perf finding 2,
 	// 2026-08-2x audit) — see needsExpire's own doc comment. Guarded by
-	// expireMu since incrBy/incrMulti/incrAndGetMulti can run
+	// expireMu since incrMulti/incrAndGetMulti can run
 	// concurrently across goroutines sharing one redisStore (the limiter
 	// calls them from every request's goroutine).
 	expireSeen  map[string]struct{}
@@ -61,22 +61,24 @@ func (s *redisStore) needsExpireBatch(entries []counterIncr) []bool {
 
 // settleExpireBatch applies incrMulti/incrAndGetMulti's post-pipeline
 // expire bookkeeping for a whole batch in ONE expireMu acquisition:
-// sent[i] is whether THIS call actually sent EXPIRE for entry i
-// (needsExpireBatch's own return, reused after the reply arrives — same
-// as incrMulti's pre-batching sendExpire[i]); firstWrite[i] is whether
-// entry i's INCRBY reply revealed it was recreated (reply == delta), the
+// confirmed[i] is whether THIS call sent EXPIRE for entry i AND its reply
+// was literally the integer 1 (applyIncrReplies' confirmed — finding F6,
+// 2026-09 review: a sent-but-failed EXPIRE is never committed, so
+// needsExpire keeps asking); firstWrite[i] is whether entry i's EXPIRE was
+// not sent and its INCRBY reply revealed it was recreated (reply ==
+// delta), the
 // same commit-after-success/forget-on-recreate contract as commitExpire/
-// forgetExpire's own doc comments, just decided per-entry and applied
+// forgetExpireLocked's own doc comments, just decided per-entry and applied
 // together here instead of via len(entries) separate commitExpire/
-// forgetExpire calls. Only entries[:n] for whatever n the caller actually
+// forgetExpireLocked calls. Only entries[:n] for whatever n the caller actually
 // finished processing should ever be passed in — see incrMulti/
 // incrAndGetMulti's own `processed` handling for why a partial prefix,
 // not always the whole batch, is what gets settled.
-func (s *redisStore) settleExpireBatch(entries []counterIncr, sent, firstWrite []bool) {
+func (s *redisStore) settleExpireBatch(entries []counterIncr, confirmed, firstWrite []bool) {
 	s.expireMu.Lock()
 	defer s.expireMu.Unlock()
 	for i, e := range entries {
-		if sent[i] {
+		if confirmed[i] {
 			s.commitExpireLocked(e.key)
 		} else if firstWrite[i] {
 			s.forgetExpireLocked(e.key)
@@ -89,8 +91,8 @@ func (s *redisStore) settleExpireBatch(entries []counterIncr, sent, firstWrite [
 // entry's commit into the ONE lock acquisition that method takes for the
 // whole call, instead of one lock per key the way calling the exported,
 // self-locking commitExpire per entry would. commitExpire itself is now
-// just commitExpireLocked wrapped in its own lock, for incrBy's
-// single-key path.
+// just commitExpireLocked wrapped in its own lock, for
+// repairRecreatedExpires' per-key commits.
 func (s *redisStore) commitExpireLocked(key string) {
 	if _, ok := s.expireSeen[key]; ok {
 		return
@@ -104,14 +106,35 @@ func (s *redisStore) commitExpireLocked(key string) {
 	s.expireOrder = append(s.expireOrder, key)
 }
 
-// forgetExpireLocked is forgetExpire's body without its own lock/unlock —
-// callers already hold expireMu (settleExpireBatch), the same relationship
-// commitExpireLocked has to commitExpire. expireOrder may still carry a
-// stale entry for key afterward; left as-is, exactly as forgetExpire's own
-// doc comment explains — the only consequence is commitExpireLocked's own
-// FIFO eviction occasionally evicting a key one step early if it is
-// re-committed at a new position later, itself always safe (a spurious
-// extra EXPIRE, the same accepted cost as any other eviction).
+// forgetExpireLocked removes key from the confirmed-EXPIRE set — called when an
+// INCRBY reply reveals key did NOT actually exist before this call (its
+// returned value equals exactly this call's own delta — Redis treats a
+// missing key as 0 for INCRBY), even though this process's cache
+// believed EXPIRE was already confirmed for it (review finding,
+// 2026-08-2x, CRITICAL, path 2): Redis lost the key — restart, maxmemory
+// eviction, FLUSHDB, or a failover to a replica that never had it — and
+// this call's own INCRBY just recreated it with NO TTL, because the
+// (stale) cache made the caller skip sending EXPIRE this round.
+//
+// Forgetting key here does not fix THIS round's missing TTL — the
+// decision to skip EXPIRE was already made and sent before this reply
+// arrived — but it makes the VERY NEXT increment for key resend EXPIRE
+// (needsExpire will report true again), bounding the immortal-key window
+// to at most one skipped cycle instead of forever. An active counter (the
+// only kind this matters for) gets incremented again almost immediately,
+// so this self-heals in practice. repairRecreatedExpires (finding F7,
+// 2026-09 review) also re-arms the TTL inside the same call; this forget
+// is the fallback when that best-effort repair fails.
+//
+// Callers already hold expireMu (settleExpireBatch), the same
+// relationship commitExpireLocked has to commitExpire. There is no
+// self-locking wrapper: settleExpireBatch is the only caller, since the
+// single-key incrBy path that used one was removed. expireOrder may still
+// carry a stale entry for key afterward; left as-is — the only
+// consequence is commitExpireLocked's own FIFO eviction occasionally
+// evicting a key one step early if it is re-committed at a new position
+// later, itself always safe (a spurious extra EXPIRE, the same accepted
+// cost as any other eviction).
 func (s *redisStore) forgetExpireLocked(key string) {
 	delete(s.expireSeen, key)
 }
@@ -143,7 +166,7 @@ func (s *redisStore) forgetExpireLocked(key string) {
 // volatile-*, a TTL-less key is not evictable, so it can drive Redis to
 // OOM-on-write). Marking now happens ONLY in commitExpire, called by the
 // caller after confirming the pipeline that carried EXPIRE actually
-// succeeded (commit-after-success). See commitExpire and forgetExpire
+// succeeded (commit-after-success). See commitExpire and forgetExpireLocked
 // for the other half of the fix: Redis can also independently lose an
 // already-EXPIRE-confirmed key (restart, maxmemory eviction, FLUSHDB, a
 // failover to a replica missing it) without this process's cache ever
@@ -165,32 +188,9 @@ func (s *redisStore) commitExpire(key string) {
 	s.commitExpireLocked(key)
 }
 
-// forgetExpire removes key from the confirmed-EXPIRE set — called when an
-// INCRBY reply reveals key did NOT actually exist before this call (its
-// returned value equals exactly this call's own delta — Redis treats a
-// missing key as 0 for INCRBY), even though this process's cache
-// believed EXPIRE was already confirmed for it (review finding,
-// 2026-08-2x, CRITICAL, path 2): Redis lost the key — restart, maxmemory
-// eviction, FLUSHDB, or a failover to a replica that never had it — and
-// this call's own INCRBY just recreated it with NO TTL, because the
-// (stale) cache made the caller skip sending EXPIRE this round.
-//
-// Forgetting key here does not fix THIS round's missing TTL — the
-// decision to skip EXPIRE was already made and sent before this reply
-// arrived — but it makes the VERY NEXT increment for key resend EXPIRE
-// (needsExpire will report true again), bounding the immortal-key window
-// to at most one skipped cycle instead of forever. An active counter (the
-// only kind this matters for) gets incremented again almost immediately,
-// so this self-heals in practice.
-func (s *redisStore) forgetExpire(key string) {
-	s.expireMu.Lock()
-	defer s.expireMu.Unlock()
-	s.forgetExpireLocked(key)
-}
-
 // ttlToSeconds converts ttl to whole Redis EXPIRE seconds, rounded up,
 // with a floor of 1s so a sub-second ttl never turns into EXPIRE 0 (an
-// immediate delete). Shared by incrBy and incrMulti.
+// immediate delete). Shared by incrMulti and incrAndGetMulti.
 func ttlToSeconds(ttl time.Duration) int64 {
 	s := int64(ttl / time.Second)
 	if ttl%time.Second != 0 {
@@ -202,88 +202,72 @@ func ttlToSeconds(ttl time.Duration) int64 {
 	return s
 }
 
-// incrBy implements counterStore: INCRBY key n, then (only when
-// needsExpire(key) is true) EXPIRE key ttlToSeconds(ttl), sent as one
-// pipeline so both commands share a single round trip when EXPIRE is
-// included. It returns INCRBY's resulting counter value; EXPIRE's reply
-// is not otherwise inspected — a failed EXPIRE right after a successful
-// INCRBY on the same key would only leave that key without a fresh TTL,
-// not corrupt the count.
+// repairRecreatedExpires immediately sends one more pipeline of EXPIRE
+// commands for every (key, ttl) pair whose INCRBY reply just revealed
+// Redis silently recreated it with no TTL, even though this process's own
+// cache believed it already had a confirmed EXPIRE (finding F7, 2026-09
+// review — v == delta in incrMulti/incrAndGetMulti above; see
+// forgetExpireLocked's own doc comment for why that combination means Redis,
+// not this process, lost the key). forgetExpireLocked alone only guarantees
+// THIS key's own NEXT increment resends EXPIRE — a different Traefik
+// instance whose own cache never forgot the key (it never observed the
+// loss) can keep skipping EXPIRE for it indefinitely, exactly the
+// multi-replica desync scenario the review reports. Repairing here,
+// inside the very call that discovered the loss, fixes the key
+// regardless of which process or key gets incremented next, without
+// adding a persistent cross-call pending-repair queue.
 //
-// expireSeen bookkeeping (perf finding 2, review fix, CRITICAL,
-// 2026-08-2x) happens strictly AFTER the pipeline succeeds — never
-// before: commitExpire(key) only when this call actually sent (and
-// confirmed) EXPIRE; forgetExpire(key) when the INCRBY reply reveals key
-// was recreated (v == n) despite this process's cache believing it
-// already had a confirmed EXPIRE — see both methods' own doc comments.
+// recreated[i] marks entries[i] for repair (applyIncrReplies' firstWrite).
+// It is usually all false (the common case — nothing to repair this call,
+// and no allocation or round trip happens); a single pipeline batches
+// every repair a whole incrMulti/incrAndGetMulti call needs, so a batch
+// with several simultaneously-recreated keys still costs one extra round
+// trip, not one per key.
 //
-// Semantics are deliberately at-least-once, not exactly-once, both in the
-// conservative direction (never under-counts): respClient.pipeline's
-// reconnect-once retry can re-send this same INCRBY if the first attempt's
-// reply was lost after the server already applied it (e.g. the connection
-// dropped between the server processing INCRBY and the client reading its
-// reply), which can over-count by n on that key; and the limiter's
-// failOpen path can additionally count the same request in its in-process
-// fallback store when a call to this method errors out after a partial
-// success upstream. Both are accepted trade-offs — a rate/budget counter
-// that occasionally over-counts by one request's worth is fail-safe (more
-// restrictive than reality), never fail-open in the unsafe direction.
-func (s *redisStore) incrBy(key string, n int64, ttl time.Duration) (int64, error) {
-	sendExpire := s.needsExpire(key)
-	cmds := [][]string{{"INCRBY", key, strconv.FormatInt(n, 10)}}
-	if sendExpire {
-		cmds = append(cmds, []string{"EXPIRE", key, strconv.FormatInt(ttlToSeconds(ttl), 10)})
+// Best-effort: this pipeline's own failure, or an EXPIRE reply other than
+// 1, is not propagated as an error to the caller — the INCRBY values
+// already computed are correct and must still be returned regardless. A
+// repair that fails leaves the key exactly as unconfirmed as it already
+// was (needsExpire keeps reporting true), so the ordinary per-key
+// self-heal on this key's own next increment still applies as a
+// fallback.
+func (s *redisStore) repairRecreatedExpires(entries []counterIncr, recreated []bool) {
+	var keys []string
+	var cmds [][]string
+	for i, e := range entries {
+		if !recreated[i] {
+			continue
+		}
+		keys = append(keys, e.key)
+		cmds = append(cmds, []string{"EXPIRE", e.key, strconv.FormatInt(ttlToSeconds(e.ttl), 10)})
+	}
+	if len(cmds) == 0 {
+		return
 	}
 	replies, err := s.client.pipeline(cmds)
-	if err != nil {
-		return 0, fmt.Errorf("redisStore: incrBy %q: %w", key, err)
+	if err != nil || len(replies) != len(cmds) {
+		return
 	}
-	if len(replies) == 0 {
-		return 0, fmt.Errorf("redisStore: incrBy %q: empty pipeline reply", key)
+	for i, k := range keys {
+		if n, ok := replies[i].(int64); ok && n == 1 {
+			s.commitExpire(k)
+		}
 	}
-	if e, ok := replies[0].(error); ok {
-		return 0, fmt.Errorf("redisStore: incrBy %q: INCRBY failed: %w", key, e)
-	}
-	v, ok := replies[0].(int64)
-	if !ok {
-		return 0, fmt.Errorf("redisStore: incrBy %q: unexpected INCRBY reply type %T", key, replies[0])
-	}
-	if sendExpire {
-		s.commitExpire(key)
-	} else if v == n {
-		s.forgetExpire(key)
-	}
-	return v, nil
 }
 
-// incrMulti implements counterStore: every entry's INCRBY, plus an EXPIRE
-// only when needsExpire(e.key) is true, sent as ONE pipeline (perf
-// review, 2026-08-21) — one round trip regardless of len(entries) or how
-// many of them get an EXPIRE this time, extending incrBy's own
-// single-key pipelining to a whole batch of counters at once.
-// sendExpire[i] records, per entry, whether THIS call actually sent
-// EXPIRE for it — decided once, before the pipeline goes out, and reused
-// after the reply arrives to choose commitExpire vs. the v==delta
-// forgetExpire check (incrBy's own doc comment covers why both matter,
-// review fix, CRITICAL, 2026-08-2x). incrReplyIdx[i] is the index within
-// cmds (and so within replies) of entry i's own INCRBY — NOT a fixed i*2
-// stride any more, since a skipped EXPIRE shifts every later entry's
-// commands left by one; entry i's own EXPIRE, when included, immediately
-// follows its INCRBY and is not otherwise inspected — same reasoning as
-// incrBy's own doc comment: a failed EXPIRE right after a successful
-// INCRBY only leaves that one key without a fresh TTL, not a corrupted
-// count. The same at-least-once semantics as incrBy (see its own doc
-// comment) apply here too, extended to the whole batch: a lost reply
-// after the server already applied the pipeline can cause
-// respClient.pipeline's reconnect-once retry to re-send it, over-counting
-// every entry in it by its own delta.
 // applyIncrReplies decodes the INCRBY replies for entries — each entry's
 // own reply located via incrReplyIdx[i], not a fixed stride (a skipped
 // EXPIRE shifts every later entry's commands left by one; see incrMulti/
 // incrAndGetMulti's own doc comments) — writing each entry's post-
-// increment value into out[i] and whether its reply equalled its own
-// delta (the Redis-lost-the-key recreate signal firstWrite feeds into
-// settleExpireBatch) into firstWrite[i]. method names the caller
+// increment value into out[i]. sent[i] is needsExpireBatch's verdict for
+// entry i (whether THIS call sent its EXPIRE, immediately after its
+// INCRBY). confirmed[i] records whether that EXPIRE was sent AND its own
+// reply is literally the integer 1 (finding F6, 2026-09 review: an ACL
+// denying EXPIRE, or any other error reply, must never be recorded as a
+// confirmed TTL). firstWrite[i] records whether EXPIRE was NOT sent and
+// the INCRBY reply equalled the entry's own delta (the Redis-lost-the-key
+// recreate signal settleExpireBatch forgets and repairRecreatedExpires
+// re-arms, finding F7). method names the caller
 // ("incrMulti" or "incrAndGetMulti") purely for the error message prefix,
 // so both callers' error text stays byte-identical to what they built
 // inline before this was factored out.
@@ -291,7 +275,7 @@ func (s *redisStore) incrBy(key string, n int64, ttl time.Duration) (int64, erro
 // It reports how many entries it finished examining: len(entries) on full
 // success, or the index of the first failing entry (0 if the very first
 // one fails) — never entries[i] itself when it fails, since out[i]/
-// firstWrite[i] were never validly written for it. Both callers settle
+// confirmed[i]/firstWrite[i] were never validly written for it. Both callers settle
 // expire bookkeeping for exactly that PROCESSED prefix in ONE
 // settleExpireBatch call at their own single call site, on every return
 // path, rather than a deferred closure per pipeline (measured ~1.5%
@@ -302,7 +286,7 @@ func (s *redisStore) incrBy(key string, n int64, ttl time.Duration) (int64, erro
 // failure (review fix, CRITICAL: entries[:processed] must still be
 // settled even when entries[processed] itself failed — see needsExpire's
 // own doc comment for why a lost forget is the dangerous half).
-func (s *redisStore) applyIncrReplies(method string, entries []counterIncr, replies []any, incrReplyIdx []int, out []int64, firstWrite []bool) (processed int, err error) {
+func (s *redisStore) applyIncrReplies(method string, entries []counterIncr, replies []any, incrReplyIdx []int, sent []bool, out []int64, confirmed, firstWrite []bool) (processed int, err error) {
 	for i, e := range entries {
 		reply := replies[incrReplyIdx[i]]
 		if re, ok := reply.(error); ok {
@@ -313,11 +297,63 @@ func (s *redisStore) applyIncrReplies(method string, entries []counterIncr, repl
 			return i, fmt.Errorf("redisStore: %s %q: unexpected INCRBY reply type %T", method, e.key, reply)
 		}
 		out[i] = v
-		firstWrite[i] = v == e.delta
+		if sent[i] {
+			expireReply, isInt := replies[incrReplyIdx[i]+1].(int64)
+			confirmed[i] = isInt && expireReply == 1
+		} else {
+			firstWrite[i] = v == e.delta
+		}
 	}
 	return len(entries), nil
 }
 
+// incrMulti implements counterStore: every entry's INCRBY, plus an EXPIRE
+// only when needsExpire(e.key) is true, sent as ONE pipeline (perf
+// review, 2026-08-21) — one round trip regardless of len(entries) or how
+// many of them get an EXPIRE this time. This is the only production path
+// that reaches Redis for a counter write (incrBy, its single-key
+// predecessor, had no production caller left once checkAndCount/account
+// moved onto the batched paths, and was removed — deadcode audit,
+// 2026-09 review); a batch of one entry carries the identical behavior.
+//
+// expireSeen bookkeeping (perf finding 2, review fix, CRITICAL,
+// 2026-08-2x) happens strictly AFTER the pipeline succeeds — never
+// before: commitExpire(e.key) only when this call actually sent EXPIRE
+// for that entry AND its own reply confirms success (finding F6, 2026-09
+// review — EXPIRE's reply used to go uninspected: an ACL that allows
+// INCRBY but denies EXPIRE, or any other EXPIRE error reply, was
+// previously recorded as a CONFIRMED TTL regardless, making the key
+// immortal, since needsExpire would never ask again); forgetExpireLocked(e.key)
+// when the INCRBY reply reveals that entry's key was recreated (v ==
+// e.delta) despite this process's cache believing it already had a
+// confirmed EXPIRE, immediately followed by repairRecreatedExpires to
+// re-arm its TTL in this SAME call rather than only on that key's own
+// next increment (finding F7) — see commitExpire/forgetExpireLocked/
+// repairRecreatedExpires' own doc comments.
+//
+// sendExpire[i] records, per entry, whether THIS call actually sent
+// EXPIRE for it — decided once, before the pipeline goes out, and reused
+// after the reply arrives (applyIncrReplies) to choose the confirmed-
+// EXPIRE commit vs. the v==delta forget-and-repair check above. incrReplyIdx[i] is the index within cmds (and
+// so within replies) of entry i's own INCRBY — NOT a fixed i*2 stride,
+// since a skipped EXPIRE shifts every later entry's commands left by one;
+// entry i's own EXPIRE, when included, immediately follows its INCRBY and
+// is not otherwise inspected: a failed EXPIRE right after a successful
+// INCRBY only leaves that one key without a fresh TTL, not a corrupted
+// count.
+//
+// Semantics are deliberately at-least-once, not exactly-once, both in the
+// conservative direction (never under-counts): respClient.pipeline's
+// reconnect-once retry can re-send the whole batch if a reply was lost
+// after the server already applied it (e.g. the connection dropped
+// between the server processing a command and the client reading its
+// reply), which can over-count every entry in it by its own delta; and
+// the limiter's failOpen path can additionally count the same request in
+// its in-process fallback store when a call to this method errors out
+// after a partial success upstream. Both are accepted trade-offs — a
+// rate/budget counter that occasionally over-counts by one request's
+// worth is fail-safe (more restrictive than reality), never fail-open in
+// the unsafe direction.
 func (s *redisStore) incrMulti(entries []counterIncr) ([]int64, error) {
 	if len(entries) == 0 {
 		return nil, nil
@@ -343,12 +379,17 @@ func (s *redisStore) incrMulti(entries []counterIncr) ([]int64, error) {
 	}
 
 	out := make([]int64, len(entries))
+	confirmed := make([]bool, len(entries))
 	firstWrite := make([]bool, len(entries))
-	processed, applyErr := s.applyIncrReplies("incrMulti", entries, replies, incrReplyIdx, out, firstWrite)
-	s.settleExpireBatch(entries[:processed], sendExpire[:processed], firstWrite[:processed])
+	processed, applyErr := s.applyIncrReplies("incrMulti", entries, replies, incrReplyIdx, sendExpire, out, confirmed, firstWrite)
+	s.settleExpireBatch(entries[:processed], confirmed[:processed], firstWrite[:processed])
 	if applyErr != nil {
 		return nil, applyErr
 	}
+	// F7: repair every recreated-with-no-TTL key found this call in ONE
+	// follow-up pipeline, batched across the whole entries slice — see
+	// repairRecreatedExpires' own doc comment.
+	s.repairRecreatedExpires(entries, firstWrite)
 	return out, nil
 }
 
@@ -399,12 +440,17 @@ func (s *redisStore) incrAndGetMulti(entries []counterIncr, reads []string) ([]i
 	}
 
 	incrVals := make([]int64, len(entries))
+	confirmed := make([]bool, len(entries))
 	firstWrite := make([]bool, len(entries))
-	processed, applyErr := s.applyIncrReplies("incrAndGetMulti", entries, replies, incrReplyIdx, incrVals, firstWrite)
-	s.settleExpireBatch(entries[:processed], sendExpire[:processed], firstWrite[:processed])
+	processed, applyErr := s.applyIncrReplies("incrAndGetMulti", entries, replies, incrReplyIdx, sendExpire, incrVals, confirmed, firstWrite)
+	s.settleExpireBatch(entries[:processed], confirmed[:processed], firstWrite[:processed])
 	if applyErr != nil {
 		return nil, nil, applyErr
 	}
+	// F7: repair every recreated-with-no-TTL key found this call in ONE
+	// follow-up pipeline, batched across the whole entries slice — see
+	// repairRecreatedExpires' own doc comment.
+	s.repairRecreatedExpires(entries, firstWrite)
 
 	// The GET half is read-only (incrAndGetMulti's own doc comment) — its
 	// own error returns below come strictly after expire bookkeeping is
@@ -443,31 +489,6 @@ func (s *redisStore) getMulti(keys []string) ([]int64, error) {
 	v, err := s.client.getBatch(keys)
 	if err != nil {
 		return nil, fmt.Errorf("redisStore: getMulti: %w", err)
-	}
-	return v, nil
-}
-
-// get implements counterStore: GET key, treating a missing key (RESP null
-// bulk reply) as 0, matching memoryStore's behavior for an absent or
-// expired counter.
-func (s *redisStore) get(key string) (int64, error) {
-	reply, err := s.client.do("GET", key)
-	if err != nil {
-		return 0, fmt.Errorf("redisStore: get %q: %w", key, err)
-	}
-	if reply == nil {
-		return 0, nil
-	}
-	if e, ok := reply.(error); ok {
-		return 0, fmt.Errorf("redisStore: get %q: %w", key, e)
-	}
-	b, ok := reply.([]byte)
-	if !ok {
-		return 0, fmt.Errorf("redisStore: get %q: unexpected reply type %T", key, reply)
-	}
-	v, err := strconv.ParseInt(string(b), 10, 64)
-	if err != nil {
-		return 0, fmt.Errorf("redisStore: get %q: non-integer value %q: %w", key, b, err)
 	}
 	return v, nil
 }

@@ -28,19 +28,27 @@ func TestIdentify(t *testing.T) {
 	if !ok || u.name != "a" || grp.name != "eng" {
 		t.Fatalf("identify failed: %v %v %v", u, grp, ok)
 	}
-	if !grp.allowsModel("gpt-5-mini") {
+	// allowsModel was removed (review-auth finding F6, 2026-09 audit —
+	// dead in non-test code, and a standalone check would reintroduce the
+	// cross-grant leak allowsProviderModel's per-grant coupling exists to
+	// prevent for a multi-grant principal); these assertions moved to
+	// allowsProviderModel, the real enforcement path every production
+	// caller already uses. "eng" has an empty Providers glob (matches
+	// every provider), so "openai" here exercises that path without
+	// constraining it.
+	if !grp.allowsProviderModel("openai", "gpt-5-mini") {
 		t.Error("glob should match")
 	}
-	// allowsModel is an exact glob against the given string only — it no
-	// longer strips a "provider/" prefix itself (fix(registry) ruling 3): a
+	// The match is an exact glob against the given string only — it does
+	// not strip a "provider/" prefix itself (fix(registry) ruling 3): a
 	// pattern like "gpt-5*" reaching a provider-prefixed request like
-	// "openai/gpt-5-mini" is now the caller's job (modelRegistry.
+	// "openai/gpt-5-mini" is the caller's job (modelRegistry.
 	// resolveAgainst / listFor build the bare-suffix candidate themselves),
 	// covered at the registry level in registry_test.go, not here.
-	if grp.allowsModel("openai/gpt-5-mini") {
-		t.Error("allowsModel must not match a provider-prefixed id on its own; prefix-stripping now lives in the caller")
+	if grp.allowsProviderModel("openai", "openai/gpt-5-mini") {
+		t.Error("must not match a provider-prefixed id on its own; prefix-stripping lives in the caller")
 	}
-	if grp.allowsModel("claude-4") {
+	if grp.allowsProviderModel("openai", "claude-4") {
 		t.Error("should not match")
 	}
 }
@@ -582,10 +590,14 @@ func TestGroup_AllowsAgent_Glob(t *testing.T) {
 	}
 }
 
-func TestGroup_AllowsModel_EmptyListAllowsAnything(t *testing.T) {
+// TestGroup_AllowsProviderModel_EmptyListsAllowAnything moved from the
+// removed allowsModel (review-auth finding F6, 2026-09 audit): both grp's
+// empty Providers and empty Models glob independently mean "allow every
+// value", so any (provider, model) pair matches.
+func TestGroup_AllowsProviderModel_EmptyListsAllowAnything(t *testing.T) {
 	grp := &group{name: "eng"}
-	if !grp.allowsModel("anything-goes") {
-		t.Fatal("empty models list should allow anything")
+	if !grp.allowsProviderModel("any-provider", "anything-goes") {
+		t.Fatal("empty providers and models lists should allow anything")
 	}
 }
 
@@ -593,8 +605,8 @@ func TestGroup_AllowsModel_EmptyListAllowsAnything(t *testing.T) {
 // default for GroupConfig.PassthroughPaths (security+performance audit,
 // 2026-08-22): a group with no PassthroughPaths configured — every group
 // that existed before this field did — must keep reaching every native
-// passthrough path, exactly like allowsProvider/allowsModel/allowsMCP/
-// allowsAgent's own empty-means-all defaults.
+// passthrough path, exactly like allowsProvider/allowsProviderModel/
+// allowsMCP/allowsAgent's own empty-means-all defaults.
 func TestGroup_AllowsPassthroughPath_EmptyListAllowsAll(t *testing.T) {
 	grp := &group{name: "eng"}
 	if !grp.allowsPassthroughPath("v1/files") {

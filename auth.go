@@ -2,7 +2,6 @@ package traefikllmgateway
 
 import (
 	"crypto/sha256"
-	"crypto/subtle"
 	"fmt"
 	"net"
 	"net/http"
@@ -107,32 +106,20 @@ func (grp *group) allowsProvider(name string) bool {
 	return matchesGlob(grp.providers, name)
 }
 
-// allowsModel reports whether id matches one of the group's model glob
-// patterns, exactly as given. An empty pattern list allows every model.
-//
-// allowsModel does no "provider/model" prefix-splitting of its own — a
-// pattern like "deepseek-*" must not spuriously match a bare model id that
-// merely happens to contain a slash (e.g. an upstream's own
-// "uni/deepseek-v4-flash-0731" naming, where "uni" is not a configured
-// provider: there is no legitimate prefix to strip there at all). A caller
-// that genuinely knows an id's leading segment names a configured provider
-// (modelRegistry.resolveAgainst, modelRegistry.listFor) generates both the
-// full and bare-suffix candidate strings itself and calls allowsModel once
-// per candidate.
-func (grp *group) allowsModel(id string) bool {
-	return matchesGlob(grp.models, id)
-}
-
 // hasModelRestriction reports whether grp's Models glob is non-empty —
-// whether there is anything for allowsModel to actually reject (security
-// review fix, 2026-08-22, round 2). handlePassthrough (routes_
-// passthrough.go) checks this BEFORE peeking a passthrough request's body
-// at all: a group with an empty Models list (matchesGlob's own
-// empty-means-all contract — the live cluster's "home" group and every
-// other group that has not opted into model restrictions) has nothing
-// allowsModel could ever deny, so there is no reason to read, buffer, or
-// even look at the request body for model enforcement — zero risk, and
-// exactly today's behavior for the overwhelming majority of traffic.
+// whether there is anything for allowsProviderModel to actually reject on
+// the model side (security review fix, 2026-08-22, round 2 — updated
+// review-auth finding F6, 2026-09 audit: the standalone allowsModel this
+// comment originally referenced was removed as dead code; every
+// production model check goes through allowsProviderModel). handlePassthrough
+// (routes_passthrough.go) checks this BEFORE peeking a passthrough
+// request's body at all: a group with an empty Models list (matchesGlob's
+// own empty-means-all contract — the live cluster's "home" group and
+// every other group that has not opted into model restrictions) has
+// nothing to deny on the model side, so there is no reason to read,
+// buffer, or even look at the request body for model enforcement — zero
+// risk, and exactly today's behavior for the overwhelming majority of
+// traffic.
 func (grp *group) hasModelRestriction() bool {
 	return len(grp.models) > 0
 }
@@ -697,21 +684,36 @@ func (g *logGate) shouldLog(now time.Time) (log bool, suppressed int64) {
 // Gateway even has a limiter wired yet. failureLog/throttleLog back
 // logAuthEvent's two distinct rate-limited lines (logger.go).
 type authStore struct {
-	lastModTime   time.Time
-	lastCheck     time.Time
-	log           gatewayLogger
-	failures      *authFailureTracker
-	usersFile     *usersFile
-	nowFn         func() time.Time
-	groups        map[string]*group
-	byDigest      map[[32]byte]*authEntry
-	inline        map[[32]byte]*authEntry
-	failureLog    logGate
-	throttleLog   logGate
-	fileUserCount int
-	mu            sync.RWMutex
-	buildMu       sync.Mutex
-	reloadMu      sync.Mutex
+	lastModTime time.Time
+	lastCheck   time.Time
+	// lastReloadErrModTime and lastReloadErrMsg dedup maybeReload's own
+	// error logging (users_file.go — review-auth finding F11, 2026-09
+	// audit): a users file left broken (bad JSON, a stat failure, a
+	// rejected replaceFileUsers) never advances lastModTime, so without
+	// this a broken file gets re-attempted AND re-logged every
+	// reloadEvery for as long as it stays broken — roughly 17k lines/day
+	// at the default 5s throttle. A later log fires again only when the
+	// error TEXT changes, or the mtime the attempt was made against
+	// changes (an operator rewrote the file, even to an identically
+	// broken state) — "once per distinct error / mtime change". Both are
+	// touched only from inside maybeReload, which its own TryLock already
+	// serializes to at most one call in flight, so no separate mutex
+	// guards them.
+	lastReloadErrModTime time.Time
+	log                  gatewayLogger
+	failures             *authFailureTracker
+	usersFile            *usersFile
+	nowFn                func() time.Time
+	groups               map[string]*group
+	byDigest             map[[32]byte]*authEntry
+	inline               map[[32]byte]*authEntry
+	lastReloadErrMsg     string
+	failureLog           logGate
+	throttleLog          logGate
+	fileUserCount        int
+	mu                   sync.RWMutex
+	buildMu              sync.Mutex
+	reloadMu             sync.Mutex
 }
 
 // newAuthStore builds an authStore from cfg's groups and inline users. It
@@ -1168,8 +1170,7 @@ func (a *authStore) shouldLogThrottleEngaged() (log bool, suppressed int64) {
 // identify resolves r's presented API key to a user and their group. It
 // reads "Authorization: Bearer <key>" (case-insensitive "bearer" prefix) or
 // "x-api-key: <key>"; Bearer wins when both are present. The presented key
-// is looked up by SHA-256 digest, then verified with a constant-time
-// compare — the key itself is never retained.
+// is looked up by its SHA-256 digest — the key itself is never retained.
 //
 // The presented key is verified FIRST, UNCONDITIONALLY (security review
 // round 2, 2026-08-22, critical finding 1): a request carrying a VALID
@@ -1186,22 +1187,32 @@ func (a *authStore) shouldLogThrottleEngaged() (log bool, suppressed int64) {
 // already-valid request can never be rejected by another caller's failed
 // attempts, from the same address or not.
 //
-// Every failure path below — no key presented, key not found, or a
-// (practically unreachable, see subtle.ConstantTimeCompare's own call
-// site) digest mismatch — records one failure for the caller's source IP
-// via recordAuthFailure; logAuthEvent (logger.go) separately decides, per
-// call, whether to emit a routine failure line or a distinct throttle-
-// engaged line by consulting authThrottled itself. No branch in this
-// function ever changes its own return value based on throttle state —
-// throttling is pure observability now (bounding the log's write volume
-// and the tracker's own memory; authFailureTracker's doc comment,
-// above), never enforcement: an attacker with no valid key gains nothing
-// from this change (every failure path here already returned false
-// either way, throttled or not), and the raw per-attempt cost this
-// function pays (one SHA-256 digest, one map lookup, one
-// ConstantTimeCompare) is already cheap enough — nanoseconds — that
-// gating it early bought negligible protection against the cost itself,
-// only the false-positive risk the paragraph above describes.
+// Every failure path below — no key presented, or key not found — records
+// one failure for the caller's source IP via recordAuthFailure;
+// logAuthEvent (logger.go) separately decides, per call, whether to emit
+// a routine failure line or a distinct throttle-engaged line by
+// consulting authThrottled itself. No branch in this function ever
+// changes its own return value based on throttle state — throttling is
+// pure observability now (bounding the log's write volume and the
+// tracker's own memory; authFailureTracker's doc comment, above), never
+// enforcement: an attacker with no valid key gains nothing from this
+// change (every failure path here already returned false either way,
+// throttled or not), and the raw per-attempt cost this function pays (one
+// SHA-256 digest, one map lookup) is already cheap enough — nanoseconds —
+// that gating it early bought negligible protection against the cost
+// itself, only the false-positive risk the paragraph above describes.
+//
+// No constant-time compare runs here (review-auth finding F7, 2026-09
+// audit — a prior revision ran subtle.ConstantTimeCompare(digest[:],
+// entry.digest[:]) after this exact lookup, but byDigest is populated
+// ONLY as a.byDigest[entry.digest] = entry (newAuthStore/
+// replaceFileUsers), so a map hit's entry.digest is the map key itself by
+// construction: the compare was a tautology, always true when found is
+// true, comparing digest against a value guaranteed identical to it. The
+// real secret-matching step already happened inside the Go runtime's own
+// map lookup, on the presented key's SHA-256 digest, not the key itself
+// — there is no separate secret-bytes compare here for a non-constant-time
+// implementation to leak timing from).
 func (a *authStore) identify(r *http.Request) (*user, *group, bool) {
 	key, ok := presentedKey(r)
 	if ok {
@@ -1209,7 +1220,7 @@ func (a *authStore) identify(r *http.Request) (*user, *group, bool) {
 		a.mu.RLock()
 		entry, found := a.byDigest[digest]
 		a.mu.RUnlock()
-		if found && subtle.ConstantTimeCompare(digest[:], entry.digest[:]) == 1 {
+		if found {
 			return entry.user, entry.group, true
 		}
 	}

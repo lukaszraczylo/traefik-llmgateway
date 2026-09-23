@@ -9,9 +9,36 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// incrOne is a test helper porting the old single-key redisStore.incrBy
+// call shape onto incrMulti: incrBy was removed from redisStore (deadcode
+// audit, 2026-09 review) since every production caller already batches
+// through incrMulti/incrAndGetMulti, leaving incrBy as an interface method
+// with no production caller of its own. It builds incrMulti's one-entry
+// counterIncr slice and unwraps its one-element result, so a test written
+// against a single key can drive incrMulti without restating that
+// boilerplate at every call site — the EXPIRE-confirmation and recreated-
+// key-repair behavior it exercises is identical, since incrMulti applies
+// incrBy's own per-entry logic to each entry, including a batch of one.
+func incrOne(s *redisStore, key string, n int64, ttl time.Duration) (int64, error) {
+	vals, err := s.incrMulti([]counterIncr{{key: key, delta: n, ttl: ttl}})
+	if err != nil {
+		return 0, err
+	}
+	return vals[0], nil
+}
+
+// getOne mirrors incrOne for getMulti, replacing the removed redisStore.get.
+func getOne(s *redisStore, key string) (int64, error) {
+	vals, err := s.getMulti([]string{key})
+	if err != nil {
+		return 0, err
+	}
+	return vals[0], nil
+}
+
 // TestRedisStore_IncrBy_PipelinesIncrbyAndExpire is the brief's Step-1
-// pipeline case: incrBy sends INCRBY and EXPIRE as one pipeline and
-// returns INCRBY's reply value.
+// pipeline case: incrMulti sends INCRBY and EXPIRE as one pipeline and
+// returns INCRBY's reply value, even for a single-entry batch.
 func TestRedisStore_IncrBy_PipelinesIncrbyAndExpire(t *testing.T) {
 	ln := newFakeListener(t)
 	runFakeRESPServer(t, ln, []respStep{
@@ -21,12 +48,12 @@ func TestRedisStore_IncrBy_PipelinesIncrbyAndExpire(t *testing.T) {
 	})
 
 	store := newRedisStore(newRESPClient(ln.Addr().String(), "", 0))
-	v, err := store.incrBy("llmgw:user:a:req:day:20260820", 1, 60*time.Second)
+	v, err := incrOne(store, "llmgw:user:a:req:day:20260820", 1, 60*time.Second)
 	if err != nil {
-		t.Fatalf("incrBy: %v", err)
+		t.Fatalf("incrMulti: %v", err)
 	}
 	if v != 5 {
-		t.Errorf("incrBy = %d, want 5", v)
+		t.Errorf("incrMulti = %d, want 5", v)
 	}
 }
 
@@ -213,13 +240,14 @@ func TestRedisStore_IncrBy_RoundsSubSecondTTLUp(t *testing.T) {
 	})
 
 	store := newRedisStore(newRESPClient(ln.Addr().String(), "", 0))
-	if _, err := store.incrBy("k", 1, 10*time.Millisecond); err != nil {
-		t.Fatalf("incrBy: %v", err)
+	if _, err := incrOne(store, "k", 1, 10*time.Millisecond); err != nil {
+		t.Fatalf("incrMulti: %v", err)
 	}
 }
 
 // TestRedisStore_Get_MissingKeyReturnsZero is the brief's Step-1 GET case:
-// a null bulk reply ("$-1") decodes to 0 with no error.
+// a null bulk reply ("$-1") decodes to 0 with no error, via getMulti's
+// single-key equivalent of the removed redisStore.get.
 func TestRedisStore_Get_MissingKeyReturnsZero(t *testing.T) {
 	ln := newFakeListener(t)
 	runFakeRESPServer(t, ln, []respStep{
@@ -228,12 +256,12 @@ func TestRedisStore_Get_MissingKeyReturnsZero(t *testing.T) {
 	})
 
 	store := newRedisStore(newRESPClient(ln.Addr().String(), "", 0))
-	v, err := store.get("llmgw:user:a:req:day:20260820")
+	v, err := getOne(store, "llmgw:user:a:req:day:20260820")
 	if err != nil {
-		t.Fatalf("get: %v", err)
+		t.Fatalf("getMulti: %v", err)
 	}
 	if v != 0 {
-		t.Errorf("get = %d, want 0", v)
+		t.Errorf("getMulti = %d, want 0", v)
 	}
 }
 
@@ -247,12 +275,12 @@ func TestRedisStore_Get_ParsesIntegerValue(t *testing.T) {
 	})
 
 	store := newRedisStore(newRESPClient(ln.Addr().String(), "", 0))
-	v, err := store.get("k")
+	v, err := getOne(store, "k")
 	if err != nil {
-		t.Fatalf("get: %v", err)
+		t.Fatalf("getMulti: %v", err)
 	}
 	if v != 123 {
-		t.Errorf("get = %d, want 123", v)
+		t.Errorf("getMulti = %d, want 123", v)
 	}
 }
 
@@ -285,20 +313,20 @@ func TestRedisStore_IncrBy_SecondCallSameKey_SkipsExpire(t *testing.T) {
 	})
 
 	store := newRedisStore(newRESPClientPool(ln.Addr().String(), "", 0, 1))
-	v1, err := store.incrBy("k", 1, 60*time.Second)
+	v1, err := incrOne(store, "k", 1, 60*time.Second)
 	if err != nil {
-		t.Fatalf("incrBy (1st): %v", err)
+		t.Fatalf("incrMulti (1st): %v", err)
 	}
 	if v1 != 1 {
-		t.Errorf("incrBy (1st) = %d, want 1", v1)
+		t.Errorf("incrMulti (1st) = %d, want 1", v1)
 	}
 
-	v2, err := store.incrBy("k", 1, 60*time.Second)
+	v2, err := incrOne(store, "k", 1, 60*time.Second)
 	if err != nil {
-		t.Fatalf("incrBy (2nd): %v", err)
+		t.Fatalf("incrMulti (2nd): %v", err)
 	}
 	if v2 != 2 {
-		t.Errorf("incrBy (2nd) = %d, want 2", v2)
+		t.Errorf("incrMulti (2nd) = %d, want 2", v2)
 	}
 }
 
@@ -317,11 +345,11 @@ func TestRedisStore_IncrBy_DifferentKeys_EachGetsItsOwnFirstExpire(t *testing.T)
 	})
 
 	store := newRedisStore(newRESPClientPool(ln.Addr().String(), "", 0, 1))
-	if _, err := store.incrBy("a", 1, 60*time.Second); err != nil {
-		t.Fatalf("incrBy(a): %v", err)
+	if _, err := incrOne(store, "a", 1, 60*time.Second); err != nil {
+		t.Fatalf("incrMulti(a): %v", err)
 	}
-	if _, err := store.incrBy("b", 1, 60*time.Second); err != nil {
-		t.Fatalf("incrBy(b): %v", err)
+	if _, err := incrOne(store, "b", 1, 60*time.Second); err != nil {
+		t.Fatalf("incrMulti(b): %v", err)
 	}
 }
 
@@ -390,8 +418,8 @@ func TestRedisStore_IncrAndGetMulti_MixedFirstAndRepeatedKeys_ReadsStillLandAfte
 	})
 
 	store := newRedisStore(newRESPClientPool(ln.Addr().String(), "", 0, 1))
-	if _, err := store.incrBy("hot", 1, time.Minute); err != nil {
-		t.Fatalf("incrBy (prime hot's expireOnce state): %v", err)
+	if _, err := incrOne(store, "hot", 1, time.Minute); err != nil {
+		t.Fatalf("incrMulti (prime hot's expireOnce state): %v", err)
 	}
 
 	incrVals, readVals, err := store.incrAndGetMulti(
@@ -464,7 +492,7 @@ func TestRedisStore_IncrBy_FailedPipeline_DoesNotConsumeExpireCredit(t *testing.
 	require.NoError(t, ln.Close()) // nothing listens at deadAddr from here on
 
 	store := newRedisStore(newRESPClientPool(deadAddr, "", 0, 1))
-	if _, err := store.incrBy("k", 1, 60*time.Second); err == nil {
+	if _, err := incrOne(store, "k", 1, 60*time.Second); err == nil {
 		t.Fatal("want an error: nothing listens at deadAddr")
 	}
 	if len(store.expireSeen) != 0 {
@@ -481,8 +509,8 @@ func TestRedisStore_IncrBy_FailedPipeline_DoesNotConsumeExpireCredit(t *testing.
 		{wantArgs: []string{"EXPIRE", "k", "60"}, reply: []byte(":1\r\n")},
 	})
 	store.client = newRESPClientPool(ln2.Addr().String(), "", 0, 1)
-	if _, err := store.incrBy("k", 1, 60*time.Second); err != nil {
-		t.Fatalf("incrBy after recovery: %v", err)
+	if _, err := incrOne(store, "k", 1, 60*time.Second); err != nil {
+		t.Fatalf("incrMulti after recovery: %v", err)
 	}
 }
 
@@ -491,9 +519,13 @@ func TestRedisStore_IncrBy_FailedPipeline_DoesNotConsumeExpireCredit(t *testing.
 // (committed by the 1st call below), so the 2nd call sends INCRBY alone
 // — but the fake server's reply for it (":1\r\n", equal to this call's
 // own delta) simulates Redis having lost the key and INCRBY recreating
-// it fresh, with no TTL. forgetExpire must fire so the 3rd call resends
-// EXPIRE — pinned by the fake server's exact script, which fails the
-// test if the 3rd call's EXPIRE is missing.
+// it fresh, with no TTL. forgetExpireLocked fires, and repairRecreatedExpires
+// (finding F7, 2026-09 review) immediately sends a follow-up EXPIRE in
+// this SAME call rather than waiting for k's own next increment — pinned
+// by the fake server's exact script, which fails the test if that
+// immediate repair EXPIRE is missing. The 3rd call then sends INCRBY
+// alone again: the repair already re-confirmed EXPIRE, so there is
+// nothing left for it to resend.
 func TestRedisStore_IncrBy_KeyRecreatedAfterLoss_ForgetsAndResendsExpireNextCall(t *testing.T) {
 	ln := newFakeListener(t)
 	runFakeRESPServer(t, ln, []respStep{
@@ -505,16 +537,19 @@ func TestRedisStore_IncrBy_KeyRecreatedAfterLoss_ForgetsAndResendsExpireNextCall
 		// only INCRBY is sent — but Redis lost the key, so its reply
 		// (":1\r\n") equals this call's own delta, the recreate signal.
 		{wantArgs: []string{"INCRBY", "k", "1"}, reply: []byte(":1\r\n")},
-		// 3rd call: forgetExpire must have fired after the 2nd call, so
-		// this one sends EXPIRE again.
-		{wantArgs: []string{"INCRBY", "k", "1"}, reply: []byte(":1\r\n")},
+		// F7: repairRecreatedExpires fires immediately, inside the same
+		// incrBy call, re-arming the TTL right away instead of waiting
+		// for k's own next increment.
 		{wantArgs: []string{"EXPIRE", "k", "60"}, reply: []byte(":1\r\n")},
+		// 3rd call: the repair above already re-confirmed EXPIRE, so this
+		// one sends INCRBY alone.
+		{wantArgs: []string{"INCRBY", "k", "1"}, reply: []byte(":1\r\n")},
 	})
 
 	store := newRedisStore(newRESPClientPool(ln.Addr().String(), "", 0, 1))
 	for i := 0; i < 3; i++ {
-		if _, err := store.incrBy("k", 1, 60*time.Second); err != nil {
-			t.Fatalf("incrBy (call %d): %v", i+1, err)
+		if _, err := incrOne(store, "k", 1, 60*time.Second); err != nil {
+			t.Fatalf("incrMulti (call %d): %v", i+1, err)
 		}
 	}
 }
@@ -523,7 +558,10 @@ func TestRedisStore_IncrBy_KeyRecreatedAfterLoss_ForgetsAndResendsExpireNextCall
 // is the incrMulti counterpart, proving the per-entry sendExpire/
 // forgetExpire bookkeeping (not just incrBy's single-key path) reacts to
 // a recreate signal correctly inside a batch alongside an unrelated,
-// genuinely-still-alive entry.
+// genuinely-still-alive entry — and that repairRecreatedExpires (finding
+// F7, 2026-09 review) repairs the recreated key's TTL immediately, in ONE
+// follow-up pipeline sent after the whole batch's own entries are
+// processed, rather than waiting for that key's own next batch.
 func TestRedisStore_IncrMulti_KeyRecreatedAfterLoss_ForgetsAndResendsExpireNextCall(t *testing.T) {
 	ln := newFakeListener(t)
 	runFakeRESPServer(t, ln, []respStep{
@@ -536,12 +574,15 @@ func TestRedisStore_IncrMulti_KeyRecreatedAfterLoss_ForgetsAndResendsExpireNextC
 		// 2nd batch: "lost" was evicted from Redis (reply == its own
 		// delta, the recreate signal) but "alive" genuinely still has
 		// its counter (reply 2, not equal to delta 1) — only "lost"
-		// must be forgotten.
+		// must be forgotten. F7: the repair follow-up pipeline fires
+		// immediately after both entries' own INCRBYs, re-arming
+		// "lost"'s TTL in this same batch.
 		{wantArgs: []string{"INCRBY", "lost", "1"}, reply: []byte(":1\r\n")},
 		{wantArgs: []string{"INCRBY", "alive", "1"}, reply: []byte(":2\r\n")},
-		// 3rd batch: "lost" gets a fresh EXPIRE; "alive" still does not.
-		{wantArgs: []string{"INCRBY", "lost", "1"}, reply: []byte(":1\r\n")},
 		{wantArgs: []string{"EXPIRE", "lost", "60"}, reply: []byte(":1\r\n")},
+		// 3rd batch: the repair above already re-confirmed "lost"'s
+		// EXPIRE, so neither entry sends one now.
+		{wantArgs: []string{"INCRBY", "lost", "1"}, reply: []byte(":1\r\n")},
 		{wantArgs: []string{"INCRBY", "alive", "1"}, reply: []byte(":3\r\n")},
 	})
 
@@ -649,6 +690,96 @@ func TestRedisStore_IncrAndGetMulti_PartialFailureStillSettlesProcessedPrefix(t 
 	assert.True(t, store.needsExpire("kA"), "kA must be forgotten — its delta-equal reply was processed before kC's failure")
 	assert.True(t, store.needsExpire("kB"), "kB must be forgotten — its delta-equal reply was processed before kC's failure")
 	assert.True(t, store.needsExpire("kC"), "kC was never reached far enough to commit or forget; must stay in its original unseen state")
+}
+
+// TestRedisStore_IncrBy_ExpireErrorReply_NotConfirmed_ResendsNextCall is
+// finding F6, 2026-09 review: an EXPIRE reply that is a RESP error (an
+// ACL denying EXPIRE while allowing INCRBY is the real-world trigger)
+// must NOT be recorded as a confirmed TTL — before this fix, reaching
+// commitExpire's call site at all (any reply, checked or not) recorded
+// the key as confirmed, permanently starving it of a real retry and
+// leaving it immortal in Redis. The INCRBY itself still succeeds (its
+// own reply is unaffected by EXPIRE's outcome), and the key's very next
+// call must resend EXPIRE — pinned by the fake server's exact script,
+// which fails the test if that resend is missing.
+func TestRedisStore_IncrBy_ExpireErrorReply_NotConfirmed_ResendsNextCall(t *testing.T) {
+	ln := newFakeListener(t)
+	runFakeRESPServer(t, ln, []respStep{
+		{wantArgs: []string{"SELECT", "0"}, reply: []byte("+OK\r\n")},
+		// 1st call: EXPIRE denied by ACL (RESP error reply) — INCRBY
+		// itself still succeeds.
+		{wantArgs: []string{"INCRBY", "k", "1"}, reply: []byte(":1\r\n")},
+		{wantArgs: []string{"EXPIRE", "k", "60"}, reply: []byte("-NOPERM this user has no permissions to run the 'expire' command\r\n")},
+		// 2nd call: EXPIRE must not have been recorded as confirmed, so
+		// this one sends EXPIRE again.
+		{wantArgs: []string{"INCRBY", "k", "2"}, reply: []byte(":3\r\n")},
+		{wantArgs: []string{"EXPIRE", "k", "60"}, reply: []byte(":1\r\n")},
+	})
+
+	store := newRedisStore(newRESPClientPool(ln.Addr().String(), "", 0, 1))
+	v, err := incrOne(store, "k", 1, 60*time.Second)
+	if err != nil {
+		t.Fatalf("incrMulti (call 1): %v", err)
+	}
+	if v != 1 {
+		t.Errorf("incrMulti (call 1) = %d, want 1 (INCRBY still succeeds even though EXPIRE was denied)", v)
+	}
+	if len(store.expireSeen) != 0 {
+		t.Fatalf("expireSeen = %v after an EXPIRE error reply, want empty (must not be recorded as confirmed)", store.expireSeen)
+	}
+	v, err = incrOne(store, "k", 2, 60*time.Second)
+	if err != nil {
+		t.Fatalf("incrMulti (call 2): %v", err)
+	}
+	if v != 3 {
+		t.Errorf("incrMulti (call 2) = %d, want 3", v)
+	}
+}
+
+// TestRedisStore_IncrMulti_ExpireErrorReply_NotConfirmedForThatEntryOnly
+// is the incrMulti counterpart of F6: one entry's EXPIRE reply is a RESP
+// error while an unrelated entry's own EXPIRE succeeds normally in the
+// SAME batch — only the errored entry must stay unconfirmed (and so
+// resend EXPIRE on its own next batch); the other entry's confirmation,
+// and both entries' own INCRBY reply-index bookkeeping (incrReplyIdx),
+// must be unaffected by the mix.
+func TestRedisStore_IncrMulti_ExpireErrorReply_NotConfirmedForThatEntryOnly(t *testing.T) {
+	ln := newFakeListener(t)
+	runFakeRESPServer(t, ln, []respStep{
+		{wantArgs: []string{"SELECT", "0"}, reply: []byte("+OK\r\n")},
+		// 1st batch: "denied"'s EXPIRE is refused; "ok"'s EXPIRE succeeds.
+		{wantArgs: []string{"INCRBY", "denied", "1"}, reply: []byte(":1\r\n")},
+		{wantArgs: []string{"EXPIRE", "denied", "60"}, reply: []byte("-NOPERM no\r\n")},
+		{wantArgs: []string{"INCRBY", "ok", "1"}, reply: []byte(":1\r\n")},
+		{wantArgs: []string{"EXPIRE", "ok", "60"}, reply: []byte(":1\r\n")},
+		// 2nd batch: "denied" is still unconfirmed, so it sends EXPIRE
+		// again (still refused); "ok" stays confirmed, so it sends
+		// INCRBY alone.
+		{wantArgs: []string{"INCRBY", "denied", "1"}, reply: []byte(":2\r\n")},
+		{wantArgs: []string{"EXPIRE", "denied", "60"}, reply: []byte("-NOPERM no\r\n")},
+		{wantArgs: []string{"INCRBY", "ok", "1"}, reply: []byte(":2\r\n")},
+	})
+
+	store := newRedisStore(newRESPClientPool(ln.Addr().String(), "", 0, 1))
+	entries := []counterIncr{
+		{key: "denied", delta: 1, ttl: time.Minute},
+		{key: "ok", delta: 1, ttl: time.Minute},
+	}
+	for i := 0; i < 2; i++ {
+		got, err := store.incrMulti(entries)
+		if err != nil {
+			t.Fatalf("incrMulti (batch %d): %v", i+1, err)
+		}
+		if len(got) != 2 {
+			t.Fatalf("incrMulti (batch %d): len(got) = %d, want 2", i+1, len(got))
+		}
+	}
+	if store.needsExpire("ok") {
+		t.Error(`needsExpire("ok") = true, want false (its EXPIRE was confirmed)`)
+	}
+	if !store.needsExpire("denied") {
+		t.Error(`needsExpire("denied") = false, want true (its EXPIRE was always denied, never confirmed)`)
+	}
 }
 
 // TestLimiter_FailOpenFalse_DeadRedisAddress_ReturnsStoreDownViolation is
@@ -793,7 +924,7 @@ func TestRedisStore_NeedsExpireBatch_OneLockForTheWholeSlice(t *testing.T) {
 }
 
 // TestRedisStore_SettleExpireBatch_NoCommitNoForgetLeavesKeyUntouched
-// asserts settleExpireBatch's third outcome (neither sent nor firstWrite)
+// asserts settleExpireBatch's third outcome (neither confirmed nor firstWrite)
 // — incrAndGetMulti now drives its own bookkeeping through this same
 // method (point 4, collapsed from a separate settleExpireFlags), so its
 // "leave alone" branch needs its own direct coverage, not just the
@@ -804,12 +935,12 @@ func TestRedisStore_SettleExpireBatch_NoCommitNoForgetLeavesKeyUntouched(t *test
 	entries := []counterIncr{{key: "x", delta: 1}, {key: "y", delta: 1}}
 
 	s.settleExpireBatch(entries, []bool{true, false}, []bool{false, false})
-	assert.False(t, s.needsExpire("x"), "sent[0]=true must commit x")
-	assert.True(t, s.needsExpire("y"), "neither sent nor firstWrite for y must leave it unseen")
+	assert.False(t, s.needsExpire("x"), "confirmed[0]=true must commit x")
+	assert.True(t, s.needsExpire("y"), "neither confirmed nor firstWrite for y must leave it unseen")
 
 	s.commitExpire("y")
 	s.settleExpireBatch(entries, []bool{false, false}, []bool{false, true})
-	assert.True(t, s.needsExpire("y"), "firstWrite[1]=true with sent[1]=false must forget y")
+	assert.True(t, s.needsExpire("y"), "firstWrite[1]=true with confirmed[1]=false must forget y")
 	assert.False(t, s.needsExpire("x"), "x must be untouched by a settle call that neither commits nor forgets it")
 }
 
@@ -837,8 +968,8 @@ func TestRedisStore_CommitExpireLocked_BoundedEviction(t *testing.T) {
 	}
 }
 
-// TestRedisStore_Get_DownServer_ReturnsError asserts get surfaces a
-// transport failure (dead address) as an error, mirroring incrBy's own
+// TestRedisStore_Get_DownServer_ReturnsError asserts getMulti surfaces a
+// transport failure (dead address) as an error, mirroring incrMulti's own
 // contract for the same failure — the limiter's storeGet relies on this to
 // treat a Redis outage as a store error rather than a false zero reading.
 func TestRedisStore_Get_DownServer_ReturnsError(t *testing.T) {
@@ -847,7 +978,7 @@ func TestRedisStore_Get_DownServer_ReturnsError(t *testing.T) {
 	require.NoError(t, ln.Close())
 
 	store := newRedisStore(newRESPClient(deadAddr, "", 0))
-	_, err := store.get("k")
+	_, err := getOne(store, "k")
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "redisStore: get")
+	assert.Contains(t, err.Error(), "redisStore: getMulti")
 }

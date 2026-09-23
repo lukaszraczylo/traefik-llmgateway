@@ -100,6 +100,70 @@ func resolveModelMeta(provider, model string, cfg map[string]*ModelMetaConfig, d
 	return out
 }
 
+// priceKnown reports whether model — given as both its canonical
+// "provider/model" id and its bare upstream id, canonical checked first,
+// the same two-id order routes_unified.go's own modelPriceKnown/
+// unifiedCostMicrosKnown already check — has a KNOWN price for billing
+// purposes: a configured pricing override or the built-in tables
+// (lookupPricing, pricing.go — builtinPricing then the generated
+// builtinModelMetaTable), OR an operator's own modelMeta entry that marks
+// the model explicitly Free (review-auth finding F1, 2026-09 audit:
+// modelPriceKnown used to consult only pricing overrides and the built-in
+// table, so a model an operator declared modelMeta:{free:true} — the
+// common case for a self-hosted/local model with no real cost — was still
+// reported "unpriced" and refused by the AllowUnpricedWithCostBudget cost
+// guard even though its price, zero, is perfectly well known).
+//
+// meta is checked by the SAME two key shapes lookupModelMetaConfig itself
+// checks (an exact "provider/model" key, then a bare "model" key) — done
+// here as plain map lookups rather than a resolveModelMeta call, since
+// resolveModelMeta also resolves context-window/discovery data this
+// cost-only check has no use for, and canonical here already IS the
+// joined "provider/model" string, not a separate (provider, model) pair
+// resolveModelMeta could split it back into.
+//
+// This does not change AllowUnpricedWithCostBudget's own default — it
+// only widens what counts as "known", so a model already treated as
+// priced stays priced, and a model an operator has explicitly marked free
+// now also counts as priced, rather than being refused as though it had
+// no price on record at all.
+func priceKnown(canonical, bare string, overrides map[string]*ModelPricing, meta map[string]*ModelMetaConfig) bool {
+	if _, ok := lookupPricing(canonical, overrides); ok {
+		return true
+	}
+	if _, ok := lookupPricing(bare, overrides); ok {
+		return true
+	}
+	return modelMetaFree(canonical, bare, meta)
+}
+
+// modelMetaFree reports whether the operator modelMeta entry for
+// canonical (or, absent that, bare) marks it Free — the SAME two-key
+// lookup priceKnown itself performs (an exact "provider/model" key, then
+// a bare "model" key), factored out so billing (unifiedCostMicros, routes_unified.go)
+// and the 402 cost-budget guard (priceKnown, above) can never disagree
+// about which models are free (verify-core fix, round 4). Before this,
+// priceKnown alone treated a modelMeta free:true model as priced, but
+// unifiedCostMicros never consulted modelMeta at all, so a self-hosted
+// id an operator declared free that also happened to match a bare id in
+// the generated LiteLLM table (gpt-oss-120b, llama-3.3-70b, and other
+// common local-model names) was billed that table's real price instead
+// of 0 — passing the 402 guard while silently charging for it anyway.
+//
+// Precedence matches the display path (lookupModelMetaConfig): an exact
+// "provider/model" entry decides on its own; the bare entry is consulted
+// only when no provider/model entry exists, so /v1/models and billing
+// never disagree about whether a model is free.
+func modelMetaFree(canonical, bare string, meta map[string]*ModelMetaConfig) bool {
+	if m, ok := meta[canonical]; ok && m != nil {
+		return m.Free
+	}
+	if m, ok := meta[bare]; ok && m != nil {
+		return m.Free
+	}
+	return false
+}
+
 // lookupModelMetaConfig resolves cfg's config-override layer for
 // (provider, model): an exact "provider/model" key wins over a bare
 // "model" key, matching this feature's own spec precedence (a key names
