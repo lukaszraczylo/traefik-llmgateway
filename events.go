@@ -452,6 +452,13 @@ func (g *Gateway) recordUnpricedRefusalEvent(scopes []limitScope, model, provide
 	}
 	applyScopeAttribution(&ev, scopes)
 	g.recordEvent(ev)
+	// r402 (always-on-with-admin, DECISIONS) — the one chokepoint both
+	// routes_unified.go's and routes_passthrough.go's identical 402 guard
+	// already share, so wiring the counter here covers both call sites
+	// without touching either route file again. Fire-and-forget
+	// (recordUnpriced402's own countAsync/l.spawn); no-op when admin
+	// stats are off.
+	g.limiter.recordUnpriced402(model)
 }
 
 // recordProxyEvent records an upstream event for a proxyUpstream result

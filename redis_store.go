@@ -41,7 +41,9 @@ func newRedisStore(client *respClient) *redisStore {
 // hot counters.
 const expireOnceCacheMax = 4096
 
-// needsExpireBatch is needsExpire (below) extended to a whole incrMulti/
+// needsExpireBatch is needsExpire (redis_store_helpers_test.go's
+// test-only single-key wrapper — every production call site now goes
+// through this batched form) extended to a whole incrMulti/
 // incrAndGetMulti batch: it takes expireMu ONCE for the whole slice
 // instead of once per entry, computed for every entry BEFORE any of the
 // batch's commands are even sent (mirroring needsExpire's own
@@ -53,6 +55,15 @@ func (s *redisStore) needsExpireBatch(entries []counterIncr) []bool {
 	s.expireMu.Lock()
 	defer s.expireMu.Unlock()
 	for i, e := range entries {
+		// An absolute entry's own command (SET key v EX secs, below)
+		// already carries its own expiry — it never needs a SEPARATE
+		// EXPIRE command the way an INCRBY does, and so is never tracked
+		// in expireSeen at all: always false here, regardless of whether
+		// this exact key has been written before.
+		if e.absolute {
+			out[i] = false
+			continue
+		}
 		_, ok := s.expireSeen[e.key]
 		out[i] = !ok
 	}
@@ -137,45 +148,6 @@ func (s *redisStore) commitExpireLocked(key string) {
 // cost as any other eviction).
 func (s *redisStore) forgetExpireLocked(key string) {
 	delete(s.expireSeen, key)
-}
-
-// needsExpire reports whether key does NOT currently have a CONFIRMED
-// EXPIRE recorded for it (perf finding 2, 2026-08-2x audit, deleting
-// EXPIRE entirely measured as the upper bound: 74->43 cmds/req, p50
-// 867.9->697.9us (-19.6%), conc=16 throughput 1,477->2,336 req/s (+58%)).
-// windowKey (limits.go) already embeds each counter's own time bucket in
-// its key string, and the TTLs callers pass (dayWindowTTL=35d,
-// monthWindowTTL=400d, ...) are deliberately far longer than their
-// window's own natural length purely as a stale-key GC margin, not a
-// sliding-window mechanism (limits.go's own doc comment on those
-// constants) — so once EXPIRE is CONFIRMED sent for an exact key string,
-// every further INCRBY against that SAME key happens well within the
-// window that key's own bucket belongs to, comfortably inside the TTL's
-// margin, and resending EXPIRE for it is redundant, not incorrect.
-//
-// needsExpire does NOT mark key as seen — unlike this method's
-// predecessor (expireOnce), which marked a key seen at CHECK time,
-// before its pipeline was ever sent. That was a bug (review finding,
-// 2026-08-2x, CRITICAL): a pipeline carrying key's only EXPIRE can still
-// fail after the mark — e.g. Redis is briefly unreachable, routine
-// during a rollout — leaving this process believing EXPIRE succeeded
-// when Redis never received it, and every later INCRBY against that key
-// sends no EXPIRE ever again: an immortal, permanently TTL-less key
-// (unbounded keyspace growth — precisely what dayWindowTTL/
-// monthWindowTTL exist to prevent — and under maxmemory-policy
-// volatile-*, a TTL-less key is not evictable, so it can drive Redis to
-// OOM-on-write). Marking now happens ONLY in commitExpire, called by the
-// caller after confirming the pipeline that carried EXPIRE actually
-// succeeded (commit-after-success). See commitExpire and forgetExpireLocked
-// for the other half of the fix: Redis can also independently lose an
-// already-EXPIRE-confirmed key (restart, maxmemory eviction, FLUSHDB, a
-// failover to a replica missing it) without this process's cache ever
-// finding out on its own.
-func (s *redisStore) needsExpire(key string) bool {
-	s.expireMu.Lock()
-	defer s.expireMu.Unlock()
-	_, ok := s.expireSeen[key]
-	return !ok
 }
 
 // commitExpire records key as having a CONFIRMED EXPIRE on Redis — call
@@ -290,7 +262,37 @@ func (s *redisStore) applyIncrReplies(method string, entries []counterIncr, repl
 	for i, e := range entries {
 		reply := replies[incrReplyIdx[i]]
 		if re, ok := reply.(error); ok {
-			return i, fmt.Errorf("redisStore: %s %q: INCRBY failed: %w", method, e.key, re)
+			// P11 fix (admin dashboard redesign verify round): an
+			// absolute entry's own command is SET, not INCRBY (below) —
+			// this error text used to say "INCRBY failed" even for a
+			// failed SET (e.g. a last-seen write against an ACL that
+			// denies SET but allows INCRBY), which would have sent an
+			// operator investigating the wrong command entirely.
+			cmd := "INCRBY"
+			if e.absolute {
+				cmd = "SET"
+			}
+			return i, fmt.Errorf("redisStore: %s %q: %s failed: %w", method, e.key, cmd, re)
+		}
+		// An absolute entry's own command is SET key v EX secs, which
+		// replies with the literal simple-string "OK" — resp.go decodes a
+		// simple-string reply to a Go string (never int64), and this is
+		// Yaegi-safe: reply.(string) is a comma-ok assertion of a COMPILED
+		// value (the resp decoder's own output) against a stdlib interface
+		// method set, never an interpreted plugin type on either side (the
+		// documented-safe direction — matchesSentinel's own doc comment,
+		// limits.go). out[i] is set to e.delta itself (the value SET wrote),
+		// since a SET reply carries no post-write count the way INCRBY's
+		// does; no EXPIRE was ever sent for it (needsExpireBatch's own
+		// absolute branch), so confirmed[i]/firstWrite[i] stay at their
+		// zero value — nothing here needs expire bookkeeping.
+		if e.absolute {
+			s, ok := reply.(string)
+			if !ok || s != "OK" {
+				return i, fmt.Errorf("redisStore: %s %q: unexpected SET reply %v (%T)", method, e.key, reply, reply)
+			}
+			out[i] = e.delta
+			continue
 		}
 		v, ok := reply.(int64)
 		if !ok {
@@ -307,10 +309,16 @@ func (s *redisStore) applyIncrReplies(method string, entries []counterIncr, repl
 	return len(entries), nil
 }
 
-// incrMulti implements counterStore: every entry's INCRBY, plus an EXPIRE
-// only when needsExpire(e.key) is true, sent as ONE pipeline (perf
-// review, 2026-08-21) — one round trip regardless of len(entries) or how
-// many of them get an EXPIRE this time. This is the only production path
+// incrMulti implements counterStore: every entry's INCRBY (or, for an
+// absolute entry, a SET — counterIncr.absolute's own doc comment) plus an
+// EXPIRE only when needsExpireBatch(entries) says so for that entry
+// (P11 fix, admin dashboard redesign verify round: this comment named
+// needsExpire, the single-key predecessor moved to redis_store_helpers_
+// test.go once every production call site went through the batched form
+// — needsExpireBatch's own doc comment; an absolute entry never gets one
+// at all, needsExpireBatch's own absolute branch), sent as ONE pipeline
+// (perf review, 2026-08-21) — one round trip regardless of len(entries)
+// or how many of them get an EXPIRE this time. This is the only production path
 // that reaches Redis for a counter write (incrBy, its single-key
 // predecessor, had no production caller left once checkAndCount/account
 // moved onto the batched paths, and was removed — deadcode audit,
@@ -364,6 +372,10 @@ func (s *redisStore) incrMulti(entries []counterIncr) ([]int64, error) {
 	sendExpire := s.needsExpireBatch(entries)
 	for i, e := range entries {
 		incrReplyIdx[i] = len(cmds)
+		if e.absolute {
+			cmds = append(cmds, []string{"SET", e.key, strconv.FormatInt(e.delta, 10), "EX", strconv.FormatInt(ttlToSeconds(e.ttl), 10)})
+			continue
+		}
 		cmds = append(cmds, []string{"INCRBY", e.key, strconv.FormatInt(e.delta, 10)})
 		if sendExpire[i] {
 			cmds = append(cmds, []string{"EXPIRE", e.key, strconv.FormatInt(ttlToSeconds(e.ttl), 10)})
@@ -393,10 +405,12 @@ func (s *redisStore) incrMulti(entries []counterIncr) ([]int64, error) {
 	return out, nil
 }
 
-// incrAndGetMulti implements counterStore: every entry's INCRBY, plus an
-// EXPIRE only when needsExpire(e.key) is true (same commit-after-success/
-// forget-on-recreate bookkeeping as incrMulti's own doc comment), AND
-// every read key's GET, sent as ONE pipeline (perf review round 3,
+// incrAndGetMulti implements counterStore: every entry's INCRBY (or SET
+// for an absolute entry), plus an EXPIRE only when needsExpireBatch(entries)
+// says so for that entry (P11 fix, admin dashboard redesign verify round —
+// see incrMulti's own doc comment for why this no longer names needsExpire;
+// same commit-after-success/forget-on-recreate bookkeeping as incrMulti's
+// own doc comment), AND every read key's GET, sent as ONE pipeline (perf review round 3,
 // 2026-08-22) — one round trip regardless of how many of each there are,
 // fusing checkAndCount's own request-counter increments with its
 // token/cost budget reads (limits.go's counterStore doc comment explains
@@ -421,6 +435,10 @@ func (s *redisStore) incrAndGetMulti(entries []counterIncr, reads []string) ([]i
 	sendExpire := s.needsExpireBatch(entries)
 	for i, e := range entries {
 		incrReplyIdx[i] = len(cmds)
+		if e.absolute {
+			cmds = append(cmds, []string{"SET", e.key, strconv.FormatInt(e.delta, 10), "EX", strconv.FormatInt(ttlToSeconds(e.ttl), 10)})
+			continue
+		}
 		cmds = append(cmds, []string{"INCRBY", e.key, strconv.FormatInt(e.delta, 10)})
 		if sendExpire[i] {
 			cmds = append(cmds, []string{"EXPIRE", e.key, strconv.FormatInt(ttlToSeconds(e.ttl), 10)})

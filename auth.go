@@ -1251,38 +1251,43 @@ func presentedKey(r *http.Request) (string, bool) {
 // construction" rule this file's own doc comment already states for
 // byDigest itself.
 type userSummary struct {
-	limits    *LimitsConfig
-	name      string
-	groupName string
-	// groups is the user's full, de-duplicated member group list
-	// (user.groupNames) — groupName above keeps only the first, for
-	// back-compat display (admin.go's adminUsageEntryView.GroupName).
-	groups []string
+	limits            *LimitsConfig
+	name              string
+	groupName         string
+	source            string
+	groups            []string
+	personalProviders []string
+	personalModels    []string
+	admin             bool
 }
 
 // groupSummary mirrors userSummary for one configured group, plus its
 // current member count (how many active users, inline or file-sourced,
 // currently reference it) and its configured access lists — providers,
-// models, mcpServers, agents — carried through exactly as group.allowsX
-// itself reads them (group-access-display task): nil/empty means every
-// provider/model/MCP server/agent is allowed (matchesGlob's own contract,
-// auth.go), never expanded to the full catalog here — the admin dashboard
-// echoes the configured glob list, not a resolved membership set.
+// models, mcpServers, agents, passthroughPaths — carried through exactly
+// as group.allowsX itself reads them (group-access-display task; GET
+// /admin/api/consumers, admin_catalog.go, added passthroughPaths):
+// nil/empty means every provider/model/MCP server/agent/path is allowed
+// (matchesGlob's own contract, auth.go), never expanded to the full
+// catalog here — the admin dashboard echoes the configured glob list,
+// not a resolved membership set.
 //
-// snapshot (below) clones all four slices rather than aliasing group's own
-// — group.providers/models/mcpServers/agents are the live authorization
-// data every allowsX call reads on the request path; groupSummary is a
-// read-only, dashboard-facing COPY, so a future caller that sorts or
-// otherwise mutates a groupSummary's list in place can never reorder or
-// corrupt the slice authorization itself still relies on.
+// snapshot (below) clones all five slices rather than aliasing group's own
+// — group.providers/models/mcpServers/agents/passthroughPaths are the
+// live authorization data every allowsX call reads on the request path;
+// groupSummary is a read-only, dashboard-facing COPY, so a future caller
+// that sorts or otherwise mutates a groupSummary's list in place can
+// never reorder or corrupt the slice authorization itself still relies
+// on.
 type groupSummary struct {
-	limits      *LimitsConfig
-	name        string
-	providers   []string
-	models      []string
-	mcpServers  []string
-	agents      []string
-	memberCount int
+	limits           *LimitsConfig
+	name             string
+	providers        []string
+	models           []string
+	mcpServers       []string
+	agents           []string
+	passthroughPaths []string
+	memberCount      int
 }
 
 // snapshot returns a sorted, redaction-safe listing of every currently
@@ -1294,12 +1299,25 @@ func (a *authStore) snapshot() ([]userSummary, []groupSummary) {
 	a.mu.RLock()
 	users := make([]userSummary, 0, len(a.byDigest))
 	memberCounts := make(map[string]int, len(a.groups))
-	for _, entry := range a.byDigest {
+	for digest, entry := range a.byDigest {
+		source := "file"
+		if a.inline[digest] == entry {
+			source = "inline"
+		}
+		var personalProviders, personalModels []string
+		if entry.group.personalGrant != nil {
+			personalProviders = cloneStringSlice(entry.group.personalGrant.providers)
+			personalModels = cloneStringSlice(entry.group.personalGrant.models)
+		}
 		users = append(users, userSummary{
-			limits:    entry.user.limits,
-			name:      entry.user.name,
-			groupName: entry.user.groupName,
-			groups:    cloneStringSlice(entry.user.groupNames),
+			limits:            entry.user.limits,
+			name:              entry.user.name,
+			groupName:         entry.user.groupName,
+			groups:            cloneStringSlice(entry.user.groupNames),
+			personalProviders: personalProviders,
+			personalModels:    personalModels,
+			source:            source,
+			admin:             entry.user.admin,
 		})
 		// A multi-group user counts once in EACH member group's own
 		// memberCount (UserConfig.Groups' own doc comment, llmgateway.go)
@@ -1317,13 +1335,14 @@ func (a *authStore) snapshot() ([]userSummary, []groupSummary) {
 	groups := make([]groupSummary, 0, len(a.groups))
 	for name, grp := range a.groups {
 		groups = append(groups, groupSummary{
-			limits:      grp.limits,
-			name:        name,
-			providers:   cloneStringSlice(grp.providers),
-			models:      cloneStringSlice(grp.models),
-			mcpServers:  cloneStringSlice(grp.mcpServers),
-			agents:      cloneStringSlice(grp.agents),
-			memberCount: memberCounts[name],
+			limits:           grp.limits,
+			name:             name,
+			providers:        cloneStringSlice(grp.providers),
+			models:           cloneStringSlice(grp.models),
+			mcpServers:       cloneStringSlice(grp.mcpServers),
+			agents:           cloneStringSlice(grp.agents),
+			passthroughPaths: cloneStringSlice(grp.passthroughPaths),
+			memberCount:      memberCounts[name],
 		})
 	}
 	sort.Slice(groups, func(i, j int) bool { return groups[i].name < groups[j].name })

@@ -1249,3 +1249,75 @@ func TestHandleAudioTranscriptions_RecordsMediaModelUsage(t *testing.T) {
 	assert.True(t, ok)
 	assert.Equal(t, int64(1), modelReq, "kindModel req counter")
 }
+
+// --- admin-redesign WP-A step 5: media routes' own latency threading ---
+
+// TestHandleImagesGenerations_Latency_WrittenWhenStatsLatencyOn proves
+// recordMediaModelUsage threads the completed request's own latSample/
+// hasLat through to accountWith — exactly one provider-level and one
+// model-level latency duration bucket must have been incremented, when
+// admin.stats.latency is on.
+func TestHandleImagesGenerations_Latency_WrittenWhenStatsLatencyOn(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"created":1,"data":[{"url":"https://example.invalid/img.png"}]}`))
+	}))
+	defer srv.Close()
+
+	cfg := newMediaTestConfig(srv.URL, "img-test")
+	cfg.Admin = &AdminConfig{Enabled: true, Stats: &AdminStatsConfig{Latency: true}}
+	gw := newMediaTestGateway(t, cfg)
+
+	body := map[string]any{"model": "img-test", "prompt": "a cat"}
+	b, err := json.Marshal(body)
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, imagesGenerationsPath, bytes.NewReader(b))
+	req.Header.Set("Authorization", "Bearer sk-alice")
+	rec := httptest.NewRecorder()
+	gw.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code, "body=%s", rec.Body.String())
+
+	now := time.Now()
+	var totalProviderLat, totalModelLat int64
+	for i := 0; i <= len(latencyBucketBounds); i++ {
+		if v, ok := gw.limiter.getCounter(kindProvider, "openai", latencyDurationMetric(i), windowDay, now); ok {
+			totalProviderLat += v
+		}
+		if v, ok := gw.limiter.getCounter(kindModel, "openai/img-test", latencyDurationMetric(i), windowDay, now); ok {
+			totalModelLat += v
+		}
+	}
+	assert.Equal(t, int64(1), totalProviderLat, "exactly one provider-level latency duration bucket must have been incremented")
+	assert.Equal(t, int64(1), totalModelLat, "exactly one model-level latency duration bucket must have been incremented")
+}
+
+// TestHandleImagesGenerations_Latency_OffByDefault proves no latency
+// bucket is ever written when admin.stats.latency (and metrics) are both
+// off — the default, additive-and-preserving behavior.
+func TestHandleImagesGenerations_Latency_OffByDefault(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"created":1,"data":[{"url":"https://example.invalid/img.png"}]}`))
+	}))
+	defer srv.Close()
+
+	gw := newMediaTestGateway(t, newMediaTestConfig(srv.URL, "img-test"))
+
+	body := map[string]any{"model": "img-test", "prompt": "a cat"}
+	b, err := json.Marshal(body)
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, imagesGenerationsPath, bytes.NewReader(b))
+	req.Header.Set("Authorization", "Bearer sk-alice")
+	rec := httptest.NewRecorder()
+	gw.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code, "body=%s", rec.Body.String())
+
+	now := time.Now()
+	for i := 0; i <= len(latencyBucketBounds); i++ {
+		v, ok := gw.limiter.getCounter(kindProvider, "openai", latencyDurationMetric(i), windowDay, now)
+		assert.True(t, ok)
+		assert.Equal(t, int64(0), v, "bucket %d must stay at 0 without admin.stats.latency", i)
+	}
+}

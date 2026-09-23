@@ -1306,3 +1306,48 @@ func TestHandleTargetProxy_TargetHealth_A2A_UsesAgentKind(t *testing.T) {
 		t.Errorf("mcp/alpha state = %q, want unknown (must not be conflated with the agent of the same name)", gw.targetHealth.stateOf(targetKindMCP, "alpha"))
 	}
 }
+
+// --- admin-redesign WP-A step 8: target x caller ---
+
+// TestHandleTargetProxy_CountsTargetCaller_OnlyWithAdminStats proves
+// handleTargetProxy threads the authenticated caller's own name
+// (u.name) into countTargetRequestBy — a proxied MCP request must move
+// targetCallerScopeID("mcp", "alpha", "alice")'s own req counter when
+// admin stats are on, and must not when they are off.
+func TestHandleTargetProxy_CountsTargetCaller_OnlyWithAdminStats(t *testing.T) {
+	for _, adminOn := range []bool{false, true} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		}))
+
+		cfg := CreateConfig()
+		cfg.Providers = map[string]*ProviderConfig{"openai": {Type: "openai", APIKey: "k"}}
+		cfg.MCPServers = map[string]*TargetConfig{"alpha": {URL: srv.URL}}
+		cfg.Groups = map[string]*GroupConfig{"default": {}}
+		cfg.Users = &UsersConfig{Inline: []*UserConfig{{Name: "alice", Group: "default", APIKey: "sk-alice"}}}
+		if adminOn {
+			cfg.Admin = &AdminConfig{Enabled: true}
+		}
+		h, err := New(context.Background(), http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), cfg, "llmgw")
+		if err != nil {
+			srv.Close()
+			t.Fatalf("New: %v", err)
+		}
+		gw := h.(*Gateway)
+
+		req := httptest.NewRequest(http.MethodGet, "/mcp/alpha/tools/list", nil)
+		req.Header.Set("Authorization", "Bearer sk-alice")
+		h.ServeHTTP(httptest.NewRecorder(), req)
+		srv.Close()
+
+		id := targetCallerScopeID(targetKindMCP, "alpha", "alice")
+		got, ok := gw.limiter.getCounter(kindTargetCaller, id, metricReq, windowDay, time.Now())
+		want := int64(0)
+		if adminOn {
+			want = 1
+		}
+		if !ok || got != want {
+			t.Errorf("adminOn=%v: tcaller req/day = %d (ok=%v), want %d", adminOn, got, ok, want)
+		}
+	}
+}

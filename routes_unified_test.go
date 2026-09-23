@@ -2790,3 +2790,341 @@ func TestHandleChat_UnderNewUnifiedCap_InlineBase64Image_StillWorks(t *testing.T
 		t.Error("upstream did not receive the full inline image payload — the cap silently truncated a request under its own limit")
 	}
 }
+
+// --- admin-redesign WP-A step 7: kindModel req must not count a failed
+// failover candidate (Q1, DECISIONS; pre-existing defect fixed here) ---
+
+// TestHandleChat_Failover_ModelReqCounter_NotChargedToFailedCandidate is
+// the regression test for the pre-existing defect DECISIONS Q1 fixes:
+// before this fix, account() ran once per candidate — including a
+// candidate that failed before writing anything — and kindModel's own req
+// counter was written UNCONDITIONALLY for every one of them. alpha fails
+// with a pre-send 500 (zero usage, callErr != nil): its own "alpha/shared"
+// model-scope req counter must stay at 0. beta succeeds: its own
+// "beta/shared" counter must read exactly 1.
+func TestHandleChat_Failover_ModelReqCounter_NotChargedToFailedCandidate(t *testing.T) {
+	alphaSrv := jsonServer(http.StatusInternalServerError, `{"error":{"message":"down","type":"server_error"}}`)
+	defer alphaSrv.Close()
+	betaSrv := jsonServer(http.StatusOK, successRespBody)
+	defer betaSrv.Close()
+
+	cfg := twoProviderFailoverConfig(alphaSrv, betaSrv)
+	next := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	gw, ok := h.(*Gateway)
+	if !ok {
+		t.Fatal("handler is not *Gateway")
+	}
+
+	body := map[string]any{"model": "shared", "messages": []any{}}
+	req := newUnifiedRequest(t, http.MethodPost, "/v1/chat/completions", "sk-alice", body)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+
+	now := time.Now()
+	alphaModelReq, ok := gw.limiter.getCounter(kindModel, "alpha/shared", metricReq, windowDay, now)
+	if !ok {
+		t.Fatal("getCounter(alpha/shared) ok = false")
+	}
+	if alphaModelReq != 0 {
+		t.Errorf("alpha/shared model req = %d, want 0 (a candidate that failed with zero usage must never touch kindModel's req counter)", alphaModelReq)
+	}
+
+	betaModelReq, ok := gw.limiter.getCounter(kindModel, "beta/shared", metricReq, windowDay, now)
+	if !ok {
+		t.Fatal("getCounter(beta/shared) ok = false")
+	}
+	if betaModelReq != 1 {
+		t.Errorf("beta/shared model req = %d, want 1", betaModelReq)
+	}
+}
+
+// TestHandleChat_ZeroUsageStreamingSuccess_StillCountsModelReq proves the
+// step-7 fix's narrow exclusion is exactly callErr!=nil&&total()==0 — a
+// SUCCESSFUL streaming response with zero reported usage (callErr == nil)
+// must still count kindModel's req, since it was genuinely served.
+func TestHandleChat_ZeroUsageStreamingSuccess_StillCountsModelReq(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("data: {\"id\":\"x\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-test\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":null}]}\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer srv.Close()
+
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{
+		"openai": {Type: "openai", BaseURL: srv.URL, APIKey: "k", Models: []string{"gpt-test"}},
+	}
+	cfg.Groups = map[string]*GroupConfig{"default": {}}
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{{Name: "alice", Group: "default", APIKey: "sk-alice"}}}
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	gw, ok := h.(*Gateway)
+	if !ok {
+		t.Fatal("handler is not *Gateway")
+	}
+
+	body := map[string]any{"model": "gpt-test", "stream": true, "messages": []any{}}
+	req := newUnifiedRequest(t, http.MethodPost, "/v1/chat/completions", "sk-alice", body)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+
+	modelReq, ok := gw.limiter.getCounter(kindModel, "openai/gpt-test", metricReq, windowDay, time.Now())
+	if !ok || modelReq != 1 {
+		t.Errorf("openai/gpt-test model req = %d (ok=%v), want 1 (a genuinely served, zero-usage stream still counts)", modelReq, ok)
+	}
+}
+
+// --- admin-redesign WP-A step 6: cache-hit/miss counters end to end ---
+
+// TestHandleChat_CacheHitMiss_RecordsCmissOnMissAndChitCsaveOnHit drives
+// two identical chat-completion requests through a real Gateway with
+// caching AND admin stats enabled (newBehavioralRedisServer, the same
+// fake-but-behaviorally-correct Redis TestHandleChat_CacheHitMiss_
+// EndToEnd_CountersAndHeaders already uses): the first (miss) must record
+// total/model cmiss in the SAME synchronous account batch; the second
+// (hit) must record total/model chit and csave via the async
+// recordCacheHit path — spawn is forced synchronous so both land
+// deterministically before this test reads them back.
+func TestHandleChat_CacheHitMiss_RecordsCmissOnMissAndChitCsaveOnHit(t *testing.T) {
+	const respBody = `{"id":"chatcmpl-1","object":"chat.completion","model":"gpt-test","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5}}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(respBody))
+	}))
+	defer srv.Close()
+
+	redisLn := newBehavioralRedisServer(t)
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{
+		"openai": {Type: "openai", BaseURL: srv.URL, APIKey: "k", Models: []string{"gpt-test"}},
+	}
+	cfg.Groups = map[string]*GroupConfig{"default": {}}
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{{Name: "alice", Group: "default", APIKey: "sk-alice", Limits: &LimitsConfig{}}}}
+	cfg.Redis = &RedisConfig{Address: redisLn.Addr().String()}
+	cfg.Cache = CacheConfig{Enabled: true, TTL: "1m"}
+	cfg.Admin = &AdminConfig{Enabled: true}
+	// Explicit price override — "gpt-test" is not a real model id, so
+	// leaving this unset would price it 0 (unpriced) and make the csave
+	// assertion below meaningless.
+	cfg.Pricing = map[string]*ModelPricing{"gpt-test": {InputPerM: 1, OutputPerM: 2}}
+
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	gw, ok := h.(*Gateway)
+	if !ok {
+		t.Fatal("handler is not *Gateway")
+	}
+	gw.limiter.spawn = func(f func()) { f() } // land recordProviderAttempt/recordCacheHit synchronously
+
+	body := map[string]any{"model": "gpt-test", "messages": []any{map[string]any{"role": "user", "content": "hi"}}}
+
+	req1 := newUnifiedRequest(t, http.MethodPost, "/v1/chat/completions", "sk-alice", body)
+	rec1 := httptest.NewRecorder()
+	h.ServeHTTP(rec1, req1)
+	if rec1.Code != http.StatusOK || rec1.Header().Get("X-Llmgw-Cache") != "miss" {
+		t.Fatalf("first request: status=%d cache-header=%q, want 200/miss, body=%s", rec1.Code, rec1.Header().Get("X-Llmgw-Cache"), rec1.Body.String())
+	}
+
+	now := time.Now()
+	totalCmiss, ok := gw.limiter.getCounter(totalScopeKind, totalScopeID, metricCmiss, windowDay, now)
+	if !ok || totalCmiss != 1 {
+		t.Errorf("after miss: total cmiss/day = %d (ok=%v), want 1", totalCmiss, ok)
+	}
+	modelCmiss, ok := gw.limiter.getCounter(kindModel, "openai/gpt-test", metricCmiss, windowDay, now)
+	if !ok || modelCmiss != 1 {
+		t.Errorf("after miss: model cmiss/day = %d (ok=%v), want 1", modelCmiss, ok)
+	}
+
+	req2 := newUnifiedRequest(t, http.MethodPost, "/v1/chat/completions", "sk-alice", body)
+	rec2 := httptest.NewRecorder()
+	h.ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusOK || rec2.Header().Get("X-Llmgw-Cache") != "hit" {
+		t.Fatalf("second request: status=%d cache-header=%q, want 200/hit, body=%s", rec2.Code, rec2.Header().Get("X-Llmgw-Cache"), rec2.Body.String())
+	}
+	if rec2.Body.String() != rec1.Body.String() {
+		t.Errorf("hit body = %q, want identical to the miss's own stored body %q", rec2.Body.String(), rec1.Body.String())
+	}
+
+	totalChit, ok := gw.limiter.getCounter(totalScopeKind, totalScopeID, metricChit, windowDay, now)
+	if !ok || totalChit != 1 {
+		t.Errorf("after hit: total chit/day = %d (ok=%v), want 1", totalChit, ok)
+	}
+	modelChit, ok := gw.limiter.getCounter(kindModel, "openai/gpt-test", metricChit, windowDay, now)
+	if !ok || modelChit != 1 {
+		t.Errorf("after hit: model chit/day = %d (ok=%v), want 1", modelChit, ok)
+	}
+	totalCsave, ok := gw.limiter.getCounter(totalScopeKind, totalScopeID, metricCsave, windowDay, now)
+	if !ok || totalCsave <= 0 {
+		t.Errorf("after hit: total csave/day = %d (ok=%v), want > 0 (gpt-test has a built-in price)", totalCsave, ok)
+	}
+}
+
+// TestHandleChat_CacheMissFailover_CountsExactlyOneCmiss is P3 (admin
+// dashboard redesign verify round): cacheMiss extras used to be set from
+// `cacheable` alone — true for EVERY candidate that attempted its own
+// cache lookup and missed, including one that went on to fail over. A
+// 2-candidate failover chain where alpha misses its own cache lookup and
+// then fails, and beta then serves, used to count 1 end-user request as 2
+// total/day cmiss increments. Gated on the SAME "served or reported
+// usage" condition as the pre-existing Q1 model-scope fix (routes_
+// unified.go), only the candidate whose result actually gets served/
+// billed reports a miss now.
+func TestHandleChat_CacheMissFailover_CountsExactlyOneCmiss(t *testing.T) {
+	alphaSrv := jsonServer(http.StatusInternalServerError, `{"error":{"message":"down","type":"server_error"}}`)
+	defer alphaSrv.Close()
+	betaSrv := jsonServer(http.StatusOK, successRespBody)
+	defer betaSrv.Close()
+
+	cfg := twoProviderFailoverConfig(alphaSrv, betaSrv)
+	redisLn := newBehavioralRedisServer(t)
+	cfg.Redis = &RedisConfig{Address: redisLn.Addr().String()}
+	cfg.Cache = CacheConfig{Enabled: true, TTL: "1m"}
+	cfg.Admin = &AdminConfig{Enabled: true}
+
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	gw, ok := h.(*Gateway)
+	if !ok {
+		t.Fatal("handler is not *Gateway")
+	}
+	gw.limiter.spawn = func(f func()) { f() }
+
+	body := map[string]any{"model": "shared", "messages": []any{map[string]any{"role": "user", "content": "hi"}}}
+	req := newUnifiedRequest(t, http.MethodPost, "/v1/chat/completions", "sk-alice", body)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (beta must serve after alpha fails), body=%s", rec.Code, rec.Body.String())
+	}
+
+	now := time.Now()
+	cmiss, ok := gw.limiter.getCounter(totalScopeKind, totalScopeID, metricCmiss, windowDay, now)
+	if !ok || cmiss != 1 {
+		t.Errorf("total cmiss/day = %d (ok=%v), want exactly 1 for one request with failover (never one per candidate that missed its own cache lookup)", cmiss, ok)
+	}
+	fover, ok := gw.limiter.getCounter(kindProvider, "alpha", metricFover, windowDay, now)
+	if !ok || fover != 1 {
+		t.Errorf("fover(alpha)/day = %d (ok=%v), want 1", fover, ok)
+	}
+}
+
+// TestCacheHit_BodyParseSkippedWhenStatsAdminOff is P4 (admin dashboard
+// redesign verify round, hot path): recordCacheHit itself already no-ops
+// when !statsAdmin, but cachedUsage(cached.Body) — a full JSON unmarshal
+// of the cached response body — used to run UNCONDITIONALLY before that
+// check, so a cache-enabled, admin-DISABLED deployment paid the parse
+// cost on every single hit for nothing (measured elsewhere at 639µs for a
+// 1 MiB body). Measured here via testing.AllocsPerRun against two real
+// Gateways (cache configured, admin on vs admin off) serving repeated
+// hits for the SAME large (256 KiB) cached body: admin off must allocate
+// dramatically less per hit than admin on, whose own cachedUsage+
+// unifiedCostMicros parse of that body — plus recordCacheHit's own
+// synchronous (spawn forced sync for determinism) counterStore write —
+// dominates its count.
+func TestCacheHit_BodyParseSkippedWhenStatsAdminOff(t *testing.T) {
+	const bodySize = 2 << 20 // 2 MiB content, comfortably past BenchmarkV6_CachedUsage's own 1 MiB/639µs figure
+
+	buildHitFunc := func(t *testing.T, adminOn bool) func() {
+		t.Helper()
+		content := strings.Repeat("a", bodySize)
+		respBody := `{"id":"x","object":"chat.completion","model":"gpt-test","choices":[{"index":0,"message":{"role":"assistant","content":"` + content + `"}}],"usage":{"prompt_tokens":10,"completion_tokens":5}}`
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(respBody))
+		}))
+		t.Cleanup(srv.Close)
+
+		redisLn := newBehavioralRedisServer(t)
+		cfg := CreateConfig()
+		cfg.Providers = map[string]*ProviderConfig{
+			"openai": {Type: "openai", BaseURL: srv.URL, APIKey: "k", Models: []string{"gpt-test"}},
+		}
+		cfg.Groups = map[string]*GroupConfig{"default": {}}
+		cfg.Users = &UsersConfig{Inline: []*UserConfig{{Name: "alice", Group: "default", APIKey: "sk-alice", Limits: &LimitsConfig{}}}}
+		cfg.Redis = &RedisConfig{Address: redisLn.Addr().String()}
+		// MaxBodyBytes raised to maxCacheMaxBodyBytes: the default
+		// (defaultCacheMaxBodyBytes, cache.go, exactly 1 MiB) would refuse
+		// to cache this test's own >1 MiB body at all, turning every
+		// "hit" attempt below back into a miss.
+		cfg.Cache = CacheConfig{Enabled: true, TTL: "1m", MaxBodyBytes: maxCacheMaxBodyBytes}
+		if adminOn {
+			cfg.Admin = &AdminConfig{Enabled: true}
+		}
+		next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+		h, err := New(context.Background(), next, cfg, "llmgw")
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		gw, ok := h.(*Gateway)
+		if !ok {
+			t.Fatal("handler is not *Gateway")
+		}
+		gw.limiter.spawn = func(f func()) { f() }
+
+		body := map[string]any{"model": "gpt-test", "messages": []any{map[string]any{"role": "user", "content": "hi"}}}
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, newUnifiedRequest(t, http.MethodPost, "/v1/chat/completions", "sk-alice", body))
+		if rec.Code != http.StatusOK || rec.Header().Get("X-Llmgw-Cache") != "miss" {
+			t.Fatalf("warm-up: status=%d cache=%q, want 200/miss", rec.Code, rec.Header().Get("X-Llmgw-Cache"))
+		}
+
+		return func() {
+			hrec := httptest.NewRecorder()
+			h.ServeHTTP(hrec, newUnifiedRequest(t, http.MethodPost, "/v1/chat/completions", "sk-alice", body))
+			if hrec.Code != http.StatusOK || hrec.Header().Get("X-Llmgw-Cache") != "hit" {
+				t.Fatalf("status=%d cache=%q, want 200/hit", hrec.Code, hrec.Header().Get("X-Llmgw-Cache"))
+			}
+		}
+	}
+
+	hitOn := buildHitFunc(t, true)
+	hitOff := buildHitFunc(t, false)
+
+	// encoding/json's decoder skips a field cachedUsage's target struct
+	// does not name (the cached body's own "choices[0].message.content")
+	// WITHOUT materializing it into a Go value — so the parse's own cost
+	// shows up as CPU time spent scanning every byte, not as a
+	// proportionally large allocation count or byte total (the actual
+	// perf finding this fix addresses was itself time-based: "1 MiB 639
+	// µs per hit"). NsPerOp is therefore the metric that actually reflects
+	// this fix, not AllocsPerRun/AllocedBytesPerOp.
+	resultOn := testing.Benchmark(func(b *testing.B) {
+		for i := 0; i < b.N; i++ {
+			hitOn()
+		}
+	})
+	resultOff := testing.Benchmark(func(b *testing.B) {
+		for i := 0; i < b.N; i++ {
+			hitOff()
+		}
+	})
+
+	nsOn := resultOn.NsPerOp()
+	nsOff := resultOff.NsPerOp()
+	t.Logf("cache-hit ns/op for a %d MiB cached body: admin on = %d, admin off = %d", bodySize/(1<<20), nsOn, nsOff)
+	if nsOn < nsOff+nsOff/3 {
+		t.Errorf("ns/op with admin on (%d) is not meaningfully slower than admin off (%d) — the cached body's own JSON parse (cachedUsage) must be skipped entirely when statsAdmin is off, not merely cheap", nsOn, nsOff)
+	}
+}

@@ -1083,3 +1083,66 @@ func TestSendStartupTelemetry_OnceAcrossConcurrentCalls(t *testing.T) {
 	}
 	wg.Wait() // -race proves the Once is the only synchronisation needed
 }
+
+// --- admin-redesign WP-A: AdminConfig.Stats + newConfiguredLimiter wiring ---
+
+// TestNewConfiguredLimiter_StatsFlags_DeriveFromAdminConfig proves
+// newConfiguredLimiter derives statsAdmin/statsUserModel/statsLatency
+// purely from Config.Admin — statsUserModel/statsLatency are ANDed with
+// statsAdmin at construction (limiter.statsUserModel's own doc comment,
+// limits.go), so a call site need only check the one field, never both.
+func TestNewConfiguredLimiter_StatsFlags_DeriveFromAdminConfig(t *testing.T) {
+	cases := []struct {
+		admin              *AdminConfig
+		name               string
+		wantStatsAdmin     bool
+		wantStatsUserModel bool
+		wantStatsLatency   bool
+	}{
+		{name: "nil Admin: every flag off", admin: nil},
+		{name: "Admin disabled: every flag off", admin: &AdminConfig{Enabled: false}},
+		{name: "Admin enabled, nil Stats: statsAdmin on, sub-flags off",
+			admin: &AdminConfig{Enabled: true}, wantStatsAdmin: true},
+		{name: "Admin enabled, Stats zero value: statsAdmin on, sub-flags off",
+			admin: &AdminConfig{Enabled: true, Stats: &AdminStatsConfig{}}, wantStatsAdmin: true},
+		{name: "Admin enabled, both sub-flags on",
+			admin:          &AdminConfig{Enabled: true, Stats: &AdminStatsConfig{UserModel: true, Latency: true}},
+			wantStatsAdmin: true, wantStatsUserModel: true, wantStatsLatency: true},
+		{name: "Admin disabled but Stats set: every flag off (statsAdmin gates the sub-flags too)",
+			admin: &AdminConfig{Enabled: false, Stats: &AdminStatsConfig{UserModel: true, Latency: true}}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			cfg := &Config{Admin: c.admin}
+			l := newConfiguredLimiter(cfg, nil) // nil client: fallback-only path, still must derive the flags
+			if l.statsAdmin != c.wantStatsAdmin {
+				t.Errorf("statsAdmin = %v, want %v", l.statsAdmin, c.wantStatsAdmin)
+			}
+			if l.statsUserModel != c.wantStatsUserModel {
+				t.Errorf("statsUserModel = %v, want %v", l.statsUserModel, c.wantStatsUserModel)
+			}
+			if l.statsLatency != c.wantStatsLatency {
+				t.Errorf("statsLatency = %v, want %v", l.statsLatency, c.wantStatsLatency)
+			}
+			if l.lastSeen == nil {
+				t.Error("lastSeen is nil; newLimiter must always construct one")
+			}
+		})
+	}
+}
+
+// TestNewLimiter_DirectConstruction_EveryStatsFlagDefaultsFalse proves a
+// limiter built directly via newLimiter (as most of this package's own
+// tests do, bypassing newConfiguredLimiter/Config entirely) defaults every
+// admin-stats flag to false — additive and default-preserving: existing
+// tests must observe byte-identical behavior to before this task unless
+// they opt in explicitly.
+func TestNewLimiter_DirectConstruction_EveryStatsFlagDefaultsFalse(t *testing.T) {
+	l := newLimiter(nil, true)
+	if l.statsAdmin || l.statsUserModel || l.statsLatency {
+		t.Errorf("statsAdmin=%v statsUserModel=%v statsLatency=%v, want all false", l.statsAdmin, l.statsUserModel, l.statsLatency)
+	}
+	if l.lastSeen == nil {
+		t.Error("lastSeen is nil; newLimiter must always construct one, regardless of stats config")
+	}
+}

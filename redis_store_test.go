@@ -982,3 +982,137 @@ func TestRedisStore_Get_DownServer_ReturnsError(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "redisStore: getMulti")
 }
+
+// --- admin-redesign WP-A step 1: absolute (last-seen SET) entries ---
+
+// TestRedisStore_IncrMulti_AbsoluteEntry_SendsSetNotIncrby is Q6's own
+// wire-shape contract: an absolute counterIncr sends ONE "SET key v EX
+// secs" command — never INCRBY, never a separate EXPIRE — and its reply
+// (the simple string "OK") decodes to out[i] == e.delta, not the reply
+// itself (a SET reply carries no post-write count the way INCRBY's does).
+func TestRedisStore_IncrMulti_AbsoluteEntry_SendsSetNotIncrby(t *testing.T) {
+	ln := newFakeListener(t)
+	runFakeRESPServer(t, ln, []respStep{
+		{wantArgs: []string{"SELECT", "0"}, reply: []byte("+OK\r\n")},
+		{wantArgs: []string{"SET", "llmgw:seen:user:alice", "1700000000", "EX", "34560000"}, reply: []byte("+OK\r\n")},
+	})
+
+	store := newRedisStore(newRESPClient(ln.Addr().String(), "", 0))
+	got, err := store.incrMulti([]counterIncr{
+		{key: "llmgw:seen:user:alice", delta: 1700000000, ttl: monthWindowTTL, absolute: true},
+	})
+	if err != nil {
+		t.Fatalf("incrMulti: %v", err)
+	}
+	if len(got) != 1 || got[0] != 1700000000 {
+		t.Errorf("got = %v, want [1700000000]", got)
+	}
+}
+
+// TestRedisStore_IncrMulti_MixedAbsoluteAndIncr_OneEmptyPipeline proves a
+// batch mixing an absolute entry with a plain INCRBY entry sends both in
+// ONE pipeline — the last-seen entries checkAndCount appends ride the
+// exact same round trip as the scope req increments, never a second one.
+func TestRedisStore_IncrMulti_MixedAbsoluteAndIncr_OneEmptyPipeline(t *testing.T) {
+	ln := newFakeListener(t)
+	runFakeRESPServer(t, ln, []respStep{
+		{wantArgs: []string{"SELECT", "0"}, reply: []byte("+OK\r\n")},
+		{wantArgs: []string{"INCRBY", "llmgw:user:alice:req:min:202609231030", "1"}, reply: []byte(":1\r\n")},
+		{wantArgs: []string{"EXPIRE", "llmgw:user:alice:req:min:202609231030", "120"}, reply: []byte(":1\r\n")},
+		{wantArgs: []string{"SET", "llmgw:seen:user:alice", "42", "EX", "34560000"}, reply: []byte("+OK\r\n")},
+	})
+
+	store := newRedisStore(newRESPClient(ln.Addr().String(), "", 0))
+	got, err := store.incrMulti([]counterIncr{
+		{key: "llmgw:user:alice:req:min:202609231030", delta: 1, ttl: minWindowTTL},
+		{key: "llmgw:seen:user:alice", delta: 42, ttl: monthWindowTTL, absolute: true},
+	})
+	if err != nil {
+		t.Fatalf("incrMulti: %v", err)
+	}
+	if len(got) != 2 || got[0] != 1 || got[1] != 42 {
+		t.Errorf("got = %v, want [1 42]", got)
+	}
+}
+
+// TestRedisStore_IncrMulti_AbsoluteEntry_UnexpectedReplyType_Errors proves
+// applyIncrReplies refuses a non-"OK" reply for an absolute entry rather
+// than silently treating it as a success.
+func TestRedisStore_IncrMulti_AbsoluteEntry_UnexpectedReplyType_Errors(t *testing.T) {
+	ln := newFakeListener(t)
+	runFakeRESPServer(t, ln, []respStep{
+		{wantArgs: []string{"SELECT", "0"}, reply: []byte("+OK\r\n")},
+		{wantArgs: []string{"SET", "llmgw:seen:user:alice", "1", "EX", "60"}, reply: []byte(":1\r\n")}, // integer, not "OK"
+	})
+
+	store := newRedisStore(newRESPClient(ln.Addr().String(), "", 0))
+	_, err := store.incrMulti([]counterIncr{
+		{key: "llmgw:seen:user:alice", delta: 1, ttl: time.Minute, absolute: true},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unexpected SET reply")
+}
+
+// TestRedisStore_IncrMulti_AbsoluteEntry_ErrorReplySaysSET is P11 (admin
+// dashboard redesign verify round): applyIncrReplies' error branch used
+// to say "INCRBY failed" for EVERY entry's errored reply, including an
+// absolute entry's own SET command (e.g. a last-seen write against an
+// ACL that denies SET but allows INCRBY) — misleading an operator
+// investigating the wrong command entirely.
+func TestRedisStore_IncrMulti_AbsoluteEntry_ErrorReplySaysSET(t *testing.T) {
+	ln := newFakeListener(t)
+	runFakeRESPServer(t, ln, []respStep{
+		{wantArgs: []string{"SELECT", "0"}, reply: []byte("+OK\r\n")},
+		{wantArgs: []string{"SET", "llmgw:seen:user:alice", "1", "EX", "60"}, reply: []byte("-NOPERM this user has no permissions to run the 'set' command\r\n")},
+	})
+
+	store := newRedisStore(newRESPClient(ln.Addr().String(), "", 0))
+	_, err := store.incrMulti([]counterIncr{
+		{key: "llmgw:seen:user:alice", delta: 1, ttl: time.Minute, absolute: true},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "SET failed")
+	assert.NotContains(t, err.Error(), "INCRBY failed")
+}
+
+// TestRedisStore_NeedsExpireBatch_AbsoluteEntry_AlwaysFalse proves an
+// absolute entry never needs a separate EXPIRE — its own SET already
+// carries EX — regardless of whether its key has ever been committed
+// before.
+func TestRedisStore_NeedsExpireBatch_AbsoluteEntry_AlwaysFalse(t *testing.T) {
+	s := newRedisStore(nil)
+	s.commitExpire("llmgw:seen:user:alice") // even a "committed" key stays false for an absolute entry
+	got := s.needsExpireBatch([]counterIncr{
+		{key: "llmgw:seen:user:alice", delta: 1, absolute: true},
+		{key: "llmgw:user:alice:req:min:x", delta: 1},
+	})
+	assert.Equal(t, []bool{false, true}, got)
+}
+
+// TestRedisStore_IncrAndGetMulti_AbsoluteEntry_SendsSetAlongsideReads
+// proves checkAndCount's own fused round trip (INCRBY/SET entries plus
+// budget-probe reads) still sends an absolute entry as SET, correctly
+// interleaved with the read keys that follow every entry's own commands.
+func TestRedisStore_IncrAndGetMulti_AbsoluteEntry_SendsSetAlongsideReads(t *testing.T) {
+	ln := newFakeListener(t)
+	runFakeRESPServer(t, ln, []respStep{
+		{wantArgs: []string{"SELECT", "0"}, reply: []byte("+OK\r\n")},
+		{wantArgs: []string{"SET", "llmgw:seen:user:alice", "9", "EX", "60"}, reply: []byte("+OK\r\n")},
+		{wantArgs: []string{"GET", "llmgw:user:alice:tokin:day:x"}, reply: []byte("$3\r\n100\r\n")},
+	})
+
+	store := newRedisStore(newRESPClient(ln.Addr().String(), "", 0))
+	incrVals, readVals, err := store.incrAndGetMulti(
+		[]counterIncr{{key: "llmgw:seen:user:alice", delta: 9, ttl: time.Minute, absolute: true}},
+		[]string{"llmgw:user:alice:tokin:day:x"},
+	)
+	if err != nil {
+		t.Fatalf("incrAndGetMulti: %v", err)
+	}
+	if len(incrVals) != 1 || incrVals[0] != 9 {
+		t.Errorf("incrVals = %v, want [9]", incrVals)
+	}
+	if len(readVals) != 1 || readVals[0] != 100 {
+		t.Errorf("readVals = %v, want [100]", readVals)
+	}
+}

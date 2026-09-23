@@ -820,3 +820,42 @@ func TestResponseCache_Store_EffectiveTTLDiffersPerGroup_SETCarriesGroupTTL(t *t
 	c.store("k-override", 200, "application/json", []byte(`{"a":1}`), effectiveTTL(c, overrideGrp))
 	c.store("k-inherit", 200, "application/json", []byte(`{"b":2}`), effectiveTTL(c, inheritGrp))
 }
+
+// --- admin-redesign WP-A step 6: cachedUsage ---
+
+// TestCachedUsage_ParsesOpenAIShapedUsageObject proves cachedUsage extracts
+// prompt_tokens/completion_tokens from a cached response body's top-level
+// "usage" object — recordCacheHit's own source for a cache HIT's avoided
+// cost (routes_unified.go).
+func TestCachedUsage_ParsesOpenAIShapedUsageObject(t *testing.T) {
+	body := []byte(`{"id":"chatcmpl-1","choices":[],"usage":{"prompt_tokens":40,"completion_tokens":10}}`)
+	got := cachedUsage(body)
+	if got.prompt != 40 || got.completion != 10 {
+		t.Errorf("cachedUsage = %+v, want prompt=40 completion=10", got)
+	}
+}
+
+// TestCachedUsage_MissingOrMalformed_ReturnsZeroUsage proves a body with
+// no "usage" object, or one that fails to unmarshal at all, reports a
+// zero usage{} — a cache hit must still count (chit), it simply has
+// nothing to value (csave skipped, matching account's own "skip a zero
+// direction" rule).
+func TestCachedUsage_MissingOrMalformed_ReturnsZeroUsage(t *testing.T) {
+	cases := []struct {
+		name string
+		body []byte
+	}{
+		{name: "no usage field", body: []byte(`{"id":"chatcmpl-1","choices":[]}`)},
+		{name: "usage is null", body: []byte(`{"usage":null}`)},
+		{name: "malformed JSON", body: []byte(`not json`)},
+		{name: "empty body", body: []byte(``)},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := cachedUsage(c.body)
+			if got != (usage{}) {
+				t.Errorf("cachedUsage(%q) = %+v, want the zero value", c.body, got)
+			}
+		})
+	}
+}

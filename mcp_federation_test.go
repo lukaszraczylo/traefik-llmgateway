@@ -2807,3 +2807,74 @@ func TestHandleMCPFederated_ToolsCall_ClientCanceled_RecordsNothing(t *testing.T
 		t.Errorf("alpha state = %q, want unknown (a client cancel must record nothing)", got)
 	}
 }
+
+// --- admin-redesign WP-A step 8: target x caller (federated routes) ---
+
+// TestHandleMCPFederated_ToolsCall_CountsTargetCaller proves
+// mcpFederatedToolsCall threads handleMCPFederated's own u.name into
+// countTargetRequestBy — the resolved server's own tcaller counter must
+// move when admin stats are on.
+func TestHandleMCPFederated_ToolsCall_CountsTargetCaller(t *testing.T) {
+	alpha := newMockJSONRPCServer(t, nil)
+	beta := newMockJSONRPCServer(t, nil)
+	cfg := newFederationTestConfig(alpha.srv.URL, beta.srv.URL, false)
+	cfg.Admin = &AdminConfig{Enabled: true}
+	h, err := New(context.Background(), http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	gw, ok := h.(*Gateway)
+	if !ok {
+		t.Fatal("handler is not *Gateway")
+	}
+
+	callParams, _ := json.Marshal(mcpToolCallParams{Name: "alpha_lookup"})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, newFederatedRequest(t, "sk-alice", jsonrpcRequest{
+		JSONRPC: jsonrpcVersion, Method: "tools/call", ID: json.RawMessage("1"), Params: callParams,
+	}))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+
+	id := targetCallerScopeID(targetKindMCP, "alpha", "alice")
+	got, ok := gw.limiter.getCounter(kindTargetCaller, id, metricReq, windowDay, time.Now())
+	if !ok || got != 1 {
+		t.Errorf("tcaller req/day = %d (ok=%v), want 1", got, ok)
+	}
+}
+
+// TestHandleMCPFederated_ToolsList_CountsTargetCaller_ForEveryDialedServer
+// proves the fan-out threads the caller through to EVERY server actually
+// dialed, not just one — mirroring countTargetRequests' own "dialed, not
+// merely attempted" accounting (mcpFederatedToolsList's own doc comment).
+func TestHandleMCPFederated_ToolsList_CountsTargetCaller_ForEveryDialedServer(t *testing.T) {
+	alpha := newMockJSONRPCServer(t, []mcpTool{{Name: "lookup", Description: "alpha's tool"}})
+	beta := newMockJSONRPCServer(t, []mcpTool{{Name: "search", Description: "beta's tool"}})
+	cfg := newFederationTestConfig(alpha.srv.URL, beta.srv.URL, false)
+	cfg.Admin = &AdminConfig{Enabled: true}
+	h, err := New(context.Background(), http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	gw, ok := h.(*Gateway)
+	if !ok {
+		t.Fatal("handler is not *Gateway")
+	}
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, newFederatedRequest(t, "sk-alice", jsonrpcRequest{
+		JSONRPC: jsonrpcVersion, Method: "tools/list", ID: json.RawMessage("1"),
+	}))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+
+	for _, name := range []string{"alpha", "beta"} {
+		id := targetCallerScopeID(targetKindMCP, name, "alice")
+		got, ok := gw.limiter.getCounter(kindTargetCaller, id, metricReq, windowDay, time.Now())
+		if !ok || got != 1 {
+			t.Errorf("server %q: tcaller req/day = %d (ok=%v), want 1", name, got, ok)
+		}
+	}
+}

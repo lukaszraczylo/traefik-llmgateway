@@ -2712,6 +2712,197 @@ func TestAdminUsageModels_SpanBounds(t *testing.T) {
 	}
 }
 
+// TestAdminUsageModels_Offset pins GET /admin/api/usage/models' offset
+// parameter (admin dashboard redesign, WP-B): with offset=1, the ranking
+// reads the PREVIOUS day's bucket, not today's, and echoes Offset back.
+func TestAdminUsageModels_Offset(t *testing.T) {
+	t.Parallel()
+	cfg := newAdminTestConfig()
+	h, gw := newAdminGatewayHandle(t, cfg)
+
+	fixedNow := time.Date(2026, 8, 20, 12, 30, 0, 0, time.UTC)
+	gw.limiter.nowFn = func() time.Time { return fixedNow }
+
+	seedModelCounter(gw, "alpha/a-model-1", metricReq, windowDay, fixedNow, 5)
+	gw.limiter.incrCounter(kindModel, "alpha/a-model-1", metricReq, windowDay, historyStepBack(fixedNow, windowDay, 1), 42, dayWindowTTL)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, adminRequest(http.MethodGet, adminUsageModelsPath+"?metric=req&window=day&span=1&offset=1", "sk-admin1"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	var got adminUsageModelsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Offset != 1 {
+		t.Errorf("Offset = %d, want 1", got.Offset)
+	}
+	if len(got.Models) != 1 || got.Models[0].ID != "alpha/a-model-1" || got.Models[0].Value != 42 {
+		t.Errorf("models = %+v, want [alpha/a-model-1: 42] (yesterday's bucket, not today's 5)", got.Models)
+	}
+}
+
+// TestAdminUsageModels_OffsetOutOfRangeIs400 pins the "0..historyMaxSpan-span"
+// bound (parseStatsOffset, stats_read.go).
+func TestAdminUsageModels_OffsetOutOfRangeIs400(t *testing.T) {
+	t.Parallel()
+	cfg := newAdminTestConfig()
+	h, _ := newAdminGatewayHandle(t, cfg)
+
+	max := historyMaxSpan(windowDay)
+	cases := []struct {
+		name string
+		qs   string
+		want int
+	}{
+		{"negative offset", "?metric=req&window=day&span=1&offset=-1", http.StatusBadRequest},
+		{"offset exceeds max-span", fmt.Sprintf("?metric=req&window=day&span=%d&offset=1", max), http.StatusBadRequest},
+		{"offset not a number", "?metric=req&window=day&span=1&offset=lots", http.StatusBadRequest},
+		{"offset at max-span boundary", fmt.Sprintf("?metric=req&window=day&span=1&offset=%d", max-1), http.StatusOK},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, adminRequest(http.MethodGet, adminUsageModelsPath+c.qs, "sk-admin1"))
+			if rec.Code != c.want {
+				t.Errorf("status = %d, want %d, body=%s", rec.Code, c.want, rec.Body.String())
+			}
+		})
+	}
+}
+
+// TestAdminUsageModels_Detail_OffsetAndCacheExtras pins detail=1's new
+// cacheHits/cacheSavedMicroUsd/r402/priceSource fields (admin dashboard
+// redesign, WP-B): present only when features.cacheStats (the response
+// cache is configured).
+func TestAdminUsageModels_Detail_OffsetAndCacheExtras(t *testing.T) {
+	t.Parallel()
+	cfg := newAdminTestConfig()
+	h, gw := newAdminGatewayHandle(t, cfg)
+
+	fixedNow := time.Date(2026, 8, 20, 12, 30, 0, 0, time.UTC)
+	gw.limiter.nowFn = func() time.Time { return fixedNow }
+	seedModelCounter(gw, "alpha/a-model-1", metricReq, windowDay, fixedNow, 5)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, adminRequest(http.MethodGet, adminUsageModelsPath+"?metric=req&window=day&detail=1", "sk-admin1"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	var got adminUsageModelsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	var row *adminUsageModelEntryView
+	for i := range got.Models {
+		if got.Models[i].ID == "alpha/a-model-1" {
+			row = &got.Models[i]
+		}
+	}
+	if row == nil {
+		t.Fatalf("alpha/a-model-1 missing from detail ranking: %+v", got.Models)
+	}
+	if row.PriceSource == "" {
+		t.Error("PriceSource = \"\", want populated in detail mode")
+	}
+	// No cache configured in newAdminTestConfig: chit/csave extras must
+	// stay nil. R402 is unrelated to cache configuration (P2 fix, admin
+	// dashboard redesign verify round: it used to be folded into the same
+	// cache-gated read as chit/csave, so it wrongly went nil too whenever
+	// cache was unconfigured) and must always be present in detail mode.
+	if row.CacheHits != nil || row.CacheSavedMicroUSD != nil {
+		t.Errorf("cache extras = (%v, %v), want both nil (cache not configured)", row.CacheHits, row.CacheSavedMicroUSD)
+	}
+	if row.R402 == nil {
+		t.Error("R402 = nil, want populated in detail mode regardless of cache configuration")
+	}
+}
+
+// TestAdminUsageModelsDetail_R402AndCacheExtras_WindowAware is P2 (admin
+// dashboard redesign verify round): r402 is read over the SAME window the
+// caller asked for whenever r402 actually has a bucket there (accountWith's
+// own recordUnpriced402 writes a model's r402 at BOTH hour and day,
+// limits.go) — never forced to day regardless of the caller's window, and
+// never gated on cache configuration at all (unrelated feature). chit/
+// csave stay day-bucket-only (recordCacheHit never writes an hour bucket
+// for a model): window=day and window=month (converted to the exact
+// covering day buckets, monthRangeToDayBuckets) both report them; window=
+// hour omits both fields entirely rather than over-counting from whole
+// days outside the requested range.
+//
+// The hour and day r402 buckets are seeded with DIFFERENT values
+// specifically so reading the wrong window is caught immediately, not
+// masked by both windows happening to agree.
+func TestAdminUsageModelsDetail_R402AndCacheExtras_WindowAware(t *testing.T) {
+	t.Parallel()
+	fixedNow := time.Date(2026, 9, 23, 10, 0, 0, 0, time.UTC)
+
+	cfg := newAdminTestConfig()
+	ln := newBehavioralRedisServer(t)
+	cfg.Redis = &RedisConfig{Address: ln.Addr().String()}
+	cfg.Cache = CacheConfig{Enabled: true, TTL: "1m"}
+	h, gw := newAdminGatewayHandle(t, cfg)
+	gw.limiter.nowFn = func() time.Time { return fixedNow }
+
+	id := "alpha/a-model-1"
+	gw.limiter.incrCounter(kindModel, id, metricReq, windowHour, fixedNow, 1, hourWindowTTL)
+	gw.limiter.incrCounter(kindModel, id, metricReq, windowDay, fixedNow, 1, dayWindowTTL)
+	gw.limiter.incrCounter(kindModel, id, metricReq, windowMonth, fixedNow, 1, monthWindowTTL)
+
+	gw.limiter.incrCounter(kindModel, id, metricR402, windowHour, fixedNow, 7, hourWindowTTL)
+	gw.limiter.incrCounter(kindModel, id, metricR402, windowDay, fixedNow, 30, dayWindowTTL)
+	gw.limiter.incrCounter(kindModel, id, metricChit, windowDay, fixedNow, 4, dayWindowTTL)
+
+	findRow := func(t *testing.T, resp adminUsageModelsResponse) *adminUsageModelEntryView {
+		t.Helper()
+		for i := range resp.Models {
+			if resp.Models[i].ID == id {
+				return &resp.Models[i]
+			}
+		}
+		t.Fatalf("%s missing from detail ranking: %+v", id, resp.Models)
+		return nil
+	}
+	doDetail := func(t *testing.T, window string) adminUsageModelsResponse {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, adminRequest(http.MethodGet, adminUsageModelsPath+"?metric=req&window="+window+"&detail=1", "sk-admin1"))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("window=%s status = %d, want 200, body=%s", window, rec.Code, rec.Body.String())
+		}
+		var got adminUsageModelsResponse
+		if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+			t.Fatalf("window=%s decode: %v", window, err)
+		}
+		return got
+	}
+
+	hourRow := findRow(t, doDetail(t, "hour"))
+	if hourRow.R402 == nil || *hourRow.R402 != 7 {
+		t.Errorf("window=hour R402 = %v, want 7 (the hour bucket, never the day bucket's 30)", hourRow.R402)
+	}
+	if hourRow.CacheHits != nil || hourRow.CacheSavedMicroUSD != nil {
+		t.Errorf("window=hour cache extras = (%v, %v), want both nil (no exact hour-window answer)", hourRow.CacheHits, hourRow.CacheSavedMicroUSD)
+	}
+
+	dayRow := findRow(t, doDetail(t, "day"))
+	if dayRow.R402 == nil || *dayRow.R402 != 30 {
+		t.Errorf("window=day R402 = %v, want 30", dayRow.R402)
+	}
+	if dayRow.CacheHits == nil || *dayRow.CacheHits != 4 {
+		t.Errorf("window=day CacheHits = %v, want 4", dayRow.CacheHits)
+	}
+
+	monthRow := findRow(t, doDetail(t, "month"))
+	if monthRow.R402 == nil || *monthRow.R402 != 30 {
+		t.Errorf("window=month R402 = %v, want 30 (converted to the covering day buckets)", monthRow.R402)
+	}
+	if monthRow.CacheHits == nil || *monthRow.CacheHits != 4 {
+		t.Errorf("window=month CacheHits = %v, want 4 (converted to the covering day buckets)", monthRow.CacheHits)
+	}
+}
+
 // TestAdminUsageModels_SpanStoreDownIs503 is TestAdminUsageModels_StoreDownIs503's
 // own span-path counterpart: an unreachable store must answer 503 through
 // chunkedModelSpanTotals too, not just modelTotals' own span=1 path.
@@ -2755,7 +2946,7 @@ func TestChunkedModelSpanTotals_SplitsIntoMultipleRoundTrips(t *testing.T) {
 	l.nowFn = func() time.Time { return fixedNow }
 	gw := &Gateway{limiter: l}
 
-	got, ok := gw.chunkedModelSpanTotals(ids, metricReq, windowDay, fixedNow, span)
+	got, ok := gw.chunkedModelSpanTotals(ids, metricReq, windowDay, fixedNow, span, 0)
 	if !ok {
 		t.Fatal("want ok=true")
 	}
@@ -2806,7 +2997,7 @@ func TestChunkedModelSpanTotalsMulti_SplitsIntoMultipleRoundTrips(t *testing.T) 
 	l.nowFn = func() time.Time { return fixedNow }
 	gw := &Gateway{limiter: l}
 
-	got, ok := gw.chunkedModelSpanTotalsMulti(ids, metrics, windowDay, fixedNow, span)
+	got, ok := gw.chunkedModelSpanTotalsMulti(ids, metrics, windowDay, fixedNow, span, 0)
 	if !ok {
 		t.Fatal("want ok=true")
 	}
@@ -3045,6 +3236,63 @@ func TestAdminUsage_RejectionsPerDayField(t *testing.T) {
 	}
 	if got.Total.RejectionsPerDay != 1 {
 		t.Errorf("total.RejectionsPerDay = %d, want 1 (Q6: rejections attributed to total/all too)", got.Total.RejectionsPerDay)
+	}
+}
+
+// TestAdminUsage_LastSeen pins GET /admin/api/usage's LastSeen field (Q6,
+// DECISIONS): a scope with a seeded lastSeenKey (limits.go, WP-A)
+// reports it back verbatim, unix seconds; a scope with none reports 0,
+// which its own omitempty tag drops from the JSON entirely ("lastSeen 0
+// means never/unknown").
+func TestAdminUsage_LastSeen(t *testing.T) {
+	t.Parallel()
+	fixedNow := time.Date(2026, 9, 23, 9, 0, 0, 0, time.UTC)
+	seenAt := fixedNow.Add(-90 * time.Second).Unix()
+
+	store := &countingMultiStore{values: map[string]int64{
+		lastSeenKey("user", "alice"): seenAt,
+		// admin1 deliberately unseeded: no key at all.
+	}}
+	cfg := newAdminTestConfig()
+	h, gw := newAdminGatewayHandle(t, cfg)
+	gw.limiter = newLimiter(store, true)
+	gw.limiter.nowFn = func() time.Time { return fixedNow }
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, adminRequest(http.MethodGet, adminUsagePath, "sk-admin1"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	var got adminUsageResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	byName := map[string]adminUsageEntryView{}
+	for _, u := range got.Users {
+		byName[u.ID] = u
+	}
+	if byName["alice"].LastSeen != seenAt {
+		t.Errorf("alice.LastSeen = %d, want %d", byName["alice"].LastSeen, seenAt)
+	}
+	if byName["admin1"].LastSeen != 0 {
+		t.Errorf("admin1.LastSeen = %d, want 0 (never seen)", byName["admin1"].LastSeen)
+	}
+	if strings.Contains(rec.Body.String(), `"lastSeen":0`) {
+		t.Error(`response body contains "lastSeen":0, want omitted via omitempty`)
+	}
+}
+
+// TestAdminUsage_ChunkScopesLoweredForLastSeenKey pins adminUsageChunkScopes
+// == 160 (lowered from 200 when usageKeysPerScope grew to 10 for
+// lastSeen) — a hand-picked constant a future edit could silently drift
+// without a test catching it.
+func TestAdminUsage_ChunkScopesLoweredForLastSeenKey(t *testing.T) {
+	t.Parallel()
+	if adminUsageChunkScopes != 160 {
+		t.Errorf("adminUsageChunkScopes = %d, want 160", adminUsageChunkScopes)
+	}
+	if adminUsageChunkScopes*usageKeysPerScope > 1600 {
+		t.Errorf("adminUsageChunkScopes*usageKeysPerScope = %d, want <= 1600", adminUsageChunkScopes*usageKeysPerScope)
 	}
 }
 

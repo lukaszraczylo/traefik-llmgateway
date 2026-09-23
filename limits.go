@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -64,6 +65,80 @@ const (
 	// scopeUsage.rejectionsPerDay / adminUsageEntryView.RejectionsPerDay.
 	metricRej = "rej"
 )
+
+// New counter-family metric names (admin-redesign WP-A): landed together,
+// early, so WP-B's read-side endpoints (admin.go, stats_read.go) can code
+// against the agreed names while WP-A finishes wiring their writers.
+// metricProvTimeout is the provider-level "did not answer within budget"
+// counter (recordProviderAttempt, below) — distinct from metricProvFail
+// (isTransient's broader classification): every timeout is a fail, but not
+// every fail is a timeout. metricFover is the failover counter
+// (accountWith's accountExtras.failoverFrom): +1 against the FROM
+// provider every time a request moves to its next candidate. metricR402
+// is the "refused: unpriced model under a cost budget" counter
+// (recordUnpriced402). metricChit/metricCsave/metricCmiss are the response
+// cache's hit/avoided-cost/miss counters (recordCacheHit, accountWith's
+// accountExtras.cacheMiss) — csave is micro-USD, the same unit metricCost
+// already uses, not a request count.
+const (
+	metricProvTimeout = "timeout"
+	metricFover       = "fover"
+	metricR402        = "r402"
+	metricChit        = "chit"
+	metricCsave       = "csave"
+	metricCmiss       = "cmiss"
+)
+
+// kindUserModel and kindTargetCaller are two more limitScope.kind (and
+// admin-API scope-kind) strings this task adds, alongside kindProvider/
+// kindProviderModel/kindModel above: kindUserModel is the opt-in per-
+// (user, model) breakdown (userModelScopeID, below; admin.stats.userModel);
+// kindTargetCaller is the per-(target, caller) breakdown countTargetRequestsBy
+// writes (targetCallerScopeID, below). Both embed kind as their counter
+// key's own leading segment, the same collision-safety every other kind
+// constant in this file already relies on.
+const (
+	kindUserModel    = "umodel"
+	kindTargetCaller = "tcaller"
+)
+
+// userModelScopeID builds kindUserModel's id for (user, canonical): the
+// user name's own byte length (decimal ASCII), ":", then the user name
+// immediately followed by canonical with NO separator between them. The
+// length prefix is what makes this unambiguous to split back apart later
+// (WP-B's usage/totals?kind=usermodel reader): a user name may itself
+// contain any character a configured username allows, including one that
+// could otherwise collide with a plain fixed separator, but canonical
+// always starts exactly len(user) bytes after the first ":".
+func userModelScopeID(user, canonical string) string {
+	return strconv.Itoa(len(user)) + ":" + user + canonical
+}
+
+// targetCallerScopeID builds kindTargetCaller's id for (targetKind,
+// target, caller): "{mcp|agent}/{target}/{caller}" — targetKind is
+// targetScopeKind's own output ("mcp" or "agent", mcp_a2a.go), so this
+// reuses the identical vocabulary GET /admin/api/targets already exposes
+// rather than minting a third one.
+func targetCallerScopeID(targetKind, target, caller string) string {
+	return targetKind + "/" + target + "/" + caller
+}
+
+// latencyDurationMetric and latencyTTFBMetric name the per-bucket latency
+// counters accountWith writes (opt-in, admin.stats.latency): idx is
+// latencyBucketIndex's own return value (metrics.go) — 0..len(
+// latencyBucketBounds)-1 for a real bucket, len(latencyBucketBounds) itself
+// for the overflow bucket — so "ld00".."ld13"/"lt00".."lt13" for the 13
+// configured bounds plus one overflow bucket each, matching plan §1.2's
+// "ld00..ld13"/"lt00..lt13" vocabulary exactly. %02d, not a bare int, so
+// every bucket's metric name sorts and reads consistently regardless of
+// how many bounds latencyBucketBounds ever grows to hold (up to 100).
+func latencyDurationMetric(idx int) string {
+	return fmt.Sprintf("ld%02d", idx)
+}
+
+func latencyTTFBMetric(idx int) string {
+	return fmt.Sprintf("lt%02d", idx)
+}
 
 // TTLs applied to counter keys. They exceed their window's natural length
 // so a key stays readable for the whole window it belongs to; the bucket
@@ -189,6 +264,17 @@ type counterIncr struct {
 	// this field entirely — ttl is applied in full there; the ceiling and
 	// this floor only ever matter for the in-process fallback.
 	enforceTTL time.Duration
+	// absolute marks this entry as a plain SET, not an INCRBY: delta is
+	// the exact value to write (e.g. a unix-second timestamp), not an
+	// amount to add. Added for the last-seen counter family (Q6,
+	// DECISIONS): a last-seen value is "when did we last see this scope",
+	// which an increment can never express. redisStore.incrMulti/
+	// incrAndGetMulti build a single "SET key delta EX secs" command for
+	// an absolute entry instead of INCRBY(+EXPIRE) — see their own doc
+	// comments — and memoryStore.applySet mirrors that: unconditionally
+	// overwrite, never add. false (the zero value) is every existing
+	// entry's own behavior, unchanged.
+	absolute bool
 }
 
 // counterStore is the storage backend the limiter uses for atomic windowed
@@ -296,35 +382,6 @@ const sweepEvery = 30 * time.Second
 // "fallback retention" note.
 const memoryStoreMaxTTL = 48 * time.Hour
 
-// enforceTTLFor returns the minimum TTL window's own counter must stay
-// alive for to enforce correctly, independent of how long history
-// retention (hourWindowTTL/dayWindowTTL/monthWindowTTL) asks the same key
-// to live for charting. These are windowLength + margin, and not
-// coincidentally match dayWindowTTL/monthWindowTTL's ORIGINAL,
-// pre-history-retention-bump values (25h/32d, v0.2 data-layer task) —
-// that bump only ever existed to serve the usage-history API's charts;
-// enforcement itself only ever needed a key to outlive its own window's
-// single rollover. Called for every checkAndCount/account/
-// countTargetRequests/recordProviderAttempt entry (directly, or via
-// enforceTTLsFor's own equivalent four-window fan-out); a window not
-// among the four handled here is a
-// programming error, mirroring windowKey/windowEnd/bucketFor's own panic
-// convention.
-func enforceTTLFor(window string) time.Duration {
-	switch window {
-	case windowMin:
-		return enforceTTLMinWindow
-	case windowHour:
-		return enforceTTLHourWindow
-	case windowDay:
-		return enforceTTLDayWindow
-	case windowMonth:
-		return enforceTTLMonthWindow
-	default:
-		panic(fmt.Sprintf("llmgateway: enforceTTLFor: unknown window %q", window))
-	}
-}
-
 // clampTTL bounds ttl to at most memoryStoreMaxTTL, but never below
 // enforceTTL — see both consts'/enforceTTLFor's own doc comments for why
 // the floor must always win a conflict with the ceiling. enforceTTL=0
@@ -396,6 +453,26 @@ func (m *memoryStore) applyIncr(key string, n int64, ttl time.Duration) int64 {
 	return e.value
 }
 
+// applySet sets key's value to v and its expiry to now+ttl, unconditionally
+// — creating the entry if absent, overwriting it if present — memoryStore's
+// counterpart to Redis's SET key v EX secs (an absolute counterIncr entry's
+// own command, redisStore.incrMulti). Unlike applyIncr, this never adds to
+// an existing value and never treats "already expired" specially: every
+// call simply replaces whatever was there, exactly like a real SET does.
+func (m *memoryStore) applySet(key string, v int64, ttl time.Duration) int64 {
+	now := m.now()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if now.Sub(m.lastSweep) >= sweepEvery {
+		m.sweepLocked(now)
+		m.lastSweep = now
+	}
+
+	m.data[key] = &memoryEntry{expiry: now.Add(ttl), value: v}
+	return v
+}
+
 // get implements counterStore.
 func (m *memoryStore) get(key string) (int64, error) {
 	now := m.now()
@@ -434,6 +511,10 @@ func (m *memoryStore) getMulti(keys []string) ([]int64, error) {
 func (m *memoryStore) incrMulti(entries []counterIncr) ([]int64, error) {
 	out := make([]int64, len(entries))
 	for i, e := range entries {
+		if e.absolute {
+			out[i] = m.applySet(e.key, e.delta, clampTTL(e.ttl, e.enforceTTL))
+			continue
+		}
 		out[i] = m.applyIncr(e.key, e.delta, clampTTL(e.ttl, e.enforceTTL))
 	}
 	return out, nil
@@ -528,14 +609,156 @@ type limitViolation struct {
 	storeDown bool
 }
 
+// lastSeenGateThrottle is the minimum real time between two last-seen SET
+// writes THIS replica issues for the identical (kind, id) scope (Q6,
+// DECISIONS: "last-seen via absolute SET entries in the admission
+// pipeline, throttled 60s/replica/scope"). An absolute SET is idempotent
+// and safe to send on every admitted request, but doing so would add a
+// synchronous store round-trip cost proportional to request volume for a
+// value nothing needs updated more often than this.
+const lastSeenGateThrottle = 60 * time.Second
+
+// lastSeenGateMapCapBase is lastSeenGate.capacity's starting value, and
+// the floor it never shrinks below — the same generation-rotation shape
+// rejectionCounter/authFailureTracker already use, and for the identical
+// reason (rejectionCounterMapCap's own doc comment): a hot-reloaded
+// user/group set can churn names over a long process lifetime, and
+// nothing here should grow this map without bound for a renamed or
+// deleted scope. A scope displaced by rotation simply writes its next
+// last-seen SET a little early — never a correctness bug, only an extra
+// write, the same trade-off rejectionCounter's own doc comment already
+// accepts.
+const lastSeenGateMapCapBase = 4096
+
+// lastSeenGateMapCapMax is the hard ceiling lastSeenGate.capacity's own
+// adaptive growth (below) never exceeds — bounding this replica's total
+// last-seen throttle memory at, worst case, two generations of
+// lastSeenGateMapCapMax entries (current + previous) regardless of how
+// many distinct scopes this process ever admits. N5 (verify-redesign-
+// final.md): a fixed 4,096 cap throttled correctly up to ~2x itself
+// (~8,192 live scopes, current+previous both full), but a live scope
+// count ABOVE that rotated current before lastSeenGateThrottle could
+// ever elapse for most of it, discarding still-fresh writes on every
+// rotation and degrading to one write per admission — the throttle it
+// exists to provide. Past this ceiling the gate degrades gracefully back
+// to the same fixed-size rotate/discard behaviour a below-ceiling gate
+// always had, rather than growing without bound.
+const lastSeenGateMapCapMax = 65536
+
+// lastSeenGate throttles checkAndCount's own last-seen SET writes
+// (lastSeenEntries, below) per (kind, id) scope, per replica: due reports
+// true (and records now) only when this replica has never written one for
+// that scope, or its last write was more than lastSeenGateThrottle ago.
+// Guarded by mu since checkAndCount runs on every request's own goroutine
+// concurrently.
+//
+// capacity is the CURRENT rotation threshold (starts at
+// lastSeenGateMapCapBase, only ever grows, up to lastSeenGateMapCapMax —
+// see due's own doc comment for when and why it grows) rather than the
+// fixed lastSeenGateMapCap constant an earlier version used.
+type lastSeenGate struct {
+	current    map[string]int64 // kind+"\x00"+id -> unix seconds of this replica's last write
+	previous   map[string]int64
+	lastRotate time.Time // zero until the first rotation; read/written under mu, same as the two maps
+	capacity   int
+	mu         sync.Mutex
+}
+
+// due reports whether this replica should write a fresh last-seen SET for
+// (kind, id) at now, recording now as that scope's new last-write time
+// when it does.
+//
+// Adaptive capacity (N5 fix, verify-redesign-final.md): when current
+// fills past g.capacity, due does not always rotate. It rotates (moving
+// current to previous, starting a fresh current) only on that scope's
+// FIRST overflow, or once at least lastSeenGateThrottle has passed since
+// the previous rotation — the same signal a healthy, below-capacity gate
+// already relies on (a population that fits comfortably takes at least
+// that long to refill current). When current instead refills WITHIN one
+// throttle window of the last rotation, that is direct evidence the live
+// scope population exceeds 2x the current capacity: rotating now would
+// immediately discard `previous`'s still-fresh writes and start evicting
+// the very entries that just proved the map too small. Growing capacity
+// instead (doubled, capped at lastSeenGateMapCapMax) lets current keep
+// accumulating past the old threshold without losing anything already
+// recorded, so a population that stabilizes below the ceiling ends up
+// fully covered by current+previous, and the throttle holds for it the
+// same way it always did below ~2x lastSeenGateMapCapBase.
+func (g *lastSeenGate) due(kind, id string, now time.Time) bool {
+	key := kind + "\x00" + id
+	nowUnix := now.Unix()
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.current == nil {
+		g.current = make(map[string]int64)
+		g.capacity = lastSeenGateMapCapBase
+	}
+	if last, ok := g.current[key]; ok {
+		if nowUnix-last < int64(lastSeenGateThrottle/time.Second) {
+			return false
+		}
+	} else if last, ok := g.previous[key]; ok {
+		// P8 fix (admin dashboard redesign verify round): a scope
+		// written before the last rotation must still throttle against
+		// ITS OWN last write instead of being treated as brand new just
+		// because current rotated out from under it — previous existed
+		// for exactly this lookup, but nothing ever consulted it before
+		// this fix, so every scope's throttle silently reset on its
+		// first request after any rotation (i.e. constantly, once the
+		// map holds more than g.capacity active scopes). Copy the found
+		// timestamp forward into current so the NEXT lookup for this key
+		// hits the fast path above; previous is left otherwise untouched
+		// (it keeps answering for every other not-yet-migrated key until
+		// the next rotation replaces it).
+		if nowUnix-last < int64(lastSeenGateThrottle/time.Second) {
+			g.current[key] = last
+			return false
+		}
+	} else if len(g.current) >= g.capacity {
+		if g.capacity < lastSeenGateMapCapMax && !g.lastRotate.IsZero() && now.Sub(g.lastRotate) < lastSeenGateThrottle {
+			g.capacity *= 2
+			if g.capacity > lastSeenGateMapCapMax {
+				g.capacity = lastSeenGateMapCapMax
+			}
+		} else {
+			g.previous = g.current
+			g.current = make(map[string]int64, g.capacity)
+			g.lastRotate = now
+		}
+	}
+	g.current[key] = nowUnix
+	return true
+}
+
+// lastSeenKey builds the counterStore key an absolute last-seen SET entry
+// writes to for (kind, id): "llmgw:seen:{kind}:{id}" — a fixed key with no
+// window-bucket component (unlike windowKey/windowKeyForBucket): a
+// last-seen timestamp has no natural rollover, so there is exactly one key
+// per scope, never one per bucket. Exposed for WP-B's own GET
+// /admin/api/usage reader (usageWindowKeys, below, already appends this
+// alongside every other per-scope key) to build the identical key.
+func lastSeenKey(kind, id string) string {
+	return "llmgw:seen:" + kind + ":" + id
+}
+
 // limiter enforces per-minute/day/month request, token, and cost limits
 // using fixed windows keyed by windowKey.
 type limiter struct {
-	lastLogAt        time.Time        // guarded by logMu; last time a store error was logged
-	lastStoreFailure time.Time        // guarded by logMu; zero means the store-down latch is not open (see storeLatched)
-	store            counterStore     // configured backend; nil means always use fallback (see newLimiter)
-	fallback         *memoryStore     // in-process counter store, always available
-	nowFn            func() time.Time // injected for tests; defaults to time.Now
+	// fieldalignment (govet): pointer-shaped fields first, grouped ahead
+	// of the two time.Time fields and every scalar below — same convention
+	// providerState/adminProviderView already document (registry.go/
+	// admin.go).
+	lastStoreFailure time.Time    // guarded by logMu; zero means the store-down latch is not open (see storeLatched)
+	lastLogAt        time.Time    // guarded by logMu; last time a store error was logged
+	store            counterStore // configured backend; nil means always use fallback (see newLimiter)
+	// lastSeen throttles checkAndCount's own last-seen SET writes (Q6,
+	// DECISIONS) — always constructed by newLimiter (never nil), so every
+	// limiter built either directly or via newConfiguredLimiter can call
+	// lastSeenEntries safely regardless of whether admin stats end up
+	// enabled.
+	lastSeen *lastSeenGate
+	fallback *memoryStore     // in-process counter store, always available
+	nowFn    func() time.Time // injected for tests; defaults to time.Now
 	// logf is a bound method value (g.errorf), injectable for tests; defaults
 	// to a no-op. Its own call site (logStoreError) passes exactly one
 	// variadic argument — never extend that to two or more without first
@@ -583,13 +806,6 @@ type limiter struct {
 	// semaphore would let one test's write volume starve an unrelated
 	// test's — see newLimiter's own construction of it.
 	spawnTokens chan struct{}
-	// lastErrMsg is the message of the most recent store operation
-	// failure, guarded by logMu alongside lastStoreFailure. It is never
-	// cleared on a later success — "last store error" for the admin
-	// dashboard (spec §4, v0.2) means exactly that, a persisting fact,
-	// not "is the store currently failing" (storeLatched already answers
-	// that question for the enforcement path).
-	lastErrMsg string
 	// rejections tracks rate/budget-limit-violation counts per scope
 	// (metrics.go's llmgateway_rate_limit_rejections_total). It is a
 	// plain in-process, per-process-lifetime counter guarded by its own
@@ -615,8 +831,35 @@ type limiter struct {
 	// the network round trip that already failed to produce this
 	// violation in the first place, never an ADDITIONAL one.
 	rejections rejectionCounter
+	// lastErrMsg is the message of the most recent store operation
+	// failure, guarded by logMu alongside lastStoreFailure. It is never
+	// cleared on a later success — "last store error" for the admin
+	// dashboard (spec §4, v0.2) means exactly that, a persisting fact,
+	// not "is the store currently failing" (storeLatched already answers
+	// that question for the enforcement path).
+	lastErrMsg string
 	logMu      sync.Mutex
 	failOpen   bool // store-error policy: true falls back to fallback, false refuses the request
+	// statsAdmin, statsUserModel, statsLatency gate the admin-redesign
+	// counter families this task adds (DECISIONS: "Always-on-with-admin"
+	// vs the two opt-in sub-flags) — set once, by newConfiguredLimiter,
+	// from Config.Admin/Config.Admin.Stats; a limiter built directly via
+	// newLimiter (most tests) defaults every one of these to false, so
+	// existing tests observe byte-identical behavior to before this task
+	// unless they opt in explicitly.
+	//
+	//   - statsAdmin: adminEnabled(cfg) — gates every "always-on-with-
+	//     admin" family (last-seen, hourly provider attempt/fail/timeout,
+	//     failover, rej/hour, r402, target x caller, cache counters).
+	//   - statsUserModel: statsAdmin && Config.Admin.Stats.UserModel
+	//     (default off) — gates the opt-in per-(user, model) breakdown.
+	//   - statsLatency: statsAdmin && Config.Admin.Stats.Latency (default
+	//     off) — gates the opt-in per-bucket latency counters. Already
+	//     ANDed with statsAdmin at construction, so a call site need only
+	//     check this one field, never both.
+	statsAdmin     bool
+	statsUserModel bool
+	statsLatency   bool
 }
 
 // rejectionScope is the (kind, id) key rejectionCounter accumulates
@@ -814,6 +1057,7 @@ func newLimiter(store counterStore, failOpen bool) *limiter {
 		logf:        func(string, ...any) {},
 		failOpen:    failOpen,
 		spawnTokens: make(chan struct{}, providerAttemptSpawnCap),
+		lastSeen:    &lastSeenGate{},
 	}
 	l.spawn = func(f func()) {
 		select {
@@ -1048,6 +1292,22 @@ func (l *limiter) failPolicyIncrAndGetMulti(entries []counterIncr, reads []strin
 	}
 	incrVals, readVals, _ := l.fallback.incrAndGetMulti(entries, reads)
 	return incrVals, readVals, true
+}
+
+// countAsync spawns entries as one fire-and-forget storeIncrMulti batch,
+// off the request's hot path (l.spawn) — the shared primitive behind every
+// async-only counter family this task adds: a cache HIT's chit/csave
+// (recordCacheHit) and a refused-unpriced-model's r402 (recordUnpriced402),
+// mirroring recordProviderAttempt's own long-established "build entries,
+// then spawn the write" shape, factored out here so it is written once. A
+// nil/empty entries slice spawns nothing at all.
+func (l *limiter) countAsync(entries []counterIncr) {
+	if len(entries) == 0 {
+		return
+	}
+	l.spawn(func() {
+		l.storeIncrMulti(entries)
+	})
 }
 
 // storeDownViolation is the violation checkAndCount returns when the
@@ -1300,6 +1560,13 @@ func (l *limiter) checkAndCount(scopes []limitScope) *limitViolation {
 			counterIncr{key: windowKeyForBucket(sc.kind, sc.id, metricReq, windowHour, wb.hour), delta: 1, ttl: hourWindowTTL, enforceTTL: et.hour},
 		)
 	}
+	// Last-seen (Q6, DECISIONS) no longer rides this batch (P9 fix, admin
+	// dashboard redesign verify round): it used to be appended here,
+	// unconditionally, which meant a REJECTED request still moved that
+	// scope's last-seen timestamp forward before checkAndCount even knew
+	// whether it was about to refuse the request. recordLastSeen, below,
+	// is now called by every admission call site's own "violation == nil"
+	// branch instead — see its own doc comment.
 	probes, reads := buildBudgetProbes(scopes, now)
 
 	incrVals, readVals, ok := l.storeIncrAndGetMulti(entries, reads)
@@ -1349,6 +1616,47 @@ func (l *limiter) checkAndCount(scopes []limitScope) *limitViolation {
 	return nil
 }
 
+// recordLastSeen writes the absolute last-seen SET entries lastSeenEntries
+// (below) builds for scopes, fire-and-forget (countAsync/l.spawn) — P9 fix
+// (admin dashboard redesign verify round): every admitRequestForRoute-
+// shaped call site calls this ONLY from its own "violation == nil" branch,
+// after checkAndCount has already reported admission, so a request
+// checkAndCount refuses never touches last-seen at all. Moving it off
+// checkAndCount's own synchronous batch adds no new round trip to the
+// admitted path either — countAsync already spawns off the request's own
+// goroutine, the same shape recordCacheHit/recordUnpriced402 use.
+func (l *limiter) recordLastSeen(scopes []limitScope, now time.Time) {
+	l.countAsync(l.lastSeenEntries(scopes, now))
+}
+
+// lastSeenEntries returns the absolute last-seen SET entries recordLastSeen
+// (above) spawns — one per "user" or "group" scope in scopes (never the
+// synthetic total scope: a fleet-wide "when was anyone last seen" has no
+// meaning), skipped entirely when admin stats are off (l.statsAdmin) or
+// this replica already wrote one for that scope within lastSeenGateThrottle
+// (l.lastSeen.due). TTL is monthWindowTTL
+// (400d, matching plan §1.2's last-seen retention) with no enforceTTL
+// floor (0): unlike a windowed counter, a last-seen value has no
+// correctness-driven minimum lifetime — memoryStoreMaxTTL's own ceiling is
+// free to shorten the in-process fallback's copy, since it is refreshed on
+// every admitted request that scope makes anyway.
+func (l *limiter) lastSeenEntries(scopes []limitScope, now time.Time) []counterIncr {
+	if !l.statsAdmin {
+		return nil
+	}
+	var out []counterIncr
+	for _, sc := range scopes {
+		if sc.kind != "user" && sc.kind != "group" {
+			continue
+		}
+		if !l.lastSeen.due(sc.kind, sc.id, now) {
+			continue
+		}
+		out = append(out, counterIncr{key: lastSeenKey(sc.kind, sc.id), delta: now.Unix(), ttl: monthWindowTTL, absolute: true})
+	}
+	return out
+}
+
 // settleRejection compensates the req:min/req:day/req:hour increments
 // checkAndCount already made for every scope OTHER than violatedIdx —
 // exactly what rollbackOtherScopeCounts (its pre-F4 name) did — AND, in
@@ -1362,7 +1670,7 @@ func (l *limiter) checkAndCount(scopes []limitScope) *limitViolation {
 // before F4 existed — see checkAndCount's own doc comment for the round-
 // trip accounting this preserves.
 func (l *limiter) settleRejection(entries []counterIncr, violatedIdx int, scopes []limitScope, wb windowBuckets, et enforceTTLSet) {
-	comp := make([]counterIncr, 0, len(scopes)*checkAndCountKeysPerScope)
+	comp := make([]counterIncr, 0, len(scopes)*checkAndCountKeysPerScope+4)
 	totalPresent := false
 	for i, sc := range scopes {
 		if i == violatedIdx {
@@ -1377,21 +1685,35 @@ func (l *limiter) settleRejection(entries []counterIncr, violatedIdx int, scopes
 		}
 	}
 	violated := scopes[violatedIdx]
-	comp = append(comp, rejectionCounterIncr(violated.kind, violated.id, wb.day, et.day))
+	comp = append(comp, rejectionCounterIncr(violated.kind, violated.id, windowDay, wb.day, et.day))
 	if totalPresent {
-		comp = append(comp, rejectionCounterIncr(totalScopeKind, totalScopeID, wb.day, et.day))
+		comp = append(comp, rejectionCounterIncr(totalScopeKind, totalScopeID, windowDay, wb.day, et.day))
+	}
+	// rej/hour (always-on-with-admin, DECISIONS): rides this SAME
+	// compensation batch, never a second round trip, alongside the
+	// existing always-on rej/day entries above.
+	if l.statsAdmin {
+		comp = append(comp, rejectionCounterIncr(violated.kind, violated.id, windowHour, wb.hour, et.hour))
+		if totalPresent {
+			comp = append(comp, rejectionCounterIncr(totalScopeKind, totalScopeID, windowHour, wb.hour, et.hour))
+		}
 	}
 	if _, ok := l.storeIncrMulti(comp); !ok {
 		l.logf("limits: rollback/rejection-accounting batch failed after a rejection; other scopes' req:min/day/hour counters may be over-counted by 1, and rejectionsPerDay may undercount, for the current window")
 	}
 }
 
-// rejectionCounterIncr builds the single rej:day counterIncr entry
-// settleRejection adds per scope it attributes a rejection to — delta 1,
-// ttl/enforceTTL matching every other day-window counter this file writes
-// (dayWindowTTL/et.day, exactly like checkAndCount's own req:day entry).
-func rejectionCounterIncr(kind, id, dayBucket string, enforceTTL time.Duration) counterIncr {
-	return counterIncr{key: windowKeyForBucket(kind, id, metricRej, windowDay, dayBucket), delta: 1, ttl: dayWindowTTL, enforceTTL: enforceTTL}
+// rejectionCounterIncr builds the single rej counterIncr entry
+// settleRejection adds per scope it attributes a rejection to, for window
+// (windowDay, always-on; windowHour, admin-gated) — delta 1, ttl the
+// window's own matching constant (dayWindowTTL/hourWindowTTL), enforceTTL
+// the caller's own et.day/et.hour.
+func rejectionCounterIncr(kind, id, window, bucket string, enforceTTL time.Duration) counterIncr {
+	ttl := dayWindowTTL
+	if window == windowHour {
+		ttl = hourWindowTTL
+	}
+	return counterIncr{key: windowKeyForBucket(kind, id, metricRej, window, bucket), delta: 1, ttl: ttl, enforceTTL: enforceTTL}
 }
 
 // requestLimitViolation reports a violation when count (already
@@ -1423,7 +1745,65 @@ func requestLimitViolation(sc limitScope, name string, limit, count int64, windo
 // silently, rather than counting it in the fallback — dropping avoids
 // double-counting once the store recovers, the same reasoning that
 // applied per-key before this call became one batch.
-func (l *limiter) account(scopes []limitScope, u usage, costMicros int64) {
+// accountExtras carries the per-call, non-scope facts accountWith's own
+// extra counter families need — never a limitScope, since none of these
+// are things a request is admitted or budgeted against, only recorded
+// alongside its usage. account (limits_helpers_test.go, admin-redesign
+// WP-G cleanup: every production call site now calls accountWith
+// directly, so account itself is test-only) is accountWith with a
+// zero-value accountExtras, so every pre-existing caller's behavior is
+// byte-for-byte unchanged.
+type accountExtras struct {
+	// provider is the serving candidate's own provider name — accountWith
+	// writes its opt-in latency buckets (statsLatency) under this, and its
+	// failover-from entry (below) is keyed by the PREVIOUS candidate's
+	// provider name, not this one.
+	provider string
+	// failoverFrom is the previous candidate's provider name, set only
+	// when this account call is for a candidate reached after an earlier
+	// one failed (i > 0 in runMeteredCall's own loop) — accountWith
+	// increments prov/{failoverFrom}:fover when non-empty and admin stats
+	// are on.
+	failoverFrom string
+	// lat/hasLat carry one completed upstream watchdogBody's latency
+	// sample (metrics.go), when withLatencyRecorder was wired for this
+	// call and it actually fired — hasLat false means no sample arrived
+	// (metrics disabled and stats.latency off, or the watchdog never
+	// closed).
+	lat    latencySample
+	hasLat bool
+	// cacheMiss reports whether THIS candidate's own cacheable response-
+	// cache lookup (routes_unified.go) was attempted and missed — always
+	// false for a request the cache was never consulted for. A HIT never
+	// reaches accountWith at all (routes_unified.go returns before ever
+	// calling it); recordCacheHit, below, is that path's own async
+	// counterpart.
+	cacheMiss bool
+	// noModelHistograms suppresses accountWith's own model-scope latency
+	// AND user x model (umodel) writes even when scopes DOES carry a
+	// kindModel scope (P13 fix, admin dashboard redesign verify round:
+	// plan §2(c) says passthrough gets "provider histograms only", but
+	// routes_passthrough.go always passed the served model's scope, so
+	// latency (28 metrics x hour/day) and umodel entries were ALSO
+	// written keyed by an upstream-echoed model id — bounded only by
+	// length/control-char, never by a configured catalog, and never read
+	// back anywhere: usage/models and usermodel totals both rank off the
+	// CONFIGURED catalog, not whatever a passthrough response happened to
+	// name). The base req/tokin/tokout/cost model-scope counters (the
+	// per-scope loop above, driven purely by which scopes the caller
+	// passed in) are unaffected — only the two opt-in, per-model-keyed
+	// families this flag names.
+	noModelHistograms bool
+}
+
+// accountWith is account generalized with accountExtras (admin-redesign
+// WP-A): every scope's own req/tokin/tokout/cost entries below are
+// byte-for-byte what account always built; x's own fields each add AT
+// MOST a few more counterIncr entries to the SAME batch, never a second
+// storeIncrMulti round trip — see accountExtras' own field docs and this
+// function's per-block comments below for exactly what each one writes
+// and when.
+func (l *limiter) accountWith(scopes []limitScope, u usage, costMicros int64, x accountExtras) {
 	now := l.now()
 	wb := bucketsFor(now)
 	et := enforceTTLsFor()
@@ -1457,8 +1837,20 @@ func (l *limiter) account(scopes []limitScope, u usage, costMicros int64) {
 		}
 	}
 
-	entries := make([]counterIncr, 0, len(scopes)*12)
+	entries := make([]counterIncr, 0, len(scopes)*12+16)
+	userScopeCount := 0
+	var userScopeID string
+	hasModelScope := false
+	var modelCanonical string
 	for _, sc := range scopes {
+		if sc.kind == "user" {
+			userScopeCount++
+			userScopeID = sc.id
+		}
+		if sc.kind == kindModel {
+			hasModelScope = true
+			modelCanonical = sc.id
+		}
 		// A kindModel scope is the one scope kind checkAndCount never
 		// sees: it is resolved post-response, because only then is the
 		// SERVING model known (failover can move a request to another
@@ -1497,28 +1889,192 @@ func (l *limiter) account(scopes []limitScope, u usage, costMicros int64) {
 			)
 		}
 	}
+
+	// (a) user x model (opt-in, admin.stats.userModel): only when exactly
+	// ONE user scope is present (a multi-group principal's several group
+	// scopes never trigger this — there is still only one user) and a
+	// served model is known. <=8 more entries: req always (a served
+	// request counts even with zero usage, mirroring kindModel's own
+	// unconditional req write above), tokin/tokout/cost only when nonzero
+	// — day and month only, no hour (plan §1.2's own umodel row). Media's
+	// account(withModelScope(nil, ...), usage{}, 0) call has no user scope
+	// at all (scopes is nil there) and so never reaches this block.
+	if l.statsUserModel && userScopeCount == 1 && hasModelScope && !x.noModelHistograms {
+		id := userModelScopeID(userScopeID, modelCanonical)
+		entries = append(entries,
+			counterIncr{key: windowKeyForBucket(kindUserModel, id, metricReq, windowDay, wb.day), delta: 1, ttl: dayWindowTTL, enforceTTL: et.day},
+			counterIncr{key: windowKeyForBucket(kindUserModel, id, metricReq, windowMonth, wb.month), delta: 1, ttl: monthWindowTTL, enforceTTL: et.month},
+		)
+		if u.prompt != 0 {
+			entries = append(entries,
+				counterIncr{key: windowKeyForBucket(kindUserModel, id, metricTokIn, windowDay, wb.day), delta: u.prompt, ttl: dayWindowTTL, enforceTTL: et.day},
+				counterIncr{key: windowKeyForBucket(kindUserModel, id, metricTokIn, windowMonth, wb.month), delta: u.prompt, ttl: monthWindowTTL, enforceTTL: et.month},
+			)
+		}
+		if u.completion != 0 {
+			entries = append(entries,
+				counterIncr{key: windowKeyForBucket(kindUserModel, id, metricTokOut, windowDay, wb.day), delta: u.completion, ttl: dayWindowTTL, enforceTTL: et.day},
+				counterIncr{key: windowKeyForBucket(kindUserModel, id, metricTokOut, windowMonth, wb.month), delta: u.completion, ttl: monthWindowTTL, enforceTTL: et.month},
+			)
+		}
+		if costMicros != 0 {
+			entries = append(entries,
+				counterIncr{key: windowKeyForBucket(kindUserModel, id, metricCost, windowDay, wb.day), delta: costMicros, ttl: dayWindowTTL, enforceTTL: et.day},
+				counterIncr{key: windowKeyForBucket(kindUserModel, id, metricCost, windowMonth, wb.month), delta: costMicros, ttl: monthWindowTTL, enforceTTL: et.month},
+			)
+		}
+	}
+
+	// (c) failover (always-on-with-admin): +1 to the PREVIOUS candidate's
+	// own prov/{from}:fover hour+day counters, every time runMeteredCall's
+	// own loop moves to a next candidate after an earlier one failed.
+	if x.failoverFrom != "" && l.statsAdmin {
+		entries = append(entries,
+			counterIncr{key: windowKeyForBucket(kindProvider, x.failoverFrom, metricFover, windowHour, wb.hour), delta: 1, ttl: hourWindowTTL, enforceTTL: et.hour},
+			counterIncr{key: windowKeyForBucket(kindProvider, x.failoverFrom, metricFover, windowDay, wb.day), delta: 1, ttl: dayWindowTTL, enforceTTL: et.day},
+		)
+	}
+
+	// (c) latency (opt-in, admin.stats.latency): the serving provider's
+	// own bucket, plus the served model's own bucket when one is known —
+	// each hour+day, duration always, TTFB only when the sample carries
+	// one (a body that never delivered a successful byte has nothing
+	// meaningful to report there).
+	if x.hasLat && l.statsLatency {
+		if x.provider != "" {
+			entries = append(entries, latencyCounterEntries(kindProvider, x.provider, x.lat, wb, et)...)
+		}
+		if hasModelScope && !x.noModelHistograms {
+			entries = append(entries, latencyCounterEntries(kindModel, modelCanonical, x.lat, wb, et)...)
+		}
+	}
+
+	// (d) cache miss (always-on-with-admin, cache already required to be
+	// enabled for cacheMiss to ever be true at all — routes_unified.go
+	// only sets it inside its own cacheable branch): total cmiss hour+day,
+	// plus the served model's own cmiss at day only (matching every other
+	// model-scope cache metric's day-only granularity — recordCacheHit's
+	// identical rule for chit/csave).
+	if x.cacheMiss && l.statsAdmin {
+		entries = append(entries,
+			counterIncr{key: windowKeyForBucket(totalScopeKind, totalScopeID, metricCmiss, windowHour, wb.hour), delta: 1, ttl: hourWindowTTL, enforceTTL: et.hour},
+			counterIncr{key: windowKeyForBucket(totalScopeKind, totalScopeID, metricCmiss, windowDay, wb.day), delta: 1, ttl: dayWindowTTL, enforceTTL: et.day},
+		)
+		if hasModelScope {
+			entries = append(entries, counterIncr{key: windowKeyForBucket(kindModel, modelCanonical, metricCmiss, windowDay, wb.day), delta: 1, ttl: dayWindowTTL, enforceTTL: et.day})
+		}
+	}
+
 	if len(entries) == 0 {
-		return // every metric was zero for every scope — nothing to write
+		return // every metric was zero for every scope, and no extra was set — nothing to write
 	}
 	l.storeIncrMulti(entries) // no error return by contract (doc comment above); ok is intentionally discarded
 }
 
-// countTargetRequests increments MULTIPLE target scopes' per-target request
-// counters (Feature B, v0.21) — each at min, hour, day, AND month, the only
-// scope kind this package tracks a month window of REQUESTS for — in ONE
-// storeIncrMulti call. kind is targetScopeKind's own output ("mcp" or
-// scopeKindAgent — mcp_a2a.go), id is the configured target name; both come
-// embedded in windowKey's own key string, so a target scope can never
-// collide with a user/group/total scope of the same id even by coincidence
-// — kind is part of the key, not just a struct field. A scope's own
-// `limits` field is ignored entirely (never read); callers pass plain
-// {kind, id} pairs.
+// latencyCounterEntries returns the hour+day duration-bucket entries for
+// (kind, id) — plus the matching TTFB-bucket entries when lat.hasTTFB —
+// accountWith's own opt-in latency block (above) appends for the serving
+// provider and, separately, for the served model. latencyBucketIndex
+// (metrics.go) already folds "past every configured bound" into its own
+// returned index (len(latencyBucketBounds)), so no separate overflow
+// branch is needed here.
+func latencyCounterEntries(kind, id string, lat latencySample, wb windowBuckets, et enforceTTLSet) []counterIncr {
+	durIdx, _ := latencyBucketIndex(lat.duration)
+	durMetric := latencyDurationMetric(durIdx)
+	out := []counterIncr{
+		{key: windowKeyForBucket(kind, id, durMetric, windowHour, wb.hour), delta: 1, ttl: hourWindowTTL, enforceTTL: et.hour},
+		{key: windowKeyForBucket(kind, id, durMetric, windowDay, wb.day), delta: 1, ttl: dayWindowTTL, enforceTTL: et.day},
+	}
+	if lat.hasTTFB {
+		ttfbIdx, _ := latencyBucketIndex(lat.ttfb)
+		ttfbMetric := latencyTTFBMetric(ttfbIdx)
+		out = append(out,
+			counterIncr{key: windowKeyForBucket(kind, id, ttfbMetric, windowHour, wb.hour), delta: 1, ttl: hourWindowTTL, enforceTTL: et.hour},
+			counterIncr{key: windowKeyForBucket(kind, id, ttfbMetric, windowDay, wb.day), delta: 1, ttl: dayWindowTTL, enforceTTL: et.day},
+		)
+	}
+	return out
+}
+
+// recordCacheHit accounts one response-cache HIT (Q7, DECISIONS:
+// "cache-hit body parse only when cache stats on: accept") — total
+// chit/csave at hour and day, plus the served model's own chit/csave at
+// day only (matching accountWith's own cmiss day-only rule for a model
+// scope). Fire-and-forget (countAsync/l.spawn): a HIT has already written
+// its full response to the client before routes_unified.go's own call
+// site reaches this, so nothing here can ever delay it. csave entries are
+// skipped when savedMicros is 0 (an unpriced or free model), mirroring
+// account's own "skip a zero direction" rule.
+func (l *limiter) recordCacheHit(canonical string, savedMicros int64) {
+	if !l.statsAdmin {
+		return
+	}
+	now := l.now()
+	wb := bucketsFor(now)
+	et := enforceTTLsFor()
+	entries := []counterIncr{
+		{key: windowKeyForBucket(totalScopeKind, totalScopeID, metricChit, windowHour, wb.hour), delta: 1, ttl: hourWindowTTL, enforceTTL: et.hour},
+		{key: windowKeyForBucket(totalScopeKind, totalScopeID, metricChit, windowDay, wb.day), delta: 1, ttl: dayWindowTTL, enforceTTL: et.day},
+	}
+	if savedMicros != 0 {
+		entries = append(entries,
+			counterIncr{key: windowKeyForBucket(totalScopeKind, totalScopeID, metricCsave, windowHour, wb.hour), delta: savedMicros, ttl: hourWindowTTL, enforceTTL: et.hour},
+			counterIncr{key: windowKeyForBucket(totalScopeKind, totalScopeID, metricCsave, windowDay, wb.day), delta: savedMicros, ttl: dayWindowTTL, enforceTTL: et.day},
+		)
+	}
+	if canonical != "" {
+		entries = append(entries, counterIncr{key: windowKeyForBucket(kindModel, canonical, metricChit, windowDay, wb.day), delta: 1, ttl: dayWindowTTL, enforceTTL: et.day})
+		if savedMicros != 0 {
+			entries = append(entries, counterIncr{key: windowKeyForBucket(kindModel, canonical, metricCsave, windowDay, wb.day), delta: savedMicros, ttl: dayWindowTTL, enforceTTL: et.day})
+		}
+	}
+	l.countAsync(entries)
+}
+
+// recordUnpriced402 accounts one "refused: unpriced model under a cost
+// budget" event (Feature F-1, security audit run-1; events.go's
+// recordUnpricedRefusalEvent calls this alongside its own gatewayEvent
+// record, the one chokepoint both routes_unified.go's and routes_
+// passthrough.go's identical 402 guard already share) — total r402
+// hour+day, plus the refused model's own r402 hour+day when canonical is
+// known. Fire-and-forget (countAsync/l.spawn): the request has already
+// been refused with a clean 402 envelope by the time this runs.
+func (l *limiter) recordUnpriced402(canonical string) {
+	if !l.statsAdmin {
+		return
+	}
+	now := l.now()
+	wb := bucketsFor(now)
+	et := enforceTTLsFor()
+	entries := []counterIncr{
+		{key: windowKeyForBucket(totalScopeKind, totalScopeID, metricR402, windowHour, wb.hour), delta: 1, ttl: hourWindowTTL, enforceTTL: et.hour},
+		{key: windowKeyForBucket(totalScopeKind, totalScopeID, metricR402, windowDay, wb.day), delta: 1, ttl: dayWindowTTL, enforceTTL: et.day},
+	}
+	if canonical != "" {
+		entries = append(entries,
+			counterIncr{key: windowKeyForBucket(kindModel, canonical, metricR402, windowHour, wb.hour), delta: 1, ttl: hourWindowTTL, enforceTTL: et.hour},
+			counterIncr{key: windowKeyForBucket(kindModel, canonical, metricR402, windowDay, wb.day), delta: 1, ttl: dayWindowTTL, enforceTTL: et.day},
+		)
+	}
+	l.countAsync(entries)
+}
+
+// countTargetRequestsBy increments MULTIPLE target scopes' per-target
+// request counters (Feature B, v0.21) — each at min, hour, day, AND
+// month, the only scope kind this package tracks a month window of
+// REQUESTS for — in ONE storeIncrMulti call. kind is targetScopeKind's
+// own output ("mcp" or scopeKindAgent — mcp_a2a.go), id is the
+// configured target name; both come embedded in windowKey's own key
+// string, so a target scope can never collide with a user/group/total
+// scope of the same id even by coincidence — kind is part of the key,
+// not just a struct field. A scope's own `limits` field is ignored
+// entirely (never read); callers pass plain {kind, id} pairs.
 //
 // This is deliberately NOT folded into checkAndCount: a target scope
 // carries no limits by design (this round adds no config surface for
 // MCP/agent limits), so there is nothing for checkAndCount to evaluate
 // and no violation this call could ever produce — it is pure accounting, exactly
-// like account() itself, hence the identical "no error return, ok
+// like accountWith() itself, hence the identical "no error return, ok
 // discarded" contract. Month exists here, uniquely, because the admin
 // dashboard's targets endpoint (admin.go's adminTargetCountersView)
 // surfaces a requestsPerMonth figure no user/group admin view does;
@@ -1533,7 +2089,15 @@ func (l *limiter) account(scopes []limitScope, u usage, costMicros int64) {
 // each fan-out goroutine paid one round trip per server; this collects
 // every scope from the whole fan-out into a single call after the fan-out's
 // own wg.Wait(), the same "one request in, one round trip out" discipline
-// checkAndCount/account already apply per scope-slice.
+// checkAndCount/accountWith already apply per scope-slice.
+//
+// caller identity (target x caller, DECISIONS' "always-on-with-admin"
+// family): when caller is non-empty and admin stats are on, ALSO appends
+// kindTargetCaller req entries at day+month for every scope, in the SAME
+// batch below already builds — never a second round trip. caller == ""
+// (countTargetRequests/countTargetRequest, limits_helpers_test.go's
+// test-only wrappers — every production call site now names a caller)
+// skips this addition entirely.
 //
 // Callers: handleTargetProxy (mcp_a2a.go, a 1-element slice, once per
 // proxied request, after its own user/group/total admission check passes)
@@ -1542,14 +2106,14 @@ func (l *limiter) account(scopes []limitScope, u usage, costMicros int64) {
 // — not necessarily reached or succeeded — for tools/list's fan-out; see
 // mcpFederatedToolsList's own doc comment for why "attempted" is the
 // correct word here).
-func (l *limiter) countTargetRequests(scopes []limitScope) {
+func (l *limiter) countTargetRequestsBy(caller string, scopes []limitScope) {
 	if len(scopes) == 0 {
 		return
 	}
 	now := l.now()
 	wb := bucketsFor(now)
 	et := enforceTTLsFor()
-	entries := make([]counterIncr, 0, len(scopes)*4)
+	entries := make([]counterIncr, 0, len(scopes)*6)
 	for _, sc := range scopes {
 		entries = append(entries,
 			counterIncr{key: windowKeyForBucket(sc.kind, sc.id, metricReq, windowMin, wb.min), delta: 1, ttl: minWindowTTL, enforceTTL: et.min},
@@ -1557,16 +2121,22 @@ func (l *limiter) countTargetRequests(scopes []limitScope) {
 			counterIncr{key: windowKeyForBucket(sc.kind, sc.id, metricReq, windowDay, wb.day), delta: 1, ttl: dayWindowTTL, enforceTTL: et.day},
 			counterIncr{key: windowKeyForBucket(sc.kind, sc.id, metricReq, windowMonth, wb.month), delta: 1, ttl: monthWindowTTL, enforceTTL: et.month},
 		)
+		if caller != "" && l.statsAdmin {
+			id := targetCallerScopeID(sc.kind, sc.id, caller)
+			entries = append(entries,
+				counterIncr{key: windowKeyForBucket(kindTargetCaller, id, metricReq, windowDay, wb.day), delta: 1, ttl: dayWindowTTL, enforceTTL: et.day},
+				counterIncr{key: windowKeyForBucket(kindTargetCaller, id, metricReq, windowMonth, wb.month), delta: 1, ttl: monthWindowTTL, enforceTTL: et.month},
+			)
+		}
 	}
 	l.storeIncrMulti(entries)
 }
 
-// countTargetRequest is countTargetRequests for exactly one target scope —
-// handleTargetProxy's own single-target shape (mcp_a2a.go), where a batch
-// of one buys nothing but keeps the call site a plain two-argument call
-// instead of a one-element slice literal.
-func (l *limiter) countTargetRequest(kind, id string) {
-	l.countTargetRequests([]limitScope{{kind: kind, id: id}})
+// countTargetRequestBy is countTargetRequest (limits_helpers_test.go's
+// test-only wrapper) with a caller identity attached —
+// countTargetRequestsBy's own single-target shape.
+func (l *limiter) countTargetRequestBy(caller, kind, id string) {
+	l.countTargetRequestsBy(caller, []limitScope{{kind: kind, id: id}})
 }
 
 // targetCounterKeysPerScope is the number of windowKey strings
@@ -1919,8 +2489,14 @@ func (l *limiter) recordProviderAttempt(provider, model string, resp *http.Respo
 	wb := bucketsFor(now)
 	et := enforceTTLsFor()
 	fail := isTransient(resp, err) || isDeadlineExceeded(err)
+	// timeout (always-on-with-admin, below): a strict SUBSET of fail — the
+	// gateway's own deadline lapsed, or the watchdog's stalled-progress
+	// sentinel fired — reusing matchesSentinel/isDeadlineExceeded exactly
+	// like recordUpstreamEvent's own identical classification (events.go),
+	// never a third, independently-drifting check.
+	timeout := matchesSentinel(err, errProviderTimeout) || isDeadlineExceeded(err)
 
-	entries := make([]counterIncr, 0, 6)
+	entries := make([]counterIncr, 0, 14)
 	entries = append(entries,
 		counterIncr{key: windowKeyForBucket(kindProvider, provider, metricProvAttempt, windowMin, wb.min), delta: 1, ttl: minWindowTTL, enforceTTL: et.min},
 		counterIncr{key: windowKeyForBucket(kindProvider, provider, metricProvAttempt, windowDay, wb.day), delta: 1, ttl: dayWindowTTL, enforceTTL: et.day},
@@ -1946,9 +2522,39 @@ func (l *limiter) recordProviderAttempt(provider, model string, resp *http.Respo
 			)
 		}
 	}
-	l.spawn(func() {
-		l.storeIncrMulti(entries) // no error return by contract (doc comment above, mirroring account()); ok is intentionally discarded
-	})
+
+	// Always-on-with-admin (DECISIONS): hourly attempt/fail for prov and
+	// provmodel, plus prov's own timeout hour+day — zero cost when admin
+	// is disabled, riding this SAME async batch otherwise, never a second
+	// round trip.
+	if l.statsAdmin {
+		entries = append(entries,
+			counterIncr{key: windowKeyForBucket(kindProvider, provider, metricProvAttempt, windowHour, wb.hour), delta: 1, ttl: hourWindowTTL, enforceTTL: et.hour},
+		)
+		if fail {
+			entries = append(entries,
+				counterIncr{key: windowKeyForBucket(kindProvider, provider, metricProvFail, windowHour, wb.hour), delta: 1, ttl: hourWindowTTL, enforceTTL: et.hour},
+			)
+		}
+		if model != "" {
+			id := providerModelScopeID(provider, model)
+			entries = append(entries,
+				counterIncr{key: windowKeyForBucket(kindProviderModel, id, metricProvAttempt, windowHour, wb.hour), delta: 1, ttl: hourWindowTTL, enforceTTL: et.hour},
+			)
+			if fail {
+				entries = append(entries,
+					counterIncr{key: windowKeyForBucket(kindProviderModel, id, metricProvFail, windowHour, wb.hour), delta: 1, ttl: hourWindowTTL, enforceTTL: et.hour},
+				)
+			}
+		}
+		if timeout {
+			entries = append(entries,
+				counterIncr{key: windowKeyForBucket(kindProvider, provider, metricProvTimeout, windowHour, wb.hour), delta: 1, ttl: hourWindowTTL, enforceTTL: et.hour},
+				counterIncr{key: windowKeyForBucket(kindProvider, provider, metricProvTimeout, windowDay, wb.day), delta: 1, ttl: dayWindowTTL, enforceTTL: et.day},
+			)
+		}
+	}
+	l.countAsync(entries)
 }
 
 // providerCounterKeysPerScope is the number of windowKey strings
@@ -2097,8 +2703,10 @@ func (l *limiter) providerUsage(scopes []limitScope) []providerCounters {
 // count from 6 to 8 for the tokens-in/tokens-out split, which is exactly
 // the moment a silent off-by-N here would have gone unnoticed. F4 (v0.3
 // dashboard task) grows it again, 8 to 9, for the fleet-wide
-// rejectionsPerDay counter (metricRej) usageWindowKeys now appends.
-const usageKeysPerScope = 9
+// rejectionsPerDay counter (metricRej) usageWindowKeys now appends. Grows
+// once more, 9 to 10, for the last-seen counter (Q6, DECISIONS) — see
+// usageWindowKeys' own doc comment for the appended field's position.
+const usageKeysPerScope = 10
 
 // scopeUsage is one scope's (a user's, a group's, or the synthetic total
 // scope's — totalScopeKind) current-window counter values — the admin
@@ -2126,6 +2734,11 @@ type scopeUsage struct {
 	// GET /admin/api/usage's rejectionsPerDay field. Unlike every other
 	// field here, this counts REFUSED requests, not admitted ones.
 	rejectionsPerDay int64
+	// lastSeen is the unix-second value THIS scope's last-seen SET last
+	// wrote (Q6, DECISIONS) — 0 when never seen, or when admin stats were
+	// off for the whole life of the deployment so far, matching GET
+	// /admin/api/usage's own "lastSeen 0 means never/unknown" contract.
+	lastSeen int64
 	// storeDown reports whether reading any of the usageKeysPerScope
 	// counters above failed closed (a configured store errored and
 	// failOpen is false) — mirrors limitViolation.storeDown. Every value
@@ -2139,8 +2752,12 @@ type scopeUsage struct {
 // req/day, tokin/day, tokin/month, tokout/day, tokout/month, cost/day,
 // cost/month, rej/day — matching scopeUsage's field order exactly, so
 // currentUsage can map storeGetMulti's result slice back to named fields
-// by plain index. rej/day (F4, v0.3 dashboard task) is appended last so
-// every existing index above it stays byte-for-byte unchanged.
+// by plain index. rej/day (F4, v0.3 dashboard task) is appended after
+// every original index; lastSeenKey (Q6, DECISIONS) is appended last of
+// all — every existing index above it stays byte-for-byte unchanged. A
+// last-seen key never rolls over (lastSeenKey has no window-bucket
+// component), so it needs no `now` argument the way every other key here
+// does; passed through only so this stays a single flat literal.
 func usageWindowKeys(sc limitScope, now time.Time) []string {
 	return []string{
 		windowKey(sc.kind, sc.id, metricReq, windowMin, now),
@@ -2152,6 +2769,7 @@ func usageWindowKeys(sc limitScope, now time.Time) []string {
 		windowKey(sc.kind, sc.id, metricCost, windowDay, now),
 		windowKey(sc.kind, sc.id, metricCost, windowMonth, now),
 		windowKey(sc.kind, sc.id, metricRej, windowDay, now),
+		lastSeenKey(sc.kind, sc.id),
 	}
 }
 
@@ -2226,7 +2844,7 @@ func (l *limiter) currentUsage(scopes []limitScope) []scopeUsage {
 			tokensInPerDay: v[2], tokensInPerMonth: v[3],
 			tokensOutPerDay: v[4], tokensOutPerMonth: v[5],
 			costPerDayMicros: v[6], costPerMonthMicros: v[7],
-			rejectionsPerDay: v[8],
+			rejectionsPerDay: v[8], lastSeen: v[9],
 		}
 	}
 	return out
@@ -2242,109 +2860,21 @@ type historyPoint struct {
 	value  int64
 }
 
-// modelSpanTotals reads span counter buckets per id — via
-// historyBucketKeys, the identical per-id bucket walk history (below)
-// uses for one scope — flattens every id's span keys into ONE
-// storeGetMulti round trip, and returns each id's SUM over its own span,
-// positionally (result[i] is the sum for ids[i]). F2, v0.3 dashboard
-// task: backs GET /admin/api/usage/models' optional ?span= parameter, so
-// the Charts view's "Models" ranking can show a window wider than the
-// current bucket alone. modelTotals (below) is the span=1 special case,
-// unchanged in behavior from before this function existed.
-//
-// ok is false when the store read fails, exactly as history/modelTotals
-// already promise, so the caller answers 503 rather than presenting a
-// partial or fallback-served sum as a genuine ranking. An empty ids slice
-// is not a store read at all: it returns an empty result and ok, never a
-// round trip.
-//
-// configuredStoreDown is checked alongside storeGetMulti's own ok
-// (finding F5, 2026-09 review, applying currentUsage/providerUsage's own
-// fix here too): with the default failOpen=true, ok alone stays true
-// during a store outage — storeGetMulti silently reads the in-process
-// fallback instead, which was never the ranking's real per-model source
-// of truth — so without this check GET /admin/api/usage/models would
-// present a fail-open read of near-empty fallback data as a genuine
-// "these models were barely used" ranking instead of the 503 this
-// function's own doc comment already promises for a store failure.
-func (l *limiter) modelSpanTotals(ids []string, metric, window string, now time.Time, span int) ([]int64, bool) {
-	if len(ids) == 0 {
-		return nil, true
-	}
-	allKeys := make([]string, 0, len(ids)*span)
-	for _, id := range ids {
-		keys, _ := historyBucketKeys(kindModel, id, metric, window, now, span)
-		allKeys = append(allKeys, keys...)
-	}
-	vals, ok := l.storeGetMulti(allKeys)
-	if !ok || len(vals) != len(allKeys) || l.configuredStoreDown() {
-		return nil, false
-	}
-	out := make([]int64, len(ids))
-	for i := range ids {
-		var sum int64
-		for _, v := range vals[i*span : i*span+span] {
-			sum += v
-		}
-		out[i] = sum
-	}
-	return out, true
-}
-
-// modelTotals reads ONE counter per id — metric at window's CURRENT
-// bucket — the modelSpanTotals span=1 special case: historyBucketKeys'
-// own i=0/span=1 step lands on exactly the same key windowKey(kindModel,
-// id, metric, window, now) would have built directly, so this wrapper is
-// byte-for-byte the pre-F2 implementation's behavior.
-func (l *limiter) modelTotals(ids []string, metric, window string) ([]int64, bool) {
-	return l.modelSpanTotals(ids, metric, window, l.now(), 1)
-}
-
-// modelSpanTotalsMulti is modelSpanTotals generalized to several metrics
-// read in ONE storeGetMulti round trip — GET /admin/api/usage/models'
-// detail=1 mode (free-models feature) needs all four metrics
-// (req/tokin/tokout/cost) for every candidate id, not just the one the
-// ranking sorts by, and a per-metric modelSpanTotals call would cost 4
-// round trips instead of 1. Keys are built id-major, metric second, span
-// innermost — out[m][i] is metrics[m]'s span-sum for ids[i], positional
-// in both dimensions, mirroring modelSpanTotals' own result[i] contract.
-// ok is false on any store read failure, exactly like modelSpanTotals —
-// a detail read that only partially succeeds is never presented as
-// complete data. An empty ids slice is not a store read at all, matching
-// modelSpanTotals' own contract.
-func (l *limiter) modelSpanTotalsMulti(ids, metrics []string, window string, now time.Time, span int) ([][]int64, bool) {
-	if len(ids) == 0 {
-		return nil, true
-	}
-	allKeys := make([]string, 0, len(ids)*len(metrics)*span)
-	for _, id := range ids {
-		for _, metric := range metrics {
-			keys, _ := historyBucketKeys(kindModel, id, metric, window, now, span)
-			allKeys = append(allKeys, keys...)
-		}
-	}
-	vals, ok := l.storeGetMulti(allKeys)
-	if !ok || len(vals) != len(allKeys) || l.configuredStoreDown() {
-		return nil, false
-	}
-	out := make([][]int64, len(metrics))
-	for m := range out {
-		out[m] = make([]int64, len(ids))
-	}
-	stride := len(metrics) * span
-	for i := range ids {
-		base := i * stride
-		for m := range metrics {
-			mBase := base + m*span
-			var sum int64
-			for _, v := range vals[mBase : mBase+span] {
-				sum += v
-			}
-			out[m][i] = sum
-		}
-	}
-	return out, true
-}
+// modelSpanTotals/modelTotals/modelSpanTotalsMulti (limits_helpers_test.go,
+// admin-redesign WP-G cleanup) read span counter buckets per id — via
+// historyBucketKeys/historyBucketKeysAt, the identical per-id bucket walk
+// history (below) uses for one scope — flattening every id's span keys
+// into ONE storeGetMulti round trip. GET /admin/api/usage/models' actual
+// production read path is admin.go's chunkedModelSpanTotals/
+// chunkedModelSpanTotalsMulti, which read directly via
+// historyBucketKeysAt+storeGetMulti in bounded-size chunks instead of
+// delegating here (admin.go's own doc comment on chunkedModelSpanTotals
+// explains why: a single limiter.modelSpanTotalsMulti call has no chunk
+// boundary, so a wide model catalog could build one storeGetMulti larger
+// than any real Redis pipeline should be). These three stay as test-only
+// helpers because limits_test.go's own coverage of historyBucketKeys/
+// historyBucketKeysAt's span and offset semantics is written against
+// them.
 
 // historyStepBack returns the instant window's bucket was current i steps
 // before now: i=0 is now's own (current, possibly partial) bucket, i=1
@@ -2370,20 +2900,155 @@ func historyStepBack(now time.Time, window string, i int) time.Time {
 	}
 }
 
-// historyBucketKeys returns the span counterStore keys and their matching
-// bucket label strings for (kind, id, metric, window), stepping back from
-// now one whole window unit at a time — oldest first, the current
-// (possibly partial) bucket last, matching GET /admin/api/usage/history's
-// "inclusive of current bucket, oldest-first" contract.
-func historyBucketKeys(kind, id, metric, window string, now time.Time, span int) (keys, buckets []string) {
+// historyBucketKeysAt is historyBucketKeys generalized with an offset
+// (WP-B's own comparison-mode reads: GET /admin/api/usage/models and
+// /usage/series' ?offset= parameter): the returned span ends offset window
+// units before now instead of at now itself, letting a caller read an
+// EARLIER span of the identical width for a period-over-period
+// comparison, without duplicating historyStepBack's own calendar-aware
+// month arithmetic a second time. offset=0 is byte-for-byte
+// historyBucketKeys' own pre-existing behavior — composing historyStepBack
+// twice (once for offset, once per bucket within the span) is
+// associative with calling it once for their sum, since historyStepBack's
+// own month case always anchors on the 1st of whatever month it is
+// applied to, and its result here is always itself a 1st-of-month date.
+func historyBucketKeysAt(kind, id, metric, window string, now time.Time, span, offset int) (keys, buckets []string) {
+	base := now
+	if offset > 0 {
+		base = historyStepBack(now, window, offset)
+	}
 	keys = make([]string, span)
 	buckets = make([]string, span)
 	for i := 0; i < span; i++ {
-		t := historyStepBack(now, window, span-1-i)
+		t := historyStepBack(base, window, span-1-i)
 		keys[i] = windowKey(kind, id, metric, window, t)
 		buckets[i] = bucketFor(t, window)
 	}
 	return keys, buckets
+}
+
+// historyBucketKeys returns the span counterStore keys and their matching
+// bucket label strings for (kind, id, metric, window), stepping back from
+// now one whole window unit at a time — oldest first, the current
+// (possibly partial) bucket last, matching GET /admin/api/usage/history's
+// "inclusive of current bucket, oldest-first" contract. A thin offset=0
+// wrapper around historyBucketKeysAt, above — every existing caller of
+// this name keeps calling it, and its own behavior is unchanged.
+func historyBucketKeys(kind, id, metric, window string, now time.Time, span int) (keys, buckets []string) {
+	return historyBucketKeysAt(kind, id, metric, window, now, span, 0)
+}
+
+// chunkedGetMulti reads keys via one or more storeGetMulti round trips,
+// each capped at chunkSize keys, and returns the values concatenated back
+// in the SAME order as keys (P6 fix, admin dashboard redesign verify
+// round: GET /admin/api/usage/series and spanTotalsMulti's own predecessors
+// each used to build ONE unbounded storeGetMulti pipeline regardless of
+// how many keys the request's own scope/span/offset/metric combination
+// worked out to — holding the shared Redis connection mutex, respClient
+// (resp.go), for however long that single oversized pipeline took, while
+// live traffic's own checkAndCount/account calls queued behind it).
+// Chunking a flat key list this way is safe for a caller that does not
+// need chunk boundaries aligned to any larger unit (e.g. one id's own
+// span): values come back positionally identical to an unchunked read,
+// this just bounds how many keys any ONE round trip carries. Any chunk
+// that fails (storeDown or a mismatched read) fails the whole call — a
+// series silently missing an arbitrary subset of its own buckets is worse
+// than a 503, the same "no partial answer" rule every admin stats reader
+// in this package already follows.
+func (l *limiter) chunkedGetMulti(keys []string, chunkSize int) ([]int64, bool) {
+	if chunkSize < 1 {
+		chunkSize = len(keys)
+	}
+	out := make([]int64, 0, len(keys))
+	for len(keys) > 0 {
+		n := chunkSize
+		if n > len(keys) {
+			n = len(keys)
+		}
+		vals, ok := l.storeGetMulti(keys[:n])
+		if !ok || len(vals) != n || l.configuredStoreDown() {
+			return nil, false
+		}
+		out = append(out, vals...)
+		keys = keys[n:]
+	}
+	return out, true
+}
+
+// spanTotalsMulti is the ONE production "per id, per metric, sum over a
+// span of window buckets" reader every admin stats endpoint that needs a
+// span TOTAL (as opposed to GET /admin/api/usage/series' own per-bucket
+// values, which read via chunkedGetMulti directly instead) now shares
+// (P12 fix, admin dashboard redesign verify round: this exact shape used
+// to exist three times over — stats_read.go's own readSpanTotals, admin.go's
+// chunkedModelSpanTotals/chunkedModelSpanTotalsMulti hardcoded to
+// kind=kindModel, and this file's own modelSpanTotalsMulti, which drifted
+// to a test-only helper (limits_helpers_test.go) once WP-B's rewrite
+// stopped calling it from production, so limits_test.go's own coverage of
+// the offset/chunking semantics no longer exercised what actually ran in
+// production). ids may name any kind's scopes; kind is fixed per call the
+// same way historyBucketKeysAt itself takes one kind per call.
+//
+// Reads are chunked at usageModelsChunkKeys (admin.go) keys per
+// storeGetMulti round trip, sized so each chunk's own key count
+// (len(chunk)*len(metrics)*span) stays at or under that bound — mirroring
+// chunkedModelSpanTotalsMulti's own pre-existing chunking math, generalized
+// past kindModel. now is resolved once by the caller and threaded through
+// every chunk, so every id's span ends at the identical instant regardless
+// of how many chunks ids splits into. Any chunk that fails fails the whole
+// call, for the identical "no partial ranking" reason chunkedGetMulti's own
+// doc comment gives.
+//
+// An empty ids or metrics slice (or span < 1) returns immediately with
+// each metric's own nil slice and ok=true — no store read at all, matching
+// every span-total reader's pre-existing "empty input never touches the
+// store" contract (TestModelSpanTotals_EmptyIDs_NoStoreRead pins this
+// against an always-erroring store).
+func (l *limiter) spanTotalsMulti(kind string, ids, metrics []string, window string, now time.Time, span, offset int) ([][]int64, bool) {
+	out := make([][]int64, len(metrics))
+	if len(ids) == 0 || len(metrics) == 0 || span < 1 {
+		return out, true
+	}
+	perChunk := usageModelsChunkKeys / (span * len(metrics))
+	if perChunk < 1 {
+		perChunk = 1
+	}
+	for m := range out {
+		out[m] = make([]int64, 0, len(ids))
+	}
+	remaining := ids
+	for len(remaining) > 0 {
+		n := perChunk
+		if n > len(remaining) {
+			n = len(remaining)
+		}
+		chunk := remaining[:n]
+		allKeys := make([]string, 0, len(chunk)*len(metrics)*span)
+		for _, id := range chunk {
+			for _, metric := range metrics {
+				keys, _ := historyBucketKeysAt(kind, id, metric, window, now, span, offset)
+				allKeys = append(allKeys, keys...)
+			}
+		}
+		vals, ok := l.chunkedGetMulti(allKeys, usageModelsChunkKeys)
+		if !ok || len(vals) != len(allKeys) {
+			return nil, false
+		}
+		stride := len(metrics) * span
+		for i := range chunk {
+			base := i * stride
+			for m := range metrics {
+				mBase := base + m*span
+				var sum int64
+				for _, v := range vals[mBase : mBase+span] {
+					sum += v
+				}
+				out[m] = append(out[m], sum)
+			}
+		}
+		remaining = remaining[n:]
+	}
+	return out, true
 }
 
 // history returns span counter values for (kind, id, metric, window)

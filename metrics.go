@@ -871,16 +871,33 @@ func newLatencyHistogram() *latencyHistogram {
 // first bound the observation is <= is its bucket, matching Prometheus's
 // own "le" (less-than-or-equal) histogram semantics exactly.
 func observeLatencyBucket(buckets []int64, overflow *int64, sum *float64, count *int64, d time.Duration) {
-	v := d.Seconds()
-	*sum += v
+	*sum += d.Seconds()
 	*count++
+	idx, isOverflow := latencyBucketIndex(d)
+	if isOverflow {
+		*overflow++
+		return
+	}
+	buckets[idx]++
+}
+
+// latencyBucketIndex returns d's index into latencyBucketBounds — the
+// first bound d.Seconds() is <= to — or overflow=true, with idx equal to
+// len(latencyBucketBounds), when d exceeds every configured bound. Shared
+// by observeLatencyBucket (this in-process Prometheus histogram, above)
+// and limits.go's accountWith/latencyCounterEntries (admin-redesign WP-A,
+// admin.stats.latency's own opt-in per-bucket counter family), so the two
+// can never disagree about which bucket a given duration belongs to —
+// accountWith's own counter names (latencyDurationMetric/
+// latencyTTFBMetric, limits.go) are built directly from this same index.
+func latencyBucketIndex(d time.Duration) (idx int, overflow bool) {
+	v := d.Seconds()
 	for i, bound := range latencyBucketBounds {
 		if v <= bound {
-			buckets[i]++
-			return
+			return i, false
 		}
 	}
-	*overflow++
+	return len(latencyBucketBounds), true
 }
 
 // latencyStore is the Gateway's in-process, per-replica upstream-latency

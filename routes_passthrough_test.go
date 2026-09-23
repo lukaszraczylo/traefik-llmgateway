@@ -3274,3 +3274,135 @@ func TestSSEAccountingBuffer_TailBoundedAndExact(t *testing.T) {
 		t.Fatal("head != first sseAccountingHeadBytes written")
 	}
 }
+
+// --- admin-redesign WP-A step 5: passthrough's own provider-level
+// latency threading (never a model bucket: the upstream model lives in
+// the response body, known only after the attempt already resolved) ---
+
+// TestHandlePassthrough_Latency_ProviderBucketWrittenWhenStatsLatencyOn
+// proves handlePassthrough's own accountWith call carries the completed
+// request's latSample/hasLat through accountExtras, writing exactly one
+// provider-level latency duration bucket when admin.stats.latency is on.
+func TestHandlePassthrough_Latency_ProviderBucketWrittenWhenStatsLatencyOn(t *testing.T) {
+	const respBody = `{"model":"gpt-native-x","choices":[],"usage":{"prompt_tokens":7,"completion_tokens":3}}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(respBody))
+	}))
+	defer srv.Close()
+
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{
+		"openai": {Type: "openai", BaseURL: srv.URL, APIKey: "sk-up"},
+	}
+	cfg.Groups = map[string]*GroupConfig{"default": {}}
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{
+		{Name: "alice", Group: "default", APIKey: "sk-alice", Limits: &LimitsConfig{}},
+	}}
+	cfg.Admin = &AdminConfig{Enabled: true, Stats: &AdminStatsConfig{Latency: true}}
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	gw, ok := h.(*Gateway)
+	if !ok {
+		t.Fatal("handler is not *Gateway")
+	}
+	gw.limiter.spawn = func(f func()) { f() }
+
+	req := httptest.NewRequest(http.MethodPost, "/openai/v1/native-endpoint", strings.NewReader(`{}`))
+	req.Header.Set("Authorization", "Bearer sk-alice")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+
+	now := time.Now()
+	var total int64
+	for i := 0; i <= len(latencyBucketBounds); i++ {
+		if v, ok := gw.limiter.getCounter(kindProvider, "openai", latencyDurationMetric(i), windowDay, now); ok {
+			total += v
+		}
+	}
+	if total != 1 {
+		t.Errorf("provider-level latency duration buckets summed = %d, want 1", total)
+	}
+}
+
+// TestHandlePassthrough_ModelLatencyAndUModelSuppressed_ProviderHistogramsOnly
+// is P13 (admin dashboard redesign verify round; plan §2(c): passthrough
+// gets "provider histograms only"): the model scope routes_passthrough.go
+// always attaches for accounting (base req/tokin/tokout/cost) must NOT
+// also drive the opt-in per-model latency or user x model (umodel)
+// counter families — canonical here is providerName + "/" + an upstream-
+// ECHOED model id, unbounded cardinality this gateway does not control,
+// and neither family is ever read back for it anyway (both rank off the
+// configured catalog, never an arbitrary passthrough id). Provider-level
+// latency (the previous test) and the base model-scope req counter are
+// BOTH still written — only the two opt-in, per-model-keyed families are
+// suppressed.
+func TestHandlePassthrough_ModelLatencyAndUModelSuppressed_ProviderHistogramsOnly(t *testing.T) {
+	const respBody = `{"model":"gpt-native-x","choices":[],"usage":{"prompt_tokens":7,"completion_tokens":3}}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(respBody))
+	}))
+	defer srv.Close()
+
+	cfg := CreateConfig()
+	cfg.Providers = map[string]*ProviderConfig{
+		"openai": {Type: "openai", BaseURL: srv.URL, APIKey: "sk-up"},
+	}
+	cfg.Groups = map[string]*GroupConfig{"default": {}}
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{
+		{Name: "alice", Group: "default", APIKey: "sk-alice", Limits: &LimitsConfig{}},
+	}}
+	cfg.Admin = &AdminConfig{Enabled: true, Stats: &AdminStatsConfig{Latency: true, UserModel: true}}
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	h, err := New(context.Background(), next, cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	gw, ok := h.(*Gateway)
+	if !ok {
+		t.Fatal("handler is not *Gateway")
+	}
+	gw.limiter.spawn = func(f func()) { f() }
+
+	req := httptest.NewRequest(http.MethodPost, "/openai/v1/native-endpoint", strings.NewReader(`{}`))
+	req.Header.Set("Authorization", "Bearer sk-alice")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+
+	now := time.Now()
+	canonical := "openai/gpt-native-x"
+
+	var modelLatTotal int64
+	for i := 0; i <= len(latencyBucketBounds); i++ {
+		if v, ok := gw.limiter.getCounter(kindModel, canonical, latencyDurationMetric(i), windowDay, now); ok {
+			modelLatTotal += v
+		}
+	}
+	if modelLatTotal != 0 {
+		t.Errorf("model-level latency duration buckets summed = %d, want 0 (provider histograms only)", modelLatTotal)
+	}
+
+	umodelID := userModelScopeID("alice", canonical)
+	if v, ok := gw.limiter.getCounter(kindUserModel, umodelID, metricReq, windowDay, now); !ok || v != 0 {
+		t.Errorf("umodel req = %d (ok=%v), want 0 (passthrough must not write umodel)", v, ok)
+	}
+
+	// The base model-scope req counter (unaffected by noModelHistograms —
+	// driven by the per-scope loop, not the latency/umodel blocks) must
+	// still be written.
+	if v, ok := gw.limiter.getCounter(kindModel, canonical, metricReq, windowDay, now); !ok || v != 1 {
+		t.Errorf("model req = %d (ok=%v), want 1 (base model-scope counters are unaffected)", v, ok)
+	}
+}

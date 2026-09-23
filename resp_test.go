@@ -46,6 +46,18 @@ func TestPipelineMutates_LPUSH(t *testing.T) {
 	}
 }
 
+// encodeCommand renders args as a RESP2 command array:
+// "*N\r\n$len\r\narg\r\n..." for each arg — encodeCommands' (resp.go)
+// single-command special case. No production call site needs a
+// one-command string result on its own (every real caller batches
+// through encodeCommands), so this stays as a test-only helper
+// (admin-redesign WP-G cleanup) purely to keep TestEncodeCommand's
+// single-command wire-format pin readable without a slice-of-slice
+// literal at every call site.
+func encodeCommand(args []string) string {
+	return string(encodeCommands([][]string{args}))
+}
+
 // TestEncodeCommand pins the exact RESP2 wire format every command must
 // use: "*N\r\n$len\r\narg\r\n..." — a fake or real server parses this
 // framing byte-for-byte, so a drift here breaks every other test silently.

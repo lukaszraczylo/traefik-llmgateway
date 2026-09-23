@@ -638,12 +638,6 @@ func encodeCommands(cmds [][]string) []byte {
 	return dst
 }
 
-// encodeCommand renders args as a RESP2 command array:
-// "*N\r\n$len\r\narg\r\n..." for each arg.
-func encodeCommand(args []string) string {
-	return string(encodeCommands([][]string{args}))
-}
-
 // decodeReply reads and decodes one RESP2 reply from r. depth is 0 for a
 // top-level reply and depth+1 for each element decodeArray recurses into;
 // an array is only accepted at depth 0 (see the '*' case) — none of this

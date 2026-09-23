@@ -2792,3 +2792,818 @@ func TestTargetUsage_ConfiguredStoreDown_FailOpen_ReturnsZeroCounters(t *testing
 		t.Errorf("got[0] = %+v, want the zero value", got[0])
 	}
 }
+
+// --- admin-redesign WP-A (steps 1-8) ---
+
+// TestMemoryStore_ApplySet_OverwritesRatherThanAdds proves memoryStore's
+// absolute-entry path (last-seen SET, Q6 DECISIONS) always REPLACES a
+// key's value, never adds to it — the SET-vs-INCRBY distinction
+// counterIncr.absolute exists to carry.
+func TestMemoryStore_ApplySet_OverwritesRatherThanAdds(t *testing.T) {
+	m := newMemoryStore()
+	m.nowFn = func() time.Time { return time.Unix(1000, 0) }
+
+	if got := m.applySet("k", 42, time.Minute); got != 42 {
+		t.Fatalf("first applySet = %d, want 42", got)
+	}
+	if got := m.applySet("k", 7, time.Minute); got != 7 {
+		t.Errorf("second applySet = %d, want 7 (overwrite, not 49)", got)
+	}
+	if v, err := m.get("k"); err != nil || v != 7 {
+		t.Errorf("get(k) = %d, err=%v, want 7, nil", v, err)
+	}
+}
+
+// TestMemoryStore_IncrMulti_AbsoluteEntry_DispatchesToApplySet proves
+// incrMulti routes an absolute counterIncr through applySet (overwrite),
+// never applyIncr (add) — a non-absolute entry in the same batch still
+// increments normally.
+func TestMemoryStore_IncrMulti_AbsoluteEntry_DispatchesToApplySet(t *testing.T) {
+	m := newMemoryStore()
+	m.nowFn = func() time.Time { return time.Unix(2000, 0) }
+
+	out, err := m.incrMulti([]counterIncr{
+		{key: "seen", delta: 555, ttl: time.Hour, absolute: true},
+		{key: "count", delta: 3, ttl: time.Hour},
+	})
+	if err != nil {
+		t.Fatalf("incrMulti: %v", err)
+	}
+	if out[0] != 555 {
+		t.Errorf("absolute entry result = %d, want 555", out[0])
+	}
+	if out[1] != 3 {
+		t.Errorf("incr entry result = %d, want 3", out[1])
+	}
+
+	out2, _ := m.incrMulti([]counterIncr{{key: "count", delta: 3, ttl: time.Hour}})
+	if out2[0] != 6 {
+		t.Errorf("second incr on non-absolute key = %d, want 6 (added)", out2[0])
+	}
+	out3, _ := m.incrMulti([]counterIncr{{key: "seen", delta: 999, ttl: time.Hour, absolute: true}})
+	if out3[0] != 999 {
+		t.Errorf("second absolute write = %d, want 999 (overwrite, not 555+999)", out3[0])
+	}
+}
+
+// TestLastSeenGate_ThrottlesWithin60Seconds is Q6's own throttle contract:
+// two due() calls for the same scope inside lastSeenGateThrottle yield
+// exactly one true; a different scope is never throttled by another
+// scope's own state.
+func TestLastSeenGate_ThrottlesWithin60Seconds(t *testing.T) {
+	g := &lastSeenGate{}
+	t0 := time.Unix(10_000, 0)
+
+	if !g.due("user", "alice", t0) {
+		t.Fatal("first due() = false, want true")
+	}
+	if g.due("user", "alice", t0.Add(30*time.Second)) {
+		t.Error("due() 30s later = true, want false (within throttle)")
+	}
+	if !g.due("user", "alice", t0.Add(61*time.Second)) {
+		t.Error("due() 61s later = false, want true (throttle elapsed)")
+	}
+	if !g.due("user", "bob", t0.Add(30*time.Second)) {
+		t.Error("due() for a different scope = false, want true")
+	}
+}
+
+// TestLastSeenGate_ThrottlesPastMapCap is P8 (admin dashboard redesign
+// verify round): due()'s two-map rotation wrote a scope forward into
+// `previous` once `current` filled past lastSeenGateMapCapBase, but
+// nothing ever CONSULTED previous on lookup — every scope that had been
+// rotated out was treated as brand new on its very next call, so
+// throttling silently stopped working once more than
+// lastSeenGateMapCapBase (4,096) distinct scopes were active. 5,000
+// distinct scopes, each looked up twice within the same second (round 2
+// repeats round 1's exact scopes, same instant), must produce exactly
+// 5,000 due()=true calls total — the pre-fix code produced far more,
+// since round 2 mostly missed both the (rotated) previous map's own
+// throttle and its freshly-empty current map. 5,000 stays below the N5
+// adaptive-growth threshold (it only crosses ONE rotation, and growth
+// only triggers on a SECOND rotation within lastSeenGateThrottle — see
+// TestLastSeenGate_AdaptiveCapacityHoldsPastEightThousandScopes for the
+// scope count that exercises growth itself), so this keeps proving the
+// original fixed-cap rotation path unchanged.
+func TestLastSeenGate_ThrottlesPastMapCap(t *testing.T) {
+	g := &lastSeenGate{}
+	now := time.Unix(1_800_000_000, 0)
+	const scopeCount = 5000
+	if scopeCount <= lastSeenGateMapCapBase {
+		t.Fatalf("scopeCount (%d) must exceed lastSeenGateMapCapBase (%d) to exercise rotation", scopeCount, lastSeenGateMapCapBase)
+	}
+	writes := 0
+	for round := 0; round < 2; round++ {
+		for i := 0; i < scopeCount; i++ {
+			if g.due("user", fmt.Sprintf("u%d", i), now) {
+				writes++
+			}
+		}
+	}
+	if writes != scopeCount {
+		t.Errorf("due()=true across 2 rounds of %d scopes within the same second = %d, want %d (round 2 must be fully throttled)", scopeCount, writes, scopeCount)
+	}
+}
+
+// TestLastSeenGate_AdaptiveCapacityHoldsPastEightThousandScopes is N5
+// (verify-redesign-final.md): a fixed 4,096-entry cap only throttled
+// correctly up to ~2x itself (current+previous both full, ~8,192 live
+// scopes) — beyond that, current rotated out before lastSeenGateThrottle
+// could elapse for most of what it held, discarding still-fresh writes
+// on every rotation, which degraded round 2 of a repeat to one write per
+// admission instead of zero. 20,000 distinct scopes (well past the old
+// ~8,192 ceiling), each looked up twice within the same second, must
+// still produce close to 20,000 due()=true calls total (round 1 only;
+// round 2 must be (almost) fully throttled) — proving due()'s adaptive
+// capacity (grows on a same-window second rotation, capped at
+// lastSeenGateMapCapMax) keeps the whole live population inside
+// current+previous instead of thrashing it.
+func TestLastSeenGate_AdaptiveCapacityHoldsPastEightThousandScopes(t *testing.T) {
+	g := &lastSeenGate{}
+	now := time.Unix(1_800_000_000, 0)
+	const scopeCount = 20000
+	if scopeCount <= 2*lastSeenGateMapCapBase {
+		t.Fatalf("scopeCount (%d) must exceed the old 2x-cap ceiling (%d) to exercise adaptive growth", scopeCount, 2*lastSeenGateMapCapBase)
+	}
+	writes := 0
+	for round := 0; round < 2; round++ {
+		for i := 0; i < scopeCount; i++ {
+			if g.due("user", fmt.Sprintf("u%d", i), now) {
+				writes++
+			}
+		}
+	}
+	// "~20000": round 1 always writes scopeCount times (every scope is
+	// new). Round 2 may add a handful more only if a scope's write fell
+	// right before the growth threshold was reached, never a large
+	// fraction of scopeCount — the old, pre-fix behaviour wrote roughly
+	// scopeCount MORE on round 2 alone (P8's "far more" regression, at
+	// this population size), so a generous 1% slack still tells the two
+	// behaviours apart with room to spare.
+	maxWant := scopeCount + scopeCount/100
+	if writes < scopeCount || writes > maxWant {
+		t.Errorf("due()=true across 2 rounds of %d scopes within the same second = %d, want in [%d, %d]", scopeCount, writes, scopeCount, maxWant)
+	}
+	if g.capacity > lastSeenGateMapCapMax {
+		t.Errorf("g.capacity = %d, want <= lastSeenGateMapCapMax (%d)", g.capacity, lastSeenGateMapCapMax)
+	}
+	total := len(g.current) + len(g.previous)
+	if bound := 2 * lastSeenGateMapCapMax; total > bound {
+		t.Errorf("len(current)+len(previous) = %d, want <= 2*lastSeenGateMapCapMax (%d) — memory bound violated", total, bound)
+	}
+}
+
+// TestCheckAndCount_NeverWritesLastSeen is the P9-fix replacement for this
+// test's own pre-fix name (AppendedAfterScopeStride): last-seen no longer
+// rides checkAndCount's batch AT ALL (admin dashboard redesign verify
+// round) — it used to be appended after every scope's own three stride
+// entries unconditionally, which meant a REJECTED request still moved a
+// scope's last-seen timestamp forward, since checkAndCount's whole batch,
+// last-seen tail included, was already sent to the store before the
+// violation check even ran. checkAndCount's own entry count is now
+// EXACTLY 3*checkAndCountKeysPerScope regardless of l.statsAdmin — see
+// TestRecordLastSeen_WritesTailEntriesForUserAndGroupScopesOnly, below,
+// for the tail-entry coverage this test used to carry, now exercised
+// against recordLastSeen directly (the function real admission call sites
+// invoke instead, only once admission is confirmed).
+func TestCheckAndCount_NeverWritesLastSeen(t *testing.T) {
+	store := &recordingStore{}
+	l := newLimiter(store, true)
+	now := time.Date(2026, 9, 23, 10, 0, 0, 0, time.UTC)
+	l.nowFn = func() time.Time { return now }
+	l.statsAdmin = true
+
+	scopes := []limitScope{
+		{kind: "user", id: "alice", limits: &LimitsConfig{RequestsPerMinute: 1000}},
+		{kind: "group", id: "friends", limits: &LimitsConfig{RequestsPerMinute: 1000}},
+		{kind: totalScopeKind, id: totalScopeID},
+	}
+	if v := l.checkAndCount(scopes); v != nil {
+		t.Fatalf("checkAndCount violation = %+v, want nil", v)
+	}
+
+	if len(store.entries) != 3*checkAndCountKeysPerScope {
+		t.Fatalf("len(store.entries) = %d, want %d (no last-seen tail)", len(store.entries), 3*checkAndCountKeysPerScope)
+	}
+	for i, e := range store.entries {
+		if e.absolute {
+			t.Errorf("entries[%d] (%q) is absolute, want checkAndCount to never write an absolute entry any more", i, e.key)
+		}
+	}
+}
+
+// TestRecordLastSeen_WritesTailEntriesForUserAndGroupScopesOnly proves
+// recordLastSeen (limits.go; called by every admission call site's own
+// "violation == nil" branch, P9 fix) writes exactly one absolute SET per
+// "user"/"group" scope, keyed by lastSeenKey, and never one for the
+// synthetic total scope.
+func TestRecordLastSeen_WritesTailEntriesForUserAndGroupScopesOnly(t *testing.T) {
+	store := &recordingStore{}
+	l := newLimiter(store, true)
+	now := time.Date(2026, 9, 23, 10, 0, 0, 0, time.UTC)
+	l.nowFn = func() time.Time { return now }
+	l.statsAdmin = true
+	l.spawn = func(f func()) { f() } // synchronous for the test to observe entries
+
+	scopes := []limitScope{
+		{kind: "user", id: "alice"},
+		{kind: "group", id: "friends"},
+		{kind: totalScopeKind, id: totalScopeID},
+	}
+	l.recordLastSeen(scopes, now)
+
+	if len(store.entries) != 2 {
+		t.Fatalf("len(store.entries) = %d, want 2 (user + group, never total)", len(store.entries))
+	}
+	seenKeys := map[string]bool{}
+	for _, e := range store.entries {
+		if !e.absolute {
+			t.Errorf("entry %q is not absolute", e.key)
+		}
+		seenKeys[e.key] = true
+	}
+	if !seenKeys[lastSeenKey("user", "alice")] || !seenKeys[lastSeenKey("group", "friends")] {
+		t.Errorf("entries = %v, want lastSeenKey for user alice and group friends", store.entries)
+	}
+	if seenKeys[lastSeenKey(totalScopeKind, totalScopeID)] {
+		t.Error("total scope must never get a last-seen entry")
+	}
+}
+
+// TestRecordLastSeen_OffWithoutStatsAdmin proves recordLastSeen (P9 fix's
+// own call site, invoked separately from checkAndCount now) builds zero
+// entries and spawns nothing when statsAdmin is false (the default for
+// every limiter built directly via newLimiter, unless a test opts in) —
+// the same "additive and default-preserving" guarantee every other family
+// in this task carries. spawn is deliberately left at its real (async,
+// goroutine-based) default: if this ever regressed to spawning an empty
+// batch, len(store.entries) staying 0 synchronously would not catch it,
+// so failing to compile a nil/empty entries slice at all (countAsync's own
+// "nil/empty entries slice spawns nothing" contract, limits.go) is what
+// this test actually pins.
+func TestRecordLastSeen_OffWithoutStatsAdmin(t *testing.T) {
+	store := &recordingStore{}
+	l := newLimiter(store, true)
+	l.recordLastSeen([]limitScope{{kind: "user", id: "alice"}}, l.now())
+	if len(store.entries) != 0 {
+		t.Errorf("entries = %d, want 0 (no last-seen without statsAdmin)", len(store.entries))
+	}
+}
+
+// TestCheckAndCount_LastSeen_OffWithoutStatsAdmin proves checkAndCount
+// itself never writes a last-seen entry, with or without statsAdmin — P9
+// fix, admin dashboard redesign verify round: last-seen no longer rides
+// checkAndCount's batch at all (TestCheckAndCount_NeverWritesLastSeen,
+// above, pins the statsAdmin=true case; this pins the default-off case
+// the pre-fix name of this test originally covered).
+func TestCheckAndCount_LastSeen_OffWithoutStatsAdmin(t *testing.T) {
+	store := &recordingStore{}
+	l := newLimiter(store, true)
+	l.checkAndCount([]limitScope{{kind: "user", id: "alice"}})
+	if len(store.entries) != checkAndCountKeysPerScope {
+		t.Errorf("entries = %d, want %d (checkAndCount never writes last-seen any more)", len(store.entries), checkAndCountKeysPerScope)
+	}
+}
+
+// TestRecordLastSeen_ThrottledSecondCallWithinWindowSkipsEntry proves the
+// SAME replica calling recordLastSeen twice in immediate succession (the
+// P9-fix call site, admin dashboard redesign verify round — every
+// admission call site invokes it once per admitted request) writes the
+// last-seen SET only once, via lastSeenGate.due's own throttle.
+func TestRecordLastSeen_ThrottledSecondCallWithinWindowSkipsEntry(t *testing.T) {
+	store := &recordingStore{}
+	l := newLimiter(store, true)
+	now := time.Date(2026, 9, 23, 10, 0, 0, 0, time.UTC)
+	l.nowFn = func() time.Time { return now }
+	l.statsAdmin = true
+	l.spawn = func(f func()) { f() }
+	scopes := []limitScope{{kind: "user", id: "alice"}}
+
+	l.recordLastSeen(scopes, now)
+	if len(store.entries) != 1 {
+		t.Fatalf("first call entries = %d, want 1", len(store.entries))
+	}
+	store.entries = nil
+	l.recordLastSeen(scopes, now)
+	if len(store.entries) != 0 {
+		t.Errorf("second call (same instant) entries = %d, want 0 (throttled, no last-seen entry)", len(store.entries))
+	}
+}
+
+// TestSettleRejection_RejHour_OnlyWhenStatsAdmin proves settleRejection's
+// rej:hour addition (rej/hour, always-on-with-admin) rides the same
+// compensation batch only when statsAdmin is true, alongside the
+// pre-existing, unconditional rej:day entry — and that the compensation
+// entries for OTHER scopes (the rollback half) are unaffected either way.
+func TestSettleRejection_RejHour_OnlyWhenStatsAdmin(t *testing.T) {
+	now := time.Date(2026, 9, 23, 10, 30, 0, 0, time.UTC)
+	wb := bucketsFor(now)
+	et := enforceTTLsFor()
+	scopes := []limitScope{
+		{kind: "user", id: "alice"},
+		{kind: totalScopeKind, id: totalScopeID},
+	}
+	entries := []counterIncr{
+		{key: windowKeyForBucket("user", "alice", metricReq, windowMin, wb.min), delta: 1, ttl: minWindowTTL, enforceTTL: et.min},
+		{key: windowKeyForBucket("user", "alice", metricReq, windowDay, wb.day), delta: 1, ttl: dayWindowTTL, enforceTTL: et.day},
+		{key: windowKeyForBucket("user", "alice", metricReq, windowHour, wb.hour), delta: 1, ttl: hourWindowTTL, enforceTTL: et.hour},
+		{key: windowKeyForBucket(totalScopeKind, totalScopeID, metricReq, windowMin, wb.min), delta: 1, ttl: minWindowTTL, enforceTTL: et.min},
+		{key: windowKeyForBucket(totalScopeKind, totalScopeID, metricReq, windowDay, wb.day), delta: 1, ttl: dayWindowTTL, enforceTTL: et.day},
+		{key: windowKeyForBucket(totalScopeKind, totalScopeID, metricReq, windowHour, wb.hour), delta: 1, ttl: hourWindowTTL, enforceTTL: et.hour},
+	}
+
+	for _, statsAdmin := range []bool{false, true} {
+		store := &recordingStore{}
+		l := newLimiter(store, true)
+		l.nowFn = func() time.Time { return now }
+		l.statsAdmin = statsAdmin
+		l.settleRejection(entries, 0, scopes, wb, et)
+
+		rejHourKey := windowKeyForBucket("user", "alice", metricRej, windowHour, wb.hour)
+		var gotHour bool
+		for _, e := range store.entries {
+			if e.key == rejHourKey {
+				gotHour = true
+			}
+		}
+		if gotHour != statsAdmin {
+			t.Errorf("statsAdmin=%v: rej:hour entry present=%v, want %v", statsAdmin, gotHour, statsAdmin)
+		}
+	}
+}
+
+// TestAccountWith_UserModel_RequiresOneUserScopeAndModelScope is (a),
+// plan §2: the opt-in per-(user, model) breakdown fires only when
+// statsUserModel is on, exactly one "user" scope is present, and a
+// kindModel scope is present — writing <=8 entries (req always,
+// tokin/tokout/cost only when nonzero) at day+month, never hour.
+func TestAccountWith_UserModel_RequiresOneUserScopeAndModelScope(t *testing.T) {
+	id := userModelScopeID("alice", "openai/gpt-4o")
+
+	cases := []struct {
+		name           string
+		scopes         []limitScope
+		statsUserModel bool
+		wantEntries    bool
+	}{
+		{name: "on, one user scope, model scope", statsUserModel: true, wantEntries: true,
+			scopes: withModelScope([]limitScope{{kind: "user", id: "alice"}}, "openai/gpt-4o")},
+		{name: "flag off", statsUserModel: false, wantEntries: false,
+			scopes: withModelScope([]limitScope{{kind: "user", id: "alice"}}, "openai/gpt-4o")},
+		{name: "no model scope", statsUserModel: true, wantEntries: false,
+			scopes: []limitScope{{kind: "user", id: "alice"}}},
+		{name: "multi-group principal: two user-kind scopes never happens, but two USER scopes must still refuse",
+			statsUserModel: true, wantEntries: false,
+			scopes: withModelScope([]limitScope{{kind: "user", id: "alice"}, {kind: "user", id: "bob"}}, "openai/gpt-4o")},
+		{name: "media: no user scope at all", statsUserModel: true, wantEntries: false,
+			scopes: withModelScope(nil, "openai/gpt-4o")},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			store := &recordingStore{}
+			l := newLimiter(store, true)
+			l.statsAdmin = true
+			l.statsUserModel = c.statsUserModel
+			l.accountWith(c.scopes, usage{prompt: 10, completion: 5}, 1000, accountExtras{})
+
+			var got int
+			for _, e := range store.entries {
+				if strings.HasPrefix(e.key, "llmgw:"+kindUserModel+":"+id+":") {
+					got++
+				}
+			}
+			if c.wantEntries && got != 8 {
+				t.Errorf("umodel entries = %d, want 8", got)
+			}
+			if !c.wantEntries && got != 0 {
+				t.Errorf("umodel entries = %d, want 0", got)
+			}
+		})
+	}
+}
+
+// TestAccountWith_UserModel_ReqAlwaysEvenWithZeroUsage proves the req pair
+// is written unconditionally (mirroring kindModel's own unconditional req
+// write), even for a served request with zero reported usage.
+func TestAccountWith_UserModel_ReqAlwaysEvenWithZeroUsage(t *testing.T) {
+	store := &recordingStore{}
+	l := newLimiter(store, true)
+	l.statsAdmin = true
+	l.statsUserModel = true
+	scopes := withModelScope([]limitScope{{kind: "user", id: "alice"}}, "openai/gpt-4o")
+	l.accountWith(scopes, usage{}, 0, accountExtras{})
+
+	id := userModelScopeID("alice", "openai/gpt-4o")
+	var got int
+	for _, e := range store.entries {
+		if strings.HasPrefix(e.key, "llmgw:"+kindUserModel+":"+id+":") && strings.Contains(e.key, ":"+metricReq+":") {
+			got++
+		}
+	}
+	if got != 2 {
+		t.Errorf("umodel req entries = %d, want 2 (day+month)", got)
+	}
+}
+
+// TestAccountWith_Failover_IncrementsFromProvider is (c), plan §2: a
+// non-empty accountExtras.failoverFrom writes prov/{from}:fover at
+// hour+day when statsAdmin is on, never when it is off.
+func TestAccountWith_Failover_IncrementsFromProvider(t *testing.T) {
+	for _, statsAdmin := range []bool{false, true} {
+		store := &recordingStore{}
+		l := newLimiter(store, true)
+		l.statsAdmin = statsAdmin
+		l.accountWith(nil, usage{}, 0, accountExtras{failoverFrom: "openai"})
+
+		var got int
+		for _, e := range store.entries {
+			if strings.HasPrefix(e.key, "llmgw:"+kindProvider+":openai:"+metricFover+":") {
+				got++
+			}
+		}
+		want := 0
+		if statsAdmin {
+			want = 2
+		}
+		if got != want {
+			t.Errorf("statsAdmin=%v: fover entries = %d, want %d", statsAdmin, got, want)
+		}
+	}
+}
+
+// TestLatencyBucketIndex_MatchesObserveLatencyBucket proves accountWith's
+// own bucket-index helper (limits.go) never disagrees with
+// observeLatencyBucket's in-process histogram (metrics.go) about which
+// bucket a duration belongs to — both must derive from the identical
+// latencyBucketIndex.
+func TestLatencyBucketIndex_MatchesObserveLatencyBucket(t *testing.T) {
+	durations := []time.Duration{
+		0, 50 * time.Millisecond, 100 * time.Millisecond, 999 * time.Millisecond,
+		2 * time.Second, 30 * time.Second, 600 * time.Second, 3600 * time.Second,
+	}
+	for _, d := range durations {
+		idx, overflow := latencyBucketIndex(d)
+
+		var buckets [1]int64
+		full := make([]int64, len(latencyBucketBounds))
+		var overflowCount int64
+		var sum float64
+		var count int64
+		observeLatencyBucket(full, &overflowCount, &sum, &count, d)
+		_ = buckets
+
+		if overflow {
+			if overflowCount != 1 {
+				t.Errorf("d=%v: latencyBucketIndex says overflow, observeLatencyBucket overflow count = %d, want 1", d, overflowCount)
+			}
+			if idx != len(latencyBucketBounds) {
+				t.Errorf("d=%v: overflow idx = %d, want %d", d, idx, len(latencyBucketBounds))
+			}
+			continue
+		}
+		if full[idx] != 1 {
+			t.Errorf("d=%v: latencyBucketIndex says bucket %d, observeLatencyBucket did not increment it: buckets=%v", d, idx, full)
+		}
+	}
+}
+
+// TestAccountWith_Latency_WritesProviderAndModelBuckets is (c), plan §2:
+// hasLat && statsLatency writes the serving provider's own duration
+// bucket (hour+day) plus the served model's own (when a kindModel scope
+// is present), and TTFB buckets too when the sample carries one — riding
+// the SAME storeIncrMulti batch account already builds (never a second
+// round trip: this test's own recordingStore records exactly one
+// incrMulti call for the whole accountWith invocation).
+func TestAccountWith_Latency_WritesProviderAndModelBuckets(t *testing.T) {
+	store := &recordingStore{}
+	l := newLimiter(store, true)
+	l.statsAdmin = true
+	l.statsLatency = true
+	scopes := withModelScope(nil, "openai/gpt-4o")
+	lat := latencySample{duration: 2 * time.Second, ttfb: 100 * time.Millisecond, hasTTFB: true}
+	l.accountWith(scopes, usage{}, 0, accountExtras{provider: "openai", lat: lat, hasLat: true})
+
+	durIdx, _ := latencyBucketIndex(lat.duration)
+	ttfbIdx, _ := latencyBucketIndex(lat.ttfb)
+	wantDur := latencyDurationMetric(durIdx)
+	wantTTFB := latencyTTFBMetric(ttfbIdx)
+
+	counts := map[string]int{}
+	for _, e := range store.entries {
+		counts[e.key]++
+	}
+	for _, kind := range []string{kindProvider, kindModel} {
+		id := "openai"
+		if kind == kindModel {
+			id = "openai/gpt-4o"
+		}
+		for _, window := range []string{windowHour, windowDay} {
+			for _, metric := range []string{wantDur, wantTTFB} {
+				key := windowKeyForBucket(kind, id, metric, window, "x")
+				// windowKeyForBucket's own bucket arg is fixed to "x" here
+				// only to build a comparable prefix; match by prefix minus
+				// bucket instead of exact key.
+				prefix := key[:len(key)-1]
+				var found bool
+				for k := range counts {
+					if strings.HasPrefix(k, prefix) {
+						found = true
+					}
+				}
+				if !found {
+					t.Errorf("missing latency entry for kind=%s id=%s metric=%s window=%s", kind, id, metric, window)
+				}
+			}
+		}
+	}
+}
+
+// TestAccountWith_CacheMiss_TotalHourDayAndModelDayOnly is (d), plan §2:
+// cacheMiss writes total cmiss at hour+day, and the served model's own
+// cmiss at day ONLY (never hour) — gated on statsAdmin.
+func TestAccountWith_CacheMiss_TotalHourDayAndModelDayOnly(t *testing.T) {
+	store := &recordingStore{}
+	l := newLimiter(store, true)
+	l.statsAdmin = true
+	scopes := withModelScope([]limitScope{{kind: totalScopeKind, id: totalScopeID}}, "openai/gpt-4o")
+	l.accountWith(scopes, usage{}, 0, accountExtras{cacheMiss: true})
+
+	totalHour := windowKeyForBucket(totalScopeKind, totalScopeID, metricCmiss, windowHour, bucketFor(l.now(), windowHour))
+	totalDay := windowKeyForBucket(totalScopeKind, totalScopeID, metricCmiss, windowDay, bucketFor(l.now(), windowDay))
+	modelDay := windowKeyForBucket(kindModel, "openai/gpt-4o", metricCmiss, windowDay, bucketFor(l.now(), windowDay))
+	modelHour := windowKeyForBucket(kindModel, "openai/gpt-4o", metricCmiss, windowHour, bucketFor(l.now(), windowHour))
+
+	present := map[string]bool{}
+	for _, e := range store.entries {
+		present[e.key] = true
+	}
+	if !present[totalHour] || !present[totalDay] {
+		t.Errorf("missing total cmiss hour/day entries: %v", store.entries)
+	}
+	if !present[modelDay] {
+		t.Error("missing model cmiss day entry")
+	}
+	if present[modelHour] {
+		t.Error("model cmiss hour entry present, want day only")
+	}
+}
+
+// TestRecordCacheHit_ChitAlwaysCsaveSkippedWhenZero is recordCacheHit's
+// own contract (Q7, DECISIONS): total chit hour+day always, csave
+// hour+day only when savedMicros != 0, model chit/csave at day only.
+func TestRecordCacheHit_ChitAlwaysCsaveSkippedWhenZero(t *testing.T) {
+	store := &recordingStore{}
+	l := newLimiter(store, true)
+	l.statsAdmin = true
+	l.spawn = func(f func()) { f() } // synchronous for the test to observe entries
+
+	l.recordCacheHit("openai/gpt-4o", 0)
+
+	var chit, csave int
+	for _, e := range store.entries {
+		switch {
+		case strings.Contains(e.key, ":"+metricChit+":"):
+			chit++
+		case strings.Contains(e.key, ":"+metricCsave+":"):
+			csave++
+		}
+	}
+	if chit != 3 { // total hour, total day, model day
+		t.Errorf("chit entries = %d, want 3", chit)
+	}
+	if csave != 0 {
+		t.Errorf("csave entries = %d, want 0 (saved=0)", csave)
+	}
+
+	store.entries = nil
+	l.recordCacheHit("openai/gpt-4o", 500)
+	csave = 0
+	for _, e := range store.entries {
+		if strings.Contains(e.key, ":"+metricCsave+":") {
+			csave++
+		}
+	}
+	if csave != 3 { // total hour, total day, model day
+		t.Errorf("csave entries (saved=500) = %d, want 3", csave)
+	}
+}
+
+// TestRecordCacheHit_OffWithoutStatsAdmin proves recordCacheHit spawns
+// nothing at all when admin stats are off.
+func TestRecordCacheHit_OffWithoutStatsAdmin(t *testing.T) {
+	store := &recordingStore{}
+	l := newLimiter(store, true)
+	l.spawn = func(f func()) { f() }
+	l.recordCacheHit("openai/gpt-4o", 500)
+	if len(store.entries) != 0 {
+		t.Errorf("entries = %d, want 0 (statsAdmin off)", len(store.entries))
+	}
+}
+
+// TestRecordUnpriced402_TotalAndModelHourDay proves recordUnpriced402
+// writes total r402 hour+day plus the refused model's own r402 hour+day,
+// gated on statsAdmin — the counter events.go's recordUnpricedRefusalEvent
+// drives from its own single chokepoint (both routes_unified.go's and
+// routes_passthrough.go's identical 402 guard).
+func TestRecordUnpriced402_TotalAndModelHourDay(t *testing.T) {
+	store := &recordingStore{}
+	l := newLimiter(store, true)
+	l.statsAdmin = true
+	l.spawn = func(f func()) { f() }
+
+	l.recordUnpriced402("openai/free-model")
+
+	present := map[string]bool{}
+	for _, e := range store.entries {
+		present[e.key] = true
+	}
+	now := l.now()
+	wantKeys := []string{
+		windowKeyForBucket(totalScopeKind, totalScopeID, metricR402, windowHour, bucketFor(now, windowHour)),
+		windowKeyForBucket(totalScopeKind, totalScopeID, metricR402, windowDay, bucketFor(now, windowDay)),
+		windowKeyForBucket(kindModel, "openai/free-model", metricR402, windowHour, bucketFor(now, windowHour)),
+		windowKeyForBucket(kindModel, "openai/free-model", metricR402, windowDay, bucketFor(now, windowDay)),
+	}
+	for _, k := range wantKeys {
+		if !present[k] {
+			t.Errorf("missing r402 entry %q", k)
+		}
+	}
+	if len(store.entries) != 4 {
+		t.Errorf("total entries = %d, want 4", len(store.entries))
+	}
+}
+
+// TestRecordProviderAttempt_HourlyAndTimeout_OnlyWithStatsAdmin proves
+// step 3: prov/provmodel attempt+fail at HOUR granularity, and prov's own
+// timeout hour+day, are added only when statsAdmin is on — riding
+// recordProviderAttempt's SAME async batch (one spawn call either way,
+// never a second round trip).
+func TestRecordProviderAttempt_HourlyAndTimeout_OnlyWithStatsAdmin(t *testing.T) {
+	for _, statsAdmin := range []bool{false, true} {
+		store := &recordingStore{}
+		l := newLimiter(store, true)
+		l.spawn = func(f func()) { f() }
+		l.statsAdmin = statsAdmin
+
+		l.recordProviderAttempt("openai", "gpt-4o", nil, errProviderTimeout)
+
+		var hourAttempt, hourFail, hourTimeout, dayTimeout, modelHourAttempt int
+		for _, e := range store.entries {
+			switch {
+			case e.key == windowKeyForBucket(kindProvider, "openai", metricProvAttempt, windowHour, bucketFor(l.now(), windowHour)):
+				hourAttempt++
+			case e.key == windowKeyForBucket(kindProvider, "openai", metricProvFail, windowHour, bucketFor(l.now(), windowHour)):
+				hourFail++
+			case e.key == windowKeyForBucket(kindProvider, "openai", metricProvTimeout, windowHour, bucketFor(l.now(), windowHour)):
+				hourTimeout++
+			case e.key == windowKeyForBucket(kindProvider, "openai", metricProvTimeout, windowDay, bucketFor(l.now(), windowDay)):
+				dayTimeout++
+			case e.key == windowKeyForBucket(kindProviderModel, providerModelScopeID("openai", "gpt-4o"), metricProvAttempt, windowHour, bucketFor(l.now(), windowHour)):
+				modelHourAttempt++
+			}
+		}
+		want := 0
+		if statsAdmin {
+			want = 1
+		}
+		if hourAttempt != want || hourFail != want || hourTimeout != want || dayTimeout != want || modelHourAttempt != want {
+			t.Errorf("statsAdmin=%v: hourAttempt=%d hourFail=%d hourTimeout=%d dayTimeout=%d modelHourAttempt=%d, want %d each",
+				statsAdmin, hourAttempt, hourFail, hourTimeout, dayTimeout, modelHourAttempt, want)
+		}
+	}
+}
+
+// TestCountTargetRequestsBy_CallerID_OnlyWithStatsAdmin proves step 8:
+// a non-empty caller writes kindTargetCaller req entries at day+month
+// (targetCallerScopeID("mcp", target, caller)) only when statsAdmin is
+// on, in the SAME batch countTargetRequests already builds.
+func TestCountTargetRequestsBy_CallerID_OnlyWithStatsAdmin(t *testing.T) {
+	for _, statsAdmin := range []bool{false, true} {
+		store := &recordingStore{}
+		l := newLimiter(store, true)
+		l.statsAdmin = statsAdmin
+		l.countTargetRequestBy("alice", targetKindMCP, "fetch")
+
+		id := targetCallerScopeID(targetKindMCP, "fetch", "alice")
+		var got int
+		for _, e := range store.entries {
+			if strings.HasPrefix(e.key, "llmgw:"+kindTargetCaller+":"+id+":") {
+				got++
+			}
+		}
+		want := 0
+		if statsAdmin {
+			want = 2 // day + month
+		}
+		if got != want {
+			t.Errorf("statsAdmin=%v: tcaller entries = %d, want %d", statsAdmin, got, want)
+		}
+	}
+}
+
+// TestCountTargetRequestsBy_EmptyCaller_MatchesCountTargetRequests proves
+// countTargetRequests (no caller) is byte-for-byte countTargetRequestsBy's
+// own caller="" special case — no behavior change for any pre-existing
+// caller of the old name.
+func TestCountTargetRequestsBy_EmptyCaller_MatchesCountTargetRequests(t *testing.T) {
+	scopes := []limitScope{{kind: targetKindMCP, id: "fetch"}}
+
+	storeA := &recordingStore{}
+	lA := newLimiter(storeA, true)
+	lA.statsAdmin = true
+	lA.nowFn = func() time.Time { return time.Unix(0, 0) }
+	lA.countTargetRequests(scopes)
+
+	storeB := &recordingStore{}
+	lB := newLimiter(storeB, true)
+	lB.statsAdmin = true
+	lB.nowFn = func() time.Time { return time.Unix(0, 0) }
+	lB.countTargetRequestsBy("", scopes)
+
+	if len(storeA.entries) != len(storeB.entries) {
+		t.Fatalf("len(A)=%d len(B)=%d, want equal", len(storeA.entries), len(storeB.entries))
+	}
+	for i := range storeA.entries {
+		if storeA.entries[i].key != storeB.entries[i].key || storeA.entries[i].delta != storeB.entries[i].delta {
+			t.Errorf("entry %d differs: A=%+v B=%+v", i, storeA.entries[i], storeB.entries[i])
+		}
+	}
+}
+
+// TestHistoryBucketKeysAt_OffsetZero_MatchesHistoryBucketKeys proves
+// offset=0 is byte-for-byte historyBucketKeys' own pre-existing output.
+func TestHistoryBucketKeysAt_OffsetZero_MatchesHistoryBucketKeys(t *testing.T) {
+	now := time.Date(2026, 9, 23, 10, 30, 0, 0, time.UTC)
+	wantKeys, wantBuckets := historyBucketKeys(kindModel, "openai/gpt-4o", metricReq, windowDay, now, 5)
+	gotKeys, gotBuckets := historyBucketKeysAt(kindModel, "openai/gpt-4o", metricReq, windowDay, now, 5, 0)
+	assert.Equal(t, wantKeys, gotKeys)
+	assert.Equal(t, wantBuckets, gotBuckets)
+}
+
+// TestHistoryBucketKeysAt_Offset_ShiftsWholeSpanBack proves an offset
+// shifts the ENTIRE span back that many window units — the span=3,
+// offset=2 window ends exactly 2 days before the span=3, offset=0
+// window's own oldest bucket.
+func TestHistoryBucketKeysAt_Offset_ShiftsWholeSpanBack(t *testing.T) {
+	now := time.Date(2026, 9, 23, 10, 30, 0, 0, time.UTC)
+	_, baseBuckets := historyBucketKeysAt(kindModel, "m", metricReq, windowDay, now, 3, 0)
+	_, offsetBuckets := historyBucketKeysAt(kindModel, "m", metricReq, windowDay, now, 3, 2)
+
+	// offsetBuckets' newest bucket must equal baseBuckets' oldest bucket
+	// shifted back one more day (span=3 starting 2 days earlier ends 2
+	// days earlier too).
+	wantNewest := bucketFor(historyStepBack(now, windowDay, 2), windowDay)
+	if offsetBuckets[len(offsetBuckets)-1] != wantNewest {
+		t.Errorf("offset span's newest bucket = %s, want %s", offsetBuckets[len(offsetBuckets)-1], wantNewest)
+	}
+	if offsetBuckets[0] == baseBuckets[0] {
+		t.Error("offset span's oldest bucket must differ from the unshifted span's")
+	}
+}
+
+// TestSpanTotalsMulti_Offset_ReadsAnEarlierSpan proves spanTotalsMulti's
+// offset argument reads a DIFFERENT (earlier) set of buckets than
+// offset=0 (plan §1.3(iii)) — exercised directly against the PRODUCTION
+// reader (limits.go), the same one admin.go's chunkedModelSpanTotals/
+// chunkedModelSpanTotalsMulti and stats_read.go's readSpanTotals now all
+// share (P12 fix, admin dashboard redesign verify round).
+func TestSpanTotalsMulti_Offset_ReadsAnEarlierSpan(t *testing.T) {
+	l := newLimiter(nil, true)
+	now := time.Date(2026, 9, 23, 10, 0, 0, 0, time.UTC)
+	id := "openai/gpt-4o"
+
+	l.incrCounter(kindModel, id, metricReq, windowDay, historyStepBack(now, windowDay, 3), 100, dayWindowTTL) // 3 days ago
+	l.incrCounter(kindModel, id, metricReq, windowDay, historyStepBack(now, windowDay, 0), 7, dayWindowTTL)   // today
+
+	gotNow, ok := l.spanTotalsMulti(kindModel, []string{id}, []string{metricReq}, windowDay, now, 1, 0)
+	if !ok || gotNow[0][0] != 7 {
+		t.Errorf("offset=0 = %v, ok=%v, want [[7]]", gotNow, ok)
+	}
+
+	gotOffset, ok := l.spanTotalsMulti(kindModel, []string{id}, []string{metricReq}, windowDay, now, 1, 3)
+	if !ok || gotOffset[0][0] != 100 {
+		t.Errorf("offset=3 = %v, ok=%v, want [[100]]", gotOffset, ok)
+	}
+}
+
+// TestAccountWith_ZeroValueExtras_AddsNoFailoverLatencyOrCacheEntries is a
+// smoke test that account (accountWith with a zero-value accountExtras)
+// never adds a fover/latency/cmiss entry — those three are gated purely by
+// accountExtras fields, unlike umodel (gated by limiter flags + scope
+// shape, exercised separately above), so they must stay silent regardless
+// of statsAdmin/statsLatency when the caller passes no extras at all.
+func TestAccountWith_ZeroValueExtras_AddsNoFailoverLatencyOrCacheEntries(t *testing.T) {
+	store := &recordingStore{}
+	l := newLimiter(store, true)
+	l.statsAdmin = true
+	l.statsLatency = true
+	scopes := withModelScope([]limitScope{{kind: "user", id: "alice"}}, "openai/gpt-4o")
+	l.account(scopes, usage{prompt: 10, completion: 5}, 1000)
+
+	for _, e := range store.entries {
+		if strings.Contains(e.key, ":"+metricFover+":") || strings.Contains(e.key, ":ld") || strings.Contains(e.key, ":lt") || strings.Contains(e.key, ":"+metricCmiss+":") {
+			t.Errorf("unexpected extras-driven entry from account() with zero-value extras: %q", e.key)
+		}
+	}
+}

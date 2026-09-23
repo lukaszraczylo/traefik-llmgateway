@@ -1196,6 +1196,9 @@ func (g *Gateway) handlePassthrough(w http.ResponseWriter, r *http.Request, u *u
 		writeLimitViolation(w, violation)
 		return
 	}
+	// P9 fix (admin dashboard redesign verify round): last-seen only for
+	// an admitted request — recordLastSeen's own doc comment (limits.go).
+	g.limiter.recordLastSeen(scopes, g.limiter.now())
 
 	// providerName is only ever passed here by ServeHTTP's dispatch, which
 	// already confirmed it is a key of g.adapters before calling in.
@@ -1247,14 +1250,23 @@ func (g *Gateway) handlePassthrough(w http.ResponseWriter, r *http.Request, u *u
 	r = r.WithContext(withAttemptRecorder(r.Context(), func(resp *http.Response, attemptErr error) {
 		g.limiter.recordProviderAttempt(providerName, "", resp, attemptErr)
 	}))
-	// feat: instrument upstream latency — gated on metricsEnabled, same
-	// reasoning as runUnified's identical wiring (routes_unified.go). No
-	// model here either, for the identical reason the attemptRecorder
-	// above passes "": the upstream model lives in the response body,
-	// read only after this attempt already resolved (comment above).
-	if metricsEnabled(g.cfg) {
+	// feat: instrument upstream latency — gated on metricsEnabled OR
+	// admin.stats.latency (admin-redesign WP-A), same reasoning as
+	// runUnified's identical wiring (routes_unified.go). No model here
+	// either, for the identical reason the attemptRecorder above passes
+	// "": the upstream model lives in the response body, read only after
+	// this attempt already resolved (comment above) — so accountWith's own
+	// opt-in latency block below only ever writes this request's PROVIDER
+	// bucket, never a model one, for native passthrough.
+	var latSample latencySample
+	var hasLat bool
+	if metricsEnabled(g.cfg) || g.limiter.statsLatency {
 		r = r.WithContext(withLatencyRecorder(r.Context(), func(sample latencySample) {
-			g.recordLatency(providerName, "", sample)
+			latSample = sample
+			hasLat = true
+			if metricsEnabled(g.cfg) {
+				g.recordLatency(providerName, "", sample)
+			}
 		}))
 	}
 
@@ -1335,7 +1347,25 @@ func (g *Gateway) handlePassthrough(w http.ResponseWriter, r *http.Request, u *u
 	// withModelScope drops the model scope when respModel is empty (the
 	// upstream reported no model id), so a passthrough reply the gateway
 	// cannot attribute still accounts to user/group/total as before.
-	g.limiter.account(withModelScope(scopes, canonical), respUsage, cost)
+	//
+	// noModelHistograms: true (P13 fix, admin dashboard redesign verify
+	// round; plan §2(c): passthrough gets "provider histograms only") —
+	// canonical here is providerName + "/" + an upstream-ECHOED model id,
+	// not one of this gateway's own configured/catalogued models, so
+	// keying the opt-in latency and umodel counter families off it would
+	// grow both families' cardinality by whatever an upstream (or a
+	// client spoofing its response shape) chooses to report, for entries
+	// that can never appear in usage/models or usermodel totals anyway —
+	// both rank off the configured catalog, never an arbitrary passthrough
+	// id. The base model-scope req/tokin/tokout/cost counters below are
+	// unaffected; only the two per-model-keyed opt-in families are
+	// suppressed.
+	extras := accountExtras{provider: providerName, noModelHistograms: true}
+	if hasLat {
+		extras.lat = latSample
+		extras.hasLat = true
+	}
+	g.limiter.accountWith(withModelScope(scopes, canonical), respUsage, cost, extras)
 }
 
 // proxyResult is what proxyUpstream reports back to its caller once it has

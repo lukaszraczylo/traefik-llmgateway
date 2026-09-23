@@ -482,6 +482,29 @@ func (g *Gateway) runMeteredCall(sw *statusTrackingWriter, r *http.Request, scop
 				}
 				sw.WriteHeader(cached.Status)
 				_, _ = sw.Write(cached.Body)
+				// Cache-hit counters (Q7, DECISIONS: "cache-hit body parse
+				// only when cache stats on: accept") — fire-and-forget
+				// (recordCacheHit's own l.spawn), so this never delays the
+				// response already written above. saved is computed with a
+				// no-op warn sink, not g.pricingWarn: this is a re-derivation
+				// of a price already known when the response was originally
+				// served and cached, not a fresh unknown-model discovery
+				// worth logging a second time.
+				//
+				// P4 fix (admin dashboard redesign verify round):
+				// recordCacheHit itself already no-ops when !statsAdmin, but
+				// cachedUsage(cached.Body) unmarshals the FULL cached body
+				// first — measured 639µs for a 1 MiB body (defaultCache
+				// MaxBodyBytes) — so that parse, and the unifiedCostMicros
+				// derivation it feeds, must never run at all for a cache-
+				// enabled, admin-disabled deployment, exactly like Q7 already
+				// requires for a cache-enabled, admin-ENABLED-but-stats-off
+				// case. Gating here, not just inside recordCacheHit, is what
+				// actually saves the parse.
+				if g.limiter.statsAdmin {
+					saved := unifiedCostMicros(cand.canonical, cand.upstreamModel, cachedUsage(cached.Body), g.cfg.Pricing, g.cfg.ModelMeta, func(string) {})
+					g.limiter.recordCacheHit(cand.canonical, saved)
+				}
 				return
 			}
 			// Set before call() below writes anything — headers must
@@ -560,13 +583,28 @@ func (g *Gateway) runMeteredCall(sw *statusTrackingWriter, r *http.Request, scop
 		ctx := withAttemptRecorder(r.Context(), func(resp *http.Response, attemptErr error) {
 			g.limiter.recordProviderAttempt(providerName, upstreamModel, resp, attemptErr)
 		})
-		// feat: instrument upstream latency — gated on metricsEnabled so a
-		// deployment with metrics off wires nothing here at all (not even
-		// the closure allocation), one level up from watchdogBody's own
-		// per-Read nil check (timeout.go).
-		if metricsEnabled(g.cfg) {
+		// feat: instrument upstream latency — gated on metricsEnabled OR
+		// admin.stats.latency (admin-redesign WP-A), so a deployment with
+		// BOTH off wires nothing here at all (not even the closure
+		// allocation), one level up from watchdogBody's own per-Read nil
+		// check (timeout.go). latSample/hasLat are candidate-LOCAL vars
+		// (declared fresh each loop iteration, assigned as two separate
+		// statements — never a tuple assignment mixing a call with another
+		// expression, the Yaegi trap this file's own failover loop already
+		// avoids elsewhere): g.recordLatency only fires when metrics are
+		// actually enabled, but the sample itself is captured whenever
+		// EITHER condition wired the recorder, so accountWith's own
+		// opt-in latency counters (below) see it even when Prometheus
+		// metrics are off.
+		var latSample latencySample
+		var hasLat bool
+		if metricsEnabled(g.cfg) || g.limiter.statsLatency {
 			ctx = withLatencyRecorder(ctx, func(sample latencySample) {
-				g.recordLatency(providerName, upstreamModel, sample)
+				latSample = sample
+				hasLat = true
+				if metricsEnabled(g.cfg) {
+					g.recordLatency(providerName, upstreamModel, sample)
+				}
 			})
 		}
 		result, callErr := call(cand.adapter, ctx, respWriter, attemptReq)
@@ -663,7 +701,45 @@ func (g *Gateway) runMeteredCall(sw *statusTrackingWriter, r *http.Request, scop
 				result.estimated = true
 			}
 		}
-		g.limiter.account(withModelScope(scopes, cand.canonical), result, unifiedCostMicros(cand.canonical, cand.upstreamModel, result, g.cfg.Pricing, g.cfg.ModelMeta, g.pricingWarn))
+		// Q1 fix (DECISIONS; pre-existing defect, WP-A step 7): kindModel's
+		// own req counter used to count EVERY candidate account() ran for,
+		// including one that failed before writing anything — a failover
+		// chain of 3 candidates where only the last succeeded inflated
+		// that model's served-request count by 2 phantom attempts. Adding
+		// the model scope only when this candidate actually served
+		// something (callErr == nil: a genuine 2xx, even a zero-usage
+		// streaming one) or reported nonzero usage (result.total() > 0: a
+		// mid-stream failure that still delivered content, billed via the
+		// estimate branch above) excludes exactly the one remaining case —
+		// callErr != nil && result.total() == 0, a candidate that failed
+		// with nothing to show for it — from ever touching kindModel's req
+		// counter at all. Token/cost counters were never affected by this
+		// bug: they were already gated on nonzero usage independently.
+		acctScopes := scopes
+		if callErr == nil || result.total() > 0 {
+			acctScopes = withModelScope(scopes, cand.canonical)
+		}
+		// P3 fix (admin dashboard redesign verify round): cacheMiss used to
+		// be set from `cacheable` alone, true for EVERY candidate that
+		// attempted its own cache lookup and missed — including one that
+		// went on to fail over. A 3-candidate failover chain where every
+		// candidate missed its own cache lookup then counted 1 request as
+		// up to 3 cmiss increments, and a chain where an earlier candidate
+		// missed-then-failed while a later one HIT double-counted the same
+		// request as both a miss and a hit. Gated on the SAME condition as
+		// the model-scope Q1 fix above: only the candidate whose own result
+		// actually gets served/billed (or that reported nonzero usage
+		// before failing) ever reports a miss, matching plan §2(d)'s "miss
+		// -> cacheMiss extras in served candidate's account".
+		extras := accountExtras{provider: providerName, cacheMiss: cacheable && (callErr == nil || result.total() > 0)}
+		if i > 0 {
+			extras.failoverFrom = candidates[i-1].providerName
+		}
+		if hasLat {
+			extras.lat = latSample
+			extras.hasLat = true
+		}
+		g.limiter.accountWith(acctScopes, result, unifiedCostMicros(cand.canonical, cand.upstreamModel, result, g.cfg.Pricing, g.cfg.ModelMeta, g.pricingWarn), extras)
 		if result.estimated {
 			g.logf("%s: usage for model %q logged as estimated (%d prompt tokens derived from request body size, not the provider's reported usage)", logPrefix, cand.canonical, result.prompt)
 		}
@@ -857,6 +933,10 @@ func (g *Gateway) admitRequestForRoute(sw *statusTrackingWriter, u *user, grp *g
 		writeLimitViolationEnvelope(sw, violation, envelope)
 		return scopes, false
 	}
+	// P9 fix (admin dashboard redesign verify round): last-seen is
+	// recorded ONLY once this request is confirmed admitted — see
+	// recordLastSeen's own doc comment (limits.go).
+	g.limiter.recordLastSeen(scopes, g.limiter.now())
 	return scopes, true
 }
 

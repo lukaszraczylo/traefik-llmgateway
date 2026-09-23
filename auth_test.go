@@ -430,6 +430,118 @@ func TestAuthStore_Snapshot_MultiGroupUser_ListsAllGroupsAndCountsEachMember(t *
 	}
 }
 
+// TestAuthStore_Snapshot_SourceInlineVsFile (admin dashboard redesign,
+// WP-B) pins userSummary.source: an inline user reports "inline", and a
+// file-sourced user — even one that overrides an inline user of the same
+// name (replaceFileUsers' own doc comment) — reports "file".
+func TestAuthStore_Snapshot_SourceInlineVsFile(t *testing.T) {
+	cfg := &Config{
+		Providers: map[string]*ProviderConfig{"openai": {Type: "openai", APIKey: "k"}},
+		Groups:    map[string]*GroupConfig{"eng": {}},
+		Users: &UsersConfig{Inline: []*UserConfig{
+			{Name: "inline-only", Group: "eng", APIKey: "sk-inline"},
+			{Name: "overridden", Group: "eng", APIKey: "sk-old"},
+		}},
+	}
+	a, err := newAuthStore(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.replaceFileUsers([]*UserConfig{
+		{Name: "overridden", Group: "eng", APIKey: "sk-new"},
+		{Name: "file-only", Group: "eng", APIKey: "sk-file"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	users, _ := a.snapshot()
+	got := map[string]string{}
+	for _, u := range users {
+		got[u.name] = u.source
+	}
+	want := map[string]string{"inline-only": "inline", "overridden": "file", "file-only": "file"}
+	for name, wantSource := range want {
+		if got[name] != wantSource {
+			t.Errorf("source[%q] = %q, want %q", name, got[name], wantSource)
+		}
+	}
+}
+
+// TestAuthStore_Snapshot_AdminAndPersonalGrant (admin dashboard redesign,
+// WP-B) pins userSummary.admin and personalProviders/personalModels: a
+// user with no personal grant reports both nil; a user with one reports
+// exactly its own Providers/Models, not the member group's resolved
+// access.
+func TestAuthStore_Snapshot_AdminAndPersonalGrant(t *testing.T) {
+	cfg := &Config{
+		Providers: map[string]*ProviderConfig{"openai": {Type: "openai", APIKey: "k"}},
+		Groups:    map[string]*GroupConfig{"eng": {Providers: []string{"anthropic"}}},
+		Users: &UsersConfig{Inline: []*UserConfig{
+			{Name: "plain", Group: "eng", APIKey: "sk-plain"},
+			{Name: "admin-user", Group: "eng", APIKey: "sk-admin", Admin: true},
+			{Name: "grantee", Group: "eng", APIKey: "sk-grant", Providers: []string{"openai"}, Models: []string{"gpt-5"}},
+		}},
+	}
+	a, err := newAuthStore(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	users, _ := a.snapshot()
+	byName := map[string]userSummary{}
+	for _, u := range users {
+		byName[u.name] = u
+	}
+
+	if byName["plain"].admin {
+		t.Error(`users["plain"].admin = true, want false`)
+	}
+	if !byName["admin-user"].admin {
+		t.Error(`users["admin-user"].admin = false, want true`)
+	}
+	if byName["plain"].personalProviders != nil || byName["plain"].personalModels != nil {
+		t.Errorf("plain user's personal grant = (%v, %v), want (nil, nil)", byName["plain"].personalProviders, byName["plain"].personalModels)
+	}
+	g := byName["grantee"]
+	if len(g.personalProviders) != 1 || g.personalProviders[0] != "openai" {
+		t.Errorf("grantee personalProviders = %v, want [openai]", g.personalProviders)
+	}
+	if len(g.personalModels) != 1 || g.personalModels[0] != "gpt-5" {
+		t.Errorf("grantee personalModels = %v, want [gpt-5]", g.personalModels)
+	}
+}
+
+// TestAuthStore_Snapshot_GroupPassthroughPaths (admin dashboard redesign,
+// WP-B) pins groupSummary.passthroughPaths: carried through unchanged
+// from GroupConfig.PassthroughPaths, cloned (not aliased) like the other
+// access-list fields.
+func TestAuthStore_Snapshot_GroupPassthroughPaths(t *testing.T) {
+	cfg := &Config{
+		Providers: map[string]*ProviderConfig{"openai": {Type: "openai", APIKey: "k"}},
+		Groups: map[string]*GroupConfig{
+			"eng":        {PassthroughPaths: []string{"v1/chat/completions"}},
+			"unrestrict": {},
+		},
+		Users: &UsersConfig{Inline: []*UserConfig{
+			{Name: "a", Group: "eng", APIKey: "sk-a"},
+		}},
+	}
+	a, err := newAuthStore(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, groups := a.snapshot()
+	byName := map[string]groupSummary{}
+	for _, g := range groups {
+		byName[g.name] = g
+	}
+	if len(byName["eng"].passthroughPaths) != 1 || byName["eng"].passthroughPaths[0] != "v1/chat/completions" {
+		t.Errorf(`groups["eng"].passthroughPaths = %v, want ["v1/chat/completions"]`, byName["eng"].passthroughPaths)
+	}
+	if byName["unrestrict"].passthroughPaths != nil {
+		t.Errorf(`groups["unrestrict"].passthroughPaths = %v, want nil`, byName["unrestrict"].passthroughPaths)
+	}
+}
+
 func TestNewAuthStore_DuplicateAPIKey_ReturnsError(t *testing.T) {
 	cfg := &Config{
 		Providers: map[string]*ProviderConfig{"openai": {Type: "openai", APIKey: "k"}},

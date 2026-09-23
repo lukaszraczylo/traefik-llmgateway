@@ -283,6 +283,137 @@ func TestLookupPricing_OverrideWinsOverGeneratedTable(t *testing.T) {
 // the exact "small cheap request silently bills 0" gap the finding
 // reports, which also meant account (limits.go) skipped the cost-counter
 // write entirely for that traffic.
+// TestLookupPricingSource_MatchesLookupPricing pins lookupPricing as a
+// thin wrapper around lookupPricingSource (admin dashboard redesign,
+// WP-B): for every layer (override, builtin, generated table, unknown),
+// the two must agree on price and ok, and lookupPricingSource must report
+// the correct source label for each.
+func TestLookupPricingSource_MatchesLookupPricing(t *testing.T) {
+	overrides := map[string]*ModelPricing{"custom-model": {InputPerM: 7, OutputPerM: 7}}
+	cases := []struct {
+		model      string
+		wantSource string
+		wantOK     bool
+	}{
+		{"custom-model", priceSourceOverride, true},
+		{"gpt-5", priceSourceBuiltin, true},         // builtinPricing entry
+		{"deepseek-chat", priceSourceLitellm, true}, // generated table only
+		{"totally-unknown-model-xyz", "", false},
+	}
+	for _, c := range cases {
+		t.Run(c.model, func(t *testing.T) {
+			price, source, ok := lookupPricingSource(c.model, overrides)
+			if ok != c.wantOK || source != c.wantSource {
+				t.Fatalf("lookupPricingSource(%q) = (%+v, %q, %v), want source=%q ok=%v", c.model, price, source, ok, c.wantSource, c.wantOK)
+			}
+			wantPrice, wantOK := lookupPricing(c.model, overrides)
+			if wantOK != ok || wantPrice != price {
+				t.Errorf("lookupPricing(%q) = (%+v, %v) disagrees with lookupPricingSource = (%+v, %v)", c.model, wantPrice, wantOK, price, ok)
+			}
+		})
+	}
+}
+
+// TestBillingPriceSource_Table exercises every layer billingPriceSource
+// resolves through, in precedence order (DECISIONS Q3 for the ':free'
+// suffix case): modelMetaFree wins outright; then an override on the
+// canonical "provider/model" id; then an override on the bare id alone;
+// then builtinPricing; then the generated LiteLLM table; then unpriced —
+// including a ':free'-suffixed bare id that resolves to NOTHING in any
+// table, which must still report priceSourceUnpriced (billing truth is
+// unaffected by the naming convention; DisplayFree is admin_catalog.go's
+// own, separate concern).
+func TestBillingPriceSource_Table(t *testing.T) {
+	overrides := map[string]*ModelPricing{
+		"providerA/canonical-model": {InputPerM: 1, OutputPerM: 2},
+		"bare-override-model":       {InputPerM: 3, OutputPerM: 4},
+	}
+	meta := map[string]*ModelMetaConfig{
+		"providerA/free-model": {Free: true},
+	}
+	cases := []struct {
+		name       string
+		canonical  string
+		bare       string
+		wantSource string
+		wantPrice  ModelPricing
+	}{
+		{"modelMeta free wins over everything", "providerA/free-model", "free-model", priceSourceFree, ModelPricing{}},
+		{"override on canonical id", "providerA/canonical-model", "canonical-model", priceSourceOverride, ModelPricing{InputPerM: 1, OutputPerM: 2}},
+		{"override on bare id when canonical has none", "providerB/bare-override-model", "bare-override-model", priceSourceOverride, ModelPricing{InputPerM: 3, OutputPerM: 4}},
+		{"builtin table", "providerC/gpt-5", "gpt-5", priceSourceBuiltin, builtinPricing["gpt-5"]},
+		{"generated table fallback", "providerC/deepseek-chat", "deepseek-chat", priceSourceLitellm, mustLookupPrice(t, "deepseek-chat", nil)},
+		{"free-tier-suffixed id with no real price is unpriced, not free", "providerD/some-model:free", "some-model:free", priceSourceUnpriced, ModelPricing{}},
+		{"totally unknown model", "providerD/unknown-xyz", "unknown-xyz", priceSourceUnpriced, ModelPricing{}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			source, price := billingPriceSource(c.canonical, c.bare, overrides, meta)
+			if source != c.wantSource {
+				t.Errorf("billingPriceSource(%q, %q) source = %q, want %q", c.canonical, c.bare, source, c.wantSource)
+			}
+			if price != c.wantPrice {
+				t.Errorf("billingPriceSource(%q, %q) price = %+v, want %+v", c.canonical, c.bare, price, c.wantPrice)
+			}
+		})
+	}
+}
+
+// mustLookupPrice is a small test helper for TestBillingPriceSource_Table's
+// generated-table case, so its "want" value stays derived from the real
+// table rather than a value that silently drifts if the table changes.
+func mustLookupPrice(t *testing.T, model string, overrides map[string]*ModelPricing) ModelPricing {
+	t.Helper()
+	price, ok := lookupPricing(model, overrides)
+	if !ok {
+		t.Fatalf("test assumption broken: lookupPricing(%q) ok = false", model)
+	}
+	return price
+}
+
+// TestBillingPriceSource_ParityWithUnifiedCostMicros pins billingPriceSource
+// against unifiedCostMicros' OWN resolution order (routes_unified.go),
+// which it must mirror exactly: whenever billingPriceSource reports a
+// priced source (anything but unpriced), costMicrosKnownFor against the
+// SAME id unifiedCostMicros itself would have picked must resolve a price
+// too, and the price itself must match what billingPriceSource reports —
+// so GET /admin/api/catalog's PriceSource field can never disagree with
+// what a real request actually gets charged.
+func TestBillingPriceSource_ParityWithUnifiedCostMicros(t *testing.T) {
+	overrides := map[string]*ModelPricing{
+		"providerA/canonical-model": {InputPerM: 1, OutputPerM: 2},
+		"bare-override-model":       {InputPerM: 3, OutputPerM: 4},
+	}
+	meta := map[string]*ModelMetaConfig{
+		"providerA/free-model": {Free: true},
+	}
+	u := usage{prompt: 1_000_000, completion: 1_000_000}
+	models := []struct{ canonical, bare string }{
+		{"providerA/free-model", "free-model"},
+		{"providerA/canonical-model", "canonical-model"},
+		{"providerB/bare-override-model", "bare-override-model"},
+		{"providerC/gpt-5", "gpt-5"},
+		{"providerC/deepseek-chat", "deepseek-chat"},
+		{"providerD/unknown-xyz", "unknown-xyz"},
+	}
+	for _, m := range models {
+		t.Run(m.canonical, func(t *testing.T) {
+			source, price := billingPriceSource(m.canonical, m.bare, overrides, meta)
+			gotCost := unifiedCostMicros(m.canonical, m.bare, u, overrides, meta, func(string) {})
+			if source == priceSourceUnpriced {
+				if gotCost != 0 {
+					t.Errorf("unifiedCostMicros = %d for an unpriced model, want 0", gotCost)
+				}
+				return
+			}
+			wantCost := computeCostMicros(price, u)
+			if gotCost != wantCost {
+				t.Errorf("unifiedCostMicros(%q) = %d, want %d (billingPriceSource's own price=%+v source=%q)", m.canonical, gotCost, wantCost, price, source)
+			}
+		})
+	}
+}
+
 func TestCostMicrosKnown_RoundsCombinedTotal(t *testing.T) {
 	overrides := map[string]*ModelPricing{"cheap-model": {InputPerM: 0.02, OutputPerM: 0.02}}
 	got, ok := costMicrosKnown("cheap-model", usage{prompt: 30, completion: 30}, overrides)

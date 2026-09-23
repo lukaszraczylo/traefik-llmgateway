@@ -211,7 +211,14 @@ func (g *Gateway) handleTargetProxy(w http.ResponseWriter, r *http.Request, u *u
 		writeLimitViolation(w, violation)
 		return
 	}
-	g.limiter.countTargetRequest(targetScopeKind(kind), name)
+	// P9 fix (admin dashboard redesign verify round): last-seen only for
+	// an admitted request — recordLastSeen's own doc comment (limits.go).
+	g.limiter.recordLastSeen(scopes, g.limiter.now())
+	// Target x caller (always-on-with-admin, DECISIONS): u.name identifies
+	// the caller whose own credential authorized this proxy — see
+	// countTargetRequestBy's own doc comment (limits.go) for the id shape
+	// and admin-stats gating.
+	g.limiter.countTargetRequestBy(u.name, targetScopeKind(kind), name)
 
 	upstreamURL, err := buildUpstreamTargetURL(targetURL, rest, r.URL.RawQuery)
 	if err != nil {

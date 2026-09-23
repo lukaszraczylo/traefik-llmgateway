@@ -349,6 +349,29 @@ func (c *responseCache) store(key string, status int, contentType string, body [
 	}
 }
 
+// cachedUsage extracts the prompt/completion token counts a cached
+// response body's own top-level "usage" object reports — the OpenAI-
+// compatible shape every non-stream JSON response this gateway's adapters
+// produce already carries — used only by a response-cache HIT
+// (routes_unified.go's own call site, admin.stats + cache both enabled)
+// to attribute the avoided cost (recordCacheHit, limits.go) against the
+// same numbers a MISS would have billed. A body with no "usage" object,
+// or one that fails to unmarshal, reports a zero usage{}: a hit still
+// counts (chit), it simply has nothing to value (csave stays 0 and is
+// skipped, mirroring account's own "skip a zero direction" rule).
+func cachedUsage(body []byte) usage {
+	var parsed struct {
+		Usage *struct {
+			Prompt     int64 `json:"prompt_tokens"`
+			Completion int64 `json:"completion_tokens"`
+		} `json:"usage"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil || parsed.Usage == nil {
+		return usage{}
+	}
+	return usage{prompt: parsed.Usage.Prompt, completion: parsed.Usage.Completion}
+}
+
 // cacheEndpointChat and cacheEndpointEmbeddings are cacheKey's endpoint
 // argument, one per cacheable route (routes_unified.go's handleChat/
 // handleEmbeddings) — keeping /v1/chat/completions and /v1/embeddings

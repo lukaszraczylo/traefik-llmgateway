@@ -1773,3 +1773,65 @@ func TestMetrics_TargetHealthy_UnaffectedByStoreOutage(t *testing.T) {
 	_, samples := parsePrometheusText(t, rec.Body.Bytes())
 	assertSample(t, samples, "llmgateway_target_healthy", map[string]string{"kind": "mcp", "target": "alpha"}, "1")
 }
+
+// --- admin-redesign WP-A: latencyBucketIndex ---
+
+// TestLatencyBucketIndex_BoundaryValuesAndOverflow pins latencyBucketIndex
+// (the helper accountWith's own opt-in per-bucket latency counters share
+// with this file's in-process observeLatencyBucket, limits.go) against
+// latencyBucketBounds' own exact boundary values: a duration equal to a
+// bound belongs to THAT bound's own bucket (le semantics, matching
+// Prometheus histogram convention), and anything past the last bound
+// overflows to index len(latencyBucketBounds).
+func TestLatencyBucketIndex_BoundaryValuesAndOverflow(t *testing.T) {
+	for i, bound := range latencyBucketBounds {
+		d := time.Duration(bound * float64(time.Second))
+		idx, overflow := latencyBucketIndex(d)
+		if overflow {
+			t.Errorf("bound[%d]=%v: overflow=true, want false", i, bound)
+		}
+		if idx != i {
+			t.Errorf("bound[%d]=%v: idx=%d, want %d", i, bound, idx, i)
+		}
+	}
+
+	idx, overflow := latencyBucketIndex(0)
+	if overflow || idx != 0 {
+		t.Errorf("d=0: idx=%d overflow=%v, want 0, false", idx, overflow)
+	}
+
+	last := latencyBucketBounds[len(latencyBucketBounds)-1]
+	past := time.Duration(last*float64(time.Second)) + time.Second
+	idx, overflow = latencyBucketIndex(past)
+	if !overflow || idx != len(latencyBucketBounds) {
+		t.Errorf("d past every bound: idx=%d overflow=%v, want %d, true", idx, overflow, len(latencyBucketBounds))
+	}
+}
+
+// TestObserveLatencyBucket_StillMatchesLatencyBucketIndexAfterRefactor
+// proves observeLatencyBucket's own dense-bucket/overflow/sum/count
+// bookkeeping stays byte-for-byte correct after being refactored to share
+// latencyBucketIndex, for both an in-range and an overflowing sample.
+func TestObserveLatencyBucket_StillMatchesLatencyBucketIndexAfterRefactor(t *testing.T) {
+	buckets := make([]int64, len(latencyBucketBounds))
+	var overflow int64
+	var sum float64
+	var count int64
+
+	observeLatencyBucket(buckets, &overflow, &sum, &count, 2*time.Second)
+	wantIdx, _ := latencyBucketIndex(2 * time.Second)
+	if buckets[wantIdx] != 1 {
+		t.Errorf("buckets[%d] = %d, want 1", wantIdx, buckets[wantIdx])
+	}
+	if count != 1 || sum != 2 {
+		t.Errorf("count=%d sum=%v, want 1, 2", count, sum)
+	}
+
+	observeLatencyBucket(buckets, &overflow, &sum, &count, 3600*time.Second)
+	if overflow != 1 {
+		t.Errorf("overflow = %d, want 1", overflow)
+	}
+	if count != 2 {
+		t.Errorf("count = %d, want 2", count)
+	}
+}

@@ -467,6 +467,9 @@ func (g *Gateway) handleMCPFederated(w http.ResponseWriter, r *http.Request, u *
 		writeLimitViolation(w, violation)
 		return
 	}
+	// P9 fix (admin dashboard redesign verify round): last-seen only for
+	// an admitted request — recordLastSeen's own doc comment (limits.go).
+	g.limiter.recordLastSeen(scopes, g.limiter.now())
 
 	switch {
 	case req.Method == "initialize":
@@ -474,9 +477,9 @@ func (g *Gateway) handleMCPFederated(w http.ResponseWriter, r *http.Request, u *
 	case req.Method == "ping":
 		writeJSONRPCResult(w, format, req.ID, map[string]any{})
 	case req.Method == "tools/list":
-		g.mcpFederatedToolsList(w, format, r, req, allowedMCPServerNames(g.cfg, grp))
+		g.mcpFederatedToolsList(w, format, r, req, allowedMCPServerNames(g.cfg, grp), u.name)
 	case req.Method == "tools/call":
-		g.mcpFederatedToolsCall(w, format, r, req, grp)
+		g.mcpFederatedToolsCall(w, format, r, req, grp, u.name)
 	case strings.HasPrefix(req.Method, "notifications/"):
 		// A JSON-RPC notification carries no id and gets no response body
 		// by definition; MCP's Streamable HTTP transport answers a
@@ -1188,7 +1191,7 @@ const mcpFederatedFanoutConcurrency = 8
 // reach, because every call for that name is routed elsewhere). Logs
 // exactly which server's tool was dropped and which server tools/call
 // actually routes this name to.
-func (g *Gateway) mcpFederatedToolsList(w http.ResponseWriter, format mcpResponseFormat, r *http.Request, req jsonrpcRequest, names []string) {
+func (g *Gateway) mcpFederatedToolsList(w http.ResponseWriter, format mcpResponseFormat, r *http.Request, req jsonrpcRequest, names []string, caller string) {
 	var (
 		mu     sync.Mutex
 		wg     sync.WaitGroup
@@ -1416,7 +1419,11 @@ func (g *Gateway) mcpFederatedToolsList(w http.ResponseWriter, format mcpRespons
 		for i, name := range dialed {
 			attempted[i] = limitScope{kind: targetKindMCP, id: name}
 		}
-		g.limiter.countTargetRequests(attempted)
+		// Target x caller (always-on-with-admin, DECISIONS): caller is
+		// handleMCPFederated's own u.name, threaded through so every
+		// dialed server's own tcaller counter attributes to the caller
+		// whose credential authorized this fan-out.
+		g.limiter.countTargetRequestsBy(caller, attempted)
 	}
 
 	if len(failed) > 0 {
@@ -1548,7 +1555,7 @@ func resolveFederatedTool(fullName string, allowedNames []string) (serverName, t
 // single resolved server, once the call was actually attempted against
 // it — the same "attempted, not necessarily succeeded" accounting
 // mcpFederatedToolsList's own doc comment explains for its own fan-out.
-func (g *Gateway) mcpFederatedToolsCall(w http.ResponseWriter, format mcpResponseFormat, r *http.Request, req jsonrpcRequest, grp *group) {
+func (g *Gateway) mcpFederatedToolsCall(w http.ResponseWriter, format mcpResponseFormat, r *http.Request, req jsonrpcRequest, grp *group, caller string) {
 	var params mcpToolCallParams
 	if err := json.Unmarshal(req.Params, &params); err != nil {
 		writeJSONRPCErrorResponse(w, format, req.ID, jsonrpcInvalidParams, "invalid params")
@@ -1588,7 +1595,9 @@ func (g *Gateway) mcpFederatedToolsCall(w http.ResponseWriter, format mcpRespons
 	if err == nil || !errors.Is(err, context.Canceled) {
 		g.targetHealth.record(targetKindMCP, serverName, targetURL, err == nil, err, time.Since(probeStart), targetHealthSourceTraffic)
 	}
-	g.limiter.countTargetRequest(targetKindMCP, serverName)
+	// Target x caller (always-on-with-admin, DECISIONS): caller is
+	// handleMCPFederated's own u.name, threaded through.
+	g.limiter.countTargetRequestBy(caller, targetKindMCP, serverName)
 	if err != nil {
 		// P4 (review round 4): err here is commonly a *url.Error wrapping
 		// targetURL verbatim, including its query string (this gateway's

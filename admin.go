@@ -69,11 +69,17 @@ func adminEnabled(cfg *Config) bool {
 // routes: the page, any hashed asset under adminAssetsPathPrefix, or one
 // of the /admin/api/* JSON routes. adminEventsPath (F3, v0.3 dashboard
 // task) is defined in events.go, alongside the rest of that feature's own
-// constants.
+// constants; adminUsageSeriesPath/adminUsageTotalsPath/
+// adminPerformancePath (stats_read.go), adminCatalogPath/
+// adminConsumersPath (admin_catalog.go), and adminConfigPath
+// (admin_config.go) — admin dashboard redesign, WP-B — follow the same
+// convention.
 func isAdminPath(path string) bool {
-	if path == adminPagePath || path == adminOverviewPath || path == adminUsagePath ||
-		path == adminUsageHistoryPath || path == adminUsageModelsPath || path == adminTargetsPath ||
-		path == adminEventsPath {
+	switch path {
+	case adminPagePath, adminOverviewPath, adminUsagePath, adminUsageHistoryPath, adminUsageModelsPath,
+		adminUsageSeriesPath, adminUsageTotalsPath, adminPerformancePath,
+		adminCatalogPath, adminConsumersPath, adminConfigPath,
+		adminTargetsPath, adminEventsPath:
 		return true
 	}
 	return strings.HasPrefix(path, adminAssetsPathPrefix)
@@ -148,6 +154,18 @@ func (g *Gateway) handleAdminAPI(sw *statusTrackingWriter, r *http.Request) {
 		g.serveAdminUsageHistory(sw, r)
 	case adminUsageModelsPath:
 		g.serveAdminUsageModels(sw, r)
+	case adminUsageSeriesPath:
+		g.serveAdminUsageSeries(sw, r)
+	case adminUsageTotalsPath:
+		g.serveAdminUsageTotals(sw, r)
+	case adminPerformancePath:
+		g.serveAdminPerformance(sw, r)
+	case adminCatalogPath:
+		g.serveAdminCatalog(sw)
+	case adminConsumersPath:
+		g.serveAdminConsumers(sw)
+	case adminConfigPath:
+		g.serveAdminConfig(sw)
 	case adminTargetsPath:
 		g.serveAdminTargets(sw)
 	case adminEventsPath:
@@ -223,19 +241,33 @@ func setAdminJSONHeaders(w http.ResponseWriter) {
 // net/url's own URL.Redacted() does: Redacted() would still leave a bare
 // embedded username in place, and a bare username with no separate
 // password is itself commonly how a token gets embedded in a URL. A raw
-// value that fails to parse as a URL is returned unchanged — it names no
-// scheme/host/userinfo net/url can identify, so there is nothing
-// structured left to strip.
+// value that fails to parse as a URL returns unparseableBaseURLPlaceholder
+// instead (P5 fix, admin dashboard redesign verify round: returning raw
+// unchanged here defeated this whole function's purpose the moment a
+// misconfigured baseUrl failed to parse, and url.Parse fails far more
+// permissively than "not a URL at all" suggests — a password containing
+// an unescaped '/' reads as an invalid port on the host, and a malformed
+// '%' escape anywhere in the string is also a parse error; either way
+// whatever credential was embedded survived verbatim in BOTH GET
+// /admin/api/config's redaction, admin_config.go, and GET /admin/api/
+// overview's provider view). A value that fails to parse has nothing
+// structured left to strip selectively, so the only safe answer is to
+// withhold it entirely.
 func sanitizeBaseURL(raw string) string {
 	u, err := url.Parse(raw)
 	if err != nil {
-		return raw
+		return unparseableBaseURLPlaceholder
 	}
 	u.User = nil
 	u.RawQuery = ""
 	u.Fragment = ""
 	return u.String()
 }
+
+// unparseableBaseURLPlaceholder is what sanitizeBaseURL (above) returns in
+// place of a raw value that failed url.Parse — named so every call site
+// and test refers to the identical literal instead of restating it.
+const unparseableBaseURLPlaceholder = "[unparseable url]"
 
 // sanitizeProviderErr applies sanitizeBaseURL's userinfo/query-stripping
 // treatment to lastErr before it is ever echoed by GET /admin/api/overview
@@ -626,9 +658,106 @@ type adminOverviewResponse struct {
 	Redis     adminRedisView      `json:"redis"`
 	Cache     adminCacheView      `json:"cache"`
 	Retry     adminRetryView      `json:"retry"`
+	// Features (admin dashboard redesign, WP-B) reports which of the
+	// new opt-in/always-on-with-admin statistics families this Gateway
+	// currently exposes — see adminFeaturesView's own doc comment.
+	Features adminFeaturesView `json:"features"`
+	// Pricing summarizes the live catalog's billing-price-source mix
+	// (adminPricingSummaryView's own doc comment) — a one-glance "how
+	// much of my fleet is actually priced" figure for the Home page,
+	// without a second round trip to GET /admin/api/catalog.
+	Pricing adminPricingSummaryView `json:"pricing"`
 	// WarningsDropped counts construction warnings that did not fit within
 	// configWarningsCap (logger.go) — omitted (0) means nothing was dropped.
 	WarningsDropped int `json:"warningsDropped,omitempty"`
+}
+
+// adminFeaturesView reports which of the admin dashboard redesign's new
+// statistics families this Gateway currently exposes — GET
+// /admin/api/overview, GET /admin/api/config, and every stats_read.go
+// endpoint's own 404 gate all echo the SAME struct, built by the SAME
+// buildAdminFeatures (below), so the webui can gate a whole page section
+// on one flag without guessing at a second endpoint's own availability.
+//
+// UserModelStats and LatencyStats are opt-in (DECISIONS Q4: both default
+// OFF), read from Config.Admin.Stats. CacheStats, LastSeen and Failover
+// are "always-on-with-admin" (DECISIONS: zero/near-zero cost, no new
+// round trips on the request path) — CacheStats additionally requires
+// the response cache itself to be configured (nothing to report
+// otherwise); LastSeen and Failover need only adminEnabled, and are
+// reported true whenever this endpoint answers at all, kept as their own
+// explicit flags (rather than assumed true) so a future version gate
+// never has to change this struct's shape to turn one off.
+type adminFeaturesView struct {
+	UserModelStats bool `json:"userModelStats"`
+	LatencyStats   bool `json:"latencyStats"`
+	CacheStats     bool `json:"cacheStats"`
+	LastSeen       bool `json:"lastSeen"`
+	Failover       bool `json:"failover"`
+}
+
+// buildAdminFeatures reads Config.Admin.Stats (nil-safe: an admin block
+// with no stats sub-block, or predating this feature, means both opt-in
+// flags stay off — DECISIONS Q4's own defaults) and g.cache's presence to
+// assemble adminFeaturesView. Shared by GET /admin/api/overview
+// (buildAdminOverview, below), GET /admin/api/config (admin_config.go),
+// and every stats_read.go endpoint's own feature-gated 404 check, so
+// they can never disagree about which families are live.
+func (g *Gateway) buildAdminFeatures() adminFeaturesView {
+	var userModel, latency bool
+	if g.cfg.Admin != nil && g.cfg.Admin.Stats != nil {
+		userModel = g.cfg.Admin.Stats.UserModel
+		latency = g.cfg.Admin.Stats.Latency
+	}
+	return adminFeaturesView{
+		UserModelStats: userModel,
+		LatencyStats:   latency,
+		CacheStats:     g.cache != nil,
+		LastSeen:       true,
+		Failover:       true,
+	}
+}
+
+// adminPricingSummaryView counts the live model catalog's rows by
+// billing price source (billingPriceSource, pricing.go) — Override,
+// Builtin, Litellm, Free and Unpriced sum to the catalog's total model
+// count. GET /admin/api/overview's own Pricing field (buildAdminOverview,
+// below); GET /admin/api/catalog's per-model PriceSource field
+// (admin_catalog.go) is this same classification, unaggregated.
+type adminPricingSummaryView struct {
+	Override int `json:"override"`
+	Builtin  int `json:"builtin"`
+	Litellm  int `json:"litellm"`
+	Free     int `json:"free"`
+	Unpriced int `json:"unpriced"`
+}
+
+// buildAdminPricingSummary counts every catalogued (provider, model)
+// pair in snaps by billingPriceSource's own result — the SAME resolution
+// GET /admin/api/catalog applies per model (admin_catalog.go), summed
+// here rather than read from a second registry snapshot, so the two
+// views can never disagree about the fleet-wide mix even though they run
+// against independently-taken snapshots.
+func buildAdminPricingSummary(snaps []providerSnapshot, overrides map[string]*ModelPricing, meta map[string]*ModelMetaConfig) adminPricingSummaryView {
+	var summary adminPricingSummaryView
+	for _, s := range snaps {
+		for _, model := range s.models {
+			canonical := providerModelScopeID(s.name, model)
+			switch source, _ := billingPriceSource(canonical, model, overrides, meta); source {
+			case priceSourceOverride:
+				summary.Override++
+			case priceSourceBuiltin:
+				summary.Builtin++
+			case priceSourceLitellm:
+				summary.Litellm++
+			case priceSourceFree:
+				summary.Free++
+			default:
+				summary.Unpriced++
+			}
+		}
+	}
+	return summary
 }
 
 // buildAdminOverview assembles adminOverviewResponse from the registry,
@@ -732,15 +861,7 @@ func (g *Gateway) buildAdminOverview() adminOverviewResponse {
 		groups[i] = adminGroupView{Name: gs.name, Limits: gs.limits, MemberCount: gs.memberCount}
 	}
 
-	aliasSnaps := g.registry.aliasSnapshot()
-	aliases := make([]adminAliasView, len(aliasSnaps))
-	for i, a := range aliasSnaps {
-		aliases[i] = adminAliasView{
-			Alias:     a.Alias,
-			Target:    a.Target,
-			ModelMeta: buildAdminModelMetaView(g.registry.resolveMetaForAliasName(a.Alias)),
-		}
-	}
+	aliases := g.buildAdminAliasViews()
 
 	warnings, warningsDropped := g.configWarningsSnapshot()
 	return adminOverviewResponse{
@@ -750,12 +871,32 @@ func (g *Gateway) buildAdminOverview() adminOverviewResponse {
 		Retry:           retryView,
 		Groups:          groups,
 		Aliases:         aliases,
+		Features:        g.buildAdminFeatures(),
+		Pricing:         buildAdminPricingSummary(snaps, g.cfg.Pricing, g.cfg.ModelMeta),
 		Version:         pluginVersion,
 		Replica:         g.replica,
 		Instance:        g.name,
 		Warnings:        warnings,
 		WarningsDropped: warningsDropped,
 	}
+}
+
+// buildAdminAliasViews returns every configured model alias's read-only
+// view (adminAliasView) — shared by GET /admin/api/overview's own
+// Aliases field (buildAdminOverview, above) and GET /admin/api/catalog's
+// identical field (admin_catalog.go), so the two can never list a
+// different alias set or disagree about one alias's resolved metadata.
+func (g *Gateway) buildAdminAliasViews() []adminAliasView {
+	aliasSnaps := g.registry.aliasSnapshot()
+	aliases := make([]adminAliasView, len(aliasSnaps))
+	for i, a := range aliasSnaps {
+		aliases[i] = adminAliasView{
+			Alias:     a.Alias,
+			Target:    a.Target,
+			ModelMeta: buildAdminModelMetaView(g.registry.resolveMetaForAliasName(a.Alias)),
+		}
+	}
+	return aliases
 }
 
 // serveAdminOverview writes buildAdminOverview's result as JSON.
@@ -810,7 +951,13 @@ type adminUsageEntryView struct {
 	// attributed to this scope today (F4, v0.3 dashboard task) — read via
 	// windowKey's metric "rej", window "day" (limits.go's metricRej).
 	RejectionsPerDay int64 `json:"rejectionsPerDay"`
-	StoreDown        bool  `json:"storeDown,omitempty"`
+	// LastSeen is this scope's most recent admitted-request instant, unix
+	// seconds (admin dashboard redesign, WP-B; DECISIONS Q6) — 0
+	// (omitted) means never observed, or unknown (a storeDown read).
+	// Sourced from scopeUsage.lastSeen (limits.go, WP-A step 1), the
+	// usageKeysPerScope's 10th key.
+	LastSeen  int64 `json:"lastSeen,omitempty"`
+	StoreDown bool  `json:"storeDown,omitempty"`
 }
 
 // adminUsageResponse is the full body of GET /admin/api/usage: every
@@ -841,6 +988,7 @@ func usageEntryView(su scopeUsage, limits *LimitsConfig) adminUsageEntryView {
 		CostPerDayMicroUSD:   su.costPerDayMicros,
 		CostPerMonthMicroUSD: su.costPerMonthMicros,
 		RejectionsPerDay:     su.rejectionsPerDay,
+		LastSeen:             su.lastSeen,
 		StoreDown:            su.storeDown,
 	}
 }
@@ -884,7 +1032,14 @@ func usageEntryView(su scopeUsage, limits *LimitsConfig) adminUsageEntryView {
 // store error marks every scope in ONE call storeDown together; chunking
 // narrows that blast radius to one chunk's worth of scopes instead of the
 // whole response, which is a strict improvement, not a new risk.
-const adminUsageChunkScopes = 200
+//
+// Lowered from 200 to 160 (admin dashboard redesign, WP-B) when
+// usageKeysPerScope grew from 9 to 10 for the new lastSeen counter
+// (limits.go, WP-A step 1): 160 scopes * 10 keys/scope = 1,600 keys per
+// chunk, keeping this endpoint's per-round-trip key count at the same
+// order of magnitude this constant has always targeted, rather than
+// letting it grow every time a future per-scope counter is added here.
+const adminUsageChunkScopes = 160
 
 // chunkedCurrentUsage calls limiter.currentUsage in batches of at most
 // adminUsageChunkScopes scopes at a time, concatenating the results in
@@ -1290,8 +1445,27 @@ type adminUsageModelEntryView struct {
 	TokensIn     *int64 `json:"tokensIn,omitempty"`
 	TokensOut    *int64 `json:"tokensOut,omitempty"`
 	CostMicroUSD *int64 `json:"costMicroUsd,omitempty"`
-	ID           string `json:"id"`
-	Value        int64  `json:"value"`
+	// CacheHits and CacheSavedMicroUsd (admin dashboard redesign, WP-B)
+	// are populated only in detail mode, only when features.cacheStats
+	// (the response cache is configured), AND only when window is "day"
+	// or "month" — nil for a window="hour" request too (P2 fix,
+	// serveAdminUsageModelsDetail's own doc comment): a model's chit/csave
+	// only ever have a DAY bucket, and there is no exact way to recover an
+	// hour-range value from whole-day sums.
+	CacheHits          *int64 `json:"cacheHits,omitempty"`
+	CacheSavedMicroUSD *int64 `json:"cacheSavedMicroUsd,omitempty"`
+	// R402 (admin dashboard redesign, WP-B) is populated only in detail
+	// mode: how many requests for this model were refused as unpriced
+	// under a caller's cost budget (metricR402) over the requested span.
+	R402 *int64 `json:"r402,omitempty"`
+	ID   string `json:"id"`
+	// PriceSource (admin dashboard redesign, WP-B) is populated only in
+	// detail mode: billingPriceSource's own result (pricing.go) for this
+	// model — the same "override"|"builtin"|"litellm"|"free"|"unpriced"
+	// vocabulary GET /admin/api/catalog's adminCatalogModel.PriceSource
+	// already uses.
+	PriceSource string `json:"priceSource,omitempty"`
+	Value       int64  `json:"value"`
 	// Free is populated only by serveAdminUsageModelsDetail too; false
 	// (the non-detail zero value) is dropped by its own omitempty.
 	Free bool `json:"free,omitempty"`
@@ -1308,7 +1482,12 @@ type adminUsageModelsResponse struct {
 	Window string                     `json:"window"`
 	Models []adminUsageModelEntryView `json:"models"`
 	Span   int                        `json:"span"`
-	Detail bool                       `json:"detail,omitempty"`
+	// Offset (admin dashboard redesign, WP-B) echoes the resolved offset
+	// (0 when the request carried no ?offset= parameter —
+	// parseStatsOffset's own default) — how many whole window-steps back
+	// from the current bucket this ranking's span starts.
+	Offset int  `json:"offset"`
+	Detail bool `json:"detail,omitempty"`
 }
 
 // usageModelsChunkKeys bounds how many counterStore keys
@@ -1332,66 +1511,32 @@ const usageModelsChunkKeys = 1600
 // mismatched read) fails the whole call: a ranking silently missing an
 // arbitrary subset of models is worse than a 503, so this never returns a
 // partial ranking.
-func (g *Gateway) chunkedModelSpanTotals(ids []string, metric, window string, now time.Time, span int) ([]int64, bool) {
-	perChunk := usageModelsChunkKeys / span
-	if perChunk < 1 {
-		perChunk = 1
+//
+// P12 fix (admin dashboard redesign verify round): now a thin
+// kind=kindModel wrapper over limits.go's spanTotalsMulti — the ONE
+// production span-sum reader this function's own chunking logic used to
+// duplicate (byte-for-byte) against admin.go's own separate
+// chunkedModelSpanTotalsMulti below AND limits_helpers_test.go's
+// test-only modelSpanTotals/modelSpanTotalsMulti. See spanTotalsMulti's
+// own doc comment for the chunking contract this preserves unchanged.
+func (g *Gateway) chunkedModelSpanTotals(ids []string, metric, window string, now time.Time, span, offset int) ([]int64, bool) {
+	out, ok := g.limiter.spanTotalsMulti(kindModel, ids, []string{metric}, window, now, span, offset)
+	if !ok {
+		return nil, false
 	}
-	out := make([]int64, 0, len(ids))
-	for len(ids) > 0 {
-		n := perChunk
-		if n > len(ids) {
-			n = len(ids)
-		}
-		totals, ok := g.limiter.modelSpanTotals(ids[:n], metric, window, now, span)
-		if !ok {
-			return nil, false
-		}
-		out = append(out, totals...)
-		ids = ids[n:]
-	}
-	return out, true
+	return out[0], true
 }
 
 // chunkedModelSpanTotalsMulti is chunkedModelSpanTotals generalized to
 // several metrics read together (GET /admin/api/usage/models' detail=1
 // mode, free-models feature: it needs all four metrics —
 // req/tokin/tokout/cost — for every candidate id, not just the one the
-// ranking sorts by). Each chunk's own key count is
-// len(chunk)*span*len(metrics), so perChunk divides usageModelsChunkKeys
-// by span*len(metrics) instead of span alone — chunkedModelSpanTotals'
-// own reasoning, extended for the extra metrics dimension. now is
-// resolved once by the caller and threaded through every chunk, exactly
-// like chunkedModelSpanTotals, and any chunk that fails fails the whole
-// call for the identical reason: a detail ranking silently missing an
-// arbitrary subset of models is worse than a 503.
-func (g *Gateway) chunkedModelSpanTotalsMulti(ids, metrics []string, window string, now time.Time, span int) ([][]int64, bool) {
-	if len(metrics) == 0 || span < 1 {
-		return nil, true
-	}
-	perChunk := usageModelsChunkKeys / (span * len(metrics))
-	if perChunk < 1 {
-		perChunk = 1
-	}
-	out := make([][]int64, len(metrics))
-	for m := range out {
-		out[m] = make([]int64, 0, len(ids))
-	}
-	for len(ids) > 0 {
-		n := perChunk
-		if n > len(ids) {
-			n = len(ids)
-		}
-		totals, ok := g.limiter.modelSpanTotalsMulti(ids[:n], metrics, window, now, span)
-		if !ok {
-			return nil, false
-		}
-		for m := range out {
-			out[m] = append(out[m], totals[m]...)
-		}
-		ids = ids[n:]
-	}
-	return out, true
+// ranking sorts by). P12 fix (admin dashboard redesign verify round): now
+// a thin kind=kindModel wrapper over limits.go's spanTotalsMulti — see
+// chunkedModelSpanTotals' own doc comment, immediately above, for what
+// this replaced.
+func (g *Gateway) chunkedModelSpanTotalsMulti(ids, metrics []string, window string, now time.Time, span, offset int) ([][]int64, bool) {
+	return g.limiter.spanTotalsMulti(kindModel, ids, metrics, window, now, span, offset)
 }
 
 // serveAdminUsageModels writes GET /admin/api/usage/models' ranking of the
@@ -1460,6 +1605,11 @@ func (g *Gateway) serveAdminUsageModels(sw *statusTrackingWriter, r *http.Reques
 		writeOAIError(sw, http.StatusBadRequest, "invalid_request_error", "invalid span")
 		return
 	}
+	offset, ok := parseStatsOffset(q.Get("offset"), window, span)
+	if !ok {
+		writeOAIError(sw, http.StatusBadRequest, "invalid_request_error", "invalid offset")
+		return
+	}
 	prefix, ok := parseUsageModelsPrefix(q.Get("prefix"))
 	if !ok {
 		writeOAIError(sw, http.StatusBadRequest, "invalid_request_error", "invalid prefix")
@@ -1481,13 +1631,34 @@ func (g *Gateway) serveAdminUsageModels(sw *statusTrackingWriter, r *http.Reques
 		}
 		ids = filtered
 	}
-
+	// P7 fix (admin dashboard redesign verify round): this cap used to
+	// check len(ids)*span regardless of detail mode, but detail mode
+	// reads up to 4 base metrics (req/tokin/tokout/cost) PLUS r402
+	// (always, P2 fix) PLUS chit/csave (when features.cacheStats and the
+	// window isn't hour) per id — up to 7x the single-metric estimate
+	// this check assumed. keyMultiplier over-estimates when a month
+	// window's cache/r402 reads convert to a smaller, retention-bounded
+	// day span (P2 fix, monthRangeToDayBuckets) — that only ever rejects
+	// a request earlier than strictly necessary, never lets an oversized
+	// one through.
+	keyMultiplier := 1
 	if detail {
-		g.serveAdminUsageModelsDetail(sw, ids, metric, window, span, limit)
+		keyMultiplier = len(usageModelsDetailMetrics()) + 1 // +1: r402, always read
+		if g.buildAdminFeatures().CacheStats {
+			keyMultiplier += 2 // chit, csave
+		}
+	}
+	if len(ids)*span*keyMultiplier > adminMaxKeysPerRequest {
+		writeOAIError(sw, http.StatusBadRequest, "invalid_request_error", "range too large; narrow span or filter")
 		return
 	}
 
-	totals, storeOK := g.chunkedModelSpanTotals(ids, metric, window, g.limiter.now(), span)
+	if detail {
+		g.serveAdminUsageModelsDetail(sw, ids, metric, window, span, offset, limit)
+		return
+	}
+
+	totals, storeOK := g.chunkedModelSpanTotals(ids, metric, window, g.limiter.now(), span, offset)
 	if !storeOK {
 		writeOAIError(sw, http.StatusServiceUnavailable, "server_error", "usage history store unavailable")
 		return
@@ -1511,7 +1682,7 @@ func (g *Gateway) serveAdminUsageModels(sw *statusTrackingWriter, r *http.Reques
 	}
 
 	setAdminJSONHeaders(sw)
-	_ = json.NewEncoder(sw).Encode(adminUsageModelsResponse{Metric: metric, Window: window, Span: span, Models: models})
+	_ = json.NewEncoder(sw).Encode(adminUsageModelsResponse{Metric: metric, Window: window, Span: span, Offset: offset, Models: models})
 }
 
 // usageModelsDetailMetrics is the fixed metric read/unpack order
@@ -1576,14 +1747,106 @@ func adminUsageModelFree(canonical, bare string, overrides map[string]*ModelPric
 // once two free models tie on the requested metric (typically cost, both
 // zero), requests is the natural next signal, ahead of the id fallback
 // every ranking already uses to stay stable across polls.
-func (g *Gateway) serveAdminUsageModelsDetail(sw *statusTrackingWriter, ids []string, metric, window string, span, limit int) {
+// monthRangeToDayBuckets converts a windowMonth span/offset (relative to
+// now) into the windowDay span/offset covering the EXACT SAME calendar
+// range — P2 fix, admin dashboard redesign verify round: GET
+// /admin/api/usage/models' detail=1 mode needs this for the counter
+// families that have no month bucket of their own (r402) or only ever
+// have a DAY bucket at the model scope (chit/csave — plan §1.2's "model
+// day only" row). Month and day buckets both align on calendar
+// boundaries (historyStepBack's own month case always anchors on the 1st
+// of a month, limits.go), so this conversion is exact, not an
+// approximation: every day it names falls entirely inside the requested
+// month range, and every day in that range is named. A day outside the
+// day family's own retention (historyMaxSpan(windowDay), 35) simply reads
+// back 0 through the store, which is the correct answer for data that
+// was never kept that long — the returned span is capped at that
+// retention purely to avoid building a key list for months of days none
+// of which could possibly hold live data.
+func monthRangeToDayBuckets(now time.Time, span, offset int) (daySpan, dayOffset int) {
+	u := now.UTC()
+	today := time.Date(u.Year(), u.Month(), u.Day(), 0, 0, 0, 0, time.UTC)
+	monthAnchor := time.Date(u.Year(), u.Month(), 1, 0, 0, 0, 0, time.UTC)
+	lastMonth := monthAnchor.AddDate(0, -offset, 0)
+	firstMonth := lastMonth.AddDate(0, -(span - 1), 0)
+	lastDay := today
+	if offset > 0 {
+		lastDay = lastMonth.AddDate(0, 1, -1) // last calendar day of lastMonth
+	}
+	dayOffset = int(today.Sub(lastDay).Hours() / 24)
+	daySpan = int(lastDay.Sub(firstMonth).Hours()/24) + 1
+	if max := historyMaxSpan(windowDay) - dayOffset; daySpan > max {
+		if max < 1 {
+			max = 1
+		}
+		daySpan = max
+	}
+	return daySpan, dayOffset
+}
+
+func (g *Gateway) serveAdminUsageModelsDetail(sw *statusTrackingWriter, ids []string, metric, window string, span, offset, limit int) {
+	now := g.limiter.now()
 	metrics := usageModelsDetailMetrics()
-	totalsByMetric, storeOK := g.chunkedModelSpanTotalsMulti(ids, metrics, window, g.limiter.now(), span)
+	totalsByMetric, storeOK := g.chunkedModelSpanTotalsMulti(ids, metrics, window, now, span, offset)
 	if !storeOK {
 		writeOAIError(sw, http.StatusServiceUnavailable, "server_error", "usage history store unavailable")
 		return
 	}
 	valueIdx := usageModelsMetricIndex(metric)
+
+	// r402 (admin dashboard redesign, WP-B; P2 fix, verify round): ALWAYS
+	// read, independent of features.cacheStats — r402 counts refused-
+	// unpriced-under-a-cost-budget requests, unrelated to the response
+	// cache. It used to be folded into the SAME cache-gated read as
+	// chit/csave, forced to windowDay regardless of the caller's own
+	// window — wrong on two counts: gated on cache config at all, and
+	// accountWith's own recordUnpriced402 (limits.go) writes a model's
+	// r402 at BOTH hour and day, so an hour-window request silently read
+	// 24-120x too many day buckets while a month-window request read only
+	// 1 day per month instead of the whole month. Read at the caller's
+	// own window when r402 has a bucket there (hour or day, exact);
+	// convert to the covering day buckets when it is month (r402 has no
+	// month bucket — monthRangeToDayBuckets, above, is exact for this).
+	r402Window, r402Span, r402Offset := window, span, offset
+	if window == windowMonth {
+		r402Window = windowDay
+		r402Span, r402Offset = monthRangeToDayBuckets(now, span, offset)
+	}
+	r402Multi, storeOK := g.chunkedModelSpanTotalsMulti(ids, []string{metricR402}, r402Window, now, r402Span, r402Offset)
+	if !storeOK {
+		writeOAIError(sw, http.StatusServiceUnavailable, "server_error", "usage history store unavailable")
+		return
+	}
+	r402ByID := r402Multi[0]
+
+	// chit/csave (admin dashboard redesign, WP-B): only when
+	// features.cacheStats (the response cache is configured) — nil
+	// otherwise, as before. Unlike r402, a model's chit/csave are ONLY
+	// ever written at windowDay (recordCacheHit, limits.go — plan §1.2's
+	// "model day only" row), so there is no hour bucket to read at all:
+	// window==day reads directly; window==month converts to the exact
+	// covering day buckets, same as r402 above; window==hour is left
+	// OMITTED (both fields stay nil, not a fabricated or over-counted
+	// number) — an hour range's true chit/csave cannot be recovered from
+	// whole-day sums without also counting every hour of those days OUTSIDE
+	// the requested range, so there is no exact answer to give (documented
+	// in README.md's GET /admin/api/usage/models section).
+	cacheEnabled := g.buildAdminFeatures().CacheStats
+	var chitByID, csaveByID []int64
+	if cacheEnabled && window != windowHour {
+		cacheWindow, cacheSpan, cacheOffset := window, span, offset
+		if window == windowMonth {
+			cacheWindow = windowDay
+			cacheSpan, cacheOffset = monthRangeToDayBuckets(now, span, offset)
+		}
+		var cacheMulti [][]int64
+		cacheMulti, storeOK = g.chunkedModelSpanTotalsMulti(ids, []string{metricChit, metricCsave}, cacheWindow, now, cacheSpan, cacheOffset)
+		if !storeOK {
+			writeOAIError(sw, http.StatusServiceUnavailable, "server_error", "usage history store unavailable")
+			return
+		}
+		chitByID, csaveByID = cacheMulti[0], cacheMulti[1]
+	}
 
 	models := make([]adminUsageModelEntryView, 0, len(ids))
 	for i, id := range ids {
@@ -1595,7 +1858,9 @@ func (g *Gateway) serveAdminUsageModelsDetail(sw *statusTrackingWriter, ids []st
 			continue
 		}
 		_, bare, _ := strings.Cut(id, "/")
-		models = append(models, adminUsageModelEntryView{
+		source, _ := billingPriceSource(id, bare, g.cfg.Pricing, g.cfg.ModelMeta)
+		r402 := r402ByID[i]
+		entry := adminUsageModelEntryView{
 			ID:           id,
 			Value:        totalsByMetric[valueIdx][i],
 			Requests:     &req,
@@ -1603,7 +1868,16 @@ func (g *Gateway) serveAdminUsageModelsDetail(sw *statusTrackingWriter, ids []st
 			TokensOut:    &tokOut,
 			CostMicroUSD: &cost,
 			Free:         adminUsageModelFree(id, bare, g.cfg.Pricing, g.cfg.ModelMeta),
-		})
+			PriceSource:  source,
+			R402:         &r402,
+		}
+		if chitByID != nil {
+			chit := chitByID[i]
+			csave := csaveByID[i]
+			entry.CacheHits = &chit
+			entry.CacheSavedMicroUSD = &csave
+		}
+		models = append(models, entry)
 	}
 	sort.Slice(models, func(i, j int) bool {
 		if models[i].Value != models[j].Value {
@@ -1619,7 +1893,7 @@ func (g *Gateway) serveAdminUsageModelsDetail(sw *statusTrackingWriter, ids []st
 	}
 
 	setAdminJSONHeaders(sw)
-	_ = json.NewEncoder(sw).Encode(adminUsageModelsResponse{Metric: metric, Window: window, Span: span, Models: models, Detail: true})
+	_ = json.NewEncoder(sw).Encode(adminUsageModelsResponse{Metric: metric, Window: window, Span: span, Offset: offset, Models: models, Detail: true})
 }
 
 // parseEventsLimit parses GET /admin/api/events' "limit" query parameter

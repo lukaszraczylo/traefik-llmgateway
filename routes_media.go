@@ -127,11 +127,18 @@ func (g *Gateway) handleImagesGenerations(w http.ResponseWriter, r *http.Request
 	ctx := withAttemptRecorder(r.Context(), func(resp *http.Response, attemptErr error) {
 		g.limiter.recordProviderAttempt(adapter.name(), upstreamModel, resp, attemptErr)
 	})
-	// feat: instrument upstream latency — gated on metricsEnabled, same
-	// reasoning as runUnified's identical wiring (routes_unified.go).
-	if metricsEnabled(g.cfg) {
+	// feat: instrument upstream latency — gated on metricsEnabled OR
+	// admin.stats.latency, same reasoning as runUnified's identical wiring
+	// (routes_unified.go).
+	var latSample latencySample
+	var hasLat bool
+	if metricsEnabled(g.cfg) || g.limiter.statsLatency {
 		ctx = withLatencyRecorder(ctx, func(sample latencySample) {
-			g.recordLatency(adapter.name(), upstreamModel, sample)
+			latSample = sample
+			hasLat = true
+			if metricsEnabled(g.cfg) {
+				g.recordLatency(adapter.name(), upstreamModel, sample)
+			}
 		})
 	}
 	if _, err := adapter.imagesGeneration(ctx, sw, req); err != nil {
@@ -139,7 +146,7 @@ func (g *Gateway) handleImagesGenerations(w http.ResponseWriter, r *http.Request
 		g.handleAdapterError(sw, err, adapter.name())
 		return
 	}
-	g.recordMediaModelUsage(adapter.name(), upstreamModel)
+	g.recordMediaModelUsage(adapter.name(), upstreamModel, latSample, hasLat)
 }
 
 // handleAudioSpeech implements POST /v1/audio/speech (spec §3): an
@@ -196,11 +203,18 @@ func (g *Gateway) handleAudioSpeech(w http.ResponseWriter, r *http.Request, u *u
 	ctx := withAttemptRecorder(r.Context(), func(resp *http.Response, attemptErr error) {
 		g.limiter.recordProviderAttempt(adapter.name(), upstreamModel, resp, attemptErr)
 	})
-	// feat: instrument upstream latency — gated on metricsEnabled, same
-	// reasoning as runUnified's identical wiring (routes_unified.go).
-	if metricsEnabled(g.cfg) {
+	// feat: instrument upstream latency — gated on metricsEnabled OR
+	// admin.stats.latency, same reasoning as runUnified's identical wiring
+	// (routes_unified.go).
+	var latSample latencySample
+	var hasLat bool
+	if metricsEnabled(g.cfg) || g.limiter.statsLatency {
 		ctx = withLatencyRecorder(ctx, func(sample latencySample) {
-			g.recordLatency(adapter.name(), upstreamModel, sample)
+			latSample = sample
+			hasLat = true
+			if metricsEnabled(g.cfg) {
+				g.recordLatency(adapter.name(), upstreamModel, sample)
+			}
 		})
 	}
 	if _, err := adapter.audioSpeech(ctx, sw, body, "application/json"); err != nil {
@@ -208,7 +222,7 @@ func (g *Gateway) handleAudioSpeech(w http.ResponseWriter, r *http.Request, u *u
 		g.handleAdapterError(sw, err, adapter.name())
 		return
 	}
-	g.recordMediaModelUsage(adapter.name(), upstreamModel)
+	g.recordMediaModelUsage(adapter.name(), upstreamModel, latSample, hasLat)
 }
 
 // handleAudioTranscriptions implements POST /v1/audio/transcriptions
@@ -304,11 +318,18 @@ func (g *Gateway) handleAudioTranscriptions(w http.ResponseWriter, r *http.Reque
 	ctx := withAttemptRecorder(r.Context(), func(resp *http.Response, attemptErr error) {
 		g.limiter.recordProviderAttempt(adapter.name(), upstreamModel, resp, attemptErr)
 	})
-	// feat: instrument upstream latency — gated on metricsEnabled, same
-	// reasoning as runUnified's identical wiring (routes_unified.go).
-	if metricsEnabled(g.cfg) {
+	// feat: instrument upstream latency — gated on metricsEnabled OR
+	// admin.stats.latency, same reasoning as runUnified's identical wiring
+	// (routes_unified.go).
+	var latSample latencySample
+	var hasLat bool
+	if metricsEnabled(g.cfg) || g.limiter.statsLatency {
 		ctx = withLatencyRecorder(ctx, func(sample latencySample) {
-			g.recordLatency(adapter.name(), upstreamModel, sample)
+			latSample = sample
+			hasLat = true
+			if metricsEnabled(g.cfg) {
+				g.recordLatency(adapter.name(), upstreamModel, sample)
+			}
 		})
 	}
 	if _, err := adapter.audioTranscription(ctx, sw, uploadBody, uploadContentType); err != nil {
@@ -316,7 +337,7 @@ func (g *Gateway) handleAudioTranscriptions(w http.ResponseWriter, r *http.Reque
 		g.handleAdapterError(sw, err, adapter.name())
 		return
 	}
-	g.recordMediaModelUsage(adapter.name(), upstreamModel)
+	g.recordMediaModelUsage(adapter.name(), upstreamModel, latSample, hasLat)
 }
 
 // recordMediaModelUsage writes ONLY the kindModel scope's own request
@@ -344,9 +365,21 @@ func (g *Gateway) handleAudioTranscriptions(w http.ResponseWriter, r *http.Reque
 // the same single-round-trip account already batches for every other
 // scope, called synchronously here, the same as every other account call
 // site (routes_unified.go, routes_passthrough.go).
-func (g *Gateway) recordMediaModelUsage(providerName, upstreamModel string) {
+//
+// lat/hasLat (admin-redesign WP-A) carry the same completed-upstream
+// latency sample runUnified/handlePassthrough thread into their own
+// accountWith call — recordMediaModelUsage passes them through via
+// accountExtras.provider/lat/hasLat, exactly like those two routes, so a
+// media route's own opt-in latency counters (admin.stats.latency) get
+// written from the identical call site, never a second one.
+func (g *Gateway) recordMediaModelUsage(providerName, upstreamModel string, lat latencySample, hasLat bool) {
 	canonical := providerModelScopeID(providerName, upstreamModel)
-	g.limiter.account(withModelScope(nil, canonical), usage{}, 0)
+	extras := accountExtras{provider: providerName}
+	if hasLat {
+		extras.lat = lat
+		extras.hasLat = true
+	}
+	g.limiter.accountWith(withModelScope(nil, canonical), usage{}, 0, extras)
 }
 
 // readAdmittedCapped claims a body-admission slot (acquireBodyAdmission),

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"runtime"
 	"strings"
@@ -510,8 +511,35 @@ type TargetHealthConfig struct {
 // exactly: no /admin* route is registered, so those paths fall through
 // to ServeHTTP's existing 404/passthroughUnknown handling like any other
 // unrecognized path.
+//
+// Stats (admin-redesign WP-A, DECISIONS Q4) is nil for every config that
+// predates it, or explicitly omitted — additive and default-preserving
+// (house rule): a nil Stats behaves exactly like &AdminStatsConfig{} would
+// (every sub-flag off), never an error, so an upgrade with no config
+// change adds no new counter writes. newConfiguredLimiter (below) reads
+// this alongside Enabled to derive the limiter's own statsAdmin/
+// statsUserModel/statsLatency fields.
 type AdminConfig struct {
-	Enabled bool `json:"enabled,omitempty"`
+	Stats   *AdminStatsConfig `json:"stats,omitempty"`
+	Enabled bool              `json:"enabled,omitempty"`
+}
+
+// AdminStatsConfig opts into two counter families this task adds that are
+// NOT part of the "always-on-with-admin" set (DECISIONS): both default to
+// false (off) even when Admin.Enabled is true, since each has its own,
+// separate cost/cardinality trade-off an operator should choose
+// explicitly rather than inherit silently from turning the dashboard on.
+type AdminStatsConfig struct {
+	// UserModel opts into the per-(user, model) usage breakdown
+	// (kindUserModel counters, limits.go) — cardinality grows with
+	// users x models actually used, unlike every always-on family.
+	UserModel bool `json:"userModel,omitempty"`
+	// Latency opts into the per-bucket upstream latency counters
+	// (accountWith's own latency block, limits.go) — up to 8 more
+	// counterIncr entries per request (4 duration + 4 TTFB buckets) riding
+	// the existing account batch, only ever written when a candidate's
+	// watchdogBody actually reports a latencySample.
+	Latency bool `json:"latency,omitempty"`
 }
 
 // ModelPricing overrides the built-in per-model price table.
@@ -1065,6 +1093,37 @@ func newGateway(ctx context.Context, next http.Handler, config *Config, name str
 	}
 	g.adapters = adapters
 
+	// P5 fix, additive part (admin dashboard redesign verify round): warn
+	// — never fail construction — about a provider baseUrl that does not
+	// parse as a URL. buildAdapters (providers.go) only ever trims a
+	// trailing slash off BaseURL; it never validated the value itself, so
+	// an operator's typo (an unescaped '/' in embedded userinfo, a
+	// malformed '%' escape, ...) previously surfaced only indirectly, as
+	// sanitizeBaseURL's own placeholder (admin.go) wherever the dashboard
+	// echoed it back. A warning, not a construction error, keeps this
+	// additive and default-preserving: a deployment that has run for a
+	// long time with an unparseable baseUrl keeps running unchanged, now
+	// with an explicit signal in GET /admin/api/overview's Warnings field
+	// instead of a silently redacted dashboard value. Iteration order over
+	// config.Providers is unspecified (Go map order), which is fine here:
+	// every warning is independent and their relative order is never
+	// observed by anything but a human reading the list.
+	for name, pc := range config.Providers {
+		if pc == nil || pc.BaseURL == "" {
+			continue
+		}
+		// The parse error itself is NEVER interpolated into this message:
+		// Go's *url.Error.Error() embeds the raw input string verbatim
+		// ("parse \"<raw>\": <reason>"), which is exactly the credential-
+		// bearing value sanitizeBaseURL exists to withhold — this warning
+		// would otherwise reopen the same leak through g.configWarnings /
+		// GET /admin/api/overview's own Warnings field instead of through
+		// baseUrl directly.
+		if _, parseErr := url.Parse(pc.BaseURL); parseErr != nil {
+			g.warnf("config: provider %q baseUrl does not parse as a URL; the admin dashboard will show it redacted as %q", name, unparseableBaseURLPlaceholder)
+		}
+	}
+
 	// targetTimeout: the global default only (resolveRequestTimeout,
 	// timeout.go) — an MCP/A2A target has no per-target override the way a
 	// provider does (ProviderConfig.RequestTimeout). Resolved again here,
@@ -1189,15 +1248,30 @@ func buildRedisClient(rc *RedisConfig) (*respClient, error) {
 // defaults to true (a Redis outage must not take the whole gateway down
 // unless an operator opts into strict enforcement) unless
 // RedisConfig.FailOpen is explicitly set.
+//
+// admin-redesign WP-A: also derives the limiter's own statsAdmin/
+// statsUserModel/statsLatency fields from config.Admin, regardless of
+// which store branch built l — no new constructor parameter, since
+// newLimiter's own signature (store, failOpen) is a public contract this
+// task does not touch; every field it does not set here (lastSeen) is
+// already initialized by newLimiter itself.
 func newConfiguredLimiter(config *Config, client *respClient) *limiter {
+	var l *limiter
 	if client == nil {
-		return newLimiter(nil, true)
+		l = newLimiter(nil, true)
+	} else {
+		failOpen := true
+		if config.Redis.FailOpen != nil {
+			failOpen = *config.Redis.FailOpen
+		}
+		l = newLimiter(newRedisStore(client), failOpen)
 	}
-	failOpen := true
-	if config.Redis.FailOpen != nil {
-		failOpen = *config.Redis.FailOpen
+	l.statsAdmin = adminEnabled(config)
+	if l.statsAdmin && config.Admin.Stats != nil {
+		l.statsUserModel = config.Admin.Stats.UserModel
+		l.statsLatency = config.Admin.Stats.Latency
 	}
-	return newLimiter(newRedisStore(client), failOpen)
+	return l
 }
 
 // attachUsersFile performs the synchronous initial load of a Users.File path

@@ -190,6 +190,54 @@ func saturatingAddInt64(a, b int64) int64 {
 	return sum
 }
 
+// priceSourceOverride, priceSourceBuiltin, priceSourceLitellm,
+// priceSourceFree and priceSourceUnpriced enumerate every value
+// billingPriceSource (below) and GET /admin/api/catalog's own
+// adminCatalogModel.PriceSource field (admin_catalog.go) can report —
+// lookupPricingSource's own three lookup layers, plus modelMetaFree's
+// explicit "free", plus "no price found at all". A model whose id
+// merely carries the freeTierSuffix (":free", modelmeta.go) resolves to
+// priceSourceUnpriced here — that DISPLAY-only free-tier naming
+// convention never counts as a real billing source on its own; GET
+// /admin/api/catalog surfaces it through its own separate DisplayFree
+// field instead (DECISIONS Q3 — see billingPriceSource's own doc
+// comment below).
+const (
+	priceSourceOverride = "override"
+	priceSourceBuiltin  = "builtin"
+	priceSourceLitellm  = "litellm"
+	priceSourceFree     = "free"
+	priceSourceUnpriced = "unpriced"
+)
+
+// lookupPricingSource resolves model's price exactly like lookupPricing
+// (below, now a thin wrapper around this), additionally reporting WHICH
+// layer matched: priceSourceOverride, priceSourceBuiltin, or
+// priceSourceLitellm, in that same precedence order — an operator
+// override always wins, builtinPricing (curated, more likely to be
+// current) wins over the generated table next, and the generated table
+// is only ever the last resort (F2, 2026-09 review — see lookupPricing's
+// own doc comment, unchanged below, for the full per-layer reasoning).
+// ok is false, with source == "", when no layer prices model at all.
+// This function's own resolution is byte-for-byte identical to
+// lookupPricing's prior direct implementation; it only ADDS the source
+// label GET /admin/api/catalog needs (billingPriceSource, below).
+func lookupPricingSource(model string, overrides map[string]*ModelPricing) (price ModelPricing, source string, ok bool) {
+	if p, ok := overrides[model]; ok && p != nil {
+		return *p, priceSourceOverride, true
+	}
+	if p, ok := builtinPricing[model]; ok {
+		return p, priceSourceBuiltin, true
+	}
+	if m, ok := builtinModelMetaTable[model]; ok && (m.InputCostPerMTokMicroUSD > 0 || m.OutputCostPerMTokMicroUSD > 0) {
+		return ModelPricing{
+			InputPerM:  microUSDPerMTokToUSD(m.InputCostPerMTokMicroUSD),
+			OutputPerM: microUSDPerMTokToUSD(m.OutputCostPerMTokMicroUSD),
+		}, priceSourceLitellm, true
+	}
+	return ModelPricing{}, "", false
+}
+
 // lookupPricing resolves model's price: overrides first (a nil entry does
 // not count as a match, so a caller can't accidentally price a model at
 // zero by leaving a map entry nil), then builtinPricing, then
@@ -213,20 +261,51 @@ func saturatingAddInt64(a, b int64) int64 {
 // an operator override always wins, builtinPricing (curated, more likely
 // to be current) wins over the generated table next, and the generated
 // table is only ever the last resort.
+//
+// A thin wrapper around lookupPricingSource (above, GET /admin/api/catalog
+// feature) since the extension here needed both the price and which layer
+// produced it — this call site only ever wanted the price.
 func lookupPricing(model string, overrides map[string]*ModelPricing) (ModelPricing, bool) {
-	if p, ok := overrides[model]; ok && p != nil {
-		return *p, true
+	price, _, ok := lookupPricingSource(model, overrides)
+	return price, ok
+}
+
+// billingPriceSource reports the SAME price/source billing itself would
+// charge for a request serving canonical ("provider/model") / bare (the
+// upstream model id alone) — mirroring unifiedCostMicros' own resolution
+// order EXACTLY (routes_unified.go): modelMetaFree first (an operator
+// modelMeta:{free:true} entry always wins, priceSourceFree, zero price),
+// then lookupPricingSource against canonical, then against bare, then
+// priceSourceUnpriced (ModelPricing{}) when neither carries a price at
+// any layer. GET /admin/api/catalog's own "billing truth" PriceSource
+// field (admin_catalog.go) calls this directly so the catalog view and
+// actual billing can never disagree about which price a model resolves
+// to — the same guarantee modelMetaFree's own doc comment already
+// promises between unifiedCostMicros and priceKnown.
+//
+// A ":free"-suffixed model id (freeTierSuffix, modelmeta.go) is NOT
+// specially handled here: unifiedCostMicros itself never consults that
+// suffix either (it only affects resolveModelMeta's DISPLAY-path cost
+// resolution, GET /v1/models), so such an id resolves through the normal
+// override/builtin/litellm/unpriced layers exactly like any other id —
+// usually priceSourceUnpriced, since the suffix rarely matches a real
+// priced entry. A caller wanting to also surface that naming convention
+// (DECISIONS Q3: "':free' suffix models: report priceSource 'unpriced' +
+// displayFree; billing unchanged") checks strings.HasSuffix(bare,
+// freeTierSuffix) itself, alongside this result (admin_catalog.go) — that
+// flag is display-only and must never change what this function reports
+// as the billing source.
+func billingPriceSource(canonical, bare string, overrides map[string]*ModelPricing, meta map[string]*ModelMetaConfig) (source string, price ModelPricing) {
+	if modelMetaFree(canonical, bare, meta) {
+		return priceSourceFree, ModelPricing{}
 	}
-	if p, ok := builtinPricing[model]; ok {
-		return p, true
+	if p, src, ok := lookupPricingSource(canonical, overrides); ok {
+		return src, p
 	}
-	if m, ok := builtinModelMetaTable[model]; ok && (m.InputCostPerMTokMicroUSD > 0 || m.OutputCostPerMTokMicroUSD > 0) {
-		return ModelPricing{
-			InputPerM:  microUSDPerMTokToUSD(m.InputCostPerMTokMicroUSD),
-			OutputPerM: microUSDPerMTokToUSD(m.OutputCostPerMTokMicroUSD),
-		}, true
+	if p, src, ok := lookupPricingSource(bare, overrides); ok {
+		return src, p
 	}
-	return ModelPricing{}, false
+	return priceSourceUnpriced, ModelPricing{}
 }
 
 // validatePricing validates every entry in raw (Config.Pricing overrides)
