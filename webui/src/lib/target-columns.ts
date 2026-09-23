@@ -4,7 +4,7 @@ import { h } from 'vue'
 import CompactNumber from '@/components/CompactNumber.vue'
 import { Badge } from '@/components/ui/badge'
 import { formatElapsedAgo, formatLatencyMs } from '@/lib/format'
-import type { AdminTargetHealthView, AdminTargetView } from '@/types/api'
+import type { AdminTargetHealthView, AdminTargetView, AdminTotalsResponse } from '@/types/api'
 
 /**
  * numericColumn builds one right-aligned, sortable request-counter
@@ -30,7 +30,7 @@ function numericColumn(id: string, header: string, read: (t: AdminTargetView) =>
 
 // --- target health (feat/target-health) ---
 //
-// Mirrors ProvidersView.vue's own healthBadgeVariant/healthBadgeLabel
+// Mirrors ProviderHealthPanel.vue's own healthBadgeVariant/healthBadgeLabel
 // convention for the discovery circuit breaker: a Badge only for the two
 // states worth flagging (unhealthy, unknown); the common healthy case
 // renders no badge at all, just muted inline text — the same "nothing to
@@ -107,20 +107,40 @@ function healthCell(health: AdminTargetHealthView) {
  * servers and the Agents DataTable in TargetsView.vue use (admin.go:
  * adminTargetView — the two tables share one identical row shape). name is
  * plain text (not the ModelChip copy treatment — a target name is not a
- * routable model id); url is muted and truncated with a title attribute
- * for the full value; health is the Badge/muted-text pair healthCell above
- * builds (feat/target-health); access renders as a Badge per allowed
- * group, or a muted "All groups" when unrestricted — the exact idiom
- * UsageView.vue's own group Access block already established (Providers/
- * Models/MCP servers/Agents dt/dd pairs there).
+ * routable model id) UNLESS `onSelect` is given, in which case it renders
+ * as a real `<button>` (same structural convention as EntityLink.vue: a
+ * click opens that target's own caller breakdown, TargetCallers.vue,
+ * rather than navigating away — redesign-plan.md section 3.4's
+ * "TargetCallers.vue expander"). url is muted and truncated with a title
+ * attribute for the full value; health is the Badge/muted-text pair
+ * healthCell above builds (feat/target-health); access renders as a
+ * Badge per allowed group, or a muted "All groups" when unrestricted —
+ * the exact idiom ConsumerDirectory.vue's own group Access block already
+ * established (Providers/Models/MCP servers/Agents dt/dd pairs there).
  */
-export function targetColumns(): ColumnDef<AdminTargetView, unknown>[] {
+export function targetColumns(onSelect?: (target: AdminTargetView) => void): ColumnDef<AdminTargetView, unknown>[] {
   return [
     {
       id: 'name',
       header: 'Name',
       accessorFn: (t) => t.name,
-      cell: ({ row }) => h('span', { class: 'font-medium' }, row.original.name),
+      cell: ({ row }) => {
+        if (!onSelect) return h('span', { class: 'font-medium' }, row.original.name)
+        return h(
+          'button',
+          {
+            type: 'button',
+            class:
+              'cursor-pointer rounded-sm font-medium hover:text-primary hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50',
+            title: `View ${row.original.name}'s callers`,
+            onClick: (event: MouseEvent) => {
+              event.stopPropagation()
+              onSelect(row.original)
+            },
+          },
+          row.original.name,
+        )
+      },
     },
     {
       id: 'url',
@@ -165,4 +185,101 @@ export function targetColumns(): ColumnDef<AdminTargetView, unknown>[] {
     numericColumn('reqDay', 'req/day', (t) => t.counters.requestsPerDay),
     numericColumn('reqMonth', 'req/month', (t) => t.counters.requestsPerMonth),
   ]
+}
+
+// --- target x caller (redesign-plan.md section 3.4's "TargetCallers.vue
+// expander" + "top callers" card) ---
+//
+// GET /admin/api/usage/totals?kind=targetcaller (redesign-plan.md section
+// 1.3.v) has no dedicated row type in types/api.ts — AdminTotalsResponse
+// inlines its row shape rather than naming it, so `TargetCallerRow` is
+// derived from that response's own `rows` element type here (single source
+// of truth: a future field added to the inline shape needs no second edit
+// in this file).
+type TargetCallerRow = AdminTotalsResponse['rows'][number]
+
+export type TargetKind = 'mcp' | 'agent'
+
+/**
+ * composeTargetId builds the "mcp/{name}" / "agent/{name}" composite id
+ * GET /admin/api/usage/totals?kind=targetcaller&target= expects (admin.go)
+ * — the SAME prefix a targetcaller row's own `id` starts with
+ * (parseTargetCallerId below splits it back apart).
+ */
+export function composeTargetId(kind: TargetKind, name: string): string {
+  return `${kind}/${name}`
+}
+
+/**
+ * ParsedTargetCallerId is one targetcaller row's `id`
+ * ("mcp/fetch/alice" — AdminTotalsResponse's own doc comment) split into
+ * its three parts.
+ */
+export interface ParsedTargetCallerId {
+  kind: string
+  target: string
+  caller: string
+}
+
+/**
+ * parseTargetCallerId never throws: an id missing either slash (a
+ * version-skewed server, or a caller name that happens to contain no
+ * slash of its own — the only way this format is ambiguous) degrades
+ * gracefully rather than dropping the row — `target`/`caller` fall back to
+ * "" so a caller can still detect the shortfall (empty string, not
+ * undefined) and choose to render the raw id verbatim.
+ */
+export function parseTargetCallerId(id: string): ParsedTargetCallerId {
+  const first = id.indexOf('/')
+  if (first === -1) return { kind: '', target: '', caller: id }
+  const kind = id.slice(0, first)
+  const rest = id.slice(first + 1)
+  const second = rest.indexOf('/')
+  if (second === -1) return { kind, target: rest, caller: '' }
+  return { kind, target: rest.slice(0, second), caller: rest.slice(second + 1) }
+}
+
+/**
+ * targetCallerColumns builds the shared TanStack `ColumnDef` set
+ * TargetCallers.vue's DataTable uses for both its modes: a single
+ * target's own caller breakdown (`showTarget: false` — the panel's own
+ * heading already names the target) and the fleet-wide "top callers" card
+ * (`showTarget: true` — each row's own target is not implied by anything
+ * else on screen). `requests` is the only metric the server returns for
+ * this kind (contract: "targetcaller req only"), so there is no metric
+ * picker here, unlike model-table-columns.ts's multi-metric table.
+ */
+export function targetCallerColumns(showTarget: boolean): ColumnDef<TargetCallerRow, unknown>[] {
+  const columns: ColumnDef<TargetCallerRow, unknown>[] = []
+  if (showTarget) {
+    columns.push({
+      id: 'target',
+      header: 'Target',
+      accessorFn: (row) => {
+        const p = parseTargetCallerId(row.id)
+        return `${p.kind}/${p.target}`
+      },
+      cell: ({ row }) => {
+        const p = parseTargetCallerId(row.original.id)
+        return h('span', { class: 'font-mono text-xs text-muted-foreground' }, `${p.kind}/${p.target}`)
+      },
+    })
+  }
+  columns.push({
+    id: 'caller',
+    header: 'Caller',
+    accessorFn: (row) => parseTargetCallerId(row.id).caller || row.id,
+    cell: ({ row }) => {
+      const caller = parseTargetCallerId(row.original.id).caller
+      return h('span', { class: 'font-medium' }, caller || row.original.id)
+    },
+  })
+  columns.push({
+    id: 'requests',
+    header: 'Requests',
+    meta: { align: 'right' },
+    accessorFn: (row) => row.values.req ?? 0,
+    cell: ({ row }) => h(CompactNumber, { value: row.original.values.req ?? 0 }),
+  })
+  return columns
 }

@@ -10,13 +10,14 @@ const POLL_MS = 5000
 
 /**
  * useDashboardStore polls GET /admin/api/overview, GET /admin/api/usage,
- * and GET /admin/api/targets together every POLL_MS, feeding the
- * Providers, Usage, and MCP & Agents views (the store's own `overview`
- * field keeps the backend's name — see ProvidersView.vue's doc comment
- * for the UI-label/API-name split). A single store (not three) because
- * every route is always fetched together — the old vanilla-JS page's own
- * Promise.all([overview, usage]) pattern, extended to targets (Feature B,
- * v0.21) rather than given its own separate poll timer.
+ * and GET /admin/api/targets together every POLL_MS — the fleet-wide,
+ * always-current data every page in the redesigned shell reads from
+ * (Home's KPI tiles, ConsumerDirectory/UserDetail's own usage rows,
+ * ProviderHealthPanel's provider list, TargetsView's target list). A
+ * single store (not three) because every route is always fetched
+ * together — the old vanilla-JS page's own Promise.all([overview, usage])
+ * pattern, extended to targets (Feature B, v0.21) rather than given its
+ * own separate poll timer.
  */
 export const useDashboardStore = defineStore('dashboard', {
   state: () => ({
@@ -110,12 +111,14 @@ export const useDashboardStore = defineStore('dashboard', {
       this.poller = createVisibilityPoller({ intervalMs: POLL_MS, tick: () => void this.refresh() })
       this.poller.start()
     },
-    // P11 review fix: a stopPolling action mirroring history.ts/events.ts's
-    // own stop() used to live here too, but nothing outside its OWN spec
-    // ever called it — App.vue mounts this store's poller once, for the
-    // app's whole session, and never unmounts it (unlike history.ts/
-    // events.ts, whose stores are torn down when ChartsView/EventsView
-    // unmount). Dead application-facing API surface, removed; `poller`
-    // itself stays (startPolling's own idempotency guard still needs it).
+    // P11 review fix: a stopPolling action mirroring events.ts's own
+    // stop() used to live here too, but nothing outside its OWN spec ever
+    // called it — App.vue mounts this store's poller once, for the app's
+    // whole session, and never unmounts it (unlike events.ts, whose store
+    // IS torn down when EventsView unmounts — the same page-scoped
+    // pattern the pre-redesign Usage/Charts tabs' own now-deleted stores
+    // used to follow too). Dead application-facing API surface, removed;
+    // `poller` itself stays (startPolling's own idempotency guard still
+    // needs it).
   },
 })

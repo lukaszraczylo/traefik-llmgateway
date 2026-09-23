@@ -1,8 +1,9 @@
-// F1 (usage-vs-limit bars): pure ratio math for the Usage tab's per-scope
-// budget bars (UsageBar.vue), kept out of the component the same way
-// lib/provider-rate.ts keeps the Providers tab's success-rate math out of
-// ProvidersView.vue — vitest's node-environment config (vite.config.ts's
-// `test` block) exercises it directly, no component mount required.
+// F1 (usage-vs-limit bars): pure ratio math for the Consumers page's
+// per-scope budget bars (UsageBar.vue), kept out of the component the
+// same way lib/provider-rate.ts keeps ProviderHealthPanel.vue's own
+// success-rate math out of it — vitest's node-environment config
+// (vite.config.ts's `test` block) exercises it directly, no component
+// mount required.
 import type { AdminUsageEntryView } from '@/types/api'
 
 /** BAR_AMBER_THRESHOLD is the used/limit ratio at and above which a bar reads amber ("approaching the limit") — below it, a bar reads its normal (healthy) tier. */
@@ -53,9 +54,10 @@ export const MICROS_PER_USD = 1_000_000
 
 /**
  * BUDGET_RATIO_LABEL (P10) names each BudgetRatio id in accurate,
- * accessible text — shared by UsageView.vue's group-detail-grid bars and
- * usage-columns.ts's own per-column bars (UsageBar's `label` prop, its
- * aria-label). tokDay/tokMonth spell out "(in+out)" explicitly: the
+ * accessible text — shared by ConsumerDirectory.vue's group-detail-grid
+ * bars, usage-columns.ts's own per-column bars, and UserDetail.vue's
+ * headroom bars (UsageBar's `label` prop, its aria-label). tokDay/
+ * tokMonth spell out "(in+out)" explicitly: the
  * underlying ratio combines both directions (see budgetRatios' own doc
  * comment below), and unlike a sighted reader — who sees the separate
  * tokIn/tokOut columns beside it for context — a screen-reader user
@@ -129,3 +131,9 @@ export function budgetRatios(entry: AdminUsageEntryView): BudgetRatio[] {
   }
   return out
 }
+
+// estimatedRunOutDate was removed (P2 item 14, DRY): UserDetail.vue and
+// BurnDownChart.vue now both call lib/burndown.ts's own runOutDate, the
+// ONE run-out projection in this codebase — it used to disagree with this
+// one on an already-exceeded budget (null here vs `now` there) and on day
+// 1 of the month (clamped/overstated here vs null there).

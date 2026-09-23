@@ -1,153 +1,132 @@
 import { describe, expect, it } from 'vitest'
 
-import {
-  buildHash,
-  DEFAULT_TAB,
-  parseChartsParams,
-  parseEventsParams,
-  parseHashState,
-  parseUsageParams,
-} from './hash-state'
+import { PAGE_IDS } from './pages'
+import { buildHash, parseGlobalParams, parseHashState, parsePageParams } from './hash-state'
 
 describe('parseHashState', () => {
-  it('splits a tab and query string', () => {
-    const { tab, query } = parseHashState('#charts?window=day&scope=user%3Aalice')
-    expect(tab).toBe('charts')
-    expect(query.get('window')).toBe('day')
-    expect(query.get('scope')).toBe('user:alice')
+  it('splits a page and query string', () => {
+    const { page, query } = parseHashState('#spend?range=30d&by=model')
+    expect(page).toBe('spend')
+    expect(query.get('range')).toBe('30d')
+    expect(query.get('by')).toBe('model')
   })
 
-  it('parses a bare tab with no query to an empty query', () => {
-    const { tab, query } = parseHashState('#usage')
-    expect(tab).toBe('usage')
+  it('parses a bare page with no query to an empty query', () => {
+    const { page, query } = parseHashState('#consumers')
+    expect(page).toBe('consumers')
     expect(Array.from(query.keys())).toEqual([])
   })
 
-  it('falls back to DEFAULT_TAB for an empty hash', () => {
-    expect(parseHashState('').tab).toBe(DEFAULT_TAB)
+  it('falls back to DEFAULT_PAGE ("home") for an empty hash', () => {
+    expect(parseHashState('').page).toBe('home')
   })
 
-  it('falls back to DEFAULT_TAB for an unrecognized tab, and still parses its query', () => {
-    const { tab, query } = parseHashState('#bogus?window=day')
-    expect(tab).toBe(DEFAULT_TAB)
-    expect(query.get('window')).toBe('day')
+  it('falls back to DEFAULT_PAGE for an unrecognized, non-legacy page, and still parses its query', () => {
+    const { page, query } = parseHashState('#bogus?range=30d')
+    expect(page).toBe('home')
+    expect(query.get('range')).toBe('30d')
   })
 
   it('accepts a hash with or without the leading #', () => {
-    expect(parseHashState('targets').tab).toBe('targets')
+    expect(parseHashState('targets').page).toBe('targets')
   })
 
-  it('every valid tab round-trips through parseHashState(buildHash(...))', () => {
-    for (const tab of ['providers', 'usage', 'charts', 'targets', 'events'] as const) {
-      expect(parseHashState(buildHash(tab, {})).tab).toBe(tab)
+  it('every current page id round-trips through parseHashState(buildHash(...))', () => {
+    for (const page of PAGE_IDS) {
+      expect(parseHashState(buildHash(page, {})).page).toBe(page)
     }
+  })
+
+  describe('legacy tab-name mapping', () => {
+    it.each([
+      ['providers', 'models'],
+      ['usage', 'consumers'],
+      ['charts', 'spend'],
+      ['events', 'reliability'],
+      ['targets', 'targets'],
+    ] as const)('#%s maps to #%s', (legacy, mapped) => {
+      expect(parseHashState(`#${legacy}`).page).toBe(mapped)
+    })
+
+    it('drops the old hash\'s query params entirely, regardless of shape', () => {
+      const { page, query } = parseHashState('#charts?tab=models&metric=cost&scope=user%3Aalice')
+      expect(page).toBe('spend')
+      expect(Array.from(query.keys())).toEqual([])
+    })
   })
 })
 
 describe('buildHash', () => {
   it('omits the query suffix entirely when params is empty', () => {
-    expect(buildHash('providers', {})).toBe('#providers')
+    expect(buildHash('home', {})).toBe('#home')
   })
 
   it('appends a query string for non-empty params', () => {
-    expect(buildHash('charts', { window: 'day' })).toBe('#charts?window=day')
+    expect(buildHash('spend', { range: '30d' })).toBe('#spend?range=30d')
   })
 
-  it('joins multiple params with &', () => {
-    const hash = buildHash('charts', { window: 'day', scope: 'user:alice' })
-    expect(hash).toBe('#charts?window=day&scope=user%3Aalice')
+  it('joins multiple params with &, in insertion order', () => {
+    const hash = buildHash('spend', { range: '30d', cmp: 'prev', scope: 'user:alice' })
+    expect(hash).toBe('#spend?range=30d&cmp=prev&scope=user%3Aalice')
   })
 
   it('drops a param whose value is an explicit empty string', () => {
-    expect(buildHash('usage', { q: '' })).toBe('#usage')
+    expect(buildHash('consumers', { q: '' })).toBe('#consumers')
   })
 })
 
-describe('parseChartsParams', () => {
-  it('accepts every valid window/tab/metric value', () => {
-    const p = parseChartsParams(new URLSearchParams('window=month&tab=models&metric=tokin'))
-    expect(p).toEqual({ window: 'month', tab: 'models', metric: 'tokin' })
+describe('parseGlobalParams', () => {
+  it('accepts every valid range/cmp/scope value', () => {
+    const p = parseGlobalParams(new URLSearchParams('range=30d&cmp=prev&scope=group:eng'))
+    expect(p).toEqual({ range: '30d', cmp: 'prev', scope: 'group:eng' })
   })
 
-  it('omits window when it is not a recognized HistoryWindow', () => {
-    expect(parseChartsParams(new URLSearchParams('window=fortnight'))).toEqual({})
+  it('omits range when it is not a recognized RangeKey', () => {
+    expect(parseGlobalParams(new URLSearchParams('range=fortnight'))).toEqual({})
   })
 
-  it('omits tab when it is not a recognized ChartTab', () => {
-    expect(parseChartsParams(new URLSearchParams('tab=bogus'))).toEqual({})
-  })
-
-  it('omits metric when it is not a recognized ModelMetric', () => {
-    expect(parseChartsParams(new URLSearchParams('metric=bogus'))).toEqual({})
-  })
-
-  it('reads filter when present (free text, not an enum — same convention as scope/q)', () => {
-    expect(parseChartsParams(new URLSearchParams('filter=openai%2F'))).toEqual({ filter: 'openai/' })
-  })
-
-  it('omits filter when absent', () => {
-    expect(parseChartsParams(new URLSearchParams())).toEqual({})
-  })
-
-  it('omits filter when it is an explicit empty string', () => {
-    expect(parseChartsParams(new URLSearchParams('filter='))).toEqual({})
+  it('omits cmp when it is not "none" or "prev"', () => {
+    expect(parseGlobalParams(new URLSearchParams('cmp=bogus'))).toEqual({})
   })
 
   it.each([
-    ['total', true],
+    ['all', true],
+    ['group:eng', true],
     ['user:alice', true],
-    ['group:ops', true],
-    ['model:openai/gpt-5', true],
-    ['user:', false], // empty id after the colon
+    ['provider:openai', true],
+    ['user:', false],
     ['bogus', false],
     ['', false],
   ] as const)('scope %s valid=%s', (scope, valid) => {
-    const p = parseChartsParams(new URLSearchParams(scope ? `scope=${encodeURIComponent(scope)}` : ''))
+    const p = parseGlobalParams(new URLSearchParams(scope ? `scope=${encodeURIComponent(scope)}` : ''))
     expect(p.scope === scope).toBe(valid)
   })
 
-  it('omits one invalid field while keeping the other valid ones (independent per-field validation)', () => {
-    const p = parseChartsParams(new URLSearchParams('window=fortnight&tab=models&scope=total'))
-    expect(p).toEqual({ tab: 'models', scope: 'total' })
+  it('omits one invalid field while keeping the other valid ones', () => {
+    const p = parseGlobalParams(new URLSearchParams('range=fortnight&cmp=prev&scope=all'))
+    expect(p).toEqual({ cmp: 'prev', scope: 'all' })
   })
 
   it('returns an empty object for an empty query', () => {
-    expect(parseChartsParams(new URLSearchParams())).toEqual({})
+    expect(parseGlobalParams(new URLSearchParams())).toEqual({})
   })
 })
 
-describe('parseUsageParams', () => {
-  it('reads q when present', () => {
-    expect(parseUsageParams(new URLSearchParams('q=alice'))).toEqual({ q: 'alice' })
+describe('parsePageParams', () => {
+  it('excludes range/cmp/scope but keeps every other key', () => {
+    const p = parsePageParams(new URLSearchParams('range=30d&cmp=prev&scope=all&by=model&metric=cost'))
+    expect(p).toEqual({ by: 'model', metric: 'cost' })
   })
 
-  it('omits q when absent', () => {
-    expect(parseUsageParams(new URLSearchParams())).toEqual({})
+  it('drops a key with an explicit empty-string value', () => {
+    expect(parsePageParams(new URLSearchParams('q='))).toEqual({})
   })
 
-  it('omits q when it is an explicit empty string', () => {
-    expect(parseUsageParams(new URLSearchParams('q='))).toEqual({})
-  })
-})
-
-describe('parseEventsParams', () => {
-  it('reads kind and user when both present', () => {
-    expect(parseEventsParams(new URLSearchParams('kind=rate_limit&user=bob'))).toEqual({
-      kind: 'rate_limit',
-      user: 'bob',
-    })
-  })
-
-  it('accepts a kind this build does not recognize as an AdminEventKind (forward-compat, never rejected)', () => {
-    expect(parseEventsParams(new URLSearchParams('kind=some_future_kind'))).toEqual({ kind: 'some_future_kind' })
-  })
-
-  it('omits either field independently when absent', () => {
-    expect(parseEventsParams(new URLSearchParams('kind=budget'))).toEqual({ kind: 'budget' })
-    expect(parseEventsParams(new URLSearchParams('user=alice'))).toEqual({ user: 'alice' })
+  it('passes through a key this build does not recognize (forward-compat)', () => {
+    expect(parsePageParams(new URLSearchParams('someFutureParam=x'))).toEqual({ someFutureParam: 'x' })
   })
 
   it('returns an empty object for an empty query', () => {
-    expect(parseEventsParams(new URLSearchParams())).toEqual({})
+    expect(parsePageParams(new URLSearchParams())).toEqual({})
   })
 })

@@ -9,8 +9,8 @@ import { formatCompactCount, formatExactInt } from '@/lib/format'
  * (mouse hover) and a visually-hidden sibling span (keyboard/screen-
  * reader parity). Used anywhere a usage count renders: DataTable numeric
  * columns (usage-columns.ts, target-columns.ts, via
- * `h(CompactNumber, { value })`), the Usage tab's Total card, and a
- * group accordion's trigger/detail stat grid (UsageView.vue).
+ * `h(CompactNumber, { value })`), the Consumers page's Total row, and a
+ * group accordion's trigger/detail stat grid (ConsumerDirectory.vue).
  *
  * Review fix (folded minor, ARIA): `aria-label` on a plain `<span>` is
  * an axe `aria-prohibited-attr` violation — a `<span>`'s implicit ARIA

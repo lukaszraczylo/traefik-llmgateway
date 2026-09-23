@@ -9,11 +9,13 @@ import { cn } from '@/lib/utils'
 
 /**
  * SearchInput is the one search-box control every filter in this panel
- * uses — ProvidersView's model search, UsageView's user/group search, and
- * ChartsView's scope-picker search each grew an identical ~22-line
- * magnifying-glass-icon + Input + clear-button block; extracted into one
- * component (vue.md: "if you've written it twice, you owe an
- * abstraction"). A controlled component (modelValue/update:modelValue),
+ * uses (today: ProviderHealthPanel's model search, ConsumerDirectory's
+ * user/group search, TargetsView's target search, EventsView's user
+ * filter, ModelCatalogTable's model search) — each pre-redesign call site
+ * grew an identical ~22-line magnifying-glass-icon + Input + clear-button
+ * block on its own; extracted into one component (vue.md: "if you've
+ * written it twice, you owe an abstraction"). A controlled component
+ * (modelValue/update:modelValue),
  * not v-model'd internally, since the incoming modelValue is a prop —
  * callers pair it with `useSearchQuery()` (composables/useSearchQuery.ts)
  * for the query/normalized/hasQuery/clear state, or v-model it against any

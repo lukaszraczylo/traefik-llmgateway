@@ -1,135 +1,126 @@
-import { hashToTab, TAB_VALUES, tabToHash, type TabValue } from '@/composables/useTabHash'
-import type { ChartTab, ModelMetric } from '@/stores/history'
-import type { HistoryWindow } from '@/types/api'
+import { DEFAULT_PAGE, isPageId } from '@/lib/pages'
+import type { PageId } from '@/lib/pages'
+import { isCmpMode, isRangeKey } from '@/lib/range'
+import type { CmpMode, RangeKey } from '@/lib/range'
 
 /**
- * DEFAULT_TAB is the app's landing tab when the hash names nothing
- * recognized — parseHashState's own fallback, mirroring the old
- * useTabHash's defaultTab parameter (which every call site passed
- * 'providers' for anyway, so this needed no parameter of its own once
- * folded into one composable, composables/useHashState.ts).
+ * LEGACY_PAGE_MAP redirects the pre-redesign flat-tab hash names to their
+ * redesign home (redesign-plan.md section 3.1's legacy mapping): a
+ * bookmark or shared link built against the old #providers/#usage/
+ * #charts/#events/#targets shell still lands somewhere sensible instead
+ * of falling back to the default page. `targets` keeps its own name —
+ * the MCP & Agents page is the one page that did not move.
+ *
+ * The OLD hash's query params never carry over (see parseHashState below)
+ * — they were shaped for the old tab (e.g. #charts's `tab=models&metric=
+ * cost`), and none of that maps cleanly onto the new page's own param
+ * names, so a legacy hash lands on a clean instance of its mapped page
+ * rather than misapplying a stale param.
  */
-export const DEFAULT_TAB: TabValue = 'providers'
+const LEGACY_PAGE_MAP: Record<string, PageId> = {
+  providers: 'models',
+  usage: 'consumers',
+  charts: 'spend',
+  events: 'reliability',
+  targets: 'targets',
+}
 
 export interface HashState {
-  tab: TabValue
+  page: PageId
   query: URLSearchParams
 }
 
 /**
- * parseHashState splits a raw location.hash ("#charts?window=day&scope=
- * user:alice") into its outer tab — validated against TAB_VALUES via
- * hashToTab, falling back to DEFAULT_TAB exactly like the pre-F9 useTabHash
- * did for an absent/unrecognized/bogus tab — and the remaining query
- * string, parsed once into a URLSearchParams every per-tab validator below
- * reads from. A hash with no "?" (a bare "#usage", or the very first load
- * with no hash at all) parses to an empty query, never throws.
+ * parseHashState splits a raw location.hash ("#spend?range=30d&by=model")
+ * into its outer page and the remaining query string. Three cases:
+ *
+ * 1. The page segment is a current PageId (lib/pages.ts) — parse the
+ *    query normally.
+ * 2. The page segment is a legacy tab name (LEGACY_PAGE_MAP) — map to the
+ *    new page, with an EMPTY query (old params dropped, see the map's own
+ *    doc comment).
+ * 3. Anything else (absent, empty, or unrecognized) — DEFAULT_PAGE, query
+ *    parsed as-is (so a malformed page segment does not also swallow an
+ *    otherwise-valid query string).
+ *
+ * Never throws.
  */
 export function parseHashState(hash: string): HashState {
   const raw = hash.startsWith('#') ? hash.slice(1) : hash
   const qIndex = raw.indexOf('?')
-  const tabPart = qIndex === -1 ? raw : raw.slice(0, qIndex)
+  const pagePart = qIndex === -1 ? raw : raw.slice(0, qIndex)
   const queryPart = qIndex === -1 ? '' : raw.slice(qIndex + 1)
-  const tab = hashToTab(tabPart, TAB_VALUES, DEFAULT_TAB)
-  return { tab, query: new URLSearchParams(queryPart) }
+
+  if (isPageId(pagePart)) return { page: pagePart, query: new URLSearchParams(queryPart) }
+
+  const legacy = LEGACY_PAGE_MAP[pagePart]
+  if (legacy) return { page: legacy, query: new URLSearchParams() }
+
+  return { page: DEFAULT_PAGE, query: new URLSearchParams(queryPart) }
 }
 
 /**
- * buildHash re-serializes a tab plus an already-default-stripped param
- * record back into a "#<tab>?<query>" string (F9) — mirrors tabToHash for
- * the tab-only portion, adding a "?<query>" suffix only when `params` has
- * at least one entry, so the common "nothing but the default selection"
- * case round-trips to a bare "#<tab>" rather than a noisy "#<tab>?".
- *
- * "Omit defaults" is the CALLER's job, not this function's: what counts
- * as default differs per field (window's default is 'hour', scope's is
- * 'total', ...), so composables/useHashState.ts's own computed simply
- * never puts a default-valued key into `params` in the first place.
- * buildHash itself only defends against an explicitly empty-string value
- * slipping through, dropping it the same way.
+ * buildHash re-serializes a page plus an already-default-stripped param
+ * record (global filters and/or page params merged by the caller) back
+ * into a "#<page>?<query>" string. "Omit defaults" is the CALLER's job —
+ * composables/useHashState.ts's own computed decides what counts as
+ * default for range/cmp/scope; buildHash itself only defends against an
+ * explicitly empty-string value slipping through, dropping it the same
+ * way. No query suffix at all when `params` ends up empty, so the common
+ * "nothing but defaults" case round-trips to a bare "#<page>".
  */
-export function buildHash(tab: TabValue, params: Record<string, string>): string {
+export function buildHash(page: PageId, params: Record<string, string>): string {
   const entries = Object.entries(params).filter(([, v]) => v !== '')
-  if (entries.length === 0) return tabToHash(tab)
-  return `${tabToHash(tab)}?${new URLSearchParams(entries).toString()}`
+  if (entries.length === 0) return `#${page}`
+  return `#${page}?${new URLSearchParams(entries).toString()}`
 }
 
-const HISTORY_WINDOWS: readonly HistoryWindow[] = ['hour', 'day', 'month']
-const CHART_TABS: readonly ChartTab[] = ['requests', 'tokens', 'cost', 'models']
-const MODEL_METRICS: readonly ModelMetric[] = ['req', 'tokin', 'tokout', 'cost']
-
-/** SCOPE_PATTERN mirrors history.ts's own scope string convention: "total", or one of the three "{kind}:{id}" forms — an id may itself contain almost anything (a model id can contain slashes), so each kind only checks its own prefix plus a non-empty remainder, never the id's own shape. */
-const SCOPE_PATTERN = /^(total|user:.+|group:.+|model:.+)$/
-
-export interface ChartsHashParams {
-  window?: HistoryWindow
-  tab?: ChartTab
-  metric?: ModelMetric
+export interface GlobalHashParams {
+  range?: RangeKey
+  cmp?: CmpMode
   scope?: string
-  /**
-   * The Models tab's provider-prefix filter (stores/history.ts's
-   * modelFilter), round-tripped through the hash so a provider-header
-   * link (nav.goToModels) or a hand-edited `#charts?tab=models&filter=`
-   * URL survives a reload or a hashchange — free text, not an enum, same
-   * convention as `scope` below and Usage's own `q` param.
-   */
-  filter?: string
 }
+
+/** SCOPE_PATTERN mirrors the global filter bar's own scope convention (redesign-plan.md section 3.1): "all", or one of the three "{kind}:{id}" forms — an id may contain almost anything, so each kind only checks its own prefix plus a non-empty remainder. Exported so GlobalFilterBar.vue validates its own scope input against the exact same rule this module uses to parse it back out of the hash. */
+export const SCOPE_PATTERN = /^(all|group:.+|user:.+|provider:.+)$/
 
 /**
- * parseChartsParams validates the Charts tab's own hash query params.
- * Each field is independently OMITTED (never throws, never substitutes a
- * fabricated default itself) when absent or not one of its own known
- * values — a hand-edited or stale-version URL with `window=fortnight` or
- * `metric=bogus` degrades to "use whatever this field already is"
- * (composables/useHashState.ts's own caller decides the actual default),
- * rather than failing the whole hash or resetting every OTHER, valid
- * field alongside the one bad one.
+ * parseGlobalParams validates the three page-independent hash params
+ * (range/cmp/scope) every page's hash shares. Each field is independently
+ * OMITTED (never throws) when absent or not a recognized value — a
+ * hand-edited or stale-version URL with `range=fortnight` degrades to
+ * "use whatever this field already is" (the caller decides the actual
+ * default), rather than failing the whole hash or resetting the other,
+ * valid fields alongside the one bad one.
  */
-export function parseChartsParams(query: URLSearchParams): ChartsHashParams {
-  const result: ChartsHashParams = {}
-  const window = query.get('window')
-  if (window && (HISTORY_WINDOWS as readonly string[]).includes(window)) result.window = window as HistoryWindow
-  const tab = query.get('tab')
-  if (tab && (CHART_TABS as readonly string[]).includes(tab)) result.tab = tab as ChartTab
-  const metric = query.get('metric')
-  if (metric && (MODEL_METRICS as readonly string[]).includes(metric)) result.metric = metric as ModelMetric
+export function parseGlobalParams(query: URLSearchParams): GlobalHashParams {
+  const result: GlobalHashParams = {}
+  const range = query.get('range')
+  if (range && isRangeKey(range)) result.range = range
+  const cmp = query.get('cmp')
+  if (cmp && isCmpMode(cmp)) result.cmp = cmp
   const scope = query.get('scope')
   if (scope && SCOPE_PATTERN.test(scope)) result.scope = scope
-  const filter = query.get('filter')
-  if (filter) result.filter = filter
   return result
 }
 
-export interface UsageHashParams {
-  q?: string
-}
-
-/** parseUsageParams reads the Usage tab's own single `q` param. It is free-text search input, not an enum, so there is nothing to validate beyond "present and non-empty" — any string round-trips as-is. */
-export function parseUsageParams(query: URLSearchParams): UsageHashParams {
-  const q = query.get('q')
-  return q ? { q } : {}
-}
-
-export interface EventsHashParams {
-  kind?: string
-  user?: string
-}
+/** GLOBAL_PARAM_KEYS names the three query keys parseGlobalParams reads — parsePageParams below excludes exactly these, and nothing else, from a page's own param record. */
+const GLOBAL_PARAM_KEYS: ReadonlySet<string> = new Set(['range', 'cmp', 'scope'])
 
 /**
- * parseEventsParams reads the Events tab's own kind/user params. `kind` is
- * deliberately NOT validated against AdminEventKind here (unlike Charts'
- * enum fields above): lib/events-filter.ts's filterEvents already treats
- * an unrecognized kind as "matches nothing" harmlessly, and rejecting it
- * here would silently drop a link built against a server-added kind this
- * webui build predates — the same "still carry it through" convention
- * AdminEventView.kind's own `| string` union documents (types/api.ts).
+ * parsePageParams returns every hash query param EXCEPT the three global
+ * ones, verbatim, as a plain record. Deliberately opaque (no per-page
+ * validation here — see stores/nav.ts's own doc comment for why): each
+ * page owns interpreting its own param names/values, and a key this
+ * build does not recognize (an older link, or one from a newer page)
+ * simply passes through unused rather than being rejected.
  */
-export function parseEventsParams(query: URLSearchParams): EventsHashParams {
-  const result: EventsHashParams = {}
-  const kind = query.get('kind')
-  const user = query.get('user')
-  if (kind) result.kind = kind
-  if (user) result.user = user
+export function parsePageParams(query: URLSearchParams): Record<string, string> {
+  const result: Record<string, string> = {}
+  for (const [key, value] of query.entries()) {
+    if (GLOBAL_PARAM_KEYS.has(key)) continue
+    if (value === '') continue
+    result[key] = value
+  }
   return result
 }

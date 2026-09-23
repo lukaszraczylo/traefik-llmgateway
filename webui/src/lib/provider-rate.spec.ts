@@ -2,11 +2,13 @@ import { describe, expect, it } from 'vitest'
 
 import {
   dayRateTitle,
+  formatErrorRatePercent,
   formatRatePercent,
   isModelDegraded,
   minuteRateTitle,
   PROVIDER_RATE_AMBER_THRESHOLD,
   PROVIDER_RATE_DESTRUCTIVE_THRESHOLD,
+  providerErrorRate,
   providerRateStatus,
   providerSuccessRate,
 } from './provider-rate'
@@ -141,5 +143,38 @@ describe('dayRateTitle', () => {
 
   it('says "today" rather than "in the last minute" — the only wording difference from minuteRateTitle', () => {
     expect(dayRateTitle(5, 0)).toBe('5 attempts, 0 failures today (100%)')
+  })
+})
+
+describe('providerErrorRate', () => {
+  it('is 1 minus the success rate', () => {
+    expect(providerErrorRate(100, 1)).toBeCloseTo(0.01)
+  })
+
+  it('is null for zero attempts (no traffic), never a fabricated 0', () => {
+    expect(providerErrorRate(0, 0)).toBeNull()
+  })
+
+  it('is 1 when every attempt failed', () => {
+    expect(providerErrorRate(10, 10)).toBe(1)
+  })
+})
+
+describe('formatErrorRatePercent', () => {
+  it('ceils rather than floors, so a genuinely non-zero rate never rounds down to "0%"', () => {
+    expect(formatErrorRatePercent(0.001)).toBe('1%')
+    expect(formatErrorRatePercent(0.011)).toBe('2%')
+  })
+
+  it('renders exactly 0 as "0%"', () => {
+    expect(formatErrorRatePercent(0)).toBe('0%')
+  })
+
+  it('renders null as "no data", never "0%"', () => {
+    expect(formatErrorRatePercent(null)).toBe('no data')
+  })
+
+  it('does not clamp a rate above 1 (should not occur with real counters, but is not silently capped)', () => {
+    expect(formatErrorRatePercent(1.8)).toBe('180%')
   })
 })

@@ -7,8 +7,9 @@ import { computed } from 'vue'
 /**
  * SortHeaderButton is the one clickable, sortable-column control every
  * sortable header in the panel uses — DataTable.vue's real `<th>` header
- * buttons AND UsageView.vue's Groups sort toolbar (which has no `<table>`
- * to put a `<th>` in — see that view's own doc comment for why).
+ * buttons AND ConsumerDirectory.vue's Groups sort toolbar (which has no
+ * `<table>` to put a `<th>` in — see that component's own "Groups
+ * accordion" doc comment for why).
  * Extracted so the button markup, sort-icon logic, click handler, and
  * accessible name exist in exactly one place (vue.md: "if you've written
  * it twice, you owe an abstraction"). Extra classes on this component

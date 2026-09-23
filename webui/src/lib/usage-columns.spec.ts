@@ -2,7 +2,7 @@ import type { VNode } from 'vue'
 import { isVNode } from 'vue'
 import { describe, expect, it } from 'vitest'
 
-import ScopeLink from '@/components/ScopeLink.vue'
+import EntityLink from '@/components/EntityLink.vue'
 import { usageColumns } from './usage-columns'
 import type { AdminUsageEntryView } from '@/types/api'
 
@@ -182,39 +182,87 @@ describe('usageColumns: F1 usage-vs-limit bars', () => {
   })
 })
 
-// F6 (ScopeLink id cell): the id column renders a ScopeLink pointed at
-// this row's own "kind:id" Charts scope, never a plain span — the click-
-// through-to-Charts affordance every Users/Groups/Members row gets.
-describe('usageColumns: F6 id cell is a ScopeLink', () => {
+// F6 (EntityLink id cell): the id column renders an EntityLink pointed at
+// Consumers?user={id}, never a plain span — the click-through-to-detail
+// affordance every Users/Members row gets.
+describe('usageColumns: F6 id cell is an EntityLink', () => {
   const columns = usageColumns('Name', 'Group', () => 'g')
   const col = columns.find((c) => c.id === 'id')
 
-  it('renders a ScopeLink vnode, not a plain span', () => {
+  it('renders an EntityLink vnode, not a plain span', () => {
     const rendered = cellOf(col)({ row: { original: testEntry({ id: 'alice', kind: 'user' }) } }) as VNode
-    expect(rendered.type).toBe(ScopeLink)
+    expect(rendered.type).toBe(EntityLink)
   })
 
-  it('builds the scope as "user:{id}" for a user row', () => {
+  it('builds kind "user" and the row id, with the label matching', () => {
     const rendered = cellOf(col)({ row: { original: testEntry({ id: 'alice', kind: 'user' }) } }) as VNode
-    expect(rendered.props?.scope).toBe('user:alice')
+    expect(rendered.props?.kind).toBe('user')
+    expect(rendered.props?.id).toBe('alice')
     expect(rendered.props?.label).toBe('alice')
   })
 
-  it('builds the scope as "group:{id}" for a group row', () => {
-    const rendered = cellOf(col)({ row: { original: testEntry({ id: 'eng', kind: 'group' }) } }) as VNode
-    expect(rendered.props?.scope).toBe('group:eng')
+  it('is not masked by storeDown — the link stays clickable even for a row with stale/unknown counters', () => {
+    const rendered = cellOf(col)({ row: { original: testEntry({ id: 'alice', kind: 'user', storeDown: true }) } }) as VNode
+    expect(rendered.type).toBe(EntityLink)
+  })
+})
+
+describe('usageColumns: last seen column', () => {
+  const now = new Date(Date.UTC(2026, 3, 16, 12, 0, 0))
+  const columns = usageColumns('Name', 'Group', () => 'g', now)
+  const col = columns.find((c) => c.id === 'lastSeen')
+
+  it('accessorFn reads the raw unix-seconds value, defaulting to 0 when unset', () => {
+    expect(accessorFnOf(col)(testEntry(), 0)).toBe(0)
+    expect(accessorFnOf(col)(testEntry({ lastSeen: 123 }), 0)).toBe(123)
   })
 
-  it('is not masked by storeDown — a scope link stays clickable even for a row with stale/unknown counters', () => {
-    const rendered = cellOf(col)({ row: { original: testEntry({ id: 'alice', kind: 'user', storeDown: true }) } }) as VNode
-    expect(rendered.type).toBe(ScopeLink)
+  it('cell renders "never" when unset', () => {
+    expect(cellOf(col)({ row: { original: testEntry() } })).toBe('never')
+  })
+
+  it('cell renders a relative-time label when set', () => {
+    const seconds = Math.floor(now.getTime() / 1000) - 300
+    expect(cellOf(col)({ row: { original: testEntry({ lastSeen: seconds }) } })).toBe('5m ago')
+  })
+
+  it('is NOT masked by storeDown — lastSeen is its own counter family, independent of the usage counters storeDown guards', () => {
+    const seconds = Math.floor(now.getTime() / 1000) - 300
+    expect(cellOf(col)({ row: { original: testEntry({ lastSeen: seconds, storeDown: true }) } })).toBe('5m ago')
+  })
+})
+
+describe('usageColumns: optional source column', () => {
+  it('is absent when no sourceValue is passed', () => {
+    const columns = usageColumns('Name', 'Group', () => 'g')
+    expect(columns.find((c) => c.id === 'source')).toBeUndefined()
+  })
+
+  it('is inserted right after the secondary column when sourceValue is passed', () => {
+    const columns = usageColumns('Name', 'Group', () => 'g', new Date(), (e) => (e.id === 'alice' ? 'inline' : undefined))
+    const ids = columns.map((c) => c.id)
+    expect(ids.indexOf('source')).toBe(ids.indexOf('secondary') + 1)
+  })
+
+  it('renders the resolved source text', () => {
+    const columns = usageColumns('Name', 'Group', () => 'g', new Date(), (e) => (e.id === 'alice' ? 'inline' : undefined))
+    const col = columns.find((c) => c.id === 'source')
+    const rendered = cellOf(col)({ row: { original: testEntry({ id: 'alice' }) } }) as VNode
+    expect(rendered.children).toBe('inline')
+  })
+
+  it('renders an em dash when the lookup returns undefined (no matching /consumers entry)', () => {
+    const columns = usageColumns('Name', 'Group', () => 'g', new Date(), () => undefined)
+    const col = columns.find((c) => c.id === 'source')
+    const rendered = cellOf(col)({ row: { original: testEntry({ id: 'bob' }) } }) as VNode
+    expect(rendered.children).toBe('—')
   })
 })
 
 // F4 (rejected/day column): destructive tint applies only once the count
 // is actually positive — a healthy scope (0 rejections) renders plain,
 // matching every other "nothing to show reads as no flag" indicator in
-// this panel (ProvidersView.vue's badges).
+// this panel (ProviderHealthPanel.vue's badges).
 describe('usageColumns: F4 rejected/day column', () => {
   const columns = usageColumns('Name', 'Group', () => 'g')
   const col = columns.find((c) => c.id === 'rejDay')

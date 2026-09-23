@@ -1,0 +1,159 @@
+import { defineStore } from 'pinia'
+
+import { AdminApiError, adminFetch } from '@/lib/api'
+import { dayOrMonthWindow, seriesUrl, totalsUrl } from '@/lib/range'
+import { useAuthStore } from '@/stores/auth'
+import type { AdminConsumersResponse, AdminSeriesResponse, AdminTotalsResponse, HistoryWindow } from '@/types/api'
+
+/** REFRESH_STALE_MS is how long a previously-fetched /admin/api/consumers response is trusted before ConsumersPage.vue's mount triggers a fresh fetch — this endpoint reflects the operator's own config (users/groups/access lists), which changes on a config edit, not every 5s like the polled dashboard store. A 60s staleness window (matches Q12's "new endpoints on demand or 60s" DECISION) means switching between pages within the Consumers tab never re-fetches on every mount, while a long-open session still notices a config reload eventually. */
+const REFRESH_STALE_MS = 60_000
+
+/** UserDetailState is one user's on-demand detail — UserDetail.vue's own data (timeline series, per-model totals), fetched only when that user's row is actually opened, keyed by user id so switching between two already-opened users never re-fetches. */
+export interface UserDetailState {
+  loading: boolean
+  error: string
+  reqSeries: AdminSeriesResponse | null
+  costSeries: AdminSeriesResponse | null
+  /** null while userModelStats is off (no fetch attempted), the 404 case (see modelTotalsUnavailable), or before the first fetch resolves. */
+  modelTotals: AdminTotalsResponse | null
+  /** True once the usermodel totals call itself came back 404 (admin.go: disabled feature gate) — checked INDEPENDENTLY of the caller's own userModelStatsEnabled flag, since that flag reads the polled overview, which may not have loaded yet on a fresh deep link/reload, or may be stale relative to a live config change (see UserDetail.vue's own featuresUserModelStats watch). */
+  modelTotalsUnavailable: boolean
+  fetchedAt: number | null
+  /** reqId guards against an out-of-order response overwriting a newer one (latest-request-wins) — two ranges in flight for the same user can otherwise land out of order. */
+  reqId: number
+}
+
+function emptyDetail(): UserDetailState {
+  return {
+    loading: false,
+    error: '',
+    reqSeries: null,
+    costSeries: null,
+    modelTotals: null,
+    modelTotalsUnavailable: false,
+    fetchedAt: null,
+    reqId: 0,
+  }
+}
+
+/** settledError reads one Error message off a rejected PromiseSettledResult, or '' for a fulfilled one — fetchUserDetail's own small helper for building a combined error message out of whichever of its three independent requests failed. */
+function settledError(result: PromiseSettledResult<unknown>): string {
+  if (result.status !== 'rejected') return ''
+  return result.reason instanceof Error ? result.reason.message : String(result.reason)
+}
+
+/**
+ * useConsumersStore backs the Consumers page (redesign-plan.md section
+ * 3.3/3.4): the user/group directory + access lists from GET /admin/api/
+ * consumers (fetched on demand, not on the 5s dashboard poll — this data
+ * is config-shaped, not live traffic), plus each opened user's own detail
+ * (timeline series, usermodel totals) fetched lazily per user id.
+ */
+export const useConsumersStore = defineStore('consumers', {
+  state: () => ({
+    data: null as AdminConsumersResponse | null,
+    loading: false,
+    error: '',
+    fetchedAt: null as number | null,
+    detail: {} as Record<string, UserDetailState>,
+  }),
+  actions: {
+    /** fetchConsumers fetches GET /admin/api/consumers unconditionally — callers that want the staleness guard use ensureConsumers instead. */
+    async fetchConsumers(): Promise<void> {
+      const auth = useAuthStore()
+      if (!auth.isAuthenticated) return
+      this.loading = true
+      try {
+        this.data = await adminFetch<AdminConsumersResponse>('/admin/api/consumers')
+        this.error = ''
+        this.fetchedAt = Date.now()
+      } catch (err) {
+        if (err instanceof AdminApiError && (err.status === 401 || err.status === 403)) return
+        this.error = err instanceof Error ? err.message : String(err)
+      } finally {
+        this.loading = false
+      }
+    },
+    /** ensureConsumers fetches only when there is no data yet, or the last fetch is older than REFRESH_STALE_MS — ConsumersPage.vue's own onMounted call, so navigating back to the page within a minute does not re-fetch. */
+    async ensureConsumers(): Promise<void> {
+      if (this.loading) return
+      if (this.data && this.fetchedAt !== null && Date.now() - this.fetchedAt < REFRESH_STALE_MS) return
+      await this.fetchConsumers()
+    },
+    /**
+     * fetchUserDetail loads one user's timeline (req + cost series) and,
+     * only when `userModelStatsEnabled` is true (AdminFeaturesView.
+     * userModelStats — GET /admin/api/usage/totals?kind=usermodel 404s
+     * otherwise, admin.go), their per-model usermodel totals. Always
+     * re-fetches when called (UserDetail.vue calls this on mount and on
+     * every global range/span/features change) — the caller decides
+     * staleness, this action does not guess.
+     *
+     * The three requests run via Promise.allSettled, not Promise.all: a
+     * 400/404/503 on the usermodel call (or a transient failure on either
+     * series call) must never wipe out data from the OTHER two calls that
+     * did succeed — each field below keeps its previous value when its own
+     * request failed, rather than the whole detail view going blank over
+     * one failing endpoint (P1). The usermodel window/span is clamped to
+     * day/month (lib/range.ts's dayOrMonthWindow, shared with stores/
+     * spend.ts's drilldown and lib/target-columns.ts's targetcaller calls)
+     * — that endpoint has no hour bucket at all, so an hour-resolution
+     * global range (24h/48h) would otherwise 400 before the server's own
+     * 404-when-disabled feature gate even runs (stats_read.go).
+     */
+    async fetchUserDetail(userId: string, window: HistoryWindow, span: number, userModelStatsEnabled: boolean): Promise<void> {
+      const auth = useAuthStore()
+      if (!auth.isAuthenticated) return
+      const existing = this.detail[userId] ?? emptyDetail()
+      const requestId = existing.reqId + 1
+      this.detail[userId] = { ...existing, loading: true, reqId: requestId }
+
+      const clamped = dayOrMonthWindow(window, span)
+      const [reqResult, costResult, modelResult] = await Promise.allSettled([
+        adminFetch<AdminSeriesResponse>(seriesUrl({ scope: [`user:${userId}`], metric: 'req', window, span })),
+        adminFetch<AdminSeriesResponse>(seriesUrl({ scope: [`user:${userId}`], metric: 'cost', window, span })),
+        userModelStatsEnabled
+          ? adminFetch<AdminTotalsResponse>(
+              totalsUrl({ kind: 'usermodel', user: userId, window: clamped.window, span: clamped.span, metrics: ['req', 'cost'] }),
+            )
+          : Promise.resolve(null as AdminTotalsResponse | null),
+      ])
+
+      // A newer fetchUserDetail call for this same user already
+      // superseded this one (latest-request-wins) — drop this result.
+      if (this.detail[userId]?.reqId !== requestId) return
+
+      const authRejected = [reqResult, costResult, modelResult].some(
+        (r) => r.status === 'rejected' && r.reason instanceof AdminApiError && (r.reason.status === 401 || r.reason.status === 403),
+      )
+      if (authRejected) return
+
+      const modelTotalsUnavailable =
+        modelResult.status === 'rejected' && modelResult.reason instanceof AdminApiError && modelResult.reason.status === 404
+
+      const current = this.detail[userId] ?? emptyDetail()
+      // A 404 on the usermodel call is a known, EXPECTED state (the
+      // feature is off server-side) — surfaced via modelTotalsUnavailable
+      // instead, never folded into the generic error message. Deduped
+      // (Set) — the req and cost calls commonly fail with the IDENTICAL
+      // message (e.g. the same network error, or the same 503 "usage
+      // store unavailable"), and repeating it twice reads as noise, not
+      // two distinct problems.
+      const errorMessages = new Set(
+        [settledError(reqResult), settledError(costResult), modelTotalsUnavailable ? '' : settledError(modelResult)].filter(Boolean),
+      )
+      const combinedError = Array.from(errorMessages).join('; ')
+
+      this.detail[userId] = {
+        loading: false,
+        error: combinedError,
+        reqSeries: reqResult.status === 'fulfilled' ? reqResult.value : current.reqSeries,
+        costSeries: costResult.status === 'fulfilled' ? costResult.value : current.costSeries,
+        modelTotals: modelResult.status === 'fulfilled' ? modelResult.value : modelTotalsUnavailable ? null : current.modelTotals,
+        modelTotalsUnavailable,
+        fetchedAt: Date.now(),
+        reqId: requestId,
+      }
+    },
+  },
+})

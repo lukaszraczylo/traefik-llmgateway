@@ -1,8 +1,10 @@
 // createVisibilityPoller is the ONE polling primitive stores/dashboard.ts,
-// stores/history.ts, and stores/events.ts each wire their own refresh
-// action into (vue.md: "if you've written it twice, you owe an
-// abstraction") — three near-identical setInterval-plus-immediate-tick
-// blocks collapsed into one tested module. Beyond the plain interval every
+// stores/spend.ts, stores/events.ts, and composables/useNow.ts each wire
+// their own refresh action into (vue.md: "if you've written it twice,
+// you owe an abstraction") — originally three near-identical
+// setInterval-plus-immediate-tick blocks (including the pre-redesign
+// stores/history.ts, since deleted) collapsed into one tested module.
+// Beyond the plain interval every
 // one of them already had, this adds visibility awareness: a background
 // browser tab has no reason to keep polling a Redis-backed admin panel
 // every 5s/30s for no reader to see, and it catches back up the instant

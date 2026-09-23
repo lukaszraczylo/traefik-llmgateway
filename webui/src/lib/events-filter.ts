@@ -64,7 +64,7 @@ export interface EventFilter {
  * filterEvents narrows the (already newest-first) event list to the
  * current kind/user selection. `filter.user` is matched pre-normalized —
  * callers pair this with useSearchQuery()'s own `normalized` the same way
- * every other search filter in this panel does (ProvidersView.vue's
+ * every other search filter in this panel does (ProviderHealthPanel.vue's
  * modelMatches, lib/usage-search.ts) — this function itself does no
  * trimming or casing of its own beyond a defensive `.trim().toLowerCase()`
  * so it is still correct if a caller passes the raw query directly.

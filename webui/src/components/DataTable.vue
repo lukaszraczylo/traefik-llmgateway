@@ -43,8 +43,8 @@ const props = defineProps<{
    * default) keeps every existing call site's original UNCONTROLLED
    * behavior unchanged — this component owns `internalSorting` itself and
    * a caller has no way to read the current sort. Passed, a caller (e.g.
-   * UsageView.vue's Users export, which needs to export rows in the
-   * table's own current sort order — the plan's own "exports
+   * ConsumerDirectory.vue's Users export, which needs to export rows in
+   * the table's own current sort order — the plan's own "exports
    * filtered+sorted rows" requirement) instead owns the ref: every header
    * click emits `update:sorting` with the new state rather than mutating
    * anything locally here.

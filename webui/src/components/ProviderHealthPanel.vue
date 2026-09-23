@@ -8,11 +8,12 @@ import {
 import { computed, h, reactive, watch } from 'vue'
 
 import DataTable from '@/components/DataTable.vue'
+import EntityLink from '@/components/EntityLink.vue'
 import ModelChip from '@/components/ModelChip.vue'
 import ProviderRateBadge from '@/components/ProviderRateBadge.vue'
-import ScopeLink from '@/components/ScopeLink.vue'
 import SearchInput from '@/components/SearchInput.vue'
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/components/ui/accordion'
+import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import {
   Card,
@@ -26,79 +27,55 @@ import { formatAgo, formatContextWindow, formatLatencyMs, formatUntil, refreshDe
 import { isModelDegraded } from '@/lib/provider-rate'
 import { type ExpandState, clearExpandOverrides, computeExpandedItems, toggleItemExpand } from '@/lib/search-expand'
 import { useDashboardStore } from '@/stores/dashboard'
+import { useModelsStore } from '@/stores/models'
 import { useNavStore } from '@/stores/nav'
-import type { AdminAliasView, AdminLatencyView, AdminModelMetaView, AdminModelRateView, AdminProvenanceView, AdminProviderView } from '@/types/api'
+import type {
+  AdminAliasView,
+  AdminLatencyView,
+  AdminModelMetaView,
+  AdminModelRateView,
+  AdminPerfRow,
+  AdminProvenanceView,
+  AdminProviderView,
+} from '@/types/api'
 
-// This component backs the "Providers" tab (App.vue) — a UI-label rename
-// only. The data it renders still comes from GET /admin/api/overview
-// (admin.go's adminOverviewResponse) and the store field below keeps that
-// same "overview" name, since the backend route/type names are unchanged
-// API surface.
+/**
+ * ProviderHealthPanel (redesign-plan.md section 3.4, Models & providers
+ * page) is ProvidersView.vue's own Providers accordion + aliases table,
+ * moved here verbatim, PLUS fleet-wide performance (p50/p95, timeouts,
+ * failovers — GET /admin/api/performance?kind=provider, read from
+ * useModelsStore, which the Models page's own onMounted fetches once for
+ * the whole page, shared with ModelCatalogTable.vue). The per-replica
+ * discovery/latency/provenance badges below are UNCHANGED from
+ * ProvidersView.vue — still sourced from the SAME 5s dashboard poll
+ * (GET /admin/api/overview), still per-replica/in-process (see each
+ * badge's own doc comment for why that never averages across replicas).
+ */
 const dashboard = useDashboardStore()
+const models = useModelsStore()
 const overview = computed(() => dashboard.overview)
 const nav = useNavStore()
 
 /**
- * goToProviderModels navigates to the Charts Models ranking, pre-filtered
- * to this provider's own models (F6, dashboard-plan.md: `nav.goToModels`).
- *
- * P2 review fix: this used to back a `<span role="link" tabindex="0">`
- * nested INSIDE AccordionTrigger's own real `<button>` — invalid per the
- * HTML button content model (no descendant may carry a `tabindex`
- * attribute, not just no nested button/anchor) and effectively invisible
- * to assistive technology (ARIA's `button` role declares "children
- * presentational: true", so the nested span was never announced as its
- * own link — see ScopeLink.vue's own doc comment for the identical
- * finding there). The provider-name label is now a real `<button>`,
- * rendered as a SIBLING of AccordionTrigger rather than nested inside it
- * (this component's template) — a plain click handler is enough: a click
- * on a sibling element never bubbles INTO the trigger's own listener
- * (event bubbling only travels through actual ancestors of the click
- * target), so the stopPropagation/Enter-only-keydown machinery this used
- * to need is gone along with the span it protected — native `<button>`
- * keyboard activation (Enter AND Space) is correct here for free.
+ * goToProviderModels navigates to the Models catalog table, pre-filtered
+ * (via its own `q` search) to this provider's own models — the redesign's
+ * replacement for the pre-redesign nav.goToModels (stores/nav.ts no
+ * longer has a per-page goTo* method at all, see that store's own doc
+ * comment; every navigation goes through the single goTo(page, params)).
  */
 function goToProviderModels(providerName: string): void {
-  nav.goToModels(`${providerName}/`)
+  nav.goTo('models', { q: `${providerName}/` })
 }
 
-// --- provider expand/collapse (shadcn-vue Accordion) ---
-//
-// Providers render as a real shadcn-vue Accordion (operator directive:
-// use the library component, restructure the layout to fit it — the
-// earlier hand-rolled table-row-toggle accordion is retired). The
-// trigger is one provider's summary line; the content holds its detail
-// (base URL, last refresh, last error) plus its model-id chips.
-//
-// Expand STATE itself is unchanged: lib/search-expand.ts's plain,
-// Vue-free two-set module (manuallyExpanded/manuallyCollapsed, generalized
-// from provider-expand.ts so UsageView.vue's Groups accordion shares the
-// same tested logic) — the exact search-interaction bug fix a prior review
-// flagged, covered by a real vitest spec (lib/search-expand.spec.ts) that
-// exercises the module directly, without mounting Vue. Only the
-// template-facing adapter changed: expandedProviderValues below is a
-// writable computed translating that Set-based state into the string[]
-// shape Accordion's `type="multiple"` v-model expects, and back —
-// clicking a trigger fires the setter with the new array; diffing it
-// against the previous effective set finds the one name that changed
-// and replays it through the SAME tested toggleItemExpand used before, so
-// Accordion never owns this state itself, only displays it.
+// --- provider expand/collapse (shadcn-vue Accordion) — unchanged from ProvidersView.vue ---
 const expandState: ExpandState = reactive({
   manuallyExpanded: new Set<string>(),
   manuallyCollapsed: new Set<string>(),
 })
 
-// --- model/alias search filter (operator feature) ---
+// --- model/alias search filter (operator feature) — unchanged from ProvidersView.vue ---
 const { query: modelQuery, normalized: normalizedQuery, hasQuery } = useSearchQuery()
 
-/**
- * Matching is against each model's full ROUTABLE id
- * (routableModelId(p.name, m) — the same string ModelChip both displays
- * and copies), not the bare model id: copying a chip's text and pasting
- * it back into search must find it, and the routable form is strictly
- * more permissive (it contains the bare id as a substring), so this
- * never hides a match the bare-id form would have found.
- */
 function modelMatches(providerName: string, modelId: string): boolean {
   return routableModelId(providerName, modelId).toLowerCase().includes(normalizedQuery.value)
 }
@@ -118,7 +95,6 @@ const filteredAliases = computed<AdminAliasView[]>(() => {
   return hasQuery.value ? all.filter(aliasMatches) : all
 })
 
-/** expandedProviders is the EFFECTIVE (possibly auto-expanded-by-search) set — see lib/search-expand.ts's own doc comments for the manual/auto-expand/override semantics. */
 const expandedProviders = computed<Set<string>>(() =>
   computeExpandedItems(
     expandState,
@@ -127,18 +103,10 @@ const expandedProviders = computed<Set<string>>(() =>
   ),
 )
 
-/** toggleProvider reads the CURRENT effective (visible) state for name before flipping it — see toggleItemExpand's own doc comment for exactly which bug this avoids. */
 function toggleProvider(name: string): void {
   toggleItemExpand(expandState, name, expandedProviders.value.has(name))
 }
 
-/**
- * expandedProviderValues adapts expandedProviders (a Set) to Accordion's
- * `type="multiple"` v-model contract (a string[]): reads out as
- * Array.from(expandedProviders.value); writes replay each name whose
- * membership changed through toggleProvider — Accordion never mutates
- * expandState directly, it only tells this setter what changed.
- */
 const expandedProviderValues = computed<string[]>({
   get: () => Array.from(expandedProviders.value),
   set: (newValues) => {
@@ -152,58 +120,33 @@ const expandedProviderValues = computed<string[]>({
   },
 })
 
-// A stale manuallyCollapsed suppression from one search must never
-// silently carry into a later, unrelated one — see ExpandState's own doc
-// comment. Watching modelQuery (not just the explicit clear button)
-// covers backspacing to empty too.
 watch(modelQuery, (value) => {
   if (value.trim() === '') clearExpandOverrides(expandState)
 })
 
-/** visibleModels is p's own model list, filtered to matches while a query is active — p only appears in filteredProviders at all because it has one, so this is never empty in that case; it exists so the accordion shows WHICH models matched instead of re-showing all 70+ with no distinction. */
 function visibleModels(p: AdminProviderView): string[] {
   return hasQuery.value ? p.models.filter((m) => modelMatches(p.name, m)) : p.models
 }
 
-/** ZERO_MODEL_RATE is the fallback ProviderRateBadge reads for a model p.modelRates has no entry for — should not happen (admin.go's buildAdminOverview populates one entry per Models id, unconditionally), but a defensive fallback keeps a stale/mismatched client build from throwing rather than just under-reporting. */
 const ZERO_MODEL_RATE: AdminModelRateView = { attemptsDay: 0, failuresDay: 0 }
 
-/**
- * modelRateFor looks up one model's counters within p.modelRates (Feature
- * A, v0.22), falling back to ZERO_MODEL_RATE. The optional-chain on
- * modelRates itself (folded review minor, v0.22 review round), not just
- * on the lookup, matches ZERO_MODEL_RATE's own doc comment: a stale
- * client talking to an older server build (before this field existed at
- * all) would otherwise throw on `.modelRates[model]` rather than fall
- * back — the type says modelRates is always present, but a real response
- * across a version skew is the one case that type cannot guarantee.
- */
 function modelRateFor(p: AdminProviderView, model: string): AdminModelRateView {
   return p.modelRates?.[model] ?? ZERO_MODEL_RATE
 }
 
-/** modelIsDegraded gates the per-model rate badge (spec: "ONLY when that model is degraded") so a healthy or no-traffic model's ModelChip renders with no badge beside it at all. */
 function modelIsDegraded(p: AdminProviderView, model: string): boolean {
   const r = modelRateFor(p, model)
   return isModelDegraded(r.attemptsDay, r.failuresDay)
 }
 
-/** ZERO_MODEL_META is modelMetaFor's fallback, mirroring ZERO_MODEL_RATE's own doc comment above — every sub-field undefined reads as "nothing known", not a thrown error, across a version-skewed client/server pair. */
 const ZERO_MODEL_META: AdminModelMetaView = {}
 
-/** modelMetaFor looks up one model's resolved metadata within p.modelMeta (feature v0.23), falling back to ZERO_MODEL_META. */
 function modelMetaFor(p: AdminProviderView, model: string): AdminModelMetaView {
   return p.modelMeta?.[model] ?? ZERO_MODEL_META
 }
 
-// --- discovery circuit breaker (feat/provider-health) ---
-//
-// Badge shown ONLY for 'open'/'half-open' — mirroring modelIsDegraded's
-// own "no badge when healthy" convention above: a 'closed' provider (the
-// common case) renders no breaker badge at all, exactly like a
-// non-degraded model gets no ProviderRateBadge.
+// --- discovery circuit breaker (feat/provider-health) — unchanged from ProvidersView.vue ---
 
-/** healthBadgeVariant maps healthState to the shadcn-vue Badge variant: destructive (backing off) for 'open', secondary (in progress) for 'half-open', undefined (no badge) for 'closed'. */
 function healthBadgeVariant(state: AdminProviderView['healthState']): 'destructive' | 'secondary' | undefined {
   switch (state) {
     case 'open':
@@ -215,36 +158,17 @@ function healthBadgeVariant(state: AdminProviderView['healthState']): 'destructi
   }
 }
 
-/** healthBadgeLabel renders the breaker badge's text: "open (in Ns)" while backing off (formatUntil omits the parenthetical once openUntil has passed or is unset), or "half-open" while probing. */
 function healthBadgeLabel(p: AdminProviderView): string {
   const until = formatUntil(p.openUntil)
   return until ? `${p.healthState} (${until})` : p.healthState
 }
 
-/** healthDetailClass matches the accordion-content detail row's text color to healthBadgeVariant's own trigger-row Badge color, rather than hardcoding text-destructive for every non-closed state: destructive (red) for 'open', muted (grey, the same neutral tone secondary conveys on the Badge) for 'half-open'. */
 function healthDetailClass(state: AdminProviderView['healthState']): string {
   return state === 'open' ? 'text-destructive' : 'text-muted-foreground'
 }
 
-// --- upstream latency (feat: instrument upstream latency) ---
-//
-// Beside the discovery-health badge above: no badge at all for a stream
-// state with no observations yet (p.latency undefined, or missing that
-// key) — mirrors healthBadgeVariant/modelIsDegraded's own "nothing to
-// show reads as no badge" convention, so absent data reads as absent,
-// never as a fabricated zero.
-//
-// The two stream states are deliberately labeled and worded differently,
-// never merged into one figure (task brief's own correctness rule):
-// streaming shows avgTtfbMs, the load-sensitive reading, labeled "ttfb";
-// non-streaming shows avgDurationMs labeled "avg" — NEVER "latency" or
-// "ttfb" — because a non-streaming provider buffers its whole completion
-// before sending anything, so its own avgTtfbMs is approximately equal
-// to avgDurationMs and carries the identical output-length contamination
-// a raw total-duration figure always has (a 4000-token answer legitimately
-// takes longer than a 50-token one on an equally healthy provider).
+// --- per-replica upstream latency (feat: instrument upstream latency) — unchanged from ProvidersView.vue ---
 
-/** streamingLatency/nonStreamingLatency pull p.latency's two known stream-state keys (admin.go's buildAdminLatencyViews emits exactly these two strings) — undefined when that stream state has no observations yet. */
 function streamingLatency(p: AdminProviderView): AdminLatencyView | undefined {
   return p.latency?.streaming
 }
@@ -252,57 +176,27 @@ function nonStreamingLatency(p: AdminProviderView): AdminLatencyView | undefined
   return p.latency?.['non-streaming']
 }
 
-/** latencyObservationCount renders v.count (omitted, per admin.go, when 0) as a singular/plural detail phrase for a badge title, falling back to "no observations counted" for the defensive case of a present view with an absent count (version skew). */
 function latencyObservationCount(v: AdminLatencyView): string {
   if (v.count === undefined) return 'no observations counted'
   return `${v.count} ${v.count === 1 ? 'observation' : 'observations'} on this replica`
 }
 
-/**
- * perReplicaCaveat is appended to every latency/provenance badge's title
- * (task brief's correctness rule 1): this figure comes from the same
- * in-process accumulator the rate-limit rejection counter reads, never
- * Redis, so it reflects only whichever of this deployment's several
- * Traefik replicas answered the current poll — never a fleet-wide
- * average, and a freshly restarted pod shows a short window. F4
- * (dashboard-plan.md) names the CONCRETE replica (admin.go's g.replica,
- * echoed as overview.replica) rather than the abstract warning alone — a
- * reader can now tell not just THAT this figure is replica-scoped, but
- * WHICH replica it came from. Falls back to the generic "this replica"
- * phrasing for a version-skewed server build that has not shipped the
- * field yet (undefined, never a fabricated id).
- */
 function perReplicaCaveat(): string {
   const replica = overview.value?.replica
   const who = replica ? `replica ${replica}` : 'this replica'
   return `Per-replica (${who}), in-process only — not a fleet-wide average across this deployment’s replicas.`
 }
 
-/** streamingLatencyTitle is the streaming ttfb badge's hover/title detail. */
 function streamingLatencyTitle(v: AdminLatencyView): string {
   return `Average time to first byte, the load-sensitive reading for streaming traffic. ${latencyObservationCount(v)}. ${perReplicaCaveat()}`
 }
 
-/** nonStreamingLatencyTitle is the non-streaming avg-duration badge's hover/title detail — explicit that this is NOT a latency/ttfb reading (correctness rule 2). */
 function nonStreamingLatencyTitle(v: AdminLatencyView): string {
   return `Average total response time, including generation — not a load-sensitive signal like streaming ttfb, since this provider buffers the whole completion before sending anything. ${latencyObservationCount(v)}. ${perReplicaCaveat()}`
 }
 
-// --- usage provenance (feat: expose token-accounting provenance) ---
-//
-// Token accounting has three provenances (see AdminProvenanceView's own
-// doc comment): reported (the healthy default — no badge, mirroring the
-// health/latency badges' own "nothing to show reads as no badge"
-// convention), estimated (a non-streaming response carried no usage, so
-// prompt was substituted from request body size), and unbilled (a
-// streaming response carried no usage, so the request was counted but
-// zero tokens were billed — a provider potentially serving completions
-// entirely free against every budget). estimated/unbilled are two
-// DISTINCT badges, never merged into one "not reported" indicator —
-// collapsing them would hide exactly the fact this feature exists to
-// surface (task brief's own correctness rule).
+// --- usage provenance (feat: expose token-accounting provenance) — unchanged from ProvidersView.vue ---
 
-/** estimatedProvenance/unbilledProvenance pull p.provenance's two known kind keys (admin.go's buildAdminProvenanceViews emits only these two strings, never "reported") — undefined when that kind has no observations yet. */
 function estimatedProvenance(p: AdminProviderView): AdminProvenanceView | undefined {
   return p.provenance?.estimated
 }
@@ -310,34 +204,48 @@ function unbilledProvenance(p: AdminProviderView): AdminProvenanceView | undefin
   return p.provenance?.unbilled
 }
 
-/** estimatedProvenanceTitle is the estimated-accounting badge's hover/title detail. */
 function estimatedProvenanceTitle(v: AdminProvenanceView): string {
   const plural = v.requests === 1 ? '' : 's'
   return `${v.requests} non-streaming response${plural} carried no usage from the provider — prompt tokens were estimated from request body size instead (${v.tokens} tokens billed from the estimate), completion billed as zero. ${perReplicaCaveat()}`
 }
 
-/** unbilledProvenanceTitle is the unbilled-accounting badge's hover/title detail — explicit about the budget-exposure implication (task brief's own framing). */
 function unbilledProvenanceTitle(v: AdminProvenanceView): string {
   const plural = v.requests === 1 ? '' : 's'
   return `${v.requests} streaming response${plural} carried no usage from the provider — the request was counted but zero tokens were billed. If this keeps happening, this provider may be serving completions entirely free against every budget. ${perReplicaCaveat()}`
 }
 
-// --- model aliases (sortable DataTable, operator directive) ---
+// --- fleet-wide performance (NEW: GET /admin/api/performance?kind=provider) ---
 //
-// The alias id gets the ModelChip copy treatment (an alias name IS the
-// routable string a caller sends as `model`); the target column stays
-// plain text.
+// Fleet-wide (Redis-backed via the latency histogram counters, WP-A), UNLIKE
+// every badge above this point in the file — a provider's own p50/p95
+// here is the SAME reading regardless which replica answered the poll,
+// the opposite of the per-replica caveat every latency/provenance badge
+// above carries. timeouts/failovers are always populated (they do not
+// need admin.stats.latency — only the percentile fields do, AdminPerfRow's
+// own doc comment); a provider with zero of either renders no badge at
+// all, mirroring every other "nothing to show" convention in this file.
+
+function providerPerfFor(name: string): AdminPerfRow | undefined {
+  return models.providerPerf.find((r) => r.id === name)
+}
+
+function fleetLatencyTitle(kind: 'p50' | 'p95'): string {
+  const { window, span } = models.perfWindow
+  return `Fleet-wide (every replica combined) ${kind === 'p50' ? 'median' : '95th percentile'} response time, over the last ${span} ${window}${span === 1 ? '' : 's'}.`
+}
+
+function fleetCountTitle(kind: 'timeouts' | 'failovers'): string {
+  const { window, span } = models.perfWindow
+  const noun = kind === 'timeouts' ? 'requests that exceeded the deadline' : "requests failed away from this provider to another candidate"
+  return `${noun}, fleet-wide, over the last ${span} ${window}${span === 1 ? '' : 's'}.`
+}
+
+// --- model aliases (sortable DataTable) — unchanged from ProvidersView.vue ---
 const aliasColumns: ColumnDef<AdminAliasView, unknown>[] = [
   {
     id: 'alias',
     header: 'Alias',
     accessorFn: (a) => a.alias,
-    // Optional-chained (review fix, folded minor) the same way
-    // modelMetaFor guards the provider path below: AdminAliasView.
-    // modelMeta is typed as always-present, but a real response from a
-    // server build older than this field (version skew) would otherwise
-    // throw on `.modelMeta.contextTokens` here instead of just omitting
-    // the hover detail.
     cell: ({ row }) =>
       h(ModelChip, {
         id: row.original.alias,
@@ -425,12 +333,17 @@ const aliasEmptyMessage = computed(() =>
       <CardHeader>
         <CardTitle>Providers</CardTitle>
         <CardDescription>
-          Every configured upstream and its last discovery refresh. Search filters providers and aliases by
-          model id.
+          Every configured upstream, its last discovery refresh, and fleet-wide performance. Search filters providers and
+          aliases by model id.
         </CardDescription>
         <SearchInput v-model="modelQuery" placeholder="Search models or aliases..." class="mt-2 max-w-sm" />
       </CardHeader>
-      <CardContent>
+      <CardContent class="flex flex-col gap-3">
+        <Alert v-if="!models.latencyEnabled" variant="warn">
+          <AlertDescription>
+            Fleet p50/p95 are off for this deployment. Enable <code>admin.stats.latency</code> to see them.
+          </AlertDescription>
+        </Alert>
         <p v-if="!overview?.providers.length" class="py-6 text-center text-sm text-muted-foreground">none</p>
         <p
           v-else-if="hasQuery && filteredProviders.length === 0"
@@ -439,31 +352,15 @@ const aliasEmptyMessage = computed(() =>
           no providers match &quot;{{ modelQuery }}&quot;
         </p>
         <template v-else>
-          <!-- F4 (dashboard-plan.md): latency/provenance badges below are per-replica, in-process figures — this caption names which replica this poll answered from, up front, instead of leaving it to each badge's own hover title. -->
-          <p class="mb-2 text-xs text-muted-foreground">{{ perReplicaCaveat() }}</p>
+          <p class="text-xs text-muted-foreground">{{ perReplicaCaveat() }} Fleet p50/p95/timeouts/failovers below are fleet-wide, not per-replica.</p>
           <Accordion v-model="expandedProviderValues" type="multiple" class="rounded-md border px-3">
           <AccordionItem v-for="p in filteredProviders" :key="p.name" :value="p.name">
-            <!--
-              P2 review fix: the provider-name link moved OUTSIDE
-              AccordionTrigger — see goToProviderModels' own doc comment
-              above for why. `py-2.5` matches AccordionTrigger.vue's own
-              vertical padding so the two line up in this row.
-              `header-class="flex-1"` fills the AccordionHeader (<h3>) that
-              wraps the trigger button, since AccordionTrigger's own
-              `class` prop lands on the inner button, not the header — see
-              AccordionTrigger.vue's doc comment. Without it the header
-              shrinks to content width, so the chevron drifts left of the
-              row's right edge and the empty space to its right stops
-              being clickable. The sr-only span gives the toggle button an
-              accessible name that names the provider, since the visible
-              text beside it is just badges and counts.
-            -->
             <div class="flex items-center gap-2">
               <button
                 type="button"
                 class="shrink-0 cursor-pointer rounded-sm py-2.5 font-medium hover:text-primary hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
-                :aria-label="`View ${p.name}'s models in Charts`"
-                :title="`View ${p.name}'s models in Charts`"
+                :aria-label="`View ${p.name}'s models in the Models table`"
+                :title="`View ${p.name}'s models in the Models table`"
                 @click="goToProviderModels(p.name)"
               >{{ p.name }}</button>
               <AccordionTrigger header-class="flex-1">
@@ -477,12 +374,6 @@ const aliasEmptyMessage = computed(() =>
                   :attempts-minute="p.attemptsMinute"
                   :failures-minute="p.failuresMinute"
                 />
-                <!--
-                  Discovery circuit breaker (feat/provider-health): no
-                  badge at all while 'closed' (the healthy, common case),
-                  mirroring modelIsDegraded's own convention for the
-                  per-model rate badge above.
-                -->
                 <Badge
                   v-if="p.healthState !== 'closed'"
                   as="span"
@@ -492,15 +383,6 @@ const aliasEmptyMessage = computed(() =>
                 >
                   {{ healthBadgeLabel(p) }}
                 </Badge>
-                <!--
-                  Upstream latency (feat: instrument upstream latency):
-                  streaming's ttfb is the load-sensitive figure; the
-                  non-streaming badge deliberately says "avg", never
-                  "ttfb"/"latency" — see nonStreamingLatencyTitle's own
-                  doc comment for why that number is not a load signal.
-                  No badge at all for a stream state with no observations
-                  yet, mirroring the health badge's own convention above.
-                -->
                 <Badge
                   v-if="streamingLatency(p)?.avgTtfbMs !== undefined"
                   as="span"
@@ -519,15 +401,42 @@ const aliasEmptyMessage = computed(() =>
                 >
                   non-streaming avg {{ formatLatencyMs(nonStreamingLatency(p)!.avgDurationMs as number) }}
                 </Badge>
-                <!--
-                  Usage provenance (feat: expose token-accounting
-                  provenance): no badge at all for a kind with no
-                  observations yet, mirroring the health/latency badges'
-                  own convention above. estimated and unbilled are two
-                  distinct badges — never merged (correctness rule, task
-                  brief) — since one substitutes an approximation and the
-                  other bills nothing at all.
-                -->
+                <Badge
+                  v-if="providerPerfFor(p.name)?.p50Ms !== undefined"
+                  as="span"
+                  variant="outline"
+                  class="font-normal tabular-nums"
+                  :title="fleetLatencyTitle('p50')"
+                >
+                  fleet p50 {{ formatLatencyMs(providerPerfFor(p.name)!.p50Ms as number) }}
+                </Badge>
+                <Badge
+                  v-if="providerPerfFor(p.name)?.p95Ms !== undefined"
+                  as="span"
+                  variant="outline"
+                  class="font-normal tabular-nums"
+                  :title="fleetLatencyTitle('p95')"
+                >
+                  fleet p95 {{ formatLatencyMs(providerPerfFor(p.name)!.p95Ms as number) }}
+                </Badge>
+                <Badge
+                  v-if="(providerPerfFor(p.name)?.timeouts ?? 0) > 0"
+                  as="span"
+                  variant="secondary"
+                  class="font-normal tabular-nums"
+                  :title="fleetCountTitle('timeouts')"
+                >
+                  {{ providerPerfFor(p.name)!.timeouts }} timeouts
+                </Badge>
+                <Badge
+                  v-if="(providerPerfFor(p.name)?.failovers ?? 0) > 0"
+                  as="span"
+                  variant="secondary"
+                  class="font-normal tabular-nums"
+                  :title="fleetCountTitle('failovers')"
+                >
+                  {{ providerPerfFor(p.name)!.failovers }} failovers
+                </Badge>
                 <Badge
                   v-if="estimatedProvenance(p)"
                   as="span"
@@ -583,17 +492,7 @@ const aliasEmptyMessage = computed(() =>
                     :input-per-m-tok-usd="modelMetaFor(p, m).inputPerMTokUsd"
                     :output-per-m-tok-usd="modelMetaFor(p, m).outputPerMTokUsd"
                   />
-                  <!-- ScopeLink (F6): jumps to Charts, scoped to this exact model — renders here as a real <button> inside AccordionContent (not AccordionTrigger), same as the provider-name button above (P2 review fix moved both out of the trigger). -->
-
-                  <ScopeLink :label="routableModelId(p.name, m)" :scope="`model:${routableModelId(p.name, m)}`" />
-                  <!--
-                    Context chip, visible, muted (feature v0.23) — only
-                    when known. Cost stays hover-only on ModelChip itself
-                    (operator directive: chips + hover would otherwise
-                    show the identical price figures twice; context
-                    visible for scanning, price on hover for the exact
-                    numbers).
-                  -->
+                  <EntityLink :label="routableModelId(p.name, m)" kind="model" :id="routableModelId(p.name, m)" />
                   <span
                     v-if="modelMetaFor(p, m).contextTokens !== undefined"
                     title="context window"
@@ -601,14 +500,6 @@ const aliasEmptyMessage = computed(() =>
                   >
                     {{ formatContextWindow(modelMetaFor(p, m).contextTokens as number) }}
                   </span>
-                  <!--
-                    attempts-minute/failures-minute deliberately omitted
-                    (SHOULD-2, v0.22 review round): AdminModelRateView no
-                    longer carries them at all, so leaving them unbound
-                    (undefined) is what tells ProviderRateBadge to render
-                    its day-window-only detail (dayRateTitle) instead of
-                    claiming a live minute-window reading no data backs.
-                  -->
                   <ProviderRateBadge
                     v-if="modelIsDegraded(p, m)"
                     :attempts-day="modelRateFor(p, m).attemptsDay"

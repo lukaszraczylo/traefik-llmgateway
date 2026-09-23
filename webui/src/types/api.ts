@@ -78,6 +78,9 @@ export interface AdminProvenanceView {
   tokens: number
 }
 
+/** The three discovery circuit-breaker states AdminProviderView.healthState and AdminCatalogProvider.healthState both carry (see AdminProviderView.healthState's own doc comment). Named so both interfaces reference the same union instead of two copies drifting apart. */
+export type ProviderHealthState = 'closed' | 'open' | 'half-open'
+
 export interface AdminProviderView {
   name: string
   type: string
@@ -113,7 +116,7 @@ export interface AdminProviderView {
    * fine still reads 'open' here. A provider with discovery disabled, or
    * one that has never failed a refresh, always reads 'closed'.
    */
-  healthState: 'closed' | 'open' | 'half-open'
+  healthState: ProviderHealthState
   /**
    * openUntil is when this provider's breaker will next attempt a
    * half-open probe (admin.go: adminProviderView.OpenUntil). The unset
@@ -215,6 +218,31 @@ export interface AdminAliasView {
   modelMeta: AdminModelMetaView
 }
 
+/**
+ * Which admin-stats features this deployment has opt-in enabled
+ * (admin.go: adminFeaturesView, AdminConfig.Stats — llmgateway.go). Every
+ * new-endpoint store/page gates its own fetch and empty-state copy on
+ * these rather than guessing from data shape: a false userModelStats, for
+ * instance, means GET /admin/api/usage/totals?kind=usermodel 404s, not
+ * that it happens to return no rows yet.
+ */
+export interface AdminFeaturesView {
+  userModelStats: boolean
+  latencyStats: boolean
+  cacheStats: boolean
+  lastSeen: boolean
+  failover: boolean
+}
+
+/** Model-count breakdown by billing price source across the catalog (admin.go: adminPricingSummaryView) — the Home page's "N unpriced models" warning reads `unpriced` directly. */
+export interface AdminPricingSummary {
+  override: number
+  builtin: number
+  litellm: number
+  free: number
+  unpriced: number
+}
+
 /** GET /admin/api/overview (admin.go: adminOverviewResponse). */
 export interface AdminOverviewResponse {
   version: string
@@ -246,6 +274,8 @@ export interface AdminOverviewResponse {
   redis: AdminRedisView
   cache: AdminCacheView
   retry: AdminRetryView
+  features: AdminFeaturesView
+  pricing: AdminPricingSummary
 }
 
 export interface AdminUsageEntryView {
@@ -295,6 +325,14 @@ export interface AdminUsageEntryView {
    */
   rejectionsPerDay: number
   storeDown?: boolean
+  /**
+   * Unix seconds this scope last made a request, fleet-wide (admin.go:
+   * adminUsageEntryView.LastSeen — the last-seen counter family,
+   * throttled per-replica to one write per 60s). 0 or omitted means
+   * never seen, or admin.stats.lastSeen is off (AdminFeaturesView.
+   * lastSeen) — never render 0 as an epoch date.
+   */
+  lastSeen?: number
 }
 
 /** GET /admin/api/usage (admin.go: adminUsageResponse). */
@@ -310,18 +348,11 @@ export type HistoryMetric = 'req' | 'tokin' | 'tokout' | 'cost'
 /** The three window values GET /admin/api/usage/history accepts. */
 export type HistoryWindow = 'hour' | 'day' | 'month'
 
-export interface UsageHistoryPoint {
-  bucket: string
-  value: number
-}
-
-/** GET /admin/api/usage/history (admin.go: usageHistoryResponse). */
-export interface UsageHistoryResponse {
-  scope: string
-  metric: string
-  window: string
-  points: UsageHistoryPoint[]
-}
+// UsageHistoryPoint/UsageHistoryResponse (GET /admin/api/usage/history)
+// were removed (P3 item 25, dead code): the redesigned shell reads
+// GET /admin/api/usage/series instead (AdminSeriesResponse below) —
+// grep confirms no remaining importer since stores/history.ts (+its own
+// spec) was deleted (redesign-plan.md section 3.5).
 
 /**
  * One ranked model in GET /admin/api/usage/models (admin.go:
@@ -343,6 +374,17 @@ export interface UsageHistoryResponse {
  * present 0 means known-free" convention, never infer either from a value
  * being falsy).
  */
+/**
+ * Which billing rule actually priced a model (admin.go/pricing.go:
+ * billingPriceSource) — an explicit per-model override, the built-in
+ * LiteLLM-derived table, a live LiteLLM lookup, a configured free model
+ * (modelMeta.free), or unpriced (billed as 0, no rule matched). This is
+ * the BILLING truth, distinct from a ':free' suffix's display-only
+ * relabeling (routes_unified.go) — a ':free' model still reports its
+ * real priceSource here even though it displays as free.
+ */
+export type PriceSource = 'override' | 'builtin' | 'litellm' | 'free' | 'unpriced'
+
 export interface AdminUsageModelEntry {
   id: string
   value: number
@@ -351,6 +393,13 @@ export interface AdminUsageModelEntry {
   tokensOut?: number
   costMicroUsd?: number
   free?: boolean
+  /** Cache hits/savings for this model today — present only when `detail=1` AND AdminFeaturesView.cacheStats is on (admin.go). cacheSavedMicroUsd is micro-USD, same unit as costMicroUsd. */
+  cacheHits?: number
+  cacheSavedMicroUsd?: number
+  /** Count of 402 (unpriced-refusal) responses for this model today — `detail=1` only (admin.go). */
+  r402?: number
+  /** This model's billing price source — `detail=1` only (admin.go). */
+  priceSource?: PriceSource
 }
 
 /**
@@ -384,6 +433,13 @@ export interface AdminUsageModelsResponse {
    */
   detail?: boolean
   models: AdminUsageModelEntry[]
+  /**
+   * How many buckets before the most recent one this ranking's span was
+   * shifted back by (admin.go: parseUsageModelsOffset) — 0 for "ending
+   * now", the ordinary case every pre-offset caller still gets. Always
+   * echoed back, mirroring `span`'s own convention above.
+   */
+  offset: number
 }
 
 /** One MCP-server or agent target's current-window request counters (admin.go: adminTargetCountersView) — requests only, no tokens or cost. */
@@ -518,3 +574,212 @@ export interface AdminEventsResponse {
   capacity: number
   degraded?: boolean
 }
+/**
+ * GET /admin/api/usage/series (admin.go: adminSeriesResponse — phase 2
+ * redesign). One or more scopes' bucketed time series for a single
+ * metric, aligned on the SAME `buckets` array — every entry in `series`
+ * has exactly `buckets.length` points, index-for-index. `unknown` names
+ * every requested scope id the server could not resolve (never throws
+ * for one bad id among several valid ones); `series` never nil.
+ */
+export interface AdminSeriesResponse {
+  metric: string
+  window: HistoryWindow
+  span: number
+  offset: number
+  /** Oldest first — the same chronological order formatBucketLabel (lib/format.ts) already expects. */
+  buckets: string[]
+  series: { scope: string; points: number[] }[]
+  unknown: string[]
+}
+
+/** The five aggregation kinds GET /admin/api/usage/totals accepts (admin.go: adminTotalsResponse.Kind). */
+export type TotalsKind = 'user' | 'group' | 'usermodel' | 'modeluser' | 'targetcaller'
+
+/**
+ * GET /admin/api/usage/totals (admin.go: adminTotalsResponse — phase 2
+ * redesign). A ranked table of ids (users, groups, user×model pairs,
+ * model×user pairs, or target×caller pairs) with one or more summed
+ * metrics each. Rows with every requested metric at 0 are dropped
+ * server-side; `truncated` is set only when `limit` cut off further,
+ * non-zero rows.
+ */
+export interface AdminTotalsResponse {
+  kind: TotalsKind
+  window: HistoryWindow
+  span: number
+  offset: number
+  metrics: string[]
+  /** id is a bare user/group/model id for kind 'user'/'group', or a composite id ("targetcaller": "mcp/fetch/alice") for the compound kinds — see admin.go's own id-building for the exact join rule per kind. */
+  rows: { id: string; values: Record<string, number> }[]
+  truncated?: boolean
+}
+
+/** The two `kind` values GET /admin/api/performance accepts, and the two windows it supports — a strict subset of HistoryWindow (no 'month': performance is a live-operations view, not a monthly rollup). */
+export type PerfKind = 'provider' | 'model'
+export type PerfWindow = Extract<HistoryWindow, 'hour' | 'day'>
+
+/**
+ * One provider's or model's performance row (admin.go: adminPerfRow).
+ * Percentile fields (p50/p95/p99Ms, ttfbP50/95Ms) are present only when
+ * AdminFeaturesView.latencyStats is on AND this id has at least one
+ * observation in the requested span — undefined never means "0ms".
+ * Attempts/failures are always present (admin.stats.latency is not
+ * required for them). `overflow` marks a row whose slowest bucket
+ * exceeded the latency histogram's own ceiling (metrics.go) — its
+ * percentile fields, if present, are a floor, not an exact value.
+ */
+export interface AdminPerfRow {
+  id: string
+  p50Ms?: number
+  p95Ms?: number
+  p99Ms?: number
+  ttfbP50Ms?: number
+  ttfbP95Ms?: number
+  count: number
+  attempts: number
+  failures: number
+  timeouts?: number
+  failovers?: number
+  overflow?: boolean
+}
+
+/**
+ * GET /admin/api/performance (admin.go: adminPerfResponse — phase 2
+ * redesign). `rows` is the ranked-by-id table (the default view);
+ * `buckets`/`points` are populated only when the request asked for
+ * `series=1` against a single id, one AdminPerfRow per bucket (its own
+ * `id` field is then the bucket string, not the provider/model id).
+ * `rows` is optional: the server omits it (`omitempty`) on an empty
+ * result (a quiet span or a fresh gateway) rather than sending `[]` —
+ * every read site must default to `[]`.
+ */
+export interface AdminPerfResponse {
+  kind: PerfKind
+  window: PerfWindow
+  span: number
+  offset: number
+  rows?: AdminPerfRow[]
+  buckets?: string[]
+  points?: AdminPerfRow[]
+  latencyEnabled: boolean
+}
+
+/**
+ * One provider's one model's resolved catalog entry (admin.go:
+ * adminCatalogModel — phase 2 redesign). `priceSource`/`displayFree`
+ * mirror AdminUsageModelEntry's own detail fields, but computed for
+ * EVERY catalog model, not just ones with observed traffic — the Models
+ * page's pricing-health table joins this against the usage ranking.
+ *
+ * `inputPerMTokUsd`/`outputPerMTokUsd` are the ACTUAL BILLED rate for
+ * `priceSource` (Go's own billingPriceSource, pricing.go) — the exact
+ * price a real request against this model gets charged, never a
+ * separately-resolved display price. Both are undefined for
+ * `priceSource: 'free'` or `'unpriced'` (nothing to report), and set for
+ * every other source. `contextTokens` is a SEPARATE, display-only
+ * resolution (admin.go's buildAdminModelMetaView — the same one GET
+ * /admin/api/overview's own AdminModelMetaView carries), since a
+ * context window is not a billing concept. N1 (verify-redesign-
+ * final.md): an earlier version filled the two price fields from that
+ * same display resolution instead, so a `pricing:` override with no
+ * separate modelMeta/discovery price reported `priceSource: 'override'`
+ * alongside undefined prices — CostAvoidedCard's pickReferenceModel
+ * (lib/cost-avoided.ts) and PricingHealthTable both read these fields
+ * assuming they agree with `priceSource`, and broke for exactly that
+ * model.
+ */
+export interface AdminCatalogModel {
+  id: string
+  model: string
+  contextTokens?: number
+  inputPerMTokUsd?: number
+  outputPerMTokUsd?: number
+  priceSource: PriceSource
+  /** True for a ':free' suffix model (routes_unified.go) — display-only relabeling; billing still follows `priceSource` unchanged. */
+  displayFree?: boolean
+  aliases?: string[]
+}
+
+/** One provider's full catalog listing (admin.go: adminCatalogProvider — phase 2 redesign), on-demand only (never part of the 5s overview poll). */
+export interface AdminCatalogProvider {
+  lastRefresh: string
+  openUntil: string
+  name: string
+  type: string
+  healthState: ProviderHealthState
+  models: AdminCatalogModel[]
+  discoveryEnabled: boolean
+}
+
+/** GET /admin/api/catalog (admin.go: adminCatalogResponse — phase 2 redesign). On-demand/stale-cached, never polled every 5s (Q12). */
+export interface AdminCatalogResponse {
+  providers: AdminCatalogProvider[]
+  aliases: AdminAliasView[]
+}
+
+/**
+ * One configured user's consumer-directory row (admin.go:
+ * adminConsumerUser — phase 2 redesign). `source` is 'inline' (defined
+ * directly in the plugin config) or 'file' (loaded from users.file);
+ * `providers`/`models` are this user's OWN personal grant, distinct from
+ * anything their group(s) already allow.
+ */
+export interface AdminConsumerUser {
+  limits?: LimitsConfig
+  name: string
+  source: 'inline' | 'file'
+  groups: string[]
+  providers?: string[]
+  models?: string[]
+  admin?: boolean
+}
+
+/** How many of a provider's models a group can reach vs. how many that provider has (admin.go: adminModelAccessCount) — the Access Matrix's per-cell "n/m models" reading. */
+export interface AdminModelAccessCount {
+  allowed: number
+  total: number
+}
+
+/**
+ * One configured group's consumer-directory + access row (admin.go:
+ * adminConsumerGroup — phase 2 redesign). `allowedProviders` is never
+ * nil (empty means every configured provider); `modelAccess` is keyed by
+ * provider name.
+ */
+export interface AdminConsumerGroup {
+  limits?: LimitsConfig
+  name: string
+  providers?: string[]
+  models?: string[]
+  mcpServers?: string[]
+  agents?: string[]
+  passthroughPaths?: string[]
+  allowedProviders: string[]
+  modelAccess: Record<string, AdminModelAccessCount>
+  memberCount: number
+}
+
+/** GET /admin/api/consumers (admin.go: adminConsumersResponse — phase 2 redesign). `usersFile` is the configured path only, never its contents (Risks, redesign-plan.md section 6). */
+export interface AdminConsumersResponse {
+  users: AdminConsumerUser[]
+  groups: AdminConsumerGroup[]
+  usersFile?: string
+}
+
+/**
+ * GET /admin/api/config (admin.go: adminConfigResponse — phase 2
+ * redesign). `config` is the FULL plugin config after redactConfig's
+ * recursive walk: every apiKey/password literal replaced with
+ * "[redacted]", an "env:NAME"/"file:/path" indirection kept verbatim,
+ * and every baseUrl/url stripped of embedded userinfo credentials — safe
+ * to render as-is (Config page's ConfigTree.vue), never re-sanitized
+ * client-side.
+ */
+export interface AdminConfigResponse {
+  config: Record<string, unknown>
+  warnings: string[]
+  features: AdminFeaturesView
+  version: string
+}
+

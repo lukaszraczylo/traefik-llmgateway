@@ -25,8 +25,9 @@ const ALL_KINDS = 'all'
 // kindFilter/userFilter live on the store, not as local refs (F9,
 // hash-state): composables/useHashState.ts reads/writes them directly so
 // this filter round-trips through the URL hash. userFilter binds through
-// useSearchQuery's own external-ref option, the same way UsageView.vue
-// binds nav.usageQuery — see useSearchQuery.ts's own doc comment.
+// useSearchQuery's own external-ref option — see useSearchQuery.ts's own
+// doc comment for the other current external-ref caller
+// (ConsumerDirectory.vue).
 const { kindFilter, userFilter } = storeToRefs(events)
 const { normalized: normalizedUserQuery } = useSearchQuery(userFilter)
 
@@ -48,9 +49,9 @@ function onKindChange(value: unknown): void {
 const columns = eventsColumns()
 
 /**
- * emptyMessage mirrors TargetsView.vue/UsageView.vue's own three-way
- * pattern: distinguishes "nothing recorded at all" from "nothing matches
- * the active filter".
+ * emptyMessage mirrors TargetsView.vue/ConsumerDirectory.vue's own
+ * three-way pattern: distinguishes "nothing recorded at all" from
+ * "nothing matches the active filter".
  *
  * P9 review fix: gated on events.lastUpdated (null until the first fetch
  * settles, stores/events.ts) — this used to read events.events.length

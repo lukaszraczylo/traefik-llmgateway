@@ -7,11 +7,11 @@ import { downloadText, type DownloadOutcome } from '@/lib/download'
 
 /**
  * CsvExportButton is the one "Export CSV" control every table export in
- * this panel uses — F8. Owned by WP-B1 (usage-csv.ts, this component) but
- * consumed unmodified by WP-B2's Models tab, which builds its own CSV text
- * via lib/usage-csv.ts's modelDetailCsv and passes it through the same
- * `build` prop — one export affordance, not a copy per tab (vue.md: "if
- * you've written it twice, you owe an abstraction").
+ * this panel uses (F8) — ConsumerDirectory.vue's Users/Groups exports
+ * (lib/usage-csv.ts's usageCsv) and PricingHealthTable.vue's own
+ * pricing-health export each build their own CSV text and pass it
+ * through the same `build` prop — one export affordance, not a copy per
+ * table (vue.md: "if you've written it twice, you owe an abstraction").
  *
  * `build` is called fresh on every click, never memoized — an export
  * always reflects whatever rows are CURRENTLY visible (filtered + sorted)

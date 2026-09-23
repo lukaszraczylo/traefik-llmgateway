@@ -7,27 +7,30 @@ import { formatCost } from '@/lib/format'
 import type { LimitsConfig } from '@/types/api'
 
 /**
- * CostForecastCard renders the Usage tab's fleet-wide cost projection —
- * F7, placed under the Total card (UsageView.vue). All math is delegated
- * to lib/forecast.ts's pure functions; this component only formats and
- * lays the result out.
+ * CostForecastCard renders a fleet- or scope-wide cost projection — F7,
+ * originally the pre-redesign Usage tab's own card, now used by both
+ * SpendPage.vue (the global range's own scope, under the burn-down chart)
+ * and ConsumerDirectory.vue (fleet-wide, under the Total row). All math is
+ * delegated to lib/forecast.ts's pure functions; this component only
+ * formats and lays the result out.
  *
  * `now` is a REQUIRED prop, not read from `new Date()` inside this
  * component (coordinator brief: "now passed as prop for determinism") —
- * the caller (UsageView.vue) supplies it, keeping every `Date.now()`-
- * flavored read in this feature at the boundary rather than buried inside
- * a component, same discipline lib/forecast.ts's own functions already
- * follow by taking `now`/`elapsedFraction` as plain arguments.
+ * every caller supplies it from its OWN composables/useNow.ts instance,
+ * keeping every `Date.now()`-flavored read in this feature at the
+ * boundary rather than buried inside a component, same discipline
+ * lib/forecast.ts's own functions already follow by taking
+ * `now`/`elapsedFraction` as plain arguments.
  *
  * P1 review fix: this used to be optional with a `withDefaults(...,
  * { now: () => new Date() })` default. Vue caches a prop's default value
  * ONCE per component instance (propsDefaults) — the very first time it is
  * read, not on every render — so a caller that omitted `now` froze this
  * card's projection at whatever instant it happened to mount, never
- * advancing again for as long as the tab stayed open. `now` is now
- * required: UsageView.vue passes the ONE shared reactive clock
- * (composables/useNow.ts) every time-dependent read on this tab shares,
- * so there is no default left to accidentally freeze.
+ * advancing again for as long as the page stayed open. `now` is now
+ * required: every caller passes the ONE shared reactive clock its own
+ * useNow() call returns, so there is no default left to accidentally
+ * freeze.
  */
 const props = defineProps<{
   /** usage.total.costPerMonthMicroUsd — fleet-wide month-to-date spend. */

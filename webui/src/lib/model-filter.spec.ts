@@ -1,38 +1,53 @@
 import { describe, expect, it } from 'vitest'
 
-import { filterModelsByPrefix } from './model-filter'
-import type { AdminUsageModelEntry } from '@/types/api'
+import { filterModelRows } from './model-filter'
+import type { ModelCatalogRow } from './model-table-columns'
 
-const models: AdminUsageModelEntry[] = [
-  { id: 'openai/gpt-5', value: 10 },
-  { id: 'openai/gpt-5-mini', value: 5 },
-  { id: 'anthropic/claude-opus', value: 8 },
+function row(overrides: Partial<ModelCatalogRow> = {}): ModelCatalogRow {
+  return {
+    id: 'openai/gpt-5',
+    model: 'gpt-5',
+    providerName: 'openai',
+    priceSource: 'builtin',
+    aliases: [],
+    requests: 0,
+    tokensIn: 0,
+    tokensOut: 0,
+    costMicroUsd: 0,
+    attempts: 0,
+    failures: 0,
+    ...overrides,
+  }
+}
+
+const rows: ModelCatalogRow[] = [
+  row({ id: 'openai/gpt-5' }),
+  row({ id: 'openai/gpt-5-mini' }),
+  row({ id: 'anthropic/claude-opus', aliases: ['smart', 'flagship'] }),
 ]
 
-describe('filterModelsByPrefix', () => {
-  it('returns every entry unchanged when the prefix is empty', () => {
-    expect(filterModelsByPrefix(models, '')).toBe(models)
+describe('filterModelRows', () => {
+  it('returns every row unchanged for an empty query', () => {
+    expect(filterModelRows(rows, '')).toBe(rows)
   })
 
-  it('keeps only ids starting with the given provider prefix', () => {
-    const result = filterModelsByPrefix(models, 'openai/')
-    expect(result.map((m) => m.id)).toEqual(['openai/gpt-5', 'openai/gpt-5-mini'])
+  it('returns every row unchanged for a whitespace-only query', () => {
+    expect(filterModelRows(rows, '   ')).toBe(rows)
   })
 
-  it('matches a full id exactly (a single-model prefix)', () => {
-    const result = filterModelsByPrefix(models, 'anthropic/claude-opus')
-    expect(result).toEqual([{ id: 'anthropic/claude-opus', value: 8 }])
+  it('matches a substring of the canonical id, case-insensitively', () => {
+    expect(filterModelRows(rows, 'GPT-5').map((r) => r.id)).toEqual(['openai/gpt-5', 'openai/gpt-5-mini'])
   })
 
-  it('returns an empty array when nothing matches the prefix', () => {
-    expect(filterModelsByPrefix(models, 'mistral/')).toEqual([])
+  it('matches a provider prefix', () => {
+    expect(filterModelRows(rows, 'anthropic/').map((r) => r.id)).toEqual(['anthropic/claude-opus'])
   })
 
-  it('is case-sensitive (ids are canonical, lowercase provider/model strings)', () => {
-    expect(filterModelsByPrefix(models, 'OpenAI/')).toEqual([])
+  it('matches an alias, case-insensitively', () => {
+    expect(filterModelRows(rows, 'FLAGSHIP').map((r) => r.id)).toEqual(['anthropic/claude-opus'])
   })
 
-  it('does not match a substring that is not a prefix', () => {
-    expect(filterModelsByPrefix(models, 'gpt-5')).toEqual([])
+  it('returns an empty array when nothing matches', () => {
+    expect(filterModelRows(rows, 'mistral')).toEqual([])
   })
 })

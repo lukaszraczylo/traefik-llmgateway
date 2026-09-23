@@ -38,6 +38,8 @@ const emptyOverview: AdminOverviewResponse = {
   redis: { configured: false, lastErrAt: '0001-01-01T00:00:00Z' },
   cache: { enabled: false },
   retry: { enabled: false },
+  features: { userModelStats: false, latencyStats: false, cacheStats: false, lastSeen: false, failover: false },
+  pricing: { override: 0, builtin: 0, litellm: 0, free: 0, unpriced: 0 },
 }
 const emptyUsage: AdminUsageResponse = {
   users: [],

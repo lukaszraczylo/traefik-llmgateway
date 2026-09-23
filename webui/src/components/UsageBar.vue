@@ -15,12 +15,13 @@ import { ratioTier } from '@/lib/usage-bars'
  * `aria-valuetext`, so a screen reader announces the same number a
  * sighted reader sees in the fill width and the `title` tooltip.
  *
- * Used two places (usage-columns.ts's numeric cells, UsageView.vue's
- * group detail grid) — both pass a fully-computed BudgetRatio plus the
- * caller's own human-readable `valueText`, so this component has no
- * formatting opinion of its own (formatCost/formatExactInt stay the
- * caller's job, same "logic lives in lib/, not the component" split
- * every other shared component in this panel follows).
+ * Used across the panel (usage-columns.ts's numeric cells,
+ * ConsumerDirectory.vue's group detail grid, UserDetail.vue's headroom
+ * bars) — every caller passes a fully-computed BudgetRatio plus its own
+ * human-readable `valueText`, so this component has no formatting
+ * opinion of its own (formatCost/formatExactInt stay the caller's job,
+ * same "logic lives in lib/, not the component" split every other
+ * shared component in this panel follows).
  */
 const props = defineProps<{
   /** used / limit — may exceed 1 (a scope's usage window can roll past its limit before the next request is rejected). */

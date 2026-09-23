@@ -24,8 +24,10 @@ describe('useSearchQuery', () => {
 
   // F9 (hash-state): a caller can supply the ref this composable reads and
   // writes instead of a private local one, so the query round-trips
-  // through an external owner (nav.usageQuery, UsageView.vue) rather than
-  // being lost on remount.
+  // through an external owner (e.g. ConsumerDirectory.vue's own
+  // `nav.params.q`-backed computed, or EventsView.vue's store-backed
+  // `userFilter` — useSearchQuery.ts's own doc comment) rather than being
+  // lost on remount.
   describe('with an external ref', () => {
     it('reads and derives from the external ref\'s current value, rather than starting blank', () => {
       const external = ref('preset')

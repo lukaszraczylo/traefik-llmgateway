@@ -98,8 +98,8 @@ describe('formatModelCostHover', () => {
 
 // Discovery circuit breaker (feat/provider-health, round 3): openUntil's
 // future-time counterpart to formatAgo's past-time "(Ns ago)". Only
-// caller today is ProvidersView.vue's healthBadgeLabel, rendering the
-// breaker's live "open (in Ns)" countdown.
+// caller today is ProviderHealthPanel.vue's healthBadgeLabel, rendering
+// the breaker's live "open (in Ns)" countdown.
 describe('formatUntil', () => {
   it('renders "" for the unset zero-time sentinel', () => {
     expect(formatUntil(ZERO_TIME)).toBe('')

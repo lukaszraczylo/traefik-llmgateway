@@ -24,13 +24,17 @@ const props = defineProps<{
   emptyMessage?: string
   /** P1: the shared reactive clock (composables/useNow.ts) — threaded into usageColumns() below so this table's own costMonthProj column recomputes as the clock ticks, instead of freezing at whatever instant this computed first ran. */
   now: Date
-  /** P6: optional controlled sort state, forwarded to DataTable's own `v-model:sorting` (see that component's identical prop doc comment) — omitted everywhere except UsageView.vue's top-level Users table, whose export must reflect the table's current sort. */
+  /** P6: optional controlled sort state, forwarded to DataTable's own `v-model:sorting` (see that component's identical prop doc comment) — omitted everywhere except ConsumerDirectory.vue's top-level Users table, whose export must reflect the table's current sort. */
   sorting?: SortingState
+  /** Optional per-row source lookup ('inline'/'file'/undefined), forwarded to usage-columns.ts's usageColumns — see that module's sourceColumn doc comment. Omitted everywhere except ConsumerDirectory.vue's flat Users table. */
+  sourceValue?: (entry: AdminUsageEntryView) => string | undefined
 }>()
 
 const emit = defineEmits<{ 'update:sorting': [value: SortingState] }>()
 
-const columns = computed(() => usageColumns(props.idLabel, props.secondaryColumnLabel, props.secondaryValue, props.now))
+const columns = computed(() =>
+  usageColumns(props.idLabel, props.secondaryColumnLabel, props.secondaryValue, props.now, props.sourceValue),
+)
 </script>
 
 <template>

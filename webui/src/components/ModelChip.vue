@@ -9,13 +9,15 @@ import { formatContextWindow, formatModelCostHover } from '@/lib/format'
 /**
  * ModelChip is one clickable, copyable model-id chip, used anywhere a
  * resolvable model or alias id renders: a provider's expanded model list
- * (ProvidersView.vue's accordion), the model-alias table, and a group's
- * usage-detail model list (UsageView.vue — passed with no metadata props
- * there, since a raw group-config glob entry has no resolvable provider/
- * model pair to look metadata up against). id is the full routable id
- * (lib/format.ts's routableModelId) or an alias name — what actually
- * gets copied, so a pasted value works straight into a `model: "..."`
- * request field.
+ * and the model-alias table (both ProviderHealthPanel.vue's accordion),
+ * the Models page's own catalog table (lib/model-table-columns.ts, WITH
+ * metadata props — see contextTokens/inputPerMTokUsd/outputPerMTokUsd
+ * below), and a group's own allowed-models list (ConsumerDirectory.vue —
+ * passed with no metadata props there for a raw glob entry, since it has
+ * no resolvable provider/model pair to look metadata up against). id is
+ * the full routable id (lib/format.ts's routableModelId) or an alias
+ * name — what actually gets copied, so a pasted value works straight
+ * into a `model: "..."` request field.
  *
  * contextTokens/inputPerMTokUsd/outputPerMTokUsd are this model's
  * resolved metadata (feature v0.23, hover-detail refinement:

@@ -120,3 +120,9 @@ describe('budgetRatios', () => {
     expect(ratios.map((r) => r.id)).toEqual(['reqMin', 'reqDay', 'tokDay', 'tokMonth', 'costDay', 'costMonth'])
   })
 })
+
+// estimatedRunOutDate was removed (P2 item 14 — it disagreed with
+// lib/burndown.ts's runOutDate on an already-exceeded budget and on day 1
+// of the month; UserDetail.vue and BurnDownChart.vue now both call the
+// one function in lib/burndown.ts, which owns this coverage —
+// lib/burndown.spec.ts's own `describe('runOutDate', ...)`).

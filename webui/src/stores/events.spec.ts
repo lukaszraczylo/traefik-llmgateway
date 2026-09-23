@@ -195,3 +195,28 @@ describe('useEventsStore.startPolling / stopPolling', () => {
     }
   })
 })
+
+// initFromParams was removed (P2 item 10): ReliabilityPage.vue now keeps
+// kindFilter/userFilter synced with nav.params via its own reactive
+// `watch(() => [nav.params.kind, nav.params.user], ...)`, rather than a
+// one-shot mount-time seed — that watch's own doc comment covers why.
+
+describe('useEventsStore.setKindFilter / setUserFilter', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+  })
+
+  it('setKindFilter sets the exact-match kind filter, including back to the "" (every kind) sentinel', () => {
+    const events = useEventsStore()
+    events.setKindFilter('timeout')
+    expect(events.kindFilter).toBe('timeout')
+    events.setKindFilter('')
+    expect(events.kindFilter).toBe('')
+  })
+
+  it('setUserFilter sets the raw, un-normalized user/group search text', () => {
+    const events = useEventsStore()
+    events.setUserFilter('alice')
+    expect(events.userFilter).toBe('alice')
+  })
+})

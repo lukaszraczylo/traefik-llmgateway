@@ -1,15 +1,17 @@
-import type { AdminUsageModelEntry } from '@/types/api'
+import type { ModelCatalogRow } from '@/lib/model-table-columns'
 
 /**
- * filterModelsByPrefix narrows the Models tab's already-fetched ranking to
- * entries whose canonical "provider/model" id starts with `prefix` (F6,
- * dashboard-plan.md) — the client-side filter ChartsView.vue applies on
- * top of stores/history.ts's own `modelFilter` state, set by
- * ProvidersView.vue's provider-header link (nav.goToModels, stores/nav.ts
- * — WP-B1). An empty prefix is "no filter", returning `models` unchanged
- * — the default state before any provider link has been clicked.
+ * filterModelRows narrows the Models page's already-fetched catalog rows
+ * (lib/model-table-columns.ts's ModelCatalogRow, built from GET
+ * /admin/api/catalog + usage/models + performance) to whichever match a
+ * free-text query (redesign-plan.md section 3.1's Models page `q` param) —
+ * against the canonical id (ModelChip's own copyable text) OR any of the
+ * model's own aliases, case-insensitively. An empty/whitespace-only query
+ * is "no filter", returning `rows` unchanged (the pre-redesign
+ * filterModelsByPrefix this function replaces made the identical choice).
  */
-export function filterModelsByPrefix(models: AdminUsageModelEntry[], prefix: string): AdminUsageModelEntry[] {
-  if (!prefix) return models
-  return models.filter((m) => m.id.startsWith(prefix))
+export function filterModelRows(rows: ModelCatalogRow[], query: string): ModelCatalogRow[] {
+  const q = query.trim().toLowerCase()
+  if (!q) return rows
+  return rows.filter((r) => r.id.toLowerCase().includes(q) || r.aliases.some((a) => a.toLowerCase().includes(q)))
 }

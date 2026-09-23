@@ -5,10 +5,10 @@ import { Badge } from '@/components/ui/badge'
 import { dayRateTitle, formatRatePercent, minuteRateTitle, providerRateStatus, providerSuccessRate } from '@/lib/provider-rate'
 
 /**
- * ProviderRateBadge is the Providers tab's success-rate badge (Feature A,
- * v0.22) — reused for both a provider's own row (ProvidersView.vue's
+ * ProviderRateBadge is the Models page's success-rate badge (Feature A,
+ * v0.22) — reused for both a provider's own row (ProviderHealthPanel.vue's
  * accordion trigger, always shown) and a single degraded model beside its
- * ModelChip (ProvidersView.vue's accordion content, shown only when
+ * ModelChip (ProviderHealthPanel.vue's accordion content, shown only when
  * isModelDegraded). attemptsMinute/failuresMinute are OPTIONAL (SHOULD-2,
  * v0.22 review round): the provider-row call site passes them (admin.go's
  * adminProviderView carries minute counters); the per-model call site
@@ -56,11 +56,11 @@ const detail = computed(() =>
 
 // Badge has no dedicated "amber"/"muted" variant (ui/badge/index.ts) —
 // severe reuses the built-in `destructive` variant exactly like every
-// other error state in this panel (e.g. ProvidersView's own lastErr
-// icon); healthy/no-traffic reuse `secondary`/`outline`, the panel's
-// existing "quiet" idioms (ProvidersView's provider-type badge is
-// `variant="secondary"`); degraded borrows the semantic --status-warn
-// token (main.css — MUST-1, v0.22 review round: --chart-tokens-out, this
+// other error state in this panel (e.g. ProviderHealthPanel.vue's own
+// lastErr icon); healthy/no-traffic reuse `secondary`/`outline`, the
+// panel's existing "quiet" idioms (ProviderHealthPanel.vue's
+// provider-type badge is `variant="secondary"`); degraded borrows the
+// semantic --status-warn token (main.css — MUST-1, v0.22 review round: --chart-tokens-out, this
 // component's original choice, measures ~2.22:1 against --card in light
 // mode, a WCAG 1.4.3 text-contrast failure on exactly the "something's
 // wrong" tier; --status-warn is tuned for body-text contrast instead,

@@ -1,7 +1,7 @@
 // F8 (CSV export): the one RFC 4180 encoder every CSV export in this panel
-// builds on (usage-csv.ts's usageCsv/modelDetailCsv, the Models tab's
-// export) — one implementation, not a copy per export (vue.md: "if you've
-// written it twice, you owe an abstraction").
+// builds on (usage-csv.ts's usageCsv, PricingHealthTable.vue's own
+// pricingHealthCsv) — one implementation, not a copy per export (vue.md:
+// "if you've written it twice, you owe an abstraction").
 
 /** CSV_LINE_ENDING is RFC 4180's own line terminator (CRLF), not the bare "\n" a JS template literal defaults to — Excel and most spreadsheet importers expect it, and RFC 4180 section 2.1 requires it. */
 const CSV_LINE_ENDING = '\r\n'

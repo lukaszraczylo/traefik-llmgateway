@@ -2,10 +2,11 @@ import type { ColumnDef } from '@tanstack/vue-table'
 import { h } from 'vue'
 
 import CompactNumber from '@/components/CompactNumber.vue'
-import ScopeLink from '@/components/ScopeLink.vue'
+import EntityLink from '@/components/EntityLink.vue'
 import UsageBar from '@/components/UsageBar.vue'
 import { headroom, monthProgress, projectMonthEnd } from '@/lib/forecast'
 import { formatCost, formatExactInt, formatLimits } from '@/lib/format'
+import { formatLastSeen } from '@/lib/last-seen'
 import { BUDGET_RATIO_LABEL, budgetRatios } from '@/lib/usage-bars'
 import type { AdminUsageEntryView } from '@/types/api'
 
@@ -151,37 +152,83 @@ function costMonthProjColumn(elapsedFraction: number): ColumnDef<AdminUsageEntry
 }
 
 /**
+ * sourceColumn (Consumers redesign, redesign-plan.md section 3.4) renders
+ * a user's directory source — 'inline' (defined directly in the plugin
+ * config) or 'file' (loaded from users.file, admin.go: adminConsumerUser.
+ * Source) — via the caller-supplied `sourceValue` lookup (ConsumerDirectory.
+ * vue joins this row's id against the /admin/api/consumers response, which
+ * this module has no fetch access to itself). Only ever added when a
+ * caller passes `sourceValue` to usageColumns (see its own doc comment) —
+ * a group row (no such concept) and the headless Groups sort toolbar never
+ * get this column at all. `sourceValue` returning undefined (a group's
+ * nested member row whose name has no matching /consumers entry yet, e.g.
+ * mid-fetch) renders an em dash rather than blank, so the column never
+ * looks like a rendering bug.
+ */
+function sourceColumn(sourceValue: (entry: AdminUsageEntryView) => string | undefined): ColumnDef<AdminUsageEntryView, unknown> {
+  return {
+    id: 'source',
+    header: 'Source',
+    accessorFn: (entry) => sourceValue(entry) ?? '',
+    cell: ({ row }) => h('span', { class: 'text-muted-foreground' }, sourceValue(row.original) ?? '—'),
+  }
+}
+
+/**
+ * lastSeenColumn (Consumers redesign) renders AdminUsageEntryView.lastSeen
+ * via lib/last-seen.ts's formatLastSeen — added unconditionally (unlike
+ * sourceColumn above): lastSeen is a fleet-wide counter written for BOTH
+ * user and group scopes (redesign-plan.md section 1.2's last-seen family:
+ * "user + every group scope"), so it is meaningful in every context
+ * usageColumns() is used in, not just the flat Users table. A storeDown
+ * row is NOT masked as "?" here (unlike every numericColumn) — lastSeen is
+ * its own separate counter family (a SET, not the same INCRBY scope
+ * counters storeDown actually guards), so a down usage store does not
+ * make this value stale/unknown the way it does for req/tok/cost.
+ */
+function lastSeenColumn(now: Date): ColumnDef<AdminUsageEntryView, unknown> {
+  return {
+    id: 'lastSeen',
+    header: 'Last seen',
+    accessorFn: (entry) => entry.lastSeen ?? 0,
+    cell: ({ row }) => formatLastSeen(row.original.lastSeen, now),
+  }
+}
+
+/**
  * usageColumns builds the shared TanStack `ColumnDef` set for one
  * AdminUsageEntryView table. Used by UsageTable.vue (the flat Users list,
- * and — reused unmodified — a group's nested member-user list inside the
- * Usage view's Groups accordion) and, headlessly (no `<Table>` render, see
- * that view's own doc comment for why), by UsageView.vue's Groups sort
- * bar, so both surfaces sort by the exact same column semantics.
+ * and — reused unmodified — a group's nested member-user list inside
+ * ConsumerDirectory.vue's Groups accordion) and, headlessly (no `<Table>`
+ * render, see that component's own doc comment for why), by its Groups
+ * sort bar, so both surfaces sort by the exact same column semantics.
  * idLabel/secondaryColumnLabel name the first two columns; secondaryValue
  * reads the second column's per-row value (a user's group name, or a
  * group's member count). `now` (F7) defaults to the real current time —
  * see costMonthProjColumn's own doc comment for why a caller can override
- * it.
+ * it. `sourceValue`, when supplied, inserts sourceColumn right after the
+ * secondary column — ConsumerDirectory.vue's flat Users table is the only
+ * caller that passes it (see sourceColumn's own doc comment).
  */
 export function usageColumns(
   idLabel: string,
   secondaryColumnLabel: string,
   secondaryValue: (entry: AdminUsageEntryView) => string,
   now: Date = new Date(),
+  sourceValue?: (entry: AdminUsageEntryView) => string | undefined,
 ): ColumnDef<AdminUsageEntryView, unknown>[] {
   const elapsedFraction = monthProgress(now)
-  return [
+  const columns: ColumnDef<AdminUsageEntryView, unknown>[] = [
     {
       id: 'id',
       header: idLabel,
       accessorFn: (entry) => entry.id,
-      // F6: ScopeLink jumps to this row's own Charts scope — "user:{id}"
-      // or "group:{id}", matching entry.kind exactly (admin.go only ever
-      // sets kind to "user"/"group"/"total"; a table row is always the
-      // first two, the "total" entry renders separately in the Total
-      // card, never as a table row — see UsageView.vue).
-      cell: ({ row }) =>
-        h(ScopeLink, { class: 'font-medium', label: row.original.id, scope: `${row.original.kind}:${row.original.id}` }),
+      // EntityLink (redesign-plan.md section 3.5, replacing ScopeLink):
+      // this column only ever renders 'user' kind entries in practice —
+      // UsageTable.vue's own doc comment ("users, or a group's member
+      // users") — so it links straight to Consumers?user={id}, opening
+      // that row's own UserDetail, rather than a Charts scope jump.
+      cell: ({ row }) => h(EntityLink, { class: 'font-medium', label: row.original.id, kind: 'user', id: row.original.id }),
     },
     {
       id: 'secondary',
@@ -189,18 +236,21 @@ export function usageColumns(
       accessorFn: secondaryValue,
       // 'alphanumeric' (not the default auto-detected sortingFn): this
       // column's value is a plain string everywhere EXCEPT the Groups
-      // toolbar, where UsageView.vue passes memberCountOf — a numeric count
-      // rendered as a string. TanStack's getAutoSortingFn only inspects
-      // rows 11+ (flatRows.slice(10)) to decide numeric vs basic, so a
-      // groups table with 10 or fewer rows silently fell back to `basic`
-      // (plain a > b string comparison), sorting "10" before "9".
-      // 'alphanumeric' handles both cases correctly regardless of row
+      // toolbar, where ConsumerDirectory.vue passes memberCountOf — a
+      // numeric count rendered as a string. TanStack's getAutoSortingFn
+      // only inspects rows 11+ (flatRows.slice(10)) to decide numeric vs
+      // basic, so a groups table with 10 or fewer rows silently fell back
+      // to `basic` (plain a > b string comparison), sorting "10" before
+      // "9". 'alphanumeric' handles both cases correctly regardless of row
       // count: numeric substrings compare numerically, and it degrades
       // gracefully for the plain-text group-name case (secondaryValue on
       // the Users table).
       sortingFn: 'alphanumeric',
       cell: ({ row }) => h('span', { class: 'text-muted-foreground' }, secondaryValue(row.original)),
     },
+  ]
+  if (sourceValue) columns.push(sourceColumn(sourceValue))
+  columns.push(
     {
       id: 'limits',
       header: 'Limits',
@@ -217,5 +267,7 @@ export function usageColumns(
     numericColumn('costDay', 'cost/day', (e) => e.costPerDayMicroUsd, formatCost, false, 'costDay'),
     numericColumn('costMonth', 'cost/month', (e) => e.costPerMonthMicroUsd, formatCost, false, 'costMonth'),
     costMonthProjColumn(elapsedFraction),
-  ]
+    lastSeenColumn(now),
+  )
+  return columns
 }

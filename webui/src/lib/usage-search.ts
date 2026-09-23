@@ -2,11 +2,14 @@ import type { AdminUsageEntryView } from '@/types/api'
 
 /**
  * Shared matching helpers for the "Filter users or groups" search
- * UsageView.vue and ChartsView.vue both offer (operator directive:
- * identical semantics, ONE implementation — no second copy of this logic).
+ * ConsumerDirectory.vue offers (operator directive: identical semantics,
+ * ONE implementation — no second copy of this logic; extracted here
+ * rather than left inline specifically because the pre-redesign Usage
+ * AND Charts tabs both needed the identical matching rules before this
+ * module existed).
  *
  * Every `query` parameter here is expected to already be trimmed and
- * lowercased by the caller, mirroring ProvidersView.vue's own
+ * lowercased by the caller, mirroring ProviderHealthPanel.vue's own
  * normalizedQuery convention (modelMatches/aliasMatches there never
  * re-normalize either) — these functions stay pure string/array
  * operations, with the caller owning the single source of truth for "is a
@@ -32,11 +35,11 @@ export function groupNameMatches(group: Pick<AdminUsageEntryView, 'id'>, query: 
  * `groupName` alone: a multi-group user would otherwise silently drop out
  * of every group but their first. This is a plain client-side join against
  * the already-polled GET /admin/api/usage response, no extra fetch.
- * UsageView.vue calls this directly (replacing its own former local
- * membersOf helper); matchingMembersOfGroup below builds on it too, which
- * is how ChartsView.vue's groupMatches call ends up depending on this same
- * join — indirectly, through matchingMembersOfGroup — without calling
- * membersOfGroup itself.
+ * ConsumerDirectory.vue calls this directly (replacing the pre-redesign
+ * Usage tab's own former local membersOf helper); matchingMembersOfGroup
+ * below builds on it too, which is how ConsumerDirectory.vue's own
+ * groupMatches call ends up depending on this same join — indirectly,
+ * through matchingMembersOfGroup — without calling membersOfGroup itself.
  */
 export function membersOfGroup(group: Pick<AdminUsageEntryView, 'id'>, users: AdminUsageEntryView[]): AdminUsageEntryView[] {
   return users.filter((u) => (u.groups ?? [u.groupName]).includes(group.id))
@@ -57,7 +60,8 @@ export function matchingMembersOfGroup(
  * need to distinguish WHICH of the two reasons a group matched — to decide
  * whether to show all of its members or only the matching ones — use
  * groupNameMatches and matchingMembersOfGroup directly instead (see
- * UsageView.vue's own doc comment for that distinction).
+ * ConsumerDirectory.vue's own memberOnlyMatchIds doc comment for that
+ * distinction).
  */
 export function groupMatches(group: Pick<AdminUsageEntryView, 'id'>, users: AdminUsageEntryView[], query: string): boolean {
   return groupNameMatches(group, query) || matchingMembersOfGroup(group, users, query).length > 0

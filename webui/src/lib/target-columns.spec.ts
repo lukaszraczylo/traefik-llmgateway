@@ -1,9 +1,10 @@
 import { isVNode } from 'vue'
 import { describe, expect, it } from 'vitest'
 
+import CompactNumber from '@/components/CompactNumber.vue'
 import { Badge } from '@/components/ui/badge'
-import { targetColumns } from './target-columns'
-import type { AdminTargetHealthView, AdminTargetView } from '@/types/api'
+import { composeTargetId, parseTargetCallerId, targetCallerColumns, targetColumns } from './target-columns'
+import type { AdminTargetHealthView, AdminTargetView, AdminTotalsResponse } from '@/types/api'
 
 /**
  * Target health rendering (feat/target-health): mirrors usage-columns.
@@ -182,5 +183,96 @@ describe('targetColumns: access column', () => {
     const children = (node as { children: unknown[] }).children
     expect(children).toHaveLength(2)
     expect(children.every((c) => isVNode(c) && c.type === Badge)).toBe(true)
+  })
+})
+
+describe('targetColumns: name column selection', () => {
+  it('renders plain text with no onSelect (default, backward-compatible)', () => {
+    const col = targetColumns().find((c) => c.id === 'name')
+    const cell = col?.cell as (ctx: { row: { original: AdminTargetView } }) => unknown
+    const rendered = cell({ row: { original: testTarget({ state: 'unknown', consecutiveFailures: 0 }) } })
+    expect(isVNode(rendered) && rendered.type).toBe('span')
+  })
+
+  it('renders a clickable button that invokes onSelect with the row when given', () => {
+    const selected: AdminTargetView[] = []
+    const col = targetColumns((t) => selected.push(t)).find((c) => c.id === 'name')
+    const cell = col?.cell as (ctx: { row: { original: AdminTargetView } }) => unknown
+    const target = testTarget({ state: 'unknown', consecutiveFailures: 0 })
+    const rendered = cell({ row: { original: target } })
+    expect(isVNode(rendered) && rendered.type).toBe('button')
+
+    const onClick = (rendered as { props?: Record<string, unknown> }).props?.onClick as (e: MouseEvent) => void
+    onClick({ stopPropagation: () => {} } as MouseEvent)
+    expect(selected).toEqual([target])
+  })
+})
+
+describe('composeTargetId', () => {
+  it('joins kind and name with a slash', () => {
+    expect(composeTargetId('mcp', 'fetch')).toBe('mcp/fetch')
+    expect(composeTargetId('agent', 'researcher')).toBe('agent/researcher')
+  })
+})
+
+describe('parseTargetCallerId', () => {
+  it('splits a well-formed "kind/target/caller" id into its three parts', () => {
+    expect(parseTargetCallerId('mcp/fetch/alice')).toEqual({ kind: 'mcp', target: 'fetch', caller: 'alice' })
+  })
+
+  it('handles a caller name that itself contains a slash by keeping it in `caller` verbatim', () => {
+    expect(parseTargetCallerId('agent/researcher/team/bob')).toEqual({ kind: 'agent', target: 'researcher', caller: 'team/bob' })
+  })
+
+  it('falls back to an empty target/caller for an id with no slash at all, without throwing', () => {
+    expect(parseTargetCallerId('malformed')).toEqual({ kind: '', target: '', caller: 'malformed' })
+  })
+
+  it('falls back to an empty caller for an id with only one slash', () => {
+    expect(parseTargetCallerId('mcp/fetch')).toEqual({ kind: 'mcp', target: 'fetch', caller: '' })
+  })
+})
+
+// dayOrMonthWindow moved to lib/range.ts (P2 item 2: a SHARED clamp used
+// by stores/consumers.ts, stores/spend.ts, AND this module's own
+// TargetCallers.vue — see range.spec.ts's own describe('dayOrMonthWindow').
+
+describe('targetCallerColumns', () => {
+  function row(id: string, req: number): AdminTotalsResponse['rows'][number] {
+    return { id, values: { req } }
+  }
+
+  it('omits the Target column when showTarget is false', () => {
+    const columns = targetCallerColumns(false)
+    expect(columns.find((c) => c.id === 'target')).toBeUndefined()
+    expect(columns.map((c) => c.id)).toEqual(['caller', 'requests'])
+  })
+
+  it('includes the Target column, rendering "kind/target", when showTarget is true', () => {
+    const columns = targetCallerColumns(true)
+    const col = columns.find((c) => c.id === 'target')
+    expect(col).toBeDefined()
+    const cell = col?.cell as (ctx: { row: { original: AdminTotalsResponse['rows'][number] } }) => unknown
+    const rendered = cell({ row: { original: row('mcp/fetch/alice', 3) } })
+    expect(isVNode(rendered) && rendered.children).toBe('mcp/fetch')
+  })
+
+  it('caller column reads the parsed caller name, falling back to the raw id', () => {
+    const columns = targetCallerColumns(false)
+    const col = columns.find((c) => c.id === 'caller') as unknown as {
+      accessorFn: (r: AdminTotalsResponse['rows'][number], i: number) => unknown
+    }
+    const accessor = col.accessorFn
+    expect(accessor(row('mcp/fetch/alice', 3), 0)).toBe('alice')
+    expect(accessor(row('malformed', 3), 0)).toBe('malformed')
+  })
+
+  it('requests column renders a CompactNumber reading values.req, defaulting to 0', () => {
+    const columns = targetCallerColumns(false)
+    const col = columns.find((c) => c.id === 'requests')
+    const cell = col?.cell as (ctx: { row: { original: AdminTotalsResponse['rows'][number] } }) => unknown
+    const rendered = cell({ row: { original: { id: 'mcp/fetch/alice', values: {} } } })
+    expect(isVNode(rendered) && rendered.type).toBe(CompactNumber)
+    expect(isVNode(rendered) && rendered.props?.value).toBe(0)
   })
 })

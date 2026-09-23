@@ -1,18 +1,18 @@
 /**
  * Pure expand/collapse state for a search-filterable shadcn-vue Accordion —
- * shared by ProvidersView.vue (providers) and UsageView.vue (groups), and
- * generalized (originally provider-expand.ts) so both consume ONE tested
- * implementation instead of two copies of the same logic (vue.md: "if
- * you've written it twice, you owe an abstraction"). Extracted out of the
- * component so the exact toggle sequence a review flagged (see
- * toggleItemExpand's own comment) is tested in isolation, without mounting
- * Vue — see search-expand.spec.ts (vitest), which exercises this module
- * directly, including the full flagged sequence.
+ * shared by ProviderHealthPanel.vue (providers) and ConsumerDirectory.vue
+ * (groups), and generalized (originally provider-expand.ts) so both
+ * consume ONE tested implementation instead of two copies of the same
+ * logic (vue.md: "if you've written it twice, you owe an abstraction").
+ * Extracted out of the component so the exact toggle sequence a review
+ * flagged (see toggleItemExpand's own comment) is tested in isolation,
+ * without mounting Vue — see search-expand.spec.ts (vitest), which
+ * exercises this module directly, including the full flagged sequence.
  *
  * Two sets track state, keyed on each accordion item's own string id (a
- * provider name in Providers, a group id in Usage — this module has no
- * opinion on what the id means or on what counts as a "match"; callers
- * decide that and pass the resulting id list in):
+ * provider name on the Models page, a group id on the Consumers page —
+ * this module has no opinion on what the id means or on what counts as a
+ * "match"; callers decide that and pass the resulting id list in):
  * - manuallyExpanded: items the user explicitly opened, independent of any
  *   search query. This is the state a cleared search returns to.
  * - manuallyCollapsed: items the user explicitly closed WHILE a search
@@ -34,12 +34,13 @@ export interface ExpandState {
  * manuallyExpanded plus every id in matchingIds that is not in
  * manuallyCollapsed (auto-expand every match, unless the user explicitly
  * closed that one). The caller decides what "matching" means for its own
- * view, and this module has no opinion on it either way — ProvidersView.vue
- * passes every provider that itself matched at all (every match there
- * implies at least one matching model, so every match auto-expands);
- * UsageView.vue instead passes only the subset of its own matches that
- * matched via a member rather than via the group's own name (see that
- * view's own doc comment for why it draws that narrower distinction).
+ * view, and this module has no opinion on it either way —
+ * ProviderHealthPanel.vue passes every provider that itself matched at
+ * all (every match there implies at least one matching model, so every
+ * match auto-expands); ConsumerDirectory.vue instead passes only the
+ * subset of its own matches that matched via a member rather than via
+ * the group's own name (see that component's own doc comment for why it
+ * draws that narrower distinction).
  */
 export function computeExpandedItems(state: ExpandState, hasQuery: boolean, matchingIds: string[]): Set<string> {
   if (!hasQuery) return new Set(state.manuallyExpanded)

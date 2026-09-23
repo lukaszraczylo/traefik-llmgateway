@@ -12,11 +12,13 @@ const POLL_MS = 5000
 const EVENTS_LIMIT = 200
 
 /**
- * useEventsStore polls GET /admin/api/events?limit=200, feeding the new
- * Events tab (App.vue, F3). Unlike useDashboardStore, this store is
- * polled only while the Events view is mounted (EventsView.vue's own
- * onMounted/onUnmounted) rather than for the app's whole lifetime — an
- * operator who never opens the tab pays no extra request for it.
+ * useEventsStore polls GET /admin/api/events?limit=200, feeding
+ * EventsView.vue — the Reliability page's own embedded events section
+ * (redesign-plan.md section 3.4), and Home's own latest-8-events list.
+ * Unlike useDashboardStore, this store is polled only while a page that
+ * reads it is mounted (EventsView.vue's own onMounted/onUnmounted) rather
+ * than for the app's whole lifetime — an operator who never opens
+ * Reliability or Home pays no extra request for it.
  */
 export const useEventsStore = defineStore('events', {
   state: () => ({
@@ -32,20 +34,23 @@ export const useEventsStore = defineStore('events', {
     lastUpdated: null as Date | null,
     error: '',
     /**
-     * kindFilter/userFilter (F9, hash-state) — the Events view's own kind
-     * Select and user SearchInput. Lifted up here rather than kept as
-     * local refs in EventsView.vue, mirroring stores/nav.ts's own
-     * usageQuery doc comment: state that must survive a #<tab>?<query>
-     * hash round trip (composables/useHashState.ts, lib/hash-state.ts's
-     * parseEventsParams/kind,user) needs one canonical place to read from
-     * and write to, not a component-local ref useHashState cannot reach.
-     * kindFilter is an exact AdminEventKind string, or '' for "every
-     * kind" (EventsView.vue's own ALL_KINDS sentinel maps to/from this at
-     * the template boundary — see lib/events-filter.ts's own EventFilter
-     * shape, which this pairs with directly). userFilter is the raw,
-     * un-normalized search text; EventsView.vue binds it via
-     * useSearchQuery's external-ref option (composables/useSearchQuery.ts)
-     * the same way UsageView.vue binds nav.usageQuery.
+     * kindFilter/userFilter — the Events section's own kind Select and
+     * user SearchInput (redesign-plan.md section 3.4, EventsView.vue
+     * reused as a Reliability page section). Lifted up here rather than
+     * kept as local refs in EventsView.vue so ReliabilityPage.vue can
+     * keep them synced with nav.params (`kind`/`user`, section 3.1's
+     * Reliability page params) via its own reactive `watch(() =>
+     * [nav.params.kind, nav.params.user], ...)` — not just seeded once on
+     * mount (P2 item 10: a one-shot mount-time seed left a filter set on
+     * an earlier visit stuck in place across a remount with the param
+     * cleared, and never picked up a hash change, e.g. browser back/
+     * forward, while already mounted). kindFilter is an exact
+     * AdminEventKind string, or '' for "every kind" (EventsView.vue's own
+     * ALL_KINDS sentinel maps to/from this at the template boundary — see
+     * lib/events-filter.ts's own EventFilter shape, which this pairs with
+     * directly). userFilter is the raw, un-normalized search text;
+     * EventsView.vue binds it via useSearchQuery's external-ref option
+     * (composables/useSearchQuery.ts).
      */
     kindFilter: '',
     userFilter: '',

@@ -90,6 +90,45 @@ export function formatRatePercent(rate: number): string {
   return `${Math.floor(rate * 100)}%`
 }
 
+/**
+ * providerErrorRate is failures/attempts directly — conceptually
+ * providerSuccessRate's complement, but computed as its OWN division
+ * rather than `1 - providerSuccessRate(...)`: chaining a subtraction onto
+ * an already-divided value compounds binary floating-point error (e.g.
+ * 1 - (99/100) computes a hair above 0.01, which then ceils to "2%"
+ * instead of "1%" once formatErrorRatePercent multiplies by 100 — a
+ * caught review bug, not a hypothetical one). Returns null (never a
+ * fabricated 0%) when there is no traffic to compute a rate from at all.
+ * Shared by the Models page's per-model error-rate column
+ * (lib/model-table-columns.ts) and the Reliability page's own bucket-by-
+ * bucket series (which instead derives its ratio via lib/series.ts's
+ * ratioSeries, but formats it through formatErrorRatePercent below) — the
+ * ONE place "attempts/failures -> error rate" is computed for a single
+ * snapshot value, as opposed to a time series.
+ */
+export function providerErrorRate(attempts: number, failures: number): number | null {
+  if (!Number.isFinite(attempts) || attempts <= 0) return null
+  const safeFailures = Number.isFinite(failures) ? failures : 0
+  return safeFailures / attempts
+}
+
+/**
+ * formatErrorRatePercent renders a 0-1(+) error-rate fraction CEILING
+ * rather than floored — the opposite honesty direction from
+ * formatRatePercent above (a SUCCESS rate must never overstate itself as
+ * 100%; an ERROR rate must never round down to a misleadingly clean 0%).
+ * `null` (no traffic to compute a rate from — providerErrorRate's own
+ * "nothing to report" case) renders as "no data", never "0%". Not clamped
+ * to 100%: a rate above 1 should not occur with real counters, but this
+ * function reports whatever the caller computed rather than silently
+ * capping it (lib/series.ts's own ratioSeries makes the identical choice).
+ */
+export function formatErrorRatePercent(rate: number | null): string {
+  if (rate === null) return 'no data'
+  if (rate <= 0) return '0%'
+  return `${Math.ceil(rate * 100)}%`
+}
+
 /** countWord returns singular when n is exactly 1, plural otherwise — shared by minuteRateTitle and dayRateTitle so their wording never drifts apart. */
 function countWord(n: number, singular: string, plural: string): string {
   return n === 1 ? singular : plural

@@ -29,8 +29,9 @@ const REVOKE_DELAY_MS = 1000
  * Guarded for a non-DOM environment (this module is never unit-tested —
  * see WP-B1's own test plan, lib/download.ts has no .spec.ts — but a
  * defensive `typeof document` check keeps it from throwing if it is ever
- * imported somewhere `document` is not global, matching useTabHash.ts's
- * own `hasWindow` convention). The clipboard fallback (copyText, Q8) runs
+ * imported somewhere `document` is not global, matching
+ * composables/useHashState.ts's own `hasWindow` convention). The
+ * clipboard fallback (copyText, Q8) runs
  * ONLY when the Blob/URL/anchor machinery itself is unavailable or throws
  * (a Blob/URL API genuinely unsupported, or the synthetic click rejected)
  * — never merely because a download was silently blocked by the browser,

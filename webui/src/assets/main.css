@@ -98,6 +98,29 @@
     --chart-cost: #d55e00;
 
     /*
+     * --chart-series-a..d: Spend's breakdown chart (pages/SpendPage.vue,
+     * BREAKDOWN_PALETTE) extends the four series above with the
+     * remaining four swatches of that same Okabe & Ito (2008) 8-color
+     * qualitative set, for its open-ended per-model/provider/group
+     * series count. These tokens used to live in SpendPage.vue's own
+     * unscoped <style> block; moved here (P3 item 22) so every chart
+     * color token lives in the one design-tokens file, matching the
+     * Tailwind-only rule (no plain CSS outside a component's own scoped
+     * block or this file).
+     *
+     * --chart-series-b is NOT the Okabe-Ito yellow (#f0e442) verbatim in
+     * light mode: that measures well under WCAG 1.4.11's 3:1 non-text
+     * contrast minimum as a chart line on this light --card (~1.4:1) —
+     * #8a6d00 instead measures ~4.9:1 against --card, clearing both the
+     * 3:1 graphical-object minimum and the 4.5:1 text minimum with
+     * margin, while staying recognizably the same yellow/gold hue.
+     */
+    --chart-series-a: #56b4e9;
+    --chart-series-b: #8a6d00;
+    --chart-series-c: #cc79a7;
+    --chart-series-d: #4d4d4d;
+
+    /*
      * --status-warn: a semantic "degraded, not broken" indicator (the
      * Providers tab's amber success-rate badge, ProviderRateBadge.vue) —
      * deliberately its OWN token, not a reuse of --chart-tokens-out despite
@@ -161,6 +184,16 @@
         --chart-tokens-in: #4098d7;
         --chart-tokens-out: #f0ac1f;
         --chart-cost: #e8763a;
+
+        /* Same Okabe-Ito hues as the light-mode block's own doc comment
+           above — already legible on a dark ground at this saturation
+           (Okabe-Ito was designed for slide/print use on light and dark
+           backgrounds alike), so only --chart-series-b's LIGHT value
+           needed darkening; here it keeps the original #f0e442. */
+        --chart-series-a: #56b4e9;
+        --chart-series-b: #f0e442;
+        --chart-series-c: #cc79a7;
+        --chart-series-d: #b8b8b8;
 
         /* #f0ac1f on the dark --card measures ~8.97:1 — no separate dark
            value was needed to clear WCAG 1.4.3 here, unlike light mode

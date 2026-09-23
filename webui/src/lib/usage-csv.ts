@@ -1,9 +1,5 @@
-// F8 (CSV export): builds the actual CSV text for the Usage tab's Users/
-// Groups exports (usageCsv) and the Models tab's ranking export. The
-// Models tab's own ChartsView.vue calls modelDetailCsv (free-models-
-// plan.md's per-row requests/tokens/cost/free breakdown) — modelRankingCsv
-// stays exported and tested as a general single-metric exporter, kept for
-// any future caller that only wants the ranked value column. Every export
+// F8 (CSV export): builds the actual CSV text for ConsumerDirectory.vue's
+// Users/Groups exports (usageCsv, CsvExportButton.vue). Every export
 // funnels through lib/csv.ts's toCsv, so quoting/line-ending (and CSV-
 // formula-injection neutralisation) behavior is defined in exactly one
 // place (that module's own doc comment).
@@ -11,9 +7,9 @@ import { toCsv } from '@/lib/csv'
 import { monthProgress, projectMonthEnd } from '@/lib/forecast'
 import { formatLimits } from '@/lib/format'
 import { MICROS_PER_USD } from '@/lib/usage-bars'
-import type { AdminUsageEntryView, AdminUsageModelEntry } from '@/types/api'
+import type { AdminUsageEntryView } from '@/types/api'
 
-/** UsageCsvKind picks the second column's label — "Group" for a Users export (each row's own group membership), "Members" for a Groups export (each row's member count) — mirroring usage-columns.ts's own usageColumns(idLabel, secondaryColumnLabel, ...) call sites in UsageTable.vue/UsageView.vue exactly. */
+/** UsageCsvKind picks the second column's label — "Group" for a Users export (each row's own group membership), "Members" for a Groups export (each row's member count) — mirroring usage-columns.ts's own usageColumns(idLabel, secondaryColumnLabel, ...) call sites in UsageTable.vue/ConsumerDirectory.vue exactly. */
 export type UsageCsvKind = 'users' | 'groups'
 
 const USAGE_CSV_SECONDARY_LABEL: Record<UsageCsvKind, string> = {
@@ -49,8 +45,9 @@ function csvCostUsd(micros: number): string {
  *
  * `secondaryValue` is the same per-row accessor usageColumns() itself
  * takes (groupNameOf for Users, memberCountOf for Groups, both
- * UsageView.vue-local) — this module has no opinion on what a group's
- * member count is, only how to render the column once given the value.
+ * ConsumerDirectory.vue-local) — this module has no opinion on what a
+ * group's member count is, only how to render the column once given the
+ * value.
  *
  * Every numeric cell is a PLAIN machine-readable number (csvCostUsd above
  * for the three cost columns, the raw integer — no formatExactInt
@@ -89,6 +86,7 @@ export function usageCsv(
     'cost/day (USD)',
     'cost/month (USD)',
     'cost/month (proj., USD)',
+    'last seen (unix seconds)',
   ]
   const rows = entries.map((entry) => {
     const masked = entry.storeDown
@@ -107,83 +105,20 @@ export function usageCsv(
       masked ? '?' : csvCostUsd(entry.costPerDayMicroUsd),
       masked ? '?' : csvCostUsd(entry.costPerMonthMicroUsd),
       masked ? '?' : projected === null ? 'not enough data yet' : csvCostUsd(projected),
+      // Never masked — lastSeen is its own SET-based counter family
+      // (redesign-plan.md section 1.2), independent of the INCRBY usage
+      // counters `storeDown` actually guards (see usage-columns.ts's
+      // lastSeenColumn's own doc comment). 0 means never seen, matching
+      // AdminUsageEntryView.lastSeen's own "0/omitted" convention.
+      entry.lastSeen ?? 0,
     ]
   })
   return toCsv(headers, rows)
 }
 
-/**
- * modelRankingCsv renders the Models tab's current ranking (WP-B2,
- * ChartsView.vue) as CSV text: one row per ranked model, `id` (the
- * canonical "provider/model" that served the traffic — AdminUsageModelEntry's
- * own doc comment, types/api.ts) and its `value` for the ranked metric.
- * `metricLabel`/`windowLabel`/`span` are the caller's own already-resolved
- * DISPLAY strings/number (e.g. MODEL_METRIC_LABEL[modelMetric],
- * WINDOW_LABEL[window], WINDOW_SPAN[window] — stores/history.ts, WP-B2),
- * not re-derived here: this module stays independent of WP-B2's store, and
- * the second header column names exactly what was ranked and over what
- * span, so the exported file is self-describing without a caller needing
- * to cross-reference the filename.
- *
- * `isCostMetric` (P6 review fix): the cost-metric ranking's `value` is raw
- * micro-USD — the on-screen chart/CSV both used to export it as-is, with
- * no unit stated anywhere in the header. The caller states whether the
- * CURRENTLY ranked metric is cost (`history.modelMetric === 'cost'`); when
- * true, the header gains an explicit " (USD)" unit suffix and every value
- * converts to a plain decimal USD number via the same csvCostUsd
- * convention usageCsv uses above. Every OTHER metric (requests, tokens in/
- * out) is already a plain raw integer with no unit ambiguity, so this
- * defaults to false and changes nothing for them.
- */
-export function modelRankingCsv(
-  models: AdminUsageModelEntry[],
-  metricLabel: string,
-  windowLabel: string,
-  span: number,
-  isCostMetric = false,
-): string {
-  const unit = isCostMetric ? ' (USD)' : ''
-  const headers = ['Model', `${metricLabel}${unit} (${windowLabel}, span ${span})`]
-  const rows = models.map((m) => [m.id, isCostMetric ? csvCostUsd(m.value) : m.value])
-  return toCsv(headers, rows)
-}
-
-/**
- * modelDetailCsv renders the Models tab's current ranking with every
- * `detail=1` figure per row (free-models-plan.md, UI section), not just
- * the single ranked metric modelRankingCsv above exports: Model, Requests,
- * Tokens in, Tokens out, Cost (USD), Free. stores/history.ts's
- * fetchModelRanking always requests detail=1 now, so every entry passed
- * here is expected to carry every detail field; `?? 0` covers the same
- * theoretical-undefined case lib/model-table-columns.ts's
- * numericDetailColumn already guards against, never a silent mis-export of
- * a genuine 0.
- *
- * Cost is the SAME plain, machine-readable decimal-USD convention
- * usageCsv/modelRankingCsv above already use (csvCostUsd) — a free model's
- * own costMicroUsd is a real 0, exported as "0.000000" like any other zero
- * cost, never overwritten by the text "free"; `free` is its own separate
- * boolean column instead ("true"/"false"), so a spreadsheet reader can
- * filter/sum the numeric Cost column without a stray non-numeric value
- * breaking that — mirrors the on-screen table's own "the badge only
- * changes what's displayed, never the sort key" rule
- * (model-table-columns.ts's costColumn doc comment).
- *
- * `windowLabel`/`span` are the caller's own already-resolved DISPLAY
- * strings/number (mirroring modelRankingCsv's identical parameters),
- * folded into the Requests column's header only — every detail figure
- * shares the identical span, so naming it once keeps the file
- * self-describing without repeating it four times.
- */
-export function modelDetailCsv(models: AdminUsageModelEntry[], windowLabel: string, span: number): string {
-  const headers = ['Model', `Requests (${windowLabel}, span ${span})`, 'Tokens in', 'Tokens out', 'Cost (USD)', 'Free']
-  const rows = models.map((m) => [
-    m.id,
-    m.requests ?? 0,
-    m.tokensIn ?? 0,
-    m.tokensOut ?? 0,
-    csvCostUsd(m.costMicroUsd ?? 0),
-    m.free ? 'true' : 'false',
-  ])
-  return toCsv(headers, rows)
-}
+// modelRankingCsv/modelDetailCsv were removed (P3 item 25, dead code):
+// both were the pre-redesign Models tab's own CSV export (ChartsView.vue,
+// stores/history.ts), and neither has a caller anywhere in the
+// redesigned shell — grep confirms only this file and its own now-deleted
+// spec section ever referenced them. The redesigned Models page
+// (ModelCatalogTable.vue) has no CSV export of its own.
