@@ -6,14 +6,12 @@ import EmptyState from '@/components/EmptyState.vue'
 import ErrorState from '@/components/ErrorState.vue'
 import SearchInput from '@/components/SearchInput.vue'
 import SkeletonTable from '@/components/SkeletonTable.vue'
-import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
-import { Button } from '@/components/ui/button'
+import StatDisabledAlert from '@/components/StatDisabledAlert.vue'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { filterModelRows } from '@/lib/model-filter'
 import { loadState } from '@/lib/load-state'
 import { modelCatalogColumns } from '@/lib/model-table-columns'
 import type { ModelCatalogRow } from '@/lib/model-table-columns'
-import { useNavStore } from '@/stores/nav'
 
 /**
  * ModelCatalogTable (redesign-plan.md section 3.4, Models & providers
@@ -40,8 +38,6 @@ const props = defineProps<{
 }>()
 
 const emit = defineEmits<{ 'update:query': [value: string] }>()
-
-const nav = useNavStore()
 
 const filtered = computed<ModelCatalogRow[]>(() => filterModelRows(props.rows, props.query))
 
@@ -82,13 +78,12 @@ const emptyMessage = computed<string>(() => {
       />
     </CardHeader>
     <CardContent class="flex flex-col gap-3">
-      <Alert v-if="!latencyEnabled" variant="warn">
-        <AlertTitle>Latency statistics are off</AlertTitle>
-        <AlertDescription class="flex flex-wrap items-center gap-2">
-          <span>Enable <code>admin.stats.latency</code> in the middleware config to see fleet p50/p95.</span>
-          <Button type="button" variant="outline" size="sm" @click="nav.goTo('config')">Open Config</Button>
-        </AlertDescription>
-      </Alert>
+      <StatDisabledAlert
+        v-if="!latencyEnabled"
+        title="Latency statistics are off"
+        config-key="admin.stats.latency"
+        purpose="to see fleet p50/p95."
+      />
       <SkeletonTable v-if="catalogLoadState === 'skeleton'" :rows="5" :cols="columns.length" />
       <ErrorState v-else-if="catalogLoadState === 'error'" :message="error ?? ''" :on-retry="onRetry" />
       <EmptyState v-else-if="catalogLoadState === 'empty'" title="No models configured." />

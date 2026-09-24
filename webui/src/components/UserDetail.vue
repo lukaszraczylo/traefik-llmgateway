@@ -2,31 +2,30 @@
 import { faArrowLeft } from '@fortawesome/free-solid-svg-icons'
 import { computed, onMounted, onUnmounted, watch } from 'vue'
 
+import BudgetRatioBars from '@/components/BudgetRatioBars.vue'
+import ChartCard from '@/components/ChartCard.vue'
 import ClampedRangeNotice from '@/components/ClampedRangeNotice.vue'
 import CompactNumber from '@/components/CompactNumber.vue'
 import EmptyState from '@/components/EmptyState.vue'
 import ErrorState from '@/components/ErrorState.vue'
 import ModelChip from '@/components/ModelChip.vue'
-import SkeletonChart from '@/components/SkeletonChart.vue'
 import SkeletonTable from '@/components/SkeletonTable.vue'
-import TimeSeriesChart from '@/components/TimeSeriesChart.vue'
+import StatDisabledAlert from '@/components/StatDisabledAlert.vue'
+import StatItem from '@/components/StatItem.vue'
 import TryLongerRangeButton from '@/components/TryLongerRangeButton.vue'
-import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
-import UsageBar from '@/components/UsageBar.vue'
 import { useNow } from '@/composables/useNow'
 import { runOutDate as computeRunOutDate } from '@/lib/burndown'
-import { formatBucketLabel, formatCost, formatExactInt, formatLimits, formatTimestamp } from '@/lib/format'
+import { formatBucketLabel, formatCost, formatLimits, formatShortDate, formatTimestamp } from '@/lib/format'
 import { loadState } from '@/lib/load-state'
-import { BUDGET_RATIO_LABEL, budgetRatios } from '@/lib/usage-bars'
+import { budgetRatios, usdToMicros } from '@/lib/usage-bars'
 import { useConsumersStore } from '@/stores/consumers'
 import { useDashboardStore } from '@/stores/dashboard'
 import { useEventsStore } from '@/stores/events'
 import { useFiltersStore } from '@/stores/filters'
-import { useNavStore } from '@/stores/nav'
 
 /**
  * UserDetail (redesign-plan.md section 3.4) is the Consumers page's
@@ -42,7 +41,6 @@ const dashboard = useDashboardStore()
 const consumers = useConsumersStore()
 const events = useEventsStore()
 const filters = useFiltersStore()
-const nav = useNavStore()
 const { now, start: startClock, stop: stopClock } = useNow()
 onMounted(startClock)
 onUnmounted(stopClock)
@@ -149,11 +147,6 @@ const recentErrors = computed(() => events.events.filter((e) => e.user === props
 
 const ratios = computed(() => (entry.value ? budgetRatios(entry.value) : []))
 
-function budgetValueText(id: string, used: number, limit: number): string {
-  if (id.startsWith('cost')) return `${formatCost(used)} / ${formatCost(limit)}`
-  return `${formatExactInt(used)} / ${formatExactInt(limit)}`
-}
-
 /**
  * runOutDate reuses lib/burndown.ts's own runOutDate — the SAME function
  * BurnDownChart.vue projects the Spend page's burn-down line with — rather
@@ -163,7 +156,7 @@ function budgetValueText(id: string, used: number, limit: number): string {
 const runOutDate = computed(() => {
   const limitUsd = entry.value?.limits?.costPerMonthUSD
   if (!entry.value || !limitUsd) return null
-  return computeRunOutDate(entry.value.costPerMonthMicroUsd, Math.round(limitUsd * 1_000_000), now.value)
+  return computeRunOutDate(entry.value.costPerMonthMicroUsd, usdToMicros(limitUsd), now.value)
 })
 </script>
 
@@ -191,18 +184,9 @@ const runOutDate = computed(() => {
         No usage scope for this user yet — it appears after their first request.
       </CardContent>
       <CardContent v-else class="grid grid-cols-2 gap-4 text-sm sm:grid-cols-4">
-        <div>
-          <p class="text-muted-foreground">Requests/day</p>
-          <p class="text-lg font-semibold tabular-nums"><CompactNumber :value="entry.requestsPerDay" /></p>
-        </div>
-        <div>
-          <p class="text-muted-foreground">Cost/day</p>
-          <p class="text-lg font-semibold tabular-nums">{{ formatCost(entry.costPerDayMicroUsd) }}</p>
-        </div>
-        <div>
-          <p class="text-muted-foreground">Cost/month</p>
-          <p class="text-lg font-semibold tabular-nums">{{ formatCost(entry.costPerMonthMicroUsd) }}</p>
-        </div>
+        <StatItem label="Requests/day"><CompactNumber :value="entry.requestsPerDay" /></StatItem>
+        <StatItem label="Cost/day">{{ formatCost(entry.costPerDayMicroUsd) }}</StatItem>
+        <StatItem label="Cost/month">{{ formatCost(entry.costPerMonthMicroUsd) }}</StatItem>
         <div>
           <p class="text-muted-foreground">Limits</p>
           <p class="text-sm">{{ formatLimits(entry.limits) }}</p>
@@ -213,41 +197,33 @@ const runOutDate = computed(() => {
     <Card v-if="entry && ratios.length">
       <CardHeader>
         <CardTitle>Headroom</CardTitle>
-        <CardDescription v-if="runOutDate">At the current pace, cost/month runs out around {{ formatTimestamp(runOutDate.toISOString()) }}.</CardDescription>
+        <CardDescription v-if="runOutDate">At the current pace, cost/month runs out around {{ formatShortDate(runOutDate) }}.</CardDescription>
       </CardHeader>
-      <CardContent class="flex flex-wrap items-center gap-x-4 gap-y-1.5">
-        <span v-for="ratio in ratios" :key="ratio.id" class="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
-          {{ BUDGET_RATIO_LABEL[ratio.id] }}
-          <UsageBar
-            :ratio="ratio.ratio"
-            :label="BUDGET_RATIO_LABEL[ratio.id]"
-            :value-text="budgetValueText(ratio.id, ratio.used, ratio.limit)"
-          />
-        </span>
+      <CardContent>
+        <BudgetRatioBars :ratios="ratios" />
       </CardContent>
     </Card>
 
-    <Card>
-      <CardHeader>
-        <CardTitle>Requests over time</CardTitle>
-      </CardHeader>
-      <CardContent>
-        <SkeletonChart v-if="reqState === 'skeleton'" />
-        <ErrorState v-else-if="reqState === 'error'" :message="detail?.reqError ?? ''" :on-retry="loadDetail" />
-        <TimeSeriesChart v-else :labels="reqLabels" :datasets="reqDatasets" :ariaLabel="`Requests over time for ${userId}`" />
-      </CardContent>
-    </Card>
+    <ChartCard
+      title="Requests over time"
+      :state="reqState"
+      :error="detail?.reqError ?? ''"
+      :on-retry="loadDetail"
+      :labels="reqLabels"
+      :datasets="reqDatasets"
+      :aria-label="`Requests over time for ${userId}`"
+    />
 
-    <Card>
-      <CardHeader>
-        <CardTitle>Cost over time</CardTitle>
-      </CardHeader>
-      <CardContent>
-        <SkeletonChart v-if="costState === 'skeleton'" />
-        <ErrorState v-else-if="costState === 'error'" :message="detail?.costError ?? ''" :on-retry="loadDetail" />
-        <TimeSeriesChart v-else :labels="costLabels" :datasets="costDatasets" :value-formatter="formatCost" :ariaLabel="`Cost over time for ${userId}`" />
-      </CardContent>
-    </Card>
+    <ChartCard
+      title="Cost over time"
+      :state="costState"
+      :error="detail?.costError ?? ''"
+      :on-retry="loadDetail"
+      :labels="costLabels"
+      :datasets="costDatasets"
+      :value-formatter="formatCost"
+      :aria-label="`Cost over time for ${userId}`"
+    />
 
     <Card>
       <CardHeader>
@@ -255,13 +231,12 @@ const runOutDate = computed(() => {
       </CardHeader>
       <CardContent class="flex flex-col gap-3">
         <ClampedRangeNotice :window="filters.window" :span="filters.span" />
-        <Alert v-if="showUserModelHint" variant="warn">
-          <AlertTitle>Per-user-model statistics are off</AlertTitle>
-          <AlertDescription class="flex flex-wrap items-center gap-2">
-            <span>Enable <code class="font-mono text-xs">admin.stats.userModel</code> in the middleware config to see a per-model breakdown for this user.</span>
-            <Button type="button" variant="outline" size="sm" @click="nav.goTo('config')">Open Config</Button>
-          </AlertDescription>
-        </Alert>
+        <StatDisabledAlert
+          v-if="showUserModelHint"
+          title="Per-user-model statistics are off"
+          config-key="admin.stats.userModel"
+          purpose="to see a per-model breakdown for this user."
+        />
         <SkeletonTable v-else-if="modelState === 'skeleton'" :rows="3" :cols="3" />
         <ErrorState v-else-if="modelState === 'error'" :message="detail?.modelError ?? ''" :on-retry="loadDetail" />
         <EmptyState v-else-if="!modelRows.length" title="No traffic in this range.">
@@ -300,7 +275,7 @@ const runOutDate = computed(() => {
             <p class="text-muted-foreground">{{ event.message }}</p>
           </li>
         </ul>
-        <p v-else class="py-6 text-center text-sm text-muted-foreground">none in the current event window</p>
+        <EmptyState v-else title="No recent errors in the current event window." />
       </CardContent>
     </Card>
 

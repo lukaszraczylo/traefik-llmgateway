@@ -3,30 +3,32 @@ import type { SortingState } from '@tanstack/vue-table'
 import { getCoreRowModel, getSortedRowModel, useVueTable } from '@tanstack/vue-table'
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 
+import BudgetRatioBars from '@/components/BudgetRatioBars.vue'
 import CompactNumber from '@/components/CompactNumber.vue'
 import CostForecastCard from '@/components/CostForecastCard.vue'
 import CsvExportButton from '@/components/CsvExportButton.vue'
+import DetailField from '@/components/DetailField.vue'
 import EmptyState from '@/components/EmptyState.vue'
 import ErrorState from '@/components/ErrorState.vue'
+import LoadStateView from '@/components/LoadStateView.vue'
 import ModelChip from '@/components/ModelChip.vue'
 import SearchInput from '@/components/SearchInput.vue'
 import SkeletonList from '@/components/SkeletonList.vue'
-import SkeletonTable from '@/components/SkeletonTable.vue'
 import SortHeaderButton from '@/components/SortHeaderButton.vue'
+import StatItem from '@/components/StatItem.vue'
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/components/ui/accordion'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { valueUpdater } from '@/components/ui/table'
-import UsageBar from '@/components/UsageBar.vue'
 import UsageTable from '@/components/UsageTable.vue'
 import { useNow } from '@/composables/useNow'
 import { useSearchQuery } from '@/composables/useSearchQuery'
-import { headroom, monthProgress, projectMonthEnd } from '@/lib/forecast'
-import { formatCost, formatExactInt, formatLimits } from '@/lib/format'
+import { monthCostProjection, NOT_ENOUGH_DATA, WILL_EXCEED_TITLE } from '@/lib/forecast'
+import { formatCost, formatLimits } from '@/lib/format'
 import { loadState } from '@/lib/load-state'
 import { type ExpandState, clearExpandOverrides, computeExpandedItems, toggleItemExpand } from '@/lib/search-expand'
-import { BUDGET_RATIO_LABEL, type BudgetRatio, budgetRatios } from '@/lib/usage-bars'
+import { budgetRatios } from '@/lib/usage-bars'
 import { usageColumns } from '@/lib/usage-columns'
 import { usageCsv } from '@/lib/usage-csv'
 import { groupMatches, groupNameMatches, matchingMembersOfGroup, membersOfGroup, userMatches } from '@/lib/usage-search'
@@ -227,19 +229,30 @@ function isGlobPattern(entry: string): boolean {
   return /[*?[]/.test(entry)
 }
 
-/** budgetValueText renders one BudgetRatio's "used / limit" detail text (UsageBar's aria-valuetext/title). */
-function budgetValueText(ratio: BudgetRatio): string {
-  if (ratio.id.startsWith('cost')) return `${formatCost(ratio.used)} / ${formatCost(ratio.limit)}`
-  return `${formatExactInt(ratio.used)} / ${formatExactInt(ratio.limit)}`
-}
-
-/** groupCostProjection mirrors usage-columns.ts's own costMonthProjColumn math for one group row. */
+/** groupCostProjection renders lib/forecast.ts's shared monthCostProjection (reuse-audit.md F7) for one group row as display text. */
 function groupCostProjection(entry: AdminUsageEntryView, now: Date): { text: string; willExceed: boolean } {
-  const elapsedFraction = monthProgress(now)
-  const projected = projectMonthEnd(entry.costPerMonthMicroUsd, elapsedFraction)
-  if (projected === null) return { text: 'not enough data yet', willExceed: false }
-  return { text: formatCost(projected), willExceed: headroom(projected, entry.limits?.costPerMonthUSD).willExceed }
+  const projection = monthCostProjection(entry, now)
+  return { text: projection.micros === null ? NOT_ENOUGH_DATA : formatCost(projection.micros), willExceed: projection.willExceed }
 }
+/**
+ * GROUP_DETAIL_FIELDS (reuse-audit.md F6) drives the group accordion's 4
+ * uniform "storeDown ? '?' : <CompactNumber>" detail fields with one
+ * v-for instead of four hand-rolled DetailField copies — the same label/
+ * accessor pairs lib/usage-columns.ts's own numericColumn calls already
+ * name for these exact ids (tokInDay, tokOutDay, tokInMonth, tokOutMonth).
+ * req/min and rejected/day are rendered explicitly, ahead of this v-for,
+ * to keep the HEAD field order (rejected/day also needs its own
+ * conditional destructive-tone class). Not the ColumnDef objects
+ * themselves: a TanStack ColumnDef's `cell` needs a full CellContext
+ * (row/column/table) to render, which this plain `dl` grid — driven by
+ * `row.original` alone, no table instance — has no reason to construct.
+ */
+const GROUP_DETAIL_FIELDS: { label: string; read: (entry: AdminUsageEntryView) => number }[] = [
+  { label: 'tokIn/day', read: (e) => e.tokensInPerDay },
+  { label: 'tokOut/day', read: (e) => e.tokensOutPerDay },
+  { label: 'tokIn/month', read: (e) => e.tokensInPerMonth },
+  { label: 'tokOut/month', read: (e) => e.tokensOutPerMonth },
+]
 
 // --- CSV export ---
 const usersColumns = computed(() => usageColumns('Name', 'Group', groupNameOf, now.value, sourceOf))
@@ -289,28 +302,13 @@ function groupsCsv(): string {
         <CardDescription>Usage summed across every user and group combined.</CardDescription>
       </CardHeader>
       <CardContent class="grid grid-cols-2 gap-4 text-sm sm:grid-cols-5">
-        <div>
-          <p class="text-muted-foreground">Requests/day</p>
-          <p class="text-lg font-semibold tabular-nums"><CompactNumber :value="usage.total.requestsPerDay" /></p>
-        </div>
-        <div>
-          <p class="text-muted-foreground">Rejected/day</p>
-          <p class="text-lg font-semibold tabular-nums" :class="usage.total.rejectionsPerDay > 0 ? 'text-destructive' : undefined">
-            <CompactNumber :value="usage.total.rejectionsPerDay" />
-          </p>
-        </div>
-        <div>
-          <p class="text-muted-foreground">Tokens in/day</p>
-          <p class="text-lg font-semibold tabular-nums"><CompactNumber :value="usage.total.tokensInPerDay" /></p>
-        </div>
-        <div>
-          <p class="text-muted-foreground">Tokens out/day</p>
-          <p class="text-lg font-semibold tabular-nums"><CompactNumber :value="usage.total.tokensOutPerDay" /></p>
-        </div>
-        <div>
-          <p class="text-muted-foreground">Cost/day</p>
-          <p class="text-lg font-semibold tabular-nums">{{ formatCost(usage.total.costPerDayMicroUsd) }}</p>
-        </div>
+        <StatItem label="Requests/day"><CompactNumber :value="usage.total.requestsPerDay" /></StatItem>
+        <StatItem label="Rejected/day" :tone="usage.total.rejectionsPerDay > 0 ? 'destructive' : 'default'">
+          <CompactNumber :value="usage.total.rejectionsPerDay" />
+        </StatItem>
+        <StatItem label="Tokens in/day"><CompactNumber :value="usage.total.tokensInPerDay" /></StatItem>
+        <StatItem label="Tokens out/day"><CompactNumber :value="usage.total.tokensOutPerDay" /></StatItem>
+        <StatItem label="Cost/day">{{ formatCost(usage.total.costPerDayMicroUsd) }}</StatItem>
       </CardContent>
     </Card>
 
@@ -354,145 +352,90 @@ function groupsCsv(): string {
             </div>
             <AccordionContent>
               <dl class="mb-3 grid grid-cols-2 gap-x-6 gap-y-1.5 text-sm sm:grid-cols-4">
-                <div>
-                  <dt class="text-xs text-muted-foreground" :title="GLOB_HINT">Providers</dt>
-                  <dd>
-                    <div v-if="row.original.providers?.length" class="flex flex-wrap gap-1.5">
-                      <Badge
-                        v-for="providerName in row.original.providers"
-                        :key="providerName"
-                        as="span"
-                        variant="secondary"
-                        class="max-w-full truncate font-mono font-normal"
-                        :title="providerName"
-                      >
-                        {{ providerName }}
-                      </Badge>
-                    </div>
-                    <span v-else class="text-muted-foreground">All providers</span>
-                  </dd>
-                </div>
-                <div>
-                  <dt class="text-xs text-muted-foreground" :title="GLOB_HINT">Models</dt>
-                  <dd>
-                    <div v-if="row.original.models?.length" class="flex flex-wrap gap-1.5">
-                      <template v-for="modelId in row.original.models" :key="modelId">
-                        <ModelChip v-if="!isGlobPattern(modelId)" :id="modelId" />
-                        <Badge v-else as="span" variant="secondary" class="max-w-full truncate font-mono font-normal" :title="modelId">{{ modelId }}</Badge>
-                      </template>
-                    </div>
-                    <span v-else class="text-muted-foreground">All models</span>
-                  </dd>
-                </div>
-                <div>
-                  <dt class="text-xs text-muted-foreground" :title="GLOB_HINT">MCP servers</dt>
-                  <dd>
-                    <div v-if="row.original.mcpServers?.length" class="flex flex-wrap gap-1.5">
-                      <Badge
-                        v-for="serverName in row.original.mcpServers"
-                        :key="serverName"
-                        as="span"
-                        variant="secondary"
-                        class="max-w-full truncate font-mono font-normal"
-                        :title="serverName"
-                      >
-                        {{ serverName }}
-                      </Badge>
-                    </div>
-                    <span v-else class="text-muted-foreground">All MCP servers</span>
-                  </dd>
-                </div>
-                <div>
-                  <dt class="text-xs text-muted-foreground" :title="GLOB_HINT">Agents</dt>
-                  <dd>
-                    <div v-if="row.original.agents?.length" class="flex flex-wrap gap-1.5">
-                      <Badge
-                        v-for="agentName in row.original.agents"
-                        :key="agentName"
-                        as="span"
-                        variant="secondary"
-                        class="max-w-full truncate font-mono font-normal"
-                        :title="agentName"
-                      >
-                        {{ agentName }}
-                      </Badge>
-                    </div>
-                    <span v-else class="text-muted-foreground">All agents</span>
-                  </dd>
-                </div>
+                <DetailField label="Providers" :label-title="GLOB_HINT">
+                  <div v-if="row.original.providers?.length" class="flex flex-wrap gap-1.5">
+                    <Badge
+                      v-for="providerName in row.original.providers"
+                      :key="providerName"
+                      as="span"
+                      variant="secondary"
+                      class="max-w-full truncate font-mono font-normal"
+                      :title="providerName"
+                    >
+                      {{ providerName }}
+                    </Badge>
+                  </div>
+                  <span v-else class="text-muted-foreground">All providers</span>
+                </DetailField>
+                <DetailField label="Models" :label-title="GLOB_HINT">
+                  <div v-if="row.original.models?.length" class="flex flex-wrap gap-1.5">
+                    <template v-for="modelId in row.original.models" :key="modelId">
+                      <ModelChip v-if="!isGlobPattern(modelId)" :id="modelId" />
+                      <Badge v-else as="span" variant="secondary" class="max-w-full truncate font-mono font-normal" :title="modelId">{{ modelId }}</Badge>
+                    </template>
+                  </div>
+                  <span v-else class="text-muted-foreground">All models</span>
+                </DetailField>
+                <DetailField label="MCP servers" :label-title="GLOB_HINT">
+                  <div v-if="row.original.mcpServers?.length" class="flex flex-wrap gap-1.5">
+                    <Badge
+                      v-for="serverName in row.original.mcpServers"
+                      :key="serverName"
+                      as="span"
+                      variant="secondary"
+                      class="max-w-full truncate font-mono font-normal"
+                      :title="serverName"
+                    >
+                      {{ serverName }}
+                    </Badge>
+                  </div>
+                  <span v-else class="text-muted-foreground">All MCP servers</span>
+                </DetailField>
+                <DetailField label="Agents" :label-title="GLOB_HINT">
+                  <div v-if="row.original.agents?.length" class="flex flex-wrap gap-1.5">
+                    <Badge
+                      v-for="agentName in row.original.agents"
+                      :key="agentName"
+                      as="span"
+                      variant="secondary"
+                      class="max-w-full truncate font-mono font-normal"
+                      :title="agentName"
+                    >
+                      {{ agentName }}
+                    </Badge>
+                  </div>
+                  <span v-else class="text-muted-foreground">All agents</span>
+                </DetailField>
               </dl>
               <dl class="mb-3 grid grid-cols-2 gap-x-6 gap-y-1.5 text-sm sm:grid-cols-4">
-                <div>
-                  <dt class="text-xs text-muted-foreground">Limits</dt>
-                  <dd>{{ formatLimits(row.original.limits) }}</dd>
-                </div>
-                <div>
-                  <dt class="text-xs text-muted-foreground">req/min</dt>
-                  <dd class="tabular-nums">
-                    <template v-if="row.original.storeDown">?</template>
-                    <CompactNumber v-else :value="row.original.requestsPerMinute" />
-                  </dd>
-                </div>
-                <div>
-                  <dt class="text-xs text-muted-foreground">rejected/day</dt>
-                  <dd class="tabular-nums" :class="!row.original.storeDown && row.original.rejectionsPerDay > 0 ? 'text-destructive' : undefined">
-                    <template v-if="row.original.storeDown">?</template>
-                    <CompactNumber v-else :value="row.original.rejectionsPerDay" />
-                  </dd>
-                </div>
-                <div>
-                  <dt class="text-xs text-muted-foreground">tokIn/day</dt>
-                  <dd class="tabular-nums">
-                    <template v-if="row.original.storeDown">?</template>
-                    <CompactNumber v-else :value="row.original.tokensInPerDay" />
-                  </dd>
-                </div>
-                <div>
-                  <dt class="text-xs text-muted-foreground">tokOut/day</dt>
-                  <dd class="tabular-nums">
-                    <template v-if="row.original.storeDown">?</template>
-                    <CompactNumber v-else :value="row.original.tokensOutPerDay" />
-                  </dd>
-                </div>
-                <div>
-                  <dt class="text-xs text-muted-foreground">tokIn/month</dt>
-                  <dd class="tabular-nums">
-                    <template v-if="row.original.storeDown">?</template>
-                    <CompactNumber v-else :value="row.original.tokensInPerMonth" />
-                  </dd>
-                </div>
-                <div>
-                  <dt class="text-xs text-muted-foreground">tokOut/month</dt>
-                  <dd class="tabular-nums">
-                    <template v-if="row.original.storeDown">?</template>
-                    <CompactNumber v-else :value="row.original.tokensOutPerMonth" />
-                  </dd>
-                </div>
-                <div>
-                  <dt class="text-xs text-muted-foreground">cost/month</dt>
-                  <dd class="tabular-nums">{{ row.original.storeDown ? '?' : formatCost(row.original.costPerMonthMicroUsd) }}</dd>
-                </div>
-                <div>
-                  <dt class="text-xs text-muted-foreground">cost/month (proj.)</dt>
-                  <dd
-                    class="tabular-nums"
-                    :class="!row.original.storeDown && groupCostProjection(row.original, now).willExceed ? 'text-destructive' : undefined"
-                    :title="!row.original.storeDown && groupCostProjection(row.original, now).willExceed ? 'Projected to exceed the configured cost/month limit' : undefined"
-                  >
-                    {{ row.original.storeDown ? '?' : groupCostProjection(row.original, now).text }}
-                  </dd>
-                </div>
-              </dl>
-              <div v-if="budgetRatios(row.original).length" class="mb-3 flex flex-wrap items-center gap-x-4 gap-y-1.5">
-                <span
-                  v-for="ratio in budgetRatios(row.original)"
-                  :key="ratio.id"
-                  class="inline-flex items-center gap-1.5 text-xs text-muted-foreground"
+                <DetailField label="Limits">{{ formatLimits(row.original.limits) }}</DetailField>
+                <DetailField label="req/min" numeric>
+                  <template v-if="row.original.storeDown">?</template>
+                  <CompactNumber v-else :value="row.original.requestsPerMinute" />
+                </DetailField>
+                <DetailField
+                  label="rejected/day"
+                  numeric
+                  :class="!row.original.storeDown && row.original.rejectionsPerDay > 0 ? 'text-destructive' : undefined"
                 >
-                  {{ BUDGET_RATIO_LABEL[ratio.id] }}
-                  <UsageBar :ratio="ratio.ratio" :label="BUDGET_RATIO_LABEL[ratio.id]" :value-text="budgetValueText(ratio)" />
-                </span>
-              </div>
+                  <template v-if="row.original.storeDown">?</template>
+                  <CompactNumber v-else :value="row.original.rejectionsPerDay" />
+                </DetailField>
+                <DetailField v-for="field in GROUP_DETAIL_FIELDS" :key="field.label" :label="field.label" numeric>
+                  <template v-if="row.original.storeDown">?</template>
+                  <CompactNumber v-else :value="field.read(row.original)" />
+                </DetailField>
+                <DetailField label="cost/month" numeric>{{ row.original.storeDown ? '?' : formatCost(row.original.costPerMonthMicroUsd) }}</DetailField>
+                <DetailField
+                  label="cost/month (proj.)"
+                  numeric
+                  :class="!row.original.storeDown && groupCostProjection(row.original, now).willExceed ? 'text-destructive' : undefined"
+                  :title="!row.original.storeDown && groupCostProjection(row.original, now).willExceed ? WILL_EXCEED_TITLE : undefined"
+                >
+                  {{ row.original.storeDown ? '?' : groupCostProjection(row.original, now).text }}
+                </DetailField>
+              </dl>
+              <BudgetRatioBars v-if="budgetRatios(row.original).length" class="mb-3" :ratios="budgetRatios(row.original)" />
               <p class="mb-1.5 text-xs font-medium text-muted-foreground">Members</p>
               <UsageTable
                 id-label="Name"
@@ -508,7 +451,7 @@ function groupsCsv(): string {
         <EmptyState v-else-if="noGroupsConfigured" title="No groups configured." description="Grant a group access from the Config page's change helper.">
           <Button type="button" variant="outline" size="sm" @click="nav.goTo('config', { helper: 'grant' })">Open change helper</Button>
         </EmptyState>
-        <p v-else class="py-6 text-center text-sm text-muted-foreground">{{ groupsEmptyMessage }}</p>
+        <EmptyState v-else :title="groupsEmptyMessage" />
         </template>
       </CardContent>
     </Card>
@@ -524,19 +467,18 @@ function groupsCsv(): string {
         </div>
       </CardHeader>
       <CardContent>
-        <SkeletonTable v-if="dashboardLoadState === 'skeleton'" :rows="5" :cols="5" />
-        <ErrorState v-else-if="dashboardLoadState === 'error'" :message="dashboard.error" :on-retry="dashboard.refresh" />
-        <UsageTable
-          v-else
-          id-label="Name"
-          secondary-column-label="Group"
-          :entries="filteredUsers"
-          :secondary-value="groupNameOf"
-          :empty-message="usersEmptyMessage"
-          :now="now"
-          :source-value="sourceOf"
-          v-model:sorting="usersSorting"
-        />
+        <LoadStateView :state="dashboardLoadState" :error="dashboard.error" :on-retry="dashboard.refresh" skeleton="table" :rows="5" :cols="5">
+          <UsageTable
+            id-label="Name"
+            secondary-column-label="Group"
+            :entries="filteredUsers"
+            :secondary-value="groupNameOf"
+            :empty-message="usersEmptyMessage"
+            :now="now"
+            :source-value="sourceOf"
+            v-model:sorting="usersSorting"
+          />
+        </LoadStateView>
       </CardContent>
     </Card>
   </div>

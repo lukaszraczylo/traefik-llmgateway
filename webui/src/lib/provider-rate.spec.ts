@@ -177,4 +177,8 @@ describe('formatErrorRatePercent', () => {
   it('does not clamp a rate above 1 (should not occur with real counters, but is not silently capped)', () => {
     expect(formatErrorRatePercent(1.8)).toBe('180%')
   })
+
+  it('renders null as the caller-supplied nullLabel instead of the "no data" default', () => {
+    expect(formatErrorRatePercent(null, 'no traffic')).toBe('no traffic')
+  })
 })

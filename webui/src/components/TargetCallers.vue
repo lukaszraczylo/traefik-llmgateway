@@ -3,10 +3,9 @@ import { computed, ref, watch } from 'vue'
 
 import ClampedRangeNotice from '@/components/ClampedRangeNotice.vue'
 import DataTable from '@/components/DataTable.vue'
-import ErrorState from '@/components/ErrorState.vue'
-import SkeletonTable from '@/components/SkeletonTable.vue'
+import LoadStateView from '@/components/LoadStateView.vue'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
-import { adminFetch } from '@/lib/api'
+import { adminFetch, messageOf } from '@/lib/api'
 import { loadState } from '@/lib/load-state'
 import { dayOrMonthWindow, totalsUrl } from '@/lib/range'
 import { targetCallerColumns } from '@/lib/target-columns'
@@ -72,7 +71,7 @@ async function load(): Promise<void> {
     loadedOk.value = true
   } catch (err) {
     if (requestId !== reqId) return
-    error.value = err instanceof Error ? err.message : String(err)
+    error.value = messageOf(err)
   } finally {
     if (requestId === reqId) loading.value = false
   }
@@ -98,9 +97,9 @@ const callersLoadState = computed(() => loadState({ loading: loading.value, hasD
     </CardHeader>
     <CardContent class="flex flex-col gap-3">
       <ClampedRangeNotice :window="filters.window" :span="filters.span" />
-      <SkeletonTable v-if="callersLoadState === 'skeleton'" :rows="5" :cols="columns.length" />
-      <ErrorState v-else-if="callersLoadState === 'error'" :message="error" :on-retry="load" />
-      <DataTable v-else :columns="columns" :data="rows" empty-message="no callers recorded in this window" />
+      <LoadStateView :state="callersLoadState" :error="error" :on-retry="load" skeleton="table" :rows="5" :cols="columns.length">
+        <DataTable :columns="columns" :data="rows" empty-message="no callers recorded in this window" />
+      </LoadStateView>
     </CardContent>
   </Card>
 </template>

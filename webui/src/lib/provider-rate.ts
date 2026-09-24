@@ -118,13 +118,16 @@ export function providerErrorRate(attempts: number, failures: number): number | 
  * formatRatePercent above (a SUCCESS rate must never overstate itself as
  * 100%; an ERROR rate must never round down to a misleadingly clean 0%).
  * `null` (no traffic to compute a rate from — providerErrorRate's own
- * "nothing to report" case) renders as "no data", never "0%". Not clamped
- * to 100%: a rate above 1 should not occur with real counters, but this
+ * "nothing to report" case) renders as `nullLabel` (default "no data"),
+ * never "0%" — reuse-audit.md F13: the `nullLabel` param lets HomePage.vue's
+ * fleet-wide reading pass "no traffic" instead of hand-rolling an identical
+ * copy of this function with a different null wording. Not clamped to
+ * 100%: a rate above 1 should not occur with real counters, but this
  * function reports whatever the caller computed rather than silently
  * capping it (lib/series.ts's own ratioSeries makes the identical choice).
  */
-export function formatErrorRatePercent(rate: number | null): string {
-  if (rate === null) return 'no data'
+export function formatErrorRatePercent(rate: number | null, nullLabel = 'no data'): string {
+  if (rate === null) return nullLabel
   if (rate <= 0) return '0%'
   return `${Math.ceil(rate * 100)}%`
 }

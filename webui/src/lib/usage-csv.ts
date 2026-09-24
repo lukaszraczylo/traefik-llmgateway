@@ -4,9 +4,9 @@
 // formula-injection neutralisation) behavior is defined in exactly one
 // place (that module's own doc comment).
 import { toCsv } from '@/lib/csv'
-import { monthProgress, projectMonthEnd } from '@/lib/forecast'
+import { monthCostProjection, NOT_ENOUGH_DATA } from '@/lib/forecast'
 import { formatLimits } from '@/lib/format'
-import { MICROS_PER_USD } from '@/lib/usage-bars'
+import { microsToUsd } from '@/lib/usage-bars'
 import type { AdminUsageEntryView } from '@/types/api'
 
 /** UsageCsvKind picks the second column's label — "Group" for a Users export (each row's own group membership), "Members" for a Groups export (each row's member count) — mirroring usage-columns.ts's own usageColumns(idLabel, secondaryColumnLabel, ...) call sites in UsageTable.vue/ConsumerDirectory.vue exactly. */
@@ -30,7 +30,7 @@ const USAGE_CSV_SECONDARY_LABEL: Record<UsageCsvKind, string> = {
  * 1 micro-USD = $0.000001.
  */
 function csvCostUsd(micros: number): string {
-  return (micros / MICROS_PER_USD).toFixed(6)
+  return microsToUsd(micros).toFixed(6)
 }
 
 /**
@@ -63,7 +63,11 @@ function csvCostUsd(micros: number): string {
  * `now` (F7, default the real current time) is threaded in rather than
  * read via `new Date()` inside this module — the same "caller can pin it
  * under test" convention costMonthProjColumn/CostForecastCard already
- * follow.
+ * follow. The projected month-end cost column reuses lib/forecast.ts's
+ * own monthCostProjection (the same helper costMonthProjColumn and
+ * ConsumerDirectory.vue's groupCostProjection call) rather than pairing
+ * projectMonthEnd by hand — this export only reads its `.micros`, never
+ * `.willExceed` (a CSV cell has no styling to apply).
  */
 export function usageCsv(
   entries: AdminUsageEntryView[],
@@ -71,7 +75,6 @@ export function usageCsv(
   secondaryValue: (entry: AdminUsageEntryView) => string,
   now: Date = new Date(),
 ): string {
-  const elapsedFraction = monthProgress(now)
   const headers = [
     'Name',
     USAGE_CSV_SECONDARY_LABEL[kind],
@@ -90,7 +93,7 @@ export function usageCsv(
   ]
   const rows = entries.map((entry) => {
     const masked = entry.storeDown
-    const projected = masked ? null : projectMonthEnd(entry.costPerMonthMicroUsd, elapsedFraction)
+    const projected = masked ? null : monthCostProjection(entry, now).micros
     return [
       entry.id,
       secondaryValue(entry),
@@ -104,7 +107,7 @@ export function usageCsv(
       masked ? '?' : entry.tokensOutPerMonth,
       masked ? '?' : csvCostUsd(entry.costPerDayMicroUsd),
       masked ? '?' : csvCostUsd(entry.costPerMonthMicroUsd),
-      masked ? '?' : projected === null ? 'not enough data yet' : csvCostUsd(projected),
+      masked ? '?' : projected === null ? NOT_ENOUGH_DATA : csvCostUsd(projected),
       // Never masked — lastSeen is its own SET-based counter family
       // (redesign-plan.md section 1.2), independent of the INCRBY usage
       // counters `storeDown` actually guards (see usage-columns.ts's

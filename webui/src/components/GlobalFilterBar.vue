@@ -2,9 +2,9 @@
 import { faArrowRightArrowLeft } from '@fortawesome/free-solid-svg-icons'
 import { computed, ref, watch } from 'vue'
 
+import LabeledSelect from '@/components/LabeledSelect.vue'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { SCOPE_PATTERN } from '@/lib/hash-state'
 import { RANGE_KEYS } from '@/lib/range'
 import type { RangeKey } from '@/lib/range'
@@ -21,6 +21,7 @@ const RANGE_LABEL: Record<RangeKey, string> = {
   '6mo': 'Last 6 months',
   '12mo': 'Last 12 months',
 }
+const RANGE_OPTIONS = RANGE_KEYS.map((key) => ({ value: key, label: RANGE_LABEL[key] }))
 
 /**
  * GlobalFilterBar (redesign-plan.md section 3.1) is the shell's one
@@ -94,17 +95,7 @@ function commitScope(): void {
 
 <template>
   <div class="flex flex-wrap items-end gap-3">
-    <div class="flex flex-col gap-1">
-      <label id="global-filter-range-label" class="text-xs font-medium text-muted-foreground">Range</label>
-      <Select :model-value="filters.range" @update:model-value="onRangeUpdate">
-        <SelectTrigger aria-labelledby="global-filter-range-label" class="w-36">
-          <SelectValue />
-        </SelectTrigger>
-        <SelectContent>
-          <SelectItem v-for="key in RANGE_KEYS" :key="key" :value="key">{{ RANGE_LABEL[key] }}</SelectItem>
-        </SelectContent>
-      </Select>
-    </div>
+    <LabeledSelect label="Range" :model-value="filters.range" :options="RANGE_OPTIONS" trigger-class="w-36" @update:model-value="onRangeUpdate" />
 
     <Button
       type="button"

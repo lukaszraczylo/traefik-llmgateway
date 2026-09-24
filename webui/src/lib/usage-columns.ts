@@ -4,7 +4,8 @@ import { h } from 'vue'
 import CompactNumber from '@/components/CompactNumber.vue'
 import EntityLink from '@/components/EntityLink.vue'
 import UsageBar from '@/components/UsageBar.vue'
-import { headroom, monthProgress, projectMonthEnd } from '@/lib/forecast'
+import { EMPTY_CELL } from '@/lib/columns'
+import { monthCostProjection, NOT_ENOUGH_DATA, WILL_EXCEED_TITLE } from '@/lib/forecast'
 import { formatCost, formatExactInt, formatLimits } from '@/lib/format'
 import { formatLastSeen } from '@/lib/last-seen'
 import { BUDGET_RATIO_LABEL, budgetRatios } from '@/lib/usage-bars'
@@ -115,17 +116,19 @@ function rejDayColumn(): ColumnDef<AdminUsageEntryView, unknown> {
  * cost for each row, extrapolated from that row's own costPerMonthMicroUsd
  * — the same math CostForecastCard.vue applies to the Total entry, here
  * applied per user/group so an operator can see WHICH scope is on track
- * to blow its own cost/month limit, not just the fleet-wide total.
+ * to blow its own cost/month limit, not just the fleet-wide total. Reuses
+ * lib/forecast.ts's own monthCostProjection (F7's one projection+headroom
+ * pairing) rather than calling projectMonthEnd/headroom separately here —
+ * the same helper ConsumerDirectory.vue's groupCostProjection and lib/
+ * usage-csv.ts's own CSV row call.
  *
  * `now` is threaded in from the caller (coordinator brief: "now passed as
  * prop for determinism") rather than read via `new Date()` inside this
  * module — usageColumns() takes it as an optional parameter, defaulting
  * to the real current time for every production call site, so a test can
- * pin it instead. elapsedFraction is computed ONCE per usageColumns() call
- * (not per row) since every row projects against the identical point in
- * the current UTC month.
+ * pin it instead.
  */
-function costMonthProjColumn(elapsedFraction: number): ColumnDef<AdminUsageEntryView, unknown> {
+function costMonthProjColumn(now: Date): ColumnDef<AdminUsageEntryView, unknown> {
   return {
     id: 'costMonthProj',
     header: 'cost/month (proj.)',
@@ -133,19 +136,18 @@ function costMonthProjColumn(elapsedFraction: number): ColumnDef<AdminUsageEntry
     // Sorting: a not-enough-data-yet row (null projection) has no real
     // figure to compare — it sorts as if projected to 0, the smallest
     // possible spend, rather than being excluded from sorting entirely.
-    accessorFn: (entry) => projectMonthEnd(entry.costPerMonthMicroUsd, elapsedFraction) ?? 0,
+    accessorFn: (entry) => monthCostProjection(entry, now).micros ?? 0,
     cell: ({ row }) => {
       if (row.original.storeDown) return '?'
-      const projected = projectMonthEnd(row.original.costPerMonthMicroUsd, elapsedFraction)
-      if (projected === null) return h('span', { class: 'text-muted-foreground' }, 'not enough data yet')
-      const result = headroom(projected, row.original.limits?.costPerMonthUSD)
+      const projection = monthCostProjection(row.original, now)
+      if (projection.micros === null) return h('span', { class: 'text-muted-foreground' }, NOT_ENOUGH_DATA)
       return h(
         'span',
         {
-          class: result.willExceed ? 'text-destructive' : undefined,
-          title: result.willExceed ? 'Projected to exceed the configured cost/month limit' : undefined,
+          class: projection.willExceed ? 'text-destructive' : undefined,
+          title: projection.willExceed ? WILL_EXCEED_TITLE : undefined,
         },
-        formatCost(projected),
+        formatCost(projection.micros),
       )
     },
   }
@@ -170,7 +172,7 @@ function sourceColumn(sourceValue: (entry: AdminUsageEntryView) => string | unde
     id: 'source',
     header: 'Source',
     accessorFn: (entry) => sourceValue(entry) ?? '',
-    cell: ({ row }) => h('span', { class: 'text-muted-foreground' }, sourceValue(row.original) ?? '—'),
+    cell: ({ row }) => h('span', { class: 'text-muted-foreground' }, sourceValue(row.original) ?? EMPTY_CELL),
   }
 }
 
@@ -217,7 +219,6 @@ export function usageColumns(
   now: Date = new Date(),
   sourceValue?: (entry: AdminUsageEntryView) => string | undefined,
 ): ColumnDef<AdminUsageEntryView, unknown>[] {
-  const elapsedFraction = monthProgress(now)
   const columns: ColumnDef<AdminUsageEntryView, unknown>[] = [
     {
       id: 'id',
@@ -266,7 +267,7 @@ export function usageColumns(
     numericColumn('tokOutMonth', 'tokOut/month', (e) => e.tokensOutPerMonth, String, true, 'tokMonth'),
     numericColumn('costDay', 'cost/day', (e) => e.costPerDayMicroUsd, formatCost, false, 'costDay'),
     numericColumn('costMonth', 'cost/month', (e) => e.costPerMonthMicroUsd, formatCost, false, 'costMonth'),
-    costMonthProjColumn(elapsedFraction),
+    costMonthProjColumn(now),
     lastSeenColumn(now),
   )
   return columns

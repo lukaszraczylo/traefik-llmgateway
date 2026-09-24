@@ -3,19 +3,19 @@ import { computed, onMounted, onUnmounted, watch } from 'vue'
 
 import AttributionDrilldown from '@/components/AttributionDrilldown.vue'
 import BurnDownChart from '@/components/BurnDownChart.vue'
+import ChartCard from '@/components/ChartCard.vue'
 import CostAvoidedCard from '@/components/CostAvoidedCard.vue'
 import CostForecastCard from '@/components/CostForecastCard.vue'
-import ErrorState from '@/components/ErrorState.vue'
+import LabeledSelect from '@/components/LabeledSelect.vue'
 import PricingHealthTable from '@/components/PricingHealthTable.vue'
-import SkeletonChart from '@/components/SkeletonChart.vue'
-import TimeSeriesChart from '@/components/TimeSeriesChart.vue'
 import type { TimeSeriesComparisonDataset, TimeSeriesDataset } from '@/components/TimeSeriesChart.vue'
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { useNow } from '@/composables/useNow'
 import { cacheSavingsStatus } from '@/lib/cache-savings'
+import { BREAKDOWN_PALETTE, seriesColor } from '@/lib/chart-palette'
 import { formatBucketLabel, formatCompactCount, formatCost } from '@/lib/format'
 import { loadState } from '@/lib/load-state'
+import { parseScope, scopeBudgetLimits, scopeId } from '@/lib/scope'
 import { useCatalogStore } from '@/stores/catalog'
 import { useDashboardStore } from '@/stores/dashboard'
 import { useFiltersStore } from '@/stores/filters'
@@ -32,6 +32,7 @@ import type { SpendBy } from '@/stores/spend'
 import type { HistoryMetric, LimitsConfig } from '@/types/api'
 
 const SPEND_BY_LABEL: Record<SpendBy, string> = { model: 'By model', provider: 'By provider', group: 'By group' }
+const metricOptions = SPEND_METRICS.map((m) => ({ value: m, label: SPEND_METRIC_LABEL[m] }))
 
 const nav = useNavStore()
 const filters = useFiltersStore()
@@ -105,43 +106,9 @@ onUnmounted(() => {
 
 // --- breakdown chart ---
 
-/**
- * BREAKDOWN_PALETTE cycles a colorblind-safe (Okabe & Ito, 2008) 8-color
- * qualitative set across the breakdown chart's per-model/provider/group
- * series. The first four reuse main.css's own existing --chart-* tokens
- * (already that same palette's requests/tokens-in/tokens-out/cost
- * members); the remaining four (--chart-series-a..d) extend it, defined
- * alongside them in assets/main.css — main.css's original four tokens
- * were sized for four FIXED semantic metrics, not an open-ended
- * breakdown series count, so this page needed four more, but every chart
- * color token lives in the one design-tokens file (Tailwind-only rule),
- * never a component-local <style> block. Beyond 8 series (e.g. a fleet
- * with more than 8 configured groups) colors repeat — an accepted
- * qualitative-palette limit, not a bug: legend labels remain the
- * disambiguator past that point, the same tradeoff any categorical chart
- * palette makes once it runs out of distinguishable hues.
- */
-const BREAKDOWN_PALETTE = [
-  '--chart-requests',
-  '--chart-tokens-in',
-  '--chart-tokens-out',
-  '--chart-cost',
-  '--chart-series-a',
-  '--chart-series-b',
-  '--chart-series-c',
-  '--chart-series-d',
-]
-
-function paletteColor(index: number): string {
-  return BREAKDOWN_PALETTE[index % BREAKDOWN_PALETTE.length]!
-}
-
-/** breakdownLabel strips a series' own scope-kind prefix ("model:"/"group:") for the chart legend — sumByProvider's own output already has no prefix (lib/series.ts). */
+/** breakdownLabel strips a series' own scope-kind prefix ("model:"/"group:"/"provider:") for the chart legend (lib/scope.ts's shared scopeId, reuse-audit.md F5) — sumByProvider's own output already has no prefix (lib/series.ts). */
 function breakdownLabel(scope: string): string {
-  if (scope.startsWith('model:')) return scope.slice('model:'.length)
-  if (scope.startsWith('group:')) return scope.slice('group:'.length)
-  if (scope.startsWith('provider:')) return scope.slice('provider:'.length)
-  return scope
+  return scopeId(scope)
 }
 
 // The breakdown chart's own window (filters.window) decides the bucket
@@ -153,7 +120,7 @@ const breakdownDatasets = computed<TimeSeriesDataset[]>(() => {
   const charted: TimeSeriesDataset[] = spend.breakdown.map((s, i) => ({
     label: breakdownLabel(s.scope),
     data: s.points,
-    color: paletteColor(i),
+    color: seriesColor(i, BREAKDOWN_PALETTE),
   }))
   if (spend.otherPoints) charted.push({ label: 'Other', data: spend.otherPoints, color: '--muted-foreground' })
   return charted
@@ -173,38 +140,23 @@ const totalInRange = computed<number>(() => spend.totalPoints.reduce((a, b) => a
 // --- forecast / burn-down scope derivation (Q2/DECISIONS: fleet budget = sum of group costPerMonthUSD) ---
 
 const scopeMtdMicros = computed<number>(() => {
-  if (filters.scope === 'all') return dashboard.usage?.total.costPerMonthMicroUsd ?? 0
-  if (filters.scope.startsWith('group:')) {
-    const name = filters.scope.slice('group:'.length)
-    return dashboard.usage?.groups.find((g) => g.id === name)?.costPerMonthMicroUsd ?? 0
-  }
-  if (filters.scope.startsWith('user:')) {
-    const name = filters.scope.slice('user:'.length)
-    return dashboard.usage?.users.find((u) => u.id === name)?.costPerMonthMicroUsd ?? 0
-  }
+  const parsed = parseScope(filters.scope)
+  if (!parsed) return dashboard.usage?.total.costPerMonthMicroUsd ?? 0
+  if (parsed.kind === 'group') return dashboard.usage?.groups.find((g) => g.id === parsed.id)?.costPerMonthMicroUsd ?? 0
+  if (parsed.kind === 'user') return dashboard.usage?.users.find((u) => u.id === parsed.id)?.costPerMonthMicroUsd ?? 0
   return 0
 })
 
-const scopeLimits = computed<LimitsConfig | undefined>(() => {
-  if (filters.scope === 'all') {
-    const groups = dashboard.overview?.groups ?? []
-    const budgeted = groups.filter((g) => (g.limits?.costPerMonthUSD ?? 0) > 0)
-    if (budgeted.length === 0) return undefined
-    const totalUsd = budgeted.reduce((sum, g) => sum + (g.limits?.costPerMonthUSD ?? 0), 0)
-    return { costPerMonthUSD: totalUsd }
-  }
-  if (filters.scope.startsWith('group:')) {
-    const name = filters.scope.slice('group:'.length)
-    return dashboard.overview?.groups.find((g) => g.name === name)?.limits
-  }
-  if (filters.scope.startsWith('user:')) {
-    const name = filters.scope.slice('user:'.length)
-    return dashboard.usage?.users.find((u) => u.id === name)?.limits
-  }
-  return undefined
-})
+/** scopeLimits resolves the current global scope's own cost/month LimitsConfig via lib/scope.ts's shared scopeBudgetLimits (reuse-audit.md F5) — the fleet-wide sum-of-group-budgets 'all' case and the per-group/user lookup both used to be reimplemented here, disagreeing in spots with stores/spend.ts's own third copy. */
+const scopeLimits = computed<LimitsConfig | undefined>(() =>
+  scopeBudgetLimits(filters.scope, dashboard.overview?.groups ?? [], dashboard.usage?.users ?? []),
+)
 
-const forecastAvailable = computed<boolean>(() => filters.scope === 'all' || filters.scope.startsWith('group:') || filters.scope.startsWith('user:'))
+/** forecastAvailable is true for every scope scopeLimits/scopeMtdMicros can resolve a figure for — 'all', a group, or a user; false only for a provider scope, which has no fleet-relative budget concept. */
+const forecastAvailable = computed<boolean>(() => {
+  const parsed = parseScope(filters.scope)
+  return !parsed || parsed.kind === 'group' || parsed.kind === 'user'
+})
 
 // --- attribution drilldown gating ---
 
@@ -263,17 +215,7 @@ function retryPricingHealthTable(): Promise<void> {
             </TabsList>
           </Tabs>
         </div>
-        <div class="flex flex-col gap-1">
-          <label id="spend-metric-label" class="text-xs font-medium text-muted-foreground">Metric</label>
-          <Select :model-value="metric" @update:model-value="onMetricUpdate">
-            <SelectTrigger aria-labelledby="spend-metric-label" class="w-40">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem v-for="m in SPEND_METRICS" :key="m" :value="m">{{ SPEND_METRIC_LABEL[m] }}</SelectItem>
-            </SelectContent>
-          </Select>
-        </div>
+        <LabeledSelect label="Metric" :model-value="metric" :options="metricOptions" trigger-class="w-40" @update:model-value="onMetricUpdate" />
       </div>
       <div class="text-right">
         <p class="text-xs font-medium text-muted-foreground">{{ SPEND_METRIC_LABEL[metric] }} in range</p>
@@ -312,16 +254,17 @@ function retryPricingHealthTable(): Promise<void> {
       {{ spend.comparisonUnavailableReason }}
     </p>
 
-    <SkeletonChart v-if="breakdownState === 'skeleton'" />
-    <ErrorState v-else-if="breakdownState === 'error'" :message="spend.breakdownError" :on-retry="spend.refresh" />
-    <TimeSeriesChart
-      v-else
+    <ChartCard
+      bare
+      :state="breakdownState"
+      :error="spend.breakdownError"
+      :on-retry="spend.refresh"
       :labels="breakdownLabels"
       :datasets="breakdownDatasets"
       :comparison-datasets="comparisonDatasets"
       stacked
       :value-formatter="valueFormatter"
-      :ariaLabel="`${SPEND_METRIC_LABEL[metric]} breakdown ${SPEND_BY_LABEL[by].toLowerCase()} over time`"
+      :aria-label="`${SPEND_METRIC_LABEL[metric]} breakdown ${SPEND_BY_LABEL[by].toLowerCase()} over time`"
     />
     <!-- verify-ui-states-3.md NEW-1: a background refetch failure (poll
     tick, or a metric/by/range/scope change) while the PREVIOUS selection's

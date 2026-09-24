@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { faCheck, faCopy, faTriangleExclamation } from '@fortawesome/free-solid-svg-icons'
-import { onUnmounted, ref, useTemplateRef } from 'vue'
+import { useTemplateRef } from 'vue'
 
 import { Button } from '@/components/ui/button'
+import { useCopyFeedback } from '@/composables/useCopyFeedback'
 import { copyText } from '@/lib/clipboard'
 import { useToastsStore } from '@/stores/toasts'
 
@@ -21,21 +22,17 @@ const props = defineProps<{
 }>()
 
 const preRef = useTemplateRef<HTMLElement>('pre')
-const state = ref<'idle' | 'copied' | 'selected' | 'failed'>('idle')
-let resetTimer: ReturnType<typeof setTimeout> | undefined
+const { state, set: setCopyFeedback } = useCopyFeedback()
 const toasts = useToastsStore()
 
 async function onCopy(): Promise<void> {
-  state.value = await copyText(props.text, preRef.value ?? undefined)
+  const result = await copyText(props.text, preRef.value ?? undefined)
+  setCopyFeedback(result)
   // Only a FAILURE also gets a toast (states-plan.md item 3) — see
   // ModelChip.vue's own identical doc comment: 'copied'/'selected'
   // already have clear inline feedback (the button's own icon/label
   // swap right below), so a success toast would double-notify.
-  if (state.value === 'failed') toasts.push({ kind: 'error', message: 'Could not copy the snippet.' })
-  clearTimeout(resetTimer)
-  resetTimer = setTimeout(() => {
-    state.value = 'idle'
-  }, 1500)
+  if (result === 'failed') toasts.push({ kind: 'error', message: 'Could not copy the snippet.' })
 }
 
 const BUTTON_LABEL: Record<typeof state.value, string> = {
@@ -44,8 +41,6 @@ const BUTTON_LABEL: Record<typeof state.value, string> = {
   selected: 'Selected — press ⌘/Ctrl+C',
   failed: 'Copy failed',
 }
-
-onUnmounted(() => clearTimeout(resetTimer))
 </script>
 
 <template>

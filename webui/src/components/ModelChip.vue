@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { faCheck, faCopy, faTriangleExclamation } from '@fortawesome/free-solid-svg-icons'
-import { computed, onUnmounted, ref, useTemplateRef } from 'vue'
+import { computed, useTemplateRef } from 'vue'
 
 import { Badge } from '@/components/ui/badge'
+import { useCopyFeedback } from '@/composables/useCopyFeedback'
 import { copyText } from '@/lib/clipboard'
 import { formatContextWindow, formatModelCostHover } from '@/lib/format'
 import { useToastsStore } from '@/stores/toasts'
@@ -50,16 +51,8 @@ const props = defineProps<{
 }>()
 
 const labelRef = useTemplateRef<HTMLElement>('label')
-const state = ref<'idle' | 'copied' | 'selected' | 'failed'>('idle')
-let resetTimer: ReturnType<typeof setTimeout> | undefined
+const { state, set: setCopyFeedback } = useCopyFeedback()
 const toasts = useToastsStore()
-
-function scheduleReset(): void {
-  clearTimeout(resetTimer)
-  resetTimer = setTimeout(() => {
-    state.value = 'idle'
-  }, 1500)
-}
 
 async function onClick(): Promise<void> {
   const result = await copyText(props.id, labelRef.value ?? undefined)
@@ -71,9 +64,8 @@ async function onClick(): Promise<void> {
   // feedback right at the click target (the icon swap plus this same
   // title/aria-label text), so a success toast on top would double-notify
   // for something the reader is already looking straight at.
-  state.value = result
+  setCopyFeedback(result)
   if (result === 'failed') toasts.push({ kind: 'error', message: `Could not copy ${props.id}.` })
-  scheduleReset()
 }
 
 const icon = {
@@ -118,10 +110,6 @@ const metaDetail = computed(() => {
 const title = computed(() => {
   const base = baseTitle.value[state.value]
   return metaDetail.value ? `${base} · ${metaDetail.value}` : base
-})
-
-onUnmounted(() => {
-  clearTimeout(resetTimer)
 })
 </script>
 

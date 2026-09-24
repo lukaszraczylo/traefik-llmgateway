@@ -1,12 +1,12 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 
+import LabeledSelect from '@/components/LabeledSelect.vue'
 import SnippetBlock from '@/components/SnippetBlock.vue'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
-import { API_KEY_PLACEHOLDER, generateApiKey, isValidUserName, userJsonLine, validatePersonalGrant } from '@/lib/snippets'
+import { API_KEY_PLACEHOLDER, generateApiKey, isValidUserName, parseList, userJsonLine, validatePersonalGrant } from '@/lib/snippets'
 import { useToastsStore } from '@/stores/toasts'
 
 /**
@@ -20,6 +20,8 @@ import { useToastsStore } from '@/stores/toasts'
  * is), and an admin checkbox.
  */
 const props = defineProps<{ groupNames: string[] }>()
+
+const groupOptions = computed(() => props.groupNames.map((g) => ({ value: g, label: g })))
 
 const name = ref('')
 const apiKey = ref(API_KEY_PLACEHOLDER)
@@ -49,15 +51,6 @@ function generate(): void {
   } catch (err) {
     toasts.push({ kind: 'error', message: err instanceof Error ? `Could not generate an API key: ${err.message}` : 'Could not generate an API key.' })
   }
-}
-
-function parseList(raw: string): string[] {
-  const seen = new Set<string>()
-  for (const part of raw.split(',')) {
-    const trimmed = part.trim()
-    if (trimmed) seen.add(trimmed)
-  }
-  return Array.from(seen)
 }
 
 const extraGroups = computed(() => parseList(extraGroupsRaw.value))
@@ -91,15 +84,13 @@ const snippet = computed<string | null>(() => {
         <label for="user-name" class="text-xs font-medium text-muted-foreground">Name</label>
         <Input id="user-name" v-model="name" placeholder="alice" />
       </div>
-      <div class="flex flex-col gap-1">
-        <label id="user-group-label" class="text-xs font-medium text-muted-foreground">Primary group</label>
-        <Select :model-value="primaryGroup" @update:model-value="(v) => (primaryGroup = String(v))">
-          <SelectTrigger aria-labelledby="user-group-label"><SelectValue placeholder="Select…" /></SelectTrigger>
-          <SelectContent>
-            <SelectItem v-for="g in props.groupNames" :key="g" :value="g">{{ g }}</SelectItem>
-          </SelectContent>
-        </Select>
-      </div>
+      <LabeledSelect
+        label="Primary group"
+        :model-value="primaryGroup"
+        :options="groupOptions"
+        placeholder="Select…"
+        @update:model-value="primaryGroup = $event"
+      />
     </div>
 
     <div class="flex flex-col gap-1">

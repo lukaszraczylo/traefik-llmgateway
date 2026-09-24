@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 
-import { AdminApiError, adminFetch } from '@/lib/api'
+import { adminFetch, isAuthRejection, messageOf } from '@/lib/api'
 import { useAuthStore } from '@/stores/auth'
 import type { AdminCatalogModel, AdminCatalogResponse } from '@/types/api'
 
@@ -86,10 +86,10 @@ export const useCatalogStore = defineStore('catalog', {
         this.error = ''
       } catch (err) {
         if (requestId !== this.reqId) return
-        if (err instanceof AdminApiError && (err.status === 401 || err.status === 403)) {
+        if (isAuthRejection(err)) {
           return
         }
-        this.error = err instanceof Error ? err.message : String(err)
+        this.error = messageOf(err)
       } finally {
         if (requestId === this.reqId) this.loading = false
       }

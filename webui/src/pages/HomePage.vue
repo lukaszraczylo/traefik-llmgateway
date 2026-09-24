@@ -3,18 +3,18 @@ import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 
 import ErrorState from '@/components/ErrorState.vue'
 import KpiTile from '@/components/KpiTile.vue'
+import LoadStateView from '@/components/LoadStateView.vue'
 import SkeletonKpiTile from '@/components/SkeletonKpiTile.vue'
-import SkeletonList from '@/components/SkeletonList.vue'
 import TopList from '@/components/TopList.vue'
 import type { TopListItem } from '@/components/TopList.vue'
 import TryLongerRangeButton from '@/components/TryLongerRangeButton.vue'
 import { Badge } from '@/components/ui/badge'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
-import { AdminApiError, adminFetch } from '@/lib/api'
-import { EVENT_KIND_LABEL, eventKindVariant } from '@/lib/events-filter'
+import { AdminApiError, adminFetch, messageOf } from '@/lib/api'
+import { eventKindVariant, kindLabel } from '@/lib/events-filter'
 import { formatCompactCount, formatCost, formatTimestamp } from '@/lib/format'
-import { headroom, monthProgress, projectMonthEnd } from '@/lib/forecast'
+import { headroom, monthProgress, NOT_ENOUGH_DATA, projectMonthEnd } from '@/lib/forecast'
 import {
   budgetRatio,
   budgetTier,
@@ -26,6 +26,7 @@ import {
 import { loadState } from '@/lib/load-state'
 import { createVisibilityPoller } from '@/lib/polling'
 import type { VisibilityPoller } from '@/lib/polling'
+import { formatErrorRatePercent } from '@/lib/provider-rate'
 import {
   DEFAULT_TOP_USERS_MODE,
   parseTopUsersMode,
@@ -37,12 +38,13 @@ import {
   topUsersTotalsUrl,
 } from '@/lib/top-users'
 import type { TopUsersMode } from '@/lib/top-users'
+import { microsToUsd } from '@/lib/usage-bars'
 import { useAuthStore } from '@/stores/auth'
 import { useDashboardStore } from '@/stores/dashboard'
 import { useEventsStore } from '@/stores/events'
 import { useFiltersStore } from '@/stores/filters'
 import { useNavStore } from '@/stores/nav'
-import type { AdminEventKind, AdminTotalsResponse, AdminUsageModelsResponse } from '@/types/api'
+import type { AdminTotalsResponse, AdminUsageModelsResponse } from '@/types/api'
 
 /**
  * HomePage (redesign-plan.md section 3.4) is the redesign's landing
@@ -81,10 +83,10 @@ const spendDelta = computed<string>(() => {
 
 const projectedMicros = computed<number | null>(() => projectMonthEnd(spendMtdMicros.value, monthProgress(new Date())))
 const projectedHeadroom = computed(() =>
-  headroom(projectedMicros.value, budgetMicros.value > 0 ? budgetMicros.value / 1_000_000 : undefined),
+  headroom(projectedMicros.value, budgetMicros.value > 0 ? microsToUsd(budgetMicros.value) : undefined),
 )
 const projectedValue = computed<string>(() =>
-  projectedMicros.value === null ? 'not enough data yet' : formatCost(projectedMicros.value),
+  projectedMicros.value === null ? NOT_ENOUGH_DATA : formatCost(projectedMicros.value),
 )
 const projectedTier = computed(() => (projectedHeadroom.value.willExceed ? 'critical' : 'ok'))
 const projectedDelta = computed<string | undefined>(() => {
@@ -101,16 +103,8 @@ const requestsPerMinute = computed<number>(() => dashboard.usage?.total.requests
 
 const errorRate = computed(() => fleetErrorRate(dashboard.overview?.providers ?? []))
 const errorTier = computed(() => errorRateTier(errorRate.value.rate))
-const errorValue = computed<string>(() => {
-  const rate = errorRate.value.rate
-  if (rate === null) return 'no traffic'
-  if (rate <= 0) return '0%'
-  // Ceiling, not the usual floor: a genuinely non-zero error rate must
-  // never round down to a misleadingly clean "0%" (the opposite honesty
-  // direction from a SUCCESS rate, which floors so it never overstates
-  // — see lib/provider-rate.ts's own formatRatePercent doc comment).
-  return `${Math.ceil(rate * 100)}%`
-})
+/** errorValue reuses lib/provider-rate.ts's shared formatErrorRatePercent (reuse-audit.md F13) — the Home tile's own "no traffic" null wording is the ONE difference from the Reliability/Models pages' "no data" default, passed via the nullLabel param rather than a second, hand-rolled copy of the same ceiling-percent formatting. */
+const errorValue = computed<string>(() => formatErrorRatePercent(errorRate.value.rate, 'no traffic'))
 const errorDelta = computed<string>(() => `${errorRate.value.failures}/${errorRate.value.attempts} attempts in the last minute`)
 
 // --- Open breakers / warnings / unpriced ---------------------------------
@@ -308,7 +302,7 @@ async function fetchTopUsers(): Promise<void> {
       topUsersRangeTooLarge.value = true
       topUsersError.value = ''
     } else {
-      topUsersError.value = err instanceof Error ? err.message : String(err)
+      topUsersError.value = messageOf(err)
     }
   } finally {
     if (requestId === topUsersReqId) topUsersLoading.value = false
@@ -334,7 +328,7 @@ async function fetchTopModels(): Promise<void> {
     topModelsLoaded.value = true
   } catch (err) {
     if (requestId !== topModelsReqId) return
-    topModelsError.value = err instanceof Error ? err.message : String(err)
+    topModelsError.value = messageOf(err)
   } finally {
     if (requestId === topModelsReqId) topModelsLoading.value = false
   }
@@ -382,11 +376,6 @@ watch(
 )
 
 // --- Latest 8 events -------------------------------------------------------
-
-/** kindLabel falls back to the raw kind string for a kind EVENT_KIND_LABEL does not know (a server newer than this webui build) — same forward-compat convention lib/events-columns.ts's own identical helper documents. */
-function kindLabel(kind: string): string {
-  return EVENT_KIND_LABEL[kind as AdminEventKind] ?? kind
-}
 
 const latestEvents = computed(() => events.events.slice(0, 8))
 
@@ -498,22 +487,21 @@ onUnmounted(() => {
         <CardTitle>Latest events</CardTitle>
       </CardHeader>
       <CardContent>
-        <SkeletonList v-if="eventsCardState === 'skeleton'" :rows="4" />
-        <ErrorState v-else-if="eventsCardState === 'error'" :message="events.error" :on-retry="events.refresh" />
-        <p v-else-if="noEventsRecorded" class="text-sm text-muted-foreground">No events recorded yet.</p>
-        <ol v-else class="flex flex-col gap-2">
-          <li
-            v-for="(event, i) in latestEvents"
-            :key="`${event.time}-${event.replica}-${i}`"
-            class="flex items-start justify-between gap-3 text-sm"
-          >
-            <span class="flex min-w-0 items-center gap-2">
-              <Badge :variant="eventKindVariant(event.kind)" class="shrink-0 font-normal">{{ kindLabel(event.kind) }}</Badge>
-              <span class="min-w-0 truncate text-muted-foreground">{{ event.message }}</span>
-            </span>
-            <span class="shrink-0 tabular-nums text-muted-foreground">{{ formatTimestamp(event.time) }}</span>
-          </li>
-        </ol>
+        <LoadStateView :state="eventsCardState" :error="events.error" :on-retry="events.refresh" skeleton="list" :rows="4" :empty="noEventsRecorded" empty-title="No events recorded yet.">
+          <ol class="flex flex-col gap-2">
+            <li
+              v-for="(event, i) in latestEvents"
+              :key="`${event.time}-${event.replica}-${i}`"
+              class="flex items-start justify-between gap-3 text-sm"
+            >
+              <span class="flex min-w-0 items-center gap-2">
+                <Badge :variant="eventKindVariant(event.kind)" class="shrink-0 font-normal">{{ kindLabel(event.kind) }}</Badge>
+                <span class="min-w-0 truncate text-muted-foreground">{{ event.message }}</span>
+              </span>
+              <span class="shrink-0 tabular-nums text-muted-foreground">{{ formatTimestamp(event.time) }}</span>
+            </li>
+          </ol>
+        </LoadStateView>
       </CardContent>
     </Card>
   </div>

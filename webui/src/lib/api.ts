@@ -61,3 +61,26 @@ export async function adminFetch<T>(path: string): Promise<T> {
   }
   return (await resp.json()) as T
 }
+
+/**
+ * messageOf (reuse-audit.md F4 step 1) extracts a human-readable message
+ * from a caught value of unknown shape: an Error's own `.message`, or the
+ * stringified value otherwise (a thrown string, object, etc.). The ONE
+ * shared implementation — every Pinia store's fetch action and every
+ * component with a local latest-request-wins fetch used to hand-roll this
+ * same ternary in its `catch` block.
+ */
+export function messageOf(err: unknown): string {
+  return err instanceof Error ? err.message : String(err)
+}
+
+/**
+ * isAuthRejection (reuse-audit.md F4 step 1) reports whether a caught
+ * value is an AdminApiError for a 401/403 — i.e. adminFetch has already
+ * rejected the stored key (authStore.reject) for this failure, so the
+ * caller's own `catch` block should return early instead of also setting
+ * its local `error` state with the same rejection.
+ */
+export function isAuthRejection(err: unknown): boolean {
+  return err instanceof AdminApiError && (err.status === 401 || err.status === 403)
+}

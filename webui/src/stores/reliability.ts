@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 
-import { AdminApiError, adminFetch } from '@/lib/api'
+import { adminFetch, isAuthRejection, messageOf } from '@/lib/api'
 import { seriesUrl } from '@/lib/range'
 import { ratioSeries } from '@/lib/series'
 import { useDashboardStore } from '@/stores/dashboard'
@@ -51,21 +51,6 @@ export function errorRateSeries(attempts: AdminSeriesResponse, fails: AdminSerie
     scope: a.scope,
     points: ratioSeries(failByScope.get(a.scope) ?? new Array<number>(a.points.length).fill(0), a.points),
   }))
-}
-
-/**
- * RELIABILITY_SERIES_COLORS cycles through main.css's four existing
- * --chart-* tokens (assets/main.css is owned by WP-E — this store does not
- * add a fifth) to color the per-provider error-rate/timeout/failover
- * overlay charts: with more than four configured providers, colors repeat
- * — a known, documented limitation rather than a silent one, since adding
- * a genuinely distinct fifth hue is out of this work package's file scope.
- */
-export const RELIABILITY_SERIES_COLORS = ['--chart-requests', '--chart-tokens-in', '--chart-tokens-out', '--chart-cost'] as const
-
-/** seriesColor picks one of RELIABILITY_SERIES_COLORS by index, cycling. */
-export function seriesColor(index: number): string {
-  return RELIABILITY_SERIES_COLORS[index % RELIABILITY_SERIES_COLORS.length]
 }
 
 /** One plain (non-ratio) metric series, e.g. failovers/timeouts per provider, or the fleet-wide rej/r402 total. */
@@ -179,8 +164,8 @@ export const useReliabilityStore = defineStore('reliability', {
         this.error = ''
       } catch (err) {
         if (requestId !== this.reqId) return
-        if (err instanceof AdminApiError && (err.status === 401 || err.status === 403)) return
-        this.error = err instanceof Error ? err.message : String(err)
+        if (isAuthRejection(err)) return
+        this.error = messageOf(err)
       } finally {
         if (requestId === this.reqId) this.loading = false
       }
@@ -232,8 +217,8 @@ export const useReliabilityStore = defineStore('reliability', {
         this.providerPerfError = ''
       } catch (err) {
         if (requestId !== this.providerPerfReqId) return
-        if (err instanceof AdminApiError && (err.status === 401 || err.status === 403)) return
-        this.providerPerfError = err instanceof Error ? err.message : String(err)
+        if (isAuthRejection(err)) return
+        this.providerPerfError = messageOf(err)
       } finally {
         if (requestId === this.providerPerfReqId) this.providerPerfLoading = false
       }

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { BAR_AMBER_THRESHOLD, BAR_RED_THRESHOLD, budgetRatios, ratioTier } from './usage-bars'
+import { BAR_AMBER_THRESHOLD, BAR_RED_THRESHOLD, budgetRatios, budgetValueText, ratioTier } from './usage-bars'
 import type { AdminUsageEntryView } from '@/types/api'
 
 function testEntry(overrides: Partial<AdminUsageEntryView> = {}): AdminUsageEntryView {
@@ -118,6 +118,17 @@ describe('budgetRatios', () => {
       }),
     )
     expect(ratios.map((r) => r.id)).toEqual(['reqMin', 'reqDay', 'tokDay', 'tokMonth', 'costDay', 'costMonth'])
+  })
+})
+
+describe('budgetValueText', () => {
+  it('formats a cost-kind ratio (id starting "cost") through formatCost, both sides', () => {
+    expect(budgetValueText({ id: 'costMonth', used: 1_500_000, limit: 5_000_000, ratio: 0.3 })).toBe('$1.5000 / $5.0000')
+  })
+
+  it('formats every other kind through formatExactInt, both sides', () => {
+    expect(budgetValueText({ id: 'reqMin', used: 42, limit: 100, ratio: 0.42 })).toBe('42 / 100')
+    expect(budgetValueText({ id: 'tokDay', used: 1_500, limit: 2_000, ratio: 0.75 })).toBe('1,500 / 2,000')
   })
 })
 

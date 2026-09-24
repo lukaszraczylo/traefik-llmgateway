@@ -1,26 +1,29 @@
 <script setup lang="ts">
 import { computed, onMounted, watch } from 'vue'
 
+import ChartCard from '@/components/ChartCard.vue'
 import EmptyState from '@/components/EmptyState.vue'
 import ErrorState from '@/components/ErrorState.vue'
 import EventsView from '@/components/EventsView.vue'
+import LabeledSelect from '@/components/LabeledSelect.vue'
 import SkeletonChart from '@/components/SkeletonChart.vue'
 import SkeletonList from '@/components/SkeletonList.vue'
+import StatDisabledAlert from '@/components/StatDisabledAlert.vue'
 import TimeSeriesChart from '@/components/TimeSeriesChart.vue'
 import type { TimeSeriesDataset } from '@/components/TimeSeriesChart.vue'
-import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
-import { Button } from '@/components/ui/button'
+import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { seriesColor } from '@/lib/chart-palette'
 import { formatBucketLabel } from '@/lib/format'
 import { loadState } from '@/lib/load-state'
 import type { LoadState } from '@/lib/load-state'
 import { formatErrorRatePercent } from '@/lib/provider-rate'
+import { scopeId } from '@/lib/scope'
 import { useDashboardStore } from '@/stores/dashboard'
 import { useEventsStore } from '@/stores/events'
 import { useFiltersStore } from '@/stores/filters'
 import { useNavStore } from '@/stores/nav'
-import { seriesColor, useReliabilityStore } from '@/stores/reliability'
+import { useReliabilityStore } from '@/stores/reliability'
 import type { CountSeries, ProviderRatioSeries } from '@/stores/reliability'
 
 /**
@@ -37,9 +40,6 @@ import type { CountSeries, ProviderRatioSeries } from '@/stores/reliability'
  * round-trip through the URL hash the same way EntityLink.vue's params do
  * — nav.goTo on every local change, read back via nav.params on mount.
  */
-/** '' is the "every provider" state (selectedProvider/filterSelected below). Radix/reka-ui Select items cannot use an empty-string value (EventsView.vue's own identical ALL_KINDS doc comment) — ALL_PROVIDERS_OPTION is the Select-only sentinel, mapped to/from '' at the template boundary. */
-const ALL_PROVIDERS_OPTION = 'all'
-
 const dashboard = useDashboardStore()
 const events = useEventsStore()
 const filters = useFiltersStore()
@@ -47,16 +47,16 @@ const nav = useNavStore()
 const reliability = useReliabilityStore()
 
 const selectedProvider = computed<string>(() => nav.params.provider ?? '')
-const providerSelectValue = computed<string>(() => selectedProvider.value || ALL_PROVIDERS_OPTION)
+/** providerOptions feeds LabeledSelect's own options list — LabeledSelect owns the "All providers" -> '' sentinel mapping itself (reuse-audit.md F11), so this page no longer needs its own ALL_PROVIDERS_OPTION constant. */
+const providerOptions = computed(() => (dashboard.overview?.providers ?? []).map((p) => ({ value: p.name, label: p.name })))
 
-function onProviderChange(value: unknown): void {
-  if (typeof value !== 'string') return
-  nav.goTo('reliability', { ...nav.params, provider: value === ALL_PROVIDERS_OPTION ? '' : value })
+function onProviderChange(value: string): void {
+  nav.goTo('reliability', { ...nav.params, provider: value })
 }
 
-/** providerLabel strips the "provider:" scope prefix every reliability series carries — the display label is just the provider name. */
+/** providerLabel strips the "provider:" scope prefix every reliability series carries (lib/scope.ts's shared scopeId, reuse-audit.md F5) — the display label is just the provider name. */
 function providerLabel(scope: string): string {
-  return scope.replace(/^provider:/, '')
+  return scopeId(scope)
 }
 
 function filterSelected<T extends { scope: string }>(series: T[]): T[] {
@@ -261,24 +261,20 @@ onMounted(() => void reliability.fetch())
           <CardTitle>Reliability</CardTitle>
           <CardDescription>Provider error rate, failovers, timeouts, rate-limit rejections, and 402 refusals.</CardDescription>
         </div>
-        <div class="flex flex-col gap-1">
-          <label id="reliability-provider-label" class="text-xs font-medium text-muted-foreground">Provider</label>
-          <Select :model-value="providerSelectValue" @update:model-value="onProviderChange">
-            <SelectTrigger aria-labelledby="reliability-provider-label" class="w-48">
-              <SelectValue placeholder="All providers" />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem :value="ALL_PROVIDERS_OPTION">All providers</SelectItem>
-              <SelectItem v-for="p in dashboard.overview?.providers ?? []" :key="p.name" :value="p.name">{{ p.name }}</SelectItem>
-            </SelectContent>
-          </Select>
-        </div>
+        <LabeledSelect
+          label="Provider"
+          :model-value="selectedProvider"
+          :options="providerOptions"
+          all-label="All providers"
+          trigger-class="w-48"
+          @update:model-value="onProviderChange"
+        />
       </CardHeader>
       <CardContent>
         <SkeletonList v-if="dashboardLoadState === 'skeleton'" :rows="2" />
         <ErrorState v-else-if="dashboardLoadState === 'error'" :message="dashboard.error" :on-retry="dashboard.refresh" />
         <p v-else-if="reliability.error" class="text-sm break-words text-destructive">{{ reliability.error }}</p>
-        <p v-else-if="!hasProviders" class="text-sm text-muted-foreground">No providers configured.</p>
+        <EmptyState v-else-if="!hasProviders" title="No providers configured." />
       </CardContent>
     </Card>
 
@@ -299,30 +295,10 @@ onMounted(() => void reliability.fetch())
       actual charts below exactly as before.
     -->
     <template v-if="providersState === 'skeleton'">
-      <Card>
-        <CardHeader>
-          <CardTitle>Error rate by provider</CardTitle>
-        </CardHeader>
-        <CardContent><SkeletonChart /></CardContent>
-      </Card>
-      <Card>
-        <CardHeader>
-          <CardTitle>Selected provider performance</CardTitle>
-        </CardHeader>
-        <CardContent><SkeletonChart /></CardContent>
-      </Card>
-      <Card>
-        <CardHeader>
-          <CardTitle>Timeouts by provider</CardTitle>
-        </CardHeader>
-        <CardContent><SkeletonChart /></CardContent>
-      </Card>
-      <Card>
-        <CardHeader>
-          <CardTitle>Failovers by provider</CardTitle>
-        </CardHeader>
-        <CardContent><SkeletonChart /></CardContent>
-      </Card>
+      <ChartCard title="Error rate by provider" state="skeleton" />
+      <ChartCard title="Selected provider performance" state="skeleton" />
+      <ChartCard title="Timeouts by provider" state="skeleton" />
+      <ChartCard title="Failovers by provider" state="skeleton" />
     </template>
     <Card v-else-if="providersState === 'empty'">
       <CardContent>
@@ -333,17 +309,17 @@ onMounted(() => void reliability.fetch())
       </CardContent>
     </Card>
     <template v-else-if="providersState === 'ready'">
-      <Card>
-        <CardHeader>
-          <CardTitle>Error rate by provider</CardTitle>
-          <CardDescription>Failed attempts / total attempts per bucket. A gap means no attempts in that bucket.</CardDescription>
-        </CardHeader>
-        <CardContent>
-          <SkeletonChart v-if="reliabilityState === 'skeleton'" />
-          <ErrorState v-else-if="reliabilityState === 'error'" :message="reliability.error" :on-retry="reliability.fetch" />
-          <TimeSeriesChart v-else :labels="bucketLabels" :datasets="errorRateDatasets" :value-formatter="errorRatePercent" ariaLabel="Error rate by provider over time" />
-        </CardContent>
-      </Card>
+      <ChartCard
+        title="Error rate by provider"
+        description="Failed attempts / total attempts per bucket. A gap means no attempts in that bucket."
+        :state="reliabilityState"
+        :error="reliability.error"
+        :on-retry="reliability.fetch"
+        :labels="bucketLabels"
+        :datasets="errorRateDatasets"
+        :value-formatter="errorRatePercent"
+        aria-label="Error rate by provider over time"
+      />
 
       <Card>
         <CardHeader>
@@ -354,16 +330,12 @@ onMounted(() => void reliability.fetch())
           <p v-if="selectedProvider === ''" class="text-sm text-muted-foreground">
             Select a provider above to see its latency and failure breakdown per bucket.
           </p>
-          <Alert v-else-if="!latencyStatsEnabled" variant="warn">
-            <AlertTitle>Latency statistics are off</AlertTitle>
-            <AlertDescription class="flex flex-wrap items-center gap-2">
-              <span
-                >Enable <code class="font-mono text-xs">admin.stats.latency</code> in the middleware config to see per-bucket latency
-                for {{ selectedProvider }}.</span
-              >
-              <Button type="button" variant="outline" size="sm" @click="nav.goTo('config')">Open Config</Button>
-            </AlertDescription>
-          </Alert>
+          <StatDisabledAlert
+            v-else-if="!latencyStatsEnabled"
+            title="Latency statistics are off"
+            config-key="admin.stats.latency"
+            :purpose="`to see per-bucket latency for ${selectedProvider}.`"
+          />
           <template v-else-if="providerPerfAvailable">
             <SkeletonChart v-if="providerPerfState === 'skeleton'" />
             <ErrorState
@@ -393,54 +365,50 @@ onMounted(() => void reliability.fetch())
         </CardContent>
       </Card>
 
-      <Card>
-        <CardHeader>
-          <CardTitle>Timeouts by provider</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <SkeletonChart v-if="reliabilityState === 'skeleton'" />
-          <ErrorState v-else-if="reliabilityState === 'error'" :message="reliability.error" :on-retry="reliability.fetch" />
-          <TimeSeriesChart v-else :labels="bucketLabels" :datasets="timeoutDatasets" ariaLabel="Timeouts by provider over time" />
-        </CardContent>
-      </Card>
+      <ChartCard
+        title="Timeouts by provider"
+        :state="reliabilityState"
+        :error="reliability.error"
+        :on-retry="reliability.fetch"
+        :labels="bucketLabels"
+        :datasets="timeoutDatasets"
+        aria-label="Timeouts by provider over time"
+      />
 
-      <Card>
-        <CardHeader>
-          <CardTitle>Failovers by provider</CardTitle>
-          <CardDescription v-if="noFailoverConfigured">This deployment has no failover chains configured.</CardDescription>
-        </CardHeader>
-        <CardContent>
-          <SkeletonChart v-if="reliabilityState === 'skeleton'" />
-          <ErrorState v-else-if="reliabilityState === 'error'" :message="reliability.error" :on-retry="reliability.fetch" />
-          <TimeSeriesChart v-else :labels="bucketLabels" :datasets="failoverDatasets" ariaLabel="Failovers by provider over time" />
-        </CardContent>
-      </Card>
+      <ChartCard
+        title="Failovers by provider"
+        :description="noFailoverConfigured ? 'This deployment has no failover chains configured.' : undefined"
+        :state="reliabilityState"
+        :error="reliability.error"
+        :on-retry="reliability.fetch"
+        :labels="bucketLabels"
+        :datasets="failoverDatasets"
+        aria-label="Failovers by provider over time"
+      />
     </template>
 
     <div class="grid gap-6 lg:grid-cols-2">
-      <Card>
-        <CardHeader>
-          <CardTitle>Rate-limit rejections (429)</CardTitle>
-          <CardDescription>Fleet-wide, every scope combined.</CardDescription>
-        </CardHeader>
-        <CardContent>
-          <SkeletonChart v-if="reliabilityState === 'skeleton'" />
-          <ErrorState v-else-if="reliabilityState === 'error'" :message="reliability.error" :on-retry="reliability.fetch" />
-          <TimeSeriesChart v-else :labels="bucketLabels" :datasets="rejectionDatasets" ariaLabel="Rate-limit rejections over time, fleet-wide" />
-        </CardContent>
-      </Card>
+      <ChartCard
+        title="Rate-limit rejections (429)"
+        description="Fleet-wide, every scope combined."
+        :state="reliabilityState"
+        :error="reliability.error"
+        :on-retry="reliability.fetch"
+        :labels="bucketLabels"
+        :datasets="rejectionDatasets"
+        aria-label="Rate-limit rejections over time, fleet-wide"
+      />
 
-      <Card>
-        <CardHeader>
-          <CardTitle>Unpriced refusals (402)</CardTitle>
-          <CardDescription>Fleet-wide requests refused for having no resolvable price.</CardDescription>
-        </CardHeader>
-        <CardContent>
-          <SkeletonChart v-if="reliabilityState === 'skeleton'" />
-          <ErrorState v-else-if="reliabilityState === 'error'" :message="reliability.error" :on-retry="reliability.fetch" />
-          <TimeSeriesChart v-else :labels="bucketLabels" :datasets="unpricedDatasets" ariaLabel="Unpriced refusals (402) over time, fleet-wide" />
-        </CardContent>
-      </Card>
+      <ChartCard
+        title="Unpriced refusals (402)"
+        description="Fleet-wide requests refused for having no resolvable price."
+        :state="reliabilityState"
+        :error="reliability.error"
+        :on-retry="reliability.fetch"
+        :labels="bucketLabels"
+        :datasets="unpricedDatasets"
+        aria-label="Unpriced refusals (402) over time, fleet-wide"
+      />
     </div>
 
     <EventsView />

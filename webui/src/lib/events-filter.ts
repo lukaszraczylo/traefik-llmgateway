@@ -26,6 +26,18 @@ export const EVENT_KIND_LABEL: Record<AdminEventKind, string> = {
  * there first).
  */
 export const EVENT_KINDS = Object.keys(EVENT_KIND_LABEL) as AdminEventKind[]
+/**
+ * kindLabel (reuse-audit.md F13) renders one event's kind as display text,
+ * falling back to the raw kind string for a kind EVENT_KIND_LABEL does not
+ * know (a server newer than this webui build) — same forward-compat
+ * convention AdminEventView.kind's own `| string` union documents. The ONE
+ * shared implementation: lib/events-columns.ts's Events-tab column and
+ * HomePage.vue's "Latest events" card used to each hand-roll an identical
+ * copy of this exact ternary.
+ */
+export function kindLabel(kind: string): string {
+  return EVENT_KIND_LABEL[kind as AdminEventKind] ?? kind
+}
 
 /**
  * eventKindVariant maps a kind to the shadcn-vue Badge variant its row

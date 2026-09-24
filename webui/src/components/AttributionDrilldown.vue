@@ -11,13 +11,12 @@ import EmptyState from '@/components/EmptyState.vue'
 import EntityLink from '@/components/EntityLink.vue'
 import ErrorState from '@/components/ErrorState.vue'
 import SkeletonTable from '@/components/SkeletonTable.vue'
+import StatDisabledAlert from '@/components/StatDisabledAlert.vue'
 import TryLongerRangeButton from '@/components/TryLongerRangeButton.vue'
-import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
-import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { formatCost } from '@/lib/format'
 import { loadState } from '@/lib/load-state'
-import { useNavStore } from '@/stores/nav'
+import { drilldownLevel, makeScope } from '@/lib/scope'
 import { SPEND_METRIC_LABEL } from '@/stores/spend'
 import type { AdminTotalsResponse, HistoryMetric, HistoryWindow } from '@/types/api'
 
@@ -70,15 +69,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{ 'update:drill': [value: string] }>()
 
-const nav = useNavStore()
-
-type Level = { kind: 'group' } | { kind: 'user'; group: string } | { kind: 'usermodel'; user: string }
-
-const level = computed<Level>(() => {
-  if (props.drill === '') return { kind: 'group' }
-  if (props.drill.startsWith('group:')) return { kind: 'user', group: props.drill.slice('group:'.length) }
-  return { kind: 'usermodel', user: props.drill.slice('user:'.length) }
-})
+const level = computed(() => drilldownLevel(props.drill))
 
 /**
  * parentGroupLabel is a BEST-EFFORT breadcrumb label for the group a
@@ -97,15 +88,15 @@ function goToGroups(): void {
   emit('update:drill', '')
 }
 function goToParentGroup(): void {
-  if (parentGroupLabel.value) emit('update:drill', `group:${parentGroupLabel.value}`)
+  if (parentGroupLabel.value) emit('update:drill', makeScope('group', parentGroupLabel.value))
 }
 function onRowClick(id: string): void {
   const l = level.value
   if (l.kind === 'group') {
-    emit('update:drill', `group:${id}`)
+    emit('update:drill', makeScope('group', id))
   } else if (l.kind === 'user' && props.userModelStatsEnabled) {
     parentGroupLabel.value = l.group
-    emit('update:drill', `user:${id}`)
+    emit('update:drill', makeScope('user', id))
   }
 }
 
@@ -189,13 +180,12 @@ const noTrafficInRange = computed<boolean>(() => !showUserModelHint.value && pro
     </CardHeader>
     <CardContent class="flex flex-col gap-3">
       <ClampedRangeNotice v-if="level.kind === 'usermodel'" :window="window" :span="span" />
-      <Alert v-if="showUserModelHint" variant="warn">
-        <AlertTitle>Per-user-model statistics are off</AlertTitle>
-        <AlertDescription class="flex flex-wrap items-center gap-2">
-          <span>Enable <code class="font-mono text-xs">admin.stats.userModel</code> in the middleware config to see per-model attribution for this user.</span>
-          <Button type="button" variant="outline" size="sm" @click="nav.goTo('config')">Open Config</Button>
-        </AlertDescription>
-      </Alert>
+      <StatDisabledAlert
+        v-if="showUserModelHint"
+        title="Per-user-model statistics are off"
+        config-key="admin.stats.userModel"
+        purpose="to see per-model attribution for this user."
+      />
       <SkeletonTable v-else-if="state === 'skeleton'" :rows="5" :cols="metrics.length + 1" />
       <ErrorState v-else-if="state === 'error'" :message="error" :on-retry="onRetry" />
       <EmptyState v-else-if="noTrafficInRange" title="No traffic in this range.">

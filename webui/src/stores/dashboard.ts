@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 
-import { AdminApiError, adminFetch } from '@/lib/api'
+import { adminFetch, isAuthRejection, messageOf } from '@/lib/api'
 import { createVisibilityPoller, type VisibilityPoller } from '@/lib/polling'
 import { useAuthStore } from '@/stores/auth'
 import { useToastsStore } from '@/stores/toasts'
@@ -98,18 +98,14 @@ export const useDashboardStore = defineStore('dashboard', {
       // A 401/403 on ANY section already rejected the key (lib/api.ts) —
       // the AuthGate takes over the whole view in that case, matching the
       // pre-existing single-Promise.all behavior; nothing left to report.
-      const authRejected = failures.some(
-        ({ reason }) => reason instanceof AdminApiError && (reason.status === 401 || reason.status === 403),
-      )
+      const authRejected = failures.some(({ reason }) => isAuthRejection(reason))
       if (authRejected) return
 
       // A partial failure still advances lastUpdated: at least one
       // section genuinely has fresh data, even though `error` (below)
       // still surfaces that something is degraded.
       if (failures.length < 3) this.lastUpdated = new Date()
-      this.error = failures
-        .map(({ label, reason }) => `${label}: ${reason instanceof Error ? reason.message : String(reason)}`)
-        .join('; ')
+      this.error = failures.map(({ label, reason }) => `${label}: ${messageOf(reason)}`).join('; ')
 
       // states-plan.md item 3: a background refresh failure while data is
       // ALREADY shown gets a toast instead of wiping content (the header's

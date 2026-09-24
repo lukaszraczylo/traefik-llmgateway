@@ -1,10 +1,10 @@
 import type { ColumnDef } from '@tanstack/vue-table'
 import { h } from 'vue'
 
-import CompactNumber from '@/components/CompactNumber.vue'
 import EntityLink from '@/components/EntityLink.vue'
 import ModelChip from '@/components/ModelChip.vue'
 import { Badge } from '@/components/ui/badge'
+import { EMPTY_CELL, optionalColumn, usageMetricColumns } from '@/lib/columns'
 import { formatContextWindow, formatCost, formatLatencyMs, formatModelCostHover } from '@/lib/format'
 import { formatErrorRatePercent, providerErrorRate } from '@/lib/provider-rate'
 import type { AdminCatalogResponse, AdminPerfResponse, AdminUsageModelsResponse, PriceSource } from '@/types/api'
@@ -117,7 +117,7 @@ function priceCell(row: ModelCatalogRow) {
   // captured into its own variable first.
   const source = row.priceSource as Exclude<PriceSource, 'unpriced' | 'free'>
   return h('span', { class: 'inline-flex flex-wrap items-center gap-1.5' }, [
-    h('span', {}, known ? formatModelCostHover(row.inputPerMTokUsd as number, row.outputPerMTokUsd as number) : '—'),
+    h('span', {}, known ? formatModelCostHover(row.inputPerMTokUsd as number, row.outputPerMTokUsd as number) : EMPTY_CELL),
     h(Badge, { as: 'span', variant: 'outline', class: 'font-normal' }, () => PRICE_SOURCE_LABEL[source]),
   ])
 }
@@ -162,18 +162,7 @@ export function modelCatalogColumns(): ColumnDef<ModelCatalogRow, unknown>[] {
           h(EntityLink, { label: row.original.id, kind: 'model', id: row.original.id }),
         ]),
     },
-    {
-      id: 'context',
-      header: 'Context',
-      meta: { align: 'right' },
-      accessorFn: (r) => r.contextTokens ?? 0,
-      cell: ({ row }) =>
-        h(
-          'span',
-          { class: 'tabular-nums' },
-          row.original.contextTokens !== undefined ? formatContextWindow(row.original.contextTokens) : '—',
-        ),
-    },
+    optionalColumn<ModelCatalogRow>('context', 'Context', (r) => r.contextTokens, formatContextWindow),
     {
       id: 'price',
       header: 'Price',
@@ -191,7 +180,7 @@ export function modelCatalogColumns(): ColumnDef<ModelCatalogRow, unknown>[] {
               { as: 'span', variant: 'secondary', class: 'font-normal', title: "':free' suffix model — display-only, billing follows the Price column's own source" },
               () => 'free',
             )
-          : h('span', { class: 'text-muted-foreground' }, '—'),
+          : h('span', { class: 'text-muted-foreground' }, EMPTY_CELL),
     },
     {
       id: 'aliases',
@@ -200,7 +189,7 @@ export function modelCatalogColumns(): ColumnDef<ModelCatalogRow, unknown>[] {
       accessorFn: (r) => r.aliases.join(', '),
       cell: ({ row }) => {
         const aliases = row.original.aliases
-        if (aliases.length === 0) return h('span', { class: 'text-muted-foreground' }, '—')
+        if (aliases.length === 0) return h('span', { class: 'text-muted-foreground' }, EMPTY_CELL)
         return h(
           'div',
           { class: 'flex flex-wrap gap-1' },
@@ -208,27 +197,13 @@ export function modelCatalogColumns(): ColumnDef<ModelCatalogRow, unknown>[] {
         )
       },
     },
-    {
-      id: 'requests',
-      header: 'Requests',
-      meta: { align: 'right' },
-      accessorFn: (r) => r.requests,
-      cell: ({ row }) => h(CompactNumber, { value: row.original.requests }),
-    },
-    {
-      id: 'tokensIn',
-      header: 'Tokens in',
-      meta: { align: 'right' },
-      accessorFn: (r) => r.tokensIn,
-      cell: ({ row }) => h(CompactNumber, { value: row.original.tokensIn }),
-    },
-    {
-      id: 'tokensOut',
-      header: 'Tokens out',
-      meta: { align: 'right' },
-      accessorFn: (r) => r.tokensOut,
-      cell: ({ row }) => h(CompactNumber, { value: row.original.tokensOut }),
-    },
+    // reuse-audit.md F9: requests/tokensIn/tokensOut share the shared
+    // usageMetricColumns factory; 'cost' stays hand-written below since
+    // this table's cost cell has an extra free-priced-model badge case
+    // usageMetricColumns' own plain costColumn does not (and should not —
+    // PricingHealthTable.vue's identical-shaped cost column has no such
+    // badge) carry.
+    ...usageMetricColumns<ModelCatalogRow>().filter((c) => c.id !== 'cost'),
     {
       id: 'cost',
       header: 'Cost',
@@ -242,20 +217,8 @@ export function modelCatalogColumns(): ColumnDef<ModelCatalogRow, unknown>[] {
         return formatCost(r.costMicroUsd)
       },
     },
-    {
-      id: 'p50',
-      header: 'p50',
-      meta: { align: 'right' },
-      accessorFn: (r) => r.p50Ms ?? -1,
-      cell: ({ row }) => h('span', { class: 'tabular-nums' }, row.original.p50Ms !== undefined ? formatLatencyMs(row.original.p50Ms) : '—'),
-    },
-    {
-      id: 'p95',
-      header: 'p95',
-      meta: { align: 'right' },
-      accessorFn: (r) => r.p95Ms ?? -1,
-      cell: ({ row }) => h('span', { class: 'tabular-nums' }, row.original.p95Ms !== undefined ? formatLatencyMs(row.original.p95Ms) : '—'),
-    },
+    optionalColumn<ModelCatalogRow>('p50', 'p50', (r) => r.p50Ms, formatLatencyMs, { sortSentinel: -1 }),
+    optionalColumn<ModelCatalogRow>('p95', 'p95', (r) => r.p95Ms, formatLatencyMs, { sortSentinel: -1 }),
     {
       id: 'errorRate',
       header: 'Error rate',

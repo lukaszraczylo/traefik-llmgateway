@@ -2,26 +2,22 @@ import type { ColumnDef } from '@tanstack/vue-table'
 import { h } from 'vue'
 
 import { Badge } from '@/components/ui/badge'
-import { EVENT_KIND_LABEL, eventKindVariant } from '@/lib/events-filter'
+import { EMPTY_CELL } from '@/lib/columns'
+import { eventKindVariant, kindLabel } from '@/lib/events-filter'
 import { formatTimestamp } from '@/lib/format'
-import type { AdminEventKind, AdminEventView } from '@/types/api'
-
-/** kindLabel falls back to the raw kind string for a version-skewed server build emitting a kind EVENT_KIND_LABEL does not know — same "still render it" convention AdminEventView.kind's own `| string` union documents. */
-function kindLabel(kind: string): string {
-  return EVENT_KIND_LABEL[kind as AdminEventKind] ?? kind
-}
+import type { AdminEventView } from '@/types/api'
 
 /** scopeText renders one event's user/group — a user-scoped event never carries a group and vice versa (AdminEventView's own doc comment), so at most one of the two is ever present; an event with neither (a total/all-scope event, e.g. a capacity rejection recorded user-less — DECISIONS Q4) renders an em dash. */
 function scopeText(e: AdminEventView): string {
   if (e.user) return `user:${e.user}`
   if (e.group) return `group:${e.group}`
-  return '—'
+  return EMPTY_CELL
 }
 
 /** targetText renders one event's model/provider pair — joined when both are known (an upstream/timeout event names both), just the one that is known otherwise, and an em dash when neither applies (a rate_limit/budget event never carries either). */
 function targetText(e: AdminEventView): string {
   const parts = [e.model, e.provider].filter((v): v is string => Boolean(v))
-  return parts.length ? parts.join(' → ') : '—'
+  return parts.length ? parts.join(' → ') : EMPTY_CELL
 }
 
 /**
@@ -63,7 +59,7 @@ export function eventsColumns(): ColumnDef<AdminEventView, unknown>[] {
       accessorFn: (e) => e.user ?? e.group ?? '',
       cell: ({ row }) => {
         const text = scopeText(row.original)
-        return h('span', { class: text === '—' ? 'text-muted-foreground' : undefined }, text)
+        return h('span', { class: text === EMPTY_CELL ? 'text-muted-foreground' : undefined }, text)
       },
     },
     {
@@ -73,7 +69,7 @@ export function eventsColumns(): ColumnDef<AdminEventView, unknown>[] {
       accessorFn: (e) => `${e.model ?? ''} ${e.provider ?? ''}`,
       cell: ({ row }) => {
         const text = targetText(row.original)
-        return h('span', { class: text === '—' ? 'text-muted-foreground' : 'font-mono text-xs' }, text)
+        return h('span', { class: text === EMPTY_CELL ? 'text-muted-foreground' : 'font-mono text-xs' }, text)
       },
     },
     {
@@ -88,7 +84,7 @@ export function eventsColumns(): ColumnDef<AdminEventView, unknown>[] {
       meta: { align: 'right' },
       accessorFn: (e) => e.status ?? 0,
       cell: ({ row }) =>
-        h('span', { class: 'tabular-nums' }, row.original.status !== undefined ? String(row.original.status) : '—'),
+        h('span', { class: 'tabular-nums' }, row.original.status !== undefined ? String(row.original.status) : EMPTY_CELL),
     },
     {
       id: 'message',

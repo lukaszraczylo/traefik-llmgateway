@@ -2,18 +2,17 @@
 import type { ColumnDef } from '@tanstack/vue-table'
 import { computed, h } from 'vue'
 
-import CompactNumber from '@/components/CompactNumber.vue'
 import CsvExportButton from '@/components/CsvExportButton.vue'
 import DataTable from '@/components/DataTable.vue'
 import EmptyState from '@/components/EmptyState.vue'
 import EntityLink from '@/components/EntityLink.vue'
-import ErrorState from '@/components/ErrorState.vue'
-import SkeletonTable from '@/components/SkeletonTable.vue'
+import LoadStateView from '@/components/LoadStateView.vue'
 import TryLongerRangeButton from '@/components/TryLongerRangeButton.vue'
 import { Badge } from '@/components/ui/badge'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import { EMPTY_CELL, optionalColumn, usageMetricColumns } from '@/lib/columns'
 import { toCsv } from '@/lib/csv'
-import { formatContextWindow, formatCost, formatModelCostHover } from '@/lib/format'
+import { formatContextWindow, formatModelCostHover } from '@/lib/format'
 import { loadState } from '@/lib/load-state'
 import { joinPricingHealth, pricingHealthOrder } from '@/lib/pricing-health'
 import type { PricingHealthRow } from '@/lib/pricing-health'
@@ -73,10 +72,14 @@ function sourceCell(row: PricingHealthRow) {
 }
 
 function priceCell(row: PricingHealthRow) {
-  if (row.inputPerMTokUsd === undefined || row.outputPerMTokUsd === undefined) return h('span', { class: 'text-muted-foreground' }, '—')
+  if (row.inputPerMTokUsd === undefined || row.outputPerMTokUsd === undefined) return h('span', { class: 'text-muted-foreground' }, EMPTY_CELL)
   return h('span', {}, formatModelCostHover(row.inputPerMTokUsd, row.outputPerMTokUsd))
 }
 
+// reuse-audit.md F9: context/requests/tokensIn/tokensOut/cost are the
+// identical shape lib/model-table-columns.ts's own modelCatalogColumns
+// builds for ModelCatalogRow — shared via lib/columns.ts's generic
+// factories rather than a second hand-rolled copy for this row type.
 const columns: ColumnDef<PricingHealthRow, unknown>[] = [
   {
     id: 'id',
@@ -96,41 +99,8 @@ const columns: ColumnDef<PricingHealthRow, unknown>[] = [
     enableSorting: false,
     cell: ({ row }) => priceCell(row.original),
   },
-  {
-    id: 'context',
-    header: 'Context',
-    meta: { align: 'right' },
-    accessorFn: (r) => r.contextTokens ?? 0,
-    cell: ({ row }) => h('span', { class: 'tabular-nums' }, row.original.contextTokens !== undefined ? formatContextWindow(row.original.contextTokens) : '—'),
-  },
-  {
-    id: 'requests',
-    header: 'Requests',
-    meta: { align: 'right' },
-    accessorFn: (r) => r.requests,
-    cell: ({ row }) => h(CompactNumber, { value: row.original.requests }),
-  },
-  {
-    id: 'tokensIn',
-    header: 'Tokens in',
-    meta: { align: 'right' },
-    accessorFn: (r) => r.tokensIn,
-    cell: ({ row }) => h(CompactNumber, { value: row.original.tokensIn }),
-  },
-  {
-    id: 'tokensOut',
-    header: 'Tokens out',
-    meta: { align: 'right' },
-    accessorFn: (r) => r.tokensOut,
-    cell: ({ row }) => h(CompactNumber, { value: row.original.tokensOut }),
-  },
-  {
-    id: 'cost',
-    header: 'Cost',
-    meta: { align: 'right' },
-    accessorFn: (r) => r.costMicroUsd,
-    cell: ({ row }) => formatCost(row.original.costMicroUsd),
-  },
+  optionalColumn<PricingHealthRow>('context', 'Context', (r) => r.contextTokens, formatContextWindow),
+  ...usageMetricColumns<PricingHealthRow>(),
 ]
 
 /**
@@ -171,17 +141,17 @@ function pricingHealthCsv(): string {
       <CardDescription>Every model served in range, joined with its billing price source.</CardDescription>
     </CardHeader>
     <CardContent class="flex flex-col gap-3">
-      <SkeletonTable v-if="state === 'skeleton'" :rows="5" :cols="columns.length" />
-      <ErrorState v-else-if="state === 'error'" :message="error" :on-retry="onRetry" />
-      <EmptyState v-else-if="rows.length === 0" title="No traffic in this range.">
-        <TryLongerRangeButton />
-      </EmptyState>
-      <template v-else>
+      <LoadStateView :state="state" :error="error" :on-retry="onRetry" skeleton="table" :rows="5" :cols="columns.length" :empty="rows.length === 0">
+        <template #empty>
+          <EmptyState title="No traffic in this range.">
+            <TryLongerRangeButton />
+          </EmptyState>
+        </template>
         <DataTable :columns="columns" :data="rows" empty-message="none" />
         <div class="flex justify-end">
           <CsvExportButton filename="pricing-health.csv" :build="pricingHealthCsv" />
         </div>
-      </template>
+      </LoadStateView>
     </CardContent>
   </Card>
 </template>

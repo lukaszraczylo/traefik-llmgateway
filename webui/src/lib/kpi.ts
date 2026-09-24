@@ -9,7 +9,7 @@
 // boundaries for the same two underlying concepts (a used/limit ratio,
 // a success rate) the rest of this panel already colors consistently.
 import { providerRateStatus, providerSuccessRate } from '@/lib/provider-rate'
-import { MICROS_PER_USD, ratioTier } from '@/lib/usage-bars'
+import { ratioTier, usdToMicros } from '@/lib/usage-bars'
 import type { AdminGroupView, AdminProviderView } from '@/types/api'
 
 /** KpiTier is KpiTile.vue's own three-color scale — 'ok' (normal), 'warn' (approaching a limit / minor degradation), 'critical' (over a limit / severe degradation). */
@@ -27,7 +27,7 @@ export function sumGroupBudgetMicros(groups: AdminGroupView[]): number {
   let total = 0
   for (const group of groups) {
     const limitUsd = group.limits?.costPerMonthUSD
-    if (limitUsd && limitUsd > 0) total += Math.round(limitUsd * MICROS_PER_USD)
+    if (limitUsd && limitUsd > 0) total += usdToMicros(limitUsd)
   }
   return total
 }

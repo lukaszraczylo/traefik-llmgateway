@@ -1,11 +1,12 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 
+import TargetPicker from '@/components/forms/TargetPicker.vue'
 import SnippetBlock from '@/components/SnippetBlock.vue'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Input } from '@/components/ui/input'
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
-import { groupGrantSnippet, isValidName, isValidUserName, userGrantJsonFragment, validatePersonalGrant } from '@/lib/snippets'
+import { useTargetPicker } from '@/composables/useTargetPicker'
+import { groupGrantSnippet, parseList, userGrantJsonFragment, validatePersonalGrant } from '@/lib/snippets'
 
 /**
  * GrantForm (ChangeHelper, redesign-plan.md section 3.4) builds a group's
@@ -23,34 +24,19 @@ const props = defineProps<{
   userNames: string[]
 }>()
 
-const targetKind = ref<'group' | 'user'>('group')
-const targetName = ref('')
+const { targetKind, targetName, targetNames, nameValid, snippetLabel } = useTargetPicker(
+  () => props.groupNames,
+  () => props.userNames,
+)
 const providersRaw = ref('')
 const modelsRaw = ref('')
 const mcpServersRaw = ref('')
 const agentsRaw = ref('')
 
-/** parseList splits a comma-separated field into trimmed, non-empty, de-duplicated entries — the one shared parser every list field below uses. */
-function parseList(raw: string): string[] {
-  const seen = new Set<string>()
-  for (const part of raw.split(',')) {
-    const trimmed = part.trim()
-    if (trimmed) seen.add(trimmed)
-  }
-  return Array.from(seen)
-}
-
 const providers = computed(() => parseList(providersRaw.value))
 const models = computed(() => parseList(modelsRaw.value))
 const mcpServers = computed(() => parseList(mcpServersRaw.value))
 const agents = computed(() => parseList(agentsRaw.value))
-
-const targetNames = computed(() => (targetKind.value === 'group' ? props.groupNames : props.userNames))
-// A group name follows NAME_PATTERN (auth.go's configNamePattern — a
-// route-path-segment safety rule); a user name only needs to be
-// non-empty (auth.go's buildEntry, no character restriction at all —
-// P3 item 27). isValidUserName, not isValidName, for targetKind === 'user'.
-const nameValid = computed(() => (targetKind.value === 'group' ? isValidName(targetName.value.trim()) : isValidUserName(targetName.value)))
 
 // validatePersonalGrant is a USER-ONLY rule (lib/snippets.ts's own doc
 // comment) — a group's own `providers: []` legitimately means "every
@@ -81,27 +67,14 @@ const snippet = computed<string | null>(() => {
 
 <template>
   <div class="flex flex-col gap-4">
-    <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
-      <div class="flex flex-col gap-1">
-        <label id="grant-target-kind-label" class="text-xs font-medium text-muted-foreground">Target</label>
-        <Select :model-value="targetKind" @update:model-value="(v) => (targetKind = v as 'group' | 'user')">
-          <SelectTrigger aria-labelledby="grant-target-kind-label"><SelectValue /></SelectTrigger>
-          <SelectContent>
-            <SelectItem value="group">Group</SelectItem>
-            <SelectItem value="user">User (personal grant, existing users.json entry)</SelectItem>
-          </SelectContent>
-        </Select>
-      </div>
-      <div class="flex flex-col gap-1">
-        <label id="grant-target-name-label" class="text-xs font-medium text-muted-foreground">{{ targetKind === 'group' ? 'Group name' : 'User name' }}</label>
-        <Select :model-value="targetName" @update:model-value="(v) => (targetName = String(v))">
-          <SelectTrigger aria-labelledby="grant-target-name-label"><SelectValue placeholder="Select…" /></SelectTrigger>
-          <SelectContent>
-            <SelectItem v-for="name in targetNames" :key="name" :value="name">{{ name }}</SelectItem>
-          </SelectContent>
-        </Select>
-      </div>
-    </div>
+    <TargetPicker
+      :target-kind="targetKind"
+      :target-name="targetName"
+      :target-names="targetNames"
+      user-option-label="User (personal grant, existing users.json entry)"
+      @update:target-kind="targetKind = $event"
+      @update:target-name="targetName = $event"
+    />
 
     <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
       <div class="flex flex-col gap-1">
@@ -128,11 +101,7 @@ const snippet = computed<string | null>(() => {
       <AlertDescription>{{ grantError }}</AlertDescription>
     </Alert>
 
-    <SnippetBlock
-      v-if="snippet"
-      :label="targetKind === 'group' ? 'Paste into middleware.yaml' : `Merge into ${targetName}’s users.json line`"
-      :text="snippet"
-    />
+    <SnippetBlock v-if="snippet" :label="snippetLabel" :text="snippet" />
     <p v-else class="text-sm text-muted-foreground">Pick a target and at least one list to build a snippet.</p>
   </div>
 </template>

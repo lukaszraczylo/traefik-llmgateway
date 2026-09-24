@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 
-import { AdminApiError, adminFetch } from '@/lib/api'
+import { adminFetch, isAuthRejection, messageOf } from '@/lib/api'
 import { createVisibilityPoller, type VisibilityPoller } from '@/lib/polling'
 import { useAuthStore } from '@/stores/auth'
 import { useToastsStore } from '@/stores/toasts'
@@ -87,8 +87,8 @@ export const useEventsStore = defineStore('events', {
         // A 401/403 already rejected the key (lib/api.ts) — the AuthGate
         // takes over the whole view, matching dashboard.ts's own
         // identical carve-out; nothing left to report here.
-        if (err instanceof AdminApiError && (err.status === 401 || err.status === 403)) return
-        this.error = err instanceof Error ? err.message : String(err)
+        if (isAuthRejection(err)) return
+        this.error = messageOf(err)
         // states-plan.md item 3 — see dashboard.ts's doRefresh for the
         // full reasoning: only when the reader already had a successful
         // fetch to show, and only once per ongoing failure streak.

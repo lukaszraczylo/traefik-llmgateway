@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { headroom, MIN_PROJECTION_FRACTION, monthProgress, projectMonthEnd } from './forecast'
+import { headroom, MIN_PROJECTION_FRACTION, monthCostProjection, monthProgress, NOT_ENOUGH_DATA, projectMonthEnd } from './forecast'
 
 describe('monthProgress', () => {
   it('reads 0 at the first instant of a UTC month', () => {
@@ -103,5 +103,37 @@ describe('headroom', () => {
 
   it('treats an exact match (projection == limit) as not exceeding (remainingMicros 0)', () => {
     expect(headroom(5_000_000, 5)).toEqual({ limitMicros: 5_000_000, remainingMicros: 0, willExceed: false })
+  })
+})
+describe('monthCostProjection', () => {
+  const halfMonth = new Date('2026-04-16T00:00:00Z') // Apr 1 -> May 1 UTC, elapsed 15/30 = 0.5
+
+  it('returns micros: null, willExceed: false too early in the month to project (NOT_ENOUGH_DATA is the caller\'s own display text)', () => {
+    const tooEarly = new Date('2026-04-01T00:00:00Z')
+    expect(monthCostProjection({ costPerMonthMicroUsd: 1_000_000 }, tooEarly)).toEqual({ micros: null, willExceed: false })
+  })
+
+  it('projects month-end cost and reports willExceed false when no limit is configured', () => {
+    expect(monthCostProjection({ costPerMonthMicroUsd: 15_000_000 }, halfMonth)).toEqual({ micros: 30_000_000, willExceed: false })
+  })
+
+  it('reports willExceed false when the projection stays under the entry\'s own configured limit', () => {
+    expect(monthCostProjection({ costPerMonthMicroUsd: 15_000_000, limits: { costPerMonthUSD: 100 } }, halfMonth)).toEqual({
+      micros: 30_000_000,
+      willExceed: false,
+    })
+  })
+
+  it('reports willExceed true when the projection crosses the entry\'s own configured limit', () => {
+    expect(monthCostProjection({ costPerMonthMicroUsd: 15_000_000, limits: { costPerMonthUSD: 10 } }, halfMonth)).toEqual({
+      micros: 30_000_000,
+      willExceed: true,
+    })
+  })
+})
+
+describe('NOT_ENOUGH_DATA', () => {
+  it('is a non-empty display string', () => {
+    expect(NOT_ENOUGH_DATA).toBeTruthy()
   })
 })

@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 
-import { AdminApiError, adminFetch } from '@/lib/api'
+import { AdminApiError, adminFetch, isAuthRejection, messageOf } from '@/lib/api'
 import { dayOrMonthWindow, seriesUrl, totalsUrl } from '@/lib/range'
 import { useAuthStore } from '@/stores/auth'
 import type { AdminConsumersResponse, AdminSeriesResponse, AdminTotalsResponse, HistoryWindow } from '@/types/api'
@@ -63,7 +63,7 @@ function emptyDetail(): UserDetailState {
 /** settledError reads one Error message off a rejected PromiseSettledResult, or '' for a fulfilled one. */
 function settledError(result: PromiseSettledResult<unknown>): string {
   if (result.status !== 'rejected') return ''
-  return result.reason instanceof Error ? result.reason.message : String(result.reason)
+  return messageOf(result.reason)
 }
 
 /**
@@ -102,8 +102,8 @@ export const useConsumersStore = defineStore('consumers', {
         this.error = ''
         this.fetchedAt = Date.now()
       } catch (err) {
-        if (err instanceof AdminApiError && (err.status === 401 || err.status === 403)) return
-        this.error = err instanceof Error ? err.message : String(err)
+        if (isAuthRejection(err)) return
+        this.error = messageOf(err)
       } finally {
         this.loading = false
       }
@@ -184,9 +184,7 @@ export const useConsumersStore = defineStore('consumers', {
       // superseded this one (latest-request-wins) — drop this result.
       if (this.detail[userId]?.reqId !== requestId) return
 
-      const authRejected = [reqResult, costResult, modelResult].some(
-        (r) => r.status === 'rejected' && r.reason instanceof AdminApiError && (r.reason.status === 401 || r.reason.status === 403),
-      )
+      const authRejected = [reqResult, costResult, modelResult].some((r) => r.status === 'rejected' && isAuthRejection(r.reason))
       if (authRejected) return
 
       const modelTotalsUnavailable =

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { eventKindVariant, EVENT_KIND_LABEL, EVENT_KINDS, filterEvents } from './events-filter'
+import { eventKindVariant, EVENT_KIND_LABEL, EVENT_KINDS, filterEvents, kindLabel } from './events-filter'
 import type { AdminEventView } from '@/types/api'
 
 function event(overrides: Partial<AdminEventView> = {}): AdminEventView {
@@ -37,6 +37,18 @@ describe('EVENT_KINDS', () => {
     for (const kind of EVENT_KINDS) {
       expect(EVENT_KIND_LABEL[kind]).toBeTruthy()
     }
+  })
+})
+
+describe('kindLabel', () => {
+  it('renders the known display label for every AdminEventKind', () => {
+    for (const kind of EVENT_KINDS) {
+      expect(kindLabel(kind)).toBe(EVENT_KIND_LABEL[kind])
+    }
+  })
+
+  it('falls back to the raw kind string for a kind this build does not recognize', () => {
+    expect(kindLabel('some_future_kind')).toBe('some_future_kind')
   })
 })
 

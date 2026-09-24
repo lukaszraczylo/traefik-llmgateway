@@ -1,8 +1,10 @@
 // reliability.spec.ts covers the pure helpers (hourOrDayWindow,
-// errorRateSeries, seriesColor) directly, plus useReliabilityStore.fetch's
+// errorRateSeries) directly, plus useReliabilityStore.fetch's
 // provider-scope-list-from-dashboard-overview wiring and its zero-providers
 // short-circuit — mirroring dashboard.spec.ts's own mocked-adminFetch,
-// Pinia-under-vitest approach (that file's own doc comment).
+// Pinia-under-vitest approach (that file's own doc comment). seriesColor/
+// CHART_SERIES_COLORS live in, and are covered by, lib/chart-palette.spec.ts
+// — this store no longer re-exports them (reuse-audit.md F13).
 
 import { createPinia, setActivePinia } from 'pinia'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
@@ -13,7 +15,7 @@ vi.mock('@/lib/api', async () => {
 })
 
 import { adminFetch } from '@/lib/api'
-import { errorRateSeries, hourOrDayWindow, RELIABILITY_SERIES_COLORS, seriesColor, useReliabilityStore } from '@/stores/reliability'
+import { errorRateSeries, hourOrDayWindow, useReliabilityStore } from '@/stores/reliability'
 import { useAuthStore } from '@/stores/auth'
 import { useDashboardStore } from '@/stores/dashboard'
 import type { AdminOverviewResponse, AdminPerfResponse, AdminPerfRow, AdminSeriesResponse } from '@/types/api'
@@ -64,14 +66,6 @@ describe('errorRateSeries', () => {
     // this function does not silently clamp on top of ratioSeries' own
     // behavior, so the two never quietly diverge.
     expect(errorRateSeries(attempts, fails)).toEqual([{ scope: 'provider:x', points: [1.8] }])
-  })
-})
-
-describe('seriesColor', () => {
-  it('cycles through RELIABILITY_SERIES_COLORS by index', () => {
-    expect(seriesColor(0)).toBe(RELIABILITY_SERIES_COLORS[0])
-    expect(seriesColor(RELIABILITY_SERIES_COLORS.length)).toBe(RELIABILITY_SERIES_COLORS[0])
-    expect(seriesColor(RELIABILITY_SERIES_COLORS.length + 1)).toBe(RELIABILITY_SERIES_COLORS[1])
   })
 })
 

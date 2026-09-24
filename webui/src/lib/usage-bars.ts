@@ -38,19 +38,21 @@ export interface BudgetRatio {
 }
 
 /**
- * MICROS_PER_USD converts a LimitsConfig cost limit (plain USD, e.g.
- * `costPerDayUSD: 5`) into the same micro-USD unit AdminUsageEntryView's
- * own cost fields already use — matching metrics.go's usdToMicros(round)
- * convention (ground truth, dashboard-plan.md section 0).
- *
- * P11 review fix (DRY): this constant used to be declared independently
- * three times (here, lib/forecast.ts, lib/usage-columns.ts) — this is now
- * the ONE definition; lib/forecast.ts imports it, and lib/usage-columns.ts
- * no longer needs its own copy at all (it now reads limits through
- * budgetRatios below instead of re-deriving them — see numericColumn's own
- * doc comment there).
+ * usdToMicros / microsToUsd (reuse-audit.md F8): moved to lib/format.ts
+ * (formatCost's own home — an "odd home" here, the audit's words, for
+ * conversions every cost-limit needs), re-exported here so every existing
+ * `from '@/lib/usage-bars'` import site (lib/forecast.ts, lib/kpi.ts, lib/
+ * usage-csv.ts, lib/scope.ts, stores/spend.ts, pages/HomePage.vue,
+ * components/UserDetail.vue) keeps working unchanged. P11 review fix
+ * (DRY) history: the underlying MICROS_PER_USD constant used to be
+ * declared independently three times (here, lib/forecast.ts, lib/usage-
+ * columns.ts) before the first consolidation onto this file; F8 is the
+ * second consolidation, onto lib/format.ts. MICROS_PER_USD itself is not
+ * re-exported here — nothing imports it from this module, only from lib/
+ * format.ts directly.
  */
-export const MICROS_PER_USD = 1_000_000
+export { usdToMicros, microsToUsd } from '@/lib/format'
+import { formatCost, formatExactInt, usdToMicros } from '@/lib/format'
 
 /**
  * BUDGET_RATIO_LABEL (P10) names each BudgetRatio id in accurate,
@@ -122,11 +124,11 @@ export function budgetRatios(entry: AdminUsageEntryView): BudgetRatio[] {
   // the rounded value, makes both paths agree with Go: a limit that rounds
   // to 0 micro-USD is skipped, exactly like an unconfigured one.
   if (limits.costPerDayUSD) {
-    const limitMicros = Math.round(limits.costPerDayUSD * MICROS_PER_USD)
+    const limitMicros = usdToMicros(limits.costPerDayUSD)
     if (limitMicros > 0) out.push(ratioOf('costDay', entry.costPerDayMicroUsd, limitMicros))
   }
   if (limits.costPerMonthUSD) {
-    const limitMicros = Math.round(limits.costPerMonthUSD * MICROS_PER_USD)
+    const limitMicros = usdToMicros(limits.costPerMonthUSD)
     if (limitMicros > 0) out.push(ratioOf('costMonth', entry.costPerMonthMicroUsd, limitMicros))
   }
   return out
@@ -137,3 +139,17 @@ export function budgetRatios(entry: AdminUsageEntryView): BudgetRatio[] {
 // ONE run-out projection in this codebase — it used to disagree with this
 // one on an already-exceeded budget (null here vs `now` there) and on day
 // 1 of the month (clamped/overstated here vs null there).
+
+/**
+ * budgetValueText (reuse-audit.md F7) renders one BudgetRatio's "used /
+ * limit" detail text (UsageBar's aria-valuetext/title) — a cost-kind ratio
+ * (id starting "cost") formats both sides through formatCost (dollars),
+ * every other kind (requests, tokens) through formatExactInt (a plain
+ * thousands-grouped integer) — the ONE definition, replacing
+ * ConsumerDirectory.vue's and UserDetail.vue's own two copies (which had
+ * drifted onto two different signatures for the identical logic).
+ */
+export function budgetValueText(ratio: BudgetRatio): string {
+  if (ratio.id.startsWith('cost')) return `${formatCost(ratio.used)} / ${formatCost(ratio.limit)}`
+  return `${formatExactInt(ratio.used)} / ${formatExactInt(ratio.limit)}`
+}

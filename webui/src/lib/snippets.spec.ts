@@ -10,12 +10,30 @@ import {
   isValidNonNegativeInt,
   isValidUserName,
   modelMetaSnippet,
+  parseList,
   pricingSnippet,
   userGrantJsonFragment,
   userJsonLine,
   userLimitsJsonFragment,
   validatePersonalGrant,
 } from './snippets'
+
+describe('parseList', () => {
+  it('splits on commas and trims whitespace', () => {
+    expect(parseList('anthropic, openai ,  gx10')).toEqual(['anthropic', 'openai', 'gx10'])
+  })
+
+  it('drops empty entries (blank field, trailing comma, doubled comma)', () => {
+    expect(parseList('')).toEqual([])
+    expect(parseList('anthropic,')).toEqual(['anthropic'])
+    expect(parseList('anthropic,,openai')).toEqual(['anthropic', 'openai'])
+    expect(parseList('   ')).toEqual([])
+  })
+
+  it('de-duplicates, keeping first-seen order', () => {
+    expect(parseList('anthropic, openai, anthropic')).toEqual(['anthropic', 'openai'])
+  })
+})
 
 // Golden strings below are checked against the REAL production shapes in
 // home-cluster/kubernetes/namespaces/traefik/base/llmgateway/middleware.yaml

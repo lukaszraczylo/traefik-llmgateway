@@ -18,9 +18,45 @@ export function routableModelId(providerName: string, modelId: string): string {
   return `${providerName}/${modelId}`
 }
 
+/**
+ * MICROS_PER_USD converts a plain USD amount (e.g. a LimitsConfig cost
+ * limit, `costPerDayUSD: 5`) into the micro-USD unit AdminUsageEntryView's
+ * own cost fields already use — matching metrics.go's usdToMicros(round)
+ * convention (ground truth, dashboard-plan.md section 0).
+ *
+ * reuse-audit.md F8: the ONE definition (moved here from lib/usage-bars.ts,
+ * which re-exports it for every existing import site) — usdToMicros/
+ * microsToUsd below are the ONE place a USD<->micro-USD conversion happens,
+ * replacing the hand-rolled `Math.round(usd * 1_000_000)` / `micros /
+ * 1_000_000` copies that used to bypass this constant.
+ */
+export const MICROS_PER_USD = 1_000_000
+
+/** usdToMicros converts a plain USD amount to micro-USD, rounded to the nearest whole micro-USD (metrics.go's own usdToMicros(round) convention). */
+export function usdToMicros(usd: number): number {
+  return Math.round(usd * MICROS_PER_USD)
+}
+
+/** microsToUsd converts a micro-USD integer back to a plain USD float — the exact inverse of usdToMicros, modulo usdToMicros' own rounding. */
+export function microsToUsd(micros: number): number {
+  return micros / MICROS_PER_USD
+}
+
 /** formatCost renders a micro-USD integer (adminUsageEntryView's convention) as "$1.2345". */
 export function formatCost(micros: number): string {
-  return `$${(micros / 1_000_000).toFixed(4)}`
+  return `$${microsToUsd(micros).toFixed(4)}`
+}
+
+/**
+ * formatShortDate renders a Date as a compact "Oct 15" label (month/day
+ * only, no time-of-day) — reuse-audit.md F13: the ONE run-out-date format,
+ * replacing BurnDownChart.vue's and UserDetail.vue's two disagreeing
+ * formats (a short date vs. a full formatTimestamp). A PROJECTED date (a
+ * run-out estimate) should never imply false time-of-day precision, so
+ * this intentionally omits it.
+ */
+export function formatShortDate(d: Date): string {
+  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
 }
 
 /** formatExactInt renders a raw integer count with thousands separators ("1,234,567") — the precise value CompactNumber.vue and the usage chart's tooltip carry alongside a compact rendering, never lost. */

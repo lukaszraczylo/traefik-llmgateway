@@ -15,11 +15,14 @@
 // with the figure actually being projected on the last/first day of a
 // month in any timezone west or east of UTC.
 
-// MICROS_PER_USD (P11 review fix, DRY): imported from lib/usage-bars.ts,
-// the one shared definition — this module used to declare its own
-// identical copy, one of three (usage-bars.ts, usage-columns.ts) the
-// coordinator's review flagged.
-import { MICROS_PER_USD } from '@/lib/usage-bars'
+// usdToMicros (P11 review fix, DRY; reuse-audit.md F8): imported from
+// lib/usage-bars.ts, which re-exports lib/format.ts's own one shared
+// definition — this module used to declare its own identical MICROS_PER_USD
+// copy, one of three (usage-bars.ts, usage-columns.ts) an earlier review
+// flagged, then hand-rolled `Math.round(x * MICROS_PER_USD)` here even
+// after that consolidation (F8's own gap) instead of calling the shared
+// conversion function.
+import { usdToMicros } from '@/lib/usage-bars'
 
 /**
  * MIN_PROJECTION_FRACTION is the smallest elapsed-month fraction
@@ -100,7 +103,37 @@ export function headroom(projectedMicros: number | null, limitUsd: number | unde
   if (projectedMicros === null || limitUsd === undefined || limitUsd <= 0) {
     return { limitMicros: null, remainingMicros: null, willExceed: false }
   }
-  const limitMicros = Math.round(limitUsd * MICROS_PER_USD)
+  const limitMicros = usdToMicros(limitUsd)
   const remainingMicros = limitMicros - projectedMicros
   return { limitMicros, remainingMicros, willExceed: remainingMicros < 0 }
+}
+
+/** NOT_ENOUGH_DATA (reuse-audit.md F7) is the ONE "too early in the month to project" message — projectMonthEnd's own null case, shown wherever a projected/run-out figure has nothing to report yet. */
+export const NOT_ENOUGH_DATA = 'not enough data yet'
+
+/** WILL_EXCEED_TITLE (reuse-audit.md F7) is the ONE tooltip text for a projection that crosses its own configured limit (headroom's own willExceed). */
+export const WILL_EXCEED_TITLE = 'Projected to exceed the configured cost/month limit'
+
+/** MonthCostProjection is monthCostProjection's own result: the projected month-end micro-USD total (null below MIN_PROJECTION_FRACTION, projectMonthEnd's own convention), and whether it crosses the entry's own configured cost/month limit. */
+export interface MonthCostProjection {
+  micros: number | null
+  willExceed: boolean
+}
+
+/**
+ * monthCostProjection projects one usage entry's month-end cost
+ * (projectMonthEnd) and checks it against that SAME entry's own configured
+ * cost/month limit (headroom) in one call — the ONE per-row month-end
+ * projection every table/detail-grid/CSV export in this panel used to
+ * re-derive separately (ConsumerDirectory.vue's groupCostProjection,
+ * lib/usage-columns.ts's costMonthProjColumn, lib/usage-csv.ts's own CSV
+ * row), each pairing projectMonthEnd + headroom by hand. Takes only the
+ * two fields it actually reads, not a full AdminUsageEntryView, so a
+ * caller building one from a narrower shape (or a test) never needs to
+ * fill in fields this has no use for.
+ */
+export function monthCostProjection(entry: { costPerMonthMicroUsd: number; limits?: { costPerMonthUSD?: number } }, now: Date): MonthCostProjection {
+  const projected = projectMonthEnd(entry.costPerMonthMicroUsd, monthProgress(now))
+  if (projected === null) return { micros: null, willExceed: false }
+  return { micros: projected, willExceed: headroom(projected, entry.limits?.costPerMonthUSD).willExceed }
 }

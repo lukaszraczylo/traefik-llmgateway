@@ -11,6 +11,8 @@
 // keep their own math out of theirs — vitest's node-environment config
 // exercises every function here directly, no component mount required.
 
+import { parseScope } from '@/lib/scope'
+
 /** One AdminSeriesResponse series entry: a scope id and its bucket-aligned points (types/api.ts: AdminSeriesResponse['series'][number]). */
 export interface Series {
   scope: string
@@ -86,7 +88,8 @@ export function other(totalPoints: number[], charted: Series[]): number[] {
 export function sumByProvider(series: Series[]): Series[] {
   const byProvider = new Map<string, number[]>()
   for (const s of series) {
-    const id = s.scope.startsWith('model:') ? s.scope.slice('model:'.length) : s.scope
+    const parsed = parseScope(s.scope)
+    const id = parsed?.kind === 'model' ? parsed.id : s.scope
     const slash = id.indexOf('/')
     const provider = slash === -1 ? id : id.slice(0, slash)
     const acc = byProvider.get(provider) ?? new Array<number>(s.points.length).fill(0)

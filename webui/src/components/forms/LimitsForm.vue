@@ -1,11 +1,12 @@
 <script setup lang="ts">
-import { computed, reactive, ref } from 'vue'
+import { computed, reactive } from 'vue'
 
+import TargetPicker from '@/components/forms/TargetPicker.vue'
 import SnippetBlock from '@/components/SnippetBlock.vue'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Input } from '@/components/ui/input'
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
-import { groupLimitsSnippet, isValidName, isValidNonNegative, isValidNonNegativeInt, isValidUserName, userLimitsJsonFragment } from '@/lib/snippets'
+import { useTargetPicker } from '@/composables/useTargetPicker'
+import { groupLimitsSnippet, isValidNonNegative, isValidNonNegativeInt, userLimitsJsonFragment } from '@/lib/snippets'
 import type { LimitsConfig } from '@/types/api'
 
 /**
@@ -22,8 +23,10 @@ const props = defineProps<{
   userNames: string[]
 }>()
 
-const targetKind = ref<'group' | 'user'>('group')
-const targetName = ref('')
+const { targetKind, targetName, targetNames, nameValid, snippetLabel } = useTargetPicker(
+  () => props.groupNames,
+  () => props.userNames,
+)
 
 /** INTEGER_FIELDS is every LimitsConfig field Go decodes as `int64` (llmgateway.go) — requestsPerMinute/requestsPerDay/tokensPerDay/tokensPerMonth reject a fractional value like "1.5" at json.Unmarshal outright (P2 item 12), unlike costPerDayUSD/costPerMonthUSD, which are `float64`. */
 const INTEGER_FIELDS = new Set<keyof LimitsConfig>(['requestsPerMinute', 'requestsPerDay', 'tokensPerDay', 'tokensPerMonth'])
@@ -51,8 +54,6 @@ const raw = reactive<Record<keyof LimitsConfig, string>>({
   costPerMonthUSD: '',
 })
 
-const targetNames = computed(() => (targetKind.value === 'group' ? props.groupNames : props.userNames))
-
 /** invalidFields lists every field whose entered text is non-empty but fails its own domain check (fieldValid above) — surfaced individually rather than one generic "invalid input" message, so the operator can see exactly which field to fix. Split by INTEGER_FIELDS so the error text is accurate for both: a fraction is invalid for requestsPerMinute etc. but perfectly valid for costPerDayUSD/costPerMonthUSD. */
 const invalidFields = computed(() =>
   FIELDS.filter(({ key }) => raw[key].trim() !== '' && !fieldValid(key, Number(raw[key]))).map((f) => f.label),
@@ -73,12 +74,6 @@ const limits = computed<LimitsConfig>(() => {
   return out
 })
 
-// A group name follows NAME_PATTERN (auth.go's configNamePattern — a
-// route-path-segment safety rule); a user name only needs to be
-// non-empty (auth.go's buildEntry, no character restriction at all —
-// P3 item 27). isValidUserName, not isValidName, for targetKind === 'user'.
-const nameValid = computed(() => (targetKind.value === 'group' ? isValidName(targetName.value.trim()) : isValidUserName(targetName.value)))
-
 const snippet = computed<string | null>(() => {
   if (!nameValid.value || invalidFields.value.length > 0) return null
   if (Object.keys(limits.value).length === 0) return null
@@ -90,27 +85,14 @@ const snippet = computed<string | null>(() => {
 
 <template>
   <div class="flex flex-col gap-4">
-    <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
-      <div class="flex flex-col gap-1">
-        <label id="limits-target-kind-label" class="text-xs font-medium text-muted-foreground">Target</label>
-        <Select :model-value="targetKind" @update:model-value="(v) => (targetKind = v as 'group' | 'user')">
-          <SelectTrigger aria-labelledby="limits-target-kind-label"><SelectValue /></SelectTrigger>
-          <SelectContent>
-            <SelectItem value="group">Group</SelectItem>
-            <SelectItem value="user">User (existing users.json entry)</SelectItem>
-          </SelectContent>
-        </Select>
-      </div>
-      <div class="flex flex-col gap-1">
-        <label id="limits-target-name-label" class="text-xs font-medium text-muted-foreground">{{ targetKind === 'group' ? 'Group name' : 'User name' }}</label>
-        <Select :model-value="targetName" @update:model-value="(v) => (targetName = String(v))">
-          <SelectTrigger aria-labelledby="limits-target-name-label"><SelectValue placeholder="Select…" /></SelectTrigger>
-          <SelectContent>
-            <SelectItem v-for="name in targetNames" :key="name" :value="name">{{ name }}</SelectItem>
-          </SelectContent>
-        </Select>
-      </div>
-    </div>
+    <TargetPicker
+      :target-kind="targetKind"
+      :target-name="targetName"
+      :target-names="targetNames"
+      user-option-label="User (existing users.json entry)"
+      @update:target-kind="targetKind = $event"
+      @update:target-name="targetName = $event"
+    />
 
     <div class="grid grid-cols-1 gap-3 sm:grid-cols-3">
       <div v-for="field in FIELDS" :key="field.key" class="flex flex-col gap-1">
@@ -133,11 +115,7 @@ const snippet = computed<string | null>(() => {
       </AlertDescription>
     </Alert>
 
-    <SnippetBlock
-      v-if="snippet"
-      :label="targetKind === 'group' ? 'Paste into middleware.yaml' : `Merge into ${targetName}’s users.json line`"
-      :text="snippet"
-    />
+    <SnippetBlock v-if="snippet" :label="snippetLabel" :text="snippet" />
     <p v-else class="text-sm text-muted-foreground">Pick a target and at least one limit to build a snippet.</p>
   </div>
 </template>

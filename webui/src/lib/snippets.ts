@@ -28,6 +28,20 @@ export const NAME_PATTERN = /^[a-zA-Z0-9._-]+$/
 export function isValidName(name: string): boolean {
   return NAME_PATTERN.test(name)
 }
+/**
+ * parseList (reuse-audit.md F12) splits a comma-separated form field into
+ * trimmed, non-empty, de-duplicated entries — the ONE shared parser
+ * GrantForm.vue's and UserForm.vue's own two identical copies (providers/
+ * models/mcpServers/agents, extraGroups) each hand-rolled.
+ */
+export function parseList(raw: string): string[] {
+  const seen = new Set<string>()
+  for (const part of raw.split(',')) {
+    const trimmed = part.trim()
+    if (trimmed) seen.add(trimmed)
+  }
+  return Array.from(seen)
+}
 
 /**
  * isValidUserName mirrors auth.go's own buildEntry check (~955-975,

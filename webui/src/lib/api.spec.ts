@@ -8,7 +8,7 @@
 import { createPinia, setActivePinia } from 'pinia'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { AdminApiError, adminFetch } from './api'
+import { AdminApiError, adminFetch, isAuthRejection, messageOf } from './api'
 import { useAuthStore } from '@/stores/auth'
 
 function jsonResponse(status: number, body: unknown): Response {
@@ -74,5 +74,30 @@ describe('adminFetch', () => {
 
     expect(auth.isAuthenticated).toBe(false)
     expect(auth.error).toBe('invalid key, or not an admin')
+  })
+})
+
+describe('messageOf', () => {
+  it('returns an Error instance\'s own message', () => {
+    expect(messageOf(new Error('boom'))).toBe('boom')
+  })
+
+  it('stringifies a non-Error thrown value', () => {
+    expect(messageOf('plain string')).toBe('plain string')
+    expect(messageOf(404)).toBe('404')
+    expect(messageOf(null)).toBe('null')
+  })
+})
+
+describe('isAuthRejection', () => {
+  it('is true for an AdminApiError with status 401 or 403', () => {
+    expect(isAuthRejection(new AdminApiError('nope', 401))).toBe(true)
+    expect(isAuthRejection(new AdminApiError('nope', 403))).toBe(true)
+  })
+
+  it('is false for any other AdminApiError status or a non-AdminApiError value', () => {
+    expect(isAuthRejection(new AdminApiError('server error', 500))).toBe(false)
+    expect(isAuthRejection(new Error('plain'))).toBe(false)
+    expect(isAuthRejection('nope')).toBe(false)
   })
 })

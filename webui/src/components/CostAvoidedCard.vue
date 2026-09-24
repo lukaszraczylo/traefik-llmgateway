@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 
+import LabeledSelect from '@/components/LabeledSelect.vue'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { costAvoidedMicros, freeRows, pickReferenceModel } from '@/lib/cost-avoided'
 import { formatCost } from '@/lib/format'
 import type { AdminCatalogModel, AdminUsageModelEntry } from '@/types/api'
@@ -81,6 +81,8 @@ const priceableOptions = computed<{ id: string; requests: number }[]>(() => {
   return out.sort((a, b) => b.requests - a.requests)
 })
 
+const referenceOptions = computed(() => priceableOptions.value.map((opt) => ({ value: opt.id, label: opt.id })))
+
 const defaultReference = computed<string | null>(() => pickReferenceModel(props.models, props.catalog))
 const effectiveReference = computed<string | null>(() => props.refModel || defaultReference.value)
 const referenceCatalog = computed<AdminCatalogModel | undefined>(() =>
@@ -111,17 +113,15 @@ function onReferenceUpdate(value: unknown): void {
         <CardTitle>Cost avoided</CardTitle>
         <CardDescription>What free-tier traffic in range would have cost at a real model's own rates.</CardDescription>
       </div>
-      <div v-if="priceableOptions.length > 0" class="flex flex-col gap-1">
-        <label id="cost-avoided-ref-label" class="text-xs font-medium text-muted-foreground">Reference model</label>
-        <Select :model-value="effectiveReference ?? undefined" @update:model-value="onReferenceUpdate">
-          <SelectTrigger aria-labelledby="cost-avoided-ref-label" class="w-56">
-            <SelectValue placeholder="Pick a reference model" />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem v-for="opt in priceableOptions" :key="opt.id" :value="opt.id">{{ opt.id }}</SelectItem>
-          </SelectContent>
-        </Select>
-      </div>
+      <LabeledSelect
+        v-if="priceableOptions.length > 0"
+        label="Reference model"
+        :model-value="effectiveReference ?? ''"
+        :options="referenceOptions"
+        placeholder="Pick a reference model"
+        trigger-class="w-56"
+        @update:model-value="onReferenceUpdate"
+      />
     </CardHeader>
     <CardContent class="grid grid-cols-2 gap-4 text-sm">
       <div>

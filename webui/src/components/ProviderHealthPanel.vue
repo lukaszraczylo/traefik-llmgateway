@@ -8,16 +8,17 @@ import {
 import { computed, h, reactive, watch } from 'vue'
 
 import DataTable from '@/components/DataTable.vue'
+import DetailField from '@/components/DetailField.vue'
+import EmptyState from '@/components/EmptyState.vue'
 import EntityLink from '@/components/EntityLink.vue'
 import ErrorState from '@/components/ErrorState.vue'
 import ModelChip from '@/components/ModelChip.vue'
 import ProviderRateBadge from '@/components/ProviderRateBadge.vue'
 import SearchInput from '@/components/SearchInput.vue'
 import SkeletonList from '@/components/SkeletonList.vue'
+import StatDisabledAlert from '@/components/StatDisabledAlert.vue'
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/components/ui/accordion'
-import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
-import { Button } from '@/components/ui/button'
 import {
   Card,
   CardContent,
@@ -356,22 +357,20 @@ const aliasEmptyMessage = computed(() =>
         <SearchInput v-model="modelQuery" placeholder="Search models or aliases..." class="mt-2 max-w-sm" />
       </CardHeader>
       <CardContent class="flex flex-col gap-3">
-        <Alert v-if="!models.latencyEnabled" variant="warn">
-          <AlertTitle>Latency statistics are off</AlertTitle>
-          <AlertDescription class="flex flex-wrap items-center gap-2">
-            <span>Enable <code>admin.stats.latency</code> in the middleware config to see fleet p50/p95.</span>
-            <Button type="button" variant="outline" size="sm" @click="nav.goTo('config')">Open Config</Button>
-          </AlertDescription>
-        </Alert>
+        <StatDisabledAlert
+          v-if="!models.latencyEnabled"
+          title="Latency statistics are off"
+          config-key="admin.stats.latency"
+          purpose="to see fleet p50/p95."
+        />
         <SkeletonList v-if="providersLoadState === 'skeleton'" :rows="3" />
         <ErrorState v-else-if="providersLoadState === 'error'" :message="dashboard.error" :on-retry="dashboard.refresh" />
-        <p v-else-if="!overview?.providers.length" class="py-6 text-center text-sm text-muted-foreground">none</p>
-        <p
+        <EmptyState v-else-if="!overview?.providers.length" title="No providers configured." />
+        <EmptyState
           v-else-if="hasQuery && filteredProviders.length === 0"
-          class="py-6 text-center text-sm text-muted-foreground"
-        >
-          no providers match &quot;{{ modelQuery }}&quot;
-        </p>
+          title="No matches."
+          :description='`No providers match "${modelQuery}".`'
+        />
         <template v-else>
           <p class="text-xs text-muted-foreground">{{ perReplicaCaveat() }} Fleet p50/p95/timeouts/failovers below are fleet-wide, not per-replica.</p>
           <Accordion v-model="expandedProviderValues" type="multiple" class="rounded-md border px-3">
@@ -488,22 +487,12 @@ const aliasEmptyMessage = computed(() =>
             </div>
             <AccordionContent>
               <dl class="mb-3 grid grid-cols-2 gap-x-6 gap-y-1.5 text-sm sm:grid-cols-3">
-                <div>
-                  <dt class="text-xs text-muted-foreground">Base URL</dt>
-                  <dd class="break-all">{{ p.baseUrl }}</dd>
-                </div>
-                <div>
-                  <dt class="text-xs text-muted-foreground">Last refresh</dt>
-                  <dd>{{ refreshDetailLabel(p.discoveryEnabled, p.lastRefresh) }}</dd>
-                </div>
-                <div v-if="p.healthState !== 'closed'">
-                  <dt class="text-xs text-muted-foreground">Discovery health</dt>
-                  <dd :class="healthDetailClass(p.healthState)">{{ healthBadgeLabel(p) }}</dd>
-                </div>
-                <div v-if="p.lastErr">
-                  <dt class="text-xs text-muted-foreground">Last error</dt>
-                  <dd class="text-destructive">{{ p.lastErr }}</dd>
-                </div>
+                <DetailField label="Base URL" class="break-all">{{ p.baseUrl }}</DetailField>
+                <DetailField label="Last refresh">{{ refreshDetailLabel(p.discoveryEnabled, p.lastRefresh) }}</DetailField>
+                <DetailField v-if="p.healthState !== 'closed'" label="Discovery health" :class="healthDetailClass(p.healthState)">
+                  {{ healthBadgeLabel(p) }}
+                </DetailField>
+                <DetailField v-if="p.lastErr" label="Last error" class="text-destructive">{{ p.lastErr }}</DetailField>
               </dl>
               <div v-if="visibleModels(p).length" class="flex flex-wrap gap-1.5">
                 <span v-for="m in visibleModels(p)" :key="m" class="inline-flex min-w-0 max-w-full items-center gap-1">

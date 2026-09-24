@@ -1,32 +1,10 @@
 import type { ColumnDef } from '@tanstack/vue-table'
 import { h } from 'vue'
 
-import CompactNumber from '@/components/CompactNumber.vue'
 import { Badge } from '@/components/ui/badge'
+import { compactColumn } from '@/lib/columns'
 import { formatElapsedAgo, formatLatencyMs } from '@/lib/format'
 import type { AdminTargetHealthView, AdminTargetsResponse, AdminTargetView, AdminTotalsResponse } from '@/types/api'
-
-/**
- * numericColumn builds one right-aligned, sortable request-counter
- * column, rendered via CompactNumber (SI-style, exact value on title/
- * aria-label — usage-columns.ts's own numericColumn applies the
- * identical treatment). Mirrors usage-columns.ts's own helper of the
- * same name and purpose, but without that one's storeDown '?' masking: a
- * target's counters carry no storeDown flag (limiter.targetUsage,
- * limits.go — a target scope has no limit to protect from a
- * misleadingly-confident zero, unlike a limited user/group scope), so
- * there is nothing to mask here. accessorFn (and therefore sorting)
- * always reads the true raw number.
- */
-function numericColumn(id: string, header: string, read: (t: AdminTargetView) => number): ColumnDef<AdminTargetView, unknown> {
-  return {
-    id,
-    header,
-    accessorFn: read,
-    meta: { align: 'right' },
-    cell: ({ row }) => h(CompactNumber, { value: read(row.original) }),
-  }
-}
 
 // --- target health (feat/target-health) ---
 //
@@ -181,9 +159,9 @@ export function targetColumns(onSelect?: (target: AdminTargetView) => void): Col
         )
       },
     },
-    numericColumn('reqMin', 'req/min', (t) => t.counters.requestsPerMinute),
-    numericColumn('reqDay', 'req/day', (t) => t.counters.requestsPerDay),
-    numericColumn('reqMonth', 'req/month', (t) => t.counters.requestsPerMonth),
+    compactColumn<AdminTargetView>('reqMin', 'req/min', (t) => t.counters.requestsPerMinute),
+    compactColumn<AdminTargetView>('reqDay', 'req/day', (t) => t.counters.requestsPerDay),
+    compactColumn<AdminTargetView>('reqMonth', 'req/month', (t) => t.counters.requestsPerMonth),
   ]
 }
 
@@ -336,12 +314,6 @@ export function targetCallerColumns(showTarget: boolean): ColumnDef<TargetCaller
       return h('span', { class: 'font-medium' }, caller || row.original.id)
     },
   })
-  columns.push({
-    id: 'requests',
-    header: 'Requests',
-    meta: { align: 'right' },
-    accessorFn: (row) => row.values.req ?? 0,
-    cell: ({ row }) => h(CompactNumber, { value: row.original.values.req ?? 0 }),
-  })
+  columns.push(compactColumn<TargetCallerRow>('requests', 'Requests', (row) => row.values.req ?? 0))
   return columns
 }

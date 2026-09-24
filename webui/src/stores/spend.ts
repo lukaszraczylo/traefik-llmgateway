@@ -1,12 +1,13 @@
 import { defineStore } from 'pinia'
 
-import { AdminApiError, adminFetch } from '@/lib/api'
+import { AdminApiError, adminFetch, isAuthRejection, messageOf } from '@/lib/api'
 import { currentMonthDaySpan } from '@/lib/burndown'
-import { sumGroupBudgetMicros } from '@/lib/kpi'
 import { createVisibilityPoller, type VisibilityPoller } from '@/lib/polling'
 import { dayOrMonthWindow, seriesUrl, totalsUrl } from '@/lib/range'
 import type { TotalsUrlParams } from '@/lib/range'
+import { drilldownLevel, scopeBudgetLimits } from '@/lib/scope'
 import { other, stackTopN, sumByProvider, type Series } from '@/lib/series'
+import { usdToMicros } from '@/lib/usage-bars'
 import { useAuthStore } from '@/stores/auth'
 import { useDashboardStore } from '@/stores/dashboard'
 import { useFiltersStore } from '@/stores/filters'
@@ -618,13 +619,6 @@ export const useSpendStore = defineStore('spend', {
   },
 })
 
-/** drilldownLevel derives AttributionDrilldown's current GET /admin/api/usage/totals request shape from the `drill` breadcrumb state (see useSpendStore's own state doc comment on `drill`). */
-function drilldownLevel(drill: string): { kind: 'group' } | { kind: 'user'; group: string } | { kind: 'usermodel'; user: string } {
-  if (drill === '') return { kind: 'group' }
-  if (drill.startsWith('group:')) return { kind: 'user', group: drill.slice('group:'.length) }
-  return { kind: 'usermodel', user: drill.slice('user:'.length) }
-}
-
 /** burndownScopeParam maps the global scope filter to the /usage/series scope this store's burn-down line requests — null for a provider scope, which has no cost series and no budget concept (see useSpendStore's own doc comment). */
 function burndownScopeParam(filtersScope: string): string | null {
   if (filtersScope === 'all') return 'total'
@@ -634,32 +628,18 @@ function burndownScopeParam(filtersScope: string): string | null {
 
 /**
  * burndownBudgetMicros resolves the configured cost/month budget (micro-
- * USD) for the burn-down line's own scope: the fleet-wide sum-of-group
- * budgets (Q2/DECISIONS: lib/kpi.ts's sumGroupBudgetMicros) for `total`,
- * or that one group's/user's own configured costPerMonthUSD limit
- * otherwise — read from stores/dashboard.ts's already-polled overview/
- * usage data rather than a second network round trip.
+ * USD) for the burn-down line's own scope, via lib/scope.ts's shared
+ * scopeBudgetLimits (reuse-audit.md F5 — the fleet-wide sum-of-group-
+ * budgets 'total' case and the per-group/user lookup both used to be
+ * reimplemented here a third time) — read from stores/dashboard.ts's
+ * already-polled overview/usage data rather than a second network round
+ * trip. `burndownScopeParam`'s own 'total' sentinel is scopeBudgetLimits'
+ * "unscoped root" case (same as filters.scope's 'all'); a provider scope
+ * never reaches here (burndownScopeParam itself returns null for one).
  */
 function burndownBudgetMicros(scope: string): number | null {
   const dashboard = useDashboardStore()
-  if (scope === 'total') {
-    const total = sumGroupBudgetMicros(dashboard.overview?.groups ?? [])
-    return total > 0 ? total : null
-  }
-  if (scope.startsWith('group:')) {
-    const name = scope.slice('group:'.length)
-    const usd = dashboard.overview?.groups.find((g) => g.name === name)?.limits?.costPerMonthUSD
-    return usd && usd > 0 ? Math.round(usd * 1_000_000) : null
-  }
-  const name = scope.slice('user:'.length)
-  const usd = dashboard.usage?.users.find((u) => u.id === name)?.limits?.costPerMonthUSD
-  return usd && usd > 0 ? Math.round(usd * 1_000_000) : null
+  const usd = scopeBudgetLimits(scope, dashboard.overview?.groups ?? [], dashboard.usage?.users ?? [])?.costPerMonthUSD
+  return usd && usd > 0 ? usdToMicros(usd) : null
 }
 
-function isAuthRejection(err: unknown): boolean {
-  return err instanceof AdminApiError && (err.status === 401 || err.status === 403)
-}
-
-function messageOf(err: unknown): string {
-  return err instanceof Error ? err.message : String(err)
-}

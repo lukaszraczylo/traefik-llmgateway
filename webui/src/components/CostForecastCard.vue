@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 
+import StatItem from '@/components/StatItem.vue'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
-import { headroom, monthProgress, projectMonthEnd } from '@/lib/forecast'
+import { headroom, monthProgress, NOT_ENOUGH_DATA, projectMonthEnd, WILL_EXCEED_TITLE } from '@/lib/forecast'
 import { formatCost } from '@/lib/format'
 import type { LimitsConfig } from '@/types/api'
 
@@ -53,26 +54,16 @@ const forecast = computed(() => headroom(projectedMicros.value, props.limits?.co
       <CardDescription>Projected month-end spend, extrapolated from month-to-date usage (UTC calendar month).</CardDescription>
     </CardHeader>
     <CardContent class="grid grid-cols-2 gap-4 text-sm sm:grid-cols-3">
-      <div>
-        <p class="text-muted-foreground">Month to date</p>
-        <p class="text-lg font-semibold tabular-nums">{{ formatCost(mtdMicros) }}</p>
-      </div>
-      <div>
-        <p class="text-muted-foreground">Projected month-end</p>
-        <p v-if="projectedMicros === null" class="text-sm text-muted-foreground">not enough data yet</p>
-        <p
-          v-else
-          class="text-lg font-semibold tabular-nums"
-          :class="forecast.willExceed ? 'text-destructive' : undefined"
-          :title="forecast.willExceed ? 'Projected to exceed the configured cost/month limit' : undefined"
-        >
-          {{ formatCost(projectedMicros) }}
-        </p>
-      </div>
-      <div v-if="forecast.limitMicros !== null">
-        <p class="text-muted-foreground">Limit</p>
-        <p class="text-lg font-semibold tabular-nums">{{ formatCost(forecast.limitMicros) }}</p>
-      </div>
+      <StatItem label="Month to date">{{ formatCost(mtdMicros) }}</StatItem>
+      <StatItem
+        label="Projected month-end"
+        :tone="forecast.willExceed ? 'destructive' : 'default'"
+        :title="forecast.willExceed ? WILL_EXCEED_TITLE : undefined"
+        :hint="projectedMicros === null ? NOT_ENOUGH_DATA : undefined"
+      >
+        {{ projectedMicros === null ? '' : formatCost(projectedMicros) }}
+      </StatItem>
+      <StatItem v-if="forecast.limitMicros !== null" label="Limit">{{ formatCost(forecast.limitMicros) }}</StatItem>
     </CardContent>
   </Card>
 </template>
