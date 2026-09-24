@@ -505,6 +505,31 @@ func run() error {
 	}))
 	defer brkUpstream.Close()
 
+	// warmRetryUpstream backs exerciseWarmFillRetry (production incident
+	// fix, registry.go's warmFillRetryDelay): 401s on the FIRST /v1/models
+	// hit only — the synchronous warmFill call inside New() itself — then
+	// serves real data on every hit after, so the scheduled background
+	// retry (and ONLY the retry) succeeds. Failing fast rather than
+	// sleeping past warmFillTimeout keeps this probe's cost down to
+	// roughly warmFillRetryDelay, not warmFillTimeout+warmFillRetryDelay.
+	warmRetryHits := new(int64)
+	warmRetryUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/v1/models") {
+			if atomic.AddInt64(warmRetryHits, 1) == 1 {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusUnauthorized)
+				_, _ = w.Write([]byte(`{"error":{"message":"cold-start timeout","type":"invalid_request_error"}}`))
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"warmretry-model"}]}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"c-warmretry","object":"chat.completion","model":"warmretry-model","choices":[],"usage":{}}`))
+	}))
+	defer warmRetryUpstream.Close()
+
 	// failoverAUpstream/failoverBUpstream back exerciseFailover (feat/
 	// failover, below): two providers configured with the IDENTICAL bare
 	// model id (failoverModelID) — the exact shape registry.go's bareWinner
@@ -674,7 +699,15 @@ func run() error {
 
 	attemptAccountingOverride := `{"failover":{"enabled":true},"breaker":{"failureThreshold":2,"openDuration":"3s","maxOpenDuration":"6s"},` +
 		`"providers":{"openai":{"type":"openai","baseUrl":"` + upstream.URL + `","apiKey":"sk-up","models":["` + testDataWantModel + `","` + builtinLookupModelID + `"]},` +
-		`"brk":{"type":"openai","baseUrl":"` + brkUpstream.URL + `","apiKey":"sk-up","discovery":true,"discoveryInterval":"1ms"},"` +
+		`"brk":{"type":"openai","baseUrl":"` + brkUpstream.URL + `","apiKey":"sk-up","discovery":true,"discoveryInterval":"1ms"},` +
+		// "warmretry" backs exerciseWarmFillRetry (production incident fix,
+		// registry.go's warmFillRetryDelay) — deliberately NO
+		// discoveryInterval override: the default (1h) keeps maybeRefresh's
+		// own request-driven interval gate from ever firing again during
+		// this probe, once warmFill's failed synchronous attempt (or the
+		// retry that follows it) has set lastRefresh, so the retry is the
+		// ONLY thing that can produce warmRetryUpstream's second hit.
+		`"warmretry":{"type":"openai","baseUrl":"` + warmRetryUpstream.URL + `","apiKey":"sk-up","discovery":true},"` +
 		slowProviderName + `":{"type":"openai","baseUrl":"` + slowUpstream.URL + `","apiKey":"sk-up","models":["` + slowProviderModel + `"]},` +
 		// timeoutProviderName (feature: request timeout) — see its own
 		// const block doc comment above for why this provider exists
@@ -933,6 +966,14 @@ func run() error {
 	// probe: a compiled `go test` pass here would prove nothing about the
 	// interpreter.
 	if err := exerciseBreaker(handler, brkModelsHits, brkHealthy); err != nil {
+		return err
+	}
+	// exerciseWarmFillRetry (production incident fix, registry.go's
+	// warmFillRetryDelay) runs right after exerciseBreaker: it drives its
+	// own, dedicated "warmretry" provider/upstream, so it cannot perturb
+	// exerciseBreaker's own "brk"-specific hit counting, and nothing below
+	// depends on "warmretry"'s own hit count either.
+	if err := exerciseWarmFillRetry(handler, warmRetryHits); err != nil {
 		return err
 	}
 	// exerciseMetricsRoute runs after exerciseBreaker has already settled:
@@ -1337,6 +1378,43 @@ func readHealth(handler http.Handler, name string) (string, error) {
 	return "", fmt.Errorf("provider %q not in overview: %s", name, rec.Body.String())
 }
 
+// readProviderModels returns provider name's known model id set from the
+// admin overview (registry.go's providerSnapshot.models,
+// provider-model-accordion task) — decoded generically like readHealth
+// above, for exerciseWarmFillRetry's own poll loop below.
+func readProviderModels(handler http.Handler, name string) ([]string, error) {
+	req := httptest.NewRequest(http.MethodGet, "/admin/api/overview", nil)
+	req.Header.Set("Authorization", "Bearer "+attemptAccountingAdminAPIKey)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		return nil, fmt.Errorf("GET /admin/api/overview: status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		return nil, err
+	}
+	providers, _ := body["providers"].([]any)
+	for _, raw := range providers {
+		p, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		if p["name"] != name {
+			continue
+		}
+		rawModels, _ := p["models"].([]any)
+		models := make([]string, 0, len(rawModels))
+		for _, rm := range rawModels {
+			if s, ok := rm.(string); ok {
+				models = append(models, s)
+			}
+		}
+		return models, nil
+	}
+	return nil, fmt.Errorf("provider %q not in overview: %s", name, rec.Body.String())
+}
+
 // drive fires n authenticated GET /v1/models requests, each of which runs
 // maybeRefresh at ServeHTTP entry, with a small gap so the 1ms discovery
 // interval always permits a fresh attempt when the breaker is closed
@@ -1410,6 +1488,57 @@ func exerciseBreaker(handler http.Handler, hits, healthy *int64) error {
 		return fmt.Errorf("BREAKER-3: breaker never returned to closed after the provider recovered (hits=%d)", atomic.LoadInt64(hits))
 	}
 	fmt.Println("yaegi-check: recovered provider closed the breaker again")
+	return nil
+}
+
+// exerciseWarmFillRetry proves registry.go's warm-fill retry (production
+// incident fix: a provider whose SYNCHRONOUS initial discovery fetch
+// fails, at pod start, is left with zero discovered models until a
+// scheduled background retry recovers it) actually schedules and runs
+// under the REAL interpreter — time.AfterFunc, the retry's own
+// context.WithTimeout budget, and the finishRefresh bookkeeping it shares
+// with warmFill/refreshProvider all proven interpreted, not merely
+// compiled, per this harness's own stated purpose.
+//
+// "warmretry" (attemptAccountingOverride, run()) 401s on its very first
+// /v1/models hit — warmFill's own synchronous call, spent inside New()
+// itself, well before this probe (or any other) runs — then serves real
+// data on every hit after. Only the scheduled retry, firing after
+// registry.go's warmFillRetryDelay (10s, not overridable from outside
+// the package), can ever produce a second hit and populate
+// "warmretry-model"; this probe does not assume anything about how much
+// wall-clock time the OTHER probes ahead of it in run()'s orchestration
+// already burned relative to that 10s window — by the time this runs the
+// retry may already have completed, or may still be pending — it only
+// polls until the recovered state is reached (or times out) and then
+// checks hits landed on exactly 2, not more.
+func exerciseWarmFillRetry(handler http.Handler, hits *int64) error {
+	// warmFillRetryDelay (10s) + warmFillTimeout (5s) + slack: the same
+	// budget shape exerciseBreaker's own phase-3 recovery wait above
+	// uses, just against this feature's fixed, non-configurable delay
+	// instead of a config-driven breaker backoff.
+	var models []string
+	var err error
+	recovered := false
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		models, err = readProviderModels(handler, "warmretry")
+		if err != nil {
+			return err
+		}
+		if len(models) == 1 && models[0] == "warmretry-model" {
+			recovered = true
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if !recovered {
+		return fmt.Errorf("WARMFILLRETRY-1: provider %q never showed the retried model %q within 20s (hits=%d, models=%v)", "warmretry", "warmretry-model", atomic.LoadInt64(hits), models)
+	}
+	if got := atomic.LoadInt64(hits); got != 2 {
+		return fmt.Errorf("WARMFILLRETRY-2: warmRetryUpstream saw %d /v1/models hits once recovered, want exactly 2 (the failed warm fill plus one retry — no maybeRefresh interference)", got)
+	}
+	fmt.Println("yaegi-check: warm-fill retry recovered the provider's discovered models after the scheduled delay")
 	return nil
 }
 

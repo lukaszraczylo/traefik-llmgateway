@@ -22,6 +22,27 @@ const defaultDiscoveryInterval = time.Hour
 // construction indefinitely.
 const warmFillTimeout = 5 * time.Second
 
+// warmFillRetryDelay is how long warmFill waits, after a provider's
+// synchronous initial discovery fetch fails, before retrying that ONE
+// provider once in the background. Production incident (three separate
+// pod-start rollouts, "openai-audio" and "anthropic" both observed):
+// occasional cold-start egress latency lets a provider's listModels call
+// exceed warmFillTimeout (5s) even though the same provider answers fine
+// a few seconds later — without a retry, the provider is left with zero
+// discovered models until the next request-driven maybeRefresh window,
+// which tryBeginRefresh's interval gate can put up to the provider's own
+// discoveryInterval away (defaultDiscoveryInterval: 1h), since
+// finishRefresh advances lastRefresh on a FAILED attempt too, so the
+// clock starts from the failed warm fill, not from whenever a request
+// happens to arrive.
+//
+// A short, fixed delay — not a config knob — because this recovers a
+// one-off cold-start blip, not a steady-state retry policy: a provider
+// that fails again after this single retry falls back to the existing
+// breaker behavior unchanged (recordHealthLocked, reached through the
+// same finishRefresh bookkeeping the retry itself uses).
+const warmFillRetryDelay = 10 * time.Second
+
 // backgroundRefreshTimeout bounds one background refresh goroutine spawned
 // by maybeRefresh. Not specified by the task brief; chosen generously
 // enough for a provider's models-list call while still bounding a leaked
@@ -306,6 +327,54 @@ func (st *providerState) tryBeginRefresh(now time.Time) bool {
 	return true
 }
 
+// tryBeginWarmFillRetry reports whether warmFill's one-shot background
+// retry (scheduleWarmFillRetry/retryWarmFill) is still allowed to run
+// against st, and if so marks it inFlight — the SAME field, and the SAME
+// mutual-exclusion contract, tryBeginRefresh's own doc comment above
+// already establishes for maybeRefresh's request-driven path. Fix 2/3
+// (verify-retry.md): an EARLIER version of retryWarmFill called neither
+// this nor tryBeginRefresh at all, so its listModels call could run
+// CONCURRENTLY with an ordinary request-driven refresh already in flight
+// against the identical provider — two in-progress fetches racing to
+// finishRefresh in arbitrary completion order, plus (with a half-open
+// breaker) a failed retry double-counting as the half-open probe. Sharing
+// st.inFlight with tryBeginRefresh, under the SAME st.mu, makes the two
+// mutually exclusive unconditionally: whichever caller's check-and-set
+// runs first wins; the other's own guard (this one, or tryBeginRefresh's)
+// observes inFlight already true and refuses — never a race window where
+// both believe they won.
+//
+// sinceWarmFill is the exact finishRefresh timestamp the warm fill that
+// scheduled THIS retry was recorded with (warmFillFailure.at, set once in
+// warmFill and threaded through scheduleWarmFillRetry/
+// scheduleOneWarmFillRetry unchanged). A refresh whose lastRefresh has
+// already moved PAST that instant by the time this retry's timer fires —
+// most plausibly a request-driven refresh admitted by a very short
+// discoveryInterval, but any refresh path qualifies — has already
+// recorded a result superseding whatever this retry would fetch, so the
+// retry is redundant and skips even though inFlight is currently false
+// again. This is also what makes tools/yaegi-check's own "brk" provider
+// probe safe (fix 3, verify-retry.md): its 1ms discoveryInterval means a
+// request-driven refresh reliably beats the 10s retry delay, so the
+// retry always finds lastRefresh already past sinceWarmFill and skips,
+// rather than racing exerciseBreaker's own hit-count assertions.
+//
+// The caller must pair a true result with a later finishRefresh call —
+// identical contract to tryBeginRefresh's own — which clears inFlight
+// unconditionally regardless of which of the two guards set it.
+func (st *providerState) tryBeginWarmFillRetry(sinceWarmFill time.Time) bool {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.inFlight {
+		return false
+	}
+	if st.lastRefresh.After(sinceWarmFill) {
+		return false
+	}
+	st.inFlight = true
+	return true
+}
+
 // finishRefresh records the outcome of a refresh attempt started by
 // tryBeginRefresh (or, for the synchronous warm fill, run unconditionally).
 // lastRefresh always advances to now, on success or failure alike — that is
@@ -570,6 +639,22 @@ type modelRegistry struct {
 	// type: call it only as m.warn("%s", fmt.Sprintf(...)), never with two
 	// or more variadic arguments.
 	warn func(string, ...any)
+	// info is the info-level counterpart of log/warn (g.logf), used only
+	// by retryWarmFill's own "recovered after retry" success line: an
+	// operator watching INFO-level logs during a rollout should see a
+	// transient cold-start discovery failure self-heal, not silence.
+	// Set by the production caller AFTER newModelRegistry returns, the
+	// same "not a fourth constructor parameter" convention the warn
+	// field's own doc comment explains above. A nil info falls back to
+	// log (infof, below) — the same fallback shape warnf already has —
+	// so a registry built without one (every existing test) keeps
+	// compiling and reports the recovery at ERROR severity instead of
+	// panicking or silently dropping the line.
+	//
+	// The same Yaegi CFG restriction the log/warn fields document above
+	// applies here too: call it only as m.info("%s", fmt.Sprintf(...)),
+	// never with two or more variadic arguments.
+	info func(string, ...any)
 	// aliases is the validated alias->target map from Config.ModelAliases
 	// (spec §5, v0.2), built once by newModelRegistry via
 	// validateModelAliases and never mutated afterward — resolve checks
@@ -608,7 +693,30 @@ type modelRegistry struct {
 	// finishRefresh writes it from whichever goroutine (warmFill's caller,
 	// or maybeRefresh's background goroutine) is recording that refresh.
 	modelsGen int64
-	warnedMu  sync.Mutex
+	// warmFillRetryDelay is the injectable form of the warmFillRetryDelay
+	// constant above (its own doc comment has the full rationale) —
+	// resolved once at construction (newModelRegistry, below) to that
+	// constant, the same "baked in, never reassigned outside a test"
+	// convention nowFn already establishes, so a test can shorten it
+	// directly (registry_test.go) without a fake clock: unlike interval/
+	// lastRefresh, this genuinely sleeps on a real timer (time.AfterFunc),
+	// which m.nowFn's overridable fake clock cannot accelerate. Grouped
+	// down here with the other pointer-free fields (fieldalignment), not
+	// beside nowFn above, despite the doc-comment cross-reference.
+	warmFillRetryDelay time.Duration
+	// warmFillTimeout is the injectable form of the warmFillTimeout
+	// constant above (its own doc comment has the full rationale) —
+	// resolved once at construction (newModelRegistry, below) to that
+	// constant, the same "baked in, never reassigned outside a test"
+	// convention warmFillRetryDelay above already establishes. warmFill,
+	// retryWarmFill, and captureModelMetadata's warm-fill budget (both
+	// call sites, within warmFill and retryWarmFill) all read this field
+	// rather than the package constant, so a test can shorten the whole
+	// warm-fill budget directly (registry_test.go) without waiting out
+	// the real 5s default — refreshProvider's own steady-state refresh
+	// stays on backgroundRefreshTimeout, unaffected.
+	warmFillTimeout time.Duration
+	warnedMu        sync.Mutex
 	// modelsCacheMu guards modelsCache.
 	modelsCacheMu sync.Mutex
 }
@@ -698,13 +806,15 @@ func newModelRegistry(adapters map[string]providerAdapter, cfg *Config, log func
 	}
 
 	m := &modelRegistry{
-		adapters:      adapters,
-		states:        make(map[string]*providerState, len(adapters)),
-		log:           log,
-		nowFn:         time.Now,
-		warned:        make(map[string]bool),
-		providerNames: make([]string, 0, len(adapters)),
-		modelsCache:   make(map[string]modelsCacheEntry),
+		adapters:           adapters,
+		states:             make(map[string]*providerState, len(adapters)),
+		log:                log,
+		nowFn:              time.Now,
+		warmFillRetryDelay: warmFillRetryDelay,
+		warmFillTimeout:    warmFillTimeout,
+		warned:             make(map[string]bool),
+		providerNames:      make([]string, 0, len(adapters)),
+		modelsCache:        make(map[string]modelsCacheEntry),
 	}
 	for name := range adapters {
 		m.providerNames = append(m.providerNames, name)
@@ -912,23 +1022,60 @@ func (m *modelRegistry) finishRefresh(st *providerState, now time.Time, ids []st
 	atomic.AddInt64(&m.modelsGen, 1)
 }
 
+// warmFillFailure records ONE provider whose synchronous warmFill
+// discovery fetch just failed and is eligible for scheduleWarmFillRetry's
+// one-shot background retry (production incident fix, warmFillRetryDelay's
+// own doc comment). at is the exact finishRefresh timestamp that failed
+// attempt was recorded with — the SAME m.now() value warmFill itself used
+// for THIS provider's finishRefresh call, threaded unchanged through
+// scheduleWarmFillRetry/scheduleOneWarmFillRetry to retryWarmFill's own
+// tryBeginWarmFillRetry guard (fix 2/3, verify-retry.md) as sinceWarmFill:
+// a refresh whose lastRefresh has already moved past this exact instant
+// by the time the retry's timer fires has already superseded whatever
+// this retry would fetch, so the retry skips rather than racing or
+// duplicating it.
+type warmFillFailure struct {
+	at   time.Time
+	name string
+}
+
 // warmFill performs newGateway's synchronous first discovery fill: for
 // every discovery-enabled provider, it fetches listModels once, bounded by
 // warmFillTimeout, and records the result via finishRefresh. A fetch error
 // is logged and otherwise non-fatal — construction still succeeds, and the
 // provider's known model set is whatever its explicit config already
 // provides (empty, if it configured neither explicit models nor a
-// reachable discovery endpoint) until the next maybeRefresh window.
+// reachable discovery endpoint) until either the one-shot retry below
+// recovers it, or the next maybeRefresh window does.
+//
+// Production incident fix: every provider whose fetch failed here is
+// handed to scheduleWarmFillRetry (below), which retries each of them
+// exactly once, in the background, after warmFillRetryDelay — see that
+// constant's own doc comment for why a plain interval-gated maybeRefresh
+// alone leaves a cold-start blip unrecovered for up to an hour. This adds
+// no cost to warmFill itself: scheduling is a single time.AfterFunc call
+// per failed provider, not a blocking wait.
+//
+// A fetch that failed because the PARENT ctx was canceled (plugin
+// construction itself aborted — shutdown, not a slow/broken upstream) is
+// excluded from the retry list (fix 4a, verify-retry.md): retryWarmFill
+// has no shutdown signal of its own to listen on (its own doc comment
+// explains why), so scheduling one anyway would keep retrying a provider
+// nobody is waiting on any more. Mirrors recordHealthLocked's own
+// "Canceled is neutral, not a failure" treatment of the breaker, extended
+// here to the separate scheduling decision.
 func (m *modelRegistry) warmFill(ctx context.Context) {
+	var failed []warmFillFailure
 	for _, name := range m.providerNames {
 		st := m.states[name]
 		if !st.discoveryEnabled {
 			continue
 		}
-		fctx, cancel := context.WithTimeout(ctx, warmFillTimeout)
+		fctx, cancel := context.WithTimeout(ctx, m.warmFillTimeout)
 		ids, err := m.adapters[name].listModels(fctx)
 		cancel()
-		m.finishRefresh(st, m.now(), ids, err)
+		now := m.now()
+		m.finishRefresh(st, now, ids, err)
 		if err != nil {
 			// sanitizeProviderErr (admin.go): the error commonly embeds the
 			// dialed URL verbatim, so a baseUrl an operator misconfigured
@@ -938,6 +1085,11 @@ func (m *modelRegistry) warmFill(ctx context.Context) {
 			// key material" contract. Security audit run-1, finding F-2.
 			m.log("%s", fmt.Sprintf("model registry: initial discovery for provider %q failed: %v",
 				name, sanitizeProviderErr(err.Error(), m.adapters[name].base())))
+			// Fix 4a (verify-retry.md): see this function's own doc
+			// comment above — a parent-ctx cancellation gets no retry.
+			if !errors.Is(err, context.Canceled) {
+				failed = append(failed, warmFillFailure{name: name, at: now})
+			}
 		}
 		// Own timeout budget, review fix (SHOULD-4): fctx above is
 		// spent by listModels — reusing it here would hand the metadata
@@ -945,9 +1097,12 @@ func (m *modelRegistry) warmFill(ctx context.Context) {
 		// timed-out listModels) context every warm fill, guaranteeing a
 		// spurious deadline error and log line even for a healthy
 		// provider whose model-list call merely took a while.
-		mctx, mcancel := context.WithTimeout(ctx, warmFillTimeout)
+		mctx, mcancel := context.WithTimeout(ctx, m.warmFillTimeout)
 		m.captureModelMetadata(mctx, name, m.adapters[name], st)
 		mcancel()
+	}
+	if len(failed) > 0 {
+		m.scheduleWarmFillRetry(failed)
 	}
 }
 
@@ -1025,6 +1180,168 @@ func (m *modelRegistry) captureModelMetadata(ctx context.Context, name string, a
 		return
 	}
 	st.setDiscoveredContext(meta)
+}
+
+// infof writes msg through the info field, falling back to log when no
+// info was injected (mirrors warnf's own fallback, above) — same
+// single-variadic-argument Yaegi-safety shape the log/warn/warnf call
+// sites already document.
+func (m *modelRegistry) infof(msg string) {
+	if m.info != nil {
+		m.info("%s", msg)
+		return
+	}
+	m.log("%s", msg)
+}
+
+// scheduleWarmFillRetry schedules exactly ONE background retry, after
+// m.warmFillRetryDelay, for each provider name in failed — providers
+// whose synchronous warmFill discovery fetch (above) just failed.
+// warmFillRetryDelay's own doc comment has the full production-incident
+// rationale; this method is purely the scheduling mechanics.
+//
+// Each retry runs on its own goroutine via time.AfterFunc, self-bounded
+// by context.Background() plus its own warmFillTimeout budget in
+// retryWarmFill (below) — the SAME self-terminating shape refreshProvider
+// already uses for its maybeRefresh-spawned goroutine, and for the
+// identical reason documented there: this plugin has no wired shutdown/
+// Close hook a background goroutine could listen on instead (Close,
+// llmgateway.go, only releases redisClient — its own doc comment explains
+// why nothing in this codebase calls it automatically, and Traefik's own
+// plugin contract gives a discarded instance no teardown signal at
+// config-reload swap time either). Binding to a fixed delay+timeout
+// instead of an external cancel signal means a Gateway discarded mid-
+// flight (a config reload landing inside the retry window) leaks at most
+// one goroutine per still-failed provider, for at most
+// warmFillRetryDelay+2×warmFillTimeout (worst case ~20s at the shipped
+// defaults: the retry's own listModels call budgeted by warmFillTimeout,
+// PLUS captureModelMetadata's own separate warmFillTimeout budget within
+// retryWarmFill, below — not merely the first of the two) — bounded, not
+// a steady-state leak, matching refreshProvider's own accepted worst case
+// (its own doc comment, below).
+//
+// The retry goes through the SAME finishRefresh bookkeeping warmFill/
+// refreshProvider already use (retryWarmFill, below), so breaker state
+// (recordHealthLocked) stays consistent: a successful retry is recorded
+// exactly like any other successful discovery attempt, closing an
+// already-open breaker if the failed warm fill alone had somehow tripped
+// one; a failed retry is simply a second consecutive failure toward the
+// ordinary breaker threshold — existing breaker behavior, unchanged.
+//
+// Each iteration calls scheduleOneWarmFillRetry (below) rather than
+// inlining the time.AfterFunc closure directly in this loop — the SAME
+// "close over named parameters, not loop variables" defense
+// refreshProvider's own doc comment already documents for maybeRefresh,
+// below. This is not merely stylistic: an EARLIER version of this method
+// built the closure right here, over this loop's own range variable, and
+// tools/yaegi-check caught it misbehaving under the real interpreter —
+// with two failed providers, BOTH scheduled timers ended up firing
+// against whichever provider's state the range variable held LAST,
+// double-retrying it and never touching the other at all. Compiled Go
+// (go.mod: go 1.22) never showed this: the range variable is per-
+// iteration there, so the bug was invisible to `go test`, only to Yaegi.
+func (m *modelRegistry) scheduleWarmFillRetry(failed []warmFillFailure) {
+	for _, f := range failed {
+		m.scheduleOneWarmFillRetry(f.name, f.at)
+	}
+}
+
+// scheduleOneWarmFillRetry schedules name's single retry timer
+// (scheduleWarmFillRetry, above). name is a plain function PARAMETER
+// here, not a loop variable of any kind, so the closure below captures a
+// binding that is unambiguously fresh per call under every Go version —
+// and, per this method's own existence, under Yaegi's interpretation of
+// one too.
+func (m *modelRegistry) scheduleOneWarmFillRetry(name string, at time.Time) {
+	st := m.states[name]
+	adapter := m.adapters[name]
+	time.AfterFunc(m.warmFillRetryDelay, func() {
+		m.retryWarmFill(name, st, adapter, at)
+	})
+}
+
+// retryWarmFill runs one deferred warm-fill retry (scheduleWarmFillRetry,
+// above) for a single provider whose synchronous warm fill just failed.
+// Mirrors warmFill's own per-provider body — including the same
+// captureModelMetadata step — rather than refreshProvider's shape below:
+// this is still a first-DISCOVERY attempt, budgeted by warmFillTimeout,
+// not a steady-state background refresh budgeted by
+// backgroundRefreshTimeout.
+//
+// On success, logs an INFO "recovered after retry" line (m.infof) so an
+// operator watching a rollout sees the transient cold-start failure
+// self-heal instead of staying silent; on failure, logs the existing
+// ERROR line unchanged and leaves the provider exactly where the
+// ordinary breaker/refresh path already would.
+//
+// The deferred recover mirrors refreshProvider's own, for the identical
+// reason: this runs off a time.AfterFunc goroutine with no ServeHTTP
+// caller to unwind into, so an unrecovered panic here would crash the
+// whole Traefik process, not just fail one request. finishRefresh still
+// runs on the panic path (with a synthetic error) — but ONLY once the
+// guard below has actually started something: sinceWarmFill's own
+// tryBeginWarmFillRetry call is this function's FIRST statement,
+// deliberately ahead of the recover-guarded section, so a guard refusal
+// returns before the deferred finishRefresh is even registered.
+//
+// Fix 2/3 (verify-retry.md) — corrected: an EARLIER version of this
+// function never called tryBeginRefresh (or any guard) at all, so its
+// listModels call could run CONCURRENTLY with an ordinary request-driven
+// refresh already in flight against the identical provider. It now calls
+// tryBeginWarmFillRetry (providerState, above) — the SAME st.inFlight
+// field and st.mu, so the two are mutually exclusive exactly like two
+// request-driven refreshes already were — and, on a true result, is
+// bound by the identical "pair with a later finishRefresh" contract
+// tryBeginRefresh's own doc comment establishes; finishRefresh clears
+// inFlight unconditionally regardless of which of the two guards set it.
+func (m *modelRegistry) retryWarmFill(name string, st *providerState, adapter providerAdapter, sinceWarmFill time.Time) {
+	// Guard (fix 2/3, verify-retry.md): skip entirely, before touching
+	// anything else, when a refresh is already in flight or one has
+	// already completed since the warm fill that scheduled this retry —
+	// tryBeginWarmFillRetry's own doc comment has the full contract. A
+	// skip here means NOTHING was attempted, so finishRefresh below must
+	// not run either: there is no outcome to record, and calling it
+	// anyway would wrongly overwrite whatever the winning refresh already
+	// recorded with a synthetic no-op result.
+	if !st.tryBeginWarmFillRetry(sinceWarmFill) {
+		return
+	}
+
+	var ids []string
+	var err error
+	defer func() {
+		if rec := recover(); rec != nil {
+			err = fmt.Errorf("panic: %v", rec)
+		}
+		m.finishRefresh(st, m.now(), ids, err)
+		if err != nil {
+			// Scrubbed for the same reason as warmFill's own
+			// discovery-failure line (security audit run-1, finding F-2).
+			m.log("%s", fmt.Sprintf("model registry: warm-fill retry for provider %q failed: %v",
+				name, sanitizeProviderErr(err.Error(), adapter.base())))
+			return
+		}
+		m.infof(fmt.Sprintf("model registry: initial discovery for provider %q recovered after retry", name))
+	}()
+
+	// Both cancels are deferred, mirroring refreshProvider's own reasoning
+	// below: this function has a recover above, so a panicking listModels
+	// would skip an inline cancel() and hold the timer until
+	// warmFillTimeout fires. Deferring costs nothing and survives the
+	// panic path.
+	fctx, cancel := context.WithTimeout(context.Background(), m.warmFillTimeout)
+	defer cancel()
+	ids, err = adapter.listModels(fctx)
+	if err != nil {
+		return
+	}
+
+	// Own timeout budget, same reasoning as warmFill/refreshProvider's
+	// identical comment: reusing fctx here would hand the metadata fetch
+	// an already-spent context whenever listModels itself ran long.
+	mctx, mcancel := context.WithTimeout(context.Background(), m.warmFillTimeout)
+	defer mcancel()
+	m.captureModelMetadata(mctx, name, adapter, st)
 }
 
 // maybeRefresh is called at every ServeHTTP entry. For each discovery-

@@ -1551,6 +1551,22 @@ one.
 - **Dashboard**: the Models page's provider health panel shows a
   provider's current state and, while open, when it will next be
   probed — see [Admin](#admin).
+- **Cold-start retry**: when a provider's synchronous warm-fill fetch
+  fails at startup, the gateway schedules ONE background retry after a
+  fixed 10-second delay (`warmFillRetryDelay`, not configurable). The
+  retry uses the same `finishRefresh` bookkeeping as every other
+  refresh, so the breaker state stays consistent with it. This recovers
+  a transient cold-start blip, such as slow egress on the very first
+  outbound call, not a provider that stays broken. If the retry also
+  fails, the provider falls back to the breaker behaviour described
+  above, unchanged. A successful retry logs one INFO line naming the
+  provider. A failed retry logs the existing ERROR line. The retry
+  shares its in-flight guard with the regular refresh cycle. It skips
+  if a refresh is already running, or if one already completed since
+  the warm-fill failure, so it never runs a second, overlapping
+  request against the same provider. A warm fill that fails because
+  the gateway itself is shutting down (its parent context canceled)
+  schedules no retry at all.
 
 ## Unified vs. passthrough
 

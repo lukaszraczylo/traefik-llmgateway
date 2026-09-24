@@ -1146,6 +1146,10 @@ func newGateway(ctx context.Context, next http.Handler, config *Config, name str
 	// Routes the self-resolving conditions (a model id two providers both
 	// serve) to WARN instead of ERROR — see the registry's warn field.
 	registry.warn = g.warnf
+	// Routes retryWarmFill's "recovered after retry" success line to INFO
+	// instead of the constructor's default ERROR (g.errorf, passed to
+	// newModelRegistry above) — see the registry's info field doc comment.
+	registry.info = g.logf
 	// ctx is passed through unwrapped, not re-bounded to warmFillTimeout here:
 	// warmFill already gives each discovery-enabled provider its own fresh
 	// warmFillTimeout budget per provider (registry.go). Wrapping ctx to a

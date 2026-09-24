@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -72,6 +73,17 @@ func (r *recordingLog) count() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return len(r.lines)
+}
+
+// linesCopy returns a snapshot of every line recorded so far — for a test
+// that needs to assert on a specific line's CONTENT (e.g. the
+// warm-fill-retry "recovered after retry" text), not merely its count.
+func (r *recordingLog) linesCopy() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]string, len(r.lines))
+	copy(out, r.lines)
+	return out
 }
 
 // waitUntil polls cond every millisecond until it returns true, failing the
@@ -914,6 +926,361 @@ func TestModelRegistry_WarmFill_EachProviderGetsFullBudget_NotSharedAcrossProvid
 
 	if fastRemaining < 4*time.Second {
 		t.Errorf("b-fast's received context deadline was %v from expiry, want >4s (its 5s warm-fill budget must not be reduced by a-slow's 1.2s elapsed time)", fastRemaining)
+	}
+}
+
+// --- warmFill retry: one-shot background recovery for a cold-start blip
+// (production incident: "openai-audio"/"anthropic" initial discovery
+// occasionally exceeds warmFillTimeout on pod start) ---
+
+// TestModelRegistry_WarmFillRetry_FailedThenSuccessful_PopulatesModelsAndClosesBreaker
+// is the core recovery case: warmFill's synchronous fetch fails, tripping
+// a threshold-1 breaker, and the scheduled retry succeeds — the provider
+// must end up with the retried models AND a closed breaker, exactly as if
+// its very first discovery attempt had simply succeeded a little late.
+func TestModelRegistry_WarmFillRetry_FailedThenSuccessful_PopulatesModelsAndClosesBreaker(t *testing.T) {
+	t.Parallel()
+	fa := newFakeAdapter("openai")
+	var calls int32
+	fa.listModelsFn = func(context.Context) ([]string, error) {
+		if atomic.AddInt32(&calls, 1) == 1 {
+			return nil, fmt.Errorf("cold-start egress timeout")
+		}
+		return []string{"gpt-warm"}, nil
+	}
+	adapters := map[string]providerAdapter{"openai": fa}
+	cfg := &Config{
+		Providers: map[string]*ProviderConfig{"openai": {Discovery: true}},
+		// FailureThreshold 1: the failed warm fill alone trips the breaker,
+		// so a successful retry closing it again is actually exercised —
+		// at the package default (3) a single failure would never open it.
+		Breaker: BreakerConfig{FailureThreshold: 1, OpenDuration: "1m", MaxOpenDuration: "10m"},
+	}
+	rl := &recordingLog{}
+	reg, err := newModelRegistry(adapters, cfg, rl.fn)
+	if err != nil {
+		t.Fatalf("newModelRegistry: %v", err)
+	}
+	infoLog := &recordingLog{}
+	reg.info = infoLog.fn
+	// Widened from an earlier 10ms (verify-retry.md item 4): the two
+	// "before the retry has had a chance to run" checks just below run
+	// synchronously, right after warmFill returns, with no synchronization
+	// of their own against the scheduled timer — a heavily loaded (e.g.
+	// -race) machine could in principle delay the test goroutine past a
+	// 10ms window and see the retry's own result instead of the pre-retry
+	// state. 200ms is generous headroom for that gap while the overall
+	// waitUntil below still bounds the test's total time.
+	reg.warmFillRetryDelay = 200 * time.Millisecond
+
+	reg.warmFill(context.Background())
+
+	if reg.discoveryHealthy("openai") {
+		t.Fatal(`discoveryHealthy("openai") = true immediately after the failed warm fill (threshold 1), want false`)
+	}
+	if reg.states["openai"].hasModel("gpt-warm") {
+		t.Fatal(`hasModel("gpt-warm") = true before the retry has had a chance to run`)
+	}
+
+	waitUntil(t, 2*time.Second, func() bool {
+		return reg.states["openai"].hasModel("gpt-warm")
+	})
+
+	if !reg.discoveryHealthy("openai") {
+		t.Error(`discoveryHealthy("openai") = false after a successful retry, want true — the retry must close the breaker it tripped`)
+	}
+	_, _, lastErr, _, _ := reg.states["openai"].snapshot()
+	if lastErr != "" {
+		t.Errorf("lastErr = %q after a successful retry, want empty", lastErr)
+	}
+	if got := atomic.LoadInt32(&calls); got != 2 {
+		t.Errorf("listModels called %d times, want exactly 2 (the failed warm fill plus one retry)", got)
+	}
+	// Fix 1 (verify-retry.md): wait for the log line itself, not just the
+	// state change that precedes it — retryWarmFill's own deferred func
+	// calls finishRefresh (which flips hasModel/discoveryHealthy, above)
+	// BEFORE it calls m.infof, on the SAME goroutine but with no
+	// synchronization the test can observe from outside; a single read
+	// immediately after the waitUntil above can race that write and see
+	// no line yet.
+	waitUntil(t, 2*time.Second, func() bool {
+		for _, line := range infoLog.linesCopy() {
+			if strings.Contains(line, "recovered after retry") {
+				return true
+			}
+		}
+		return false
+	})
+}
+
+// TestModelRegistry_WarmFillRetry_RetryAlsoFails_FallsBackToExistingBreakerBehavior
+// proves the retry adds no special-casing to the breaker: two consecutive
+// failures (the warm fill, then its retry) against a threshold-2 breaker
+// open it exactly as two ordinary consecutive discovery failures already
+// would, and the existing ERROR line (not the success INFO line) is what
+// logs.
+func TestModelRegistry_WarmFillRetry_RetryAlsoFails_FallsBackToExistingBreakerBehavior(t *testing.T) {
+	t.Parallel()
+	fa := newFakeAdapter("openai")
+	var calls int32
+	fa.listModelsFn = func(context.Context) ([]string, error) {
+		atomic.AddInt32(&calls, 1)
+		return nil, fmt.Errorf("upstream still down")
+	}
+	adapters := map[string]providerAdapter{"openai": fa}
+	cfg := &Config{
+		Providers: map[string]*ProviderConfig{"openai": {Models: []string{"gpt-a"}, Discovery: true}},
+		Breaker:   BreakerConfig{FailureThreshold: 2, OpenDuration: "1m", MaxOpenDuration: "10m"},
+	}
+	rl := &recordingLog{}
+	reg, err := newModelRegistry(adapters, cfg, rl.fn)
+	if err != nil {
+		t.Fatalf("newModelRegistry: %v", err)
+	}
+	infoLog := &recordingLog{}
+	reg.info = infoLog.fn
+	reg.warmFillRetryDelay = 10 * time.Millisecond
+
+	reg.warmFill(context.Background())
+
+	waitUntil(t, 2*time.Second, func() bool {
+		return atomic.LoadInt32(&calls) == 2
+	})
+	waitUntil(t, 2*time.Second, func() bool {
+		return !reg.discoveryHealthy("openai")
+	})
+
+	if reg.states["openai"].hasModel("gpt-a") == false {
+		t.Error(`hasModel("gpt-a") = false, want true — the explicit model must survive two failed discovery attempts (stale-while-error)`)
+	}
+	_, _, lastErr, _, _ := reg.states["openai"].snapshot()
+	if lastErr == "" {
+		t.Error("lastErr = \"\" after the retry also failed, want the retry's own error message")
+	}
+	// Fix 1 (verify-retry.md): wait for the ERROR line itself rather than
+	// reading it once right after the state-change waits above —
+	// retryWarmFill's deferred func writes the log line AFTER finishRefresh
+	// (which is what discoveryHealthy/lastErr above already observed), on
+	// the SAME goroutine but with no synchronization the test can see from
+	// outside; a single read can race that write and find nothing yet.
+	waitUntil(t, 2*time.Second, func() bool {
+		for _, line := range rl.linesCopy() {
+			if strings.Contains(line, "warm-fill retry") && strings.Contains(line, "failed") {
+				return true
+			}
+		}
+		return false
+	})
+	if len(infoLog.linesCopy()) != 0 {
+		t.Errorf("info log = %v, want no INFO line — the retry itself failed, nothing recovered", infoLog.linesCopy())
+	}
+}
+
+// TestModelRegistry_WarmFillRetry_NoRetry_WhenWarmFillSucceeds proves
+// scheduleWarmFillRetry is never invoked for a provider whose synchronous
+// warm fill already succeeded: listModels must not be called a second
+// time just because a retry window happened to elapse.
+func TestModelRegistry_WarmFillRetry_NoRetry_WhenWarmFillSucceeds(t *testing.T) {
+	t.Parallel()
+	fa := newFakeAdapter("openai")
+	var calls int32
+	fa.listModelsFn = func(context.Context) ([]string, error) {
+		atomic.AddInt32(&calls, 1)
+		return []string{"gpt-a"}, nil
+	}
+	adapters := map[string]providerAdapter{"openai": fa}
+	cfg := &Config{Providers: map[string]*ProviderConfig{"openai": {Discovery: true}}}
+	reg, err := newModelRegistry(adapters, cfg, func(string, ...any) {})
+	if err != nil {
+		t.Fatalf("newModelRegistry: %v", err)
+	}
+	reg.warmFillRetryDelay = 15 * time.Millisecond
+
+	reg.warmFill(context.Background())
+
+	// Sleep comfortably past the retry window: proving an ABSENCE of a
+	// second call needs to outlast the delay that would have fired it,
+	// not just poll for a positive condition.
+	time.Sleep(10 * reg.warmFillRetryDelay)
+
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Errorf("listModels called %d times after a successful warm fill, want exactly 1 (no retry scheduled)", got)
+	}
+}
+
+// TestModelRegistry_WarmFillRetry_BoundedByOwnTimeout_NoGoroutineLeak
+// proves the retry goroutine is bounded by its own context timeout
+// (m.warmFillTimeout) rather than depending on any external shutdown
+// signal — this plugin has none (llmgateway.go's Close doc comment) — so
+// an upstream that never responds at all still cannot leak the goroutine
+// forever: retryWarmFill's own context.WithTimeout cuts it off and
+// finishRefresh still runs.
+func TestModelRegistry_WarmFillRetry_BoundedByOwnTimeout_NoGoroutineLeak(t *testing.T) {
+	t.Parallel()
+	fa := newFakeAdapter("openai")
+	var calls int32
+	fa.listModelsFn = func(ctx context.Context) ([]string, error) {
+		if atomic.AddInt32(&calls, 1) == 1 {
+			return nil, fmt.Errorf("cold-start egress timeout")
+		}
+		// The retry attempt: never returns on its own, exactly like a
+		// hung upstream connection — only ctx's own timeout can end it.
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	adapters := map[string]providerAdapter{"openai": fa}
+	cfg := &Config{Providers: map[string]*ProviderConfig{"openai": {Discovery: true}}}
+	reg, err := newModelRegistry(adapters, cfg, func(string, ...any) {})
+	if err != nil {
+		t.Fatalf("newModelRegistry: %v", err)
+	}
+	reg.warmFillRetryDelay = 20 * time.Millisecond
+	// Shortened from the package default (5s, registry.go's warmFillTimeout
+	// const) via the injectable m.warmFillTimeout field: this test only
+	// needs the retry's own context to expire, not the production budget,
+	// so there is no reason to actually wait out 5s of real time here.
+	reg.warmFillTimeout = 50 * time.Millisecond
+
+	// Fix 4b (verify-retry.md): capture the goroutine count BEFORE the
+	// retry's own goroutine (time.AfterFunc, fired warmFillRetryDelay from
+	// now) exists at all, so the "back to baseline" poll below actually
+	// proves it exited rather than merely proving something else did.
+	runtime.GC()
+	before := runtime.NumGoroutine()
+
+	reg.warmFill(context.Background())
+
+	// warmFillRetryDelay (20ms) + reg.warmFillTimeout (50ms, shortened
+	// above) + slack for a loaded (e.g. -race) test machine.
+	waitUntil(t, 2*time.Second, func() bool {
+		_, _, lastErr, _, _ := reg.states["openai"].snapshot()
+		return strings.Contains(lastErr, context.DeadlineExceeded.Error())
+	})
+
+	// The state change above (finishRefresh recording lastErr) happens
+	// BEFORE retryWarmFill's goroutine actually returns and exits — its
+	// deferred log call still runs after. Poll NumGoroutine back down to
+	// (at most) the baseline instead of asserting immediately, so the
+	// test proves the goroutine itself ends, not just that its result was
+	// recorded.
+	waitUntil(t, 2*time.Second, func() bool {
+		runtime.GC()
+		return runtime.NumGoroutine() <= before
+	})
+}
+
+// TestModelRegistry_WarmFillRetry_GuardSkipsWhenRefreshInFlightOrDone proves
+// fix 2/3 (verify-retry.md): retryWarmFill's tryBeginWarmFillRetry guard
+// makes it skip entirely — never calling listModels a second time — both
+// while a request-driven refresh (maybeRefresh/refreshProvider, via
+// tryBeginRefresh) is already in flight against the SAME provider, and
+// after one has already completed since the warm fill that scheduled this
+// retry. Exercised by calling refreshProvider/retryWarmFill directly
+// (not by racing real timers against each other), so the assertion is
+// deterministic rather than timing-dependent — this is also, structurally,
+// the "concurrent request-driven refresh + retry" scenario: both paths
+// gate on the identical st.mu-guarded inFlight field, so at most one
+// listModels call is ever in progress for this provider at a time.
+func TestModelRegistry_WarmFillRetry_GuardSkipsWhenRefreshInFlightOrDone(t *testing.T) {
+	t.Parallel()
+	fa := newFakeAdapter("openai")
+	inProgress := make(chan struct{})
+	release := make(chan struct{})
+	var calls, current, maxConcurrent int32
+	fa.listModelsFn = func(context.Context) ([]string, error) {
+		atomic.AddInt32(&calls, 1)
+		n := atomic.AddInt32(&current, 1)
+		for {
+			old := atomic.LoadInt32(&maxConcurrent)
+			if n <= old || atomic.CompareAndSwapInt32(&maxConcurrent, old, n) {
+				break
+			}
+		}
+		close(inProgress)
+		<-release
+		atomic.AddInt32(&current, -1)
+		return []string{"gpt-a"}, nil
+	}
+	adapters := map[string]providerAdapter{"openai": fa}
+	cfg := &Config{Providers: map[string]*ProviderConfig{"openai": {Discovery: true}}}
+	reg, err := newModelRegistry(adapters, cfg, func(string, ...any) {})
+	if err != nil {
+		t.Fatalf("newModelRegistry: %v", err)
+	}
+	st := reg.states["openai"]
+	warmFillTime := reg.now()
+
+	// Simulate a request-driven refresh already claiming inFlight — exactly
+	// what maybeRefresh's own tryBeginRefresh call, ahead of spawning
+	// refreshProvider, already does in production — and let it block
+	// mid-fetch so a concurrent retry has something real to race against.
+	if !st.tryBeginRefresh(reg.now()) {
+		t.Fatal("tryBeginRefresh on a fresh provider must succeed")
+	}
+	go reg.refreshProvider("openai", st, fa)
+
+	select {
+	case <-inProgress:
+	case <-time.After(2 * time.Second):
+		t.Fatal("refreshProvider's listModels call never started")
+	}
+
+	// The retry must skip: a refresh is already inFlight.
+	reg.retryWarmFill("openai", st, fa, warmFillTime)
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("calls = %d after the in-flight guard should have skipped the retry, want 1 (only the request-driven refresh)", got)
+	}
+
+	close(release)
+	waitUntil(t, 2*time.Second, func() bool {
+		return st.hasModel("gpt-a")
+	})
+
+	// The retry must ALSO skip now that the refresh has completed: its
+	// lastRefresh has already moved past warmFillTime.
+	reg.retryWarmFill("openai", st, fa, warmFillTime)
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("calls = %d after the retry should have skipped (a refresh already completed since the warm fill), want 1", got)
+	}
+	if got := atomic.LoadInt32(&maxConcurrent); got > 1 {
+		t.Errorf("max concurrent listModels calls = %d, want at most 1 — the retry must never overlap a request-driven refresh", got)
+	}
+}
+
+// TestModelRegistry_WarmFillRetry_NoRetry_WhenParentCtxCanceled proves fix
+// 4a (verify-retry.md): a warm fill that fails because the PARENT ctx
+// (newGateway's own construction context) was already canceled — a
+// shutdown mid-construction, not a slow or broken upstream — must not
+// schedule a retry at all.
+func TestModelRegistry_WarmFillRetry_NoRetry_WhenParentCtxCanceled(t *testing.T) {
+	t.Parallel()
+	fa := newFakeAdapter("openai")
+	var calls int32
+	fa.listModelsFn = func(ctx context.Context) ([]string, error) {
+		atomic.AddInt32(&calls, 1)
+		return nil, ctx.Err()
+	}
+	adapters := map[string]providerAdapter{"openai": fa}
+	cfg := &Config{Providers: map[string]*ProviderConfig{"openai": {Discovery: true}}}
+	reg, err := newModelRegistry(adapters, cfg, func(string, ...any) {})
+	if err != nil {
+		t.Fatalf("newModelRegistry: %v", err)
+	}
+	reg.warmFillRetryDelay = 15 * time.Millisecond
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // parent already canceled — simulates a shutdown mid-construction
+
+	reg.warmFill(ctx)
+
+	// Sleep comfortably past the retry window: proving an ABSENCE of a
+	// scheduled retry needs to outlast the delay that would have fired
+	// it, not just poll for a positive condition — same shape as
+	// NoRetry_WhenWarmFillSucceeds above.
+	time.Sleep(10 * reg.warmFillRetryDelay)
+
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Errorf("listModels called %d times after a parent-ctx-canceled warm fill, want exactly 1 (no retry scheduled)", got)
 	}
 }
 
