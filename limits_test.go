@@ -2637,6 +2637,19 @@ func TestModelTotals_ConfiguredStoreDown_FailOpen_ReturnsNotOK(t *testing.T) {
 func TestModelSpanTotalsSumsBuckets(t *testing.T) {
 	l := newLimiter(nil, true)
 	now := time.Date(2026, 9, 23, 10, 0, 0, 0, time.UTC)
+	// Fix (verify-retry.md item 5): pin the limiter's own clock to the
+	// fixed now above — the same convention every other test in this file
+	// that touches l.now() already follows (TestLimiterRequestWindow and
+	// dozens more, each setting l.nowFn right after newLimiter). Without
+	// this, modelTotals below reads l.now() (real time.Now(), limits.go's
+	// newLimiter default) instead of this test's fixed now: the buckets
+	// were written against 2026-09-23, so the span=1 assertion only
+	// happened to pass on the calendar day this test was first written,
+	// and fails deterministically on every later day — not a race, and
+	// not flaky under -race specifically; a plain date mismatch that
+	// -race's slower execution does not change the odds of, just the day
+	// this was first noticed on.
+	l.nowFn = func() time.Time { return now }
 	id := "openai/gpt-4o"
 
 	l.incrCounter(kindModel, id, metricReq, windowDay, historyStepBack(now, windowDay, 2), 5, dayWindowTTL)
