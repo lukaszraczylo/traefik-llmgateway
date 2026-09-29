@@ -655,13 +655,13 @@ func (m *geminiUsageMetadata) safeCompletion() int64 {
 type geminiStreamState struct {
 	id      string
 	model   string
+	content contentChunker
 	u       usage
 	created int64
 	// nextToolOrdinal is the per-stream contiguous tool-call counter lesson
 	// (a) requires.
 	nextToolOrdinal int
 	startedRole     bool
-	content         contentChunker
 	// sawFunctionCall latches true the first time any chunk in this stream
 	// carries a functionCall part, and stays true for the rest of the
 	// stream. Gemini's finishReason is "STOP" whether the turn ended in

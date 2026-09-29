@@ -695,9 +695,9 @@ type anthropicStreamState struct {
 	// block right after a text block is content-block index 1, but it is
 	// still the first — index 0 — tool call).
 	toolOrdinals    map[int]int
-	content         contentChunker
 	id              string
 	model           string
+	content         contentChunker
 	u               usage
 	created         int64
 	nextToolOrdinal int
