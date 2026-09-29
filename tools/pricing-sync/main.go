@@ -57,6 +57,12 @@
 //     a defensive fallback, not just a hardcoded "sample_spec" skip, so
 //     a future upstream schema-example entry with some other key name
 //     degrades the same way.
+//  4. Freshness: an entry is dropped when LiteLLM's own deprecation_date
+//     has already passed, or when a full calendar date embedded in its
+//     bare id ("claude-opus-4-1-20250805", "gpt-4o-2024-11-20") is
+//     older than maxModelAgeMonths. LiteLLM carries no release date, so
+//     an id with no such date and no deprecation_date is always kept:
+//     an undated alias is never dropped on a guess.
 //
 // # Bare-id collision resolution
 //
@@ -102,6 +108,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -128,6 +135,34 @@ const microUSDPerUSDPerToken = 1e12
 // doc comment describes) so the pruning rule reads unambiguously for
 // this specific, known case.
 const sampleSpecKey = "sample_spec"
+
+// maxModelAgeMonths is the freshness rule's age cutoff for a date embedded
+// in a bare model id.
+const maxModelAgeMonths = 12
+
+// idDatePattern finds a full calendar date in a model id, as YYYYMMDD or
+// YYYY-MM-DD, delimited by the id's ends or a "-" or "_".
+var idDatePattern = regexp.MustCompile(`(?:^|[-_])(20\d{2})-?(0[1-9]|1[0-2])-?(0[1-9]|[12]\d|3[01])(?:$|[-_])`)
+
+// isStale reports whether an entry fails the freshness rule: its
+// deprecation_date (YYYY-MM-DD) is before now, or a date embedded in
+// bareID is more than maxModelAgeMonths before now.
+func isStale(bareID, deprecationDate string, now time.Time) bool {
+	if deprecationDate != "" {
+		if d, err := time.Parse("2006-01-02", deprecationDate); err == nil && d.Before(now) {
+			return true
+		}
+	}
+	m := idDatePattern.FindStringSubmatch(bareID)
+	if m == nil {
+		return false
+	}
+	d, err := time.Parse("20060102", m[1]+m[2]+m[3])
+	if err != nil {
+		return false
+	}
+	return d.Before(now.AddDate(0, -maxModelAgeMonths, 0))
+}
 
 // allowedProviders is the pruning rule's provider allowlist — see the
 // package doc comment for the full rationale and the qwen/alibaba ->
@@ -218,6 +253,7 @@ func applyNamingBridges(table map[string]builtinEntry, winners map[string]candid
 // max_input_tokens/max_tokens as a JSON float (2000000.0) — decoding
 // those into *int would fail outright and drop the entry.
 type litellmEntry struct {
+	DeprecationDate    string   `json:"deprecation_date"`
 	InputCostPerToken  *float64 `json:"input_cost_per_token"`
 	OutputCostPerToken *float64 `json:"output_cost_per_token"`
 	MaxInputTokens     *float64 `json:"max_input_tokens"`
@@ -268,7 +304,7 @@ func run() error {
 		return fmt.Errorf("fetch %s: %w", litellmSourceURL, err)
 	}
 
-	table, totalUpstream, err := parseAndPrune(data)
+	table, totalUpstream, err := parseAndPrune(data, time.Now())
 	if err != nil {
 		return fmt.Errorf("parse and prune: %w", err)
 	}
@@ -319,7 +355,7 @@ func fetchLiteLLMPrices(ctx context.Context, url string) ([]byte, error) {
 // chooseWinner's deterministic bare-id collision resolution. It returns
 // the pruned table and the total number of top-level keys data carried
 // (including ones this function skips), for the summary line run prints.
-func parseAndPrune(data []byte) (map[string]builtinEntry, int, error) {
+func parseAndPrune(data []byte, now time.Time) (map[string]builtinEntry, int, error) {
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return nil, 0, fmt.Errorf("decode top-level object: %w", err)
@@ -346,6 +382,9 @@ func parseAndPrune(data []byte) (map[string]builtinEntry, int, error) {
 		}
 
 		bare, isBareKey := bareModelID(key, e.LiteLLMProvider)
+		if isStale(bare, e.DeprecationDate, now) {
+			continue
+		}
 		byBare[bare] = append(byBare[bare], candidate{
 			fullKey:  key,
 			provider: e.LiteLLMProvider,

@@ -6,7 +6,10 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
+
+var fixtureNow = time.Date(2026, time.August, 1, 0, 0, 0, 0, time.UTC)
 
 // fixtureJSON is a small, hand-built stand-in for LiteLLM's real
 // model_prices_and_context_window.json, covering every branch of the
@@ -116,7 +119,7 @@ const fixtureUpstreamKeyCount = 17
 // out, covering every pruning-rule branch fixtureJSON's own doc comment
 // lists.
 func TestParseAndPrune_Golden(t *testing.T) {
-	got, totalUpstream, err := parseAndPrune([]byte(fixtureJSON))
+	got, totalUpstream, err := parseAndPrune([]byte(fixtureJSON), fixtureNow)
 	if err != nil {
 		t.Fatalf("parseAndPrune: %v", err)
 	}
@@ -262,5 +265,51 @@ func TestContentDigest(t *testing.T) {
 	}
 	if len(a) != contentDigestLen {
 		t.Errorf("len(contentDigest(...)) = %d, want %d", len(a), contentDigestLen)
+	}
+}
+
+func TestIsStale(t *testing.T) {
+	now := time.Date(2026, time.September, 29, 0, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name, id, deprecated string
+		want                 bool
+	}{
+		{"undated alias kept", "claude-opus-4-1", "", false},
+		{"recent compact date kept", "claude-sonnet-5-20260401", "", false},
+		{"old compact date dropped", "claude-opus-4-1-20250805", "", true},
+		{"old dashed date dropped", "gpt-4o-2024-11-20", "", true},
+		{"just inside cutoff kept", "model-2025-10-01", "", false},
+		{"just outside cutoff dropped", "model-2025-09-28", "", true},
+		{"date mid-id dropped", "gpt-4o-2024-11-20-preview", "", true},
+		{"short MMDD suffix ignored", "grok-4.20-experimental-beta-0304", "", false},
+		{"invalid month ignored", "model-20251301", "", false},
+		{"past deprecation dropped", "gpt-4-turbo", "2025-06-01", true},
+		{"future deprecation kept", "gpt-4-turbo", "2027-01-01", false},
+		{"bad deprecation format ignored", "gpt-4-turbo", "soon", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isStale(tc.id, tc.deprecated, now); got != tc.want {
+				t.Errorf("isStale(%q, %q) = %v, want %v", tc.id, tc.deprecated, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestParseAndPrune_DropsStaleEntries(t *testing.T) {
+	const data = `{
+  "gpt-fresh": {"litellm_provider": "openai", "mode": "chat", "input_cost_per_token": 1e-6, "output_cost_per_token": 2e-6},
+  "gpt-old-2024-05-13": {"litellm_provider": "openai", "mode": "chat", "input_cost_per_token": 1e-6, "output_cost_per_token": 2e-6},
+  "gpt-dead": {"litellm_provider": "openai", "mode": "chat", "deprecation_date": "2026-01-01", "input_cost_per_token": 1e-6, "output_cost_per_token": 2e-6}
+}`
+	got, _, err := parseAndPrune([]byte(data), fixtureNow)
+	if err != nil {
+		t.Fatalf("parseAndPrune: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("kept %d entries %v, want only gpt-fresh", len(got), got)
+	}
+	if _, ok := got["gpt-fresh"]; !ok {
+		t.Errorf("gpt-fresh missing from %v", got)
 	}
 }
