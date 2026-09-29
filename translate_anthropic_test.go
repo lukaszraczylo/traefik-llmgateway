@@ -1129,16 +1129,23 @@ func TestOpenAIRequestFromAnthropic_NoTools_OmitsToolsAndToolChoiceFields(t *tes
 	}
 }
 
-func TestAnthropicContentChunkMatchesChunk(t *testing.T) {
+func TestContentChunkerMatchesChunk(t *testing.T) {
 	texts := []string{"", "Hello", "a \"quoted\" <b>&amp;</b>", "line\nbreak\ttab", "unicode é 日本 \u2028\u2029", "bad\xffutf8"}
 	for _, id := range []string{"", "msg_01", "we\"ird"} {
-		st := newAnthropicStreamState("gw-model", 1734000000)
-		st.id = id
+		ast := newAnthropicStreamState("gw-model", 1734000000)
+		ast.id = id
+		ast.content.set(chatCompletionIDPrefix+id, ast.model, ast.created)
+		gst := newGeminiStreamState("gw-model", 1734000000)
+		gst.id = id
+		gst.content.set(chatCompletionIDPrefix+id, gst.model, gst.created)
 		for _, text := range texts {
-			got := st.contentChunk(text)
-			want := st.chunk(map[string]any{"content": text}, nil)
-			if !bytes.Equal(got, want) {
-				t.Errorf("id=%q text=%q:\n got %s\nwant %s", id, text, got, want)
+			gotA := ast.content.build(text)
+			if want := ast.chunk(map[string]any{"content": text}, nil); !bytes.Equal(gotA, want) {
+				t.Errorf("anthropic id=%q text=%q:\n got %s\nwant %s", id, text, gotA, want)
+			}
+			gotG := gst.content.build(text)
+			if want := gst.chunk(map[string]any{"content": text}, nil); !bytes.Equal(gotG, want) {
+				t.Errorf("gemini id=%q text=%q:\n got %s\nwant %s", id, text, gotG, want)
 			}
 		}
 	}

@@ -661,6 +661,7 @@ type geminiStreamState struct {
 	// (a) requires.
 	nextToolOrdinal int
 	startedRole     bool
+	content         contentChunker
 	// sawFunctionCall latches true the first time any chunk in this stream
 	// carries a functionCall part, and stays true for the rest of the
 	// stream. Gemini's finishReason is "STOP" whether the turn ended in
@@ -681,7 +682,9 @@ type geminiStreamState struct {
 // shares one stable, non-empty id instead of drifting between an empty
 // string and whatever a later chunk happens to report.
 func newGeminiStreamState(model string, created int64) *geminiStreamState {
-	return &geminiStreamState{model: model, created: created, id: geminiResponseIDOrFallback("", created)}
+	st := &geminiStreamState{model: model, created: created, id: geminiResponseIDOrFallback("", created)}
+	st.content.set(chatCompletionIDPrefix+st.id, model, created)
+	return st
 }
 
 // usage returns the prompt/completion token counts captured so far, from
@@ -783,6 +786,7 @@ func (st *geminiStreamState) translate(ev sseEvent) ([][]byte, error) {
 	isFirstChunk := !st.startedRole
 	if isFirstChunk && resp.ResponseID != "" {
 		st.id = resp.ResponseID
+		st.content.set(chatCompletionIDPrefix+st.id, st.model, st.created)
 	}
 
 	if resp.UsageMetadata != nil {
@@ -832,7 +836,7 @@ func (st *geminiStreamState) translate(ev sseEvent) ([][]byte, error) {
 			st.nextToolOrdinal++
 			chunks = append(chunks, st.chunk(delta, nil))
 		case p.Text != "":
-			chunks = append(chunks, st.chunk(map[string]any{"content": p.Text}, nil))
+			chunks = append(chunks, st.content.build(p.Text))
 		}
 	}
 
