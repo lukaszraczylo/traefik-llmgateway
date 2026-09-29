@@ -1150,3 +1150,20 @@ func TestContentChunkerMatchesChunk(t *testing.T) {
 		}
 	}
 }
+
+func TestAppendJSONStringMatchesMarshal(t *testing.T) {
+	var cases []string
+	for r := rune(0); r < 0x250; r++ {
+		cases = append(cases, string(r), "a"+string(r)+"b")
+	}
+	cases = append(cases, "\u2028", "\u2029", "x\u2028y\u2029z", "bad\xffutf8", "\xc3", "\xe2\x80", "\U0001F600 emoji", "", "<script>alert('&')</script>")
+	for _, s := range cases {
+		want, err := json.Marshal(s)
+		if err != nil {
+			t.Fatalf("Marshal(%q): %v", s, err)
+		}
+		if got := appendJSONString(nil, s); !bytes.Equal(got, want) {
+			t.Errorf("appendJSONString(%q) = %s, want %s", s, got, want)
+		}
+	}
+}

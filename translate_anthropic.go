@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 // anthropicAPIVersion is the "anthropic-version" header value every request
@@ -776,14 +777,67 @@ func (c *contentChunker) set(id, model string, created int64) {
 }
 
 func (c *contentChunker) build(text string) []byte {
-	tb, err := json.Marshal(text)
-	if err != nil {
-		panic(fmt.Sprintf("llmgateway: stream chunk failed to marshal text: %v", err))
-	}
-	out := make([]byte, 0, len(contentChunkHead)+len(tb)+len(c.tail))
+	out := make([]byte, 0, len(contentChunkHead)+len(text)+len(text)/8+2+len(c.tail))
 	out = append(out, contentChunkHead...)
-	out = append(out, tb...)
+	out = appendJSONString(out, text)
 	return append(out, c.tail...)
+}
+
+const jsonHex = "0123456789abcdef"
+
+// appendJSONString appends s as a quoted JSON string using
+// encoding/json's default escaping (HTML characters, U+2028/U+2029 and
+// invalid UTF-8 included), so its output equals json.Marshal(s).
+func appendJSONString(dst []byte, s string) []byte {
+	dst = append(dst, '"')
+	start := 0
+	for i := 0; i < len(s); {
+		b := s[i]
+		if b < utf8.RuneSelf {
+			if b >= 0x20 && b != '"' && b != '\\' && b != '<' && b != '>' && b != '&' {
+				i++
+				continue
+			}
+			dst = append(dst, s[start:i]...)
+			switch b {
+			case '"', '\\':
+				dst = append(dst, '\\', b)
+			case '\b':
+				dst = append(dst, '\\', 'b')
+			case '\f':
+				dst = append(dst, '\\', 'f')
+			case '\n':
+				dst = append(dst, '\\', 'n')
+			case '\r':
+				dst = append(dst, '\\', 'r')
+			case '\t':
+				dst = append(dst, '\\', 't')
+			default:
+				dst = append(dst, '\\', 'u', '0', '0', jsonHex[b>>4], jsonHex[b&0xF])
+			}
+			i++
+			start = i
+			continue
+		}
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if r == utf8.RuneError && size == 1 {
+			dst = append(dst, s[start:i]...)
+			dst = append(dst, "\xef\xbf\xbd"...)
+			i += size
+			start = i
+			continue
+		}
+		if r == '\u2028' || r == '\u2029' {
+			dst = append(dst, s[start:i]...)
+			dst = append(dst, '\\', 'u', '2', '0', '2', jsonHex[r&0xF])
+			i += size
+			start = i
+			continue
+		}
+		i += size
+	}
+	dst = append(dst, s[start:]...)
+	return append(dst, '"')
 }
 
 // usageChunk builds the final usage-only "chat.completion.chunk" payload —
