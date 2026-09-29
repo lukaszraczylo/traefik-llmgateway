@@ -1,6 +1,7 @@
 package traefikllmgateway
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -1125,5 +1126,20 @@ func TestOpenAIRequestFromAnthropic_NoTools_OmitsToolsAndToolChoiceFields(t *tes
 	}
 	if _, ok := out["tool_choice"]; ok {
 		t.Errorf(`out["tool_choice"] = %v, want the key absent when no tool_choice was requested`, out["tool_choice"])
+	}
+}
+
+func TestAnthropicContentChunkMatchesChunk(t *testing.T) {
+	texts := []string{"", "Hello", "a \"quoted\" <b>&amp;</b>", "line\nbreak\ttab", "unicode é 日本 \u2028\u2029", "bad\xffutf8"}
+	for _, id := range []string{"", "msg_01", "we\"ird"} {
+		st := newAnthropicStreamState("gw-model", 1734000000)
+		st.id = id
+		for _, text := range texts {
+			got := st.contentChunk(text)
+			want := st.chunk(map[string]any{"content": text}, nil)
+			if !bytes.Equal(got, want) {
+				t.Errorf("id=%q text=%q:\n got %s\nwant %s", id, text, got, want)
+			}
+		}
 	}
 }
