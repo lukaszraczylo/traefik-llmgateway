@@ -5,7 +5,7 @@ package traefikllmgateway
 //
 // Source: https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json
 // Source digest: sha256:9f7b337871ed
-// 171 entries kept (pruned from 4422 upstream entries — see
+// 172 entries kept (pruned from 4422 upstream entries — see
 // tools/pricing-sync/main.go's own doc comment for the exact pruning
 // rule and bare-id collision resolution).
 //
@@ -36,6 +36,7 @@ var builtinModelMetaTable = map[string]builtinModelMeta{
 	"claude-opus-5":                       {ContextTokens: 1000000, InputCostPerMTokMicroUSD: 5000000, OutputCostPerMTokMicroUSD: 25000000},
 	"claude-opus-5-5":                     {ContextTokens: 1000000, InputCostPerMTokMicroUSD: 4000000, OutputCostPerMTokMicroUSD: 20000000},
 	"claude-sonnet-4-5":                   {ContextTokens: 1000000, InputCostPerMTokMicroUSD: 3000000, OutputCostPerMTokMicroUSD: 15000000},
+	"claude-sonnet-4-5-20250929":          {ContextTokens: 1000000, InputCostPerMTokMicroUSD: 3000000, OutputCostPerMTokMicroUSD: 15000000},
 	"claude-sonnet-4-6":                   {ContextTokens: 1000000, InputCostPerMTokMicroUSD: 3000000, OutputCostPerMTokMicroUSD: 15000000},
 	"claude-sonnet-5":                     {ContextTokens: 1000000, InputCostPerMTokMicroUSD: 2000000, OutputCostPerMTokMicroUSD: 10000000},
 	"claude-sonnet-5-5":                   {ContextTokens: 1000000, InputCostPerMTokMicroUSD: 2000000, OutputCostPerMTokMicroUSD: 10000000},
