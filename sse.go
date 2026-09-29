@@ -164,7 +164,7 @@ func readSSE(r io.Reader, fn func(sseEvent) error) error {
 		// suite, the SSE streaming path); tools/yaegi-check never exercises
 		// a live streaming response.
 		event = ""
-		dataLines = nil
+		dataLines = dataLines[:0]
 		hasData = false
 		dataBytes = 0
 		if !fire {
