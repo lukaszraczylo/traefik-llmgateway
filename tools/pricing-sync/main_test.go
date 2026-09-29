@@ -9,7 +9,10 @@ import (
 	"time"
 )
 
-var fixtureNow = time.Date(2026, time.August, 1, 0, 0, 0, 0, time.UTC)
+var (
+	fixtureNow  = time.Date(2026, time.August, 1, 0, 0, 0, 0, time.UTC)
+	fixtureOpts = pruneOptions{now: fixtureNow, maxAgeMonths: defaultMaxAgeMonths}
+)
 
 // fixtureJSON is a small, hand-built stand-in for LiteLLM's real
 // model_prices_and_context_window.json, covering every branch of the
@@ -119,7 +122,7 @@ const fixtureUpstreamKeyCount = 17
 // out, covering every pruning-rule branch fixtureJSON's own doc comment
 // lists.
 func TestParseAndPrune_Golden(t *testing.T) {
-	got, totalUpstream, err := parseAndPrune([]byte(fixtureJSON), fixtureNow)
+	got, totalUpstream, err := parseAndPrune([]byte(fixtureJSON), fixtureOpts)
 	if err != nil {
 		t.Fatalf("parseAndPrune: %v", err)
 	}
@@ -289,7 +292,8 @@ func TestIsStale(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := isStale(tc.id, tc.deprecated, now); got != tc.want {
+			opts := pruneOptions{now: now, maxAgeMonths: defaultMaxAgeMonths}
+			if got := isStale(tc.id, tc.deprecated, opts); got != tc.want {
 				t.Errorf("isStale(%q, %q) = %v, want %v", tc.id, tc.deprecated, got, tc.want)
 			}
 		})
@@ -302,7 +306,7 @@ func TestParseAndPrune_DropsStaleEntries(t *testing.T) {
   "gpt-old-2024-05-13": {"litellm_provider": "openai", "mode": "chat", "input_cost_per_token": 1e-6, "output_cost_per_token": 2e-6},
   "gpt-dead": {"litellm_provider": "openai", "mode": "chat", "deprecation_date": "2026-01-01", "input_cost_per_token": 1e-6, "output_cost_per_token": 2e-6}
 }`
-	got, _, err := parseAndPrune([]byte(data), fixtureNow)
+	got, _, err := parseAndPrune([]byte(data), fixtureOpts)
 	if err != nil {
 		t.Fatalf("parseAndPrune: %v", err)
 	}
@@ -311,5 +315,31 @@ func TestParseAndPrune_DropsStaleEntries(t *testing.T) {
 	}
 	if _, ok := got["gpt-fresh"]; !ok {
 		t.Errorf("gpt-fresh missing from %v", got)
+	}
+}
+
+func TestIsStale_Options(t *testing.T) {
+	now := time.Date(2026, time.September, 29, 0, 0, 0, 0, time.UTC)
+	const old = "gpt-4o-2024-08-06"
+	tests := []struct {
+		name string
+		opts pruneOptions
+		id   string
+		want bool
+	}{
+		{"default drops old", pruneOptions{now: now, maxAgeMonths: 12}, old, true},
+		{"zero disables rule", pruneOptions{now: now, maxAgeMonths: 0}, old, false},
+		{"negative disables rule", pruneOptions{now: now, maxAgeMonths: -1}, old, false},
+		{"longer window keeps", pruneOptions{now: now, maxAgeMonths: 36}, old, false},
+		{"shorter window drops more", pruneOptions{now: now, maxAgeMonths: 3}, "model-2026-03-01", true},
+		{"keep flag exempts", pruneOptions{now: now, maxAgeMonths: 12, keep: map[string]bool{old: true}}, old, false},
+		{"alwaysKeep exempts", pruneOptions{now: now, maxAgeMonths: 12}, "claude-sonnet-4-5-20250929", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isStale(tc.id, "", tc.opts); got != tc.want {
+				t.Errorf("isStale(%q) = %v, want %v", tc.id, got, tc.want)
+			}
+		})
 	}
 }

@@ -40,8 +40,12 @@ yaegi-check:
 # pruning rule and naming-bridge mechanism. Not run by CI (network
 # fetch, and the generated table is committed); an operator re-runs this
 # by hand when LiteLLM's own pricing drifts.
+# PRICING_MAX_AGE_MONTHS drops entries older than N months (0 = keep all);
+# PRICING_KEEP is a comma-separated list of bare ids exempt from that rule.
+PRICING_MAX_AGE_MONTHS ?= 12
+PRICING_KEEP ?=
 pricing-sync:
-	cd tools/pricing-sync && GOWORK=off go run . $(CURDIR)
+	cd tools/pricing-sync && GOWORK=off go run . -max-age-months=$(PRICING_MAX_AGE_MONTHS) -keep=$(PRICING_KEEP) $(CURDIR)
 	gofmt -w pricing_data_gen.go
 
 INTEGRATION_COMPOSE := integration/docker-compose.yml
