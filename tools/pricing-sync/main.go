@@ -57,6 +57,14 @@
 //     a defensive fallback, not just a hardcoded "sample_spec" skip, so
 //     a future upstream schema-example entry with some other key name
 //     degrades the same way.
+//  4. Freshness: an entry is dropped when LiteLLM's own deprecation_date
+//     has already passed, or when a full calendar date embedded in its
+//     bare id ("claude-opus-4-1-20250805", "gpt-4o-2024-11-20") is
+//     older than the -max-age-months flag (default 12; 0 turns the whole
+//     rule off). LiteLLM carries no release date, so an id with no such
+//     date and no deprecation_date is always kept: an undated alias is
+//     never dropped on a guess. An id in alwaysKeep, or in the -keep
+//     flag's comma-separated list, is exempt.
 //
 // # Bare-id collision resolution
 //
@@ -95,6 +103,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"go/format"
 	"io"
@@ -102,6 +111,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -128,6 +138,51 @@ const microUSDPerUSDPerToken = 1e12
 // doc comment describes) so the pruning rule reads unambiguously for
 // this specific, known case.
 const sampleSpecKey = "sample_spec"
+
+// defaultMaxAgeMonths is the -max-age-months flag's default.
+const defaultMaxAgeMonths = 12
+
+// alwaysKeep lists bare ids the freshness rule never drops, because they
+// are still served after their age or deprecation date says otherwise.
+var alwaysKeep = map[string]bool{
+	"claude-sonnet-4-5-20250929": true,
+}
+
+// pruneOptions is the freshness rule's configuration. maxAgeMonths <= 0
+// turns the rule off.
+type pruneOptions struct {
+	now          time.Time
+	keep         map[string]bool
+	maxAgeMonths int
+}
+
+// idDatePattern finds a full calendar date in a model id, as YYYYMMDD or
+// YYYY-MM-DD, delimited by the id's ends or a "-" or "_".
+var idDatePattern = regexp.MustCompile(`(?:^|[-_])(20\d{2})-?(0[1-9]|1[0-2])-?(0[1-9]|[12]\d|3[01])(?:$|[-_])`)
+
+// isStale reports whether an entry fails the freshness rule: its
+// deprecation_date (YYYY-MM-DD) is before opts.now, or a date embedded in
+// bareID is more than opts.maxAgeMonths before it. Ids in opts.keep and
+// alwaysKeep never fail.
+func isStale(bareID, deprecationDate string, opts pruneOptions) bool {
+	if opts.maxAgeMonths <= 0 || opts.keep[bareID] || alwaysKeep[bareID] {
+		return false
+	}
+	if deprecationDate != "" {
+		if d, err := time.Parse("2006-01-02", deprecationDate); err == nil && d.Before(opts.now) {
+			return true
+		}
+	}
+	m := idDatePattern.FindStringSubmatch(bareID)
+	if m == nil {
+		return false
+	}
+	d, err := time.Parse("20060102", m[1]+m[2]+m[3])
+	if err != nil {
+		return false
+	}
+	return d.Before(opts.now.AddDate(0, -opts.maxAgeMonths, 0))
+}
 
 // allowedProviders is the pruning rule's provider allowlist — see the
 // package doc comment for the full rationale and the qwen/alibaba ->
@@ -218,6 +273,7 @@ func applyNamingBridges(table map[string]builtinEntry, winners map[string]candid
 // max_input_tokens/max_tokens as a JSON float (2000000.0) — decoding
 // those into *int would fail outright and drop the entry.
 type litellmEntry struct {
+	DeprecationDate    string   `json:"deprecation_date"`
 	InputCostPerToken  *float64 `json:"input_cost_per_token"`
 	OutputCostPerToken *float64 `json:"output_cost_per_token"`
 	MaxInputTokens     *float64 `json:"max_input_tokens"`
@@ -254,9 +310,18 @@ func main() {
 }
 
 func run() error {
+	maxAge := flag.Int("max-age-months", defaultMaxAgeMonths, "drop entries older than this many months; 0 disables the freshness rule")
+	keepList := flag.String("keep", "", "comma-separated bare ids the freshness rule never drops")
+	flag.Parse()
 	repoRoot := "."
-	if len(os.Args) > 1 {
-		repoRoot = os.Args[1]
+	if flag.NArg() > 0 {
+		repoRoot = flag.Arg(0)
+	}
+	keep := map[string]bool{}
+	for _, id := range strings.Split(*keepList, ",") {
+		if id = strings.TrimSpace(id); id != "" {
+			keep[id] = true
+		}
 	}
 	outPath := filepath.Join(repoRoot, "pricing_data_gen.go")
 
@@ -268,7 +333,7 @@ func run() error {
 		return fmt.Errorf("fetch %s: %w", litellmSourceURL, err)
 	}
 
-	table, totalUpstream, err := parseAndPrune(data)
+	table, totalUpstream, err := parseAndPrune(data, pruneOptions{now: time.Now(), maxAgeMonths: *maxAge, keep: keep})
 	if err != nil {
 		return fmt.Errorf("parse and prune: %w", err)
 	}
@@ -319,7 +384,7 @@ func fetchLiteLLMPrices(ctx context.Context, url string) ([]byte, error) {
 // chooseWinner's deterministic bare-id collision resolution. It returns
 // the pruned table and the total number of top-level keys data carried
 // (including ones this function skips), for the summary line run prints.
-func parseAndPrune(data []byte) (map[string]builtinEntry, int, error) {
+func parseAndPrune(data []byte, opts pruneOptions) (map[string]builtinEntry, int, error) {
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return nil, 0, fmt.Errorf("decode top-level object: %w", err)
@@ -346,6 +411,9 @@ func parseAndPrune(data []byte) (map[string]builtinEntry, int, error) {
 		}
 
 		bare, isBareKey := bareModelID(key, e.LiteLLMProvider)
+		if isStale(bare, e.DeprecationDate, opts) {
+			continue
+		}
 		byBare[bare] = append(byBare[bare], candidate{
 			fullKey:  key,
 			provider: e.LiteLLMProvider,

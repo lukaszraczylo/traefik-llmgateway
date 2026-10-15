@@ -164,7 +164,7 @@ func readSSE(r io.Reader, fn func(sseEvent) error) error {
 		// suite, the SSE streaming path); tools/yaegi-check never exercises
 		// a live streaming response.
 		event = ""
-		dataLines = nil
+		dataLines = dataLines[:0]
 		hasData = false
 		dataBytes = 0
 		if !fire {
@@ -315,12 +315,20 @@ func splitSSELines(b []byte) [][]byte {
 // "\r" of any kind ever reaches the wire from here, regardless of what
 // readSSE upstream of this call did or did not already split it on.
 func (s *sseWriter) writeData(b []byte) error {
-	lines := splitSSELines(b)
-	buf := make([]byte, 0, len(b)+len(lines)*len(sseDataPrefix)+1)
-	for _, line := range lines {
+	var buf []byte
+	if !bytes.ContainsAny(b, "\r\n") {
+		buf = make([]byte, 0, len(sseDataPrefix)+len(b)+2)
 		buf = append(buf, sseDataPrefix...)
-		buf = append(buf, line...)
+		buf = append(buf, b...)
 		buf = append(buf, '\n')
+	} else {
+		lines := splitSSELines(b)
+		buf = make([]byte, 0, len(b)+len(lines)*len(sseDataPrefix)+1)
+		for _, line := range lines {
+			buf = append(buf, sseDataPrefix...)
+			buf = append(buf, line...)
+			buf = append(buf, '\n')
+		}
 	}
 	buf = append(buf, '\n')
 

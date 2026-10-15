@@ -3,7 +3,9 @@ package traefikllmgateway
 import (
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 // anthropicAPIVersion is the "anthropic-version" header value every request
@@ -695,6 +697,7 @@ type anthropicStreamState struct {
 	toolOrdinals    map[int]int
 	id              string
 	model           string
+	content         contentChunker
 	u               usage
 	created         int64
 	nextToolOrdinal int
@@ -705,7 +708,9 @@ type anthropicStreamState struct {
 // created the response timestamp every emitted chunk carries — the
 // adapter fixes both once, before the first upstream event arrives.
 func newAnthropicStreamState(model string, created int64) *anthropicStreamState {
-	return &anthropicStreamState{model: model, created: created, toolOrdinals: map[int]int{}}
+	st := &anthropicStreamState{model: model, created: created, toolOrdinals: map[int]int{}}
+	st.content.set(chatCompletionIDPrefix, model, created)
+	return st
 }
 
 // usage returns the prompt/completion token counts captured so far, from
@@ -739,6 +744,100 @@ func (st *anthropicStreamState) chunk(delta map[string]any, finishReason *string
 		panic(fmt.Sprintf("llmgateway: anthropic stream chunk failed to marshal: %v", err))
 	}
 	return b
+}
+
+// contentChunkHead frames a text-delta chunk with the same alphabetical
+// key order json.Marshal gives a map, so the bytes are identical to the
+// chunk method's output for map[string]any{"content": text}.
+const contentChunkHead = `{"choices":[{"delta":{"content":`
+
+// contentChunker builds text-delta chunks without allocating the envelope
+// maps a state's chunk method needs for arbitrary deltas.
+type contentChunker struct {
+	// tail is the per-stream suffix after the delta text, rebuilt by set.
+	tail []byte
+}
+
+// set fixes the envelope fields every later chunk carries; call it again
+// whenever the stream id changes.
+func (c *contentChunker) set(id, model string, created int64) {
+	idb, ierr := json.Marshal(id)
+	mb, merr := json.Marshal(model)
+	if ierr != nil || merr != nil {
+		panic("llmgateway: stream chunk failed to marshal id or model")
+	}
+	t := append([]byte(nil), `},"finish_reason":null,"index":0}],"created":`...)
+	t = strconv.AppendInt(t, created, 10)
+	t = append(t, `,"id":`...)
+	t = append(t, idb...)
+	t = append(t, `,"model":`...)
+	t = append(t, mb...)
+	t = append(t, `,"object":"chat.completion.chunk"}`...)
+	c.tail = t
+}
+
+func (c *contentChunker) build(text string) []byte {
+	out := make([]byte, 0, len(contentChunkHead)+len(text)+len(text)/8+2+len(c.tail))
+	out = append(out, contentChunkHead...)
+	out = appendJSONString(out, text)
+	return append(out, c.tail...)
+}
+
+const jsonHex = "0123456789abcdef"
+
+// appendJSONString appends s as a quoted JSON string using
+// encoding/json's default escaping (HTML characters, U+2028/U+2029 and
+// invalid UTF-8 included), so its output equals json.Marshal(s).
+func appendJSONString(dst []byte, s string) []byte {
+	dst = append(dst, '"')
+	start := 0
+	for i := 0; i < len(s); {
+		b := s[i]
+		if b < utf8.RuneSelf {
+			if b >= 0x20 && b != '"' && b != '\\' && b != '<' && b != '>' && b != '&' {
+				i++
+				continue
+			}
+			dst = append(dst, s[start:i]...)
+			switch b {
+			case '"', '\\':
+				dst = append(dst, '\\', b)
+			case '\b':
+				dst = append(dst, '\\', 'b')
+			case '\f':
+				dst = append(dst, '\\', 'f')
+			case '\n':
+				dst = append(dst, '\\', 'n')
+			case '\r':
+				dst = append(dst, '\\', 'r')
+			case '\t':
+				dst = append(dst, '\\', 't')
+			default:
+				dst = append(dst, '\\', 'u', '0', '0', jsonHex[b>>4], jsonHex[b&0xF])
+			}
+			i++
+			start = i
+			continue
+		}
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if r == utf8.RuneError && size == 1 {
+			dst = append(dst, s[start:i]...)
+			dst = append(dst, "\xef\xbf\xbd"...)
+			i += size
+			start = i
+			continue
+		}
+		if r == '\u2028' || r == '\u2029' {
+			dst = append(dst, s[start:i]...)
+			dst = append(dst, '\\', 'u', '2', '0', '2', jsonHex[r&0xF])
+			i += size
+			start = i
+			continue
+		}
+		i += size
+	}
+	dst = append(dst, s[start:]...)
+	return append(dst, '"')
 }
 
 // usageChunk builds the final usage-only "chat.completion.chunk" payload —
@@ -854,6 +953,7 @@ func (st *anthropicStreamState) translate(ev sseEvent) ([][]byte, error) {
 			return nil, fmt.Errorf("%w: decode anthropic message_start event: %w", errUpstream, err)
 		}
 		st.id = p.Message.ID
+		st.content.set(chatCompletionIDPrefix+st.id, st.model, st.created)
 		st.u.prompt = p.Message.Usage.totalInputTokens()
 		return [][]byte{st.chunk(map[string]any{"role": "assistant"}, nil)}, nil
 
@@ -886,7 +986,7 @@ func (st *anthropicStreamState) translate(ev sseEvent) ([][]byte, error) {
 		}
 		switch p.Delta.Type {
 		case "text_delta":
-			return [][]byte{st.chunk(map[string]any{"content": p.Delta.Text}, nil)}, nil
+			return [][]byte{st.content.build(p.Delta.Text)}, nil
 		case "input_json_delta":
 			ordinal, ok := st.toolOrdinals[p.Index]
 			if !ok {
