@@ -664,6 +664,9 @@ type modelRegistry struct {
 	// cheap nil-map lookup (always false/zero) that adds no branching
 	// cost to the v0.1 no-aliases case.
 	aliases map[string]string
+	// requirePrefix is Config.RequireModelPrefix: resolve and listFor treat
+	// a bare id as unaddressable, leaving "provider/model" and aliases.
+	requirePrefix bool
 	// modelMeta is the validated Config.ModelMeta config-override map
 	// (feature v0.23), built once by newModelRegistry via
 	// validateModelMeta and never mutated afterward. nil (not merely
@@ -882,6 +885,7 @@ func newModelRegistry(adapters map[string]providerAdapter, cfg *Config, log func
 		return nil, err
 	}
 	m.aliases = aliases
+	m.requirePrefix = cfg.RequireModelPrefix
 
 	modelMeta, err := validateModelMeta(cfg.ModelMeta)
 	if err != nil {
@@ -1603,6 +1607,9 @@ func (m *modelRegistry) resolve(id string, grp *group) (providerAdapter, string,
 	if providerName, rest, ok := m.splitConfiguredProvider(id); ok {
 		return m.resolveAgainst(providerName, rest, id, "", grp, errModelUnknown)
 	}
+	if m.requirePrefix {
+		return nil, "", "", errModelUnknown
+	}
 	providerName, ok := m.bareWinner(id, grp)
 	if !ok {
 		return nil, "", "", errModelUnknown
@@ -1981,10 +1988,10 @@ func (m *modelRegistry) listFor(grp *group) []map[string]any {
 		// that branch (harmless — matchesGlob is cheap), but still
 		// REQUIRED for the single-grant fast path, which never consults
 		// id at all.
-		if gwOK && grp.allowsProviderModel(groupWinner, id) && !shadowed && !ambiguousBareID {
+		if gwOK && grp.allowsProviderModel(groupWinner, id) && !shadowed && !ambiguousBareID && !m.requirePrefix {
 			out = append(out, modelObject(id, groupWinner, m.resolveMetaFor(groupWinner, id)))
 		}
-		if len(visible) < 2 && !shadowed && !ambiguousBareID {
+		if len(visible) < 2 && !shadowed && !ambiguousBareID && !m.requirePrefix {
 			continue // only one provider serving id is visible to grp: no disambiguating prefix to add
 		}
 		for _, p := range visible {
