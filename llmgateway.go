@@ -127,6 +127,12 @@ type Config struct {
 	// exposure (GET /admin/api/targets, llmgateway_target_healthy) stay
 	// on unconditionally regardless of this block's presence.
 	TargetHealth TargetHealthConfig `json:"targetHealth"`
+	// MaxRequestBytes raises the unified chat/embeddings body cap above the
+	// default maxUnifiedRequestBytes (4MiB), clamped to
+	// maxExplicitUnifiedRequestBytes. 0 or negative keeps the default. Size
+	// maxInFlightBodyRequests and the pod memory limit to match: an
+	// adversarial body decodes to ~12x live heap.
+	MaxRequestBytes int64 `json:"maxRequestBytes,omitempty"`
 	// MaxInFlightBodyRequests caps how many unified and media JSON/
 	// multipart requests (routes_unified.go's runUnified via
 	// readAndDecodeUnifiedBody; routes_media.go's decodeMediaJSONRequest/
@@ -771,6 +777,7 @@ type Gateway struct {
 	next                          http.Handler
 	events                        *eventLog
 	bodyAdmission                 chan struct{}
+	unifiedRequestBytes           int64
 	teeBudget                     *teeBudget
 	fanoutGate                    chan struct{}
 	failoverHealth                *requestHealthTracker
@@ -1061,6 +1068,13 @@ func newGateway(ctx context.Context, next http.Handler, config *Config, name str
 		}
 	}
 	g.bodyAdmission = make(chan struct{}, bodyAdmissionCap)
+	g.unifiedRequestBytes = maxUnifiedRequestBytes
+	if config.MaxRequestBytes > 0 {
+		g.unifiedRequestBytes = config.MaxRequestBytes
+		if g.unifiedRequestBytes > maxExplicitUnifiedRequestBytes {
+			g.unifiedRequestBytes = maxExplicitUnifiedRequestBytes
+		}
+	}
 	g.teeBudget = newTeeBudget(maxAccountingTeeTotalBytes)
 	g.fanoutGate = make(chan struct{}, mcpFederatedFanoutGlobalConcurrency)
 
