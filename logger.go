@@ -4,12 +4,22 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strings"
 )
+
+// logSafe escapes the line breaks in msg. A value an upstream controls, such
+// as a panic or error string, must not forge extra log lines.
+func logSafe(msg string) string {
+	if !strings.ContainsAny(msg, "\r\n") {
+		return msg
+	}
+	return strings.NewReplacer("\r", "\\r", "\n", "\\n").Replace(msg)
+}
 
 // logf writes an info-level log line to stderr. No timestamps — Traefik
 // adds its own. Never log key material.
 func (g *Gateway) logf(format string, args ...any) {
-	fmt.Fprintf(os.Stderr, "llmgw[%s] INFO %s\n", g.name, fmt.Sprintf(format, args...))
+	fmt.Fprintf(os.Stderr, "llmgw[%s] INFO %s\n", g.name, logSafe(fmt.Sprintf(format, args...)))
 }
 
 // warnf writes a warning-level log line to stderr. No timestamps —
@@ -30,7 +40,7 @@ func (g *Gateway) logf(format string, args ...any) {
 // see noteConfigWarning's own doc comment for why.
 func (g *Gateway) warnf(format string, args ...any) {
 	msg := fmt.Sprintf(format, args...)
-	fmt.Fprintf(os.Stderr, "llmgw[%s] WARN %s\n", g.name, msg)
+	fmt.Fprintf(os.Stderr, "llmgw[%s] WARN %s\n", g.name, logSafe(msg))
 	g.noteConfigWarning(msg)
 }
 
@@ -80,7 +90,7 @@ func (g *Gateway) configWarningsSnapshot() (warnings []string, dropped int) {
 // errorf writes an error-level log line to stderr. No timestamps — Traefik
 // adds its own. Never log key material.
 func (g *Gateway) errorf(format string, args ...any) {
-	fmt.Fprintf(os.Stderr, "llmgw[%s] ERROR %s\n", g.name, fmt.Sprintf(format, args...))
+	fmt.Fprintf(os.Stderr, "llmgw[%s] ERROR %s\n", g.name, logSafe(fmt.Sprintf(format, args...)))
 }
 
 // pricingWarn is g's own per-instance pricing-warning sink, passed to

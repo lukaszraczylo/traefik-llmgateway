@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 )
 
 // messagesPath is the inbound Anthropic Messages API route this gateway
@@ -212,6 +213,9 @@ func (g *Gateway) callAnthropicMessagesPassthrough(ctx context.Context, w http.R
 	hdr := http.Header{}
 	hdr.Set("Content-Type", "application/json")
 	for _, name := range anthropicPassthroughForwardedHeaders {
+		if g.cfg.StripClientAnthropicBeta && strings.EqualFold(name, "anthropic-beta") {
+			continue
+		}
 		for _, v := range clientHeaders.Values(name) {
 			hdr.Add(name, v)
 		}

@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -1137,6 +1138,10 @@ func lastSSEDataLine(body []byte) []byte {
 // concurrency or backend count — see its own doc comment.
 const mcpFederatedFanoutConcurrency = 8
 
+// mcpFederatedFanoutGlobalConcurrency caps the backend connections every
+// concurrent federated tools/list call may hold together.
+const mcpFederatedFanoutGlobalConcurrency = 32
+
 // mcpFederatedToolsList implements the federated "tools/list": it fans
 // out one per-server fetch (below) per server in names (handleMCPFederated's
 // own allowedMCPServerNames(grp) call, made once there so the exact set
@@ -1280,6 +1285,23 @@ func (g *Gateway) mcpFederatedToolsList(w http.ResponseWriter, format mcpRespons
 				return
 			}
 			defer func() { <-sem }()
+
+			// The per-request semaphore above bounds one tools/list call;
+			// fanoutGate bounds every concurrent call together, so N
+			// callers cannot open N x mcpFederatedFanoutConcurrency
+			// connections to the backends. A nil gate (a Gateway built
+			// without New) is unbounded, as before.
+			if g.fanoutGate != nil {
+				select {
+				case g.fanoutGate <- struct{}{}:
+					defer func() { <-g.fanoutGate }()
+				case <-fanoutCtx.Done():
+					mu.Lock()
+					failed = append(failed, name)
+					mu.Unlock()
+					return
+				}
+			}
 
 			// F10: this goroutine won the semaphore, so it is about to
 			// actually dial the server — recorded now, unconditionally,
@@ -1629,5 +1651,22 @@ func (g *Gateway) mcpFederatedToolsCall(w http.ResponseWriter, format mcpRespons
 		return
 	}
 
-	writeJSONRPCEnvelope(w, format, jsonrpcResponse{ID: req.ID, Result: resp.Result, Error: resp.Error})
+	relayed := resp.Error
+	if relayed != nil {
+		scrubbed := *relayed
+		scrubbed.Message = scrubRelayedBackendMessage(relayed.Message, g.cfg.MCPServers[serverName].URL)
+		relayed = &scrubbed
+	}
+	writeJSONRPCEnvelope(w, format, jsonrpcResponse{ID: req.ID, Result: resp.Result, Error: relayed})
+}
+
+// urlQueryPattern matches the query string of any URL in free text.
+var urlQueryPattern = regexp.MustCompile(`(https?://[^\s?#"']+)\?[^\s#"']*`)
+
+// scrubRelayedBackendMessage removes credentials a backend's own error text
+// can carry before the text reaches a caller: the configured target URL in
+// any form, and the query string of every URL, where API keys travel.
+func scrubRelayedBackendMessage(msg, targetURL string) string {
+	msg = sanitizeProviderErr(msg, targetURL)
+	return urlQueryPattern.ReplaceAllString(msg, "$1?[redacted]")
 }

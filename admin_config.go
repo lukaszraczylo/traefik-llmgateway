@@ -44,6 +44,14 @@ var redactedConfigKeys = map[string]bool{
 	"password": true,
 }
 
+// hiddenConfigKeys names JSON keys whose non-empty value is replaced
+// outright: RedisConfig.Address ("address"), which can embed credentials in
+// a redis:// URL. UsersConfig.File stays visible on purpose, as a path
+// reveals where user keys live without holding one.
+var hiddenConfigKeys = map[string]bool{
+	"address": true,
+}
+
 // baseURLLikeConfigKeys names every JSON object key redactConfig passes
 // through sanitizeBaseURL (admin.go) instead of the literal/env/file
 // redaction rule above: ProviderConfig.BaseURL ("baseUrl") and
@@ -102,6 +110,10 @@ func redactValue(v any) {
 			switch {
 			case redactedConfigKeys[k] && isString:
 				t[k] = redactSecretString(s)
+			case hiddenConfigKeys[k] && isString:
+				if s != "" {
+					t[k] = redactedSecretPlaceholder
+				}
 			case baseURLLikeConfigKeys[k] && isString:
 				t[k] = sanitizeBaseURL(s)
 			default:

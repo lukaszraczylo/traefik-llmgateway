@@ -664,9 +664,6 @@ type modelRegistry struct {
 	// cheap nil-map lookup (always false/zero) that adds no branching
 	// cost to the v0.1 no-aliases case.
 	aliases map[string]string
-	// requirePrefix is Config.RequireModelPrefix: resolve and listFor treat
-	// a bare id as unaddressable, leaving "provider/model" and aliases.
-	requirePrefix bool
 	// modelMeta is the validated Config.ModelMeta config-override map
 	// (feature v0.23), built once by newModelRegistry via
 	// validateModelMeta and never mutated afterward. nil (not merely
@@ -722,6 +719,9 @@ type modelRegistry struct {
 	warnedMu        sync.Mutex
 	// modelsCacheMu guards modelsCache.
 	modelsCacheMu sync.Mutex
+	// requirePrefix is Config.RequireModelPrefix: resolve and listFor treat
+	// a bare id as unaddressable, leaving "provider/model" and aliases.
+	requirePrefix bool
 }
 
 // modelsCacheEntry is one cached, encoded GET /v1/models response body
@@ -1553,6 +1553,13 @@ func (m *modelRegistry) bareWinner(id string, grp *group, extraIDs ...string) (s
 		return winner, true
 	}
 	return visible[0], true
+}
+
+// providerHasModel reports whether provider's explicit or discovered model
+// set contains id.
+func (m *modelRegistry) providerHasModel(provider, id string) bool {
+	st, ok := m.states[provider]
+	return ok && st.hasModel(id)
 }
 
 // resolve maps a client-requested model id to the adapter that serves it.

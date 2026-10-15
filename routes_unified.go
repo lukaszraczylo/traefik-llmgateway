@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -501,6 +500,10 @@ func (g *Gateway) runMeteredCall(sw *statusTrackingWriter, r *http.Request, scop
 				// requires for a cache-enabled, admin-ENABLED-but-stats-off
 				// case. Gating here, not just inside recordCacheHit, is what
 				// actually saves the parse.
+				if g.cfg.Cache.AccountHits {
+					hitUsage := cachedUsage(cached.Body)
+					g.limiter.accountWith(scopes, hitUsage, unifiedCostMicros(cand.canonical, cand.upstreamModel, hitUsage, g.cfg.Pricing, g.cfg.ModelMeta, g.pricingWarn), accountExtras{provider: cand.providerName})
+				}
 				if g.limiter.statsAdmin {
 					saved := unifiedCostMicros(cand.canonical, cand.upstreamModel, cachedUsage(cached.Body), g.cfg.Pricing, g.cfg.ModelMeta, func(string) {})
 					g.limiter.recordCacheHit(cand.canonical, saved)
@@ -691,13 +694,13 @@ func (g *Gateway) runMeteredCall(sw *statusTrackingWriter, r *http.Request, scop
 				// never streamed at all, or a failover pair is double-
 				// billed: the failed candidate's phantom estimate plus
 				// the next candidate's real usage.
-				result.prompt = int64(math.Ceil(float64(len(body)) / 4))
+				result.prompt = estimatePromptTokens(int64(len(body)))
 				result.estimated = true
 				g.logf("%s: streaming response from model %q failed or was canceled after starting to write to the client with zero usage reported; accounting an estimate derived from request body size", logPrefix, cand.canonical)
 			case streaming:
 				g.logf("%s: zero usage reported for a streaming response from model %q; accounting the request only", logPrefix, cand.canonical)
 			case callErr == nil:
-				result.prompt = int64(math.Ceil(float64(len(body)) / 4))
+				result.prompt = estimatePromptTokens(int64(len(body)))
 				result.estimated = true
 			}
 		}
@@ -1434,4 +1437,19 @@ func (w *cacheCaptureWriter) Write(b []byte) (int, error) {
 		}
 	}
 	return w.statusTrackingWriter.Write(b)
+}
+
+// maxEstimatedPromptTokens caps a body-size estimate, so a padded request
+// cannot bill, or overshoot a budget by, more than a very large context
+// window would legitimately hold.
+const maxEstimatedPromptTokens = 1 << 20
+
+// estimatePromptTokens estimates prompt tokens as one per four body bytes,
+// rounded up and capped at maxEstimatedPromptTokens.
+func estimatePromptTokens(bodyBytes int64) int64 {
+	est := (bodyBytes + 3) / 4
+	if est > maxEstimatedPromptTokens {
+		return maxEstimatedPromptTokens
+	}
+	return est
 }

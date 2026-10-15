@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math"
 	"net/http"
 	"net/url"
 	"strings"
@@ -28,6 +27,11 @@ const maxPassthroughBytes = 32 << 20
 // while the client-facing io.Copy streams every byte of the response —
 // of any size — without ever waiting for the full body to buffer first.
 const maxAccountingTeeBytes = 4 << 20
+
+// maxAccountingTeeTotalBytes caps the bytes all concurrent accounting tees
+// may retain together. A response that cannot reserve room is accounted
+// from the truncated-body estimate instead of its parsed usage.
+const maxAccountingTeeTotalBytes = 256 << 20
 
 // sseAccountingHeadBytes/sseAccountingTailBytes cap sseAccountingBuffer
 // (verify-core fix, round 4): an SSE stream used to be teed through the
@@ -419,8 +423,42 @@ func hasTraversalSegment(rest string) bool {
 // parse afterward. truncated records whether the cap was hit, so the
 // caller knows a parse would only fail on cut-off JSON and skips it.
 type cappedAccountingBuffer struct {
+	budget    *teeBudget
 	buf       bytes.Buffer
+	reserved  int64
 	truncated bool
+}
+
+// teeBudget bounds the bytes every in-flight accounting tee may hold at
+// once, so N concurrent large responses cannot add up to N x
+// maxAccountingTeeBytes. Counters use the sync/atomic function forms, the
+// style this package already uses under Yaegi.
+type teeBudget struct {
+	used  int64
+	limit int64
+}
+
+func newTeeBudget(limit int64) *teeBudget { return &teeBudget{limit: limit} }
+
+// reserve claims n bytes and reports whether the budget had room.
+func (b *teeBudget) reserve(n int64) bool {
+	if atomic.AddInt64(&b.used, n) > b.limit {
+		atomic.AddInt64(&b.used, -n)
+		return false
+	}
+	return true
+}
+
+func (b *teeBudget) free(n int64) { atomic.AddInt64(&b.used, -n) }
+
+// release returns the tee's reserved bytes to the budget. It is safe on a
+// nil receiver and idempotent.
+func (c *cappedAccountingBuffer) release() {
+	if c == nil || c.budget == nil || c.reserved == 0 {
+		return
+	}
+	c.budget.free(c.reserved)
+	c.reserved = 0
 }
 
 // Write implements io.Writer. It always reports success for the full
@@ -443,6 +481,13 @@ func (c *cappedAccountingBuffer) Write(p []byte) (int, error) {
 	if len(p) > remaining {
 		p = p[:remaining]
 		c.truncated = true
+	}
+	if c.budget != nil {
+		if !c.budget.reserve(int64(len(p))) {
+			c.truncated = true
+			return n, nil
+		}
+		c.reserved += int64(len(p))
 	}
 	c.buf.Write(p) //nolint:errcheck // bytes.Buffer.Write never errors
 	return n, nil
@@ -1180,6 +1225,9 @@ func (g *Gateway) handlePassthrough(w http.ResponseWriter, r *http.Request, u *u
 		}
 	}
 
+	if !proxyMethodAllowed(w, r) {
+		return
+	}
 	if r.Header.Get("Upgrade") != "" {
 		writeOAIError(w, http.StatusNotImplemented, "invalid_request_error", "websocket/upgrade passthrough not supported")
 		return
@@ -1224,9 +1272,11 @@ func (g *Gateway) handlePassthrough(w http.ResponseWriter, r *http.Request, u *u
 	// was already restored via io.MultiReader after that first call) so
 	// this check runs independently of whether the group restricts
 	// models at all.
+	var gatedModel string
 	if !g.cfg.AllowUnpricedWithCostBudget && scopesHaveCostBudget(scopes) {
 		if model, hasModel, _, peekErr := peekPassthroughModel(r); peekErr == nil && hasModel {
 			canonical := providerName + "/" + model
+			gatedModel = model
 			if !priceKnown(canonical, model, g.cfg.Pricing, g.cfg.ModelMeta) {
 				g.logf("passthrough: refusing model %q: it has no configured price, and a cost budget applies to this caller that cannot be enforced without one", model)
 				g.recordUnpricedRefusalEvent(scopes, canonical, providerName, routePassthrough) // F3 hook 5 (item 5, this round)
@@ -1271,6 +1321,7 @@ func (g *Gateway) handlePassthrough(w http.ResponseWriter, r *http.Request, u *u
 	}
 
 	result, complete := g.proxyUpstream(w, r, upstreamURL, adapter.httpClient(), adapter.injectAuth, providerCredentialRetargetHeaders, true, "passthrough (provider "+providerName+")", adapter.requestTimeout())
+	defer result.tee.release()
 	g.recordProxyEvent(scopes, providerName, routePassthrough, result) // F3 hook 3 (v0.3 dashboard task)
 
 	// Finding 2 fix (review-routes.md): a build/dial failure that never
@@ -1335,7 +1386,7 @@ func (g *Gateway) handlePassthrough(w http.ResponseWriter, r *http.Request, u *u
 		if !canEstimate || result.requestBytes <= 0 {
 			return
 		}
-		respUsage = usage{prompt: int64(math.Ceil(float64(result.requestBytes) / 4)), estimated: true}
+		respUsage = usage{prompt: estimatePromptTokens(int64(result.requestBytes)), estimated: true}
 		if respModel == "" {
 			respModel = "unknown/" + providerName
 		}
@@ -1343,7 +1394,19 @@ func (g *Gateway) handlePassthrough(w http.ResponseWriter, r *http.Request, u *u
 	}
 
 	canonical := providerName + "/" + respModel
-	cost := unifiedCostMicros(canonical, respModel, respUsage, g.cfg.Pricing, g.cfg.ModelMeta, g.pricingWarn)
+	billModel := respModel
+	// Gate and bill on the same price: an upstream that echoes a model id
+	// the gate never saw must not turn a priced request into a free one.
+	if gatedModel != "" && respModel != gatedModel && !priceKnown(canonical, respModel, g.cfg.Pricing, g.cfg.ModelMeta) {
+		billModel = gatedModel
+	}
+	cost := unifiedCostMicros(providerName+"/"+billModel, billModel, respUsage, g.cfg.Pricing, g.cfg.ModelMeta, g.pricingWarn)
+	// Only ids the provider is known to serve get a model scope: the id is
+	// read from the upstream response body, so any other value would mint
+	// counter keys without bound.
+	if !g.registry.providerHasModel(providerName, respModel) {
+		canonical = ""
+	}
 	// withModelScope drops the model scope when respModel is empty (the
 	// upstream reported no model id), so a passthrough reply the gateway
 	// cannot attribute still accounts to user/group/total as before.
@@ -1714,7 +1777,7 @@ func (g *Gateway) proxyUpstream(w http.ResponseWriter, r *http.Request, upstream
 	var reader io.Reader = resp.Body
 	switch {
 	case isJSON:
-		tee = &cappedAccountingBuffer{}
+		tee = &cappedAccountingBuffer{budget: g.teeBudget}
 		reader = io.TeeReader(resp.Body, tee)
 	case isSSE:
 		sseTee = &sseAccountingBuffer{}
@@ -1737,4 +1800,17 @@ func (g *Gateway) proxyUpstream(w http.ResponseWriter, r *http.Request, upstream
 		return proxyResult{isJSON: isJSON, isSSE: isSSE, tee: tee, sseTee: sseTee, status: resp.StatusCode, requestBytes: requestBytes}, false
 	}
 	return proxyResult{isJSON: isJSON, isSSE: isSSE, tee: tee, sseTee: sseTee, status: resp.StatusCode, requestBytes: requestBytes}, true
+}
+
+// proxyMethodAllowed rejects the methods a reverse proxy to a configured
+// backend must never relay. CONNECT opens a tunnel and TRACE echoes the
+// request back, and no supported provider or target needs either.
+func proxyMethodAllowed(w http.ResponseWriter, r *http.Request) bool {
+	switch r.Method {
+	case http.MethodConnect, http.MethodTrace:
+		w.Header().Set("Allow", "GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS")
+		writeOAIError(w, http.StatusMethodNotAllowed, "invalid_request_error", "method not allowed")
+		return false
+	}
+	return true
 }
