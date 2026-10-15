@@ -1555,6 +1555,13 @@ func (m *modelRegistry) bareWinner(id string, grp *group, extraIDs ...string) (s
 	return visible[0], true
 }
 
+// providerHasModel reports whether provider's explicit or discovered model
+// set contains id.
+func (m *modelRegistry) providerHasModel(provider, id string) bool {
+	st, ok := m.states[provider]
+	return ok && st.hasModel(id)
+}
+
 // resolve maps a client-requested model id to the adapter that serves it.
 // It returns the adapter, the upstream model id to send that adapter (the
 // id form the provider itself knows, with any gateway-side provider prefix

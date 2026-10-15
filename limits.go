@@ -1824,6 +1824,23 @@ func (l *limiter) accountWith(scopes []limitScope, u usage, costMicros int64, x 
 	// misbehaving or hostile upstream is visible rather than silently
 	// rewriting a budget. Clamped per-component, so one bad field does not
 	// discard the other two, which may be perfectly valid.
+	// The positive direction needs a ceiling too: one absurd figure from an
+	// upstream (or a saturated cost) would otherwise put a counter past
+	// every budget until its window, up to 400 days on Redis, expires. No
+	// real request reports figures anywhere near these bounds, so an
+	// out-of-range figure is dropped like a negative one.
+	if u.prompt > maxUsageTokensPerRequest || u.completion > maxUsageTokensPerRequest || costMicros > maxCostMicrosPerRequest {
+		l.logf("%s", fmt.Sprintf("limits: dropping implausible usage reported by an upstream (prompt=%d completion=%d costMicros=%d)", u.prompt, u.completion, costMicros))
+		if u.prompt > maxUsageTokensPerRequest {
+			u.prompt = 0
+		}
+		if u.completion > maxUsageTokensPerRequest {
+			u.completion = 0
+		}
+		if costMicros > maxCostMicrosPerRequest {
+			costMicros = 0
+		}
+	}
 	if u.prompt < 0 || u.completion < 0 || costMicros < 0 {
 		l.logf("%s", fmt.Sprintf("limits: dropping negative usage reported by an upstream (prompt=%d completion=%d costMicros=%d); these counters are increment-only", u.prompt, u.completion, costMicros))
 		if u.prompt < 0 {
@@ -2249,6 +2266,15 @@ const (
 // serving provider kept in the key. windowKey embeds kind, so a model
 // scope can never collide with a user, group, provider or target scope.
 const kindModel = "model"
+
+// maxUsageTokensPerRequest and maxCostMicrosPerRequest bound what one
+// upstream response may add to a token or cost counter. 2^30 tokens is
+// far above any model context window, and 2^40 micro-USD is about
+// 1.1 million USD.
+const (
+	maxUsageTokensPerRequest = 1 << 30
+	maxCostMicrosPerRequest  = 1 << 40
+)
 
 // maxModelScopeIDLen bounds the "provider/model" id withModelScope will
 // accept as a counter-scope id. Generous next to any real model id —

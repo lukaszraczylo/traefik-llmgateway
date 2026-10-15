@@ -447,6 +447,11 @@ type CacheConfig struct {
 	// value above maxCacheMaxBodyBytes is a construction error.
 	MaxBodyBytes int  `json:"maxBodyBytes,omitempty"`
 	Enabled      bool `json:"enabled,omitempty"`
+	// AccountHits charges the usage a cached response originally reported
+	// to the user and group that receive the hit, so token and cost
+	// budgets also bind repeated identical prompts. Defaults to false: a
+	// hit then adds only to the request counters.
+	AccountHits bool `json:"accountHits,omitempty"`
 }
 
 // BreakerConfig configures the per-provider discovery circuit breaker
@@ -761,6 +766,7 @@ type Gateway struct {
 	next                          http.Handler
 	events                        *eventLog
 	bodyAdmission                 chan struct{}
+	teeBudget                     *teeBudget
 	failoverHealth                *requestHealthTracker
 	targetHealth                  *targetHealthTracker
 	limiter                       *limiter
@@ -1049,6 +1055,7 @@ func newGateway(ctx context.Context, next http.Handler, config *Config, name str
 		}
 	}
 	g.bodyAdmission = make(chan struct{}, bodyAdmissionCap)
+	g.teeBudget = newTeeBudget(maxAccountingTeeTotalBytes)
 
 	if config.Users != nil && config.Users.File != "" {
 		if err = attachUsersFile(auth, config.Users.File, g); err != nil {

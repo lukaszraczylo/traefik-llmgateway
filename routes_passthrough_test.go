@@ -3355,7 +3355,7 @@ func TestHandlePassthrough_ModelLatencyAndUModelSuppressed_ProviderHistogramsOnl
 
 	cfg := CreateConfig()
 	cfg.Providers = map[string]*ProviderConfig{
-		"openai": {Type: "openai", BaseURL: srv.URL, APIKey: "sk-up"},
+		"openai": {Type: "openai", BaseURL: srv.URL, APIKey: "sk-up", Models: []string{"gpt-native-x"}},
 	}
 	cfg.Groups = map[string]*GroupConfig{"default": {}}
 	cfg.Users = &UsersConfig{Inline: []*UserConfig{
