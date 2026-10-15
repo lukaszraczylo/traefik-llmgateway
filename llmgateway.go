@@ -55,11 +55,6 @@ type Config struct {
 	// (validateModelAliases, registry.go).
 	ModelAliases map[string]string          `json:"modelAliases,omitempty"`
 	Providers    map[string]*ProviderConfig `json:"providers,omitempty"`
-	// RequireModelPrefix, when true, makes every model addressable only as
-	// "provider/model" or as a ModelAliases id: a bare discovered id is not
-	// resolved (404 unknown model) and is not listed by GET /v1/models. It
-	// removes the sorted-first bare-id collision winner. Defaults to false.
-	RequireModelPrefix bool `json:"requireModelPrefix,omitempty"`
 	// ModelMeta declares per-model metadata overrides (feature v0.23):
 	// context window size and per-token cost, keyed by an exact
 	// "provider/model" id or a bare model id (applying wherever that bare
@@ -177,6 +172,11 @@ type Config struct {
 	// already does. Without it a tenant can enable beta features on the
 	// operator's own Anthropic account. Defaults to false.
 	StripClientAnthropicBeta bool `json:"stripClientAnthropicBeta,omitempty"`
+	// RequireModelPrefix, when true, makes every model addressable only as
+	// "provider/model" or as a ModelAliases id: a bare discovered id is not
+	// resolved (404 unknown model) and is not listed by GET /v1/models. It
+	// removes the sorted-first bare-id collision winner. Defaults to false.
+	RequireModelPrefix bool `json:"requireModelPrefix,omitempty"`
 }
 
 // ProviderConfig describes one upstream LLM provider.

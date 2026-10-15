@@ -664,9 +664,6 @@ type modelRegistry struct {
 	// cheap nil-map lookup (always false/zero) that adds no branching
 	// cost to the v0.1 no-aliases case.
 	aliases map[string]string
-	// requirePrefix is Config.RequireModelPrefix: resolve and listFor treat
-	// a bare id as unaddressable, leaving "provider/model" and aliases.
-	requirePrefix bool
 	// modelMeta is the validated Config.ModelMeta config-override map
 	// (feature v0.23), built once by newModelRegistry via
 	// validateModelMeta and never mutated afterward. nil (not merely
@@ -722,6 +719,9 @@ type modelRegistry struct {
 	warnedMu        sync.Mutex
 	// modelsCacheMu guards modelsCache.
 	modelsCacheMu sync.Mutex
+	// requirePrefix is Config.RequireModelPrefix: resolve and listFor treat
+	// a bare id as unaddressable, leaving "provider/model" and aliases.
+	requirePrefix bool
 }
 
 // modelsCacheEntry is one cached, encoded GET /v1/models response body
