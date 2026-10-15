@@ -74,6 +74,10 @@ const maxRequestBytes = 10 << 20
 // package ships.
 const maxUnifiedRequestBytes = 4 << 20
 
+// maxExplicitUnifiedRequestBytes is the ceiling for Config.MaxRequestBytes,
+// so an explicit value cannot disable the bound.
+const maxExplicitUnifiedRequestBytes = 64 << 20
+
 // gatewayAliasKey is the request map's internal-convention key carrying
 // the client-requested model id through to an adapter (ruling a, ALIAS
 // ECHO), distinct from "model" itself, which runUnified rewrites to the
@@ -1069,7 +1073,7 @@ func (g *Gateway) readAndDecodeUnifiedBody(sw *statusTrackingWriter, r *http.Req
 		return nil, nil, false
 	}
 
-	body, oversize, err := readCapped(r.Body, maxUnifiedRequestBytes)
+	body, oversize, err := readCapped(r.Body, g.unifiedRequestBytes)
 	if err != nil {
 		envelope(sw, http.StatusBadRequest, "invalid_request_error", "cannot read request body")
 		return nil, nil, false

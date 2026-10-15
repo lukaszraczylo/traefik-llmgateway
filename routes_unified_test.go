@@ -3128,3 +3128,79 @@ func TestCacheHit_BodyParseSkippedWhenStatsAdminOff(t *testing.T) {
 		t.Errorf("ns/op with admin on (%d) is not meaningfully slower than admin off (%d) — the cached body's own JSON parse (cachedUsage) must be skipped entirely when statsAdmin is off, not merely cheap", nsOn, nsOff)
 	}
 }
+
+func newMaxRequestBytesGateway(t *testing.T, upstream string, maxRequestBytes int64) *Gateway {
+	t.Helper()
+	cfg := CreateConfig()
+	cfg.MaxRequestBytes = maxRequestBytes
+	cfg.Providers = map[string]*ProviderConfig{
+		"openai": {Type: "openai", BaseURL: upstream, APIKey: "k", Models: []string{"gpt-test"}},
+	}
+	cfg.Groups = map[string]*GroupConfig{"default": {}}
+	cfg.Users = &UsersConfig{Inline: []*UserConfig{{Name: "alice", Group: "default", APIKey: "sk-alice"}}}
+	h, err := New(context.Background(), http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), cfg, "llmgw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	return h.(*Gateway)
+}
+
+func postPaddedChat(g *Gateway, padBytes int) *httptest.ResponseRecorder {
+	body := `{"model":"gpt-test","padding":"` + strings.Repeat("A", padBytes) + `","messages":[{"role":"user","content":"hi"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer sk-alice")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	g.ServeHTTP(rec, req)
+	return rec
+}
+
+// A client that sends a long agent transcript gets 413 under the default cap
+// and success once the operator raises maxRequestBytes.
+func TestHandleChat_MaxRequestBytes_RaisesUnifiedCap(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"c1","choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`))
+	}))
+	defer srv.Close()
+
+	const pad = 5 << 20
+	if rec := postPaddedChat(newMaxRequestBytesGateway(t, srv.URL, 0), pad); rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("default cap: status = %d, want 413, body=%s", rec.Code, rec.Body.String())
+	}
+	if rec := postPaddedChat(newMaxRequestBytesGateway(t, srv.URL, 16<<20), pad); rec.Code != http.StatusOK {
+		t.Fatalf("16MiB cap: status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// The raised cap still rejects a body past it, so raising the limit never
+// removes the bound.
+func TestHandleChat_MaxRequestBytes_StillRejectsOversize(t *testing.T) {
+	rec := postPaddedChat(newMaxRequestBytesGateway(t, "http://127.0.0.1:1", 16<<20), 16<<20+1024)
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want 413, body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// An explicit value cannot disable the bound: anything above the ceiling is
+// clamped, and a negative value falls back to the default.
+func TestNew_MaxRequestBytes_ClampedAndDefaulted(t *testing.T) {
+	cases := []struct {
+		name string
+		in   int64
+		want int64
+	}{
+		{"unset keeps default", 0, maxUnifiedRequestBytes},
+		{"negative keeps default", -1, maxUnifiedRequestBytes},
+		{"explicit value wins", 16 << 20, 16 << 20},
+		{"above ceiling is clamped", 1 << 40, maxExplicitUnifiedRequestBytes},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := newMaxRequestBytesGateway(t, "http://127.0.0.1:1", tc.in).unifiedRequestBytes; got != tc.want {
+				t.Fatalf("unifiedRequestBytes = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
