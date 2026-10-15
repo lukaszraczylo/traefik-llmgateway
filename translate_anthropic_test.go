@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -1129,6 +1130,27 @@ func TestOpenAIRequestFromAnthropic_NoTools_OmitsToolsAndToolChoiceFields(t *tes
 	}
 }
 
+// sameJSON reports whether got and want encode the same value. Invalid UTF-8
+// input is escaped as \ufffd by encoding/json before Go 1.26 and written as
+// the raw replacement rune after, so those inputs compare semantically.
+func sameJSON(t *testing.T, input string, got, want []byte) bool {
+	t.Helper()
+	if bytes.Equal(got, want) {
+		return true
+	}
+	if utf8.ValidString(input) {
+		return false
+	}
+	var g, w any
+	if err := json.Unmarshal(got, &g); err != nil {
+		return false
+	}
+	if err := json.Unmarshal(want, &w); err != nil {
+		return false
+	}
+	return reflect.DeepEqual(g, w)
+}
+
 func TestContentChunkerMatchesChunk(t *testing.T) {
 	texts := []string{"", "Hello", "a \"quoted\" <b>&amp;</b>", "line\nbreak\ttab", "unicode é 日本 \u2028\u2029", "bad\xffutf8"}
 	for _, id := range []string{"", "msg_01", "we\"ird"} {
@@ -1140,11 +1162,11 @@ func TestContentChunkerMatchesChunk(t *testing.T) {
 		gst.content.set(chatCompletionIDPrefix+id, gst.model, gst.created)
 		for _, text := range texts {
 			gotA := ast.content.build(text)
-			if want := ast.chunk(map[string]any{"content": text}, nil); !bytes.Equal(gotA, want) {
+			if want := ast.chunk(map[string]any{"content": text}, nil); !sameJSON(t, text, gotA, want) {
 				t.Errorf("anthropic id=%q text=%q:\n got %s\nwant %s", id, text, gotA, want)
 			}
 			gotG := gst.content.build(text)
-			if want := gst.chunk(map[string]any{"content": text}, nil); !bytes.Equal(gotG, want) {
+			if want := gst.chunk(map[string]any{"content": text}, nil); !sameJSON(t, text, gotG, want) {
 				t.Errorf("gemini id=%q text=%q:\n got %s\nwant %s", id, text, gotG, want)
 			}
 		}
@@ -1162,7 +1184,7 @@ func TestAppendJSONStringMatchesMarshal(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Marshal(%q): %v", s, err)
 		}
-		if got := appendJSONString(nil, s); !bytes.Equal(got, want) {
+		if got := appendJSONString(nil, s); !sameJSON(t, s, got, want) {
 			t.Errorf("appendJSONString(%q) = %s, want %s", s, got, want)
 		}
 	}
