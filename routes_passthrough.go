@@ -423,8 +423,8 @@ func hasTraversalSegment(rest string) bool {
 // parse afterward. truncated records whether the cap was hit, so the
 // caller knows a parse would only fail on cut-off JSON and skips it.
 type cappedAccountingBuffer struct {
-	buf       bytes.Buffer
 	budget    *teeBudget
+	buf       bytes.Buffer
 	reserved  int64
 	truncated bool
 }
@@ -1225,6 +1225,9 @@ func (g *Gateway) handlePassthrough(w http.ResponseWriter, r *http.Request, u *u
 		}
 	}
 
+	if !proxyMethodAllowed(w, r) {
+		return
+	}
 	if r.Header.Get("Upgrade") != "" {
 		writeOAIError(w, http.StatusNotImplemented, "invalid_request_error", "websocket/upgrade passthrough not supported")
 		return
@@ -1797,4 +1800,17 @@ func (g *Gateway) proxyUpstream(w http.ResponseWriter, r *http.Request, upstream
 		return proxyResult{isJSON: isJSON, isSSE: isSSE, tee: tee, sseTee: sseTee, status: resp.StatusCode, requestBytes: requestBytes}, false
 	}
 	return proxyResult{isJSON: isJSON, isSSE: isSSE, tee: tee, sseTee: sseTee, status: resp.StatusCode, requestBytes: requestBytes}, true
+}
+
+// proxyMethodAllowed rejects the methods a reverse proxy to a configured
+// backend must never relay. CONNECT opens a tunnel and TRACE echoes the
+// request back, and no supported provider or target needs either.
+func proxyMethodAllowed(w http.ResponseWriter, r *http.Request) bool {
+	switch r.Method {
+	case http.MethodConnect, http.MethodTrace:
+		w.Header().Set("Allow", "GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS")
+		writeOAIError(w, http.StatusMethodNotAllowed, "invalid_request_error", "method not allowed")
+		return false
+	}
+	return true
 }

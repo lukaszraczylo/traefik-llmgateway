@@ -196,6 +196,9 @@ func (g *Gateway) handleTargetProxy(w http.ResponseWriter, r *http.Request, u *u
 		return
 	}
 
+	if !proxyMethodAllowed(w, r) {
+		return
+	}
 	if r.Header.Get("Upgrade") != "" {
 		writeOAIError(w, http.StatusNotImplemented, "invalid_request_error", "websocket/upgrade passthrough not supported")
 		return

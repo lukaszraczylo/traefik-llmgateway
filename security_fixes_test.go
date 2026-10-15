@@ -2,9 +2,12 @@ package traefikllmgateway
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -177,4 +180,174 @@ func TestCacheHit_AccountHits_ChargesServingUser(t *testing.T) {
 			assert.EqualValues(t, 2, reqs, "the request counter must not double count a hit")
 		})
 	}
+}
+
+func TestMessages_StripClientAnthropicBeta(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		wantBeta string
+		strip    bool
+	}{
+		{"default forwards the header", "context-1m", false},
+		{"flag strips the header", "", true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var gotBeta string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotBeta = r.Header.Get("anthropic-beta")
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"id":"m","type":"message","role":"assistant","content":[],"model":"claude-real","usage":{"input_tokens":1,"output_tokens":1}}`))
+			}))
+			defer srv.Close()
+			gw := newMessagesTestGateway(t, srv.URL, "")
+			gw.cfg.StripClientAnthropicBeta = tt.strip
+
+			body := map[string]any{"model": "claude-test", "max_tokens": 10, "messages": []any{map[string]any{"role": "user", "content": "hi"}}}
+			req := newMessagesRequest(t, body, "x-api-key", "sk-alice")
+			req.Header.Set("anthropic-beta", "context-1m")
+			rec := httptest.NewRecorder()
+			gw.ServeHTTP(rec, req)
+
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			assert.Equal(t, tt.wantBeta, gotBeta)
+		})
+	}
+}
+
+func TestProxyMethodAllowed(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		method  string
+		allowed bool
+	}{
+		{http.MethodGet, true},
+		{http.MethodPost, true},
+		{http.MethodPut, true},
+		{http.MethodPatch, true},
+		{http.MethodDelete, true},
+		{http.MethodOptions, true},
+		{http.MethodConnect, false},
+		{http.MethodTrace, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.method, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			got := proxyMethodAllowed(rec, httptest.NewRequest(tt.method, "/x", nil))
+			assert.Equal(t, tt.allowed, got)
+			if !tt.allowed {
+				assert.Equal(t, http.StatusMethodNotAllowed, rec.Code)
+				assert.NotEmpty(t, rec.Header().Get("Allow"))
+			}
+		})
+	}
+}
+
+func TestHandlePassthrough_TraceMethod_Returns405_UpstreamUntouched(t *testing.T) {
+	t.Parallel()
+	called := false
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called = true }))
+	defer srv.Close()
+	gw := newPassthroughUsageGateway(t, `{}`, nil, &LimitsConfig{}, nil)
+	gw.cfg.Providers["openai"].BaseURL = srv.URL
+
+	req := httptest.NewRequest(http.MethodTrace, "/openai/v1/x", nil)
+	req.Header.Set("Authorization", "Bearer sk-alice")
+	rec := httptest.NewRecorder()
+	gw.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusMethodNotAllowed, rec.Code)
+	assert.False(t, called)
+}
+
+func TestScrubRelayedBackendMessage(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name, in, target, want string
+	}{
+		{"plain text untouched", "tool execution failed", "http://b", "tool execution failed"},
+		{"query string redacted", "dial http://backend.internal?api-key=SECRET rejected", "http://other", "dial http://backend.internal?[redacted] rejected"},
+		{"configured url with query redacted", "GET http://b/mcp?token=abc failed", "http://b/mcp?token=abc", "GET http://b/mcp failed"},
+		{"empty", "", "http://b", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := scrubRelayedBackendMessage(tt.in, tt.target)
+			assert.Equal(t, tt.want, got)
+			assert.NotContains(t, got, "SECRET")
+		})
+	}
+}
+
+func TestHandleMCPFederated_ToolsCall_BackendErrorSecretScrubbed(t *testing.T) {
+	alpha := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req jsonrpcRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(jsonrpcResponse{ID: req.ID, Error: &jsonrpcError{Code: -32000, Message: "dial http://backend.internal?api-key=SECRET rejected"}})
+	}))
+	defer alpha.Close()
+	cfg := newFederationTestConfig(alpha.URL, "http://beta.invalid", false)
+	h, err := New(context.Background(), http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), cfg, "llmgw")
+	require.NoError(t, err)
+
+	callParams, _ := json.Marshal(mcpToolCallParams{Name: "alpha_lookup"})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, newFederatedRequest(t, "sk-alice", jsonrpcRequest{JSONRPC: jsonrpcVersion, Method: "tools/call", ID: json.RawMessage("5"), Params: callParams}))
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.NotContains(t, rec.Body.String(), "SECRET")
+	assert.Contains(t, rec.Body.String(), "[redacted]")
+}
+
+func TestHandleMCPFederated_ToolsList_GlobalFanoutGateBoundsConnections(t *testing.T) {
+	var inFlight, peak int32
+	release := make(chan struct{})
+	backend := func() *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			n := atomic.AddInt32(&inFlight, 1)
+			for {
+				p := atomic.LoadInt32(&peak)
+				if n <= p || atomic.CompareAndSwapInt32(&peak, p, n) {
+					break
+				}
+			}
+			<-release
+			atomic.AddInt32(&inFlight, -1)
+			var req jsonrpcRequest
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(jsonrpcResponse{ID: req.ID, Result: json.RawMessage(`{"tools":[]}`)})
+		}))
+	}
+	alpha, beta := backend(), backend()
+	defer alpha.Close()
+	defer beta.Close()
+
+	cfg := newFederationTestConfig(alpha.URL, beta.URL, false)
+	h, err := New(context.Background(), http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), cfg, "llmgw")
+	require.NoError(t, err)
+	gw, ok := h.(*Gateway)
+	require.True(t, ok)
+	gw.fanoutGate = make(chan struct{}, 3)
+
+	var wg sync.WaitGroup
+	for i := 0; i < 5; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, newFederatedRequest(t, "sk-alice", jsonrpcRequest{JSONRPC: jsonrpcVersion, Method: "tools/list", ID: json.RawMessage("1")}))
+		}()
+	}
+	time.Sleep(300 * time.Millisecond)
+	assert.LessOrEqual(t, atomic.LoadInt32(&peak), int32(3), "5 callers x 2 backends must not exceed the global gate")
+	close(release)
+	wg.Wait()
+}
+
+func TestLogSafe(t *testing.T) {
+	t.Parallel()
+	assert.Equal(t, "plain", logSafe("plain"))
+	assert.Equal(t, `a\nllmgw[x] ERROR forged`, logSafe("a\nllmgw[x] ERROR forged"))
+	assert.Equal(t, `a\r\nb`, logSafe("a\r\nb"))
 }

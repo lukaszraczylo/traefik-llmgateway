@@ -107,7 +107,7 @@ func TestRedactConfig_LiteralAndIndirectSecrets(t *testing.T) {
 	}
 	body := string(raw)
 
-	for _, leaked := range []string{"literal-key", "redis-literal-pw", "alice-literal-key", "s3cr3t", "user:pw", "abc123"} {
+	for _, leaked := range []string{"literal-key", "redis-literal-pw", "alice-literal-key", "s3cr3t", "user:pw", "abc123", "redis:6379"} {
 		if strings.Contains(body, leaked) {
 			t.Errorf("redacted config still contains %q: %s", leaked, body)
 		}

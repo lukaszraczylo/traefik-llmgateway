@@ -172,6 +172,11 @@ type Config struct {
 	// callers that set one — and nothing for a model that has a price.
 	// Prefer adding the missing "pricing" entry over setting this.
 	AllowUnpricedWithCostBudget bool `json:"allowUnpricedWithCostBudget,omitempty"`
+	// StripClientAnthropicBeta stops POST /v1/messages from forwarding the
+	// client's anthropic-beta header to the provider, as native passthrough
+	// already does. Without it a tenant can enable beta features on the
+	// operator's own Anthropic account. Defaults to false.
+	StripClientAnthropicBeta bool `json:"stripClientAnthropicBeta,omitempty"`
 }
 
 // ProviderConfig describes one upstream LLM provider.
@@ -767,6 +772,7 @@ type Gateway struct {
 	events                        *eventLog
 	bodyAdmission                 chan struct{}
 	teeBudget                     *teeBudget
+	fanoutGate                    chan struct{}
 	failoverHealth                *requestHealthTracker
 	targetHealth                  *targetHealthTracker
 	limiter                       *limiter
@@ -1056,6 +1062,7 @@ func newGateway(ctx context.Context, next http.Handler, config *Config, name str
 	}
 	g.bodyAdmission = make(chan struct{}, bodyAdmissionCap)
 	g.teeBudget = newTeeBudget(maxAccountingTeeTotalBytes)
+	g.fanoutGate = make(chan struct{}, mcpFederatedFanoutGlobalConcurrency)
 
 	if config.Users != nil && config.Users.File != "" {
 		if err = attachUsersFile(auth, config.Users.File, g); err != nil {
