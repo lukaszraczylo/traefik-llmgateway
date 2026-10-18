@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -183,6 +184,13 @@ type Config struct {
 	// resolved (404 unknown model) and is not listed by GET /v1/models. It
 	// removes the sorted-first bare-id collision winner. Defaults to false.
 	RequireModelPrefix bool `json:"requireModelPrefix,omitempty"`
+	// MaxConcurrency, when > 0, is advertised on every response as
+	// X-Concurrency-Limit so clients that honour it (omps) cap their own
+	// in-flight requests to this gateway. It documents what the upstreams
+	// can serve at once; the gateway does not queue or reject on it. 0
+	// (the default) sends no header. Negative values are rejected at
+	// construction.
+	MaxConcurrency int `json:"maxConcurrency,omitempty"`
 }
 
 // ProviderConfig describes one upstream LLM provider.
@@ -927,6 +935,9 @@ func newGateway(ctx context.Context, next http.Handler, config *Config, name str
 	if err := validateTargetURLs(config); err != nil {
 		return nil, err
 	}
+	if config.MaxConcurrency < 0 {
+		return nil, errors.New("llmgateway: maxConcurrency must not be negative")
+	}
 	// Finding F4, 2026-09 review: validate every Config.Pricing override
 	// at construction — non-nil, finite, >= 0 — rather than letting a
 	// negative/NaN/Inf entry reach costMicrosKnownFor (pricing.go), where it
@@ -1347,9 +1358,15 @@ func attachUsersFile(auth *authStore, path string, log gatewayLogger) error {
 }
 
 // ServeHTTP is the internal router. It grows in later tasks.
+// concurrencyLimitHeader advertises Config.MaxConcurrency to clients.
+const concurrencyLimitHeader = "X-Concurrency-Limit"
+
 func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	sw := &statusTrackingWriter{ResponseWriter: w}
 	defer recoverPanic(sw, g)
+	if g.cfg.MaxConcurrency > 0 {
+		sw.Header().Set(concurrencyLimitHeader, strconv.Itoa(g.cfg.MaxConcurrency))
+	}
 	// pruneRejectionsAfterReload only runs when maybeReload just performed
 	// a REAL reload (users_file.go's own doc comment explains why it must
 	// never run on every request) — a deleted file-sourced user must not
