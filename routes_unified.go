@@ -587,9 +587,7 @@ func (g *Gateway) runMeteredCall(sw *statusTrackingWriter, r *http.Request, scop
 			return
 		}
 
-		ctx := withAttemptRecorder(r.Context(), func(resp *http.Response, attemptErr error) {
-			g.limiter.recordProviderAttempt(providerName, upstreamModel, resp, attemptErr)
-		})
+		ctx, endUpstream := g.trackUpstream(r.Context(), respWriter, providerName, upstreamModel)
 		// feat: instrument upstream latency — gated on metricsEnabled OR
 		// admin.stats.latency (admin-redesign WP-A), so a deployment with
 		// BOTH off wires nothing here at all (not even the closure
@@ -615,6 +613,7 @@ func (g *Gateway) runMeteredCall(sw *statusTrackingWriter, r *http.Request, scop
 			})
 		}
 		result, callErr := call(cand.adapter, ctx, respWriter, attemptReq)
+		endUpstream()
 
 		// Request-path health, recorded ONCE per candidate per logical
 		// request (F3/F6 fix, adversarial-review) — see

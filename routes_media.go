@@ -124,9 +124,8 @@ func (g *Gateway) handleImagesGenerations(w http.ResponseWriter, r *http.Request
 
 	// Feature A (v0.22): see routes_unified.go's runUnified for the
 	// identical pattern this mirrors.
-	ctx := withAttemptRecorder(r.Context(), func(resp *http.Response, attemptErr error) {
-		g.limiter.recordProviderAttempt(adapter.name(), upstreamModel, resp, attemptErr)
-	})
+	ctx, endUpstream := g.trackUpstream(r.Context(), sw, adapter.name(), upstreamModel)
+	defer endUpstream()
 	// feat: instrument upstream latency — gated on metricsEnabled OR
 	// admin.stats.latency, same reasoning as runUnified's identical wiring
 	// (routes_unified.go).
@@ -200,9 +199,8 @@ func (g *Gateway) handleAudioSpeech(w http.ResponseWriter, r *http.Request, u *u
 
 	// Feature A (v0.22): see routes_unified.go's runUnified for the
 	// identical pattern this mirrors.
-	ctx := withAttemptRecorder(r.Context(), func(resp *http.Response, attemptErr error) {
-		g.limiter.recordProviderAttempt(adapter.name(), upstreamModel, resp, attemptErr)
-	})
+	ctx, endUpstream := g.trackUpstream(r.Context(), sw, adapter.name(), upstreamModel)
+	defer endUpstream()
 	// feat: instrument upstream latency — gated on metricsEnabled OR
 	// admin.stats.latency, same reasoning as runUnified's identical wiring
 	// (routes_unified.go).
@@ -315,9 +313,8 @@ func (g *Gateway) handleAudioTranscriptions(w http.ResponseWriter, r *http.Reque
 
 	// Feature A (v0.22): see routes_unified.go's runUnified for the
 	// identical pattern this mirrors.
-	ctx := withAttemptRecorder(r.Context(), func(resp *http.Response, attemptErr error) {
-		g.limiter.recordProviderAttempt(adapter.name(), upstreamModel, resp, attemptErr)
-	})
+	ctx, endUpstream := g.trackUpstream(r.Context(), sw, adapter.name(), upstreamModel)
+	defer endUpstream()
 	// feat: instrument upstream latency — gated on metricsEnabled OR
 	// admin.stats.latency, same reasoning as runUnified's identical wiring
 	// (routes_unified.go).

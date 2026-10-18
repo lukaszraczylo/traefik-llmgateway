@@ -12,7 +12,6 @@ import (
 	"net/url"
 	"os"
 	"runtime"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -184,12 +183,15 @@ type Config struct {
 	// resolved (404 unknown model) and is not listed by GET /v1/models. It
 	// removes the sorted-first bare-id collision winner. Defaults to false.
 	RequireModelPrefix bool `json:"requireModelPrefix,omitempty"`
-	// MaxConcurrency, when > 0, is advertised on every response as
-	// X-Concurrency-Limit so clients that honour it (omps) cap their own
-	// in-flight requests to this gateway. It documents what the upstreams
-	// can serve at once; the gateway does not queue or reject on it. 0
-	// (the default) sends no header. Negative values are rejected at
-	// construction.
+	// ConcurrencyAutodetect, when true, learns each provider's concurrency
+	// from overload answers (429/503/504/timeout) and advertises
+	// min(MaxConcurrency, learned). Defaults to false.
+	ConcurrencyAutodetect bool `json:"concurrencyAutodetect,omitempty"`
+	// MaxConcurrency, when > 0, is advertised on every response as a
+	// RateLimit-Policy concurrent-requests quota
+	// (draft-ietf-httpapi-ratelimit-headers). The gateway does not queue or
+	// reject on it. It wins over any learned value. 0 (the default) sends
+	// nothing. Negative values are rejected at construction.
 	MaxConcurrency int `json:"maxConcurrency,omitempty"`
 }
 
@@ -789,6 +791,7 @@ type Gateway struct {
 	teeBudget                     *teeBudget
 	fanoutGate                    chan struct{}
 	failoverHealth                *requestHealthTracker
+	concurrency                   *concurrencyLearner
 	targetHealth                  *targetHealthTracker
 	limiter                       *limiter
 	registry                      *modelRegistry
@@ -971,6 +974,9 @@ func newGateway(ctx context.Context, next http.Handler, config *Config, name str
 	}
 	g.failover = failoverCfg
 	g.failoverHealth = newRequestHealthTracker()
+	if config.ConcurrencyAutodetect {
+		g.concurrency = newConcurrencyLearner(config.MaxConcurrency)
+	}
 
 	// Security audit run-1: nothing validates the PRODUCT of the two
 	// retry axes, which compose multiplicatively at runtime. Surface it
@@ -1358,14 +1364,11 @@ func attachUsersFile(auth *authStore, path string, log gatewayLogger) error {
 }
 
 // ServeHTTP is the internal router. It grows in later tasks.
-// concurrencyLimitHeader advertises Config.MaxConcurrency to clients.
-const concurrencyLimitHeader = "X-Concurrency-Limit"
-
 func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	sw := &statusTrackingWriter{ResponseWriter: w}
 	defer recoverPanic(sw, g)
 	if g.cfg.MaxConcurrency > 0 {
-		sw.Header().Set(concurrencyLimitHeader, strconv.Itoa(g.cfg.MaxConcurrency))
+		sw.Header().Set(rateLimitPolicyHeader, concurrencyPolicyValue(g.cfg.MaxConcurrency))
 	}
 	// pruneRejectionsAfterReload only runs when maybeReload just performed
 	// a REAL reload (users_file.go's own doc comment explains why it must

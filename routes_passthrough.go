@@ -1297,9 +1297,9 @@ func (g *Gateway) handlePassthrough(w http.ResponseWriter, r *http.Request, u *u
 	// (extractPassthroughUsage, below), read only after this attempt
 	// already resolved, so there is no model to attribute it to yet. See
 	// recordProviderAttempt's own doc comment (limits.go).
-	r = r.WithContext(withAttemptRecorder(r.Context(), func(resp *http.Response, attemptErr error) {
-		g.limiter.recordProviderAttempt(providerName, "", resp, attemptErr)
-	}))
+	trackedCtx, endUpstream := g.trackUpstream(r.Context(), w, providerName, "")
+	defer endUpstream()
+	r = r.WithContext(trackedCtx)
 	// feat: instrument upstream latency — gated on metricsEnabled OR
 	// admin.stats.latency (admin-redesign WP-A), same reasoning as
 	// runUnified's identical wiring (routes_unified.go). No model here
