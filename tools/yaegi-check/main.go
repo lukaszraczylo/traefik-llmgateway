@@ -697,7 +697,7 @@ func run() error {
 		return fmt.Errorf("marshal metrics escaping probe user name: %w", err)
 	}
 
-	attemptAccountingOverride := `{"failover":{"enabled":true},"breaker":{"failureThreshold":2,"openDuration":"3s","maxOpenDuration":"6s"},` +
+	attemptAccountingOverride := `{"maxConcurrency":4,"concurrencyAutodetect":true,"failover":{"enabled":true},"breaker":{"failureThreshold":2,"openDuration":"3s","maxOpenDuration":"6s"},` +
 		`"providers":{"openai":{"type":"openai","baseUrl":"` + upstream.URL + `","apiKey":"sk-up","models":["` + testDataWantModel + `","` + builtinLookupModelID + `"]},` +
 		`"brk":{"type":"openai","baseUrl":"` + brkUpstream.URL + `","apiKey":"sk-up","discovery":true,"discoveryInterval":"1ms"},` +
 		// "warmretry" backs exerciseWarmFillRetry (production incident fix,
@@ -1914,6 +1914,15 @@ func exerciseHandler(handler http.Handler, builtinContextTokens int, failoverBHi
 	}
 	if !strings.Contains(authedRec.Body.String(), testDataWantModel) {
 		return fmt.Errorf("GET /v1/models body does not contain %q: %s", testDataWantModel, authedRec.Body.String())
+	}
+	// maxConcurrency=4 must surface as the IETF concurrent-requests policy
+	// under the interpreter, and the retired X-Concurrency-Limit must be absent.
+	const wantRateLimitPolicy = `"concurrency";q=4;qu="concurrent-requests"`
+	if got := authedRec.Header().Get("RateLimit-Policy"); got != wantRateLimitPolicy {
+		return fmt.Errorf("GET /v1/models RateLimit-Policy = %q, want %q", got, wantRateLimitPolicy)
+	}
+	if got := authedRec.Header().Get("X-Concurrency-Limit"); got != "" {
+		return fmt.Errorf("GET /v1/models sent retired X-Concurrency-Limit = %q", got)
 	}
 
 	// modelMeta (feature v0.23), interpreted, decoded structurally (not
