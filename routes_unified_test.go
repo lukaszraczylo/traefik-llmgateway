@@ -1569,6 +1569,87 @@ func TestHandleChat_CacheHitMiss_EndToEnd_CountersAndHeaders(t *testing.T) {
 	}
 }
 
+// postEmbeddingsTwice sends the same /v1/embeddings request twice through gw
+// and returns both X-Llmgw-Cache headers.
+func postEmbeddingsTwice(t *testing.T, gw *Gateway) (first, second string) {
+	t.Helper()
+	body := map[string]any{"model": "gpt-test", "input": "hello"}
+	var got [2]string
+	for i := range got {
+		rec := httptest.NewRecorder()
+		gw.ServeHTTP(rec, newUnifiedRequest(t, http.MethodPost, "/v1/embeddings", "sk-alice", body))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("request %d: status = %d, body=%s", i+1, rec.Code, rec.Body.String())
+		}
+		got[i] = rec.Header().Get("X-Llmgw-Cache")
+	}
+	return got[0], got[1]
+}
+
+// TestHandleEmbeddings_CacheOffByDefault_NeverCached pins that a gateway with
+// the cache enabled still sends every embeddings request upstream, while chat
+// keeps its cache.
+func TestHandleEmbeddings_CacheOffByDefault_NeverCached(t *testing.T) {
+	const respBody = `{"object":"list","data":[{"embedding":[0.1,0.2]}],"model":"gpt-test","usage":{"prompt_tokens":5,"total_tokens":5}}`
+	var upstreamCalls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalls++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(respBody))
+	}))
+	defer srv.Close()
+
+	gw := newCacheTestGateway(t, srv, nil, defaultCacheMaxBodyBytes)
+	first, second := postEmbeddingsTwice(t, gw)
+
+	if first != "" || second != "" {
+		t.Errorf("X-Llmgw-Cache = %q then %q, want no header on both (embeddings not cached)", first, second)
+	}
+	if upstreamCalls != 2 {
+		t.Errorf("upstreamCalls = %d, want 2 (every embeddings request goes upstream)", upstreamCalls)
+	}
+}
+
+// TestHandleEmbeddings_CacheEmbeddingsEnabled_HitsOnSecondRequest covers the
+// opt-in: with CacheEmbeddings set the second identical request is a hit.
+func TestHandleEmbeddings_CacheEmbeddingsEnabled_HitsOnSecondRequest(t *testing.T) {
+	const respBody = `{"object":"list","data":[{"embedding":[0.1,0.2]}],"model":"gpt-test","usage":{"prompt_tokens":5,"total_tokens":5}}`
+	var upstreamCalls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalls++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(respBody))
+	}))
+	defer srv.Close()
+
+	gw := newCacheTestGateway(t, srv, nil, defaultCacheMaxBodyBytes)
+	gw.cache.embeddings = true
+	first, second := postEmbeddingsTwice(t, gw)
+
+	if first != "miss" || second != "hit" {
+		t.Errorf("X-Llmgw-Cache = %q then %q, want miss then hit", first, second)
+	}
+	if upstreamCalls != 1 {
+		t.Errorf("upstreamCalls = %d, want 1 (second request served from cache)", upstreamCalls)
+	}
+}
+
+// TestBuildResponseCache_CacheEmbeddingsFlag_Propagates checks the config
+// field reaches the cache.
+func TestBuildResponseCache_CacheEmbeddingsFlag_Propagates(t *testing.T) {
+	noop := func(string, ...any) {}
+	client := &respClient{}
+	for _, want := range []bool{false, true} {
+		c, err := buildResponseCache(CacheConfig{Enabled: true, CacheEmbeddings: want}, client, noop, noop, noop)
+		if err != nil || c == nil {
+			t.Fatalf("buildResponseCache(CacheEmbeddings=%v) = %v, %v", want, c, err)
+		}
+		if c.embeddings != want {
+			t.Errorf("CacheEmbeddings=%v: cache.embeddings = %v", want, c.embeddings)
+		}
+	}
+}
+
 // TestHandleChat_CacheGroupOptOut_NeverServesFromCache is spec §2's
 // per-group override: GroupConfig.Cache=false must opt the group out even
 // though the global cache is enabled — every request goes to the

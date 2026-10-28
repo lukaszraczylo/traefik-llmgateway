@@ -473,6 +473,10 @@ type CacheConfig struct {
 	// budgets also bind repeated identical prompts. Defaults to false: a
 	// hit then adds only to the request counters.
 	AccountHits bool `json:"accountHits,omitempty"`
+	// CacheEmbeddings opts /v1/embeddings responses into the cache. Off by
+	// default: a vector body is large and rarely repeats, so it fills the
+	// shared Redis for little benefit.
+	CacheEmbeddings bool `json:"cacheEmbeddings,omitempty"`
 }
 
 // BreakerConfig configures the per-provider discovery circuit breaker

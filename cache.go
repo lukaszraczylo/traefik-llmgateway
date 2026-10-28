@@ -115,7 +115,9 @@ func buildResponseCache(cc CacheConfig, client *respClient, logf, warnf, errorf 
 		logf("cache: enabled but redis is not configured; response caching disabled")
 		return nil, nil
 	}
-	return newResponseCache(client, ttl, maxBody, logf, errorf), nil
+	c := newResponseCache(client, ttl, maxBody, logf, errorf)
+	c.embeddings = cc.CacheEmbeddings
+	return c, nil
 }
 
 // groupCacheEnabled resolves whether grp's requests are cacheable, given
@@ -229,6 +231,7 @@ type responseCache struct {
 	lastFailure  time.Time
 	ttl          time.Duration
 	maxBodyBytes int
+	embeddings   bool // CacheConfig.CacheEmbeddings
 	logMu        sync.Mutex
 }
 

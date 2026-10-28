@@ -314,7 +314,8 @@ func (g *Gateway) runMeteredCall(sw *statusTrackingWriter, r *http.Request, scop
 	// depends only on req["stream"]/grp, neither of which a failover
 	// attempt changes.
 	streaming, _ := req["stream"].(bool)
-	cacheable := !streaming && g.cache != nil && groupCacheEnabled(grp)
+	cacheable := !streaming && g.cache != nil && groupCacheEnabled(grp) &&
+		(endpoint != cacheEndpointEmbeddings || g.cache.embeddings)
 
 	// pristineReq is the client's own decoded request, snapshotted ONCE,
 	// BEFORE any candidate's adapter ever touches it, with "model"

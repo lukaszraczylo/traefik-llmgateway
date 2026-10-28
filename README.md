@@ -545,6 +545,7 @@ byte-identically to before multi-group support existed.
 | `ttl` | `string` (Go duration) | `5m` | How long a cached response stays valid. A malformed duration string is a construction error. Zero or negative is accepted, not refused — construction logs one warning, since the store floors it to a 1-second TTL rather than actually disabling the cache; set `enabled: false` to turn caching off. |
 | `maxBodyBytes` | `int` | `1048576` (1MiB) | Largest response body still eligible for caching; a larger one is skipped (never stored, never an error). Maximum accepted value is `8388608` (8MiB) — above that is a construction error. |
 | `accountHits` | `bool` | `false` | When `true`, a cache hit adds the usage stored with the cached response to the requesting user's and group's token and cost counters, so budgets also bind repeated identical prompts. `false` counts a hit as a request only. |
+| `cacheEmbeddings` | `bool` | `false` | When `true`, `/v1/embeddings` responses are cached too. `false`: embeddings always go upstream and are never stored, because vector bodies are large and rarely repeat. Chat caching is unaffected. |
 
 ### `BreakerConfig`
 
@@ -1438,7 +1439,8 @@ disabled with one warning logged at construction, never a per-replica
 in-process fallback: divergent replicas would otherwise serve different
 cached bodies for the same request.
 
-- **What's cacheable**: a non-streaming request to either route, whose
+- **What's cacheable**: a non-streaming chat request, or a non-streaming
+  embeddings request when `cache.cacheEmbeddings` is `true`, whose
   upstream response was HTTP 200 and no larger than `cache.maxBodyBytes`.
   Never cached: a streaming request, native passthrough, MCP/A2A, the
   image/audio endpoints (see [Image and audio endpoints](#image-and-audio-endpoints)),
