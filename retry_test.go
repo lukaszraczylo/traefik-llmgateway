@@ -1087,3 +1087,52 @@ func TestRetryPolicy_Do_NoAttemptRecorderInContext_NoPanic(t *testing.T) {
 		t.Errorf("resp.StatusCode = %d, want 200", resp.StatusCode)
 	}
 }
+
+// TestNewRetryPolicy_RejectsNonPositiveBackoff pins that a zero or
+// negative backoff is a config error, not a silent no-wait retry.
+func TestNewRetryPolicy_RejectsNonPositiveBackoff(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		backoff string
+		wantErr bool
+	}{
+		{name: "zero", backoff: "0s", wantErr: true},
+		{name: "negative", backoff: "-1s", wantErr: true},
+		{name: "positive", backoff: "1ms", wantErr: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := newRetryPolicy(RetryConfig{Enabled: true, Backoff: tt.backoff})
+			if (err != nil) != tt.wantErr {
+				t.Errorf("newRetryPolicy(Backoff:%q) err = %v, wantErr %v", tt.backoff, err, tt.wantErr)
+			}
+		})
+	}
+}
+
+// TestRetryPolicy_WaitBeforeLargeBackoffCapped pins that a backoff at or
+// above the cap returns the cap for every attempt, without overflowing.
+func TestRetryPolicy_WaitBeforeLargeBackoffCapped(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		backoff time.Duration
+	}{
+		{name: "equal to cap", backoff: maxRetryWait},
+		{name: "int64 overflow range", backoff: time.Duration(1) << 62},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			p := &retryPolicy{enabled: true, attempts: maxRetryAttempts, backoff: tt.backoff, waitFn: defaultWaitFn}
+			for attempt := 1; attempt <= maxRetryAttempts; attempt++ {
+				got, fromRetryAfter := p.waitBefore(attempt, nil)
+				if got != maxRetryWait || fromRetryAfter {
+					t.Errorf("attempt %d: waitBefore = (%v, %v), want (%v, false)", attempt, got, fromRetryAfter, maxRetryWait)
+				}
+			}
+		})
+	}
+}

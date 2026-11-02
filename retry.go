@@ -171,7 +171,7 @@ func defaultWaitFn(ctx context.Context, d time.Duration) bool {
 // tries total); the maximum, maxRetryAttempts, is 3 retries (four tries
 // total). A value outside 1..maxRetryAttempts is a config error.
 // rc.Backoff defaults to defaultRetryBackoff when left empty, and must
-// parse via time.ParseDuration either way.
+// parse via time.ParseDuration to a positive duration either way.
 func newRetryPolicy(rc RetryConfig) (*retryPolicy, error) {
 	if !rc.Enabled {
 		return &retryPolicy{enabled: false, waitFn: defaultWaitFn}, nil
@@ -192,6 +192,9 @@ func newRetryPolicy(rc RetryConfig) (*retryPolicy, error) {
 	backoff, err := time.ParseDuration(backoffStr)
 	if err != nil {
 		return nil, fmt.Errorf("llmgateway: retry.backoff: %w", err)
+	}
+	if backoff <= 0 {
+		return nil, fmt.Errorf("llmgateway: retry.backoff must be positive, got %q", backoffStr)
 	}
 
 	return &retryPolicy{enabled: true, attempts: attempts, backoff: backoff, waitFn: defaultWaitFn}, nil
@@ -263,6 +266,10 @@ func (p *retryPolicy) waitBefore(attempt int, resp *http.Response) (wait time.Du
 		}
 	}
 
+	// Compare before multiplying: a backoff at or above the cap must not overflow the shift.
+	if p.backoff >= maxRetryWait {
+		return maxRetryWait, false
+	}
 	wait = p.backoff * time.Duration(int64(1)<<uint(attempt-1))
 	if wait > maxRetryWait {
 		wait = maxRetryWait
