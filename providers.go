@@ -231,7 +231,14 @@ func newAdapterHTTPClient(timeout time.Duration) *http.Client {
 	}
 	tr.MaxIdleConnsPerHost = adapterIdleConnsPerHost
 	tr.ResponseHeaderTimeout = timeout
-	return &http.Client{Transport: tr}
+	// Redirects are not followed: the client re-sends provider API key
+	// headers, and a hijacked redirect target would receive them.
+	return &http.Client{
+		Transport: tr,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
 }
 
 // attemptRecorder is invoked once per upstream HTTP attempt a shared

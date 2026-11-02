@@ -6,8 +6,11 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"testing/iotest"
+	"time"
 )
 
 // TestProviderPassthroughEnabled is the security+performance audit
@@ -208,5 +211,51 @@ func TestReadAllLimited_PropagatesNonEOFError(t *testing.T) {
 	}
 	if !errors.Is(gotErr, injected) {
 		t.Errorf("readAllLimited err = %v, want errors.Is match for %v", gotErr, injected)
+	}
+}
+
+// TestAdapterHTTPClient_RedirectHandling pins that the adapter client
+// never follows a redirect, so provider API key headers are not re-sent
+// to a redirect target.
+func TestAdapterHTTPClient_RedirectHandling(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name         string
+		wantStatus   int
+		wantFollowed bool
+	}{
+		{name: "redirect returned to caller, target not contacted", wantStatus: http.StatusFound, wantFollowed: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var followed atomic.Bool
+			target := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+				followed.Store(true)
+			}))
+			t.Cleanup(target.Close)
+			redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				http.Redirect(w, r, target.URL, http.StatusFound)
+			}))
+			t.Cleanup(redirector.Close)
+
+			req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, redirector.URL, nil)
+			if err != nil {
+				t.Fatalf("NewRequestWithContext: %v", err)
+			}
+			req.Header.Set("x-api-key", "test-key")
+			resp, err := newAdapterHTTPClient(time.Second).Do(req)
+			if err != nil {
+				t.Fatalf("Do: %v", err)
+			}
+			t.Cleanup(func() { _ = resp.Body.Close() })
+
+			if resp.StatusCode != tt.wantStatus {
+				t.Errorf("status = %d, want %d", resp.StatusCode, tt.wantStatus)
+			}
+			if got := followed.Load(); got != tt.wantFollowed {
+				t.Errorf("redirect target contacted = %v, want %v", got, tt.wantFollowed)
+			}
+		})
 	}
 }
