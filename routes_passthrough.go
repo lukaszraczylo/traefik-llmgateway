@@ -1788,6 +1788,15 @@ func (g *Gateway) proxyUpstream(w http.ResponseWriter, r *http.Request, upstream
 		reader = io.TeeReader(resp.Body, sseTee)
 	}
 
+	// The caller releases tee only after this function returns; a panic in
+	// the copy never returns, so release here and keep unwinding.
+	defer func() {
+		if p := recover(); p != nil {
+			tee.release()
+			panic(p)
+		}
+	}()
+
 	if _, err := io.Copy(fw, reader); err != nil {
 		// errors.Is(err, context.Canceled) here means the CLIENT went away
 		// mid-copy — reader wraps resp.Body, which is now a watchdogBody

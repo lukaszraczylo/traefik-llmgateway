@@ -383,3 +383,43 @@ func TestTeeBudget_ReserveNeverExceedsLimit(t *testing.T) {
 	assert.EqualValues(t, limit, granted.Load(), "exactly the budget is granted")
 	assert.EqualValues(t, limit, atomic.LoadInt64(&b.used))
 }
+
+// firstWritePanics is a ResponseWriter whose first Write panics, to
+// simulate a failure inside the proxy copy loop.
+type firstWritePanics struct {
+	http.ResponseWriter
+	writes atomic.Int32
+}
+
+func (w *firstWritePanics) Write(p []byte) (int, error) {
+	if w.writes.Add(1) == 1 {
+		panic("simulated copy failure")
+	}
+	return w.ResponseWriter.Write(p)
+}
+
+// TestPassthrough_PanicInCopyReleasesTeeBudget pins that a panic while a
+// response is teed returns the tee's reserved bytes to the shared budget.
+func TestPassthrough_PanicInCopyReleasesTeeBudget(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		body string
+	}{
+		{name: "small json body", body: `{"model":"gpt-known","usage":{"prompt_tokens":4,"completion_tokens":2}}`},
+		{name: "larger json body", body: `{"model":"gpt-known","pad":"` + strings.Repeat("x", 4096) + `","usage":{"prompt_tokens":4,"completion_tokens":2}}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			gw := newPassthroughUsageGateway(t, tt.body, []string{"gpt-known"}, &LimitsConfig{}, nil)
+			req := httptest.NewRequest(http.MethodPost, "/openai/v1/native-endpoint", strings.NewReader(`{"model":"gpt-1"}`))
+			req.Header.Set("Authorization", "Bearer sk-alice")
+			w := &firstWritePanics{ResponseWriter: httptest.NewRecorder()}
+
+			gw.ServeHTTP(w, req)
+
+			assert.Zero(t, atomic.LoadInt64(&gw.teeBudget.used), "a panic must not leak the tee reservation")
+		})
+	}
+}
