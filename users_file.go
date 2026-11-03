@@ -3,6 +3,7 @@ package traefikllmgateway
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"time"
 )
@@ -11,6 +12,11 @@ import (
 // request path. maybeReload never stats the file more often than this, even
 // under heavy concurrent traffic.
 const reloadEvery = 5 * time.Second
+
+// maxUsersFileBytes caps how much of the users file load reads. A real file
+// is a few KiB to a few MiB; the cap only stops an oversized file from being
+// read into memory on the request path.
+const maxUsersFileBytes = 16 << 20
 
 // usersFile is a JSON-encoded file of API-key users at path, in the shape
 // {"users":[{"name":...,"group":...,"apiKey":...,"limits":{...}}]}.
@@ -32,9 +38,17 @@ type usersFileDoc struct {
 // load reads and parses uf's file. path is operator-supplied middleware
 // configuration, not untrusted request input.
 func (uf *usersFile) load() ([]*UserConfig, error) {
-	b, err := os.ReadFile(uf.path) // #nosec G304 -- operator-supplied users file path from middleware config
+	f, err := os.Open(uf.path) // #nosec G304 -- operator-supplied users file path from middleware config
 	if err != nil {
 		return nil, fmt.Errorf("llmgateway: cannot read users file %q: %w", uf.path, err)
+	}
+	defer f.Close() //nolint:errcheck // read-only close; nothing actionable on failure
+	b, err := io.ReadAll(io.LimitReader(f, maxUsersFileBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("llmgateway: cannot read users file %q: %w", uf.path, err)
+	}
+	if len(b) > maxUsersFileBytes {
+		return nil, fmt.Errorf("llmgateway: users file %q exceeds %d bytes", uf.path, maxUsersFileBytes)
 	}
 	var doc usersFileDoc
 	if err := json.Unmarshal(b, &doc); err != nil {

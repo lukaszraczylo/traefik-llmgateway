@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -512,5 +513,35 @@ func TestAuthStore_MaybeReload_MultiGroupUser_RebuiltPrincipalStillAuthorizesCor
 	}
 	if grpAfter.allowsProvider("gamma") {
 		t.Error("want gamma still denied after reload")
+	}
+}
+
+// TestUsersFile_Load_SizeCap pins that a users file larger than
+// maxUsersFileBytes is refused instead of read into memory.
+func TestUsersFile_Load_SizeCap(t *testing.T) {
+	t.Parallel()
+	const doc = `{"users":[]}`
+	tests := []struct {
+		name    string
+		size    int
+		wantErr bool
+	}{
+		{name: "small valid file", size: len(doc), wantErr: false},
+		{name: "exactly at the cap", size: maxUsersFileBytes, wantErr: false},
+		{name: "one byte over the cap", size: maxUsersFileBytes + 1, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			path := filepath.Join(t.TempDir(), "users.json")
+			content := doc + strings.Repeat(" ", tt.size-len(doc))
+			if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+				t.Fatalf("WriteFile: %v", err)
+			}
+			_, err := newUsersFile(path).load()
+			if (err != nil) != tt.wantErr {
+				t.Errorf("load err = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
 	}
 }
