@@ -571,3 +571,30 @@ func TestNewFlushWriter_AssertsFlusherOnce(t *testing.T) {
 		}
 	})
 }
+
+// TestReadSSE_EmptyDataLinesCountTheirRetainedCost pins that an event of
+// many empty "data:" lines hits the size cap on retained cost, not just
+// payload bytes.
+func TestReadSSE_EmptyDataLinesCountTheirRetainedCost(t *testing.T) {
+	t.Parallel()
+	maxLines := sseMaxEventBytes / sseDataLineOverhead
+	tests := []struct {
+		wantErr error
+		name    string
+		lines   int
+	}{
+		{name: "few lines", lines: 10, wantErr: nil},
+		{name: "just under the cap", lines: maxLines - 10, wantErr: nil},
+		{name: "past the cap", lines: maxLines + 10, wantErr: errSSEEventTooLarge},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			input := strings.Repeat("data:\n", tt.lines) + "\n"
+			err := readSSE(strings.NewReader(input), func(sseEvent) error { return nil })
+			if !errors.Is(err, tt.wantErr) {
+				t.Errorf("readSSE err = %v, want %v", err, tt.wantErr)
+			}
+		})
+	}
+}

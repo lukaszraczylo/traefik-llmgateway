@@ -442,11 +442,15 @@ func newTeeBudget(limit int64) *teeBudget { return &teeBudget{limit: limit} }
 
 // reserve claims n bytes and reports whether the budget had room.
 func (b *teeBudget) reserve(n int64) bool {
-	if atomic.AddInt64(&b.used, n) > b.limit {
-		atomic.AddInt64(&b.used, -n)
-		return false
+	for {
+		cur := atomic.LoadInt64(&b.used)
+		if cur+n > b.limit {
+			return false
+		}
+		if atomic.CompareAndSwapInt64(&b.used, cur, cur+n) {
+			return true
+		}
 	}
-	return true
 }
 
 func (b *teeBudget) free(n int64) { atomic.AddInt64(&b.used, -n) }

@@ -351,3 +351,35 @@ func TestLogSafe(t *testing.T) {
 	assert.Equal(t, `a\nllmgw[x] ERROR forged`, logSafe("a\nllmgw[x] ERROR forged"))
 	assert.Equal(t, `a\r\nb`, logSafe("a\r\nb"))
 }
+
+// TestTeeBudget_ReserveNeverExceedsLimit pins that concurrent reserves
+// grant exactly the budget: used never passes limit, and no reserve is
+// denied while room remains.
+func TestTeeBudget_ReserveNeverExceedsLimit(t *testing.T) {
+	t.Parallel()
+	const (
+		limit   = 100
+		chunk   = 10
+		workers = 50
+	)
+	b := newTeeBudget(limit)
+	var granted atomic.Int64
+	var overshoot atomic.Bool
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if b.reserve(chunk) {
+				granted.Add(chunk)
+			}
+			if atomic.LoadInt64(&b.used) > limit {
+				overshoot.Store(true)
+			}
+		}()
+	}
+	wg.Wait()
+	assert.False(t, overshoot.Load(), "used must never exceed limit")
+	assert.EqualValues(t, limit, granted.Load(), "exactly the budget is granted")
+	assert.EqualValues(t, limit, atomic.LoadInt64(&b.used))
+}

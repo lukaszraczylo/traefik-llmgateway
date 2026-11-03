@@ -95,6 +95,9 @@ func (c *concurrencyLearner) observe(provider string, resp *http.Response, err e
 		if next < 1 {
 			next = 1
 		}
+		if next > learnedCeiling-1 {
+			next = learnedCeiling - 1
+		}
 		if s.learned == 0 || next < s.learned {
 			s.learned = next
 		}
