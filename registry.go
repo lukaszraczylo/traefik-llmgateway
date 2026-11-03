@@ -113,6 +113,10 @@ const maxBreakerOpenDuration = 24 * time.Hour
 // successful discovery fetch) — 404 semantics for the caller.
 var errModelUnknown = errors.New("llmgateway: unknown model")
 
+// errEmptyDiscovery marks a successful but empty discovery answer over a
+// known model set: it is treated as a failure so the set is kept.
+var errEmptyDiscovery = errors.New("llmgateway: discovery returned no models, keeping the previous set")
+
 // errModelDenied is returned by modelRegistry.resolve when id is a known
 // model but the requesting group is not authorized for it — 403 semantics
 // for the caller. Distinct from errModelUnknown so the caller can tell "no
@@ -381,7 +385,9 @@ func (st *providerState) tryBeginWarmFillRetry(sinceWarmFill time.Time) bool {
 // what throttles a failing provider to one attempt per interval instead of
 // retrying on every call. On success (err == nil) ids replaces the
 // discovered set; on failure the previous discovered set is kept
-// (stale-while-error). Either way, recordHealthLocked (feat/provider-health)
+// (stale-while-error). An empty success over a non-empty set counts as a
+// failure (errEmptyDiscovery), so a flapping upstream cannot erase every
+// known model. Either way, recordHealthLocked (feat/provider-health)
 // updates the discovery circuit breaker from this same outcome — a healthy
 // provider's breaker never leaves closed, so this adds no new behavior for
 // the common case, only for a provider that is actually failing.
@@ -390,6 +396,9 @@ func (st *providerState) finishRefresh(now time.Time, ids []string, err error) {
 	defer st.mu.Unlock()
 	st.inFlight = false
 	st.lastRefresh = now
+	if err == nil && len(ids) == 0 && len(st.discovered) > 0 {
+		err = errEmptyDiscovery
+	}
 	if err != nil {
 		st.lastErr = err.Error()
 	} else {

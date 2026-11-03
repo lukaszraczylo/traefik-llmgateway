@@ -2645,3 +2645,48 @@ func TestModelRegistry_ListFor_Alias_ShadowedCollisionKeepsAliasEntry(t *testing
 		t.Errorf("listFor = %v, want the shadowed discovered model listed as %q", got, "acme/shared-id")
 	}
 }
+
+// TestProviderState_FinishRefresh_EmptyAnswerKeepsKnownModels pins that a
+// successful but empty discovery answer never erases a known model set.
+func TestProviderState_FinishRefresh_EmptyAnswerKeepsKnownModels(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		first       []string
+		second      []string
+		wantModels  []string
+		wantErrText bool
+	}{
+		{name: "empty answer over known set keeps it", first: []string{"a", "b"}, second: []string{}, wantModels: []string{"a", "b"}, wantErrText: true},
+		{name: "nil answer over known set keeps it", first: []string{"a"}, second: nil, wantModels: []string{"a"}, wantErrText: true},
+		{name: "first fill may be empty", first: nil, second: []string{}, wantModels: nil, wantErrText: false},
+		{name: "non-empty answer replaces the set", first: []string{"a", "b"}, second: []string{"c"}, wantModels: []string{"c"}, wantErrText: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			reg := newAliasTestRegistry(t, nil, nil)
+			st := reg.states["openai"]
+			st.finishRefresh(reg.now(), tt.first, nil)
+			st.finishRefresh(reg.now(), tt.second, nil)
+			st.mu.Lock()
+			got := make(map[string]bool, len(st.discovered))
+			for id := range st.discovered {
+				got[id] = true
+			}
+			lastErr := st.lastErr
+			st.mu.Unlock()
+			if len(got) != len(tt.wantModels) {
+				t.Fatalf("discovered = %v, want %v", got, tt.wantModels)
+			}
+			for _, id := range tt.wantModels {
+				if !got[id] {
+					t.Errorf("discovered = %v, missing %q", got, id)
+				}
+			}
+			if (lastErr != "") != tt.wantErrText {
+				t.Errorf("lastErr = %q, want non-empty = %v", lastErr, tt.wantErrText)
+			}
+		})
+	}
+}
