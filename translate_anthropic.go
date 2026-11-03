@@ -3,6 +3,7 @@ package traefikllmgateway
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -100,11 +101,19 @@ func toFloat64(v any) (float64, bool) {
 }
 
 // toInt64 is toFloat64 truncated to an integer, for fields (max_tokens)
-// Anthropic's API requires as a JSON integer.
+// Anthropic's API requires as a JSON integer. A value outside the int64
+// range saturates, because Go leaves that conversion implementation-defined;
+// NaN is refused.
 func toInt64(v any) (int64, bool) {
 	f, ok := toFloat64(v)
-	if !ok {
+	if !ok || math.IsNaN(f) {
 		return 0, false
+	}
+	switch {
+	case f >= math.MaxInt64:
+		return math.MaxInt64, true
+	case f <= math.MinInt64:
+		return math.MinInt64, true
 	}
 	return int64(f), true
 }

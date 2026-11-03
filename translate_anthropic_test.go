@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -1187,5 +1188,38 @@ func TestAppendJSONStringMatchesMarshal(t *testing.T) {
 		if got := appendJSONString(nil, s); !sameJSON(t, s, got, want) {
 			t.Errorf("appendJSONString(%q) = %s, want %s", s, got, want)
 		}
+	}
+}
+
+// TestToInt64_Saturates pins toInt64's defined behaviour for out-of-range
+// and non-finite floats, which Go otherwise leaves implementation-defined.
+func TestToInt64_Saturates(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		in     any
+		name   string
+		want   int64
+		wantOK bool
+	}{
+		{name: "fraction truncates toward zero", in: 42.9, want: 42, wantOK: true},
+		{name: "negative fraction truncates toward zero", in: -3.7, want: -3, wantOK: true},
+		{name: "zero", in: 0.0, want: 0, wantOK: true},
+		{name: "int passes through", in: 7, want: 7, wantOK: true},
+		{name: "huge positive saturates", in: 1e300, want: math.MaxInt64, wantOK: true},
+		{name: "huge negative saturates", in: -1e300, want: math.MinInt64, wantOK: true},
+		{name: "just above int64 saturates", in: 9.3e18, want: math.MaxInt64, wantOK: true},
+		{name: "positive infinity saturates", in: math.Inf(1), want: math.MaxInt64, wantOK: true},
+		{name: "negative infinity saturates", in: math.Inf(-1), want: math.MinInt64, wantOK: true},
+		{name: "NaN is refused", in: math.NaN(), want: 0, wantOK: false},
+		{name: "string is refused", in: "5", want: 0, wantOK: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, ok := toInt64(tt.in)
+			if got != tt.want || ok != tt.wantOK {
+				t.Errorf("toInt64(%v) = (%d, %v), want (%d, %v)", tt.in, got, ok, tt.want, tt.wantOK)
+			}
+		})
 	}
 }
