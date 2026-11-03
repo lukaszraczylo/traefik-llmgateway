@@ -973,8 +973,10 @@ model id) and per alias (`aliases[].modelMeta`) — see
   accumulated** from prior requests, before this request's own usage is
   known (usage only arrives after the upstream call completes). A request
   that would start already over budget is refused; a request that starts
-  under budget but pushes the scope over it is still allowed to complete —
-  an accepted at-most-one-request overshoot, not an exactly-enforced cap.
+  under budget but pushes the scope over it is still allowed to complete.
+  Requests in flight at the same time all pass the check, so the overshoot
+  is bounded by the number of concurrent requests times the largest single
+  request cost. It is not an exactly-enforced cap.
 - **Accounting** parses usage from the provider's own response: OpenAI-type
   `usage`, Anthropic `usage` (from `message_start`/`message_delta`), Gemini
   `usageMetadata`. When a **non-streaming** unified-route response reports
