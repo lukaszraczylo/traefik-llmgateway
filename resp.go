@@ -716,14 +716,48 @@ func decodeBulk(r *bufio.Reader, lenField string) (any, error) {
 		return nil, fmt.Errorf("resp: bulk length %d out of range (max %d)", n, respMaxBulkLen)
 	}
 
-	buf := make([]byte, n+2) // payload plus trailing CRLF; n is bounded above, so n+2 cannot overflow
-	if _, err := io.ReadFull(r, buf); err != nil {
+	buf, err := readBulkBody(r, n+2) // payload plus trailing CRLF; n is bounded above, so n+2 cannot overflow
+	if err != nil {
 		return nil, fmt.Errorf("resp: read bulk body: %w", err)
 	}
 	if buf[n] != '\r' || buf[n+1] != '\n' {
 		return nil, fmt.Errorf("resp: bulk reply missing CRLF trailer")
 	}
 	return buf[:n], nil
+}
+
+// respBulkEagerBytes is the largest bulk body allocated up front. Larger
+// declared bodies grow with the bytes that arrive, so a stalled or hostile
+// peer cannot pin respMaxBulkLen of memory with a bare "$<len>" line.
+const respBulkEagerBytes = 64 << 10
+
+// readBulkBody reads exactly total bytes from r. The buffer doubles only
+// after the previous capacity has fully arrived, so memory held is at most
+// about twice the bytes received plus respBulkEagerBytes.
+func readBulkBody(r io.Reader, total int) ([]byte, error) {
+	capNow := respBulkEagerBytes
+	if total < capNow {
+		capNow = total
+	}
+	buf := make([]byte, capNow)
+	got := 0
+	for {
+		n, err := io.ReadFull(r, buf[got:])
+		got += n
+		if err != nil {
+			return nil, err
+		}
+		if got == total {
+			return buf, nil
+		}
+		capNow *= 2
+		if capNow > total {
+			capNow = total
+		}
+		grown := make([]byte, capNow)
+		copy(grown, buf)
+		buf = grown
+	}
 }
 
 // decodeArray reads n elements given the already-parsed "*" length field

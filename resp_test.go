@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -1436,5 +1437,49 @@ func TestRESPClient_Close_EmptyPool_ReturnsNilImmediately(t *testing.T) {
 	}
 	if got := len(c.free); got != 0 {
 		t.Errorf("len(free) after Close = %d, want 0", got)
+	}
+}
+
+// TestDecodeBulk_AllocationFollowsBytesReceived pins that a declared bulk
+// length does not allocate its full size before the payload arrives, and
+// that a complete large reply still decodes intact. It is deliberately not
+// parallel: it reads the process-wide allocation counter.
+func TestDecodeBulk_AllocationFollowsBytesReceived(t *testing.T) {
+	const slackBytes = 1 << 20
+	tests := []struct {
+		name     string
+		declared int
+		payload  int
+		wantErr  bool
+	}{
+		{name: "stalled huge declaration", declared: respMaxBulkLen, payload: 0, wantErr: true},
+		{name: "truncated mid payload", declared: respMaxBulkLen, payload: 1 << 20, wantErr: true},
+		{name: "small complete reply", declared: 100, payload: 100, wantErr: false},
+		{name: "large complete reply", declared: 2 << 20, payload: 2 << 20, wantErr: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			wire := strings.Repeat("x", tt.payload)
+			if !tt.wantErr {
+				wire += "\r\n"
+			}
+			r := bufio.NewReader(strings.NewReader(wire))
+			var before, after runtime.MemStats
+			runtime.ReadMemStats(&before)
+			got, err := decodeBulk(r, strconv.Itoa(tt.declared))
+			runtime.ReadMemStats(&after)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("decodeBulk err = %v, wantErr %v", err, tt.wantErr)
+			}
+			maxAlloc := uint64(4*tt.payload + slackBytes) //nolint:gosec // small non-negative test constants
+			if delta := after.TotalAlloc - before.TotalAlloc; delta > maxAlloc {
+				t.Errorf("decodeBulk allocated %d bytes for %d received, want <= %d", delta, tt.payload, maxAlloc)
+			}
+			if !tt.wantErr {
+				if b, _ := got.([]byte); len(b) != tt.declared {
+					t.Errorf("decoded %d bytes, want %d", len(b), tt.declared)
+				}
+			}
+		})
 	}
 }
