@@ -46,9 +46,13 @@ func geminiImageAspectRatio(size string) (string, error) {
 // rejected the same way chat's translators reject an unsupported field
 // (isTruthy, translate_anthropic.go): Imagen has no equivalent for
 // either. n defaults to 1 when absent or non-positive, matching OpenAI's
-// own default. The request's "model" field is deliberately never read
+// own default, and above maxImagesPerRequest is refused. The request's "model" field is deliberately never read
 // here — the adapter reads it separately to build the :predict URL, the
 // same convention chatCompletion/embeddings already follow.
+// maxImagesPerRequest bounds the n a client can ask for, so one call cannot
+// request an unbounded Imagen sampleCount.
+const maxImagesPerRequest = 10
+
 func geminiImagesRequestFromOpenAI(req map[string]any) (map[string]any, error) {
 	if rf, ok := req["response_format"].(string); ok && rf == "url" {
 		return nil, &translateError{msg: `response_format "url" is not supported for gemini image generation (the gateway stores nothing to host a URL from)`}
@@ -65,6 +69,9 @@ func geminiImagesRequestFromOpenAI(req map[string]any) (map[string]any, error) {
 	n := int64(1)
 	if v, ok := req["n"]; ok {
 		if parsed, ok2 := toInt64(v); ok2 && parsed > 0 {
+			if parsed > maxImagesPerRequest {
+				return nil, &translateError{msg: fmt.Sprintf("n must be at most %d for gemini image generation", maxImagesPerRequest)}
+			}
 			n = parsed
 		}
 	}

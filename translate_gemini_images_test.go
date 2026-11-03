@@ -157,3 +157,39 @@ func TestGeminiImageAspectRatio_UnknownSizeErrors(t *testing.T) {
 		t.Error("notSupported = true, want false (this is a 400, not a 501)")
 	}
 }
+
+// TestGeminiImagesRequest_CountBounds pins the accepted range for n: absent
+// or non-positive defaults to 1, and more than maxImagesPerRequest is refused.
+func TestGeminiImagesRequest_CountBounds(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		req     map[string]any
+		name    string
+		want    int64
+		wantErr bool
+	}{
+		{name: "absent defaults to one", req: map[string]any{"prompt": "p"}, want: 1},
+		{name: "zero defaults to one", req: map[string]any{"prompt": "p", "n": 0.0}, want: 1},
+		{name: "negative defaults to one", req: map[string]any{"prompt": "p", "n": -4.0}, want: 1},
+		{name: "in range", req: map[string]any{"prompt": "p", "n": 4.0}, want: 4},
+		{name: "at the cap", req: map[string]any{"prompt": "p", "n": float64(maxImagesPerRequest)}, want: maxImagesPerRequest},
+		{name: "one over the cap", req: map[string]any{"prompt": "p", "n": float64(maxImagesPerRequest + 1)}, wantErr: true},
+		{name: "huge", req: map[string]any{"prompt": "p", "n": 1e9}, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			out, err := geminiImagesRequestFromOpenAI(tt.req)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("err = %v, wantErr %v", err, tt.wantErr)
+			}
+			if tt.wantErr {
+				return
+			}
+			params, _ := out["parameters"].(map[string]any)
+			if got, _ := params["sampleCount"].(int64); got != tt.want {
+				t.Errorf("sampleCount = %v, want %d", params["sampleCount"], tt.want)
+			}
+		})
+	}
+}
