@@ -39,6 +39,11 @@ const sseScannerMaxLineSize = 4 * 1024 * 1024
 // tuning knob.
 const sseMaxEventBytes = 8 * 1024 * 1024
 
+// sseDataLineOverhead is the per-"data:" line cost counted against
+// sseMaxEventBytes: 1 byte for the joined "\n" plus the 16-byte string
+// header the dataLines slice retains for the line.
+const sseDataLineOverhead = 1 + 16
+
 // errSSEEventTooLarge is returned by readSSE when one event's accumulated
 // "data:" payload exceeds sseMaxEventBytes. It mirrors how the per-line
 // cap surfaces (bufio.ErrTooLong is returned as-is): the caller's stream
@@ -195,10 +200,11 @@ func readSSE(r io.Reader, fn func(sseEvent) error) error {
 		case "event":
 			event = value
 		case "data":
-			// +1 for the "\n" this line will contribute to the joined
-			// payload. Checked BEFORE appending, so the cap bounds what is
-			// actually held rather than catching it one line late.
-			dataBytes += len(value) + 1
+			// Each line costs its payload plus the "\n" it adds to the
+			// joined payload plus the string header dataLines retains, so
+			// many empty lines cannot amplify past the cap. Checked BEFORE
+			// appending, so the cap bounds what is actually held.
+			dataBytes += len(value) + sseDataLineOverhead
 			if dataBytes > sseMaxEventBytes {
 				return errSSEEventTooLarge
 			}
