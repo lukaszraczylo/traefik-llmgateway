@@ -1136,3 +1136,22 @@ func TestRetryPolicy_WaitBeforeLargeBackoffCapped(t *testing.T) {
 		})
 	}
 }
+
+func TestDefaultWaitFn(t *testing.T) {
+	t.Run("completes", func(t *testing.T) {
+		if !defaultWaitFn(context.Background(), time.Millisecond) {
+			t.Fatal("want true after the wait elapses")
+		}
+	})
+	t.Run("cancel returns promptly", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		start := time.Now()
+		if defaultWaitFn(ctx, time.Minute) {
+			t.Fatal("want false on canceled ctx")
+		}
+		if time.Since(start) > time.Second {
+			t.Fatal("canceled wait did not return promptly")
+		}
+	})
+}

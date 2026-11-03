@@ -151,8 +151,10 @@ func (p *retryPolicy) totalTries() int {
 // normally (do should proceed with the next attempt), false when ctx
 // ended it early (do should stop retrying and return the last result).
 func defaultWaitFn(ctx context.Context, d time.Duration) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
 	select {
-	case <-time.After(d):
+	case <-t.C:
 		return true
 	case <-ctx.Done():
 		return false
