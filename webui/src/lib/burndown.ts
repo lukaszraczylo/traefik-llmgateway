@@ -91,3 +91,11 @@ export function runOutDate(mtdMicros: number, limitMicros: number, now: Date): D
   const daysToExhaust = remainingMicros / dailyRateMicros
   return new Date(now.getTime() + daysToExhaust * MS_PER_DAY)
 }
+
+/** BUDGET_LINE_MAX_RATIO is how far above spend the budget may sit before its line is hidden. */
+export const BUDGET_LINE_MAX_RATIO = 10
+
+/** budgetLineVisible hides a budget line so far above spend that it flattens the spend curve against the axis. */
+export function budgetLineVisible(spentMicros: number, budgetMicros: number): boolean {
+  return budgetMicros <= BUDGET_LINE_MAX_RATIO * spentMicros
+}

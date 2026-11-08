@@ -58,6 +58,10 @@ const raw = reactive<Record<keyof LimitsConfig, string>>({
 const invalidFields = computed(() =>
   FIELDS.filter(({ key }) => raw[key].trim() !== '' && !fieldValid(key, Number(raw[key]))).map((f) => f.label),
 )
+/** fieldInvalid is the per-input twin of invalidFields, so each input can carry aria-invalid. */
+function fieldInvalid(key: (typeof FIELDS)[number]['key']): boolean {
+  return raw[key].trim() !== '' && !fieldValid(key, Number(raw[key]))
+}
 const invalidIntegerFields = computed(() =>
   FIELDS.filter(({ key }) => INTEGER_FIELDS.has(key) && raw[key].trim() !== '' && !fieldValid(key, Number(raw[key]))).map((f) => f.label),
 )
@@ -104,11 +108,13 @@ const snippet = computed<string | null>(() => {
           min="0"
           :step="INTEGER_FIELDS.has(field.key) ? '1' : 'any'"
           placeholder="unset"
+          :aria-invalid="fieldInvalid(field.key) || undefined"
+          :aria-describedby="fieldInvalid(field.key) ? 'limits-errors' : undefined"
         />
       </div>
     </div>
 
-    <Alert v-if="invalidFields.length" variant="destructive">
+    <Alert v-if="invalidFields.length" id="limits-errors" variant="destructive">
       <AlertDescription>
         <p v-if="invalidIntegerFields.length">Enter a non-negative whole number for: {{ invalidIntegerFields.join(', ') }}.</p>
         <p v-if="invalidDecimalFields.length">Enter a non-negative number for: {{ invalidDecimalFields.join(', ') }}.</p>

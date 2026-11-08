@@ -5,7 +5,7 @@ import ChartCard from '@/components/ChartCard.vue'
 import StatItem from '@/components/StatItem.vue'
 import TimeSeriesChart from '@/components/TimeSeriesChart.vue'
 import type { TimeSeriesDataset } from '@/components/TimeSeriesChart.vue'
-import { cumulative, runOutDate } from '@/lib/burndown'
+import { BUDGET_LINE_MAX_RATIO, budgetLineVisible, cumulative, runOutDate } from '@/lib/burndown'
 import { NOT_ENOUGH_DATA } from '@/lib/forecast'
 import { formatBucketLabel, formatCostAxis, formatCostDisplay, formatShortDate } from '@/lib/format'
 import { loadState } from '@/lib/load-state'
@@ -53,7 +53,7 @@ const spentMicros = computed<number>(() => cumulativePoints.value.at(-1) ?? 0)
 const datasets = computed<TimeSeriesDataset[]>(() => [{ label: 'Spent (MTD)', data: cumulativePoints.value, color: '--chart-cost' }])
 
 const comparisonDatasets = computed<TimeSeriesDataset[]>(() => {
-  if (props.budgetMicros === null) return []
+  if (props.budgetMicros === null || !budgetLineVisible(spentMicros.value, props.budgetMicros)) return []
   const flat = new Array<number>(cumulativePoints.value.length).fill(props.budgetMicros)
   return [{ label: 'Budget', data: flat, color: '--destructive' }]
 })
@@ -85,6 +85,9 @@ const willExceed = computed<boolean>(() => props.budgetMicros !== null && spentM
         </StatItem>
       </div>
       <p v-if="budgetMicros === null" class="text-sm text-muted-foreground">No budget configured for this scope.</p>
+      <p v-else-if="comparisonDatasets.length === 0" class="text-sm text-muted-foreground">
+        Budget line hidden: it is more than {{ BUDGET_LINE_MAX_RATIO }}× current spend and would flatten the curve.
+      </p>
       <TimeSeriesChart
         :labels="labels"
         :datasets="datasets"

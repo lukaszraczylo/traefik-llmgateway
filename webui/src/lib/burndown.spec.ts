@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { cumulative, currentMonthDaySpan, MIN_ELAPSED_DAYS, runOutDate } from './burndown'
+import { budgetLineVisible, BUDGET_LINE_MAX_RATIO, cumulative, currentMonthDaySpan, MIN_ELAPSED_DAYS, runOutDate } from './burndown'
 
 describe('currentMonthDaySpan', () => {
   it('returns the UTC day-of-month', () => {
@@ -61,5 +61,16 @@ describe('runOutDate', () => {
 
   it('exposes MIN_ELAPSED_DAYS as a stable, importable constant', () => {
     expect(MIN_ELAPSED_DAYS).toBe(1)
+  })
+})
+
+describe('budgetLineVisible', () => {
+  it.each([
+    { spent: 0, budget: 1, visible: false },
+    { spent: 1_000, budget: 1_000 * BUDGET_LINE_MAX_RATIO, visible: true },
+    { spent: 1_000, budget: 1_000 * BUDGET_LINE_MAX_RATIO + 1, visible: false },
+    { spent: 5_000, budget: 1_000, visible: true },
+  ])('spent=$spent budget=$budget -> $visible', ({ spent, budget, visible }) => {
+    expect(budgetLineVisible(spent, budget)).toBe(visible)
   })
 })

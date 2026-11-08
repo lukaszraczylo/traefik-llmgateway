@@ -79,7 +79,13 @@ const snippet = computed<string | null>(() => {
     <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
       <div class="flex flex-col gap-1">
         <label for="grant-providers" class="text-xs font-medium text-muted-foreground">Providers (comma-separated, empty = all)</label>
-        <Input id="grant-providers" v-model="providersRaw" placeholder="anthropic, openai" />
+        <Input
+          id="grant-providers"
+          v-model="providersRaw"
+          placeholder="anthropic, openai"
+          :aria-invalid="grantError ? true : undefined"
+          :aria-describedby="grantError ? 'grant-error' : undefined"
+        />
       </div>
       <div class="flex flex-col gap-1">
         <label for="grant-models" class="text-xs font-medium text-muted-foreground">Models (comma-separated, empty = all)</label>
@@ -97,7 +103,7 @@ const snippet = computed<string | null>(() => {
       </template>
     </div>
 
-    <Alert v-if="grantError" variant="destructive">
+    <Alert v-if="grantError" id="grant-error" variant="destructive">
       <AlertDescription>{{ grantError }}</AlertDescription>
     </Alert>
 

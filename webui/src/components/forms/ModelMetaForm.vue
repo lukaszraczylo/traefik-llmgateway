@@ -46,7 +46,16 @@ const snippet = computed<string | null>(() => {
     <div class="grid grid-cols-1 gap-3 sm:grid-cols-2 sm:items-end">
       <div class="flex flex-col gap-1">
         <label for="modelmeta-context" class="text-xs font-medium text-muted-foreground">Context window (tokens)</label>
-        <Input id="modelmeta-context" v-model="contextRaw" type="number" min="1" step="1" placeholder="131072" />
+        <Input
+          id="modelmeta-context"
+          v-model="contextRaw"
+          type="number"
+          min="1"
+          step="1"
+          placeholder="131072"
+          :aria-invalid="contextEntered && !contextValid ? true : undefined"
+          :aria-describedby="contextEntered && !contextValid ? 'modelmeta-context-error' : undefined"
+        />
       </div>
       <label class="flex items-center gap-2 pb-1.5 text-sm">
         <input id="modelmeta-free" v-model="free" type="checkbox" class="size-4 rounded border-input" />
@@ -54,7 +63,7 @@ const snippet = computed<string | null>(() => {
       </label>
     </div>
 
-    <Alert v-if="contextEntered && !contextValid" variant="destructive">
+    <Alert v-if="contextEntered && !contextValid" id="modelmeta-context-error" variant="destructive">
       <AlertDescription>Context window must be a positive whole number of tokens.</AlertDescription>
     </Alert>
 

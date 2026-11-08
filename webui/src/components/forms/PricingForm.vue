@@ -54,15 +54,33 @@ const snippet = computed<string | null>(() => {
     <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
       <div class="flex flex-col gap-1">
         <label for="pricing-input" class="text-xs font-medium text-muted-foreground">Input price / MTok (USD)</label>
-        <Input id="pricing-input" v-model="inputRaw" type="number" min="0" step="any" placeholder="0.50" />
+        <Input
+          id="pricing-input"
+          v-model="inputRaw"
+          type="number"
+          min="0"
+          step="any"
+          placeholder="0.50"
+          :aria-invalid="errors.length > 0 && !inputValid ? true : undefined"
+          :aria-describedby="errors.length > 0 && !inputValid ? 'pricing-errors' : undefined"
+        />
       </div>
       <div class="flex flex-col gap-1">
         <label for="pricing-output" class="text-xs font-medium text-muted-foreground">Output price / MTok (USD)</label>
-        <Input id="pricing-output" v-model="outputRaw" type="number" min="0" step="any" placeholder="1.50" />
+        <Input
+          id="pricing-output"
+          v-model="outputRaw"
+          type="number"
+          min="0"
+          step="any"
+          placeholder="1.50"
+          :aria-invalid="errors.length > 0 && !outputValid ? true : undefined"
+          :aria-describedby="errors.length > 0 && !outputValid ? 'pricing-errors' : undefined"
+        />
       </div>
     </div>
 
-    <Alert v-if="errors.length" variant="destructive">
+    <Alert v-if="errors.length" id="pricing-errors" variant="destructive">
       <AlertDescription>
         <p v-for="(error, index) in errors" :key="index">{{ error }}</p>
       </AlertDescription>
