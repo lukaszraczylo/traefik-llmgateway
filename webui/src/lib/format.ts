@@ -194,8 +194,13 @@ export function formatContextWindow(tokens: number): string {
   }
 
   // 999_500+ would round to "1000k"; the M branch renders it as "1M".
-  if (tokens < 999_500) return `${Math.round(tokens / 1_000)}k`
-  return `${Math.round(tokens / 1_000_000)}M`
+  if (tokens < 999_500) return `${roundScaled(tokens / 1_000)}k`
+  return `${roundScaled(tokens / 1_000_000)}M`
+}
+
+/** roundScaled keeps one decimal below 10 ("1.5") so 1500 does not read as 2k, and rounds to whole units from 10 up. */
+function roundScaled(value: number): string {
+  return value < 10 ? String(Math.round(value * 10) / 10) : String(Math.round(value))
 }
 
 /** formatUsdPerMTok renders a USD-per-million-tokens float as "$0.19" (2 decimals) — the shared building block for both the visible cost chip and ModelChip's hover detail. */

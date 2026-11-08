@@ -148,10 +148,19 @@ export function emitYamlKey(key: string): string {
   return yamlKeyNeedsQuoting(key) ? escapeYamlUnsafeControls(JSON.stringify(key)) : key
 }
 
+/** yamlNumber spells non-finite values with their YAML 1.2 float forms; String(NaN) is a plain string in YAML. */
+function yamlNumber(n: number): string {
+  if (Number.isNaN(n)) return '.nan'
+  if (n === Infinity) return '.inf'
+  if (n === -Infinity) return '-.inf'
+  return String(n)
+}
+
 /** emitYamlScalar renders one leaf value in "key: <here>" position OR a flow list/map element — quoted (JSON-style) whenever needsQuoting says the plain form is unsafe, plain otherwise. Booleans/numbers/null render via their own JS literal, never through the string quoting path (a real `true`/`false`/`null`/number is safe unquoted by construction — only a STRING value can accidentally spell one of those). */
 export function emitYamlScalar(value: YamlPrimitive): string {
   if (value === null) return 'null'
-  if (typeof value === 'boolean' || typeof value === 'number') return String(value)
+  if (typeof value === 'number') return yamlNumber(value)
+  if (typeof value === 'boolean') return String(value)
   return needsQuoting(value) ? escapeYamlUnsafeControls(JSON.stringify(value)) : value
 }
 

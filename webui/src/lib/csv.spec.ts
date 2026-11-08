@@ -84,3 +84,13 @@ describe('toCsv: formula injection (P4)', () => {
     expect(toCsv(['note'], [['cost=5']])).toBe('note\r\ncost=5\r\n')
   })
 })
+
+describe('toCsv numbers', () => {
+  it.each([
+    [-5, '-5'],
+    [-0.25, '-0.25'],
+    [12, '12'],
+  ])('writes the number %s unguarded', (n, want) => {
+    expect(toCsv(['v'], [[n]])).toBe(`v\r\n${want}\r\n`)
+  })
+})

@@ -41,7 +41,7 @@ const CSV_FORMULA_LEAD_CHARS = /^[=+\-@\t\r]/
  */
 function csvField(value: unknown): string {
   let s = value === null || value === undefined ? '' : String(value)
-  if (CSV_FORMULA_LEAD_CHARS.test(s)) s = `'${s}`
+  if (typeof value !== 'number' && CSV_FORMULA_LEAD_CHARS.test(s)) s = `'${s}`
   if (!CSV_SPECIAL_CHARS.test(s)) return s
   return `"${s.replace(/"/g, '""')}"`
 }

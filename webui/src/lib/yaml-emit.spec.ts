@@ -285,3 +285,14 @@ describe('toYamlValue', () => {
     expect(toYamlValue(weird)).toBe(String(weird))
   })
 })
+
+describe('emitYamlScalar non-finite numbers', () => {
+  it.each([
+    [Number.NaN, '.nan'],
+    [Infinity, '.inf'],
+    [-Infinity, '-.inf'],
+    [-3.5, '-3.5'],
+  ])('%s -> %s', (n, want) => {
+    expect(emitYamlScalar(n)).toBe(want)
+  })
+})

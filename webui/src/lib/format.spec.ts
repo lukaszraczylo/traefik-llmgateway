@@ -72,6 +72,9 @@ describe('formatContextWindow', () => {
     // when they happen to be exact multiples of 1024 (128000 = 125 ×
     // 1024) — decimal-K/M.
     { tokens: 128_000, want: '128k' }, // review regression: was "125k"
+    { tokens: 1_500, want: '1.5k' },
+    { tokens: 9_950, want: '10k' },
+    { tokens: 1_500_000, want: '1.5M' },
     { tokens: 1_000_000, want: '1M' }, // review regression: was "977k"
     { tokens: 2_000_000, want: '2M' }, // review regression: was "1953k"
     // Plain digits under 1024, either path.
