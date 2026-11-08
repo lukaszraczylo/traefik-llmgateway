@@ -420,6 +420,8 @@ also a construction error, never a panic (`providers.go`, `mcp_a2a.go`,
 | `models` | `[]string` | `[]` | Explicit model ids this provider serves. Combined with any discovered ids. |
 | `discovery` | `bool` | `false` | Pull the provider's own model-listing endpoint at startup, then no more often than `discoveryInterval` when requests arrive. A discovery failure is logged and non-fatal; construction still succeeds on `models` alone. |
 | `metadataPath` | `string` | `""` (no metadata capture) | Only read by `openai`-type providers. A second endpoint, fetched alongside `discovery`, that reports per-model context length — for example `/api/v0/models` on an LM Studio server. Must start with `/` when set (checked at construction). See [Model metadata](#model-metadata). |
+| `modelBaseUrls` | `map[string]string` | `{}` | Only for `openai`-type providers. Maps a bare model id (the id sent upstream) to the base URL that serves it, instead of `baseUrl`. Its keys are declared models of the provider, like `models`, and are never polled by `discovery`. Each URL must be absolute `http(s)` with no userinfo, query or fragment (checked at construction). See [Several upstreams per provider](#several-upstreams-per-provider). |
+| `pathBaseUrls` | `map[string]string` | `{}` | Only for `openai`-type providers. Maps a native passthrough path prefix (such as `/v1/decide`) to a base URL, for requests whose body names no `modelBaseUrls` model. Longest prefix wins, matched on whole path segments. Same URL rules as `modelBaseUrls`. |
 | `passthrough` | `*bool` | `nil` (enabled) | `nil` or `true`: this provider's native passthrough route (`/{name}/...`) stays reachable, unchanged from before this field existed. `false`: the route is disabled — `ServeHTTP` treats it exactly like an unconfigured provider name, falling through to the ordinary unknown-route 404 without even reaching authentication. Does not affect the MCP/A2A target proxy, which has its own routing prefix. |
 | `requestTimeout` | `string` (Go duration) | Inherits the top-level `requestTimeout` (`5m` if that is also unset) | Overrides the global request timeout for this provider alone, including its native passthrough route — see [Request timeout](#request-timeout). An explicit override always wins over the global default. Empty inherits; a value that fails to parse, or parses to zero or a negative duration, is a construction error. |
 
@@ -1610,6 +1612,41 @@ only once it has something to authorize:
   path, never the JSON body, so a group with a restricted `models` list
   will see every Gemini passthrough request denied. Route Gemini traffic
   for a model-restricted group through the unified `/v1/*` API instead.
+
+### Several upstreams per provider
+
+One `openai`-type provider can front several servers. `baseUrl` stays the
+default upstream; `modelBaseUrls` and `pathBaseUrls` override it. Both are
+off when absent, and then every request goes to `baseUrl` as before.
+
+```yaml
+providers:
+  gx10:
+    type: openai
+    baseUrl: http://llm-api.llm.svc.cluster.local:8000
+    discovery: true
+    models: ["current"]
+    modelBaseUrls:
+      Qwen3.8-27B: http://qwen27.llm.svc.cluster.local:8000
+      text-embedding-multilingual-e5-base: http://embed-e5.llm.svc.cluster.local:8000
+      text-embedding-bge-reranker-v2: http://rerank-bge-v2.llm.svc.cluster.local:8000
+    pathBaseUrls:
+      /v1/decide: http://thx02.llm.svc.cluster.local:8200
+```
+
+- **Unified routes** (chat, embeddings, images, audio): a request for
+  `gx10/Qwen3.8-27B` goes to the `modelBaseUrls` entry for the bare id
+  `Qwen3.8-27B`. A model without an entry goes to `baseUrl`.
+- **Native passthrough** (`/gx10/v1/rerank`, `/gx10/v1/decide`): the gateway
+  reads the body's top-level `model` (bare or `gx10/`-prefixed, within the
+  first 64KiB). A `modelBaseUrls` hit wins; otherwise the longest matching
+  `pathBaseUrls` prefix; otherwise `baseUrl`. Only providers that set
+  `modelBaseUrls` read the body for this purpose.
+- **Discovery** polls `baseUrl` only. `modelBaseUrls` ids are static.
+- **Auth** reuses the provider's `apiKey` for every upstream.
+- **Failover health** is tracked per provider, not per upstream. One failing
+  upstream marks the whole provider unhealthy, so with failover enabled its
+  other models can be tried after another provider for the breaker window.
 
 ## Anthropic Messages API (`/v1/messages`)
 

@@ -12,8 +12,8 @@ var nonSecretConfigKeys = map[string]bool{
 	"agents": true, "allowedCIDRs": true, "backoff": true, "cacheTTL": true,
 	"card": true, "discoveryInterval": true, "file": true, "group": true,
 	"groups": true, "maxOpenDuration": true, "mcpServers": true,
-	"metadataPath": true, "modelAliases": true, "models": true, "name": true,
-	"openDuration": true, "passthroughPaths": true, "path": true,
+	"metadataPath": true, "modelAliases": true, "modelBaseUrls": true, "models": true, "name": true,
+	"openDuration": true, "passthroughPaths": true, "path": true, "pathBaseUrls": true,
 	"probeInterval": true, "providers": true, "requestTimeout": true,
 	"ttl": true, "type": true,
 }

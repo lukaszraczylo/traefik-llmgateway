@@ -877,6 +877,10 @@ func newModelRegistry(adapters map[string]providerAdapter, cfg *Config, log func
 			explicit[id] = true
 			explicitModels[id] = true
 		}
+		for id := range pc.ModelBaseURLs {
+			explicit[id] = true
+			explicitModels[id] = true
+		}
 
 		m.states[name] = &providerState{
 			explicit:         explicit,

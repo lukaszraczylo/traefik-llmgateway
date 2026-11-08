@@ -148,6 +148,7 @@ func setConcurrencyHeader(h http.Header, n int) {
 // learning and the RateLimit-Policy header on w. The returned func must run
 // when the upstream exchange ends.
 func (g *Gateway) trackUpstream(ctx context.Context, w http.ResponseWriter, provider, model string) (context.Context, func()) {
+	ctx = withUpstreamModel(ctx, model)
 	c := g.concurrency
 	if c == nil {
 		return withAttemptRecorder(ctx, func(resp *http.Response, attemptErr error) {

@@ -662,9 +662,23 @@ func buildAdapters(cfg *Config) (map[string]providerAdapter, error) {
 			return nil, timeoutErr
 		}
 
+		modelBases, baseErr := validateUpstreamBases(name, "modelBaseUrls", pc.ModelBaseURLs, false)
+		if baseErr != nil {
+			return nil, baseErr
+		}
+		pathBases, baseErr := validateUpstreamBases(name, "pathBaseUrls", pc.PathBaseURLs, true)
+		if baseErr != nil {
+			return nil, baseErr
+		}
+		if pc.Type != providerTypeOpenAI && (len(modelBases) > 0 || len(pathBases) > 0) {
+			return nil, fmt.Errorf("llmgateway: provider %q: modelBaseUrls and pathBaseUrls are supported for type %q only", name, providerTypeOpenAI)
+		}
+
 		switch pc.Type {
 		case providerTypeOpenAI:
 			a := newOpenAIAdapter(name, base, apiKey)
+			a.modelBases = modelBases
+			a.pathBases = pathBases
 			a.retry = policy
 			a.metadataPath = pc.MetadataPath
 			// timeout/client are re-resolved here rather than left at the
