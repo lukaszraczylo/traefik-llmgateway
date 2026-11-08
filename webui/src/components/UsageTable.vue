@@ -39,6 +39,7 @@ const columns = computed(() =>
 
 <template>
   <DataTable
+    label="Usage"
     :columns="columns"
     :data="entries"
     :empty-message="emptyMessage"

@@ -1,5 +1,11 @@
 import { useAuthStore } from '@/stores/auth'
 
+/** Upper bound on one admin request; a hung socket would otherwise pin a store's in-flight guard and freeze polling. */
+const ADMIN_FETCH_TIMEOUT_MS = 15_000
+
+/** Concurrent GETs for the same key and path share one request (spend.ts asks twice for the default metric). */
+const inFlight = new Map<string, Promise<unknown>>()
+
 /** AdminApiError carries the HTTP status alongside the message, so callers
  * can tell an auth failure (already handled by adminFetch itself) apart
  * from any other fetch failure without re-parsing the message string. */
@@ -41,12 +47,29 @@ async function serverErrorMessage(resp: Response, path: string): Promise<string>
  * poll timer should not spam the status line with "unauthorized" on every
  * tick once the gate is already showing) can catch and check `status`.
  */
-export async function adminFetch<T>(path: string): Promise<T> {
+export function adminFetch<T>(path: string): Promise<T> {
+  const key = useAuthStore().apiKey
+  const flightKey = `${key}\0${path}`
+  const existing = inFlight.get(flightKey)
+  if (existing) return existing as Promise<T>
+  const request = doAdminFetch<T>(path, key).finally(() => inFlight.delete(flightKey))
+  inFlight.set(flightKey, request)
+  return request
+}
+
+async function doAdminFetch<T>(path: string, key: string): Promise<T> {
   const auth = useAuthStore()
-  const key = auth.apiKey
   const headers: HeadersInit = key ? { 'x-api-key': key } : {}
 
-  const resp = await fetch(path, { credentials: 'same-origin', headers })
+  let resp: Response
+  try {
+    resp = await fetch(path, { credentials: 'same-origin', headers, signal: AbortSignal.timeout(ADMIN_FETCH_TIMEOUT_MS) })
+  } catch (err) {
+    if (err instanceof DOMException && err.name === 'TimeoutError') {
+      throw new AdminApiError(`${path}: no response after ${ADMIN_FETCH_TIMEOUT_MS / 1000}s`, 0)
+    }
+    throw err
+  }
 
   if (!resp.ok) {
     const message = await serverErrorMessage(resp, path)
@@ -59,7 +82,11 @@ export async function adminFetch<T>(path: string): Promise<T> {
     }
     throw new AdminApiError(message, resp.status)
   }
-  return (await resp.json()) as T
+  try {
+    return (await resp.json()) as T
+  } catch {
+    throw new AdminApiError(`${path}: response was not valid JSON`, resp.status)
+  }
 }
 
 /**

@@ -174,7 +174,7 @@ function cellIconClass(cell: AccessCell): string {
       </EmptyState>
     </CardContent>
     <CardContent v-else-if="columnsState === 'error'">
-      <ErrorState :message="dashboard.error" />
+      <ErrorState :message="dashboard.error" :on-retry="dashboard.refresh" />
     </CardContent>
     <CardContent v-else-if="columnsState === 'loading'">
       <SkeletonTable :rows="rows.length" :cols="4" />

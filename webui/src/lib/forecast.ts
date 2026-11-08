@@ -70,7 +70,7 @@ export function monthProgress(now: Date): number {
  * infinite figure for the first sliver of a month.
  */
 export function projectMonthEnd(mtdMicros: number, elapsedFraction: number): number | null {
-  if (elapsedFraction < MIN_PROJECTION_FRACTION) return null
+  if (!(elapsedFraction >= MIN_PROJECTION_FRACTION)) return null
   return Math.round(mtdMicros / elapsedFraction)
 }
 

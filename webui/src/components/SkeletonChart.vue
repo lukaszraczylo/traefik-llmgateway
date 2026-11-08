@@ -12,7 +12,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 </script>
 
 <template>
-  <div class="h-72 w-full">
+  <div class="h-72 w-full" role="status" aria-busy="true" aria-label="Loading chart">
     <Skeleton class="h-full w-full" />
   </div>
 </template>

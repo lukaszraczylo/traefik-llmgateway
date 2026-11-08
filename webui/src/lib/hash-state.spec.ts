@@ -130,3 +130,12 @@ describe('parsePageParams', () => {
     expect(parsePageParams(new URLSearchParams())).toEqual({})
   })
 })
+
+describe('parseHashState prototype keys', () => {
+  it.each(['constructor', 'toString', '__proto__', 'hasOwnProperty'])('#%s falls back to the default page', (key) => {
+    const state = parseHashState(`#${key}?range=7d`)
+    expect(typeof state.page).toBe('string')
+    expect(PAGE_IDS).toContain(state.page)
+    expect(state.query.get('range')).toBe('7d')
+  })
+})

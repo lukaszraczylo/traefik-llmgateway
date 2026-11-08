@@ -126,8 +126,8 @@ const agentColumns = targetColumns(onSelect('agent'))
         </CardHeader>
         <CardContent>
           <SkeletonTable v-if="targetsLoadState === 'skeleton'" :rows="3" :cols="mcpColumns.length" />
-          <ErrorState v-else-if="targetsLoadState === 'error'" :message="dashboard.error" />
-          <DataTable v-else :columns="mcpColumns" :data="filteredMCPServers" :empty-message="mcpEmptyMessage" />
+          <ErrorState v-else-if="targetsLoadState === 'error'" :message="dashboard.error" :on-retry="dashboard.refresh" />
+          <DataTable v-else label="MCP servers" :columns="mcpColumns" :data="filteredMCPServers" :empty-message="mcpEmptyMessage" />
         </CardContent>
       </Card>
 
@@ -141,8 +141,8 @@ const agentColumns = targetColumns(onSelect('agent'))
         </CardHeader>
         <CardContent>
           <SkeletonTable v-if="targetsLoadState === 'skeleton'" :rows="3" :cols="agentColumns.length" />
-          <ErrorState v-else-if="targetsLoadState === 'error'" :message="dashboard.error" />
-          <DataTable v-else :columns="agentColumns" :data="filteredAgents" :empty-message="agentsEmptyMessage" />
+          <ErrorState v-else-if="targetsLoadState === 'error'" :message="dashboard.error" :on-retry="dashboard.refresh" />
+          <DataTable v-else label="Agents" :columns="agentColumns" :data="filteredAgents" :empty-message="agentsEmptyMessage" />
         </CardContent>
       </Card>
     </template>

@@ -87,7 +87,7 @@ const emptyMessage = computed<string>(() => {
       <SkeletonTable v-if="catalogLoadState === 'skeleton'" :rows="5" :cols="columns.length" />
       <ErrorState v-else-if="catalogLoadState === 'error'" :message="error ?? ''" :on-retry="onRetry" />
       <EmptyState v-else-if="catalogLoadState === 'empty'" title="No models configured." />
-      <DataTable v-else :columns="columns" :data="filtered" :empty-message="emptyMessage" />
+      <DataTable v-else label="Model catalog" :columns="columns" :data="filtered" :empty-message="emptyMessage" />
     </CardContent>
   </Card>
 </template>

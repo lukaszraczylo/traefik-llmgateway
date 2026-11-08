@@ -137,3 +137,9 @@ describe('NOT_ENOUGH_DATA', () => {
     expect(NOT_ENOUGH_DATA).toBeTruthy()
   })
 })
+
+describe('projectMonthEnd non-finite input', () => {
+  it.each([NaN, Infinity * 0, -1])('returns null for elapsedFraction %s', (f) => {
+    expect(projectMonthEnd(5, f)).toBeNull()
+  })
+})

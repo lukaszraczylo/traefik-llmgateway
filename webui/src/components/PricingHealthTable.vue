@@ -147,7 +147,7 @@ function pricingHealthCsv(): string {
             <TryLongerRangeButton />
           </EmptyState>
         </template>
-        <DataTable :columns="columns" :data="rows" empty-message="none" />
+        <DataTable :columns="columns" :data="rows" empty-message="No priced models in this range." label="Pricing health" />
         <div class="flex justify-end">
           <CsvExportButton filename="pricing-health.csv" :build="pricingHealthCsv" />
         </div>

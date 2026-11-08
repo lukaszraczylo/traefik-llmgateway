@@ -162,7 +162,8 @@ export function formatContextWindow(tokens: number): string {
     return `${Math.round(tokens / (1024 * 1024))}M`
   }
 
-  if (tokens < 1_000_000) return `${Math.round(tokens / 1_000)}k`
+  // 999_500+ would round to "1000k"; the M branch renders it as "1M".
+  if (tokens < 999_500) return `${Math.round(tokens / 1_000)}k`
   return `${Math.round(tokens / 1_000_000)}M`
 }
 
@@ -195,7 +196,9 @@ export function formatModelCostHover(inputUsd: number, outputUsd: number): strin
  * crossed, just a plain rounded reading.
  */
 export function formatLatencyMs(ms: number): string {
-  if (ms < 1000) return `${Math.round(ms)}ms`
+  if (!Number.isFinite(ms)) return '—'
+  const rounded = Math.round(ms)
+  if (rounded < 1000) return `${rounded}ms`
   return `${(ms / 1000).toFixed(1)}s`
 }
 

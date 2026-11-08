@@ -53,7 +53,7 @@ export function parseHashState(hash: string): HashState {
 
   if (isPageId(pagePart)) return { page: pagePart, query: new URLSearchParams(queryPart) }
 
-  const legacy = LEGACY_PAGE_MAP[pagePart]
+  const legacy = Object.hasOwn(LEGACY_PAGE_MAP, pagePart) ? LEGACY_PAGE_MAP[pagePart] : undefined
   if (legacy) return { page: legacy, query: new URLSearchParams() }
 
   return { page: DEFAULT_PAGE, query: new URLSearchParams(queryPart) }

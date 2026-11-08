@@ -191,7 +191,7 @@ const noTrafficInRange = computed<boolean>(() => !showUserModelHint.value && pro
       <EmptyState v-else-if="noTrafficInRange" title="No traffic in this range.">
         <TryLongerRangeButton />
       </EmptyState>
-      <DataTable v-else :columns="columns" :data="rows" empty-message="none" />
+      <DataTable v-else :columns="columns" :data="rows" empty-message="No models recorded for this user in this range." label="Per-model attribution" />
     </CardContent>
   </Card>
 </template>

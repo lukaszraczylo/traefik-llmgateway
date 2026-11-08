@@ -7,6 +7,7 @@ import DataTable from '@/components/DataTable.vue'
 import EmptyState from '@/components/EmptyState.vue'
 import ErrorState from '@/components/ErrorState.vue'
 import SearchInput from '@/components/SearchInput.vue'
+import StaleNotice from '@/components/StaleNotice.vue'
 import SkeletonTable from '@/components/SkeletonTable.vue'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
@@ -15,6 +16,7 @@ import { useSearchQuery } from '@/composables/useSearchQuery'
 import { eventsColumns } from '@/lib/events-columns'
 import { EVENT_KIND_LABEL, EVENT_KINDS, filterEvents } from '@/lib/events-filter'
 import { loadState } from '@/lib/load-state'
+import { staleNotice } from '@/lib/stale-notice'
 import { useEventsStore } from '@/stores/events'
 
 // This component backs the new "Events" tab (App.vue, F3) — GET
@@ -68,6 +70,7 @@ const columns = eventsColumns()
  * skeleton or error here).
  */
 const eventsLoadState = computed(() => loadState({ loading: events.refreshing, hasData: events.lastUpdated !== null, error: events.error }))
+const staleMessage = computed(() => staleNotice(events.lastUpdated !== null, events.error, events.lastUpdated))
 
 /**
  * noEventsRecorded is the GENUINE "nothing has ever happened" case
@@ -148,6 +151,7 @@ onUnmounted(() => {
         </div>
       </CardHeader>
       <CardContent>
+        <StaleNotice :message="staleMessage" class="mb-3" />
         <SkeletonTable v-if="eventsLoadState === 'skeleton'" :rows="5" :cols="columns.length" />
         <ErrorState v-else-if="eventsLoadState === 'error'" :message="events.error" :on-retry="events.refresh" />
         <EmptyState
@@ -156,7 +160,7 @@ onUnmounted(() => {
           title="No failures recorded."
           description="Rate-limit, budget, and upstream events will show up here as they happen."
         />
-        <DataTable v-else :columns="columns" :data="filteredEvents" :empty-message="emptyMessage" />
+        <DataTable v-else label="Events" :columns="columns" :data="filteredEvents" :empty-message="emptyMessage" />
       </CardContent>
     </Card>
   </div>

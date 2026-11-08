@@ -38,6 +38,8 @@ const props = defineProps<{
   rowClass?: (row: TData) => string | undefined
   /** Shown in the empty-state row when data is empty. */
   emptyMessage?: string
+  /** Accessible name for the table (aria-label). */
+  label?: string
   /**
    * Optional CONTROLLED sort state (P6, `v-model:sorting`). Omitted (the
    * default) keeps every existing call site's original UNCONTROLLED
@@ -88,7 +90,7 @@ function ariaSort(dir: false | 'asc' | 'desc'): 'ascending' | 'descending' | und
 </script>
 
 <template>
-  <Table>
+  <Table :aria-label="label">
     <TableHeader>
       <TableRow v-for="headerGroup in table.getHeaderGroups()" :key="headerGroup.id">
         <TableHead
@@ -104,7 +106,7 @@ function ariaSort(dir: false | 'asc' | 'desc'): 'ascending' | 'descending' | und
     </TableHeader>
     <TableBody>
       <TableEmpty v-if="table.getRowModel().rows.length === 0" :colspan="columns.length" class="text-muted-foreground">
-        {{ emptyMessage ?? 'none' }}
+        {{ emptyMessage ?? 'No rows to show.' }}
       </TableEmpty>
       <TableRow v-for="row in table.getRowModel().rows" :key="row.id" :class="rowClass?.(row.original)">
         <TableCell

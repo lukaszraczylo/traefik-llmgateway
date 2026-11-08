@@ -6,6 +6,7 @@ import { computed, defineAsyncComponent, onMounted } from 'vue'
 
 import AuthGate from '@/components/AuthGate.vue'
 import ConfigWarningsBanner from '@/components/ConfigWarningsBanner.vue'
+import PageLoadError from '@/components/PageLoadError.vue'
 import GlobalFilterBar from '@/components/GlobalFilterBar.vue'
 import SidebarNav from '@/components/SidebarNav.vue'
 import ToastViewport from '@/components/ToastViewport.vue'
@@ -43,14 +44,18 @@ useHashState()
  * on first load, generalizing the same reasoning the old shell already
  * applied to its one chart-heavy tab.
  */
+function lazyPage(loader: () => Promise<Component>): Component {
+  return defineAsyncComponent({ loader, errorComponent: PageLoadError, timeout: 30_000 })
+}
+
 const PAGES: Record<PageId, Component> = {
-  home: defineAsyncComponent(() => import('@/pages/HomePage.vue')),
-  spend: defineAsyncComponent(() => import('@/pages/SpendPage.vue')),
-  consumers: defineAsyncComponent(() => import('@/pages/ConsumersPage.vue')),
-  models: defineAsyncComponent(() => import('@/pages/ModelsPage.vue')),
-  reliability: defineAsyncComponent(() => import('@/pages/ReliabilityPage.vue')),
-  config: defineAsyncComponent(() => import('@/pages/ConfigPage.vue')),
-  targets: defineAsyncComponent(() => import('@/pages/TargetsPage.vue')),
+  home: lazyPage(() => import('@/pages/HomePage.vue')),
+  spend: lazyPage(() => import('@/pages/SpendPage.vue')),
+  consumers: lazyPage(() => import('@/pages/ConsumersPage.vue')),
+  models: lazyPage(() => import('@/pages/ModelsPage.vue')),
+  reliability: lazyPage(() => import('@/pages/ReliabilityPage.vue')),
+  config: lazyPage(() => import('@/pages/ConfigPage.vue')),
+  targets: lazyPage(() => import('@/pages/TargetsPage.vue')),
 }
 
 const currentPage = computed<Component>(() => PAGES[nav.page])
@@ -68,7 +73,10 @@ const currentPage = computed<Component>(() => PAGES[nav.page])
 // neither of this function's two `if` branches fires, and the template
 // renders the Skeleton for that state instead of ever reading statusText.
 const statusText = computed<string>(() => {
-  if (dashboard.error) return `refresh failed: ${dashboard.error}`
+  if (dashboard.error) {
+    const age = dashboard.lastUpdated ? ` · data from ${dashboard.lastUpdated.toLocaleTimeString()}` : ''
+    return `refresh failed: ${dashboard.error}${age}`
+  }
   const replica = dashboard.overview?.replica
   const updated = dashboard.lastUpdated?.toLocaleTimeString() ?? ''
   return `last updated ${updated}${replica ? ` · replica ${replica}` : ''}`

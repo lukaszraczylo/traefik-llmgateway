@@ -7,6 +7,7 @@ vi.mock('@/lib/api', async () => {
 })
 
 import { adminFetch, AdminApiError } from '@/lib/api'
+import { clearStoredKey } from '@/lib/key-storage'
 import { useAuthStore } from '@/stores/auth'
 import { useCatalogStore } from '@/stores/catalog'
 import type { AdminCatalogResponse } from '@/types/api'
@@ -39,6 +40,7 @@ describe('useCatalogStore.fetch', () => {
   })
 
   it('is a no-op while unauthenticated', async () => {
+    clearStoredKey()
     setActivePinia(createPinia())
     const catalog = useCatalogStore()
     await catalog.fetch()

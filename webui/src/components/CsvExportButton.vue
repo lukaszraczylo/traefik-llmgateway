@@ -91,5 +91,6 @@ onBeforeUnmount(() => {
     />
     <FontAwesomeIcon v-else :icon="faFileCsv" class="size-3.5" aria-hidden="true" />
     <span :class="isFailure ? 'text-destructive' : undefined">{{ label }}</span>
+    <span class="sr-only" role="status">{{ feedback ? label : '' }}</span>
   </Button>
 </template>

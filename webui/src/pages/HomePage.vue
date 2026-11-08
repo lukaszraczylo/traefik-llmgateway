@@ -496,7 +496,7 @@ onUnmounted(() => {
             >
               <span class="flex min-w-0 items-center gap-2">
                 <Badge :variant="eventKindVariant(event.kind)" class="shrink-0 font-normal">{{ kindLabel(event.kind) }}</Badge>
-                <span class="min-w-0 truncate text-muted-foreground">{{ event.message }}</span>
+                <span class="min-w-0 truncate text-muted-foreground" :title="event.message">{{ event.message }}</span>
               </span>
               <span class="shrink-0 tabular-nums text-muted-foreground">{{ formatTimestamp(event.time) }}</span>
             </li>

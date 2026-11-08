@@ -531,7 +531,7 @@ const aliasEmptyMessage = computed(() =>
         <CardDescription>Operator-defined alias &rarr; target model mappings.</CardDescription>
       </CardHeader>
       <CardContent>
-        <DataTable :columns="aliasColumns" :data="filteredAliases" :empty-message="aliasEmptyMessage" />
+        <DataTable label="Model aliases" :columns="aliasColumns" :data="filteredAliases" :empty-message="aliasEmptyMessage" />
       </CardContent>
     </Card>
 

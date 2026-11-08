@@ -98,7 +98,7 @@ const callersLoadState = computed(() => loadState({ loading: loading.value, hasD
     <CardContent class="flex flex-col gap-3">
       <ClampedRangeNotice :window="filters.window" :span="filters.span" />
       <LoadStateView :state="callersLoadState" :error="error" :on-retry="load" skeleton="table" :rows="5" :cols="columns.length">
-        <DataTable :columns="columns" :data="rows" empty-message="no callers recorded in this window" />
+        <DataTable :columns="columns" :data="rows" label="Callers" empty-message="no callers recorded in this window" />
       </LoadStateView>
     </CardContent>
   </Card>

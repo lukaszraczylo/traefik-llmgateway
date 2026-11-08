@@ -250,3 +250,22 @@ describe('formatElapsedAgo', () => {
     expect(formatElapsedAgo(iso)).toMatch(/^\d+s ago$/)
   })
 })
+
+describe('rounding boundaries', () => {
+  it.each([
+    { name: 'k rounding never reaches 1000k', tokens: 999_999, want: '1M' },
+    { name: 'just under the cutoff stays k', tokens: 999_499, want: '999k' },
+    { name: 'cutoff moves to M', tokens: 999_500, want: '1M' },
+  ])('formatContextWindow: $name', ({ tokens, want }) => {
+    expect(formatContextWindow(tokens)).toBe(want)
+  })
+
+  it.each([
+    { name: 'rounds before the second cutoff', ms: 999.6, want: '1.0s' },
+    { name: 'plain ms', ms: 120, want: '120ms' },
+    { name: 'NaN', ms: NaN, want: '—' },
+    { name: 'Infinity', ms: Infinity, want: '—' },
+  ])('formatLatencyMs: $name', ({ ms, want }) => {
+    expect(formatLatencyMs(ms)).toBe(want)
+  })
+})

@@ -14,10 +14,11 @@ withDefaults(defineProps<{ rows?: number; cols?: number }>(), { rows: 5, cols: 4
 </script>
 
 <template>
-  <Table>
+  <Table role="status" aria-busy="true" aria-label="Loading">
     <TableHeader>
       <TableRow>
         <TableHead v-for="c in cols" :key="c">
+          <span class="sr-only">Loading</span>
           <Skeleton class="h-4 w-16" />
         </TableHead>
       </TableRow>

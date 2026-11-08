@@ -101,3 +101,78 @@ describe('isAuthRejection', () => {
     expect(isAuthRejection('nope')).toBe(false)
   })
 })
+
+describe('adminFetch resilience', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    useAuthStore().submit('test-admin-key')
+    vi.stubGlobal('fetch', vi.fn())
+  })
+
+  it('passes an abort signal so a hung request cannot block polling forever', async () => {
+    vi.mocked(fetch).mockResolvedValue(jsonResponse(200, {}))
+    await adminFetch('/admin/api/overview')
+    const init = vi.mocked(fetch).mock.calls[0][1]
+    expect(init?.signal).toBeInstanceOf(AbortSignal)
+  })
+
+  it('turns a timeout into an AdminApiError naming the path', async () => {
+    vi.mocked(fetch).mockRejectedValue(new DOMException('timed out', 'TimeoutError'))
+    await expect(adminFetch('/admin/api/overview')).rejects.toMatchObject({
+      name: 'AdminApiError',
+      message: expect.stringContaining('/admin/api/overview'),
+    })
+  })
+
+  it('turns a 200 with a non-JSON body into an AdminApiError, not a raw SyntaxError', async () => {
+    vi.mocked(fetch).mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () => Promise.reject(new SyntaxError('Unexpected token <')),
+    } as Response)
+    await expect(adminFetch('/admin/api/overview')).rejects.toBeInstanceOf(AdminApiError)
+  })
+
+  it('rethrows network errors unchanged', async () => {
+    vi.mocked(fetch).mockRejectedValue(new TypeError('Failed to fetch'))
+    await expect(adminFetch('/admin/api/overview')).rejects.toThrow('Failed to fetch')
+  })
+})
+
+describe('adminFetch in-flight dedupe', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    useAuthStore().submit('test-admin-key')
+    vi.stubGlobal('fetch', vi.fn())
+  })
+
+  it('shares one request between concurrent calls for the same path', async () => {
+    vi.mocked(fetch).mockResolvedValue(jsonResponse(200, { n: 1 }))
+    const [a, b] = await Promise.all([adminFetch('/admin/api/x'), adminFetch('/admin/api/x')])
+    expect(fetch).toHaveBeenCalledTimes(1)
+    expect(a).toEqual({ n: 1 })
+    expect(b).toEqual({ n: 1 })
+  })
+
+  it('does not share between different paths', async () => {
+    vi.mocked(fetch).mockResolvedValue(jsonResponse(200, {}))
+    await Promise.all([adminFetch('/admin/api/x'), adminFetch('/admin/api/y')])
+    expect(fetch).toHaveBeenCalledTimes(2)
+  })
+
+  it('issues a fresh request once the first settles, including after failure', async () => {
+    vi.mocked(fetch).mockRejectedValueOnce(new TypeError('down')).mockResolvedValue(jsonResponse(200, { ok: true }))
+    await expect(adminFetch('/admin/api/x')).rejects.toThrow('down')
+    await expect(adminFetch('/admin/api/x')).resolves.toEqual({ ok: true })
+    expect(fetch).toHaveBeenCalledTimes(2)
+  })
+
+  it('does not share across different admin keys', async () => {
+    vi.mocked(fetch).mockResolvedValue(jsonResponse(200, {}))
+    const first = adminFetch('/admin/api/x')
+    useAuthStore().submit('other-key')
+    const second = adminFetch('/admin/api/x')
+    await Promise.all([first, second])
+    expect(fetch).toHaveBeenCalledTimes(2)
+  })
+})
