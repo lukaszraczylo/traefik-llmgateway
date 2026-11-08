@@ -57,6 +57,7 @@ function onNameUpdate(value: unknown): void {
           <SelectItem v-for="name in targetNames" :key="name" :value="name">{{ name }}</SelectItem>
         </SelectContent>
       </Select>
+      <p v-if="targetNames.length === 0" class="text-xs text-muted-foreground">No {{ targetKind === 'group' ? 'groups' : 'users' }} loaded yet.</p>
     </div>
   </div>
 </template>

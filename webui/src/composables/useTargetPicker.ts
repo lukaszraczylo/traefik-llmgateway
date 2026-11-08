@@ -1,4 +1,4 @@
-import { computed, ref, type ComputedRef, type Ref } from 'vue'
+import { computed, ref, watch, type ComputedRef, type Ref } from 'vue'
 
 import { isValidName, isValidUserName } from '@/lib/snippets'
 
@@ -29,6 +29,8 @@ export interface UseTargetPicker {
 export function useTargetPicker(groupNames: () => string[], userNames: () => string[]): UseTargetPicker {
   const targetKind = ref<GrantTargetKind>('group')
   const targetName = ref('')
+
+  watch(targetKind, () => (targetName.value = ''), { flush: 'sync' })
 
   const targetNames = computed(() => (targetKind.value === 'group' ? groupNames() : userNames()))
 

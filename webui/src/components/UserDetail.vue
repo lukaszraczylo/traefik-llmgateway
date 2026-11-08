@@ -67,6 +67,7 @@ function loadDetail(): Promise<void> {
 onMounted(() => {
   void loadDetail()
   void events.refresh()
+  void consumers.ensureConsumers()
 })
 // featuresUserModelStats is included alongside userId/range: on a deep
 // link or reload (#consumers?user=x), this component mounts and fires
@@ -119,7 +120,7 @@ const reqState = computed(() => loadState({ loading: detail.value?.loading ?? fa
 const costState = computed(() => loadState({ loading: detail.value?.loading ?? false, hasData: detail.value?.costSeries != null, error: detail.value?.costError ?? '' }))
 
 /** showUserModelHint mirrors AttributionDrilldown.vue's own convention (Spend page): the hint shows when the client's own feature flag reads off, OR the usermodel call itself came back 404 (stores/consumers.ts's modelTotalsUnavailable) — the second case catches a stale/not-yet-loaded overview on a deep link or reload, where featuresUserModelStats can read true for a moment while the server still says otherwise. */
-const showUserModelHint = computed(() => !featuresUserModelStats.value || detail.value?.modelTotalsUnavailable === true)
+const showUserModelHint = computed(() => (dashboard.overview !== null && !featuresUserModelStats.value) || detail.value?.modelTotalsUnavailable === true)
 
 /** modelRows ranks usermodel totals by cost desc (falling back to req when cost is absent from the requested metrics) — a small, page-local sort since this table has no other consumer that would justify a shared column/sort helper. */
 const modelRows = computed(() => {
@@ -144,6 +145,7 @@ const modelState = computed(() => loadState({ loading: detail.value?.loading ?? 
 
 /** recentErrors filters the shared Events store (WP-F, read-only import) down to this user — the newest 10, matching the store's own newest-first order. */
 const recentErrors = computed(() => events.events.filter((e) => e.user === props.userId).slice(0, 10))
+const recentErrorsState = computed(() => loadState({ loading: events.refreshing, hasData: events.lastUpdated !== null, error: events.error }))
 
 const ratios = computed(() => (entry.value ? budgetRatios(entry.value) : []))
 
@@ -266,13 +268,15 @@ const runOutDate = computed(() => {
         <CardTitle>Recent errors</CardTitle>
       </CardHeader>
       <CardContent>
-        <ul v-if="recentErrors.length" class="flex flex-col gap-2 text-sm">
+        <SkeletonTable v-if="recentErrorsState === 'skeleton'" :rows="2" :cols="2" />
+        <ErrorState v-else-if="recentErrorsState === 'error'" :message="events.error" :on-retry="events.refresh" />
+        <ul v-else-if="recentErrors.length" class="flex flex-col gap-2 text-sm">
           <li v-for="(event, index) in recentErrors" :key="index" class="border-b pb-2 last:border-0 last:pb-0">
             <p class="flex flex-wrap items-center gap-2">
               <Badge variant="secondary">{{ event.kind }}</Badge>
               <span class="text-muted-foreground">{{ formatTimestamp(event.time) }}</span>
             </p>
-            <p class="text-muted-foreground">{{ event.message }}</p>
+            <p class="break-words text-muted-foreground">{{ event.message }}</p>
           </li>
         </ul>
         <EmptyState v-else title="No recent errors in the current event window." />

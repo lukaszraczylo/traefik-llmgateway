@@ -219,7 +219,7 @@ function retryPricingHealthTable(): Promise<void> {
       </div>
       <div class="text-right">
         <p class="text-xs font-medium text-muted-foreground">{{ SPEND_METRIC_LABEL[metric] }} in range</p>
-        <p class="text-2xl font-semibold tabular-nums">{{ valueFormatter(totalInRange) }}</p>
+        <p class="text-2xl font-semibold tabular-nums">{{ breakdownState === 'ready' ? valueFormatter(totalInRange) : '—' }}</p>
       </div>
     </div>
     <p v-if="byDisabled" class="text-sm text-muted-foreground">
@@ -285,7 +285,7 @@ function retryPricingHealthTable(): Promise<void> {
         :error="spend.burndownError"
         :on-retry="spend.refresh"
       />
-      <CostForecastCard v-if="forecastAvailable" :mtd-micros="scopeMtdMicros" :limits="scopeLimits" :now="now" />
+      <CostForecastCard v-if="forecastAvailable && dashboard.usage" :mtd-micros="scopeMtdMicros" :limits="scopeLimits" :now="now" />
     </div>
 
     <CostAvoidedCard

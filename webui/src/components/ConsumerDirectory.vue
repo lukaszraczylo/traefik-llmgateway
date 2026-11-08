@@ -335,11 +335,11 @@ function groupsCsv(): string {
         <Accordion v-if="sortedGroupRows.length" v-model="expandedGroupValues" type="multiple" class="rounded-md border px-3">
           <AccordionItem v-for="row in sortedGroupRows" :key="row.original.id" :value="row.original.id">
             <div class="flex items-center gap-2">
-              <span class="shrink-0 py-2.5 font-medium">{{ row.original.id }}</span>
+              <span class="min-w-0 break-all py-2.5 font-medium">{{ row.original.id }}</span>
               <AccordionTrigger header-class="flex-1">
                 <span class="sr-only">Group {{ row.original.id }} details</span>
                 <span class="flex flex-1 flex-wrap items-center gap-x-4 gap-y-1 pr-2 text-left">
-                  <span class="text-xs text-muted-foreground tabular-nums">{{ memberCountOf(row.original) || '0' }} members</span>
+                  <span class="text-xs text-muted-foreground tabular-nums">{{ dashboard.overview ? memberCountOf(row.original) || '0' : '?' }} members</span>
                   <span class="text-xs text-muted-foreground tabular-nums">
                     <template v-if="row.original.storeDown">?</template>
                     <CompactNumber v-else :value="row.original.requestsPerDay" /> req/day
@@ -433,6 +433,7 @@ function groupsCsv(): string {
                   :title="!row.original.storeDown && groupCostProjection(row.original, now).willExceed ? WILL_EXCEED_TITLE : undefined"
                 >
                   {{ row.original.storeDown ? '?' : groupCostProjection(row.original, now).text }}
+                  <span v-if="!row.original.storeDown && groupCostProjection(row.original, now).willExceed" class="sr-only">(will exceed limit)</span>
                 </DetailField>
               </dl>
               <BudgetRatioBars v-if="budgetRatios(row.original).length" class="mb-3" :ratios="budgetRatios(row.original)" />

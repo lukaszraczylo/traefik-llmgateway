@@ -45,3 +45,13 @@ describe('useTargetPicker', () => {
     expect(picker.snippetLabel.value).toBe('Merge into alice’s users.json line')
   })
 })
+
+describe('useTargetPicker kind switch', () => {
+  it('clears targetName when targetKind changes so a stale name cannot leak across kinds', () => {
+    const picker = useTargetPicker(() => ['admins'], () => ['alice'])
+    picker.targetName.value = 'admins'
+    picker.targetKind.value = 'user'
+    expect(picker.targetName.value).toBe('')
+    expect(picker.nameValid.value).toBe(false)
+  })
+})

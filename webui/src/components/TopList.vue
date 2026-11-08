@@ -5,8 +5,10 @@ import EmptyState from '@/components/EmptyState.vue'
 import EntityLink from '@/components/EntityLink.vue'
 import ErrorState from '@/components/ErrorState.vue'
 import SkeletonList from '@/components/SkeletonList.vue'
+import StaleNotice from '@/components/StaleNotice.vue'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { loadState } from '@/lib/load-state'
+import { staleNotice } from '@/lib/stale-notice'
 
 /** One TopList.vue row — an entity id/label, its formatted value, and which EntityLink.vue target it opens. */
 export interface TopListItem {
@@ -81,6 +83,7 @@ const props = withDefaults(
 )
 
 const state = computed(() => loadState({ loading: props.loading, hasData: props.loaded, error: props.error ?? '' }))
+const staleMessage = computed(() => staleNotice(props.loaded, props.error ?? '', null))
 </script>
 
 <template>
@@ -90,6 +93,7 @@ const state = computed(() => loadState({ loading: props.loading, hasData: props.
       <slot name="controls" />
     </CardHeader>
     <CardContent>
+      <StaleNotice :message="notice ? null : staleMessage" class="mb-3" />
       <EmptyState v-if="notice" :title="notice" :description="noticeDescription" />
       <SkeletonList v-else-if="state === 'skeleton'" :rows="5" />
       <ErrorState v-else-if="state === 'error'" :message="error ?? ''" :on-retry="onRetry" />

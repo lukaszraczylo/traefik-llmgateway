@@ -19,20 +19,26 @@ export const useConfigStore = defineStore('config', {
     data: null as AdminConfigResponse | null,
     loading: false,
     error: '',
+    /** Latest-request-wins guard: only the newest fetch may write state. */
+    reqId: 0,
   }),
   actions: {
     async fetchConfig(): Promise<void> {
       const auth = useAuthStore()
       if (!auth.isAuthenticated) return
+      const requestId = ++this.reqId
       this.loading = true
       try {
-        this.data = await adminFetch<AdminConfigResponse>('/admin/api/config')
+        const res = await adminFetch<AdminConfigResponse>('/admin/api/config')
+        if (requestId !== this.reqId) return
+        this.data = res
         this.error = ''
       } catch (err) {
+        if (requestId !== this.reqId) return
         if (isAuthRejection(err)) return
         this.error = messageOf(err)
       } finally {
-        this.loading = false
+        if (requestId === this.reqId) this.loading = false
       }
     },
     /** ensureConfig fetches only when there is no data yet — ConfigPage.vue's own onMounted call. */
