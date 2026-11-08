@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { formatBucketLabel, formatCompactCount, formatContextWindow, formatCostAxis, formatCostDisplay, formatElapsedAgo, formatLatencyMs, formatModelCostHover, formatUntil, refreshDetailLabel, refreshLabel, ZERO_TIME } from './format'
+import { formatBucketLabel, formatCompactCount, formatContextWindow, formatCostAxis, formatCostDisplay, formatElapsedAgo, formatLatencyMs, formatModelCostHover, formatPercentAxis, formatUntil, refreshDetailLabel, refreshLabel, ZERO_TIME } from './format'
 
 describe('refreshLabel', () => {
   it('reads "discovery off" when discovery is disabled, regardless of lastRefresh', () => {
@@ -286,5 +286,17 @@ describe('cost display formatters', () => {
   ])('$name', ({ micros, display, axis }) => {
     expect(formatCostDisplay(micros)).toBe(display)
     expect(formatCostAxis(micros)).toBe(axis)
+  })
+})
+
+describe('formatPercentAxis', () => {
+  it.each([
+    { rate: 0, want: '0%' },
+    { rate: 0.005, want: '0.5%' },
+    { rate: 0.01, want: '1%' },
+    { rate: 0.045, want: '4.5%' },
+    { rate: 0.05, want: '5%' },
+  ])('$rate -> $want', ({ rate, want }) => {
+    expect(formatPercentAxis(rate)).toBe(want)
   })
 })

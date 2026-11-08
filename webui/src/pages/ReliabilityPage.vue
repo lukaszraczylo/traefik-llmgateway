@@ -14,7 +14,7 @@ import type { TimeSeriesDataset } from '@/components/TimeSeriesChart.vue'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { seriesColor } from '@/lib/chart-palette'
-import { formatBucketLabel } from '@/lib/format'
+import { formatBucketLabel, formatPercentAxis } from '@/lib/format'
 import { emptyWhenAllZero, loadState } from '@/lib/load-state'
 import type { LoadState } from '@/lib/load-state'
 import { formatErrorRatePercent } from '@/lib/provider-rate'
@@ -322,6 +322,7 @@ onMounted(() => void reliability.fetch())
         :labels="bucketLabels"
         :datasets="errorRateDatasets"
         :value-formatter="errorRatePercent"
+        :axis-formatter="formatPercentAxis"
         aria-label="Error rate by provider over time"
       />
 

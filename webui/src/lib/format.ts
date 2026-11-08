@@ -221,6 +221,11 @@ export function formatModelCostHover(inputUsd: number, outputUsd: number): strin
   return `in ${formatUsdPerMTok(inputUsd)} / out ${formatUsdPerMTok(outputUsd)} per MTok`
 }
 
+/** formatPercentAxis labels a 0-1 rate axis tick with up to one decimal, so half-percent ticks stay distinct ("0.5%" not "1%"). */
+export function formatPercentAxis(rate: number): string {
+  return `${Math.round(rate * 1000) / 10}%`
+}
+
 /** formatModelPriceShort is the table-cell form of formatModelCostHover: "$1.00 / $2.00" (input / output per MTok). */
 export function formatModelPriceShort(inputUsd: number, outputUsd: number): string {
   if (inputUsd === 0 && outputUsd === 0) return 'free'
