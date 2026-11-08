@@ -230,6 +230,16 @@ type ProviderConfig struct {
 	// also unset); a non-empty value that fails to parse, or parses to a
 	// duration <= 0, is a construction error naming this provider.
 	RequestTimeout string `json:"requestTimeout,omitempty"`
+	// ModelBaseURLs maps a bare model id (the id sent upstream) to the base
+	// URL that serves it, overriding BaseURL for that model. Its keys are
+	// declared models of the provider, like Models. Static: never polled by
+	// discovery. openai-type providers only. Empty keeps single-upstream
+	// behavior.
+	ModelBaseURLs map[string]string `json:"modelBaseUrls,omitempty"`
+	// PathBaseURLs maps a native passthrough path prefix (e.g. "/v1/decide")
+	// to a base URL for requests that name no model in ModelBaseURLs. Longest
+	// prefix wins; no match uses BaseURL. openai-type providers only.
+	PathBaseURLs map[string]string `json:"pathBaseUrls,omitempty"`
 	// MetadataPath is an optional second discovery endpoint (feature
 	// v0.23), fetched alongside the provider's normal listModels call
 	// when set: a path such as "/api/v0/models" (LM Studio's own,

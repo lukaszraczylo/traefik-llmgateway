@@ -14,7 +14,12 @@ import (
 // itself, and any OpenAI-compatible upstream (the operator's own gateway
 // included — a real deployment target for this adapter is keyless).
 type openaiAdapter struct {
-	client *http.Client
+	// modelBases and pathBases are ProviderConfig.ModelBaseURLs and
+	// PathBaseURLs, validated and slash-trimmed by buildAdapters. Both nil
+	// (the default) means every request uses baseURL.
+	modelBases map[string]string
+	pathBases  map[string]string
+	client     *http.Client
 	// retry is nil for every adapter built by a bare newOpenAIAdapter call
 	// (every v0.1 test, and any caller that never wires one) — nil-safe,
 	// per retryPolicy.do's own contract, so leaving it unset is exactly
@@ -161,7 +166,7 @@ func (a *openaiAdapter) chatCompletion(ctx context.Context, w http.ResponseWrite
 		hdr.Set("Accept", "text/event-stream")
 	}
 
-	resp, err := upstreamJSON(ctx, a.client, http.MethodPost, a.baseURL+"/v1/chat/completions", hdr, req, a.retry, a.timeout, a.adapterName)
+	resp, err := upstreamJSON(ctx, a.client, http.MethodPost, a.baseForCtx(ctx)+"/v1/chat/completions", hdr, req, a.retry, a.timeout, a.adapterName)
 	if err != nil {
 		return usage{}, err
 	}
@@ -186,7 +191,7 @@ func (a *openaiAdapter) chatCompletion(ctx context.Context, w http.ResponseWrite
 // non-streaming path.
 func (a *openaiAdapter) embeddings(ctx context.Context, w http.ResponseWriter, req map[string]any) (usage, error) {
 	delete(req, gatewayAliasKey) // see chatCompletion's identical delete for why
-	resp, err := upstreamJSON(ctx, a.client, http.MethodPost, a.baseURL+"/v1/embeddings", a.requestHeaders(true), req, a.retry, a.timeout, a.adapterName)
+	resp, err := upstreamJSON(ctx, a.client, http.MethodPost, a.baseForCtx(ctx)+"/v1/embeddings", a.requestHeaders(true), req, a.retry, a.timeout, a.adapterName)
 	if err != nil {
 		return usage{}, err
 	}
@@ -295,7 +300,7 @@ func (a *openaiAdapter) imagesGeneration(ctx context.Context, w http.ResponseWri
 	// it — the same defensive posture chatCompletion/embeddings already
 	// take.
 	delete(req, gatewayAliasKey)
-	resp, err := upstreamJSON(ctx, a.client, http.MethodPost, a.baseURL+"/v1/images/generations", a.requestHeaders(true), req, a.retry, a.timeout, a.adapterName)
+	resp, err := upstreamJSON(ctx, a.client, http.MethodPost, a.baseForCtx(ctx)+"/v1/images/generations", a.requestHeaders(true), req, a.retry, a.timeout, a.adapterName)
 	if err != nil {
 		return usage{}, err
 	}
@@ -321,7 +326,7 @@ func (a *openaiAdapter) audioSpeech(ctx context.Context, w http.ResponseWriter, 
 	if contentType != "" {
 		hdr.Set("Content-Type", contentType)
 	}
-	resp, err := upstreamRawBytes(ctx, a.client, http.MethodPost, a.baseURL+"/v1/audio/speech", hdr, body, a.retry, a.timeout, a.adapterName)
+	resp, err := upstreamRawBytes(ctx, a.client, http.MethodPost, a.baseForCtx(ctx)+"/v1/audio/speech", hdr, body, a.retry, a.timeout, a.adapterName)
 	if err != nil {
 		return usage{}, err
 	}
@@ -358,7 +363,7 @@ func (a *openaiAdapter) audioTranscription(ctx context.Context, w http.ResponseW
 	if contentType != "" {
 		hdr.Set("Content-Type", contentType)
 	}
-	resp, err := upstreamRawBytes(ctx, a.client, http.MethodPost, a.baseURL+"/v1/audio/transcriptions", hdr, body, a.retry, a.timeout, a.adapterName)
+	resp, err := upstreamRawBytes(ctx, a.client, http.MethodPost, a.baseForCtx(ctx)+"/v1/audio/transcriptions", hdr, body, a.retry, a.timeout, a.adapterName)
 	if err != nil {
 		return usage{}, err
 	}

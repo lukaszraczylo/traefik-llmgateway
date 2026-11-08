@@ -1291,7 +1291,15 @@ func (g *Gateway) handlePassthrough(w http.ResponseWriter, r *http.Request, u *u
 		}
 	}
 
-	upstreamURL := adapter.base() + "/" + rest
+	upstreamBase := adapter.base()
+	if oa, isOpenAI := adapter.(*openaiAdapter); isOpenAI && oa.hasUpstreamOverrides() {
+		var model string
+		if m, hasModel, truncated, peekErr := peekPassthroughModel(r); peekErr == nil && hasModel && !truncated {
+			model = m
+		}
+		upstreamBase = oa.passthroughBase(model, "/"+rest)
+	}
+	upstreamURL := upstreamBase + "/" + rest
 	if r.URL.RawQuery != "" {
 		upstreamURL += "?" + r.URL.RawQuery
 	}
