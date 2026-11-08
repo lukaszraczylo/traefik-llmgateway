@@ -216,6 +216,12 @@ export function formatModelCostHover(inputUsd: number, outputUsd: number): strin
   return `in ${formatUsdPerMTok(inputUsd)} / out ${formatUsdPerMTok(outputUsd)} per MTok`
 }
 
+/** formatModelPriceShort is the table-cell form of formatModelCostHover: "$1.00 / $2.00" (input / output per MTok). */
+export function formatModelPriceShort(inputUsd: number, outputUsd: number): string {
+  if (inputUsd === 0 && outputUsd === 0) return 'free'
+  return `${formatUsdPerMTok(inputUsd)} / ${formatUsdPerMTok(outputUsd)}`
+}
+
 /**
  * formatLatencyMs renders a millisecond average (admin.go's
  * adminLatencyView.avgTtfbMs/avgDurationMs — feat: latency panel) as a

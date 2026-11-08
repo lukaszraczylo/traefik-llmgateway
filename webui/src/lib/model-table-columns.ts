@@ -3,8 +3,9 @@ import { h } from 'vue'
 
 import ModelChip from '@/components/ModelChip.vue'
 import { Badge } from '@/components/ui/badge'
+import CompactNumber from '@/components/CompactNumber.vue'
 import { EMPTY_CELL, optionalColumn, usageMetricColumns } from '@/lib/columns'
-import { formatContextWindow, formatCost, formatLatencyMs, formatModelCostHover } from '@/lib/format'
+import { formatCost, formatLatencyMs, formatModelCostHover, formatModelPriceShort } from '@/lib/format'
 import { formatErrorRatePercent, providerErrorRate } from '@/lib/provider-rate'
 import type { AdminCatalogResponse, AdminPerfResponse, AdminUsageModelsResponse, PriceSource } from '@/types/api'
 
@@ -97,6 +98,8 @@ const PRICE_SOURCE_LABEL: Record<Extract<PriceSource, 'override' | 'builtin' | '
   litellm: 'litellm',
 }
 
+const FREE_SUFFIX_TITLE = "':free' suffix model — display-only, billing follows the price source"
+
 function priceCell(row: ModelCatalogRow) {
   if (row.priceSource === 'unpriced') {
     return h(
@@ -116,8 +119,13 @@ function priceCell(row: ModelCatalogRow) {
   // captured into its own variable first.
   const source = row.priceSource as Exclude<PriceSource, 'unpriced' | 'free'>
   return h('span', { class: 'inline-flex flex-wrap items-center gap-1.5' }, [
-    h('span', {}, known ? formatModelCostHover(row.inputPerMTokUsd as number, row.outputPerMTokUsd as number) : EMPTY_CELL),
+    h(
+      'span',
+      known ? { class: 'tabular-nums', title: formatModelCostHover(row.inputPerMTokUsd as number, row.outputPerMTokUsd as number) } : {},
+      known ? formatModelPriceShort(row.inputPerMTokUsd as number, row.outputPerMTokUsd as number) : EMPTY_CELL,
+    ),
     h(Badge, { as: 'span', variant: 'outline', class: 'font-normal' }, () => PRICE_SOURCE_LABEL[source]),
+    ...(row.displayFree ? [h(Badge, { as: 'span', variant: 'secondary', class: 'font-normal', title: FREE_SUFFIX_TITLE }, () => ':free')] : []),
   ])
 }
 
@@ -134,9 +142,8 @@ function priceSortValue(row: ModelCatalogRow): number {
 
 /**
  * modelCatalogColumns builds the Models page's catalog table (redesign-
- * plan.md section 3.4): id, context, price + source badge, free (the
- * ':free' suffix flag — distinct from the price column's own 'free'
- * priceSource badge, see ModelCatalogRow's own doc comment), aliases,
+ * plan.md section 3.4): id, context, price + source badge (plus a ':free' badge for
+ * the suffix flag, distinct from the 'free' priceSource badge), aliases,
  * req/tokens/cost for the current global range, p50/p95, and error rate.
  * p50/p95 read "—" whenever undefined, regardless of WHY (no observations
  * yet, or admin.stats.latency off entirely) — ModelCatalogTable.vue itself
@@ -158,25 +165,11 @@ export function modelCatalogColumns(): ColumnDef<ModelCatalogRow, unknown>[] {
           outputPerMTokUsd: row.original.outputPerMTokUsd,
         }),
     },
-    optionalColumn<ModelCatalogRow>('context', 'Context', (r) => r.contextTokens, formatContextWindow),
     {
       id: 'price',
-      header: 'Price',
+      header: 'Price $/MTok',
       accessorFn: (r) => priceSortValue(r),
       cell: ({ row }) => priceCell(row.original),
-    },
-    {
-      id: 'free',
-      header: 'Free',
-      accessorFn: (r) => (r.displayFree ? 1 : 0),
-      cell: ({ row }) =>
-        row.original.displayFree
-          ? h(
-              Badge,
-              { as: 'span', variant: 'secondary', class: 'font-normal', title: "':free' suffix model — display-only, billing follows the Price column's own source" },
-              () => 'free',
-            )
-          : h('span', { class: 'text-muted-foreground' }, EMPTY_CELL),
     },
     {
       id: 'aliases',
@@ -199,7 +192,19 @@ export function modelCatalogColumns(): ColumnDef<ModelCatalogRow, unknown>[] {
     // usageMetricColumns' own plain costColumn does not (and should not —
     // PricingHealthTable.vue's identical-shaped cost column has no such
     // badge) carry.
-    ...usageMetricColumns<ModelCatalogRow>().filter((c) => c.id !== 'cost'),
+    ...usageMetricColumns<ModelCatalogRow>().filter((c) => c.id === 'requests'),
+    {
+      id: 'tokens',
+      header: 'Tokens',
+      meta: { align: 'right' },
+      accessorFn: (r) => r.tokensIn + r.tokensOut,
+      cell: ({ row }) =>
+        h('span', { class: 'inline-flex items-center gap-1 whitespace-nowrap', title: 'input / output tokens' }, [
+          h(CompactNumber, { value: row.original.tokensIn }),
+          h('span', { class: 'text-muted-foreground' }, '/'),
+          h(CompactNumber, { value: row.original.tokensOut }),
+        ]),
+    },
     {
       id: 'cost',
       header: 'Cost',
@@ -217,7 +222,7 @@ export function modelCatalogColumns(): ColumnDef<ModelCatalogRow, unknown>[] {
     optionalColumn<ModelCatalogRow>('p95', 'p95', (r) => r.p95Ms, formatLatencyMs, { sortSentinel: -1 }),
     {
       id: 'errorRate',
-      header: 'Error rate',
+      header: 'Errors',
       meta: { align: 'right' },
       accessorFn: (r) => providerErrorRate(r.attempts, r.failures) ?? -1,
       cell: ({ row }) => h('span', { class: 'tabular-nums' }, formatErrorRatePercent(providerErrorRate(row.original.attempts, row.original.failures))),

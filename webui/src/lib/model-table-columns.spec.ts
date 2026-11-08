@@ -154,7 +154,7 @@ describe('modelCatalogColumns: price column', () => {
       row: { original: testRow({ priceSource: 'litellm', inputPerMTokUsd: 1, outputPerMTokUsd: 2 }) },
     }) as VNode
     const children = rendered.children as VNode[]
-    expect((children[0] as VNode).children).toBe('in $1.00 / out $2.00 per MTok')
+    expect((children[0] as VNode).children).toBe('$1.00 / $2.00')
     const badge = children[1] as VNode
     expect(badge.type).toBe(Badge)
     expect((badge.children as { default: () => string }).default()).toBe('litellm')
@@ -178,18 +178,21 @@ describe('modelCatalogColumns: price column', () => {
   })
 })
 
-describe('modelCatalogColumns: free column (":free" suffix, distinct from priceSource)', () => {
-  const col = modelCatalogColumns().find((c) => c.id === 'free')
+describe('modelCatalogColumns: ":free" suffix flag', () => {
+  const col = modelCatalogColumns().find((c) => c.id === 'price')
+  const priced = { priceSource: 'litellm', inputPerMTokUsd: 1, outputPerMTokUsd: 2 } as const
 
-  it('renders a Badge only when displayFree is true', () => {
-    const rendered = cellOf(col)({ row: { original: testRow({ displayFree: true }) } }) as VNode
-    expect(rendered.type).toBe(Badge)
+  it('has no separate free column', () => {
+    expect(modelCatalogColumns().some((c) => c.id === 'free')).toBe(false)
   })
 
-  it('renders an em dash when displayFree is false/undefined, even for priceSource "free"', () => {
-    const rendered = cellOf(col)({ row: { original: testRow({ priceSource: 'free' }) } })
-    expect(isVNode(rendered) && rendered.type).toBe('span')
-    expect(isVNode(rendered) && rendered.children).toBe('—')
+  it.each([
+    { displayFree: true, children: 3 },
+    { displayFree: false, children: 2 },
+    { displayFree: undefined, children: 2 },
+  ])('displayFree=$displayFree renders $children price-cell children', ({ displayFree, children }) => {
+    const rendered = cellOf(col)({ row: { original: testRow({ ...priced, displayFree }) } }) as VNode
+    expect((rendered.children as VNode[]).length).toBe(children)
   })
 })
 
