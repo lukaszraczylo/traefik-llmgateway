@@ -12,7 +12,7 @@ vi.mock('@/lib/api', async () => {
 
 import { AdminApiError, adminFetch } from '@/lib/api'
 import { useAuthStore } from '@/stores/auth'
-import { useConsumersStore } from '@/stores/consumers'
+import { evictOldestDetails, useConsumersStore } from '@/stores/consumers'
 import type { AdminConsumersResponse, AdminSeriesResponse, AdminTotalsResponse } from '@/types/api'
 
 const mockedAdminFetch = vi.mocked(adminFetch)
@@ -316,5 +316,21 @@ describe('useConsumersStore.fetchUserDetail', () => {
 
     resolvers.forEach((resolve) => resolve())
     await inFlight
+  })
+})
+
+describe('evictOldestDetails', () => {
+  const entry = (fetchedAt: number | null, loading = false) =>
+    ({ loading, fetchedAt, reqId: 1, window: 'day', span: 7 }) as unknown as import('@/stores/consumers').UserDetailState
+
+  it.each([
+    { name: 'under cap keeps all', cap: 5, keep: 'a', loadingId: '', want: ['a', 'b', 'c'] },
+    { name: 'drops oldest beyond cap', cap: 2, keep: 'c', loadingId: '', want: ['b', 'c'] },
+    { name: 'never drops the kept user', cap: 1, keep: 'a', loadingId: '', want: ['a'] },
+    { name: 'never drops a loading entry', cap: 1, keep: 'c', loadingId: 'a', want: ['a', 'c'] },
+  ])('$name', ({ cap, keep, loadingId, want }) => {
+    const detail = { a: entry(1, loadingId === 'a'), b: entry(2), c: entry(3) }
+    evictOldestDetails(detail, keep, cap)
+    expect(Object.keys(detail).sort()).toEqual(want)
   })
 })

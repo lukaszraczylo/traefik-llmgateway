@@ -677,7 +677,7 @@ describe('useSpendStore: pricingHealthLoaded / drilldownLoaded', () => {
 describe('useSpendStore.refresh: overlapping calls', () => {
   it('an earlier refresh finishing after a newer one has started does not clear loading', async () => {
     const spend = useSpendStore()
-    vi.spyOn(spend, 'fetchModelRanking').mockResolvedValue(undefined)
+    vi.spyOn(spend, 'fetchModelRanking').mockResolvedValue(true)
 
     const pending: (() => void)[] = []
     const controlled = (): Promise<void> => new Promise((resolve) => pending.push(resolve))
@@ -702,5 +702,33 @@ describe('useSpendStore.refresh: overlapping calls', () => {
     secondPending.forEach((resolve) => resolve())
     await secondRefresh
     expect(spend.loading).toBe(false)
+  })
+})
+
+describe('useSpendStore.refresh: breakdown depends on the ranking', () => {
+  it('keeps the previous breakdown when the ranking fails and the breakdown needs it', async () => {
+    const spend = useSpendStore()
+    spend.by = 'model'
+    spend.breakdown = [{ scope: 'model:old', points: [1, 2] }]
+    mockedAdminFetch.mockImplementation((async (path: string) => {
+      if (path.startsWith('/admin/api/usage/models')) throw new AdminApiError('boom', 500)
+      if (path.startsWith('/admin/api/usage/series')) return seriesFor(['total'], 0)
+      return { kind: 'group', window: 'day', span: 2, offset: 0, metrics: [], rows: [] }
+    }) as typeof adminFetch)
+    await spend.refresh()
+    expect(spend.rankingError).not.toBe('')
+    expect(spend.breakdown).toEqual([{ scope: 'model:old', points: [1, 2] }])
+  })
+
+  it('still builds a group breakdown when the ranking fails', async () => {
+    const spend = useSpendStore()
+    spend.by = 'group'
+    mockedAdminFetch.mockImplementation((async (path: string) => {
+      if (path.startsWith('/admin/api/usage/models')) throw new AdminApiError('boom', 500)
+      if (path.startsWith('/admin/api/usage/series')) return seriesFor(['total', 'group:a'], 5)
+      return { kind: 'group', window: 'day', span: 2, offset: 0, metrics: [], rows: [{ id: 'a' }] }
+    }) as typeof adminFetch)
+    await spend.refresh()
+    expect(spend.breakdown.map((s) => s.scope)).toContain('group:a')
   })
 })

@@ -292,7 +292,7 @@ export const useSpendStore = defineStore('spend', {
       this.loading = true
       try {
         await Promise.all([
-          this.fetchModelRanking().then(() => this.fetchBreakdown()),
+          this.fetchModelRanking().then((applied) => (applied || !this.breakdownNeedsRanking() ? this.fetchBreakdown() : undefined)),
           this.fetchPricingHealthRanking(),
           this.fetchBurndown(),
           this.fetchDrilldown(),
@@ -301,23 +301,32 @@ export const useSpendStore = defineStore('spend', {
         if (requestId === this.refreshReqId) this.loading = false
       }
     },
-    async fetchModelRanking(): Promise<void> {
+    /** breakdownNeedsRanking is true when the current breakdown is built from the model ranking: model and provider breakdowns, and any provider scope. Group and single group/user scopes do not read it. */
+    breakdownNeedsRanking(): boolean {
+      const filters = useFiltersStore()
+      if (filters.scope === 'all') return this.by !== 'group'
+      return !(filters.scope.startsWith('group:') || filters.scope.startsWith('user:'))
+    },
+    /** Resolves true only when this call's ranking was applied: a failed or superseded fetch resolves false, so refresh() does not build a breakdown from a stale ranking. */
+    async fetchModelRanking(): Promise<boolean> {
       const filters = useFiltersStore()
       const requestId = ++this.rankingReqId
       try {
         const res = await adminFetch<AdminUsageModelsResponse>(
           `/admin/api/usage/models?metric=${this.metric}&window=${filters.window}&span=${filters.span}&limit=${MODEL_RANKING_LIMIT}&detail=1`,
         )
-        if (requestId !== this.rankingReqId) return
+        if (requestId !== this.rankingReqId) return false
         this.modelRanking = res.models
         this.rankingError = ''
+        return true
       } catch (err) {
-        if (requestId !== this.rankingReqId) return
-        if (isAuthRejection(err)) return
+        if (requestId !== this.rankingReqId) return false
+        if (isAuthRejection(err)) return false
         // Own field, never folded into breakdownError — see this store's
         // own doc comment on rankingError (verify-ui-states-3.md
         // pre-existing fix).
         this.rankingError = messageOf(err)
+        return false
       }
     },
     /** fetchPricingHealthRanking is pricingHealthRanking's own fetch — always metric=req, independent of `this.metric` (see that field's own doc comment, P3 item 21). Runs in parallel with fetchModelRanking in refresh(), not chained after it: neither depends on the other's result. */

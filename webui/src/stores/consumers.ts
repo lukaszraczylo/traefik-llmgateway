@@ -43,6 +43,22 @@ export interface UserDetailState {
   span: number | null
 }
 
+/** MAX_CACHED_USER_DETAILS caps how many opened users' detail the store keeps in memory. */
+export const MAX_CACHED_USER_DETAILS = 20
+
+/** evictOldestDetails drops the least recently fetched entries beyond the cap, never the kept user and never one still loading. */
+export function evictOldestDetails(detail: Record<string, UserDetailState>, keep: string, cap: number): void {
+  const ids = Object.keys(detail)
+  let excess = ids.length - cap
+  if (excess <= 0) return
+  const candidates = ids.filter((id) => id !== keep && !detail[id]?.loading).sort((a, b) => (detail[a]?.fetchedAt ?? 0) - (detail[b]?.fetchedAt ?? 0))
+  for (const id of candidates) {
+    if (excess <= 0) break
+    delete detail[id]
+    excess--
+  }
+}
+
 function emptyDetail(): UserDetailState {
   return {
     loading: false,
@@ -168,6 +184,7 @@ export const useConsumersStore = defineStore('consumers', {
         costError: rangeChanged ? '' : existing.costError,
         modelError: rangeChanged ? '' : existing.modelError,
       }
+      evictOldestDetails(this.detail, userId, MAX_CACHED_USER_DETAILS)
 
       const clamped = dayOrMonthWindow(window, span)
       const [reqResult, costResult, modelResult] = await Promise.allSettled([

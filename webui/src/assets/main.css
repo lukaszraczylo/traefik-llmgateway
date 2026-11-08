@@ -1,4 +1,6 @@
 @import "tailwindcss";
+/* Layered below utilities so Tailwind classes such as `hidden` still win over the FontAwesome icon display rule. */
+@import "@fortawesome/fontawesome-svg-core/styles.css" layer(base);
 @import "tw-animate-css";
 @import "shadcn-vue/tailwind.css";
 
