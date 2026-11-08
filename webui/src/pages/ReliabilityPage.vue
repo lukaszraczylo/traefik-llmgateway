@@ -373,7 +373,7 @@ onMounted(() => void reliability.fetch())
         title="Timeouts by provider"
         :state="timeoutState"
         show-empty
-        empty-title="No timeouts in this range.""
+        empty-title="No timeouts in this range."
         :error="reliability.error"
         :on-retry="reliability.fetch"
         :labels="bucketLabels"

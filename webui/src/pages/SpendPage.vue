@@ -14,7 +14,7 @@ import { useNow } from '@/composables/useNow'
 import { cacheSavingsStatus } from '@/lib/cache-savings'
 import { BREAKDOWN_PALETTE, seriesColor } from '@/lib/chart-palette'
 import { formatBucketLabel, formatCompactCount, formatCostAxis, formatCostDisplay } from '@/lib/format'
-import { loadState } from '@/lib/load-state'
+import { emptyWhenAllZero, loadState } from '@/lib/load-state'
 import { parseScope, scopeBudgetLimits, scopeId } from '@/lib/scope'
 import { useCatalogStore } from '@/stores/catalog'
 import { useDashboardStore } from '@/stores/dashboard'
@@ -182,8 +182,11 @@ const cacheSavingsNote = computed<string | null>(() => cacheSavingsStatusResult.
 // --- skeleton/error states (verify-ui-states.md #7: "Spend and Reliability
 // pages got no skeletons or ErrorState") -----------------------------------
 
-/** breakdownState gates the main breakdown chart's own skeleton/error — hasData is bucket presence (a real response landed), not "every value is non-zero", so a genuinely zero-traffic range still reads 'ready' and the chart draws its own honest zero line. BurnDownChart.vue computes its own identical state internally now (it owns its own Card/CardHeader, verify-ui-states.md fix) — SpendPage.vue just forwards spend.burndownLoading/spend.burndownError as props. */
-const breakdownState = computed(() => loadState({ loading: spend.loading, hasData: spend.buckets.length > 0, error: spend.breakdownError }))
+/** breakdownLoadState gates the main breakdown chart's own skeleton/error — hasData is bucket presence (a real response landed), not "every value is non-zero", so a genuinely zero-traffic range still reads 'ready'. BurnDownChart.vue computes its own identical state internally now (it owns its own Card/CardHeader, verify-ui-states.md fix) — SpendPage.vue just forwards spend.burndownLoading/spend.burndownError as props. */
+const breakdownLoadState = computed(() => loadState({ loading: spend.loading, hasData: spend.buckets.length > 0, error: spend.breakdownError }))
+
+/** An all-zero range shows a message instead of a flat line over a column of identical "$0" ticks. */
+const breakdownState = computed(() => emptyWhenAllZero(breakdownLoadState.value, breakdownDatasets.value))
 
 /**
  * retryPricingHealthTable (verify-ui-states-2.md #9 fix) is
@@ -220,7 +223,7 @@ function retryPricingHealthTable(): Promise<void> {
       </div>
       <div class="text-right">
         <p class="text-xs font-medium text-muted-foreground">{{ SPEND_METRIC_LABEL[metric] }} in range</p>
-        <p class="text-2xl font-semibold tabular-nums">{{ breakdownState === 'ready' ? valueFormatter(totalInRange) : '—' }}</p>
+        <p class="text-2xl font-semibold tabular-nums">{{ breakdownLoadState === 'ready' ? valueFormatter(totalInRange) : '—' }}</p>
       </div>
     </div>
     <p v-if="byDisabled" class="text-sm text-muted-foreground">
@@ -258,6 +261,8 @@ function retryPricingHealthTable(): Promise<void> {
     <ChartCard
       bare
       :state="breakdownState"
+      show-empty
+      empty-title="No usage in this range."
       :error="spend.breakdownError"
       :on-retry="spend.refresh"
       :labels="breakdownLabels"
@@ -274,7 +279,7 @@ function retryPricingHealthTable(): Promise<void> {
     precedence), so the ErrorState above never mounts. Without this line the
     failure was invisible: the chart kept the old series under the new
     labels/formatter with no indication anything had gone wrong. -->
-    <p v-if="spend.breakdownError && breakdownState === 'ready'" class="text-sm break-words text-destructive">{{ spend.breakdownError }}</p>
+    <p v-if="spend.breakdownError && breakdownLoadState === 'ready'" class="text-sm break-words text-destructive">{{ spend.breakdownError }}</p>
 
     <div class="grid grid-cols-1 items-start gap-4 lg:grid-cols-2">
       <BurnDownChart

@@ -2,7 +2,7 @@
 import type { Component } from 'vue'
 import { faGithub } from '@fortawesome/free-brands-svg-icons'
 import { faCircleExclamation } from '@fortawesome/free-solid-svg-icons'
-import { computed, defineAsyncComponent, onMounted } from 'vue'
+import { computed, defineAsyncComponent, onMounted, watch } from 'vue'
 
 import AuthGate from '@/components/AuthGate.vue'
 import ConfigWarningsBanner from '@/components/ConfigWarningsBanner.vue'
@@ -17,6 +17,7 @@ import type { PageId } from '@/lib/pages'
 import { useAuthStore } from '@/stores/auth'
 import { useDashboardStore } from '@/stores/dashboard'
 import { useNavStore } from '@/stores/nav'
+import { resetSessionData } from '@/stores/session'
 
 /** The module path (go.mod / .traefik.yml `import:`) — same repo the plugin ships from, so this is the one canonical URL rather than a guess. */
 const GITHUB_REPO_URL = 'https://github.com/lukaszraczylo/traefik-llmgateway'
@@ -84,6 +85,14 @@ const statusText = computed<string>(() => {
 
 /** isInitialStatusLoad gates the header status line's skeleton — the FIRST dashboard poll only (states-plan.md item 1: a skeleton only when there is no data yet, never on a background refresh — dashboard.lastUpdated stays set through every later poll, success or failure). */
 const isInitialStatusLoad = computed<boolean>(() => !dashboard.error && !dashboard.lastUpdated)
+
+// A different key may carry different privileges, so never keep the previous key's data on screen.
+watch(
+  () => auth.apiKey,
+  (next, prev) => {
+    if (next !== prev) resetSessionData()
+  },
+)
 
 onMounted(() => {
   dashboard.startPolling()
