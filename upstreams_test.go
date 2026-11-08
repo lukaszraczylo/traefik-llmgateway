@@ -224,6 +224,62 @@ func TestUpstreams_Passthrough_ModelAndPath(t *testing.T) {
 	assert.Equal(t, []string{"/v1/rerank", "/v1/rerank", "/v1/decide", "/v1/decide/batch", "/v1/other"}, paths)
 }
 
+func TestUpstreams_Passthrough_PathOnly(t *testing.T) {
+	rec := &upstreamRecorder{}
+	base := httptest.NewServer(rec.handler("base", "application/json", `{}`))
+	defer base.Close()
+	thx := httptest.NewServer(rec.handler("thx", "application/json", `{}`))
+	defer thx.Close()
+
+	h := newUpstreamsGateway(t, &ProviderConfig{
+		Type: "openai", BaseURL: base.URL, Models: []string{"current"},
+		PathBaseURLs: map[string]string{"/v1/decide": thx.URL},
+	})
+	post := func(path, body string) {
+		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer sk-alice")
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	}
+	post("/gx10/v1/decide", `{"model":"current"}`)
+	post("/gx10/v1/other", `{"model":"current"}`)
+
+	var servers []string
+	for _, hit := range rec.snapshot() {
+		servers = append(servers, hit.server)
+	}
+	assert.Equal(t, []string{"thx", "base"}, servers)
+}
+
+type failingBody struct{ read bool }
+
+func (f *failingBody) Read(p []byte) (int, error) {
+	if !f.read {
+		f.read = true
+		return copy(p, `{"mod`), nil
+	}
+	return 0, io.ErrClosedPipe
+}
+
+func TestUpstreams_Passthrough_BodyReadError_400(t *testing.T) {
+	rec := &upstreamRecorder{}
+	base := httptest.NewServer(rec.handler("base", "application/json", `{}`))
+	defer base.Close()
+	h := newUpstreamsGateway(t, &ProviderConfig{
+		Type: "openai", BaseURL: base.URL, Models: []string{"current"},
+		ModelBaseURLs: map[string]string{"bge": base.URL},
+	})
+	req := httptest.NewRequest(http.MethodPost, "/gx10/v1/rerank", &failingBody{})
+	req.Header.Set("Authorization", "Bearer sk-alice")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
+	assert.Empty(t, rec.snapshot())
+}
+
 func TestUpstreams_NoNewFields_AllTrafficToBaseURL(t *testing.T) {
 	rec := &upstreamRecorder{}
 	base := httptest.NewServer(rec.handler("base", "application/json", `{"usage":{"prompt_tokens":1,"completion_tokens":1}}`))

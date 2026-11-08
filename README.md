@@ -1640,10 +1640,13 @@ providers:
 - **Native passthrough** (`/gx10/v1/rerank`, `/gx10/v1/decide`): the gateway
   reads the body's top-level `model` (bare or `gx10/`-prefixed, within the
   first 64KiB). A `modelBaseUrls` hit wins; otherwise the longest matching
-  `pathBaseUrls` prefix; otherwise `baseUrl`. Only providers that set either
-  map read the body for this purpose.
+  `pathBaseUrls` prefix; otherwise `baseUrl`. Only providers that set
+  `modelBaseUrls` read the body for this purpose.
 - **Discovery** polls `baseUrl` only. `modelBaseUrls` ids are static.
 - **Auth** reuses the provider's `apiKey` for every upstream.
+- **Failover health** is tracked per provider, not per upstream. One failing
+  upstream marks the whole provider unhealthy, so with failover enabled its
+  other models can be tried after another provider for the breaker window.
 
 ## Anthropic Messages API (`/v1/messages`)
 

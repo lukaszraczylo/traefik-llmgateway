@@ -1294,8 +1294,15 @@ func (g *Gateway) handlePassthrough(w http.ResponseWriter, r *http.Request, u *u
 	upstreamBase := adapter.base()
 	if oa, isOpenAI := adapter.(*openaiAdapter); isOpenAI && oa.hasUpstreamOverrides() {
 		var model string
-		if m, hasModel, truncated, peekErr := peekPassthroughModel(r); peekErr == nil && hasModel && !truncated {
-			model = m
+		if len(oa.modelBases) > 0 {
+			m, hasModel, truncated, peekErr := peekPassthroughModel(r)
+			if peekErr != nil {
+				writeOAIError(w, http.StatusBadRequest, "invalid_request_error", "cannot read request body")
+				return
+			}
+			if hasModel && !truncated {
+				model = m
+			}
 		}
 		upstreamBase = oa.passthroughBase(model, "/"+rest)
 	}
