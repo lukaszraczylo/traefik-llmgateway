@@ -4,7 +4,7 @@ import { computed } from 'vue'
 import StatItem from '@/components/StatItem.vue'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { headroom, monthProgress, NOT_ENOUGH_DATA, projectMonthEnd, WILL_EXCEED_TITLE } from '@/lib/forecast'
-import { formatCost } from '@/lib/format'
+import { formatCostDisplay } from '@/lib/format'
 import type { LimitsConfig } from '@/types/api'
 
 /**
@@ -54,16 +54,16 @@ const forecast = computed(() => headroom(projectedMicros.value, props.limits?.co
       <CardDescription>Projected month-end spend, extrapolated from month-to-date usage (UTC calendar month).</CardDescription>
     </CardHeader>
     <CardContent class="grid grid-cols-2 gap-4 text-sm sm:grid-cols-3">
-      <StatItem label="Month to date">{{ formatCost(mtdMicros) }}</StatItem>
+      <StatItem label="Month to date">{{ formatCostDisplay(mtdMicros) }}</StatItem>
       <StatItem
         label="Projected month-end"
         :tone="forecast.willExceed ? 'destructive' : 'default'"
         :title="forecast.willExceed ? WILL_EXCEED_TITLE : undefined"
         :hint="projectedMicros === null ? NOT_ENOUGH_DATA : undefined"
       >
-        {{ projectedMicros === null ? '' : formatCost(projectedMicros) }}
+        {{ projectedMicros === null ? '' : formatCostDisplay(projectedMicros) }}
       </StatItem>
-      <StatItem v-if="forecast.limitMicros !== null" label="Limit">{{ formatCost(forecast.limitMicros) }}</StatItem>
+      <StatItem v-if="forecast.limitMicros !== null" label="Limit">{{ formatCostDisplay(forecast.limitMicros) }}</StatItem>
     </CardContent>
   </Card>
 </template>

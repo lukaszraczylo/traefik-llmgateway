@@ -28,6 +28,8 @@ const props = defineProps<{
   sorting?: SortingState
   /** Optional per-row source lookup ('inline'/'file'/undefined), forwarded to usage-columns.ts's usageColumns — see that module's sourceColumn doc comment. Omitted everywhere except ConsumerDirectory.vue's flat Users table. */
   sourceValue?: (entry: AdminUsageEntryView) => string | undefined
+  /** Forwarded to DataTable: rows per page for large user lists. */
+  pageSize?: number
 }>()
 
 const emit = defineEmits<{ 'update:sorting': [value: SortingState] }>()
@@ -40,6 +42,7 @@ const columns = computed(() =>
 <template>
   <DataTable
     label="Usage"
+    :page-size="pageSize"
     :columns="columns"
     :data="entries"
     :empty-message="emptyMessage"

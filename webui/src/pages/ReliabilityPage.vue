@@ -15,7 +15,7 @@ import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { seriesColor } from '@/lib/chart-palette'
 import { formatBucketLabel } from '@/lib/format'
-import { loadState } from '@/lib/load-state'
+import { emptyWhenAllZero, loadState } from '@/lib/load-state'
 import type { LoadState } from '@/lib/load-state'
 import { formatErrorRatePercent } from '@/lib/provider-rate'
 import { scopeId } from '@/lib/scope'
@@ -201,6 +201,10 @@ const reliabilityState = computed<LoadState>(() => {
   if (dashboardLoadState.value !== 'ready') return dashboardLoadState.value
   return loadState({ loading: reliability.loading, hasData: reliability.buckets.length > 0, error: reliability.error })
 })
+
+/** Count charts with nothing to plot show a message instead of an empty 0-1 axis. */
+const timeoutState = computed<LoadState>(() => emptyWhenAllZero(reliabilityState.value, timeoutDatasets.value))
+const failoverState = computed<LoadState>(() => emptyWhenAllZero(reliabilityState.value, failoverDatasets.value))
 /** providerPerfState mirrors reliabilityState for the "Selected provider performance" chart pair — reliability.fetchProviderPerf runs independently of fetch() (its own doc comment), so it needs its own loading/error signal, only reachable once providerPerfAvailable is already true. */
 const providerPerfState = computed(() =>
   loadState({ loading: reliability.providerPerfLoading, hasData: reliability.providerPerfPoints.length > 0, error: reliability.providerPerfError }),
@@ -367,7 +371,9 @@ onMounted(() => void reliability.fetch())
 
       <ChartCard
         title="Timeouts by provider"
-        :state="reliabilityState"
+        :state="timeoutState"
+        show-empty
+        empty-title="No timeouts in this range.""
         :error="reliability.error"
         :on-retry="reliability.fetch"
         :labels="bucketLabels"
@@ -378,7 +384,9 @@ onMounted(() => void reliability.fetch())
       <ChartCard
         title="Failovers by provider"
         :description="noFailoverConfigured ? 'This deployment has no failover chains configured.' : undefined"
-        :state="reliabilityState"
+        :state="failoverState"
+        show-empty
+        empty-title="No failovers in this range."
         :error="reliability.error"
         :on-retry="reliability.fetch"
         :labels="bucketLabels"

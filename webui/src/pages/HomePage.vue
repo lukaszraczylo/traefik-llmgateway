@@ -13,7 +13,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { AdminApiError, adminFetch, messageOf } from '@/lib/api'
 import { eventKindVariant, kindLabel } from '@/lib/events-filter'
-import { formatCompactCount, formatCost, formatTimestamp } from '@/lib/format'
+import { formatCompactCount, formatCostDisplay, formatTimestamp } from '@/lib/format'
 import { headroom, monthProgress, NOT_ENOUGH_DATA, projectMonthEnd } from '@/lib/forecast'
 import {
   budgetRatio,
@@ -75,8 +75,8 @@ const spendMtdMicros = computed<number>(() => dashboard.usage?.total.costPerMont
 const budgetMicros = computed<number>(() => sumGroupBudgetMicros(dashboard.overview?.groups ?? []))
 const spendTier = computed(() => budgetTier(budgetRatio(spendMtdMicros.value, budgetMicros.value)))
 const spendDelta = computed<string>(() => {
-  const today = `${formatCost(spendTodayMicros.value)} today`
-  return budgetMicros.value > 0 ? `${today} · budget ${formatCost(budgetMicros.value)}/mo` : `${today} · no budget set`
+  const today = `${formatCostDisplay(spendTodayMicros.value)} today`
+  return budgetMicros.value > 0 ? `${today} · budget ${formatCostDisplay(budgetMicros.value)}/mo` : `${today} · no budget set`
 })
 
 // --- Projected month-end (lib/forecast.ts) ------------------------------
@@ -86,7 +86,7 @@ const projectedHeadroom = computed(() =>
   headroom(projectedMicros.value, budgetMicros.value > 0 ? microsToUsd(budgetMicros.value) : undefined),
 )
 const projectedValue = computed<string>(() =>
-  projectedMicros.value === null ? NOT_ENOUGH_DATA : formatCost(projectedMicros.value),
+  projectedMicros.value === null ? NOT_ENOUGH_DATA : formatCostDisplay(projectedMicros.value),
 )
 const projectedTier = computed(() => (projectedHeadroom.value.willExceed ? 'critical' : 'ok'))
 const projectedDelta = computed<string | undefined>(() => {
@@ -244,9 +244,9 @@ const topUsersLoaded = computed<boolean>(() => topUsersCache.has(topUsersMode.va
 let topUsersReqId = 0
 let topModelsReqId = 0
 
-/** formatTopUserValue applies the existing formatter each mode's unit calls for — formatCost (already 2-decimal-cents-safe) for money, formatCompactCount for raw counts/token sums. */
+/** formatTopUserValue applies the existing formatter each mode's unit calls for — formatCostDisplay (already 2-decimal-cents-safe) for money, formatCompactCount for raw counts/token sums. */
 function formatTopUserValue(mode: TopUsersMode, value: number): string {
-  return mode === 'cost' ? formatCost(value) : formatCompactCount(value)
+  return mode === 'cost' ? formatCostDisplay(value) : formatCompactCount(value)
 }
 
 const topUsers = computed<TopListItem[]>(() =>
@@ -321,7 +321,7 @@ async function fetchTopModels(): Promise<void> {
     topModels.value = res.models.map((m) => ({
       id: m.id,
       label: m.id,
-      value: formatCost(m.value),
+      value: formatCostDisplay(m.value),
       kind: 'model' as const,
     }))
     topModelsError.value = ''
@@ -407,7 +407,7 @@ onUnmounted(() => {
         <ErrorState :message="dashboard.error" :on-retry="dashboard.refresh" />
       </div>
       <template v-else>
-        <KpiTile label="Spend (MTD)" :value="formatCost(spendMtdMicros)" :delta="spendDelta" :tier="spendTier" :to="{ page: 'spend' }" />
+        <KpiTile label="Spend (MTD)" :value="formatCostDisplay(spendMtdMicros)" :delta="spendDelta" :tier="spendTier" :to="{ page: 'spend' }" />
         <KpiTile
           label="Projected month-end"
           :value="projectedValue"

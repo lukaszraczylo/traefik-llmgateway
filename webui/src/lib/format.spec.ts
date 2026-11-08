@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { formatBucketLabel, formatCompactCount, formatContextWindow, formatElapsedAgo, formatLatencyMs, formatModelCostHover, formatUntil, refreshDetailLabel, refreshLabel, ZERO_TIME } from './format'
+import { formatBucketLabel, formatCompactCount, formatContextWindow, formatCostAxis, formatCostDisplay, formatElapsedAgo, formatLatencyMs, formatModelCostHover, formatUntil, refreshDetailLabel, refreshLabel, ZERO_TIME } from './format'
 
 describe('refreshLabel', () => {
   it('reads "discovery off" when discovery is disabled, regardless of lastRefresh', () => {
@@ -267,5 +267,21 @@ describe('rounding boundaries', () => {
     { name: 'Infinity', ms: Infinity, want: '—' },
   ])('formatLatencyMs: $name', ({ ms, want }) => {
     expect(formatLatencyMs(ms)).toBe(want)
+  })
+})
+
+describe('cost display formatters', () => {
+  it.each([
+    { name: 'zero', micros: 0, display: '$0.0000', axis: '$0' },
+    { name: 'sub-cent keeps precision', micros: 1_234, display: '$0.0012', axis: '$0.0012' },
+    { name: 'under a dollar', micros: 500_000, display: '$0.5000', axis: '$0.5' },
+    { name: 'a few dollars', micros: 2_688_800, display: '$2.69', axis: '$2.69' },
+    { name: 'hundreds', micros: 999_000_000, display: '$999.00', axis: '$999' },
+    { name: 'thousands', micros: 1_500_000_000, display: '$1,500', axis: '$1,500' },
+    { name: 'negative', micros: -2_000_000, display: '-$2.00', axis: '-$2' },
+    { name: 'NaN', micros: NaN, display: '—', axis: '—' },
+  ])('$name', ({ micros, display, axis }) => {
+    expect(formatCostDisplay(micros)).toBe(display)
+    expect(formatCostAxis(micros)).toBe(axis)
   })
 })

@@ -59,6 +59,7 @@ const props = withDefaults(
     comparisonDatasets?: TimeSeriesComparisonDataset[]
     stacked?: boolean
     valueFormatter?: (value: number) => string
+    axisFormatter?: (value: number) => string
     /** Required whenever `state` can reach 'ready' with the default TimeSeriesChart body (TimeSeriesChart's own ariaLabel doc comment: no safe generic default) — optional here only so a skeleton-only ChartCard is not forced to pass a meaningless placeholder. */
     ariaLabel?: string
   }>(),
@@ -92,6 +93,7 @@ const props = withDefaults(
         :comparison-datasets="comparisonDatasets"
         :stacked="stacked"
         :value-formatter="valueFormatter"
+        :axis-formatter="axisFormatter"
         :ariaLabel="ariaLabel"
       />
     </slot>
@@ -113,6 +115,7 @@ const props = withDefaults(
           :comparison-datasets="comparisonDatasets"
           :stacked="stacked"
           :value-formatter="valueFormatter"
+          :axis-formatter="axisFormatter"
           :ariaLabel="ariaLabel"
         />
       </slot>

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { loadState } from './load-state'
+import { emptyWhenAllZero, loadState } from './load-state'
 
 describe('loadState', () => {
   it('is "ready" when there is data, no error, not loading', () => {
@@ -32,5 +32,18 @@ describe('loadState', () => {
 
   it('is "empty" when there is no data, no error, and not loading', () => {
     expect(loadState({ loading: false, hasData: false, error: '' })).toBe('empty')
+  })
+})
+
+describe('emptyWhenAllZero', () => {
+  const zero = [{ data: [0, 0, null] }]
+  it.each([
+    { name: 'ready + all zero', state: 'ready', series: zero, want: 'empty' },
+    { name: 'ready + no series', state: 'ready', series: [], want: 'empty' },
+    { name: 'ready + traffic', state: 'ready', series: [{ data: [0, 2] }], want: 'ready' },
+    { name: 'skeleton passes through', state: 'skeleton', series: zero, want: 'skeleton' },
+    { name: 'error passes through', state: 'error', series: zero, want: 'error' },
+  ] as const)('$name', ({ state, series, want }) => {
+    expect(emptyWhenAllZero(state, series)).toBe(want)
   })
 })

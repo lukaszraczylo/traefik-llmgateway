@@ -25,7 +25,7 @@ import UsageTable from '@/components/UsageTable.vue'
 import { useNow } from '@/composables/useNow'
 import { useSearchQuery } from '@/composables/useSearchQuery'
 import { monthCostProjection, NOT_ENOUGH_DATA, WILL_EXCEED_TITLE } from '@/lib/forecast'
-import { formatCost, formatLimits } from '@/lib/format'
+import { formatCostDisplay, formatLimits } from '@/lib/format'
 import { loadState } from '@/lib/load-state'
 import { type ExpandState, clearExpandOverrides, computeExpandedItems, toggleItemExpand } from '@/lib/search-expand'
 import { budgetRatios } from '@/lib/usage-bars'
@@ -49,6 +49,9 @@ import type { AdminUsageEntryView } from '@/types/api'
  * Source column (inline/file, GET /admin/api/consumers) on the flat Users
  * table only.
  */
+/** Rows per page in the flat Users table: keeps a 30+ user fleet scannable. */
+const USERS_PAGE_SIZE = 25
+
 const dashboard = useDashboardStore()
 const consumers = useConsumersStore()
 const nav = useNavStore()
@@ -232,7 +235,7 @@ function isGlobPattern(entry: string): boolean {
 /** groupCostProjection renders lib/forecast.ts's shared monthCostProjection (reuse-audit.md F7) for one group row as display text. */
 function groupCostProjection(entry: AdminUsageEntryView, now: Date): { text: string; willExceed: boolean } {
   const projection = monthCostProjection(entry, now)
-  return { text: projection.micros === null ? NOT_ENOUGH_DATA : formatCost(projection.micros), willExceed: projection.willExceed }
+  return { text: projection.micros === null ? NOT_ENOUGH_DATA : formatCostDisplay(projection.micros), willExceed: projection.willExceed }
 }
 /**
  * GROUP_DETAIL_FIELDS (reuse-audit.md F6) drives the group accordion's 4
@@ -308,7 +311,7 @@ function groupsCsv(): string {
         </StatItem>
         <StatItem label="Tokens in/day"><CompactNumber :value="usage.total.tokensInPerDay" /></StatItem>
         <StatItem label="Tokens out/day"><CompactNumber :value="usage.total.tokensOutPerDay" /></StatItem>
-        <StatItem label="Cost/day">{{ formatCost(usage.total.costPerDayMicroUsd) }}</StatItem>
+        <StatItem label="Cost/day">{{ formatCostDisplay(usage.total.costPerDayMicroUsd) }}</StatItem>
       </CardContent>
     </Card>
 
@@ -328,7 +331,8 @@ function groupsCsv(): string {
         <SkeletonList v-if="dashboardLoadState === 'skeleton'" :rows="3" />
         <ErrorState v-else-if="dashboardLoadState === 'error'" :message="dashboard.error" :on-retry="dashboard.refresh" />
         <template v-else>
-        <div v-if="sortedGroupRows.length" class="mb-3 flex flex-wrap gap-x-4 gap-y-1 text-xs font-medium text-muted-foreground">
+        <div v-if="sortedGroupRows.length" class="mb-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs font-medium text-muted-foreground">
+          <span>Sort groups by</span>
           <SortHeaderButton v-for="header in toolbarHeaders" :key="header.id" :header="header" />
         </div>
 
@@ -345,7 +349,7 @@ function groupsCsv(): string {
                     <CompactNumber v-else :value="row.original.requestsPerDay" /> req/day
                   </span>
                   <span class="text-xs text-muted-foreground tabular-nums">
-                    {{ row.original.storeDown ? '?' : formatCost(row.original.costPerDayMicroUsd) }}/day
+                    {{ row.original.storeDown ? '?' : formatCostDisplay(row.original.costPerDayMicroUsd) }}/day
                   </span>
                 </span>
               </AccordionTrigger>
@@ -425,7 +429,7 @@ function groupsCsv(): string {
                   <template v-if="row.original.storeDown">?</template>
                   <CompactNumber v-else :value="field.read(row.original)" />
                 </DetailField>
-                <DetailField label="cost/month" numeric>{{ row.original.storeDown ? '?' : formatCost(row.original.costPerMonthMicroUsd) }}</DetailField>
+                <DetailField label="cost/month" numeric>{{ row.original.storeDown ? '?' : formatCostDisplay(row.original.costPerMonthMicroUsd) }}</DetailField>
                 <DetailField
                   label="cost/month (proj.)"
                   numeric
@@ -462,7 +466,7 @@ function groupsCsv(): string {
         <div class="flex items-start justify-between gap-2">
           <div>
             <CardTitle>Users</CardTitle>
-            <CardDescription v-if="consumers.data?.usersFile">File-backed users load from {{ consumers.data.usersFile }}.</CardDescription>
+            <CardDescription v-if="consumers.data?.usersFile" class="max-w-full truncate" :title="consumers.data.usersFile">File-backed users load from {{ consumers.data.usersFile }}.</CardDescription>
           </div>
           <CsvExportButton filename="consumers-users.csv" :build="usersCsv" />
         </div>
@@ -470,6 +474,7 @@ function groupsCsv(): string {
       <CardContent>
         <LoadStateView :state="dashboardLoadState" :error="dashboard.error" :on-retry="dashboard.refresh" skeleton="table" :rows="5" :cols="5">
           <UsageTable
+            :page-size="USERS_PAGE_SIZE"
             id-label="Name"
             secondary-column-label="Group"
             :entries="filteredUsers"

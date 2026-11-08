@@ -218,3 +218,12 @@
     font-variant-numeric: tabular-nums;
     }
 }
+
+/* Horizontal scroll cue: a soft shadow on whichever edge still has hidden content. */
+@utility scroll-shadow-x {
+  background:
+    linear-gradient(to right, var(--card) 30%, transparent) 0 0 / 2.5rem 100% no-repeat local,
+    linear-gradient(to left, var(--card) 30%, transparent) 100% 0 / 2.5rem 100% no-repeat local,
+    radial-gradient(farthest-side at 0 50%, oklch(0 0 0 / 0.22), transparent) 0 0 / 0.6rem 100% no-repeat scroll,
+    radial-gradient(farthest-side at 100% 50%, oklch(0 0 0 / 0.22), transparent) 100% 0 / 0.6rem 100% no-repeat scroll;
+}

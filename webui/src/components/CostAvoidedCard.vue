@@ -4,7 +4,7 @@ import { computed } from 'vue'
 import LabeledSelect from '@/components/LabeledSelect.vue'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { costAvoidedMicros, freeRows, pickReferenceModel } from '@/lib/cost-avoided'
-import { formatCost } from '@/lib/format'
+import { formatCostDisplay } from '@/lib/format'
 import type { AdminCatalogModel, AdminUsageModelEntry } from '@/types/api'
 
 /**
@@ -129,12 +129,12 @@ function onReferenceUpdate(value: unknown): void {
         <p v-if="avoidedMicros === null" class="text-sm text-muted-foreground">
           {{ priceableOptions.length === 0 ? 'No priced model served in range to compare against.' : 'Pick a reference model above.' }}
         </p>
-        <p v-else class="text-lg font-semibold tabular-nums text-chart-requests">{{ formatCost(avoidedMicros) }}</p>
+        <p v-else class="text-lg font-semibold tabular-nums text-chart-requests">{{ formatCostDisplay(avoidedMicros) }}</p>
       </div>
       <div v-if="cacheStatsEnabled">
         <p class="text-muted-foreground">Cache savings</p>
         <p v-if="!cacheSavingsAvailable" class="text-lg font-semibold tabular-nums text-muted-foreground">n/a</p>
-        <p v-else class="text-lg font-semibold tabular-nums text-chart-requests">{{ formatCost(cacheSavedMicros) }}</p>
+        <p v-else class="text-lg font-semibold tabular-nums text-chart-requests">{{ formatCostDisplay(cacheSavedMicros) }}</p>
         <p v-if="cacheSavingsNote" class="text-xs text-status-warn">{{ cacheSavingsNote }}</p>
       </div>
     </CardContent>

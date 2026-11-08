@@ -7,7 +7,7 @@ import TimeSeriesChart from '@/components/TimeSeriesChart.vue'
 import type { TimeSeriesDataset } from '@/components/TimeSeriesChart.vue'
 import { cumulative, runOutDate } from '@/lib/burndown'
 import { NOT_ENOUGH_DATA } from '@/lib/forecast'
-import { formatBucketLabel, formatCost, formatShortDate } from '@/lib/format'
+import { formatBucketLabel, formatCostAxis, formatCostDisplay, formatShortDate } from '@/lib/format'
 import { loadState } from '@/lib/load-state'
 
 /**
@@ -73,8 +73,8 @@ const willExceed = computed<boolean>(() => props.budgetMicros !== null && spentM
   >
     <div class="flex flex-col gap-4">
       <div class="grid grid-cols-2 gap-4 text-sm sm:grid-cols-3">
-        <StatItem label="Spent so far" :tone="willExceed ? 'destructive' : 'default'">{{ formatCost(spentMicros) }}</StatItem>
-        <StatItem v-if="budgetMicros !== null" label="Budget">{{ formatCost(budgetMicros) }}</StatItem>
+        <StatItem label="Spent so far" :tone="willExceed ? 'destructive' : 'default'">{{ formatCostDisplay(spentMicros) }}</StatItem>
+        <StatItem v-if="budgetMicros !== null" label="Budget">{{ formatCostDisplay(budgetMicros) }}</StatItem>
         <StatItem
           v-if="budgetMicros !== null"
           label="Projected run-out"
@@ -89,7 +89,8 @@ const willExceed = computed<boolean>(() => props.budgetMicros !== null && spentM
         :labels="labels"
         :datasets="datasets"
         :comparison-datasets="comparisonDatasets"
-        :value-formatter="formatCost"
+        :value-formatter="formatCostDisplay"
+        :axis-formatter="formatCostAxis"
         ariaLabel="Cumulative spend this month against the configured budget"
       />
     </div>

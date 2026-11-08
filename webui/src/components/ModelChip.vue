@@ -2,7 +2,9 @@
 import { faCheck, faCopy, faTriangleExclamation } from '@fortawesome/free-solid-svg-icons'
 import { computed, useTemplateRef } from 'vue'
 
+import AliasBadge from '@/components/AliasBadge.vue'
 import { Badge } from '@/components/ui/badge'
+import { useAliasNames } from '@/composables/useAliasNames'
 import { useCopyFeedback } from '@/composables/useCopyFeedback'
 import { copyText } from '@/lib/clipboard'
 import { formatContextWindow, formatModelCostHover } from '@/lib/format'
@@ -50,6 +52,7 @@ const props = defineProps<{
   outputPerMTokUsd?: number
 }>()
 
+const { isAlias } = useAliasNames()
 const labelRef = useTemplateRef<HTMLElement>('label')
 const { state, set: setCopyFeedback } = useCopyFeedback()
 const toasts = useToastsStore()
@@ -125,6 +128,7 @@ const title = computed(() => {
     @click="onClick"
   >
     <span ref="label" class="min-w-0 truncate select-text">{{ id }}</span>
+    <AliasBadge v-if="isAlias(id)" />
     <FontAwesomeIcon :icon="icon[state]" class="size-2.5 shrink-0" aria-hidden="true" />
   </Badge>
 </template>

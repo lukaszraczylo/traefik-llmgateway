@@ -131,7 +131,7 @@ export const useDashboardStore = defineStore('dashboard', {
      */
     startPolling(): void {
       if (this.poller) return
-      this.poller = createVisibilityPoller({ intervalMs: POLL_MS, tick: () => void this.refresh() })
+      this.poller = createVisibilityPoller({ intervalMs: POLL_MS, tick: () => this.refresh().then(() => this.error !== '') })
       this.poller.start()
     },
     // P11 review fix: a stopPolling action mirroring events.ts's own

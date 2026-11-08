@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { createVisibilityPoller, type VisibilityDocumentLike } from './polling'
+import { backoffSkips, createVisibilityPoller, type VisibilityDocumentLike } from './polling'
 
 /**
  * createFakeDoc builds a minimal VisibilityDocumentLike test double: a
@@ -219,6 +219,40 @@ describe('createVisibilityPoller', () => {
     poller.start()
 
     expect(tick).toHaveBeenCalledTimes(1)
+    poller.stop()
+  })
+})
+
+describe('poll backoff', () => {
+  beforeEach(() => vi.useFakeTimers())
+  afterEach(() => vi.useRealTimers())
+
+  it.each([
+    { failures: 0, want: 0 },
+    { failures: 1, want: 1 },
+    { failures: 2, want: 3 },
+    { failures: 3, want: 7 },
+    { failures: 50, want: 7 },
+  ])('backoffSkips($failures) = $want', ({ failures, want }) => {
+    expect(backoffSkips(failures)).toBe(want)
+  })
+
+  it('skips ticks after a failed poll and resets after a success', async () => {
+    const tick = vi.fn<() => Promise<boolean>>().mockResolvedValue(true)
+    const poller = createVisibilityPoller({ intervalMs: 1000, tick, doc: undefined })
+    poller.start()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(tick).toHaveBeenCalledTimes(1)
+    await vi.advanceTimersByTimeAsync(1000) // skipped (1 skip after 1 failure)
+    expect(tick).toHaveBeenCalledTimes(1)
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(tick).toHaveBeenCalledTimes(2)
+    tick.mockResolvedValue(false)
+    await vi.advanceTimersByTimeAsync(3000) // 2 failures -> 3 skips, then a call
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(tick).toHaveBeenCalledTimes(3)
+    await vi.advanceTimersByTimeAsync(1000) // healthy again: every tick
+    expect(tick).toHaveBeenCalledTimes(4)
     poller.stop()
   })
 })

@@ -47,6 +47,37 @@ export function formatCost(micros: number): string {
   return `$${microsToUsd(micros).toFixed(4)}`
 }
 
+/** Thresholds in micro-USD: 4 decimals under $1 (per-request costs are tiny), cents under $1000, whole dollars above. */
+const COST_DISPLAY_CENTS_FROM_MICROS = 1_000_000
+const COST_DISPLAY_WHOLE_FROM_MICROS = 1_000_000_000
+
+function costFractionDigits(absMicros: number): number {
+  if (absMicros < COST_DISPLAY_CENTS_FROM_MICROS) return 4
+  return absMicros < COST_DISPLAY_WHOLE_FROM_MICROS ? 2 : 0
+}
+
+function formatUsdAmount(micros: number, minDigits: (max: number) => number): string {
+  if (!Number.isFinite(micros)) return '—'
+  const abs = Math.abs(micros)
+  const max = costFractionDigits(abs)
+  const text = microsToUsd(abs).toLocaleString('en-US', { minimumFractionDigits: minDigits(max), maximumFractionDigits: max })
+  return `${micros < 0 ? '-' : ''}$${text}`
+}
+
+/**
+ * formatCostDisplay renders micro-USD for cards, headings and tooltips with thousands separators and magnitude-scaled
+ * decimals. Tables and CSV keep formatCost's fixed 4 decimals. Rounding error is at most 0.5% from $1 up
+ * (formal/Gateway/Ui/Cost.lean rel_err_ge1).
+ */
+export function formatCostDisplay(micros: number): string {
+  return formatUsdAmount(micros, (max) => max)
+}
+
+/** formatCostAxis is formatCostDisplay without trailing zeros ("$0", "$0.5", "$1,600"), for chart ticks. */
+export function formatCostAxis(micros: number): string {
+  return formatUsdAmount(micros, () => 0)
+}
+
 /**
  * formatShortDate renders a Date as a compact "Oct 15" label (month/day
  * only, no time-of-day) — reuse-audit.md F13: the ONE run-out-date format,

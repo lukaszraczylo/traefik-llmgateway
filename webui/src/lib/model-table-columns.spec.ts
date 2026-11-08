@@ -2,7 +2,6 @@ import type { VNode } from 'vue'
 import { isVNode } from 'vue'
 import { describe, expect, it } from 'vitest'
 
-import EntityLink from '@/components/EntityLink.vue'
 import ModelChip from '@/components/ModelChip.vue'
 import { Badge } from '@/components/ui/badge'
 import { buildModelCatalogRows, modelCatalogColumns } from './model-table-columns'
@@ -126,15 +125,11 @@ describe('buildModelCatalogRows', () => {
 describe('modelCatalogColumns: id column', () => {
   const col = modelCatalogColumns().find((c) => c.id === 'id')
 
-  it('cell renders a ModelChip and an EntityLink pointed at kind "model"', () => {
+  // This table lives on the Models page, so a link back to it would repeat the chip's own text.
+  it('cell renders one ModelChip and no self-link', () => {
     const rendered = cellOf(col)({ row: { original: testRow({ id: 'anthropic/claude' }) } }) as VNode
-    const children = rendered.children as VNode[]
-    const chip = children.find((c) => c.type === ModelChip)
-    const link = children.find((c) => c.type === EntityLink)
-    expect(chip?.props?.id).toBe('anthropic/claude')
-    expect(link?.props?.kind).toBe('model')
-    expect(link?.props?.id).toBe('anthropic/claude')
-    expect(link?.props?.label).toBe('anthropic/claude')
+    expect(rendered.type).toBe(ModelChip)
+    expect(rendered.props?.id).toBe('anthropic/claude')
   })
 })
 

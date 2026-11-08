@@ -69,6 +69,9 @@ const columns = eventsColumns()
  * states-plan.md item 3 — so content is never wiped/replaced by a
  * skeleton or error here).
  */
+/** Rows per page in the Events table. */
+const EVENTS_PAGE_SIZE = 50
+
 const eventsLoadState = computed(() => loadState({ loading: events.refreshing, hasData: events.lastUpdated !== null, error: events.error }))
 const staleMessage = computed(() => staleNotice(events.lastUpdated !== null, events.error, events.lastUpdated))
 
@@ -160,7 +163,7 @@ onUnmounted(() => {
           title="No failures recorded."
           description="Rate-limit, budget, and upstream events will show up here as they happen."
         />
-        <DataTable v-else label="Events" :columns="columns" :data="filteredEvents" :empty-message="emptyMessage" />
+        <DataTable v-else label="Events" :page-size="EVENTS_PAGE_SIZE" :columns="columns" :data="filteredEvents" :empty-message="emptyMessage" />
       </CardContent>
     </Card>
   </div>

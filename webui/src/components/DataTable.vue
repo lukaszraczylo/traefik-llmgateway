@@ -1,9 +1,11 @@
 <script setup lang="ts" generic="TData">
 import type { ColumnDef, SortingState } from '@tanstack/vue-table'
 import { FlexRender, getCoreRowModel, getSortedRowModel, useVueTable } from '@tanstack/vue-table'
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 
 import SortHeaderButton from '@/components/SortHeaderButton.vue'
+import { Button } from '@/components/ui/button'
+import { pageWindow } from '@/lib/paging'
 import {
   Table,
   TableBody,
@@ -40,6 +42,8 @@ const props = defineProps<{
   emptyMessage?: string
   /** Accessible name for the table (aria-label). */
   label?: string
+  /** Rows per page; omit to show every row. A pager appears only when the data exceeds one page. */
+  pageSize?: number
   /**
    * Optional CONTROLLED sort state (P6, `v-model:sorting`). Omitted (the
    * default) keeps every existing call site's original UNCONTROLLED
@@ -58,6 +62,8 @@ const emit = defineEmits<{ 'update:sorting': [value: SortingState] }>()
 
 /** internalSorting is read only when props.sorting is undefined (uncontrolled mode) — see the `sorting` prop's own doc comment above. */
 const internalSorting = ref<SortingState>([])
+
+const pageIndex = ref(0)
 
 const table = useVueTable({
   get data() {
@@ -81,6 +87,11 @@ const table = useVueTable({
   },
 })
 
+const allRows = computed(() => table.getRowModel().rows)
+const pg = computed(() => pageWindow(allRows.value.length, props.pageSize ?? Math.max(1, allRows.value.length), pageIndex.value))
+const paged = computed(() => props.pageSize !== undefined && allRows.value.length > props.pageSize)
+const visibleRows = computed(() => (paged.value ? allRows.value.slice(pg.value.from, pg.value.to) : allRows.value))
+
 /** ariaSort maps a column's current sort direction to the `aria-sort` value native to a real <th> — set only on the sorted column, per spec. */
 function ariaSort(dir: false | 'asc' | 'desc'): 'ascending' | 'descending' | undefined {
   if (dir === 'asc') return 'ascending'
@@ -90,6 +101,7 @@ function ariaSort(dir: false | 'asc' | 'desc'): 'ascending' | 'descending' | und
 </script>
 
 <template>
+  <div>
   <Table :aria-label="label">
     <TableHeader>
       <TableRow v-for="headerGroup in table.getHeaderGroups()" :key="headerGroup.id">
@@ -108,7 +120,7 @@ function ariaSort(dir: false | 'asc' | 'desc'): 'ascending' | 'descending' | und
       <TableEmpty v-if="table.getRowModel().rows.length === 0" :colspan="columns.length" class="text-muted-foreground">
         {{ emptyMessage ?? 'No rows to show.' }}
       </TableEmpty>
-      <TableRow v-for="row in table.getRowModel().rows" :key="row.id" :class="rowClass?.(row.original)">
+      <TableRow v-for="row in visibleRows" :key="row.id" :class="rowClass?.(row.original)">
         <TableCell
           v-for="cell in row.getVisibleCells()"
           :key="cell.id"
@@ -119,4 +131,13 @@ function ariaSort(dir: false | 'asc' | 'desc'): 'ascending' | 'descending' | und
       </TableRow>
     </TableBody>
   </Table>
+  <nav v-if="paged" class="flex items-center justify-between gap-2 pt-3 text-xs text-muted-foreground" aria-label="Table pages">
+    <span aria-live="polite">Rows {{ pg.from + 1 }}–{{ pg.to }} of {{ allRows.length }}</span>
+    <span class="flex items-center gap-2">
+      <Button type="button" variant="outline" size="sm" :disabled="pg.index === 0" @click="pageIndex = pg.index - 1">Previous</Button>
+      <span class="tabular-nums">Page {{ pg.index + 1 }} / {{ pg.count }}</span>
+      <Button type="button" variant="outline" size="sm" :disabled="pg.index >= pg.count - 1" @click="pageIndex = pg.index + 1">Next</Button>
+    </span>
+  </nav>
+  </div>
 </template>

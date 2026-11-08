@@ -1,7 +1,6 @@
 import type { ColumnDef } from '@tanstack/vue-table'
 import { h } from 'vue'
 
-import EntityLink from '@/components/EntityLink.vue'
 import ModelChip from '@/components/ModelChip.vue'
 import { Badge } from '@/components/ui/badge'
 import { EMPTY_CELL, optionalColumn, usageMetricColumns } from '@/lib/columns'
@@ -152,15 +151,12 @@ export function modelCatalogColumns(): ColumnDef<ModelCatalogRow, unknown>[] {
       header: 'Model',
       accessorFn: (r) => r.id,
       cell: ({ row }) =>
-        h('span', { class: 'inline-flex flex-wrap items-center gap-1.5' }, [
-          h(ModelChip, {
-            id: row.original.id,
-            contextTokens: row.original.contextTokens,
-            inputPerMTokUsd: row.original.inputPerMTokUsd,
-            outputPerMTokUsd: row.original.outputPerMTokUsd,
-          }),
-          h(EntityLink, { label: row.original.id, kind: 'model', id: row.original.id }),
-        ]),
+        h(ModelChip, {
+          id: row.original.id,
+          contextTokens: row.original.contextTokens,
+          inputPerMTokUsd: row.original.inputPerMTokUsd,
+          outputPerMTokUsd: row.original.outputPerMTokUsd,
+        }),
     },
     optionalColumn<ModelCatalogRow>('context', 'Context', (r) => r.contextTokens, formatContextWindow),
     {

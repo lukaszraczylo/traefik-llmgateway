@@ -26,12 +26,12 @@ export interface VisibilityPollerOptions {
   /** How often `tick` fires while the page is visible. */
   intervalMs: number
   /**
-   * The store's own refresh step. Never awaited here — a caller that
+   * The store's own refresh step. May return a promise resolving `true` when the poll failed: consecutive failures then skip ticks (see backoffSkips) so a down gateway is not hit every interval. Never awaited here — a caller that
    * needs its own in-flight guard (history.ts keeps its "skip a tick
    * while the previous fetch is still in flight" rule) builds that into
    * `tick` itself, same as before this module existed.
    */
-  tick: () => void
+  tick: () => void | Promise<boolean | void>
   /**
    * The document to watch for visibility changes. Defaults to the real
    * `document` global when one exists. In a non-browser context (vitest's
@@ -57,8 +57,40 @@ function resolveDoc(doc: VisibilityDocumentLike | undefined): VisibilityDocument
   return typeof document === 'undefined' ? undefined : (document as unknown as VisibilityDocumentLike)
 }
 
-export function createVisibilityPoller({ intervalMs, tick, doc }: VisibilityPollerOptions): VisibilityPoller {
+/** Most ticks skipped between attempts while failing: 2^3 - 1, so a down gateway is retried at least every 8 intervals. */
+const MAX_BACKOFF_EXPONENT = 3
+
+/** backoffSkips is how many ticks to skip after `failures` consecutive failed polls; 0 while healthy. */
+export function backoffSkips(failures: number): number {
+  return 2 ** Math.min(failures, MAX_BACKOFF_EXPONENT) - 1
+}
+
+export function createVisibilityPoller({ intervalMs, tick: rawTick, doc }: VisibilityPollerOptions): VisibilityPoller {
   const target = resolveDoc(doc)
+  let failures = 0
+  let skipsLeft = 0
+
+  /** run fires the store's tick and, when it reports failure, schedules the backoff. `force` (start, tab becoming visible) bypasses pending skips. */
+  function run(force: boolean): void {
+    if (!force && skipsLeft > 0) {
+      skipsLeft--
+      return
+    }
+    const result = rawTick()
+    if (result instanceof Promise) {
+      void result.then(
+        (failed) => {
+          failures = failed === true ? failures + 1 : 0
+          skipsLeft = backoffSkips(failures)
+        },
+        () => {
+          failures++
+          skipsLeft = backoffSkips(failures)
+        },
+      )
+    }
+  }
+  const tick = (): void => run(false)
   let timer: ReturnType<typeof setInterval> | undefined
   // P13 review fix: `timer !== undefined` alone used to double as start()'s
   // idempotency guard, but a poller that STARTS while the page is hidden
@@ -89,7 +121,7 @@ export function createVisibilityPoller({ intervalMs, tick, doc }: VisibilityPoll
     if (target.hidden) {
       clearTimer()
     } else {
-      tick()
+      run(true)
       scheduleTimer()
     }
   }
@@ -107,7 +139,7 @@ export function createVisibilityPoller({ intervalMs, tick, doc }: VisibilityPoll
     if (started) return
     started = true
     if (!target?.hidden) {
-      tick()
+      run(true)
       scheduleTimer()
     }
     target?.addEventListener('visibilitychange', onVisibilityChange)

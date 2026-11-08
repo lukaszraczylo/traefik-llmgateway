@@ -13,7 +13,7 @@ import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { useNow } from '@/composables/useNow'
 import { cacheSavingsStatus } from '@/lib/cache-savings'
 import { BREAKDOWN_PALETTE, seriesColor } from '@/lib/chart-palette'
-import { formatBucketLabel, formatCompactCount, formatCost } from '@/lib/format'
+import { formatBucketLabel, formatCompactCount, formatCostAxis, formatCostDisplay } from '@/lib/format'
 import { loadState } from '@/lib/load-state'
 import { parseScope, scopeBudgetLimits, scopeId } from '@/lib/scope'
 import { useCatalogStore } from '@/stores/catalog'
@@ -133,7 +133,8 @@ const comparisonDatasets = computed<TimeSeriesComparisonDataset[]>(() =>
   spend.comparisonPoints ? [{ label: 'Total', data: spend.comparisonPoints, color: '--foreground', labelSuffix: ' (previous period)' }] : [],
 )
 
-const valueFormatter = computed<(value: number) => string>(() => (metric.value === 'cost' ? formatCost : formatCompactCount))
+const valueFormatter = computed<(value: number) => string>(() => (metric.value === 'cost' ? formatCostDisplay : formatCompactCount))
+const axisFormatter = computed<(value: number) => string>(() => (metric.value === 'cost' ? formatCostAxis : formatCompactCount))
 
 const totalInRange = computed<number>(() => spend.totalPoints.reduce((a, b) => a + b, 0))
 
@@ -264,6 +265,7 @@ function retryPricingHealthTable(): Promise<void> {
       :comparison-datasets="comparisonDatasets"
       stacked
       :value-formatter="valueFormatter"
+      :axis-formatter="axisFormatter"
       :aria-label="`${SPEND_METRIC_LABEL[metric]} breakdown ${SPEND_BY_LABEL[by].toLowerCase()} over time`"
     />
     <!-- verify-ui-states-3.md NEW-1: a background refetch failure (poll
@@ -274,7 +276,7 @@ function retryPricingHealthTable(): Promise<void> {
     labels/formatter with no indication anything had gone wrong. -->
     <p v-if="spend.breakdownError && breakdownState === 'ready'" class="text-sm break-words text-destructive">{{ spend.breakdownError }}</p>
 
-    <div class="grid grid-cols-1 gap-4 lg:grid-cols-2">
+    <div class="grid grid-cols-1 items-start gap-4 lg:grid-cols-2">
       <BurnDownChart
         v-if="spend.burndownAvailable"
         :buckets="spend.burndownBuckets"

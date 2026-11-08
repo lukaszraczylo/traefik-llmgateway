@@ -97,7 +97,17 @@ export function sumByProvider(series: Series[]): Series[] {
     byProvider.set(provider, acc)
   }
   const grouped = Array.from(byProvider.entries()).map(([scope, points]) => ({ scope, points }))
-  return grouped.sort((a, b) => sumSeries(b.points) - sumSeries(a.points))
+  return activeSeries(grouped).sort((a, b) => sumSeries(b.points) - sumSeries(a.points))
+}
+
+/** activeSeries drops series whose points sum to zero, so a legend lists only entities that had traffic in the window. The chart-wide total is unchanged. */
+export function activeSeries<T extends { points: readonly (number | null)[] }>(series: T[]): T[] {
+  return series.filter((s) => sumSeries(s.points.map((p) => p ?? 0)) > 0)
+}
+
+/** activeScopes is the set of scope ids that had any traffic in `series`. */
+export function activeScopes(series: Series[]): Set<string> {
+  return new Set(activeSeries(series).map((s) => s.scope))
 }
 
 /**

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { other, ratioSeries, stackTopN, sumByProvider } from './series'
+import { activeScopes, activeSeries, other, ratioSeries, stackTopN, sumByProvider } from './series'
 
 describe('stackTopN', () => {
   it('returns the n series with the largest total, descending', () => {
@@ -127,5 +127,31 @@ describe('ratioSeries', () => {
 
   it('returns an empty array for empty input', () => {
     expect(ratioSeries([], [])).toEqual([])
+  })
+})
+
+describe('activeSeries / activeScopes', () => {
+  const series = [
+    { scope: 'provider:a', points: [0, 3, 0] },
+    { scope: 'provider:idle', points: [0, 0, 0] },
+    { scope: 'provider:empty', points: [] },
+    { scope: 'provider:b', points: [1, 0, 0] },
+  ]
+
+  it('drops series with no traffic and keeps order', () => {
+    expect(activeSeries(series).map((s) => s.scope)).toEqual(['provider:a', 'provider:b'])
+  })
+
+  it('keeps the chart-wide total unchanged (Lean Gateway.Ui.Active.total_preserved)', () => {
+    const total = (ss: { points: number[] }[]) => ss.reduce((acc, s) => acc + s.points.reduce((x, y) => x + y, 0), 0)
+    expect(total(activeSeries(series))).toBe(total(series))
+  })
+
+  it('returns an empty list for no input', () => {
+    expect(activeSeries([])).toEqual([])
+  })
+
+  it('activeScopes names only providers with traffic', () => {
+    expect([...activeScopes(series)].sort()).toEqual(['provider:a', 'provider:b'])
   })
 })

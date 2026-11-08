@@ -41,3 +41,10 @@ export function loadState({ loading, hasData, error }: LoadStateInput): LoadStat
   if (loading) return 'skeleton'
   return 'empty'
 }
+
+/** emptyWhenAllZero turns a 'ready' chart state into 'empty' when no series has a non-zero point, so an all-zero chart is replaced by a short message. Other states pass through (formal/Gateway/Ui/EmptyChart.lean). */
+export function emptyWhenAllZero(state: LoadState, series: readonly { data: readonly (number | null)[] }[]): LoadState {
+  if (state !== 'ready') return state
+  const hasTraffic = series.some((s) => s.data.some((v) => v !== null && v !== 0))
+  return hasTraffic ? state : 'empty'
+}

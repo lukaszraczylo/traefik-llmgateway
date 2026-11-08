@@ -19,7 +19,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { useNow } from '@/composables/useNow'
 import { runOutDate as computeRunOutDate } from '@/lib/burndown'
-import { formatBucketLabel, formatCost, formatLimits, formatShortDate, formatTimestamp } from '@/lib/format'
+import { formatBucketLabel, formatCostAxis, formatCostDisplay, formatLimits, formatShortDate, formatTimestamp } from '@/lib/format'
 import { loadState } from '@/lib/load-state'
 import { budgetRatios, usdToMicros } from '@/lib/usage-bars'
 import { useConsumersStore } from '@/stores/consumers'
@@ -187,8 +187,8 @@ const runOutDate = computed(() => {
       </CardContent>
       <CardContent v-else class="grid grid-cols-2 gap-4 text-sm sm:grid-cols-4">
         <StatItem label="Requests/day"><CompactNumber :value="entry.requestsPerDay" /></StatItem>
-        <StatItem label="Cost/day">{{ formatCost(entry.costPerDayMicroUsd) }}</StatItem>
-        <StatItem label="Cost/month">{{ formatCost(entry.costPerMonthMicroUsd) }}</StatItem>
+        <StatItem label="Cost/day">{{ formatCostDisplay(entry.costPerDayMicroUsd) }}</StatItem>
+        <StatItem label="Cost/month">{{ formatCostDisplay(entry.costPerMonthMicroUsd) }}</StatItem>
         <div>
           <p class="text-muted-foreground">Limits</p>
           <p class="text-sm">{{ formatLimits(entry.limits) }}</p>
@@ -223,7 +223,8 @@ const runOutDate = computed(() => {
       :on-retry="loadDetail"
       :labels="costLabels"
       :datasets="costDatasets"
-      :value-formatter="formatCost"
+      :value-formatter="formatCostDisplay"
+      :axis-formatter="formatCostAxis"
       :aria-label="`Cost over time for ${userId}`"
     />
 
@@ -256,7 +257,7 @@ const runOutDate = computed(() => {
             <TableRow v-for="row in modelRows" :key="row.id">
               <TableCell><ModelChip :id="row.id" /></TableCell>
               <TableCell class="text-right tabular-nums"><CompactNumber :value="row.values.req ?? 0" /></TableCell>
-              <TableCell class="text-right tabular-nums">{{ formatCost(row.values.cost ?? 0) }}</TableCell>
+              <TableCell class="text-right tabular-nums">{{ formatCostDisplay(row.values.cost ?? 0) }}</TableCell>
             </TableRow>
           </TableBody>
         </Table>

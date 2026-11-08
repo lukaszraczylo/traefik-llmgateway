@@ -2,7 +2,7 @@ import { defineStore } from 'pinia'
 
 import { adminFetch, isAuthRejection, messageOf } from '@/lib/api'
 import { seriesUrl } from '@/lib/range'
-import { ratioSeries } from '@/lib/series'
+import { activeScopes, ratioSeries } from '@/lib/series'
 import { useDashboardStore } from '@/stores/dashboard'
 import { useFiltersStore } from '@/stores/filters'
 import type { AdminPerfResponse, AdminPerfRow, AdminSeriesResponse, HistoryWindow } from '@/types/api'
@@ -155,9 +155,11 @@ export const useReliabilityStore = defineStore('reliability', {
 
         this.buckets = attemptRes.buckets
         this.windowUsed = window
-        this.errorRate = errorRateSeries(attemptRes, failRes)
-        this.timeouts = timeoutRes.series
-        this.failovers = foverRes.series
+        // A provider with no attempts in the window is idle, not healthy: keep it out of every legend.
+        const active = activeScopes(attemptRes.series)
+        this.errorRate = errorRateSeries(attemptRes, failRes).filter((s) => active.has(s.scope))
+        this.timeouts = timeoutRes.series.filter((s) => active.has(s.scope))
+        this.failovers = foverRes.series.filter((s) => active.has(s.scope))
         this.rejections = rejRes.series[0]?.points ?? []
         this.unpriced = r402Res.series[0]?.points ?? []
         this.lastUpdated = new Date()

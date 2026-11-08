@@ -58,6 +58,8 @@ const props = withDefaults(
     stacked?: boolean
     /** Formats a raw value for the tooltip and y-axis ticks — defaults to formatExactInt (lib/format.ts). Cost callers pass formatCost, a ratio series a percent formatter, and so on. */
     valueFormatter?: (value: number) => string
+    /** Y-axis tick formatter when the tooltip formatter is too wordy for a tick (cost: "$1,600" not "$1,600.00"); defaults to valueFormatter. */
+    axisFormatter?: (value: number) => string
     /**
      * ariaLabel is this chart's accessible name (P3 item 16) — a bare
      * `<canvas>` has no text alternative at all for a screen reader, so
@@ -158,7 +160,12 @@ const chartOptions = computed<ChartOptions<'line'>>(() => ({
       stacked: props.stacked,
       beginAtZero: true,
       grid: { color: border.value },
-      ticks: { color: mutedForeground.value, callback: (value) => props.valueFormatter(Number(value)) },
+      // Counts are whole numbers: no 0.1-step ticks on a chart whose largest value is 1.
+      ticks: {
+        color: mutedForeground.value,
+        precision: props.valueFormatter === formatExactInt ? 0 : undefined,
+        callback: (value) => (props.axisFormatter ?? props.valueFormatter)(Number(value)),
+      },
     },
   },
   plugins: {

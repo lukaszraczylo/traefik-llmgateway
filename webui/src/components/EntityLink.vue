@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { faArrowUpRightFromSquare } from '@fortawesome/free-solid-svg-icons'
 
+import AliasBadge from '@/components/AliasBadge.vue'
+import { useAliasNames } from '@/composables/useAliasNames'
 import { useNavStore } from '@/stores/nav'
 
 /**
@@ -43,6 +45,7 @@ const props = defineProps<{
 }>()
 
 const nav = useNavStore()
+const { isAlias } = useAliasNames()
 
 const TARGET: Record<'user' | 'model', { page: 'consumers' | 'models'; paramKey: 'user' | 'model'; noun: string }> = {
   user: { page: 'consumers', paramKey: 'user', noun: 'Consumers' },
@@ -65,6 +68,7 @@ function onClick(event: MouseEvent): void {
     @click="onClick"
   >
     <span class="min-w-0" :class="labelClass">{{ label }}</span>
+    <AliasBadge v-if="kind === 'model' && isAlias(id)" />
     <FontAwesomeIcon :icon="faArrowUpRightFromSquare" class="size-3 shrink-0" aria-hidden="true" />
   </button>
 </template>

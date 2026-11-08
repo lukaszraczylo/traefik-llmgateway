@@ -81,7 +81,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <Button type="button" variant="outline" size="sm" :disabled="exporting" @click="onClick">
+  <Button type="button" variant="outline" size="sm" class="relative" :disabled="exporting" @click="onClick">
     <FontAwesomeIcon v-if="feedback === 'failed'" :icon="faCircleXmark" class="size-3.5 text-destructive" aria-hidden="true" />
     <FontAwesomeIcon
       v-else-if="feedback"
