@@ -375,8 +375,8 @@ func TestAdminCatalog_KindsAndEndpointRows(t *testing.T) {
 	}{
 		{"zeta/z-model", "", false},
 		{"zeta/bge-reranker", "reranking", false},
-		{"zeta//v1/decide", "decision", true},
-		{"zeta//v1/other", "", true},
+		{"zeta/v1/decide", "decision", true},
+		{"zeta/v1/other", "", true},
 	}
 	for _, c := range cases {
 		m, ok := byID[c.id]
@@ -397,5 +397,35 @@ func TestKindsValidation(t *testing.T) {
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
 	if _, err := New(context.Background(), next, cfg, "llmgw"); err == nil {
 		t.Fatal("empty kind accepted")
+	}
+}
+
+func TestAdminOverview_KindsAndEndpoints(t *testing.T) {
+	t.Parallel()
+	cfg := newAdminTestConfig()
+	cfg.Providers["zeta"].PathBaseURLs = map[string]string{"/v1/decide": "http://thx.invalid"}
+	cfg.Providers["zeta"].Kinds = map[string]string{"/v1/decide": "decision"}
+	h, _ := newAdminGatewayHandle(t, cfg)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, adminRequest(http.MethodGet, adminOverviewPath, "sk-admin1"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	var got adminOverviewResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	for _, p := range got.Providers {
+		switch p.Name {
+		case "zeta":
+			if len(p.Endpoints) != 1 || p.Endpoints[0] != "/v1/decide" || p.Kinds["/v1/decide"] != "decision" {
+				t.Errorf("zeta endpoints=%v kinds=%v", p.Endpoints, p.Kinds)
+			}
+		default:
+			if len(p.Endpoints) != 0 || len(p.Kinds) != 0 {
+				t.Errorf("%s carries endpoints/kinds without config", p.Name)
+			}
+		}
 	}
 }

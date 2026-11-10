@@ -411,6 +411,12 @@ type adminProviderView struct {
 	// "[]", not omitted, so the dashboard can tell "no models yet" apart
 	// from a field a stale client build does not know how to read.
 	Models []string `json:"models"`
+	// Kinds is the provider's configured display labels (ProviderConfig.
+	// Kinds), keyed by model id or endpoint path. Omitted when none are set.
+	Kinds map[string]string `json:"kinds,omitempty"`
+	// Endpoints is the sorted pathBaseUrls keys: native passthrough paths
+	// shown beside Models as display-only rows, never routable as models.
+	Endpoints []string `json:"endpoints,omitempty"`
 	// AttemptsDay/FailuresDay/AttemptsMinute/FailuresMinute are this
 	// provider's current-window upstream-attempt counters (Feature A,
 	// v0.22 — see limiter.recordProviderAttempt, limits.go): every
@@ -812,7 +818,15 @@ func (g *Gateway) buildAdminOverview() adminOverviewResponse {
 			}
 			modelMeta[model] = buildAdminModelMetaView(g.registry.resolveMetaFor(s.name, model))
 		}
+		var kinds map[string]string
+		var endpoints []string
+		if pc := g.cfg.Providers[s.name]; pc != nil {
+			kinds = pc.Kinds
+			endpoints = sortedKeys(pc.PathBaseURLs)
+		}
 		providers[i] = adminProviderView{
+			Kinds:            kinds,
+			Endpoints:        endpoints,
 			Name:             s.name,
 			Type:             s.typeName,
 			BaseURL:          sanitizeBaseURL(s.baseURL),

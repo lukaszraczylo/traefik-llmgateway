@@ -12,6 +12,8 @@ import DetailField from '@/components/DetailField.vue'
 import EmptyState from '@/components/EmptyState.vue'
 import EntityLink from '@/components/EntityLink.vue'
 import ErrorState from '@/components/ErrorState.vue'
+import { providerSections } from '@/lib/provider-sections'
+import type { ProviderSection } from '@/lib/provider-sections'
 import ModelChip from '@/components/ModelChip.vue'
 import ProviderRateBadge from '@/components/ProviderRateBadge.vue'
 import SearchInput from '@/components/SearchInput.vue'
@@ -144,6 +146,14 @@ watch(modelQuery, (value) => {
 
 function visibleModels(p: AdminProviderView): string[] {
   return hasQuery.value ? p.models.filter((m) => modelMatches(p.name, m)) : p.models
+}
+
+function visibleSections(p: AdminProviderView): ProviderSection[] {
+  const sections = providerSections({ models: visibleModels(p), kinds: p.kinds, endpoints: p.endpoints })
+  if (!hasQuery.value) return sections.filter((s) => s.models.length > 0 || s.endpoints.length > 0)
+  return sections
+    .map((s) => ({ ...s, endpoints: s.endpoints.filter((e) => modelMatches(p.name, e)) }))
+    .filter((s) => s.models.length > 0 || s.endpoints.length > 0)
 }
 
 const ZERO_MODEL_RATE: AdminModelRateView = { attemptsDay: 0, failuresDay: 0 }
@@ -494,28 +504,41 @@ const aliasEmptyMessage = computed(() =>
                 </DetailField>
                 <DetailField v-if="p.lastErr" label="Last error" class="text-destructive">{{ p.lastErr }}</DetailField>
               </dl>
-              <div v-if="visibleModels(p).length" class="flex flex-wrap gap-1.5">
-                <span v-for="m in visibleModels(p)" :key="m" class="inline-flex min-w-0 max-w-full items-center gap-1">
-                  <ModelChip
-                    :id="routableModelId(p.name, m)"
-                    :context-tokens="modelMetaFor(p, m).contextTokens"
-                    :input-per-m-tok-usd="modelMetaFor(p, m).inputPerMTokUsd"
-                    :output-per-m-tok-usd="modelMetaFor(p, m).outputPerMTokUsd"
-                  />
-                  <EntityLink :label="routableModelId(p.name, m)" kind="model" :id="routableModelId(p.name, m)" class="min-w-0" label-class="truncate" />
-                  <span
-                    v-if="modelMetaFor(p, m).contextTokens !== undefined"
-                    title="context window"
-                    class="text-xs text-muted-foreground tabular-nums"
-                  >
-                    {{ formatContextWindow(modelMetaFor(p, m).contextTokens as number) }}
-                  </span>
-                  <ProviderRateBadge
-                    v-if="modelIsDegraded(p, m)"
-                    :attempts-day="modelRateFor(p, m).attemptsDay"
-                    :failures-day="modelRateFor(p, m).failuresDay"
-                  />
-                </span>
+              <div v-if="visibleSections(p).length" class="flex flex-col gap-3">
+                <section v-for="sec in visibleSections(p)" :key="sec.title" class="flex flex-col gap-1.5">
+                  <h4 v-if="sec.title" class="text-xs font-medium uppercase tracking-wide text-muted-foreground">{{ sec.title }}</h4>
+                  <div class="flex flex-wrap gap-1.5">
+                    <span v-for="m in sec.models" :key="m" class="inline-flex min-w-0 max-w-full items-center gap-1">
+                      <ModelChip
+                        :id="routableModelId(p.name, m)"
+                        :context-tokens="modelMetaFor(p, m).contextTokens"
+                        :input-per-m-tok-usd="modelMetaFor(p, m).inputPerMTokUsd"
+                        :output-per-m-tok-usd="modelMetaFor(p, m).outputPerMTokUsd"
+                      />
+                      <EntityLink :label="routableModelId(p.name, m)" kind="model" :id="routableModelId(p.name, m)" class="min-w-0" label-class="truncate" />
+                      <span
+                        v-if="modelMetaFor(p, m).contextTokens !== undefined"
+                        title="context window"
+                        class="text-xs text-muted-foreground tabular-nums"
+                      >
+                        {{ formatContextWindow(modelMetaFor(p, m).contextTokens as number) }}
+                      </span>
+                      <ProviderRateBadge
+                        v-if="modelIsDegraded(p, m)"
+                        :attempts-day="modelRateFor(p, m).attemptsDay"
+                        :failures-day="modelRateFor(p, m).failuresDay"
+                      />
+                    </span>
+                    <code
+                      v-for="e in sec.endpoints"
+                      :key="e"
+                      title="native passthrough path (not a routable model)"
+                      class="rounded bg-muted px-1.5 py-0.5 text-xs"
+                    >
+                      {{ p.name }}{{ e }}
+                    </code>
+                  </div>
+                </section>
               </div>
               <p v-else class="text-sm text-muted-foreground">no models known yet</p>
             </AccordionContent>

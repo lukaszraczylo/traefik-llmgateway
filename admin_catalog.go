@@ -154,14 +154,9 @@ func (g *Gateway) buildAdminCatalog() adminCatalogResponse {
 				Kind:             kinds[model],
 			}
 		}
-		paths := make([]string, 0, len(pathBases))
-		for path := range pathBases {
-			paths = append(paths, path)
-		}
-		sort.Strings(paths)
-		for _, path := range paths {
+		for _, path := range sortedKeys(pathBases) {
 			models = append(models, adminCatalogModel{
-				ID:          providerModelScopeID(s.name, path),
+				ID:          s.name + path, // path starts with "/", so no extra separator
 				Model:       path,
 				Kind:        kinds[path],
 				PriceSource: priceSourceUnpriced,
@@ -180,6 +175,19 @@ func (g *Gateway) buildAdminCatalog() adminCatalogResponse {
 	}
 
 	return adminCatalogResponse{Providers: providers, Aliases: g.buildAdminAliasViews()}
+}
+
+// sortedKeys returns m's keys in ascending order, nil for an empty map.
+func sortedKeys(m map[string]string) []string {
+	if len(m) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // serveAdminCatalog writes buildAdminCatalog's result as JSON.

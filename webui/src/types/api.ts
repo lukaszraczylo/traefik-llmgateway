@@ -89,6 +89,10 @@ export interface AdminProviderView {
   lastErr?: string
   /** Sorted explicit∪discovered model ids (admin.go: adminProviderView.Models) — always an array, never omitted, even when empty. */
   models: string[]
+  /** Display labels from the provider's `kinds` config, keyed by model id or endpoint path (admin.go: adminProviderView.Kinds). */
+  kinds?: Record<string, string>
+  /** pathBaseUrls keys (admin.go: adminProviderView.Endpoints) — display-only rows, not routable models. */
+  endpoints?: string[]
   modelCount: number
   /**
    * Resolved metadata (context window, per-token cost — feature v0.23)

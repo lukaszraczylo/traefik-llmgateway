@@ -1647,7 +1647,7 @@ providers:
   `modelBaseUrls` read the body for this purpose.
 - **Discovery** polls `baseUrl` only. `modelBaseUrls` ids are static.
 - **Admin catalog**: each `pathBaseUrls` key appears as a pseudo-model row
-  (`gx10//v1/decide`). It is display only and never routable as a model.
+  (`gx10/v1/decide`). It is display only and never routable as a model.
   `kinds` labels a model id or a path key. The Models page then groups the
   provider's rows into one sub-section per kind. Without `kinds`, the table
   stays flat.
