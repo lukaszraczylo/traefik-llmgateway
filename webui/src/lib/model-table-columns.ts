@@ -32,6 +32,10 @@ export interface ModelCatalogRow {
   /** The bare upstream model id, without the provider prefix (AdminCatalogModel.model). */
   model: string
   providerName: string
+  /** AdminCatalogModel.kind — '' when the model has none. */
+  kind: string
+  /** AdminCatalogModel.endpoint — a pathBaseUrls pseudo-model: no price, no context. */
+  endpoint: boolean
   contextTokens?: number
   inputPerMTokUsd?: number
   outputPerMTokUsd?: number
@@ -71,6 +75,8 @@ export function buildModelCatalogRows(
         id: m.id,
         model: m.model,
         providerName: provider.name,
+        kind: m.kind ?? '',
+        endpoint: m.endpoint ?? false,
         contextTokens: m.contextTokens,
         inputPerMTokUsd: m.inputPerMTokUsd,
         outputPerMTokUsd: m.outputPerMTokUsd,
@@ -101,6 +107,7 @@ const PRICE_SOURCE_LABEL: Record<Extract<PriceSource, 'override' | 'builtin' | '
 const FREE_SUFFIX_TITLE = "':free' suffix model — display-only, billing follows the price source"
 
 function priceCell(row: ModelCatalogRow) {
+  if (row.endpoint) return h('span', { class: 'text-muted-foreground' }, EMPTY_CELL)
   if (row.priceSource === 'unpriced') {
     return h(
       Badge,
@@ -136,6 +143,7 @@ function priceCell(row: ModelCatalogRow) {
  * on.
  */
 function priceSortValue(row: ModelCatalogRow): number {
+  if (row.endpoint) return 0
   if (row.priceSource === 'unpriced') return -1
   return row.inputPerMTokUsd ?? 0
 }

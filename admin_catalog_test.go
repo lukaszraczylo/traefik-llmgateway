@@ -1,6 +1,7 @@
 package traefikllmgateway
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -333,5 +334,68 @@ func TestAdminConsumers_UsersFilePathOnly(t *testing.T) {
 		if u.Name == "filed" && u.Source != "file" {
 			t.Errorf("filed.Source = %q, want file", u.Source)
 		}
+	}
+}
+
+func TestAdminCatalog_KindsAndEndpointRows(t *testing.T) {
+	t.Parallel()
+	cfg := newAdminTestConfig()
+	cfg.Providers["zeta"].ModelBaseURLs = map[string]string{"bge-reranker": "http://rerank.invalid"}
+	cfg.Providers["zeta"].PathBaseURLs = map[string]string{"/v1/decide": "http://thx.invalid", "/v1/other": "http://o.invalid"}
+	cfg.Providers["zeta"].Kinds = map[string]string{"bge-reranker": "reranking", "/v1/decide": "decision"}
+	h, _ := newAdminGatewayHandle(t, cfg)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, adminRequest(http.MethodGet, adminCatalogPath, "sk-admin1"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	var got adminCatalogResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	byID := map[string]adminCatalogModel{}
+	for _, p := range got.Providers {
+		if p.Name != "zeta" {
+			for _, m := range p.Models {
+				if m.Kind != "" || m.Endpoint {
+					t.Errorf("provider %s model %s carries kind/endpoint without config", p.Name, m.ID)
+				}
+			}
+			continue
+		}
+		for _, m := range p.Models {
+			byID[m.ID] = m
+		}
+	}
+	cases := []struct {
+		id       string
+		kind     string
+		endpoint bool
+	}{
+		{"zeta/z-model", "", false},
+		{"zeta/bge-reranker", "reranking", false},
+		{"zeta//v1/decide", "decision", true},
+		{"zeta//v1/other", "", true},
+	}
+	for _, c := range cases {
+		m, ok := byID[c.id]
+		if !ok {
+			t.Errorf("%s missing from catalog", c.id)
+			continue
+		}
+		if m.Kind != c.kind || m.Endpoint != c.endpoint {
+			t.Errorf("%s: kind=%q endpoint=%v, want %q %v", c.id, m.Kind, m.Endpoint, c.kind, c.endpoint)
+		}
+	}
+}
+
+func TestKindsValidation(t *testing.T) {
+	t.Parallel()
+	cfg := newAdminTestConfig()
+	cfg.Providers["zeta"].Kinds = map[string]string{"z-model": ""}
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	if _, err := New(context.Background(), next, cfg, "llmgw"); err == nil {
+		t.Fatal("empty kind accepted")
 	}
 }

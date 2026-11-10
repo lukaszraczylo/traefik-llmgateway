@@ -8,6 +8,8 @@ function row(overrides: Partial<ModelCatalogRow> = {}): ModelCatalogRow {
     id: 'openai/gpt-5',
     model: 'gpt-5',
     providerName: 'openai',
+    kind: '',
+    endpoint: false,
     priceSource: 'builtin',
     aliases: [],
     requests: 0,

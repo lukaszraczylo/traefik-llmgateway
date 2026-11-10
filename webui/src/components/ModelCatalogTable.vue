@@ -43,6 +43,41 @@ const filtered = computed<ModelCatalogRow[]>(() => filterModelRows(props.rows, p
 
 const columns = modelCatalogColumns()
 
+interface CatalogSection {
+  key: string
+  /** '' for the ungrouped (no-kind) rows. */
+  title: string
+  rows: ModelCatalogRow[]
+}
+
+/**
+ * sections splits the filtered rows into one table per (provider, kind): a
+ * provider's plain models first, then one sub-section per kind, sorted.
+ * With no kind set anywhere this is a single untitled section, so an
+ * unconfigured catalog renders exactly as the flat table did.
+ */
+const sections = computed<CatalogSection[]>(() => {
+  if (!filtered.value.some((r) => r.kind)) return [{ key: 'all', title: '', rows: filtered.value }]
+  const providers: string[] = []
+  const byKey = new Map<string, CatalogSection>()
+  for (const r of filtered.value) {
+    if (!providers.includes(r.providerName)) providers.push(r.providerName)
+    const key = `${r.providerName}\u0000${r.kind}`
+    let sec = byKey.get(key)
+    if (!sec) {
+      sec = { key, title: r.kind ? `${r.providerName} · ${r.kind}` : r.providerName, rows: [] }
+      byKey.set(key, sec)
+    }
+    sec.rows.push(r)
+  }
+  const kindsOf = (provider: string): string[] =>
+    [...byKey.values()]
+      .filter((sec) => sec.rows[0].providerName === provider)
+      .map((sec) => sec.rows[0].kind)
+      .sort((a, b) => (a === '' ? -1 : b === '' ? 1 : a.localeCompare(b)))
+  return providers.flatMap((p) => kindsOf(p).map((k) => byKey.get(`${p}\u0000${k}`) as CatalogSection))
+})
+
 /**
  * catalogLoadState (lib/load-state.ts, verify-ui-states.md #3 fix) now
  * reads the REAL `error` prop, not a hardcoded ''. A not-yet-loaded (or
@@ -87,7 +122,12 @@ const emptyMessage = computed<string>(() => {
       <SkeletonTable v-if="catalogLoadState === 'skeleton'" :rows="5" :cols="columns.length" />
       <ErrorState v-else-if="catalogLoadState === 'error'" :message="error ?? ''" :on-retry="onRetry" />
       <EmptyState v-else-if="catalogLoadState === 'empty'" title="No models configured." />
-      <DataTable v-else label="Model catalog" :columns="columns" :data="filtered" :empty-message="emptyMessage" />
+      <template v-else>
+        <section v-for="sec in sections" :key="sec.key" class="flex flex-col gap-2">
+          <h3 v-if="sec.title" class="text-sm font-medium text-muted-foreground">{{ sec.title }}</h3>
+          <DataTable :label="sec.title ? `Model catalog: ${sec.title}` : 'Model catalog'" :columns="columns" :data="sec.rows" :empty-message="emptyMessage" />
+        </section>
+      </template>
     </CardContent>
   </Card>
 </template>

@@ -49,9 +49,13 @@ type adminCatalogModel struct {
 	OutputPerMTokUSD *float64 `json:"outputPerMTokUsd,omitempty"`
 	ID               string   `json:"id"`
 	Model            string   `json:"model"`
+	Kind             string   `json:"kind,omitempty"`
 	PriceSource      string   `json:"priceSource"`
 	Aliases          []string `json:"aliases,omitempty"`
 	DisplayFree      bool     `json:"displayFree,omitempty"`
+	// Endpoint marks a pseudo-model row for a pathBaseUrls key: shown in
+	// the catalog, but never routable as a model and never priced.
+	Endpoint bool `json:"endpoint,omitempty"`
 }
 
 // adminCatalogProvider is one configured provider's catalog row in GET
@@ -102,7 +106,11 @@ func (g *Gateway) buildAdminCatalog() adminCatalogResponse {
 
 	providers := make([]adminCatalogProvider, len(snaps))
 	for i, s := range snaps {
-		models := make([]adminCatalogModel, len(s.models))
+		var kinds, pathBases map[string]string
+		if pc := g.cfg.Providers[s.name]; pc != nil {
+			kinds, pathBases = pc.Kinds, pc.PathBaseURLs
+		}
+		models := make([]adminCatalogModel, len(s.models), len(s.models)+len(pathBases))
 		for j, model := range s.models {
 			canonical := providerModelScopeID(s.name, model)
 			metaView := buildAdminModelMetaView(g.registry.resolveMetaFor(s.name, model))
@@ -143,7 +151,22 @@ func (g *Gateway) buildAdminCatalog() adminCatalogResponse {
 				PriceSource:      source,
 				DisplayFree:      displayFree,
 				Aliases:          aliases,
+				Kind:             kinds[model],
 			}
+		}
+		paths := make([]string, 0, len(pathBases))
+		for path := range pathBases {
+			paths = append(paths, path)
+		}
+		sort.Strings(paths)
+		for _, path := range paths {
+			models = append(models, adminCatalogModel{
+				ID:          providerModelScopeID(s.name, path),
+				Model:       path,
+				Kind:        kinds[path],
+				PriceSource: priceSourceUnpriced,
+				Endpoint:    true,
+			})
 		}
 		providers[i] = adminCatalogProvider{
 			Name:             s.name,

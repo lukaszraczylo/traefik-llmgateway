@@ -1632,6 +1632,9 @@ providers:
       text-embedding-bge-reranker-v2: http://rerank-bge-v2.llm.svc.cluster.local:8000
     pathBaseUrls:
       /v1/decide: http://thx02.llm.svc.cluster.local:8200
+    kinds:
+      text-embedding-bge-reranker-v2: reranking
+      /v1/decide: decision
 ```
 
 - **Unified routes** (chat, embeddings, images, audio): a request for
@@ -1643,6 +1646,11 @@ providers:
   `pathBaseUrls` prefix; otherwise `baseUrl`. Only providers that set
   `modelBaseUrls` read the body for this purpose.
 - **Discovery** polls `baseUrl` only. `modelBaseUrls` ids are static.
+- **Admin catalog**: each `pathBaseUrls` key appears as a pseudo-model row
+  (`gx10//v1/decide`). It is display only and never routable as a model.
+  `kinds` labels a model id or a path key. The Models page then groups the
+  provider's rows into one sub-section per kind. Without `kinds`, the table
+  stays flat.
 - **Auth** reuses the provider's `apiKey` for every upstream.
 - **Failover health** is tracked per provider, not per upstream. One failing
   upstream marks the whole provider unhealthy, so with failover enabled its

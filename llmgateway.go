@@ -240,6 +240,12 @@ type ProviderConfig struct {
 	// to a base URL for requests that name no model in ModelBaseURLs. Longest
 	// prefix wins; no match uses BaseURL. openai-type providers only.
 	PathBaseURLs map[string]string `json:"pathBaseUrls,omitempty"`
+	// Kinds labels a model id or a PathBaseURLs key with a free-form kind
+	// (for example "reranking", "decision") for the admin catalog, which
+	// groups a provider's rows by kind. Display only: routing, auth and
+	// billing never read it. Each PathBaseURLs key also appears in the
+	// catalog as an endpoint row.
+	Kinds map[string]string `json:"kinds,omitempty"`
 	// MetadataPath is an optional second discovery endpoint (feature
 	// v0.23), fetched alongside the provider's normal listModels call
 	// when set: a path such as "/api/v0/models" (LM Studio's own,

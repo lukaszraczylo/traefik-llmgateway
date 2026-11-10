@@ -698,6 +698,10 @@ export interface AdminCatalogModel {
   priceSource: PriceSource
   /** True for a ':free' suffix model (routes_unified.go) — display-only relabeling; billing still follows `priceSource` unchanged. */
   displayFree?: boolean
+  /** Operator label from the provider's `kinds` map (for example 'reranking'); absent for an ordinary model. */
+  kind?: string
+  /** True for a pseudo-model row built from a `pathBaseUrls` key — not a routable model, never priced. */
+  endpoint?: boolean
   aliases?: string[]
 }
 

@@ -670,6 +670,11 @@ func buildAdapters(cfg *Config) (map[string]providerAdapter, error) {
 		if baseErr != nil {
 			return nil, baseErr
 		}
+		for key, kind := range pc.Kinds {
+			if !isValidModelID(key) || !isValidModelID(kind) {
+				return nil, fmt.Errorf("llmgateway: provider %q: kinds[%q] needs a non-empty key and kind without control characters", name, key)
+			}
+		}
 		if pc.Type != providerTypeOpenAI && (len(modelBases) > 0 || len(pathBases) > 0) {
 			return nil, fmt.Errorf("llmgateway: provider %q: modelBaseUrls and pathBaseUrls are supported for type %q only", name, providerTypeOpenAI)
 		}
