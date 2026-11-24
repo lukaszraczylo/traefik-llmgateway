@@ -41,7 +41,7 @@ const (
 
 // SmartRouterCalibrationConfig tunes threshold calibration. Zero values mean the default.
 type SmartRouterCalibrationConfig struct {
-	// MaxLower caps how far a threshold may drop; nil means 150.
+	// MaxLower caps how far a threshold may drop; nil means 150, shrunk to fit the smallest tier gap.
 	MaxLower *int `json:"maxLower,omitempty"`
 	// Mode is "off" (default), "shadow" (computes and exports offsets only) or "live" (applies them).
 	Mode string `json:"mode,omitempty"`
@@ -94,6 +94,20 @@ func (s *smartCalibState) set(delta []int) {
 	s.mu.Unlock()
 }
 
+// smartDefaultMaxLower shrinks the default cap so it fits tightly spaced tiers; an explicit maxLower is still validated as given.
+func smartDefaultMaxLower(tiers []smartTier, maxRaise int) int {
+	limit := defaultCalibMaxLower
+	for i := 1; i < len(tiers); i++ {
+		if room := tiers[i].minScore - tiers[i-1].minScore - maxRaise - 1; room < limit {
+			limit = room
+		}
+	}
+	if limit < 0 {
+		limit = 0
+	}
+	return limit
+}
+
 func compileSmartCalibration(router string, cfg *SmartRouterCalibrationConfig, tiers []smartTier) (smartCalibCfg, *smartCalibState, error) {
 	if cfg == nil {
 		return smartCalibCfg{mode: smartCalibOff}, nil, nil
@@ -116,6 +130,8 @@ func compileSmartCalibration(router string, cfg *SmartRouterCalibrationConfig, t
 	}
 	if cfg.MaxLower != nil {
 		c.maxLower = *cfg.MaxLower
+	} else {
+		c.maxLower = smartDefaultMaxLower(tiers, c.maxRaise)
 	}
 	ranges := []struct {
 		name      string

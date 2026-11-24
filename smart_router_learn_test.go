@@ -373,3 +373,23 @@ func TestCalibCountsServedRequest(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, []int64{1, 0}, v)
 }
+
+func TestCalibDefaultMaxLowerFitsTightTiers(t *testing.T) {
+	t.Parallel()
+	tiers := []smartTier{{name: "low", minScore: 0}, {name: "mid", minScore: 150}, {name: "top", minScore: 350}}
+	c, st, err := compileSmartCalibration("r", &SmartRouterCalibrationConfig{Mode: smartCalibShadow}, tiers)
+	if err != nil {
+		t.Fatalf("default maxLower must fit a 150 gap: %v", err)
+	}
+	if c.maxLower != 149 || st == nil {
+		t.Fatalf("maxLower = %d, state %v; want 149 and state", c.maxLower, st != nil)
+	}
+	explicit := 150
+	if _, _, err := compileSmartCalibration("r", &SmartRouterCalibrationConfig{Mode: smartCalibShadow, MaxLower: &explicit}, tiers); err == nil {
+		t.Fatal("an explicit maxLower of 150 must still be rejected for a 150 gap")
+	}
+	wide := []smartTier{{name: "low", minScore: 0}, {name: "mid", minScore: 300}, {name: "top", minScore: 600}}
+	if c, _, err := compileSmartCalibration("r", &SmartRouterCalibrationConfig{Mode: smartCalibShadow}, wide); err != nil || c.maxLower != defaultCalibMaxLower {
+		t.Fatalf("wide tiers keep the default: maxLower=%d err=%v", c.maxLower, err)
+	}
+}
