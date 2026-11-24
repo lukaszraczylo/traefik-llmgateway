@@ -85,3 +85,43 @@ func TestAdminRouters_RequiresAdmin(t *testing.T) {
 		assert.NotContains(t, rec.Body.String(), "zauto", p)
 	}
 }
+
+func TestAdminRouters_ContextTokensAndStats(t *testing.T) {
+	t.Parallel()
+	cfg := adminRouterTestConfig()
+	cfg.ModelMeta = map[string]*ModelMetaConfig{"auto": {ContextTokens: 262144}}
+	_, gw := newAdminGatewayHandle(t, cfg)
+
+	views := gw.buildAdminRouterViews()
+	require.Len(t, views, 2)
+	auto, zauto := views[0], views[1]
+	require.NotNil(t, auto.ContextTokens)
+	assert.Equal(t, 262144, *auto.ContextTokens)
+	assert.Nil(t, zauto.ContextTokens, "unknown window is omitted")
+
+	for _, v := range views {
+		assert.Zero(t, v.Stats.Requests)
+		assert.NotNil(t, v.Stats.Reasons)
+		assert.NotNil(t, v.Stats.Escalations)
+	}
+	require.Len(t, auto.Stats.Tiers, 2, "tiers zero-filled in config order")
+	assert.Equal(t, adminRouterCountView{Name: "small"}, auto.Stats.Tiers[0])
+
+	gw.routerStats.addRequest(routerRequestKey{router: "auto", tier: "big", reason: "keyword"})
+	gw.routerStats.addRequest(routerRequestKey{router: "auto", tier: "big", reason: "score"})
+	gw.routerStats.addRequest(routerRequestKey{router: "auto", tier: "big", reason: "score"})
+	gw.routerStats.addRequest(routerRequestKey{router: "zauto", tier: "only", reason: "default"})
+	gw.routerStats.addEscalation(routerEscalationKey{router: "auto", from: "small", to: "big"})
+	gw.routerStats.addEscalation(routerEscalationKey{router: "auto", from: "big", to: "small"})
+	gw.routerStats.addEscalation(routerEscalationKey{router: "auto", from: "big", to: "small"})
+	gw.routerStats.addEscalation(routerEscalationKey{router: "zauto", from: "x", to: "y"})
+
+	auto = gw.buildAdminRouterViews()[0]
+	assert.EqualValues(t, 3, auto.Stats.Requests)
+	assert.Equal(t, []adminRouterCountView{{Name: "small"}, {Name: "big", Count: 3}}, auto.Stats.Tiers)
+	assert.Equal(t, []adminRouterCountView{{Name: "keyword", Count: 1}, {Name: "score", Count: 2}}, auto.Stats.Reasons)
+	assert.Equal(t, []adminRouterEscalationView{
+		{From: "big", To: "small", Count: 2},
+		{From: "small", To: "big", Count: 1},
+	}, auto.Stats.Escalations)
+}

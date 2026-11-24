@@ -223,6 +223,27 @@ export interface AdminRouterRuleView {
   keywords: string[]
 }
 
+/** A named request count (admin_routers.go: adminRouterCountView). */
+export interface AdminRouterCountView {
+  name: string
+  count: number
+}
+
+/** One tier-to-tier escalation count (admin_routers.go: adminRouterEscalationView). */
+export interface AdminRouterEscalationView {
+  from: string
+  to: string
+  count: number
+}
+
+/** This replica's router counters since process start (admin_routers.go: adminRouterStatsView). */
+export interface AdminRouterStatsView {
+  requests: number
+  tiers: AdminRouterCountView[]
+  reasons: AdminRouterCountView[]
+  escalations: AdminRouterEscalationView[]
+}
+
 /** One configured smart router, read-only (admin_routers.go: adminRouterView). */
 export interface AdminRouterView {
   name: string
@@ -232,6 +253,9 @@ export interface AdminRouterView {
   keywordRules: AdminRouterRuleView[]
   maxAttempts: number
   contextEscalation: boolean
+  /** Advertised context window in tokens; absent when no target declares one. */
+  contextTokens?: number
+  stats?: AdminRouterStatsView
 }
 
 export interface AdminAliasView {
