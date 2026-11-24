@@ -831,6 +831,7 @@ type Gateway struct {
 	targetClient                  *http.Client
 	provenance                    *provenanceStore
 	routerStats                   *routerStats
+	tokenCalib                    *smartTokenCalibrator
 	name                          string
 	replica                       string
 	failoverLogGate               logGate
@@ -1050,6 +1051,7 @@ func newGateway(ctx context.Context, next http.Handler, config *Config, name str
 	// g.latency's own identical "always-present" ruling immediately above.
 	g.provenance = newProvenanceStore()
 	g.routerStats = newRouterStats()
+	g.tokenCalib = newSmartTokenCalibrator()
 
 	// A malformed Config.Metrics.AllowedCIDRs entry is a constructor
 	// error (validate-at-construction), not a silently-ignored allowlist

@@ -32,6 +32,9 @@ type routerPlan struct {
 	reason    string
 	startTier string
 	entries   []routerPlanEntry
+	// promptBytes is the size estimate that calibration compares with reported usage.
+	promptBytes int64
+	hasImage    bool
 }
 
 func (p *routerPlan) candidates() []resolveCandidate {
@@ -59,7 +62,8 @@ func (s routerSkips) detail() string {
 }
 
 type routerRequestFacts struct {
-	promptTokens int64
+	promptBytes  int64
+	imageTokens  int64
 	outputTokens int64
 	hasImage     bool
 	costBudget   bool
@@ -84,13 +88,15 @@ func (g *Gateway) planSmartRouter(rt *smartRouter, req map[string]any, endpoint 
 	g.registry.noteRouterShadow(rt.name, grp)
 
 	start, reason, scored, hasImage := classifySmartRequest(rt, req, endpoint)
+	promptBytes, imageTokens := smartPromptBytes(req, endpoint)
 	facts := routerRequestFacts{
 		hasImage:     hasImage,
-		promptTokens: estimateSmartPromptTokens(req, endpoint),
+		promptBytes:  promptBytes,
+		imageTokens:  imageTokens,
 		outputTokens: requestedOutputTokens(req, endpoint),
 		costBudget:   !g.cfg.AllowUnpricedWithCostBudget && scopesHaveCostBudget(scopes),
 	}
-	plan := &routerPlan{router: rt.name, reason: reason, startTier: rt.tiers[start].name}
+	plan := &routerPlan{router: rt.name, reason: reason, startTier: rt.tiers[start].name, promptBytes: promptBytes, hasImage: hasImage}
 	seen := make(map[string]bool)
 	var skips routerSkips
 
@@ -228,7 +234,7 @@ func (g *Gateway) routerCandidateSkipped(cand resolveCandidate, tier string, rt 
 	// Checked last so the fallback candidate already passed vision and cost.
 	if rt.contextEscalation {
 		meta := g.registry.resolveMetaFor(cand.providerName, cand.upstreamModel)
-		if meta.ContextKnown && !contextFits(facts, int64(meta.ContextTokens)) {
+		if meta.ContextKnown && !contextFits(facts, g.tokenCalib.promptTokens(cand.providerName, cand.upstreamModel, facts.promptBytes), int64(meta.ContextTokens)) {
 			skips.context++
 			if skips.largest == nil || meta.ContextTokens > skips.largestCtx {
 				skips.largest = &routerPlanEntry{tier: tier, cand: cand}
@@ -251,11 +257,10 @@ func setRouterHeaders(h http.Header, plan *routerPlan, i int) {
 // say nothing about what the provider bills or fits in the window.
 const smartImageTokens = 1000
 
-// estimateSmartPromptTokens estimates prompt tokens from extracted text, one
-// per four bytes, plus a flat cost per image.
-func estimateSmartPromptTokens(req map[string]any, endpoint string) int64 {
+// smartPromptBytes returns the prompt's estimated byte size and its flat image token cost.
+func smartPromptBytes(req map[string]any, endpoint string) (promptBytes, imageTokens int64) {
 	chars, images := smartPromptSize(req, endpoint)
-	return int64(chars+3)/4 + int64(images)*smartImageTokens
+	return int64(chars), int64(images) * smartImageTokens
 }
 
 // smartContextHeadroomPct caps prompt plus output at this share of a window:
@@ -288,7 +293,8 @@ func requestedOutputTokens(req map[string]any, endpoint string) int64 {
 	return 0
 }
 
-// contextFits reports whether prompt plus requested output stays within the headroom share of window.
-func contextFits(facts routerRequestFacts, window int64) bool {
-	return (facts.promptTokens+facts.outputTokens)*100 <= window*smartContextHeadroomPct
+// contextFits reports whether the text tokens (the candidate's own estimate),
+// image tokens and requested output stay within the headroom share of window.
+func contextFits(facts routerRequestFacts, textTokens, window int64) bool {
+	return (textTokens+facts.imageTokens+facts.outputTokens)*100 <= window*smartContextHeadroomPct
 }

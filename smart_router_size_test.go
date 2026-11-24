@@ -95,14 +95,16 @@ func TestSmartValueSize_BoundedWork(t *testing.T) {
 	}
 }
 
-func TestEstimateSmartPromptTokens_IncludesToolsSchema(t *testing.T) {
+func TestSmartPromptBytes_IncludesToolsSchema(t *testing.T) {
 	t.Parallel()
 	base := chatMsgs(msg("user", "hello"))
 	withTools := map[string]any{
 		"messages": base["messages"],
 		"tools":    []any{map[string]any{"type": "function", "function": map[string]any{"name": "f", "description": strings.Repeat("d", 8000)}}},
 	}
-	if diff := estimateSmartPromptTokens(withTools, cacheEndpointChat) - estimateSmartPromptTokens(base, cacheEndpointChat); diff < 2000 {
-		t.Errorf("tools schema added %d tokens, want >= 2000", diff)
+	baseBytes, _ := smartPromptBytes(base, cacheEndpointChat)
+	toolBytes, _ := smartPromptBytes(withTools, cacheEndpointChat)
+	if diff := toolBytes - baseBytes; diff < 8000 {
+		t.Errorf("tools schema added %d bytes, want >= 8000", diff)
 	}
 }

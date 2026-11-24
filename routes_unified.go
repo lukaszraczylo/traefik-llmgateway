@@ -762,6 +762,10 @@ func (g *Gateway) runMeteredCall(sw *statusTrackingWriter, r *http.Request, scop
 			g.logf("%s: usage for model %q logged as estimated (%d prompt tokens derived from request body size, not the provider's reported usage)", logPrefix, cand.canonical, result.prompt)
 		}
 
+		if plan != nil && callErr == nil && !plan.hasImage && !result.estimated {
+			g.tokenCalib.observe(providerName, cand.upstreamModel, plan.promptBytes, result.prompt)
+		}
+
 		// Usage provenance (feat: expose token-accounting provenance),
 		// recorded ONLY for a candidate whose own response actually
 		// completed (callErr == nil): a candidate that failed over never
