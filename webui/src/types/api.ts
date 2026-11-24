@@ -11,6 +11,16 @@ export interface LimitsConfig {
   tokensPerMonth?: number
   costPerDayUSD?: number
   costPerMonthUSD?: number
+  pacing?: PacingConfig
+}
+
+/** LimitKey is the numeric LimitsConfig fields — everything except the nested pacing block. */
+export type LimitKey = Exclude<keyof LimitsConfig, 'pacing'>
+
+/** Mirrors Go's PacingConfig: requests wait up to maxDelay (a Go duration) as minute usage rises from startPct to 100%. */
+export interface PacingConfig {
+  startPct: number
+  maxDelay: string
 }
 
 /** Maps a LimitsConfig field name to where its effective value came from: "user" or "memberLimits:<group>". */

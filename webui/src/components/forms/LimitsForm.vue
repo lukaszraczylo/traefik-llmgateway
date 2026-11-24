@@ -7,7 +7,7 @@ import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Input } from '@/components/ui/input'
 import { useTargetPicker } from '@/composables/useTargetPicker'
 import { groupLimitsSnippet, groupMemberLimitsSnippet, isValidNonNegative, isValidNonNegativeInt, userLimitsJsonFragment } from '@/lib/snippets'
-import type { LimitsConfig } from '@/types/api'
+import type { LimitKey, LimitsConfig } from '@/types/api'
 
 /**
  * LimitsForm (ChangeHelper, redesign-plan.md section 3.4) builds a
@@ -29,14 +29,14 @@ const { targetKind, targetName, targetNames, nameValid, snippetLabel } = useTarg
 )
 
 /** INTEGER_FIELDS is every LimitsConfig field Go decodes as `int64` (llmgateway.go) — requestsPerMinute/requestsPerDay/tokensPerDay/tokensPerMonth reject a fractional value like "1.5" at json.Unmarshal outright (P2 item 12), unlike costPerDayUSD/costPerMonthUSD, which are `float64`. */
-const INTEGER_FIELDS = new Set<keyof LimitsConfig>(['requestsPerMinute', 'requestsPerDay', 'tokensPerMinute', 'tokensPerDay', 'tokensPerMonth'])
+const INTEGER_FIELDS = new Set<LimitKey>(['requestsPerMinute', 'requestsPerDay', 'tokensPerMinute', 'tokensPerDay', 'tokensPerMonth'])
 
 /** fieldValid applies isValidNonNegativeInt to the four int64 fields and isValidNonNegative (fractions allowed) to the two float64 cost fields — the ONE gate both invalidFields and limits below share, so they can never disagree on which fields are int-only. */
-function fieldValid(key: keyof LimitsConfig, value: number): boolean {
+function fieldValid(key: LimitKey, value: number): boolean {
   return INTEGER_FIELDS.has(key) ? isValidNonNegativeInt(value) : isValidNonNegative(value)
 }
 
-const FIELDS: { key: keyof LimitsConfig; label: string }[] = [
+const FIELDS: { key: LimitKey; label: string }[] = [
   { key: 'requestsPerMinute', label: 'Requests/minute' },
   { key: 'requestsPerDay', label: 'Requests/day' },
   { key: 'tokensPerMinute', label: 'Tokens/minute (in+out)' },
@@ -46,7 +46,7 @@ const FIELDS: { key: keyof LimitsConfig; label: string }[] = [
   { key: 'costPerMonthUSD', label: 'Cost/month (USD)' },
 ]
 
-const raw = reactive<Record<keyof LimitsConfig, string>>({
+const raw = reactive<Record<LimitKey, string>>({
   requestsPerMinute: '',
   requestsPerDay: '',
   tokensPerMinute: '',

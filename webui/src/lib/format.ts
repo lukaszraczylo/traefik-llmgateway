@@ -383,6 +383,7 @@ export function formatLimits(limits: LimitsConfig | undefined, sources?: LimitSo
   add('tokensPerMonth', `tok/month ${limits.tokensPerMonth}`)
   add('costPerDayUSD', `cost/day $${limits.costPerDayUSD}`)
   add('costPerMonthUSD', `cost/month $${limits.costPerMonthUSD}`)
+  if (limits.pacing) add('pacing', `pace from ${limits.pacing.startPct}% up to ${limits.pacing.maxDelay}`)
   return parts.length ? parts.join(', ') : 'none'
 }
 

@@ -311,6 +311,12 @@ describe('formatLimits', () => {
     expect(formatLimits({ tokensPerMinute: 500 })).toBe('tok/min 500')
   })
 
+  it('renders pacing with its source', () => {
+    expect(formatLimits({ pacing: { startPct: 80, maxDelay: '10s' } }, { pacing: 'memberLimits:friends' })).toBe(
+      'pace from 80% up to 10s (memberLimits:friends)',
+    )
+  })
+
   it('appends each field source when given', () => {
     expect(
       formatLimits(
