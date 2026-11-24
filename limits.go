@@ -229,6 +229,10 @@ func (lc *LimitsConfig) validate() error {
 		}
 	}
 
+	if err := lc.Pacing.validate(); err != nil {
+		return err
+	}
+
 	costs := []struct {
 		name string
 		v    float64
@@ -1550,6 +1554,13 @@ func buildBudgetProbes(scopes []limitScope, now time.Time) (probes []budgetProbe
 // call completes, one request may still push a scope over its budget — an
 // accepted trade-off, unchanged from before this round.
 func (l *limiter) checkAndCount(scopes []limitScope) *limitViolation {
+	v, _ := l.checkAndCountInfo(scopes)
+	return v
+}
+
+// checkAndCountInfo is checkAndCount plus the user scope's minute-window
+// view, built from the same round trip's counters (no extra store call).
+func (l *limiter) checkAndCountInfo(scopes []limitScope) (*limitViolation, *rateInfo) {
 	now := l.now()
 	wb := bucketsFor(now)
 	et := enforceTTLsFor()
@@ -1574,26 +1585,30 @@ func (l *limiter) checkAndCount(scopes []limitScope) *limitViolation {
 	incrVals, readVals, ok := l.storeIncrAndGetMulti(entries, reads)
 	if !ok || len(incrVals) != len(entries) || len(readVals) != len(reads) {
 		l.rejections.increment(rejectionScopeStoreDown, rejectionScopeStoreDown)
-		return storeDownViolation()
+		return storeDownViolation(), nil
 	}
 
+	var info *rateInfo
 	for i, sc := range scopes {
 		if sc.limits == nil {
 			continue
 		}
 		minCount := incrVals[i*checkAndCountKeysPerScope]
+		if sc.kind == "user" && info == nil {
+			info = buildRateInfo(sc, minCount, minuteTokensUsed(probes, readVals, i), now)
+		}
 		dayCount := incrVals[i*checkAndCountKeysPerScope+1]
 		// incrVals[i*checkAndCountKeysPerScope+2] is the req:hour count —
 		// stats-only, deliberately never read here.
 		if v := requestLimitViolation(sc, "requests-per-minute", sc.limits.RequestsPerMinute, minCount, windowMin, now); v != nil {
 			l.rejections.increment(sc.kind, sc.id)
 			l.settleRejection(entries, i, scopes, wb, et)
-			return v
+			return v, info
 		}
 		if v := requestLimitViolation(sc, "requests-per-day", sc.limits.RequestsPerDay, dayCount, windowDay, now); v != nil {
 			l.rejections.increment(sc.kind, sc.id)
 			l.settleRejection(entries, i, scopes, wb, et)
-			return v
+			return v, info
 		}
 		for _, p := range probes {
 			if p.scopeIdx != i {
@@ -1612,10 +1627,21 @@ func (l *limiter) checkAndCount(scopes []limitScope) *limitViolation {
 				message:    fmt.Sprintf("%s %q exceeded %s budget", sc.kind, sc.id, p.name),
 				retryAfter: retryAfterSeconds(now, p.window),
 				kind:       eventKindBudget,
-			}
+			}, info
 		}
 	}
-	return nil
+	return nil, info
+}
+
+// minuteTokensUsed returns the tokens-per-minute probe's already-read usage
+// for scope idx, or 0 when that scope has no such probe.
+func minuteTokensUsed(probes []budgetProbe, readVals []int64, idx int) int64 {
+	for _, p := range probes {
+		if p.scopeIdx == idx && p.window == windowMin {
+			return readVals[p.keyStart] + readVals[p.keyStart+1]
+		}
+	}
+	return 0
 }
 
 // recordLastSeen writes the absolute last-seen SET entries lastSeenEntries

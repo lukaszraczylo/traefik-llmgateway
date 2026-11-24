@@ -1,0 +1,242 @@
+package traefikllmgateway
+
+import (
+	"context"
+	"fmt"
+	"net/http"
+	"strconv"
+	"strings"
+	"time"
+)
+
+const (
+	// maxPacingDelay keeps a paced request below common CDN 100s timeouts.
+	maxPacingDelay = 60 * time.Second
+	// pacedHeader reports the pacing delay applied to a request.
+	pacedHeader = "X-Llmgw-Paced-Ms"
+	// eventKindPaced tags the rate-gated pacing event.
+	eventKindPaced = "paced"
+	// pacedEventScope keys the pacing event throttle in limiter.lastSeen.
+	pacedEventScope = "paced"
+)
+
+// validate reports an error for a malformed pacing block. Nil is valid.
+func (p *PacingConfig) validate() error {
+	if p == nil {
+		return nil
+	}
+	if p.StartPct < 1 || p.StartPct > 99 {
+		return fmt.Errorf("llmgateway: limits: pacing.startPct must be between 1 and 99, got %d", p.StartPct)
+	}
+	d, err := time.ParseDuration(p.MaxDelay)
+	if err != nil {
+		return fmt.Errorf("llmgateway: limits: pacing.maxDelay %q is not a duration: %v", p.MaxDelay, err)
+	}
+	if d <= 0 || d > maxPacingDelay {
+		return fmt.Errorf("llmgateway: limits: pacing.maxDelay must be greater than 0 and at most %s, got %s", maxPacingDelay, d)
+	}
+	p.maxDelay = d
+	return nil
+}
+
+// maxDelayDuration returns the parsed MaxDelay, parsing it when validate has
+// not run (a config built directly in code). It returns 0 for a bad value.
+func (p *PacingConfig) maxDelayDuration() time.Duration {
+	if p.maxDelay > 0 {
+		return p.maxDelay
+	}
+	d, err := time.ParseDuration(p.MaxDelay)
+	if err != nil || d <= 0 {
+		return 0
+	}
+	if d > maxPacingDelay {
+		return maxPacingDelay
+	}
+	return d
+}
+
+// delay returns the wait for a request when the usage fraction is frac
+// (1.0 is the limit): 0 up to StartPct, then linear up to MaxDelay at 100%.
+func (p *PacingConfig) delay(frac float64) time.Duration {
+	if p == nil {
+		return 0
+	}
+	maxD := p.maxDelayDuration()
+	start := float64(p.StartPct) / 100
+	if maxD <= 0 || frac <= start {
+		return 0
+	}
+	if frac >= 1 {
+		return maxD
+	}
+	d := time.Duration(float64(maxD) * (frac - start) / (1 - start))
+	if d > maxD {
+		return maxD
+	}
+	return d
+}
+
+// rateInfo is one admitted-or-refused request's view of the user scope's
+// minute windows, taken from the counters checkAndCount already read.
+type rateInfo struct {
+	reset        time.Time
+	pacing       *PacingConfig
+	reqLimit     int64
+	reqRemaining int64
+	tokLimit     int64
+	tokRemaining int64
+	frac         float64
+}
+
+func remainingOf(limit, used int64) int64 {
+	if used >= limit {
+		return 0
+	}
+	return limit - used
+}
+
+// buildRateInfo derives the minute-window view for one user scope. It
+// returns nil when the scope sets neither a minute limit nor pacing.
+func buildRateInfo(sc limitScope, minCount, tokUsed int64, now time.Time) *rateInfo {
+	lim := sc.limits
+	if lim == nil || (lim.RequestsPerMinute <= 0 && lim.TokensPerMinute <= 0) {
+		return nil
+	}
+	info := &rateInfo{reset: windowEnd(now, windowMin), pacing: lim.Pacing}
+	if lim.RequestsPerMinute > 0 {
+		info.reqLimit = lim.RequestsPerMinute
+		info.reqRemaining = remainingOf(lim.RequestsPerMinute, minCount)
+		info.frac = float64(minCount) / float64(lim.RequestsPerMinute)
+	}
+	if lim.TokensPerMinute > 0 {
+		info.tokLimit = lim.TokensPerMinute
+		info.tokRemaining = remainingOf(lim.TokensPerMinute, tokUsed)
+		if f := float64(tokUsed) / float64(lim.TokensPerMinute); f > info.frac {
+			info.frac = f
+		}
+	}
+	return info
+}
+
+func resetSeconds(reset, now time.Time) int64 {
+	s := int64(reset.Sub(now).Seconds() + 0.999)
+	if s < 0 {
+		return 0
+	}
+	return s
+}
+
+// removePolicyMember drops the list member named name from an RFC 8941 list.
+func removePolicyMember(list, name string) string {
+	if list == "" {
+		return ""
+	}
+	prefix := `"` + name + `"`
+	var kept []string
+	for _, m := range strings.Split(list, ", ") {
+		if !strings.HasPrefix(m, prefix) {
+			kept = append(kept, m)
+		}
+	}
+	return strings.Join(kept, ", ")
+}
+
+func appendPolicyMember(h http.Header, member string) {
+	cur := h.Get(rateLimitPolicyHeader)
+	if cur != "" {
+		member = cur + ", " + member
+	}
+	h.Set(rateLimitPolicyHeader, member)
+}
+
+// writeRateLimitHeaders sets the OpenAI, Anthropic and IETF draft headers
+// for the configured minute windows. The RateLimit-Policy header keeps any
+// concurrency member already present.
+func writeRateLimitHeaders(h http.Header, info *rateInfo, now time.Time) {
+	if info == nil {
+		return
+	}
+	secs := resetSeconds(info.reset, now)
+	resetDur := strconv.FormatInt(secs, 10) + "s"
+	resetAt := info.reset.UTC().Format(time.RFC3339)
+	var quota, policy []string
+	if info.reqLimit > 0 {
+		h.Set("x-ratelimit-limit-requests", strconv.FormatInt(info.reqLimit, 10))
+		h.Set("x-ratelimit-remaining-requests", strconv.FormatInt(info.reqRemaining, 10))
+		h.Set("x-ratelimit-reset-requests", resetDur)
+		h.Set("anthropic-ratelimit-requests-limit", strconv.FormatInt(info.reqLimit, 10))
+		h.Set("anthropic-ratelimit-requests-remaining", strconv.FormatInt(info.reqRemaining, 10))
+		h.Set("anthropic-ratelimit-requests-reset", resetAt)
+		quota = append(quota, `"requests";r=`+strconv.FormatInt(info.reqRemaining, 10)+";t="+strconv.FormatInt(secs, 10))
+		policy = append(policy, `"requests";q=`+strconv.FormatInt(info.reqLimit, 10)+";w=60")
+	}
+	if info.tokLimit > 0 {
+		h.Set("x-ratelimit-limit-tokens", strconv.FormatInt(info.tokLimit, 10))
+		h.Set("x-ratelimit-remaining-tokens", strconv.FormatInt(info.tokRemaining, 10))
+		h.Set("x-ratelimit-reset-tokens", resetDur)
+		h.Set("anthropic-ratelimit-input-tokens-limit", strconv.FormatInt(info.tokLimit, 10))
+		h.Set("anthropic-ratelimit-input-tokens-remaining", strconv.FormatInt(info.tokRemaining, 10))
+		h.Set("anthropic-ratelimit-input-tokens-reset", resetAt)
+		quota = append(quota, `"tokens";r=`+strconv.FormatInt(info.tokRemaining, 10)+";t="+strconv.FormatInt(secs, 10))
+		policy = append(policy, `"tokens";q=`+strconv.FormatInt(info.tokLimit, 10)+";w=60")
+	}
+	if len(quota) == 0 {
+		return
+	}
+	h.Set("RateLimit", strings.Join(quota, ", "))
+	appendPolicyMember(h, strings.Join(policy, ", "))
+}
+
+// pace waits for the pacing delay unless ctx ends first. It reports false
+// when the client went away during the wait.
+func pace(ctx context.Context, d time.Duration) bool {
+	if d <= 0 {
+		return true
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-t.C:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+// admitCounted runs checkAndCount for scopes, writes the rate-limit headers
+// on w for the user's effective limits, and on admission waits out the
+// pacing delay. The wait happens before any body is read, so it holds no
+// body-admission or concurrency slot. gone is true when the client
+// cancelled during the wait; the caller must then write nothing.
+func (g *Gateway) admitCounted(ctx context.Context, w http.ResponseWriter, scopes []limitScope) (*limitViolation, bool) {
+	violation, info := g.limiter.checkAndCountInfo(scopes)
+	now := g.limiter.now()
+	writeRateLimitHeaders(w.Header(), info, now)
+	if violation != nil || info == nil {
+		return violation, false
+	}
+	if info.pacing == nil {
+		return nil, false
+	}
+	d := info.pacing.delay(info.frac)
+	if d <= 0 {
+		return nil, false
+	}
+	w.Header().Set(pacedHeader, strconv.FormatInt(d.Milliseconds(), 10))
+	g.recordPacedEvent(scopes, d)
+	if !pace(ctx, d) {
+		return nil, true
+	}
+	return nil, false
+}
+
+// recordPacedEvent records at most one pacing event per user per throttle
+// window.
+func (g *Gateway) recordPacedEvent(scopes []limitScope, d time.Duration) {
+	ev := gatewayEvent{Route: "pacing", Kind: eventKindPaced, Message: "request paced " + d.String()}
+	applyScopeAttribution(&ev, scopes)
+	if ev.User == "" || !g.limiter.lastSeen.due(pacedEventScope, ev.User, g.limiter.now()) {
+		return
+	}
+	g.recordEvent(ev)
+}

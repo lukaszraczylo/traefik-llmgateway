@@ -9,7 +9,7 @@ import (
 // nonSecretConfigKeys lists every string-valued JSON key in Config reviewed as
 // non-secret. A new key must be classified here or in the redaction sets.
 var nonSecretConfigKeys = map[string]bool{
-	"agents": true, "allowedCIDRs": true, "backoff": true, "cacheTTL": true,
+	"agents": true, "allowedCIDRs": true, "backoff": true, "cacheTTL": true, "maxDelay": true,
 	"card": true, "discoveryInterval": true, "file": true, "group": true,
 	"groups": true, "maxOpenDuration": true, "mcpServers": true,
 	"kinds": true, "metadataPath": true, "modelAliases": true, "modelBaseUrls": true, "models": true, "name": true,

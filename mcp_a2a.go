@@ -209,7 +209,11 @@ func (g *Gateway) handleTargetProxy(w http.ResponseWriter, r *http.Request, u *u
 	}
 
 	scopes := withTotalScope(buildLimitScopes(u, grp))
-	if violation := g.limiter.checkAndCount(scopes); violation != nil {
+	violation, gone := g.admitCounted(r.Context(), w, scopes)
+	if gone {
+		return
+	}
+	if violation != nil {
 		g.recordLimitEvent(scopes, kind, violation) // F3 hook 1 (v0.3 dashboard task): kind is already "mcp"/"a2a"
 		writeLimitViolation(w, violation)
 		return

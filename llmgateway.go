@@ -322,13 +322,27 @@ type GroupConfig struct {
 
 // LimitsConfig holds request/token/cost limits. Zero means unlimited.
 type LimitsConfig struct {
-	RequestsPerMinute int64   `json:"requestsPerMinute,omitempty"`
-	RequestsPerDay    int64   `json:"requestsPerDay,omitempty"`
-	TokensPerMinute   int64   `json:"tokensPerMinute,omitempty"`
-	TokensPerDay      int64   `json:"tokensPerDay,omitempty"`
-	TokensPerMonth    int64   `json:"tokensPerMonth,omitempty"`
-	CostPerDayUSD     float64 `json:"costPerDayUSD,omitempty"`
-	CostPerMonthUSD   float64 `json:"costPerMonthUSD,omitempty"`
+	// Pacing delays requests as the per-minute usage approaches the limit.
+	// Nil (the default) disables it.
+	Pacing            *PacingConfig `json:"pacing,omitempty"`
+	RequestsPerMinute int64         `json:"requestsPerMinute,omitempty"`
+	RequestsPerDay    int64         `json:"requestsPerDay,omitempty"`
+	TokensPerMinute   int64         `json:"tokensPerMinute,omitempty"`
+	TokensPerDay      int64         `json:"tokensPerDay,omitempty"`
+	TokensPerMonth    int64         `json:"tokensPerMonth,omitempty"`
+	CostPerDayUSD     float64       `json:"costPerDayUSD,omitempty"`
+	CostPerMonthUSD   float64       `json:"costPerMonthUSD,omitempty"`
+}
+
+// PacingConfig slows requests before the hard limit. Once the higher of the
+// minute request and token usage fractions passes StartPct, each request waits
+// a delay that grows linearly from 0 to MaxDelay at 100%.
+type PacingConfig struct {
+	// MaxDelay is a Go duration string, greater than 0 and at most 60s.
+	MaxDelay string `json:"maxDelay"`
+	// StartPct is the usage percentage (1-99) where pacing begins.
+	StartPct int64 `json:"startPct"`
+	maxDelay time.Duration
 }
 
 // UsersConfig combines inline users with an optional file-backed source.

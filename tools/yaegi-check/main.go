@@ -782,7 +782,7 @@ func run() error {
 		`"` + round3P1BGroupName + `":{"providers":["round3-shared"],"passthroughPaths":["v1/chat/completions"]},` +
 		`"` + round3P2HomeGroupName + `":{"providers":["round3-alpha"]},` +
 		`"` + round3P2FriendsGroupName + `":{"providers":["round3-shared"],"passthroughPaths":["v1/chat/completions"]},` +
-		`"` + memberLimitsGroupName + `":{"memberLimits":{"requestsPerMinute":2}}},` +
+		`"` + memberLimitsGroupName + `":{"memberLimits":{"requestsPerMinute":2,"pacing":{"startPct":50,"maxDelay":"20ms"}}}},` +
 		// modelMeta (feature v0.23): a config-override entry for
 		// testDataWantModel, so exerciseHandler's GET /v1/models
 		// assertion below proves resolveModelMeta's config-override
@@ -1230,13 +1230,19 @@ func exerciseMemberLimits(handler http.Handler) error {
 		{"A 3rd (over memberLimits requestsPerMinute:2)", memberLimitsUserAAPIKey, http.StatusTooManyRequests},
 		{"B 1st (own counter)", memberLimitsUserBAPIKey, http.StatusOK},
 	}
-	for _, st := range steps {
+	for i, st := range steps {
 		rec := post(st.key)
 		if rec.Code != st.want {
 			return fmt.Errorf("memberLimits harness, %s: status = %d, want %d, body=%s", st.label, rec.Code, st.want, rec.Body.String())
 		}
+		if got := rec.Header().Get("x-ratelimit-limit-requests"); got != "2" {
+			return fmt.Errorf("memberLimits harness, %s: x-ratelimit-limit-requests = %q, want 2", st.label, got)
+		}
+		if i == 1 && rec.Header().Get("X-Llmgw-Paced-Ms") == "" {
+			return fmt.Errorf("memberLimits harness, %s: X-Llmgw-Paced-Ms missing at 100%% of the limit", st.label)
+		}
 	}
-	fmt.Println("yaegi-check: group memberLimits enforced per member user under the interpreter")
+	fmt.Println("yaegi-check: group memberLimits enforced per member user, with rate-limit headers and pacing, under the interpreter")
 	return nil
 }
 

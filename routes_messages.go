@@ -104,7 +104,7 @@ func (g *Gateway) handleMessages(w http.ResponseWriter, r *http.Request, u *user
 		return
 	}
 
-	scopes, ok := g.admitRequestForRoute(sw, u, grp, writeAnthropicError, routeMessages)
+	scopes, ok := g.admitRequestForRoute(r.Context(), sw, u, grp, writeAnthropicError, routeMessages)
 	if !ok {
 		return
 	}

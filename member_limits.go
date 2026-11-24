@@ -6,6 +6,10 @@ const (
 	limitSourceMemberGroup = "memberLimits:"
 )
 
+// limitFieldPacing is the limitSources key for the pacing block; the
+// earliest startPct across member groups is the strictest.
+const limitFieldPacing = "pacing"
+
 var limitIntFields = []string{"requestsPerMinute", "requestsPerDay", "tokensPerMinute", "tokensPerDay", "tokensPerMonth"}
 
 var limitCostFields = []string{"costPerDayUSD", "costPerMonthUSD"}
@@ -124,6 +128,29 @@ func effectiveUserLimits(own *LimitsConfig, members []*group) (*LimitsConfig, ma
 		if best > 0 {
 			setLimitCostField(eff, f, best)
 			sources[f] = src
+		}
+	}
+	switch {
+	case own != nil && own.Pacing != nil:
+		if hasMember {
+			eff.Pacing = own.Pacing
+		}
+		sources[limitFieldPacing] = limitSourceUser
+	case hasMember:
+		var best *PacingConfig
+		src := ""
+		for _, m := range members {
+			if m.memberLimits == nil || m.memberLimits.Pacing == nil {
+				continue
+			}
+			if best == nil || m.memberLimits.Pacing.StartPct < best.StartPct {
+				best = m.memberLimits.Pacing
+				src = limitSourceMemberGroup + m.name
+			}
+		}
+		if best != nil {
+			eff.Pacing = best
+			sources[limitFieldPacing] = src
 		}
 	}
 	if len(sources) == 0 {

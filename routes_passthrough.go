@@ -1243,7 +1243,11 @@ func (g *Gateway) handlePassthrough(w http.ResponseWriter, r *http.Request, u *u
 	}
 
 	scopes := withTotalScope(buildLimitScopes(u, grp))
-	if violation := g.limiter.checkAndCount(scopes); violation != nil {
+	violation, gone := g.admitCounted(r.Context(), w, scopes)
+	if gone {
+		return
+	}
+	if violation != nil {
 		g.recordLimitEvent(scopes, routePassthrough, violation)
 		writeLimitViolation(w, violation)
 		return

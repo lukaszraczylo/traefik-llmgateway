@@ -222,7 +222,7 @@ func (g *Gateway) handleEmbeddings(w http.ResponseWriter, r *http.Request, u *us
 func (g *Gateway) runUnified(w http.ResponseWriter, r *http.Request, u *user, grp *group, endpoint string, call adapterCall) {
 	sw := &statusTrackingWriter{ResponseWriter: w}
 
-	scopes, ok := g.admitRequestForRoute(sw, u, grp, writeOAIError, eventRouteForEndpoint(endpoint))
+	scopes, ok := g.admitRequestForRoute(r.Context(), sw, u, grp, writeOAIError, eventRouteForEndpoint(endpoint))
 	if !ok {
 		return
 	}
@@ -933,9 +933,13 @@ func withTotalScope(scopes []limitScope) []limitScope {
 // 2026-08-22 review) lets routes_messages.go answer a violation in
 // Anthropic's own error shape instead of OpenAI's, without a second copy
 // of this function's own logic.
-func (g *Gateway) admitRequestForRoute(sw *statusTrackingWriter, u *user, grp *group, envelope envelopeWriter, route string) (scopes []limitScope, ok bool) {
+func (g *Gateway) admitRequestForRoute(ctx context.Context, sw *statusTrackingWriter, u *user, grp *group, envelope envelopeWriter, route string) (scopes []limitScope, ok bool) {
 	scopes = withTotalScope(buildLimitScopes(u, grp))
-	if violation := g.limiter.checkAndCount(scopes); violation != nil {
+	violation, gone := g.admitCounted(ctx, sw, scopes)
+	if gone {
+		return scopes, false
+	}
+	if violation != nil {
 		g.recordLimitEvent(scopes, route, violation)
 		writeLimitViolationEnvelope(sw, violation, envelope)
 		return scopes, false
