@@ -305,6 +305,27 @@ func TestRouterLearningStopsWhenIdle(t *testing.T) {
 	}, 2*time.Second, 5*time.Millisecond)
 }
 
+func TestRouterLearningRecoversFromPanic(t *testing.T) {
+	gw, rt := calibGateway(t, &SmartRouterCalibrationConfig{Mode: smartCalibShadow})
+	gw.routerLearn.every = 5 * time.Millisecond
+	gw.registry.routers["broken"] = nil
+	gw.touchRouterLearning(rt)
+	done := gw.routerLearn.done
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the refresh goroutine never returned")
+	}
+	gw.routerLearn.mu.Lock()
+	running := gw.routerLearn.running
+	gw.routerLearn.mu.Unlock()
+	assert.False(t, running, "a panicked refresh marks the learner stopped so the next request restarts it")
+	delete(gw.registry.routers, "broken")
+	gw.touchRouterLearning(rt)
+	assert.True(t, gw.routerLearn.running)
+	assert.NoError(t, gw.Close())
+}
+
 func threeTierStructs() []smartTier {
 	return []smartTier{{name: "t0"}, {name: "t1", minScore: 300}, {name: "t2", minScore: 600}}
 }

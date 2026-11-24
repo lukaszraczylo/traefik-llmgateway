@@ -319,7 +319,16 @@ func (g *Gateway) touchRouterLearning(rt *smartRouter) {
 }
 
 func (g *Gateway) runRouterLearning(l *routerLearner, stop, done chan struct{}) {
-	defer close(done)
+	// No request goroutine can catch a panic here, and it would end the whole Traefik process.
+	defer func() {
+		if rec := recover(); rec != nil {
+			g.errorf("router learning refresh panicked: %v", rec)
+			l.mu.Lock()
+			l.running = false
+			l.mu.Unlock()
+		}
+		close(done)
+	}()
 	t := time.NewTicker(l.every)
 	defer t.Stop()
 	for {
