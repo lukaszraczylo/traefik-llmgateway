@@ -112,6 +112,7 @@ export function validatePersonalGrant(providers: string[], models: string[]): st
 const LIMITS_FIELD_ORDER: (keyof LimitsConfig)[] = [
   'requestsPerMinute',
   'requestsPerDay',
+  'tokensPerMinute',
   'tokensPerDay',
   'tokensPerMonth',
   'costPerDayUSD',
@@ -133,6 +134,13 @@ export function groupLimitsSnippet(groupName: string, limits: LimitsConfig): str
   const body: { [key: string]: YamlValue | undefined } = {}
   for (const [key, value] of limitsEntries(limits)) body[key] = value
   return emitConfigSnippet(['groups', groupName], { limits: body })
+}
+
+/** groupMemberLimitsSnippet builds a group's per-member YAML block at spec.plugin.llmgateway.groups.<name>.memberLimits — each member user gets their own counter with these values. */
+export function groupMemberLimitsSnippet(groupName: string, limits: LimitsConfig): string {
+  const body: { [key: string]: YamlValue | undefined } = {}
+  for (const [key, value] of limitsEntries(limits)) body[key] = value
+  return emitConfigSnippet(['groups', groupName], { memberLimits: body })
 }
 
 function jsonString(s: string): string {

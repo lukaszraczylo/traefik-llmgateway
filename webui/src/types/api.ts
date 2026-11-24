@@ -6,11 +6,15 @@
 export interface LimitsConfig {
   requestsPerMinute?: number
   requestsPerDay?: number
+  tokensPerMinute?: number
   tokensPerDay?: number
   tokensPerMonth?: number
   costPerDayUSD?: number
   costPerMonthUSD?: number
 }
+
+/** Maps a LimitsConfig field name to where its effective value came from: "user" or "memberLimits:<group>". */
+export type LimitSources = Partial<Record<keyof LimitsConfig, string>>
 
 /**
  * One upstream model's current-window attempt/failure counters within its
@@ -284,6 +288,10 @@ export interface AdminOverviewResponse {
 
 export interface AdminUsageEntryView {
   limits?: LimitsConfig
+  /** Users only: each set limits field's origin, "user" or "memberLimits:<group>" (admin.go: adminUsageEntryView.LimitSources). */
+  limitSources?: LimitSources
+  /** Groups only: the per-member default each member user inherits. */
+  memberLimits?: LimitsConfig
   kind: string
   id: string
   groupName?: string
@@ -735,6 +743,7 @@ export interface AdminCatalogResponse {
  */
 export interface AdminConsumerUser {
   limits?: LimitsConfig
+  limitSources?: LimitSources
   name: string
   source: 'inline' | 'file'
   groups: string[]
@@ -757,6 +766,7 @@ export interface AdminModelAccessCount {
  */
 export interface AdminConsumerGroup {
   limits?: LimitsConfig
+  memberLimits?: LimitsConfig
   name: string
   providers?: string[]
   models?: string[]

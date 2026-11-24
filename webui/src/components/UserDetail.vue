@@ -191,7 +191,7 @@ const runOutDate = computed(() => {
         <StatItem label="Cost/month">{{ formatCostDisplay(entry.costPerMonthMicroUsd) }}</StatItem>
         <div>
           <p class="text-muted-foreground">Limits</p>
-          <p class="text-sm">{{ formatLimits(entry.limits) }}</p>
+          <p class="text-sm">{{ formatLimits(entry.limits, entry.limitSources) }}</p>
         </div>
       </CardContent>
     </Card>
