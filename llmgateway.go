@@ -830,9 +830,11 @@ type Gateway struct {
 	latency                       *latencyStore
 	targetClient                  *http.Client
 	provenance                    *provenanceStore
+	routerStats                   *routerStats
 	name                          string
 	replica                       string
 	failoverLogGate               logGate
+	routerEventGate               logGate
 	metricsNets                   []*net.IPNet
 	configWarnings                []string
 	targetHealthCfg               targetHealthConfig
@@ -1047,6 +1049,7 @@ func newGateway(ctx context.Context, next http.Handler, config *Config, name str
 	// regardless of whether Config.Metrics is nil/disabled, mirroring
 	// g.latency's own identical "always-present" ruling immediately above.
 	g.provenance = newProvenanceStore()
+	g.routerStats = newRouterStats()
 
 	// A malformed Config.Metrics.AllowedCIDRs entry is a constructor
 	// error (validate-at-construction), not a silently-ignored allowlist

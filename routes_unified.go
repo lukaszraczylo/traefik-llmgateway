@@ -467,6 +467,7 @@ func (g *Gateway) runMeteredCall(sw *statusTrackingWriter, r *http.Request, scop
 		attemptReq[gatewayAliasKey] = requestedModel
 		if plan != nil {
 			setRouterHeaders(sw.Header(), plan, i)
+			g.recordRouterAttempt(plan, i, endpoint, scopes)
 		}
 
 		// Cache lookup for THIS candidate, immediately before its own
@@ -840,6 +841,9 @@ func (g *Gateway) runMeteredCall(sw *statusTrackingWriter, r *http.Request, scop
 			g.errorf("%s: provider %q returned 404 for model %q; failing over to %q — this usually means a real provider/model configuration mistake, not a transient outage", logPrefix, providerName, requestedModel, candidates[i+1].providerName)
 		}
 		if !hasNext {
+			if plan != nil && i == len(candidates)-1 && failoverEligible(callErr) {
+				g.recordRouterExhausted(plan, i, endpoint, scopes)
+			}
 			g.recordUpstreamEvent(scopes, cand.canonical, providerName, eventRouteForEndpoint(endpoint), callErr)
 			g.handleAdapterErrorEnvelope(sw, callErr, providerName, logPrefix, envelope, writeUpstream)
 			return
