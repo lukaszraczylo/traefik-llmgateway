@@ -107,11 +107,11 @@ func chunkHasOutput(data []byte) bool {
 	return keyHasValue(data, contentKey) || keyHasValue(data, toolCallsKey)
 }
 
-// badResult reports whether a finished attempt counts as a bad outcome: a mid-stream failure,
+// badResult reports whether a finished attempt counts as a bad outcome: a retryable mid-stream failure,
 // an empty answer, or a length cut that is not the client's small max_tokens.
 func (p *routerPlan) badResult(u usage, callErr error, wroteHeader bool) bool {
 	if callErr != nil {
-		return wroteHeader
+		return wroteHeader && failoverEligible(callErr)
 	}
 	if u.emptyOutput {
 		return true

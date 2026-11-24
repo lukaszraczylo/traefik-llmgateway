@@ -1,7 +1,9 @@
 package traefikllmgateway
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -155,6 +157,16 @@ func TestBadResultRules(t *testing.T) {
 	assert.True(t, capped.badResult(usage{}, errors.New("reset"), true), "failure after the first byte is bad")
 	assert.False(t, capped.badResult(usage{}, errors.New("refused"), false), "failure before any byte is an error, not bad")
 	assert.False(t, capped.badResult(usage{completion: 9}, nil, false))
+}
+
+func TestBadResultIgnoresCallerEndedAttempts(t *testing.T) {
+	t.Parallel()
+	p := &routerPlan{}
+	assert.False(t, p.badResult(usage{}, context.Canceled, true), "client cancel after headers is not the model's fault")
+	assert.False(t, p.badResult(usage{}, fmt.Errorf("copy: %w", context.Canceled), true))
+	assert.False(t, p.badResult(usage{}, errRequestBuildFailed, true))
+	assert.True(t, p.badResult(usage{}, &providerHTTPError{status: http.StatusBadGateway}, true), "upstream 5xx after headers is bad")
+	assert.False(t, p.badResult(usage{}, &providerHTTPError{status: http.StatusBadGateway}, false))
 }
 
 func TestChunkHelpers(t *testing.T) {
