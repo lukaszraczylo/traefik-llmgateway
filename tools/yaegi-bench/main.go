@@ -181,7 +181,35 @@ func firstByteHelperCheck() string {
 	if !e.feed([]byte("data: {}\n")) {
 		return "sseDataDetector missed a data line"
 	}
+	if msg := fallbackRankCheck(); msg != "" {
+		return msg
+	}
 	return firstByteErrCheck()
+}
+
+// fallbackRankCheck alternates usable sets so a result kept from the previous call shows up as a mismatch.
+func fallbackRankCheck() string {
+	has := func(set ...int) func(int) bool {
+		return func(r int) bool {
+			for _, s := range set {
+				if s == r {
+					return true
+				}
+			}
+			return false
+		}
+	}
+	if routerFallbackRank(2, has(0, 1)) != 1 || routerFallbackRank(2, has(0)) != 0 || routerFallbackRank(2, has(2)) != -1 || routerFallbackRank(2, has(0, 1)) != 1 {
+		return "routerFallbackRank changed between calls"
+	}
+	if routerFallbackRank(0, has(0, 1)) != -1 || routerFallbackRank(3, has(2)) != 2 {
+		return "routerFallbackRank missed the lowest or highest edge"
+	}
+	counts := map[routerOutcomeKey]int64{{router: "r", reason: routerReasonFallback, outcome: routerOutcomeSlow}: 2, {router: "r", reason: smartReasonScore, outcome: routerOutcomeOK}: 5, {router: "o", reason: routerReasonFallback}: 9}
+	if routerFallbackCount("r", counts) != 2 || routerFallbackCount("o", counts) != 9 || routerFallbackCount("r", counts) != 2 {
+		return "routerFallbackCount changed between calls"
+	}
+	return ""
 }
 
 func firstByteErrCheck() string {

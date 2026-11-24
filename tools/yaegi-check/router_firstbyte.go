@@ -18,6 +18,9 @@ import (
 const (
 	fbOK      = "fb-ok"
 	fbDead    = "fb-dead"
+	fbFall    = "fb-fall"
+	fbNoFall  = "fb-nofall"
+	fbTopAsk  = "escalate-me"
 	fbTimeout = "1s"
 	// fbStall outlasts every probe request; handlers return as soon as the gateway cancels the attempt.
 	fbStall = 20 * time.Second
@@ -67,16 +70,25 @@ func fbConfig(slow, slow2, fast string) string {
 		`"users":{"inline":[{"name":"rv2-user","group":"rv2g","apiKey":"` + rv2UserKey + `"}]},` +
 		`"smartRouters":{` +
 		`"` + fbOK + `":{"firstByteTimeout":"` + fbTimeout + `",` + tiers("fb-slow", "fb-fast") + `},` +
-		`"` + fbDead + `":{"firstByteTimeout":"` + fbTimeout + `",` + tiers("fb-slow", "fb-slow2") + `}}}`
+		`"` + fbDead + `":{"firstByteTimeout":"` + fbTimeout + `",` + tiers("fb-slow", "fb-slow2") + `},` +
+		`"` + fbFall + `":{"firstByteTimeout":"` + fbTimeout + `","timeoutFallback":true,` + fbTopSlow + `},` +
+		`"` + fbNoFall + `":{"firstByteTimeout":"` + fbTimeout + `",` + fbTopSlow + `}}}`
 }
 
+// fbTopSlow is a router whose top tier is slow, a lower tier fast, and a keyword that routes to the top.
+const fbTopSlow = `"keywordRules":[{"tier":"t1","keywords":["` + fbTopAsk + `"]}],"tiers":[{"name":"t0","minScore":0,"models":["fb-fast/m"]},{"name":"t1","minScore":300,"models":["fb-slow/m"]}]`
+
 func fbPost(handler http.Handler, model string, stream bool) (*httptest.ResponseRecorder, time.Duration) {
+	return fbPostAsk(handler, model, "hi", stream)
+}
+
+func fbPostAsk(handler http.Handler, model, ask string, stream bool) (*httptest.ResponseRecorder, time.Duration) {
 	extra := ""
 	if stream {
 		extra = `,"stream":true`
 	}
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(
-		`{"model":"`+model+`","messages":[{"role":"user","content":"hi"}]`+extra+`}`,
+		`{"model":"`+model+`","messages":[{"role":"user","content":"`+ask+`"}]`+extra+`}`,
 	))
 	req.Header.Set("Authorization", "Bearer "+rv2UserKey)
 	req.Header.Set("Content-Type", "application/json")
@@ -110,6 +122,27 @@ func exerciseRouterFirstByte(i *interp.Interpreter, pkgName string) error {
 	if rec.Code != http.StatusGatewayTimeout || !strings.Contains(rec.Body.String(), "did not start responding in time") || took > fbBudget {
 		return fmt.Errorf("router %q with every model slow: status=%d took=%s body=%s, want 504 within %s", fbDead, rec.Code, took, rec.Body.String(), fbBudget)
 	}
+	if err := exerciseTimeoutFallback(handler); err != nil {
+		return err
+	}
 	fmt.Println("yaegi-check: a slow first tier escalated for a plain and a stream request, and a router with no timely model answered 504 under the interpreter")
+	return nil
+}
+
+// exerciseTimeoutFallback checks that a slow top tier falls back one tier down when the router opts in, for a
+// plain and a stream request, and that the same router without the flag still answers 504.
+func exerciseTimeoutFallback(handler http.Handler) error {
+	for _, stream := range []bool{false, true} {
+		rec, took := fbPostAsk(handler, fbFall, fbTopAsk, stream)
+		if rec.Code != http.StatusOK || rec.Header().Get("X-Llmgw-Router-Tier") != "t0" || rec.Header().Get("X-Llmgw-Router-Downgraded") != "t1" || took > fbBudget {
+			return fmt.Errorf("router %q stream=%v with a slow top tier: status=%d tier=%q downgraded=%q took=%s, want 200 t0 from t1 within %s (body %s)",
+				fbFall, stream, rec.Code, rec.Header().Get("X-Llmgw-Router-Tier"), rec.Header().Get("X-Llmgw-Router-Downgraded"), took, fbBudget, rec.Body.String())
+		}
+	}
+	rec, took := fbPostAsk(handler, fbNoFall, fbTopAsk, false)
+	if rec.Code != http.StatusGatewayTimeout || rec.Header().Get("X-Llmgw-Router-Downgraded") != "" || took > fbBudget {
+		return fmt.Errorf("router %q without timeoutFallback: status=%d downgraded=%q took=%s, want 504 within %s", fbNoFall, rec.Code, rec.Header().Get("X-Llmgw-Router-Downgraded"), took, fbBudget)
+	}
+	fmt.Println("yaegi-check: a slow top tier fell back one tier for a plain and a stream request, and stayed a 504 without timeoutFallback under the interpreter")
 	return nil
 }
