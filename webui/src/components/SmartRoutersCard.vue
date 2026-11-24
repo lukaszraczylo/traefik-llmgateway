@@ -21,7 +21,7 @@ const scopeLabel = computed(() =>
   props.routers.some((r) => r.stats?.scope === 'shared') ? 'Counts: All replicas, this month (UTC)' : 'Counts: This gateway instance, since start',
 )
 
-const OUTCOMES = ['ok', 'escalated', 'error', 'bad'] as const
+const OUTCOMES = ['ok', 'escalated', 'error', 'bad', 'slow'] as const
 
 function shadowCount(router: AdminRouterView, live: string, shadow: string): number {
   return router.stats?.shadow.find((c) => c.live === live && c.shadow === shadow)?.count ?? 0
@@ -79,6 +79,9 @@ function share(count: number, total: number): number {
           </Badge>
           <Badge v-if="router.saturationDowngrade" variant="secondary" class="font-normal">downgraded: {{ router.downgraded }}</Badge>
           <Badge variant="outline" class="font-normal">max attempts: {{ router.maxAttempts }}</Badge>
+          <Badge v-if="router.firstByteTimeout" variant="outline" class="font-normal">
+            first byte timeout: {{ router.firstByteTimeout }}
+          </Badge>
           <Badge variant="outline" class="font-normal">context escalation: {{ router.contextEscalation ? 'on' : 'off' }}</Badge>
           <Badge v-if="router.contextTokens" variant="outline" class="font-normal">
             context window: {{ formatContextWindow(router.contextTokens) }}
@@ -146,7 +149,7 @@ function share(count: number, total: number): number {
         </div>
         <div v-if="router.stats && router.stats.outcomes.length > 0" class="flex flex-col gap-1">
           <p class="text-xs text-muted-foreground">
-            <span class="font-medium">Outcomes</span> by first attempted tier. Escalated means a higher tier served it; error means a final non-2xx.
+            <span class="font-medium">Outcomes</span> by first attempted tier. Escalated means a higher tier served it; error means a final non-2xx; slow means an attempt missed the first-byte timeout.
           </p>
           <table class="w-fit text-xs tabular-nums" :aria-label="`Outcomes for ${router.name}`">
             <thead>

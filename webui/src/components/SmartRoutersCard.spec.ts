@@ -88,6 +88,11 @@ describe('SmartRoutersCard', () => {
     expect(html).toContain('prove, audit')
   })
 
+  it('shows the first byte timeout only when set', async () => {
+    expect(await render([{ ...router, firstByteTimeout: '40s' }])).toContain('first byte timeout: 40s')
+    expect(await render([router])).not.toContain('first byte timeout')
+  })
+
   it('shows the tools min tier only when set', async () => {
     expect(await render([{ ...router, toolsMinTier: 'big' }])).toContain('tools min tier: big')
     expect(await render([router])).not.toContain('tools min tier')
@@ -145,6 +150,8 @@ describe('SmartRoutersCard', () => {
           { tier: 'small', reason: 'score', outcome: 'escalated', count: 2 },
           { tier: 'big', reason: 'score', outcome: 'error', count: 1 },
           { tier: 'big', reason: 'score', outcome: 'bad', count: 2 },
+          { tier: 'big', reason: 'score', outcome: 'slow', count: 5 },
+          { tier: 'big', reason: 'keyword', outcome: 'slow', count: 1 },
         ],
       },
     }
@@ -154,6 +161,9 @@ describe('SmartRoutersCard', () => {
     expect(html).toMatch(/data-cell="small:escalated"[^>]*>2</)
     expect(html).toMatch(/data-cell="big:error"[^>]*>1</)
     expect(html).toMatch(/data-cell="big:bad"[^>]*>2</)
+    expect(html).toMatch(/<th[^>]*>slow<\/th>/)
+    expect(html).toMatch(/data-cell="big:slow"[^>]*>6</)
+    expect(html).toMatch(/data-cell="small:slow"[^>]*>0</)
     expect(await render([router])).not.toContain('Outcomes for')
   })
 

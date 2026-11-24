@@ -247,7 +247,7 @@ export interface AdminRouterShadowView {
 export interface AdminRouterOutcomeView {
   tier: string
   reason: string
-  outcome: 'ok' | 'error' | 'escalated' | 'bad'
+  outcome: 'ok' | 'error' | 'escalated' | 'bad' | 'slow'
   count: number
 }
 
@@ -299,6 +299,8 @@ export interface AdminRouterView {
   shadowClassifier?: string
   /** v2 risk margin in hundredths of a sigma. */
   riskZ: number
+  /** Go duration after which a slow upstream attempt escalates; absent when unset. */
+  firstByteTimeout?: string
   selection: string
   adaptive?: AdminRouterAdaptiveView
   calibration: AdminRouterCalibrationView
