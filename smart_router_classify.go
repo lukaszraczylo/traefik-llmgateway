@@ -17,7 +17,6 @@ const (
 	smartSimpleMaxTokens = 60
 	smartMultiQuestionAt = 2
 	smartReasoningFloor  = 2
-	smartToolsFloorRank  = 1
 	smartPerMille        = 1000
 )
 
@@ -69,10 +68,7 @@ func classifySmartRequest(rt *smartRouter, req map[string]any, endpoint string) 
 
 	floorRank := 0
 	if ex.hasTools || ex.toolHist {
-		floorRank = smartToolsFloorRank
-		if floorRank > top {
-			floorRank = top
-		}
+		floorRank = rt.toolsMinRank
 	}
 	if smartWantsReasoning(req) {
 		floorRank = top

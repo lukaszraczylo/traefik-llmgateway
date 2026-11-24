@@ -42,6 +42,7 @@ type adminRouterStatsView struct {
 type adminRouterView struct {
 	Name              string                `json:"name"`
 	DefaultTier       string                `json:"defaultTier"`
+	ToolsMinTier      string                `json:"toolsMinTier,omitempty"`
 	Selection         string                `json:"selection"`
 	Tiers             []adminRouterTierView `json:"tiers"`
 	KeywordRules      []adminRouterRuleView `json:"keywordRules"`
@@ -66,6 +67,9 @@ func (g *Gateway) buildAdminRouterViews() []adminRouterView {
 		}
 		if rt.defaultRank >= 0 && rt.defaultRank < len(rt.tiers) {
 			v.DefaultTier = rt.tiers[rt.defaultRank].name
+		}
+		if rt.toolsMinRank > 0 && rt.toolsMinRank < len(rt.tiers) {
+			v.ToolsMinTier = rt.tiers[rt.toolsMinRank].name
 		}
 		for i, t := range rt.tiers {
 			v.Tiers[i] = adminRouterTierView{Name: t.name, Models: append([]string{}, t.models...), MinScore: t.minScore}

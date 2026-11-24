@@ -103,12 +103,12 @@ func TestClassifySmartRequest(t *testing.T) {
 			wantRank: 2, wantWhy: smartReasonFloor,
 		},
 		{
-			name: "openai tool loop on a trivial ask is floored to rank 1 and scores that ask",
+			name: "openai tool loop on a trivial ask stays low and scores that ask",
 			req: chatMsgs(
 				msg("user", "hello"), toolCall, toolResult,
 			),
 			endpoint: cacheEndpointChat,
-			wantRank: 1, wantWhy: smartReasonFloor, wantText: "hello",
+			wantRank: 0, wantWhy: smartReasonScore, wantText: "hello",
 		},
 		{
 			name: "anthropic tool_result-only trailing turn scores the earlier ask",
@@ -132,7 +132,17 @@ func TestClassifySmartRequest(t *testing.T) {
 			wantRank: 0, wantWhy: smartReasonDefault,
 		},
 		{
-			name: "tools floor raises a no-text request above the default",
+			name: "tools without toolsMinTier leave a no-text request on the default",
+			req: map[string]any{
+				"messages": []any{msg("assistant", "x")},
+				"tools":    []any{map[string]any{"type": "function"}},
+			},
+			endpoint: cacheEndpointChat,
+			wantRank: 0, wantWhy: smartReasonDefault,
+		},
+		{
+			name: "toolsMinTier raises a no-text request above the default",
+			mut:  func(c *SmartRouterConfig) { c.ToolsMinTier = "mid" },
 			req: map[string]any{
 				"messages": []any{msg("assistant", "x")},
 				"tools":    []any{map[string]any{"type": "function"}},
@@ -141,13 +151,47 @@ func TestClassifySmartRequest(t *testing.T) {
 			wantRank: 1, wantWhy: smartReasonFloor,
 		},
 		{
-			name: "tools present floors a trivial ask to rank 1",
+			name: "tools present keep a trivial ask on the low tier",
+			req: map[string]any{
+				"messages": []any{msg("user", "hello")},
+				"tools":    []any{map[string]any{"type": "function"}},
+			},
+			endpoint: cacheEndpointChat,
+			wantRank: 0, wantWhy: smartReasonScore,
+		},
+		{
+			name: "toolsMinTier floors a trivial ask with tools",
+			mut:  func(c *SmartRouterConfig) { c.ToolsMinTier = "mid" },
 			req: map[string]any{
 				"messages": []any{msg("user", "hello")},
 				"tools":    []any{map[string]any{"type": "function"}},
 			},
 			endpoint: cacheEndpointChat,
 			wantRank: 1, wantWhy: smartReasonFloor,
+		},
+		{
+			name: "toolsMinTier floors a trivial ask with tool history only",
+			mut:  func(c *SmartRouterConfig) { c.ToolsMinTier = "mid" },
+			req: chatMsgs(msg("user", "hello"),
+				map[string]any{"role": "assistant", "content": "", "tool_calls": []any{map[string]any{"id": "c1"}}},
+				map[string]any{"role": "tool", "tool_call_id": "c1", "content": "ok"}),
+			endpoint: cacheEndpointChat,
+			wantRank: 1, wantWhy: smartReasonFloor,
+		},
+		{
+			name:     "toolsMinTier does not apply without tools",
+			mut:      func(c *SmartRouterConfig) { c.ToolsMinTier = "mid" },
+			req:      chatMsgs(msg("user", "hello")),
+			endpoint: cacheEndpointChat,
+			wantRank: 0, wantWhy: smartReasonScore,
+		},
+		{
+			name: "reasoning floor beats toolsMinTier",
+			mut:  func(c *SmartRouterConfig) { c.ToolsMinTier = "mid" },
+			req: map[string]any{"messages": []any{msg("user", "hello")}, "reasoning_effort": "high",
+				"tools": []any{map[string]any{"type": "function"}}},
+			endpoint: cacheEndpointChat,
+			wantRank: 2, wantWhy: smartReasonFloor,
 		},
 		{
 			name:     "reasoning_effort high goes to top",

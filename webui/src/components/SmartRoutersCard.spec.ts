@@ -54,6 +54,11 @@ describe('SmartRoutersCard', () => {
     expect(html).toContain('prove, audit')
   })
 
+  it('shows the tools min tier only when set', async () => {
+    expect(await render([{ ...router, toolsMinTier: 'big' }])).toContain('tools min tier: big')
+    expect(await render([router])).not.toContain('tools min tier')
+  })
+
   it('shows the context window, per-tier counts and shares, reasons and escalations', async () => {
     const html = await render([router])
     expect(html).toContain('context window: 256k')

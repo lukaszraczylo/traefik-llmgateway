@@ -168,6 +168,16 @@ func TestNewModelRegistry_SmartRouters_Validation(t *testing.T) {
 			wantErr: "",
 		},
 		{
+			name:    "unknown toolsMinTier",
+			mut:     func(c *Config) { c.SmartRouters["smart/auto"].ToolsMinTier = "nope" },
+			wantErr: "toolsMinTier",
+		},
+		{
+			name:    "known toolsMinTier",
+			mut:     func(c *Config) { c.SmartRouters["smart/auto"].ToolsMinTier = "mid" },
+			wantErr: "",
+		},
+		{
 			name: "unknown rule tier",
 			mut: func(c *Config) {
 				c.SmartRouters["smart/auto"].KeywordRules = []SmartRouterKeywordRule{{Tier: "nope", Keywords: []string{"x"}}}

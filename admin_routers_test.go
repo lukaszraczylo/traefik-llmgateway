@@ -15,9 +15,10 @@ func adminRouterTestConfig() *Config {
 	cfg.SmartRouters = map[string]*SmartRouterConfig{
 		"zauto": {Tiers: []SmartRouterTier{{Name: "only", Models: []string{"zeta/z-model"}}}},
 		"auto": {
-			DefaultTier: "big",
-			Selection:   "hash",
-			MaxAttempts: 3,
+			DefaultTier:  "big",
+			ToolsMinTier: "big",
+			Selection:    "hash",
+			MaxAttempts:  3,
 			Tiers: []SmartRouterTier{
 				{Name: "small", MinScore: 0, Models: []string{"alpha/a-model-1"}},
 				{Name: "big", MinScore: 400, Models: []string{"zeta/z-model", "a-model-2"}},
@@ -41,6 +42,8 @@ func TestAdminRouters_OverviewAndCatalog(t *testing.T) {
 	assert.Equal(t, "auto", ov.Routers[0].Name, "sorted by name")
 	auto := ov.Routers[0]
 	assert.Equal(t, "big", auto.DefaultTier)
+	assert.Equal(t, "big", auto.ToolsMinTier)
+	assert.Empty(t, ov.Routers[1].ToolsMinTier, "unset toolsMinTier is omitted")
 	assert.Equal(t, "hash", auto.Selection)
 	assert.Equal(t, 3, auto.MaxAttempts)
 	assert.True(t, auto.ContextEscalation)

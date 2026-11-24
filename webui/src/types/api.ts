@@ -249,6 +249,8 @@ export interface AdminRouterStatsView {
 export interface AdminRouterView {
   name: string
   defaultTier: string
+  /** Floor tier for requests with tools; absent when unset. */
+  toolsMinTier?: string
   selection: string
   tiers: AdminRouterTierView[]
   keywordRules: AdminRouterRuleView[]

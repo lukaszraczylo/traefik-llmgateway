@@ -32,6 +32,8 @@ type SmartRouterConfig struct {
 	Weights           *SmartRouterWeights `json:"weights,omitempty"`
 	// DefaultTier serves requests with no user text; empty means the first tier.
 	DefaultTier string `json:"defaultTier,omitempty"`
+	// ToolsMinTier floors requests that carry tools or tool history; empty means no floor.
+	ToolsMinTier string `json:"toolsMinTier,omitempty"`
 	// Selection is "ordered" (default) or "hash".
 	Selection string `json:"selection,omitempty"`
 	// Tiers is ordered cheapest first; list position is the rank.
@@ -77,6 +79,7 @@ type smartRouter struct {
 	rules             []smartKeywordRule
 	weights           smartWeights
 	defaultRank       int
+	toolsMinRank      int
 	maxAttempts       int
 	contextEscalation bool
 }
@@ -233,6 +236,15 @@ func compileSmartRouter(name string, cfg *SmartRouterConfig, routers map[string]
 		defaultRank = r
 	}
 
+	toolsMinRank := 0
+	if cfg.ToolsMinTier != "" {
+		r, ok := tierRank[cfg.ToolsMinTier]
+		if !ok {
+			return nil, fmt.Errorf("llmgateway: smartRouters: router %q: toolsMinTier %q is not a tier of this router", name, cfg.ToolsMinTier)
+		}
+		toolsMinRank = r
+	}
+
 	selection := cfg.Selection
 	switch selection {
 	case "":
@@ -267,6 +279,7 @@ func compileSmartRouter(name string, cfg *SmartRouterConfig, routers map[string]
 		name:              name,
 		tiers:             tiers,
 		defaultRank:       defaultRank,
+		toolsMinRank:      toolsMinRank,
 		selection:         selection,
 		maxAttempts:       maxAttempts,
 		contextEscalation: contextEscalation,

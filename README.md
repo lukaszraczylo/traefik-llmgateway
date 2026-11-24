@@ -854,14 +854,15 @@ http:
                 - tier: large
                   keywords: ["security review", "architecture"]
               defaultTier: small
+              # toolsMinTier: medium   # optional: floor for requests with tools
               selection: ordered
               maxAttempts: 4
               contextEscalation: true
 ```
 
 - **Tiers**: list tiers cheapest first. The list position is the rank. The first tier must have `minScore: 0`, and each later `minScore` must be higher. Scores run from 0 to 1000. A request goes to the highest tier whose `minScore` its score reaches. Tiers must not share a model.
-- **Classifier signals**: the gateway scores the newest user text. It adds points for length, code markers, reasoning markers, technical vocabulary, multi-step phrasing, and several questions. It subtracts points for short, simple questions. Override the weights with `weights`.
-- **Floors**: a floor raises the tier but never lowers it. A request with `tools` starts at the second tier at least. `reasoning_effort` of `medium` or `high`, or `thinking.type: enabled`, starts at the top tier. Two or more reasoning markers also start at the top tier. A keyword rule raises the request to its tier when the text contains one of its keywords.
+- **Classifier signals**: the gateway scores the newest user text. It adds points for length, code markers, reasoning markers, technical vocabulary, multi-step phrasing, and several questions. It subtracts points for short, simple questions. A request with `tools`, or tool calls in its history, adds the `tools` weight (default 100) and nothing else, so a simple agent turn can use the lowest tier. Override the weights with `weights`.
+- **Floors**: a floor raises the tier but never lowers it. `reasoning_effort` of `medium` or `high`, or `thinking.type: enabled`, starts at the top tier. Two or more reasoning markers also start at the top tier. Set `toolsMinTier` to a tier name to floor every request with tools or tool history at that tier. It is unset by default. A keyword rule raises the request to its tier when the text contains one of its keywords.
 - **Empty text**: a request with no user text uses `defaultTier`. The default is the first tier.
 - **Selection**: `ordered` tries the models of a tier in the listed order. `hash` starts at a model chosen from the request text, which spreads load but keeps the choice stable per prompt.
 - **Escalation**: on a retryable failure, the gateway tries the next model in the same tier, then the first model of the next tier. It never moves down. It stops after `maxAttempts` upstream attempts (default 4). When a higher tier has a usable model, the plan keeps one attempt for it, so same-tier failover cannot fill every attempt. An upstream `400` is not escalated, because the request itself is invalid. Escalation works with `failover` off. Once the gateway has sent the first response byte, it cannot escalate.
