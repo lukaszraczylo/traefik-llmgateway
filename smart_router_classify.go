@@ -232,7 +232,7 @@ func extractSmartRequest(req map[string]any, endpoint string) smartExtract {
 	if endpoint == cacheEndpointMessages {
 		ex.systemText, _, _ = smartContentText(req["system"])
 	}
-	_, images := smartPromptSize(req, endpoint)
+	_, images := smartMessagesSize(req, endpoint)
 	ex.hasImage = images > 0
 
 	msgs, _ := req["messages"].([]any)
@@ -298,10 +298,20 @@ func smartContentText(content any) (text string, images int, toolParts bool) {
 	return "", 0, false
 }
 
-// smartPromptSize walks every message, plus the Anthropic system field, and
-// returns the total text length and image-part count. Images inside
-// tool_result content are included. It allocates nothing.
+// smartPromptSize returns the prompt's text length and image-part count:
+// messages plus the tools schema, whose bytes count toward the context window.
 func smartPromptSize(req map[string]any, endpoint string) (chars, images int) {
+	chars, images = smartMessagesSize(req, endpoint)
+	if tools, ok := req["tools"].([]any); ok && len(tools) > 0 {
+		chars += smartValueSize(tools)
+	}
+	return chars, images
+}
+
+// smartMessagesSize walks every message, plus the Anthropic system field, and
+// returns the text and tool-argument length and the image-part count. Images
+// inside tool_result content are included.
+func smartMessagesSize(req map[string]any, endpoint string) (chars, images int) {
 	if endpoint == cacheEndpointMessages {
 		c, i := smartContentSize(req["system"], 0)
 		chars, images = chars+c, images+i
@@ -313,7 +323,7 @@ func smartPromptSize(req map[string]any, endpoint string) (chars, images int) {
 			continue
 		}
 		c, i := smartContentSize(msg["content"], 0)
-		chars, images = chars+c, images+i
+		chars, images = chars+c+smartToolCallsSize(msg["tool_calls"]), images+i
 	}
 	return chars, images
 }
@@ -338,6 +348,8 @@ func smartContentSize(content any, depth int) (chars, images int) {
 				}
 			case "image_url", "image", "input_image":
 				images++
+			case "tool_use":
+				chars += smartValueSize(part["input"])
 			case "tool_result":
 				if depth < 1 {
 					ic, ii := smartContentSize(part["content"], depth+1)
