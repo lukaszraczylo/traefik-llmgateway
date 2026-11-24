@@ -22,11 +22,31 @@ type routerEscalationKey struct {
 	router, from, to string
 }
 
+// routerShadowKey counts requests by the live tier and the tier shadowWeights chose.
+type routerShadowKey struct {
+	router, live, shadow string
+}
+
+// routerOutcomeKey counts finished requests by first attempted tier, routing reason and outcome.
+type routerOutcomeKey struct {
+	router, tier, reason, outcome string
+}
+
+const (
+	routerOutcomeOK        = "ok"
+	routerOutcomeError     = "error"
+	routerOutcomeEscalated = "escalated"
+)
+
+var routerOutcomeNames = [...]string{routerOutcomeOK, routerOutcomeError, routerOutcomeEscalated}
+
 // routerStats holds per-instance router counters. Keys come from router and
 // tier names in the config, so cardinality is bounded by the config.
 type routerStats struct {
 	requests    map[routerRequestKey]int64
 	escalations map[routerEscalationKey]int64
+	shadow      map[routerShadowKey]int64
+	outcomes    map[routerOutcomeKey]int64
 	mu          sync.Mutex
 }
 
@@ -34,7 +54,45 @@ func newRouterStats() *routerStats {
 	return &routerStats{
 		requests:    make(map[routerRequestKey]int64),
 		escalations: make(map[routerEscalationKey]int64),
+		shadow:      make(map[routerShadowKey]int64),
+		outcomes:    make(map[routerOutcomeKey]int64),
 	}
+}
+
+func (s *routerStats) addShadow(k routerShadowKey) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.shadow[k]++
+	s.mu.Unlock()
+}
+
+func (s *routerStats) addOutcome(k routerOutcomeKey) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.outcomes[k]++
+	s.mu.Unlock()
+}
+
+// extraSnapshot copies the shadow and outcome counters.
+func (s *routerStats) extraSnapshot() (map[routerShadowKey]int64, map[routerOutcomeKey]int64) {
+	shadow := make(map[routerShadowKey]int64)
+	outcomes := make(map[routerOutcomeKey]int64)
+	if s == nil {
+		return shadow, outcomes
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for k, v := range s.shadow {
+		shadow[k] = v
+	}
+	for k, v := range s.outcomes {
+		outcomes[k] = v
+	}
+	return shadow, outcomes
 }
 
 func (s *routerStats) addRequest(k routerRequestKey) {
@@ -91,6 +149,13 @@ func (g *Gateway) recordRouterAttempt(plan *routerPlan, i int, endpoint string, 
 			g.routerStats.addRequest(k)
 		}
 		g.countRouterShared(func(bucket string) string { return routerReqKeyFor(k, bucket) })
+		if plan.shadowTier != "" {
+			sk := routerShadowKey{router: plan.router, live: plan.startTier, shadow: plan.shadowTier}
+			if metricsEnabled(g.cfg) {
+				g.routerStats.addShadow(sk)
+			}
+			g.countRouterShared(func(bucket string) string { return routerShadowKeyFor(sk, bucket) })
+		}
 		return
 	}
 	from, to := plan.entries[i-1].tier, plan.entries[i].tier
@@ -103,6 +168,23 @@ func (g *Gateway) recordRouterAttempt(plan *routerPlan, i int, endpoint string, 
 	}
 	g.countRouterShared(func(bucket string) string { return routerEscKeyFor(ek, bucket) })
 	g.recordRouterEvent(plan, i, endpoint, scopes, fmt.Sprintf("router %q escalated from tier %q to tier %q", plan.router, from, to))
+}
+
+// recordRouterOutcome counts a finished request once. attempt is the plan
+// index of the last attempt; served says whether the client got a 2xx.
+func (g *Gateway) recordRouterOutcome(plan *routerPlan, attempt int, served bool) {
+	outcome := routerOutcomeError
+	if served {
+		outcome = routerOutcomeOK
+		if plan.entries[attempt].tier != plan.entries[0].tier {
+			outcome = routerOutcomeEscalated
+		}
+	}
+	k := routerOutcomeKey{router: plan.router, tier: plan.entries[0].tier, reason: routerRequestReason(plan), outcome: outcome}
+	if metricsEnabled(g.cfg) {
+		g.routerStats.addOutcome(k)
+	}
+	g.countRouterShared(func(bucket string) string { return routerOutcomeKeyFor(k, bucket) })
 }
 
 // recordRouterExhausted records an event when the last plan entry failed.

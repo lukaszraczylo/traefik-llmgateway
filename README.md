@@ -855,6 +855,7 @@ http:
                   keywords: ["security review", "architecture"]
               defaultTier: small
               # toolsMinTier: medium   # optional: floor for requests with tools
+              # shadowWeights: {code: 0}   # optional: compare weights without routing on them
               selection: ordered
               maxAttempts: 4
               contextEscalation: true
@@ -875,7 +876,9 @@ http:
 - **Validation at construction**: a router needs at least one tier. A router name must not name a configured provider prefix, an explicit model id, or a model alias. A tier model must not itself be a router. A keyword rule must name a real tier.
 - **Metrics**: `llmgateway_router_requests_total{router,tier,reason}` counts each request once. `reason` is `score`, `keyword`, `floor`, `default`, or `skipped`. `skipped` means the first attempted tier is above the classified tier because lower tiers had no usable target. Such targets fail the context-window, vision, cost-budget, access, or resolution checks. `llmgateway_router_escalations_total{router,from_tier,to_tier}` counts each move to a higher tier. Same-tier failover is not counted. Labels come only from configured router and tier names.
 - **Events**: the admin events feed records a `router_escalation` event on a cross-tier escalation or when a router exhausts its attempts. A rate gate limits the events to one per 30 seconds per replica, and the next event reports how many it suppressed.
-- **Admin**: `GET /admin/api/overview` and `GET /admin/api/catalog` list routers. The Models page shows a Smart routers card, and the Config page has a Smart router helper that builds a snippet.
+- **Shadow weights**: set `shadowWeights` (same shape as `weights`) to score each request a second time with other weights. The shadow result never changes routing. The gateway counts only totals: how often the live tier and the shadow tier agree, and how each request ended. It stores no prompt text and no per-request record. The counters use the same monthly buckets as the other router counters, shared through Redis when available and kept per instance otherwise.
+- **Outcomes**: each request counts once by first attempted tier, routing reason, and outcome. `ok` means the first attempted tier served a 2xx. `escalated` means a higher tier served it. `error` means the final response was not a 2xx.
+- **Admin**: `GET /admin/api/overview` and `GET /admin/api/catalog` list routers. The overview lists `toolsMinTier`, `shadowEnabled`, and the `shadow` and `outcomes` counts. The Models page shows a Smart routers card with a shadow agreement matrix and outcome table, and the Config page has a Smart router helper that builds a snippet.
 
 **Limitations**
 

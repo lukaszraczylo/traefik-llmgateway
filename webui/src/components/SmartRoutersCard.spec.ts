@@ -11,6 +11,7 @@ const router: AdminRouterView = {
   selection: 'hash',
   maxAttempts: 3,
   contextEscalation: false,
+  shadowEnabled: false,
   tiers: [
     { name: 'small', minScore: 0, models: ['openai/gpt-5-mini'] },
     { name: 'big', minScore: 400, models: ['anthropic/claude-opus', 'openai/gpt-5'] },
@@ -29,6 +30,8 @@ const router: AdminRouterView = {
       { name: 'score', count: 3 },
     ],
     escalations: [{ from: 'small', to: 'big', count: 2 }],
+    shadow: [],
+    outcomes: [],
   },
 }
 
@@ -57,6 +60,62 @@ describe('SmartRoutersCard', () => {
   it('shows the tools min tier only when set', async () => {
     expect(await render([{ ...router, toolsMinTier: 'big' }])).toContain('tools min tier: big')
     expect(await render([router])).not.toContain('tools min tier')
+  })
+
+  it('renders the shadow agreement matrix only when shadow weights are set', async () => {
+    const shadowed: AdminRouterView = {
+      ...router,
+      shadowEnabled: true,
+      stats: {
+        ...router.stats!,
+        shadow: [
+          { live: 'small', shadow: 'small', count: 6 },
+          { live: 'big', shadow: 'small', count: 2 },
+          { live: 'big', shadow: 'big', count: 2 },
+        ],
+      },
+    }
+    const html = await render([shadowed])
+    expect(html).toContain('Shadow weights')
+    expect(html).toContain('aria-label="Shadow agreement matrix for auto"')
+    expect(html).toContain('agreement: 80%')
+    expect(html).toMatch(/<th[^>]*>small<\/th>/)
+    expect(html).toMatch(/data-cell="big:small"[^>]*>2</)
+    expect(html).toMatch(/data-cell="small:big"[^>]*>0</)
+    expect(await render([router])).not.toContain('Shadow weights')
+  })
+
+  it('shows an empty shadow matrix without NaN', async () => {
+    const html = await render([{ ...router, shadowEnabled: true }])
+    expect(html).toContain('Shadow weights')
+    expect(html).toContain('agreement: 0%')
+    expect(html).not.toContain('NaN')
+  })
+
+  it('renders outcome counts per tier summed over reasons', async () => {
+    const withOutcomes: AdminRouterView = {
+      ...router,
+      stats: {
+        ...router.stats!,
+        outcomes: [
+          { tier: 'small', reason: 'score', outcome: 'ok', count: 3 },
+          { tier: 'small', reason: 'keyword', outcome: 'ok', count: 1 },
+          { tier: 'small', reason: 'score', outcome: 'escalated', count: 2 },
+          { tier: 'big', reason: 'score', outcome: 'error', count: 1 },
+        ],
+      },
+    }
+    const html = await render([withOutcomes])
+    expect(html).toContain('aria-label="Outcomes for auto"')
+    expect(html).toMatch(/data-cell="small:ok"[^>]*>4</)
+    expect(html).toMatch(/data-cell="small:escalated"[^>]*>2</)
+    expect(html).toMatch(/data-cell="big:error"[^>]*>1</)
+    expect(await render([router])).not.toContain('Outcomes for')
+  })
+
+  it('labels shadow and outcome scope like the other counts', async () => {
+    const html = await render([{ ...router, shadowEnabled: true, stats: { ...router.stats!, scope: 'instance' } }])
+    expect(html).toContain('This gateway instance, since start')
   })
 
   it('shows the context window, per-tier counts and shares, reasons and escalations', async () => {
@@ -91,7 +150,7 @@ describe('SmartRoutersCard', () => {
   it('handles zero-filled stats without dividing by zero', async () => {
     const zero: AdminRouterView = {
       ...router,
-      stats: { scope: 'instance', requests: 0, tiers: [{ name: 'small', count: 0 }, { name: 'big', count: 0 }], reasons: [], escalations: [] },
+      stats: { scope: 'instance', requests: 0, tiers: [{ name: 'small', count: 0 }, { name: 'big', count: 0 }], reasons: [], escalations: [], shadow: [], outcomes: [] },
     }
     const html = await render([zero])
     expect(html).toContain('0 req (0%)')

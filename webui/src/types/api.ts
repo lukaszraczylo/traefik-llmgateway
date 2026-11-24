@@ -236,6 +236,21 @@ export interface AdminRouterEscalationView {
   count: number
 }
 
+/** One live-tier by shadow-tier matrix cell (admin_routers.go: adminRouterShadowView). */
+export interface AdminRouterShadowView {
+  live: string
+  shadow: string
+  count: number
+}
+
+/** Finished requests by first attempted tier, routing reason and outcome (admin_routers.go: adminRouterOutcomeView). */
+export interface AdminRouterOutcomeView {
+  tier: string
+  reason: string
+  outcome: 'ok' | 'error' | 'escalated'
+  count: number
+}
+
 /** Router counters (admin_routers.go: adminRouterStatsView); scope "shared" sums all gateway instances this month, "instance" is this process since start. */
 export interface AdminRouterStatsView {
   scope: 'shared' | 'instance'
@@ -243,6 +258,9 @@ export interface AdminRouterStatsView {
   tiers: AdminRouterCountView[]
   reasons: AdminRouterCountView[]
   escalations: AdminRouterEscalationView[]
+  /** Non-zero cells of the live-by-shadow tier matrix; empty without shadowWeights. */
+  shadow: AdminRouterShadowView[]
+  outcomes: AdminRouterOutcomeView[]
 }
 
 /** One configured smart router, read-only (admin_routers.go: adminRouterView). */
@@ -251,6 +269,8 @@ export interface AdminRouterView {
   defaultTier: string
   /** Floor tier for requests with tools; absent when unset. */
   toolsMinTier?: string
+  /** True when the router has shadowWeights, so the matrix is meaningful even when empty. */
+  shadowEnabled: boolean
   selection: string
   tiers: AdminRouterTierView[]
   keywordRules: AdminRouterRuleView[]

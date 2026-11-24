@@ -27,6 +27,21 @@ type adminRouterEscalationView struct {
 	Count int64  `json:"count"`
 }
 
+// adminRouterShadowView is one cell of the live-tier by shadow-tier agreement matrix.
+type adminRouterShadowView struct {
+	Live   string `json:"live"`
+	Shadow string `json:"shadow"`
+	Count  int64  `json:"count"`
+}
+
+// adminRouterOutcomeView counts finished requests by first attempted tier, reason and outcome.
+type adminRouterOutcomeView struct {
+	Tier    string `json:"tier"`
+	Reason  string `json:"reason"`
+	Outcome string `json:"outcome"`
+	Count   int64  `json:"count"`
+}
+
 // adminRouterStatsView holds router counters. Scope "shared" sums all gateway
 // instances this month (Redis); "instance" is this process since start.
 type adminRouterStatsView struct {
@@ -34,6 +49,8 @@ type adminRouterStatsView struct {
 	Tiers       []adminRouterCountView      `json:"tiers"`
 	Reasons     []adminRouterCountView      `json:"reasons"`
 	Escalations []adminRouterEscalationView `json:"escalations"`
+	Shadow      []adminRouterShadowView     `json:"shadow"`
+	Outcomes    []adminRouterOutcomeView    `json:"outcomes"`
 	Requests    int64                       `json:"requests"`
 }
 
@@ -50,11 +67,12 @@ type adminRouterView struct {
 	Stats             adminRouterStatsView  `json:"stats"`
 	MaxAttempts       int                   `json:"maxAttempts"`
 	ContextEscalation bool                  `json:"contextEscalation"`
+	ShadowEnabled     bool                  `json:"shadowEnabled"`
 }
 
 // buildAdminRouterViews lists every router sorted by name; never nil.
 func (g *Gateway) buildAdminRouterViews() []adminRouterView {
-	reqs, escs, scope := g.routerStatsSnapshot(time.Now())
+	counters := g.routerStatsSnapshot(time.Now())
 	out := make([]adminRouterView, 0, len(g.registry.routers))
 	for _, rt := range g.registry.routers {
 		v := adminRouterView{
@@ -62,6 +80,7 @@ func (g *Gateway) buildAdminRouterViews() []adminRouterView {
 			Selection:         rt.selection,
 			MaxAttempts:       rt.maxAttempts,
 			ContextEscalation: rt.contextEscalation,
+			ShadowEnabled:     rt.shadow != nil,
 			Tiers:             make([]adminRouterTierView, len(rt.tiers)),
 			KeywordRules:      make([]adminRouterRuleView, len(rt.rules)),
 		}
@@ -85,8 +104,8 @@ func (g *Gateway) buildAdminRouterViews() []adminRouterView {
 			tokens := int(meta.ContextTokens)
 			v.ContextTokens = &tokens
 		}
-		v.Stats = buildAdminRouterStats(rt, reqs, escs)
-		v.Stats.Scope = scope
+		v.Stats = buildAdminRouterStats(rt, counters)
+		v.Stats.Scope = counters.scope
 		out = append(out, v)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
@@ -95,11 +114,14 @@ func (g *Gateway) buildAdminRouterViews() []adminRouterView {
 
 // buildAdminRouterStats zero-fills every configured tier and sorts reasons and
 // escalations by name so the response is stable.
-func buildAdminRouterStats(rt *smartRouter, reqs map[routerRequestKey]int64, escs map[routerEscalationKey]int64) adminRouterStatsView {
+func buildAdminRouterStats(rt *smartRouter, c routerCounters) adminRouterStatsView {
+	reqs, escs := c.reqs, c.escs
 	st := adminRouterStatsView{
 		Tiers:       make([]adminRouterCountView, len(rt.tiers)),
 		Reasons:     []adminRouterCountView{},
 		Escalations: []adminRouterEscalationView{},
+		Shadow:      []adminRouterShadowView{},
+		Outcomes:    []adminRouterOutcomeView{},
 	}
 	tierIdx := make(map[string]int, len(rt.tiers))
 	for i, t := range rt.tiers {
@@ -133,7 +155,37 @@ func buildAdminRouterStats(rt *smartRouter, reqs map[routerRequestKey]int64, esc
 		}
 		return a.To < b.To
 	})
+	st.Shadow = buildAdminRouterShadow(rt, c.shadow)
+	st.Outcomes = buildAdminRouterOutcomes(rt, c.outcomes)
 	return st
+}
+
+// buildAdminRouterShadow lists the non-zero matrix cells in tier order.
+func buildAdminRouterShadow(rt *smartRouter, counts map[routerShadowKey]int64) []adminRouterShadowView {
+	out := []adminRouterShadowView{}
+	for _, live := range rt.tiers {
+		for _, shadow := range rt.tiers {
+			if n := counts[routerShadowKey{router: rt.name, live: live.name, shadow: shadow.name}]; n > 0 {
+				out = append(out, adminRouterShadowView{Live: live.name, Shadow: shadow.name, Count: n})
+			}
+		}
+	}
+	return out
+}
+
+// buildAdminRouterOutcomes lists the non-zero outcome counts in tier, reason, outcome order.
+func buildAdminRouterOutcomes(rt *smartRouter, counts map[routerOutcomeKey]int64) []adminRouterOutcomeView {
+	out := []adminRouterOutcomeView{}
+	for _, t := range rt.tiers {
+		for _, reason := range routerReasonNames {
+			for _, outcome := range routerOutcomeNames {
+				if n := counts[routerOutcomeKey{router: rt.name, tier: t.name, reason: reason, outcome: outcome}]; n > 0 {
+					out = append(out, adminRouterOutcomeView{Tier: t.name, Reason: reason, Outcome: outcome, Count: n})
+				}
+			}
+		}
+	}
+	return out
 }
 
 // routersByTarget maps each router target string to the sorted router names that list it.

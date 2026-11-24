@@ -9,6 +9,8 @@ const (
 	kindRouter       = "router"
 	metricRouterReq  = "rreq"
 	metricRouterEsc  = "resc"
+	metricRouterShd  = "rshd"
+	metricRouterOut  = "rout"
 	routerKeySep     = "/"
 	routerReasonsMax = 5
 )
@@ -21,6 +23,14 @@ func routerReqKeyFor(k routerRequestKey, bucket string) string {
 
 func routerEscKeyFor(k routerEscalationKey, bucket string) string {
 	return windowKeyForBucket(kindRouter, k.router, metricRouterEsc+routerKeySep+k.from+routerKeySep+k.to, windowMonth, bucket)
+}
+
+func routerShadowKeyFor(k routerShadowKey, bucket string) string {
+	return windowKeyForBucket(kindRouter, k.router, metricRouterShd+routerKeySep+k.live+routerKeySep+k.shadow, windowMonth, bucket)
+}
+
+func routerOutcomeKeyFor(k routerOutcomeKey, bucket string) string {
+	return windowKeyForBucket(kindRouter, k.router, metricRouterOut+routerKeySep+k.tier+routerKeySep+k.reason+routerKeySep+k.outcome, windowMonth, bucket)
 }
 
 // routerSharedEnabled reports whether router counters go to the shared store; false keeps them per instance.
@@ -37,23 +47,36 @@ func (g *Gateway) countRouterShared(key func(bucket string) string) {
 	g.limiter.countAsync([]counterIncr{{key: key(bucket), delta: 1, ttl: monthWindowTTL, enforceTTL: enforceTTLMonthWindow}})
 }
 
+// routerCounters is one read of every router counter family and the scope it covers.
+type routerCounters struct {
+	reqs     map[routerRequestKey]int64
+	escs     map[routerEscalationKey]int64
+	shadow   map[routerShadowKey]int64
+	outcomes map[routerOutcomeKey]int64
+	scope    string
+}
+
 // routerStatsSnapshot returns the counters the admin view shows and their scope.
-func (g *Gateway) routerStatsSnapshot(now time.Time) (map[routerRequestKey]int64, map[routerEscalationKey]int64, string) {
+func (g *Gateway) routerStatsSnapshot(now time.Time) routerCounters {
 	if g.routerSharedEnabled() {
-		if reqs, escs, ok := g.readRouterShared(now); ok {
-			return reqs, escs, statsScopeShared
+		if c, ok := g.readRouterShared(now); ok {
+			c.scope = statsScopeShared
+			return c
 		}
 	}
 	reqs, escs := g.routerStats.snapshot()
-	return reqs, escs, statsScopeInstance
+	shadow, outcomes := g.routerStats.extraSnapshot()
+	return routerCounters{reqs: reqs, escs: escs, shadow: shadow, outcomes: outcomes, scope: statsScopeInstance}
 }
 
 // readRouterShared reads every config-derived key in one chunked round trip; ok is false on any store failure.
-func (g *Gateway) readRouterShared(now time.Time) (map[routerRequestKey]int64, map[routerEscalationKey]int64, bool) {
+func (g *Gateway) readRouterShared(now time.Time) (routerCounters, bool) {
 	bucket := bucketFor(now, windowMonth)
 	var reqKeys []routerRequestKey
 	var escKeys []routerEscalationKey
-	var reqNames, escNames []string
+	var shdKeys []routerShadowKey
+	var outKeys []routerOutcomeKey
+	var reqNames, escNames, outNames, shdNames []string
 	for _, rt := range g.registry.routers {
 		for _, t := range rt.tiers {
 			for _, reason := range routerReasonNames {
@@ -69,27 +92,61 @@ func (g *Gateway) readRouterShared(now time.Time) (map[routerRequestKey]int64, m
 				escKeys = append(escKeys, k)
 				escNames = append(escNames, routerEscKeyFor(k, bucket))
 			}
+			for _, reason := range routerReasonNames {
+				for _, outcome := range routerOutcomeNames {
+					k := routerOutcomeKey{router: rt.name, tier: t.name, reason: reason, outcome: outcome}
+					outKeys = append(outKeys, k)
+					outNames = append(outNames, routerOutcomeKeyFor(k, bucket))
+				}
+			}
+			if rt.shadow == nil {
+				continue
+			}
+			for _, to := range rt.tiers {
+				k := routerShadowKey{router: rt.name, live: t.name, shadow: to.name}
+				shdKeys = append(shdKeys, k)
+				shdNames = append(shdNames, routerShadowKeyFor(k, bucket))
+			}
 		}
 	}
-	keys := append(reqNames, escNames...)
-	reqs := make(map[routerRequestKey]int64)
-	escs := make(map[routerEscalationKey]int64)
-	if len(keys) == 0 {
-		return reqs, escs, true
+	names := append(append(append(reqNames, escNames...), outNames...), shdNames...)
+	c := routerCounters{
+		reqs:     make(map[routerRequestKey]int64),
+		escs:     make(map[routerEscalationKey]int64),
+		shadow:   make(map[routerShadowKey]int64),
+		outcomes: make(map[routerOutcomeKey]int64),
 	}
-	vals, ok := g.limiter.chunkedGetMulti(keys, usageModelsChunkKeys)
+	if len(names) == 0 {
+		return c, true
+	}
+	vals, ok := g.limiter.chunkedGetMulti(names, usageModelsChunkKeys)
 	if !ok {
-		return nil, nil, false
+		return routerCounters{}, false
 	}
-	for i, k := range reqKeys {
-		if vals[i] > 0 {
-			reqs[k] = vals[i]
+	pos := 0
+	for _, k := range reqKeys {
+		if vals[pos] > 0 {
+			c.reqs[k] = vals[pos]
 		}
+		pos++
 	}
-	for i, k := range escKeys {
-		if v := vals[len(reqKeys)+i]; v > 0 {
-			escs[k] = v
+	for _, k := range escKeys {
+		if vals[pos] > 0 {
+			c.escs[k] = vals[pos]
 		}
+		pos++
 	}
-	return reqs, escs, true
+	for _, k := range outKeys {
+		if vals[pos] > 0 {
+			c.outcomes[k] = vals[pos]
+		}
+		pos++
+	}
+	for _, k := range shdKeys {
+		if vals[pos] > 0 {
+			c.shadow[k] = vals[pos]
+		}
+		pos++
+	}
+	return c, true
 }

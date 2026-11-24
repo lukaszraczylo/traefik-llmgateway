@@ -31,7 +31,9 @@ type routerPlan struct {
 	router    string
 	reason    string
 	startTier string
-	entries   []routerPlanEntry
+	// shadowTier is the tier the router's shadowWeights chose; empty when unset.
+	shadowTier string
+	entries    []routerPlanEntry
 	// promptBytes is the size estimate that calibration compares with reported usage.
 	promptBytes int64
 	hasImage    bool
@@ -87,7 +89,8 @@ func (g *Gateway) planSmartRouter(rt *smartRouter, req map[string]any, endpoint 
 	}
 	g.registry.noteRouterShadow(rt.name, grp)
 
-	start, reason, scored, hasImage := classifySmartRequest(rt, req, endpoint)
+	cls := classifySmart(rt, req, endpoint)
+	start, reason, scored, hasImage := cls.rank, cls.reason, cls.scoredText, cls.hasImage
 	promptBytes, imageTokens := smartPromptBytes(req, endpoint)
 	facts := routerRequestFacts{
 		hasImage:     hasImage,
@@ -97,6 +100,9 @@ func (g *Gateway) planSmartRouter(rt *smartRouter, req map[string]any, endpoint 
 		costBudget:   !g.cfg.AllowUnpricedWithCostBudget && scopesHaveCostBudget(scopes),
 	}
 	plan := &routerPlan{router: rt.name, reason: reason, startTier: rt.tiers[start].name, promptBytes: promptBytes, hasImage: hasImage}
+	if cls.shadowRank >= 0 {
+		plan.shadowTier = rt.tiers[cls.shadowRank].name
+	}
 	seen := make(map[string]bool)
 	var skips routerSkips
 

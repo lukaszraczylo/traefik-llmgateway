@@ -58,13 +58,31 @@ type smartExtract struct {
 	toolHist   bool
 }
 
+// smartClassification is the full result of scoring one request.
+type smartClassification struct {
+	reason     string
+	scoredText string
+	rank       int
+	// shadowRank is the rank the router's shadowWeights would have chosen, or -1 when unset.
+	shadowRank int
+	hasImage   bool
+}
+
 // classifySmartRequest scores req and returns the starting tier rank, why that
 // rank won, the bounded text it scored (stable input for hash selection) and
 // whether the request carries image input. It never lowers a rank: floors and
 // keyword rules only raise the score-derived one.
 func classifySmartRequest(rt *smartRouter, req map[string]any, endpoint string) (rank int, reason string, scoredText string, hasImage bool) {
+	c := classifySmart(rt, req, endpoint)
+	return c.rank, c.reason, c.scoredText, c.hasImage
+}
+
+// classifySmart is classifySmartRequest plus the shadow rank. The shadow pass
+// reuses the extracted features and only re-weights them.
+func classifySmart(rt *smartRouter, req map[string]any, endpoint string) smartClassification {
 	ex := extractSmartRequest(req, endpoint)
 	top := len(rt.tiers) - 1
+	out := smartClassification{shadowRank: -1, hasImage: ex.hasImage}
 
 	floorRank := 0
 	if ex.hasTools || ex.toolHist {
@@ -75,20 +93,24 @@ func classifySmartRequest(rt *smartRouter, req map[string]any, endpoint string) 
 	}
 
 	if ex.userText == "" {
-		rank = rt.defaultRank
-		reason = smartReasonDefault
-		if floorRank > rank {
-			rank = floorRank
-			reason = smartReasonFloor
+		out.rank = rt.defaultRank
+		out.reason = smartReasonDefault
+		if floorRank > out.rank {
+			out.rank = floorRank
+			out.reason = smartReasonFloor
 		}
-		return rank, reason, boundSmartText(ex.systemText, smartTextCap), ex.hasImage
+		out.scoredText = boundSmartText(ex.systemText, smartTextCap)
+		if rt.shadow != nil {
+			out.shadowRank = out.rank
+		}
+		return out
 	}
 
 	userLen := len(ex.userText)
 	text := strings.ToLower(boundSmartText(ex.userText, smartTextCap))
-	scoredText = text
+	out.scoredText = text
 	if ex.systemText != "" {
-		scoredText = text + "\n" + boundSmartText(ex.systemText, smartSystemCap)
+		out.scoredText = text + "\n" + boundSmartText(ex.systemText, smartSystemCap)
 	}
 
 	reasoningHits := countSmartMarkers(text, smartReasoningMarkers)
@@ -96,7 +118,8 @@ func classifySmartRequest(rt *smartRouter, req map[string]any, endpoint string) 
 		floorRank = top
 	}
 
-	scoreRank := smartTierForScore(rt, scoreSmartText(rt, text, userLen, reasoningHits, ex.hasTools || ex.toolHist))
+	sig := smartSignalsFor(text, userLen, reasoningHits, ex.hasTools || ex.toolHist)
+	scoreRank := smartTierForScore(rt, sig.score(rt.weights))
 	kwRank := -1
 	for i := 0; i < len(rt.rules); i++ {
 		if rt.rules[i].rank > kwRank && containsAnySmart(text, rt.rules[i].keywords) {
@@ -104,33 +127,61 @@ func classifySmartRequest(rt *smartRouter, req map[string]any, endpoint string) 
 		}
 	}
 
-	rank = scoreRank
-	reason = smartReasonScore
-	if kwRank > rank {
-		rank = kwRank
-		reason = smartReasonKeyword
+	out.rank = scoreRank
+	out.reason = smartReasonScore
+	if kwRank > out.rank {
+		out.rank = kwRank
+		out.reason = smartReasonKeyword
 	}
-	if floorRank > rank {
-		rank = floorRank
-		reason = smartReasonFloor
+	if floorRank > out.rank {
+		out.rank = floorRank
+		out.reason = smartReasonFloor
 	}
-	return rank, reason, scoredText, ex.hasImage
+	if rt.shadow != nil {
+		shadow := smartTierForScore(rt, sig.score(*rt.shadow))
+		if kwRank > shadow {
+			shadow = kwRank
+		}
+		if floorRank > shadow {
+			shadow = floorRank
+		}
+		out.shadowRank = shadow
+	}
+	return out
 }
 
-func scoreSmartText(rt *smartRouter, text string, userLen, reasoningHits int, tools bool) int {
-	w := rt.weights
-	score := smartLengthScore(w.length, userLen)
-	score += w.code * smartHitFraction(countSmartMarkers(text, smartCodeMarkers)) / smartPerMille
-	score += w.reasoning * smartHitFraction(reasoningHits) / smartPerMille
-	score += w.technical * smartHitFraction(countSmartMarkers(text, smartTechnicalMarkers)) / smartPerMille
-	score += w.multiStep * smartHitFraction(countSmartMarkers(text, smartMultiStepMarkers)) / smartPerMille
-	if strings.Count(text, "?") >= smartMultiQuestionAt {
+// smartSignals are the weight-independent features of one request's text.
+type smartSignals struct {
+	userLen, reasoningHits, codeHits, technicalHits, multiStepHits int
+	multiQuestion, simple, tools                                   bool
+}
+
+func smartSignalsFor(text string, userLen, reasoningHits int, tools bool) smartSignals {
+	return smartSignals{
+		userLen:       userLen,
+		reasoningHits: reasoningHits,
+		codeHits:      countSmartMarkers(text, smartCodeMarkers),
+		technicalHits: countSmartMarkers(text, smartTechnicalMarkers),
+		multiStepHits: countSmartMarkers(text, smartMultiStepMarkers),
+		multiQuestion: strings.Count(text, "?") >= smartMultiQuestionAt,
+		simple:        userLen/4 < smartSimpleMaxTokens && containsAnySmart(text, smartSimpleMarkers),
+		tools:         tools,
+	}
+}
+
+func (sg smartSignals) score(w smartWeights) int {
+	score := smartLengthScore(w.length, sg.userLen)
+	score += w.code * smartHitFraction(sg.codeHits) / smartPerMille
+	score += w.reasoning * smartHitFraction(sg.reasoningHits) / smartPerMille
+	score += w.technical * smartHitFraction(sg.technicalHits) / smartPerMille
+	score += w.multiStep * smartHitFraction(sg.multiStepHits) / smartPerMille
+	if sg.multiQuestion {
 		score += w.multiQuestion
 	}
-	if userLen/4 < smartSimpleMaxTokens && containsAnySmart(text, smartSimpleMarkers) {
+	if sg.simple {
 		score -= w.simple
 	}
-	if tools {
+	if sg.tools {
 		score += w.tools
 	}
 	if score < 0 {

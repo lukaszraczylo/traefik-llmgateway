@@ -30,6 +30,8 @@ type SmartRouterConfig struct {
 	// ContextEscalation skips targets whose known context window is too small; nil means on.
 	ContextEscalation *bool               `json:"contextEscalation,omitempty"`
 	Weights           *SmartRouterWeights `json:"weights,omitempty"`
+	// ShadowWeights scores each request a second time for comparison; it never changes routing.
+	ShadowWeights *SmartRouterWeights `json:"shadowWeights,omitempty"`
 	// DefaultTier serves requests with no user text; empty means the first tier.
 	DefaultTier string `json:"defaultTier,omitempty"`
 	// ToolsMinTier floors requests that carry tools or tool history; empty means no floor.
@@ -73,6 +75,7 @@ type SmartRouterWeights struct {
 // smartRouter is a validated SmartRouterConfig with defaults applied and
 // keywords lowercased; it is immutable after construction.
 type smartRouter struct {
+	shadow            *smartWeights
 	name              string
 	selection         string
 	tiers             []smartTier
@@ -124,7 +127,7 @@ func buildSmartWeights(w *SmartRouterWeights) smartWeights {
 	}
 }
 
-func validateSmartWeights(router string, w *SmartRouterWeights) error {
+func validateSmartWeights(router, label string, w *SmartRouterWeights) error {
 	if w == nil {
 		return nil
 	}
@@ -138,7 +141,7 @@ func validateSmartWeights(router string, w *SmartRouterWeights) error {
 	}
 	for _, n := range named {
 		if n.v != nil && (*n.v < 0 || *n.v > maxSmartMinScore) {
-			return fmt.Errorf("llmgateway: smartRouters: router %q: weight %q must be between 0 and %d, got %d", router, n.name, maxSmartMinScore, *n.v)
+			return fmt.Errorf("llmgateway: smartRouters: router %q: %s %q must be between 0 and %d, got %d", router, label, n.name, maxSmartMinScore, *n.v)
 		}
 	}
 	return nil
@@ -271,8 +274,16 @@ func compileSmartRouter(name string, cfg *SmartRouterConfig, routers map[string]
 	if err != nil {
 		return nil, err
 	}
-	if wErr := validateSmartWeights(name, cfg.Weights); wErr != nil {
+	if wErr := validateSmartWeights(name, "weight", cfg.Weights); wErr != nil {
 		return nil, wErr
+	}
+	var shadow *smartWeights
+	if cfg.ShadowWeights != nil {
+		if wErr := validateSmartWeights(name, "shadowWeights weight", cfg.ShadowWeights); wErr != nil {
+			return nil, wErr
+		}
+		sw := buildSmartWeights(cfg.ShadowWeights)
+		shadow = &sw
 	}
 
 	return &smartRouter{
@@ -285,6 +296,7 @@ func compileSmartRouter(name string, cfg *SmartRouterConfig, routers map[string]
 		contextEscalation: contextEscalation,
 		rules:             rules,
 		weights:           buildSmartWeights(cfg.Weights),
+		shadow:            shadow,
 	}, nil
 }
 
