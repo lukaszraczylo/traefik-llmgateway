@@ -154,7 +154,10 @@ func (g *Gateway) planSmartRouter(rt *smartRouter, req map[string]any, endpoint 
 		}
 		room := rt.maxAttempts - len(plan.entries)
 		take := len(cands)
-		if take >= room && g.routerHigherTierUsable(rt, rank, fresh) {
+		if take > room {
+			take = room
+		}
+		if take == room && g.routerHigherTierUsable(rt, rank, fresh, cands[:room-1]) {
 			take = room - 1
 		}
 		if take < 1 {
@@ -219,11 +222,19 @@ func routerCandidateKey(cand resolveCandidate) string {
 	return cand.providerName + "\x00" + cand.upstreamModel
 }
 
-// routerHigherTierUsable reports whether any tier above rank still has a candidate to try.
-func (g *Gateway) routerHigherTierUsable(rt *smartRouter, rank int, fresh func(int) []resolveCandidate) bool {
+// routerHigherTierUsable reports whether any tier above rank still has a candidate to try
+// once the candidates in placing take their slots.
+func (g *Gateway) routerHigherTierUsable(rt *smartRouter, rank int, fresh func(int) []resolveCandidate, placing []resolveCandidate) bool {
+	taken := make(map[string]bool, len(placing))
+	for i := range placing {
+		taken[routerCandidateKey(placing[i])] = true
+	}
 	for r := rank + 1; r < len(rt.tiers); r++ {
-		if len(fresh(r)) > 0 {
-			return true
+		higher := fresh(r)
+		for i := range higher {
+			if !taken[routerCandidateKey(higher[i])] {
+				return true
+			}
 		}
 	}
 	return false

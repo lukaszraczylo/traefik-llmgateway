@@ -214,3 +214,30 @@ func TestPlanSmartRouter_ContextCheckMargin(t *testing.T) {
 		})
 	}
 }
+
+func TestPlanSingleTierHonoursMaxAttempts(t *testing.T) {
+	gw, rt := planTestGateway(t, func(c *Config) {
+		rc := c.SmartRouters[routerName]
+		rc.KeywordRules = nil
+		rc.MaxAttempts = 2
+		rc.Tiers = []SmartRouterTier{{Name: "t0", MinScore: 0, Models: []string{"a1", "a2", "b1"}}}
+	})
+	plan := planOf(t, gw, rt, userReq("hi"))
+	assert.Len(t, plan.entries, 2, "the attempt cap holds with no higher tier")
+}
+
+func TestPlanReservedSlotNotWastedOnPlacedKey(t *testing.T) {
+	gw, rt := planTestGateway(t, func(c *Config) {
+		rc := c.SmartRouters[routerName]
+		rc.KeywordRules = nil
+		rc.MaxAttempts = 2
+		rc.Tiers = []SmartRouterTier{
+			{Name: "t0", MinScore: 0, Models: []string{"a1", "a2"}},
+			{Name: "t1", MinScore: 300, Models: []string{"alpha/a1"}},
+		}
+	})
+	plan := planOf(t, gw, rt, userReq("hi"))
+	require.Len(t, plan.entries, 2, "the second slot is not reserved for a key the first tier places")
+	assert.Equal(t, "alpha/a1", plan.entries[0].cand.canonical)
+	assert.Equal(t, "alpha/a2", plan.entries[1].cand.canonical)
+}
