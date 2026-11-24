@@ -236,8 +236,9 @@ export interface AdminRouterEscalationView {
   count: number
 }
 
-/** This replica's router counters since process start (admin_routers.go: adminRouterStatsView). */
+/** Router counters (admin_routers.go: adminRouterStatsView); scope "shared" sums all gateway instances this month, "instance" is this process since start. */
 export interface AdminRouterStatsView {
+  scope: 'shared' | 'instance'
   requests: number
   tiers: AdminRouterCountView[]
   reasons: AdminRouterCountView[]

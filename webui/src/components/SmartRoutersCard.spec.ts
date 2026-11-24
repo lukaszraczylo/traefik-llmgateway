@@ -18,6 +18,7 @@ const router: AdminRouterView = {
   keywordRules: [{ tier: 'big', keywords: ['prove', 'audit'] }],
   contextTokens: 262144,
   stats: {
+    scope: 'shared',
     requests: 4,
     tiers: [
       { name: 'small', count: 1 },
@@ -63,7 +64,13 @@ describe('SmartRoutersCard', () => {
     expect(html).toContain('keyword: 1')
     expect(html).toContain('score: 3')
     expect(html).toMatch(/Escalated[\s\S]*small[\s\S]*to[\s\S]*big[\s\S]*: 2/)
-    expect(html).toContain('this replica, since start')
+    expect(html).toContain('All replicas, this month (UTC)')
+  })
+
+  it('labels per-instance counts when Redis is not shared', async () => {
+    const html = await render([{ ...router, stats: { ...router.stats!, scope: 'instance' } }])
+    expect(html).toContain('This gateway instance, since start')
+    expect(html).not.toContain('All replicas')
   })
 
   it('renders zero counts and no window without stats', async () => {
@@ -79,7 +86,7 @@ describe('SmartRoutersCard', () => {
   it('handles zero-filled stats without dividing by zero', async () => {
     const zero: AdminRouterView = {
       ...router,
-      stats: { requests: 0, tiers: [{ name: 'small', count: 0 }, { name: 'big', count: 0 }], reasons: [], escalations: [] },
+      stats: { scope: 'instance', requests: 0, tiers: [{ name: 'small', count: 0 }, { name: 'big', count: 0 }], reasons: [], escalations: [] },
     }
     const html = await render([zero])
     expect(html).toContain('0 req (0%)')

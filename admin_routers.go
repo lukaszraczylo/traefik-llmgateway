@@ -1,6 +1,9 @@
 package traefikllmgateway
 
-import "sort"
+import (
+	"sort"
+	"time"
+)
 
 type adminRouterTierView struct {
 	Name     string   `json:"name"`
@@ -24,9 +27,10 @@ type adminRouterEscalationView struct {
 	Count int64  `json:"count"`
 }
 
-// adminRouterStatsView is this replica's router counters since process
-// start; other replicas keep their own.
+// adminRouterStatsView holds router counters. Scope "shared" sums all gateway
+// instances this month (Redis); "instance" is this process since start.
 type adminRouterStatsView struct {
+	Scope       string                      `json:"scope"`
 	Tiers       []adminRouterCountView      `json:"tiers"`
 	Reasons     []adminRouterCountView      `json:"reasons"`
 	Escalations []adminRouterEscalationView `json:"escalations"`
@@ -49,7 +53,7 @@ type adminRouterView struct {
 
 // buildAdminRouterViews lists every router sorted by name; never nil.
 func (g *Gateway) buildAdminRouterViews() []adminRouterView {
-	reqs, escs := g.routerStats.snapshot()
+	reqs, escs, scope := g.routerStatsSnapshot(time.Now())
 	out := make([]adminRouterView, 0, len(g.registry.routers))
 	for _, rt := range g.registry.routers {
 		v := adminRouterView{
@@ -78,6 +82,7 @@ func (g *Gateway) buildAdminRouterViews() []adminRouterView {
 			v.ContextTokens = &tokens
 		}
 		v.Stats = buildAdminRouterStats(rt, reqs, escs)
+		v.Stats.Scope = scope
 		out = append(out, v)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })

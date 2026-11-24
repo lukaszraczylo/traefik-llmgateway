@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { computed } from 'vue'
+
 import { Badge } from '@/components/ui/badge'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { formatContextWindow } from '@/lib/format'
@@ -9,12 +11,15 @@ import type { AdminRouterView } from '@/types/api'
  * smart router (admin_routers.go): tiers cheapest first with their score
  * floor and models, plus selection, attempt cap and keyword rules. Config
  * lives in the plugin config; use the Config page's router helper to build a
- * snippet. Request and escalation counts are per process (this replica, since
- * start), not fleet totals.
+ * snippet. Counts are fleet-wide per month with Redis, else per process.
  */
-defineProps<{
+const props = defineProps<{
   routers: AdminRouterView[]
 }>()
+
+const scopeLabel = computed(() =>
+  props.routers.some((r) => r.stats?.scope === 'shared') ? 'Counts: All replicas, this month (UTC)' : 'Counts: This gateway instance, since start',
+)
 
 function share(count: number, total: number): number {
   return total > 0 ? Math.round((count / total) * 100) : 0
@@ -25,7 +30,7 @@ function share(count: number, total: number): number {
   <Card>
     <CardHeader>
       <CardTitle>Smart routers</CardTitle>
-      <CardDescription>Virtual models that pick a tier by request complexity and escalate on failure. Counts are for this replica, since start.</CardDescription>
+      <CardDescription>Virtual models that pick a tier by request complexity and escalate on failure. {{ scopeLabel }}.</CardDescription>
     </CardHeader>
     <CardContent class="flex flex-col gap-4">
       <p v-if="routers.length === 0" class="text-sm text-muted-foreground">None configured.</p>

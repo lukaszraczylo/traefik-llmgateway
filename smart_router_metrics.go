@@ -22,7 +22,7 @@ type routerEscalationKey struct {
 	router, from, to string
 }
 
-// routerStats holds per-replica router counters. Keys come from router and
+// routerStats holds per-instance router counters. Keys come from router and
 // tier names in the config, so cardinality is bounded by the config.
 type routerStats struct {
 	requests    map[routerRequestKey]int64
@@ -86,18 +86,22 @@ func routerRequestReason(plan *routerPlan) string {
 // cross-tier step. A same-tier attempt is plain failover and counts nothing.
 func (g *Gateway) recordRouterAttempt(plan *routerPlan, i int, endpoint string, scopes []limitScope) {
 	if i == 0 {
+		k := routerRequestKey{router: plan.router, tier: plan.entries[0].tier, reason: routerRequestReason(plan)}
 		if metricsEnabled(g.cfg) {
-			g.routerStats.addRequest(routerRequestKey{router: plan.router, tier: plan.entries[0].tier, reason: routerRequestReason(plan)})
+			g.routerStats.addRequest(k)
 		}
+		g.countRouterShared(func(bucket string) string { return routerReqKeyFor(k, bucket) })
 		return
 	}
 	from, to := plan.entries[i-1].tier, plan.entries[i].tier
 	if from == to {
 		return
 	}
+	ek := routerEscalationKey{router: plan.router, from: from, to: to}
 	if metricsEnabled(g.cfg) {
-		g.routerStats.addEscalation(routerEscalationKey{router: plan.router, from: from, to: to})
+		g.routerStats.addEscalation(ek)
 	}
+	g.countRouterShared(func(bucket string) string { return routerEscKeyFor(ek, bucket) })
 	g.recordRouterEvent(plan, i, endpoint, scopes, fmt.Sprintf("router %q escalated from tier %q to tier %q", plan.router, from, to))
 }
 
