@@ -259,3 +259,27 @@ func TestExtractV2EmptyAndHistoryGaps(t *testing.T) {
 	assert.Equal(t, 3, f.msgCount)
 	assert.Equal(t, smartIntentUnknown, f.intent)
 }
+
+func hugePasteReq(pasteBytes int) map[string]any {
+	paste := strings.Repeat("if (a[i] == b[j]) { x = y | z; }\n", pasteBytes/32+1)[:pasteBytes]
+	return userReq("Please review this code and tell me why it fails.\n```\n" + paste + "\n```\nwhy does it fail on empty input?")
+}
+
+func TestSplitAskBoundsHugePaste(t *testing.T) {
+	t.Parallel()
+	huge := extractSmartV2(hugePasteReq(1<<20), cacheEndpointChat)
+	assert.LessOrEqual(t, huge.codeBytes, smartAskTextCap, "a megabyte paste is cut before it is split")
+	assert.Contains(t, huge.lower, "why does it fail on empty input", "the ask after the paste survives")
+	assert.Contains(t, huge.lower, "please review this code", "the ask before the paste survives")
+
+	big := extractSmartV2(hugePasteReq(2*smartAskTextCap), cacheEndpointChat)
+	assert.Equal(t, smartBonusCodeCap*smartBonusCodeBytes <= huge.codeBytes, smartBonusCodeCap*smartBonusCodeBytes <= big.codeBytes, "both pastes saturate the code bonus")
+}
+
+func BenchmarkSplitAskHugePaste(b *testing.B) {
+	req := hugePasteReq(1 << 20)
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_ = extractSmartV2(req, cacheEndpointChat)
+	}
+}

@@ -19,6 +19,8 @@ const (
 	smartForeignMinBytes  = 24
 	smartFenceMarker      = "```"
 	smartParagraphBreak   = "\n\n"
+	// smartAskTextCap keeps 16 KB of head and tail of the ask; the code bonus saturates at 20 KB of paste.
+	smartAskTextCap = 32768
 )
 
 // Intent ids are ordered by their base score so a higher id wins a tie between matches.
@@ -249,6 +251,7 @@ func smartEdgeHasLog(s string) bool {
 // splitAsk separates prose from fenced code and paste paragraphs and records the
 // structural sizes. Odd fence segments are code.
 func (f *smartFeatures) splitAsk(text string) {
+	text = boundSmartText(text, smartAskTextCap)
 	f.mathStruct = containsAnySmart(text, smartMathStructure)
 	segs := strings.Split(text, smartFenceMarker)
 	var parts []string
