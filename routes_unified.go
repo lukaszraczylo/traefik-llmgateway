@@ -318,11 +318,8 @@ func (g *Gateway) runMeteredCall(sw *statusTrackingWriter, r *http.Request, scop
 		(endpoint != cacheEndpointEmbeddings || g.cache.embeddings)
 
 	// pristineReq is the client's own decoded request, snapshotted ONCE,
-	// BEFORE any candidate's adapter ever touches it, with "model"
-	// already rewritten to the upstream id every candidate in this
-	// failover chain shares by construction (failoverCandidates,
-	// failover.go, only ever adds providers serving the IDENTICAL bare
-	// id resolve's primary already resolved to). Every attempt below
+	// BEFORE any candidate's adapter ever touches it ("model" is rewritten
+	// per attempt below). Every attempt below
 	// builds its OWN fresh top-level copy from this snapshot rather than
 	// reusing or mutating one shared map (adversarial-review fix, F1):
 	// openai-type adapters mutate req in place — chatCompletion forces
@@ -336,9 +333,6 @@ func (g *Gateway) runMeteredCall(sw *statusTrackingWriter, r *http.Request, scop
 	pristineReq := make(map[string]any, len(req)+1)
 	for k, v := range req {
 		pristineReq[k] = v
-	}
-	if len(candidates) > 0 {
-		pristineReq["model"] = candidates[0].upstreamModel
 	}
 
 	// preFailoverHeaders snapshots sw.Header() ONCE, before the loop below
@@ -452,6 +446,12 @@ func (g *Gateway) runMeteredCall(sw *statusTrackingWriter, r *http.Request, scop
 		for k, v := range pristineReq {
 			attemptReq[k] = v
 		}
+		attemptReq["model"] = cand.upstreamModel
+		// Hashed before gatewayAliasKey is injected: cacheKey does not strip it.
+		var cacheKeyStr string
+		if cacheable {
+			cacheKeyStr = cacheKey(cand.providerName, cand.upstreamModel, requestedModel, endpoint, attemptReq)
+		}
 		attemptReq[gatewayAliasKey] = requestedModel
 
 		// Cache lookup for THIS candidate, immediately before its own
@@ -470,15 +470,10 @@ func (g *Gateway) runMeteredCall(sw *statusTrackingWriter, r *http.Request, scop
 		// on a later request without ever dialing the dead one — the
 		// pre-pass solved that problem by accident, with the side
 		// effect of mis-serving healthy traffic from an unrelated
-		// candidate's cache. cacheKeyStr is computed from pristineReq,
-		// BEFORE gatewayAliasKey was injected above would have mattered
-		// — gatewayAliasKey is a purely internal echo-back mechanism
-		// cacheKey does not itself strip (its own doc comment,
-		// cache.go), so hashing attemptReq instead would add noise no
-		// two requests would otherwise disagree on.
-		var cacheKeyStr string
+		// candidate's cache. cacheKeyStr is computed from attemptReq
+		// before gatewayAliasKey is injected (an internal echo-back key
+		// cacheKey does not strip).
 		if cacheable {
-			cacheKeyStr = cacheKey(cand.providerName, cand.upstreamModel, requestedModel, endpoint, pristineReq)
 			if cached, hit := g.cache.lookup(cacheKeyStr); hit {
 				sw.Header().Set("X-Llmgw-Cache", "hit")
 				if cached.ContentType != "" {
