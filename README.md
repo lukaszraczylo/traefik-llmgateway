@@ -380,6 +380,7 @@ config accepts them as YAML, which decodes to the same JSON shape.
 | `admin` | `*AdminConfig` | `nil` (disabled) | Read-only admin dashboard — see [Admin](#admin). `nil` or `enabled: false` means the `/admin*` routes are not registered at all. |
 | `metrics` | `*MetricsConfig` | `nil` (disabled) | Prometheus text-exposition endpoint — see [Metrics](#metrics). `nil` or `enabled: false` means the metrics route is not registered at all. |
 | `modelAliases` | `map[string]string` | `{}` | Operator-defined alias id → target model id — see [Model aliases](#model-aliases). Omitted or empty means no aliases, byte-identical to a gateway built before this field existed. |
+| `smartRouters` | `map[string]SmartRouterConfig` | `{}` | Virtual models that route each request to a real model by estimated complexity — see [Smart routers](#smart-routers). Omitted or empty means no routers, so behaviour matches a gateway built before this field existed. |
 | `requireModelPrefix` | `bool` | `false` | When `true`, a model resolves only as `provider/model` or as a `modelAliases` id. A bare id returns 404 `unknown model` and `GET /v1/models` lists no bare ids. `false` keeps the sorted-first bare-id collision winner. |
 | `stripClientAnthropicBeta` | `bool` | `false` | When `true`, `POST /v1/messages` does not forward the client's `anthropic-beta` header to the provider, as native passthrough already does. `false` forwards it, so a client can enable beta features on the operator's own Anthropic account. |
 | `modelMeta` | `map[string]*ModelMetaConfig` | `{}` | Per-model context-window and cost overrides, keyed by exact `provider/model` or a bare model id — see [Model metadata](#model-metadata). Omitted or empty means no overrides; every model's metadata still resolves through discovery and the built-in table. |
@@ -615,6 +616,7 @@ changes what a request is billed.
 | `inputCostPerMTokMicroUsd` | `int64` | `0` (not overridden) | Input cost per 1,000,000 tokens, in micro-USD (1 USD = 1,000,000). `0` falls through to the next layer unless `free` is set. Must not be negative. |
 | `outputCostPerMTokMicroUsd` | `int64` | `0` (not overridden) | Output cost per 1,000,000 tokens, in micro-USD. Same fallthrough rule as `inputCostPerMTokMicroUsd`. |
 | `free` | `bool` | `false` | `true` sets both cost fields to an explicit, known zero — distinct from leaving them at `0`, which means "not overridden here, keep looking." Rejected at construction when combined with a non-zero cost field (contradictory). |
+| `vision` | `bool` | unset (treated as capable) | Declares whether the model accepts image input. A [smart router](#smart-routers) skips a model with `vision: false` when the request carries an image. An unset value or a missing entry counts as capable. |
 
 ### `TargetConfig` (an `mcpServers` entry)
 
@@ -824,6 +826,61 @@ http:
 - **Admin overview**: `GET /admin/api/overview` includes an `aliases`
   array (`{alias, target}`, sorted by alias) — see [Admin](#admin). No
   secrets involved.
+
+## Smart routers
+
+A smart router is a virtual model. The client requests the router name, such as `auto`. The gateway scores the request, picks a tier of real models, and escalates to a higher tier when the upstream fails. A router costs nothing when `smartRouters` is empty.
+
+```yaml
+http:
+  middlewares:
+    llmgateway:
+      plugin:
+        llmgateway:
+          # ... providers, groups, users unchanged ...
+          smartRouters:
+            auto:
+              tiers:
+                - name: small
+                  minScore: 0
+                  models: ["openai/gpt-5-mini"]
+                - name: medium
+                  minScore: 300
+                  models: ["anthropic/claude-sonnet-4-5"]
+                - name: large
+                  minScore: 600
+                  models: ["anthropic/claude-opus-4-5", "openai/gpt-5"]
+              keywordRules:
+                - tier: large
+                  keywords: ["security review", "architecture"]
+              defaultTier: small
+              selection: ordered
+              maxAttempts: 4
+              contextEscalation: true
+```
+
+- **Tiers**: list tiers cheapest first. The list position is the rank. The first tier must have `minScore: 0`, and each later `minScore` must be higher. Scores run from 0 to 1000. A request goes to the highest tier whose `minScore` its score reaches. Tiers must not share a model.
+- **Classifier signals**: the gateway scores the newest user text. It adds points for length, code markers, reasoning markers, technical vocabulary, multi-step phrasing, and several questions. It subtracts points for short, simple questions. Override the weights with `weights`.
+- **Floors**: a floor raises the tier but never lowers it. A request with `tools` starts at the second tier at least. `reasoning_effort` of `medium` or `high`, or `thinking.type: enabled`, starts at the top tier. Two or more reasoning markers also start at the top tier. A keyword rule raises the request to its tier when the text contains one of its keywords.
+- **Empty text**: a request with no user text uses `defaultTier`. The default is the first tier.
+- **Selection**: `ordered` tries the models of a tier in the listed order. `hash` starts at a model chosen from the request text, which spreads load but keeps the choice stable per prompt.
+- **Escalation**: on a retryable failure, the gateway tries the next model in the same tier, then the first model of the next tier. It never moves down. It stops after `maxAttempts` upstream attempts (default 4). When a higher tier has a usable model, the plan keeps one attempt for it, so same-tier failover cannot fill every attempt. An upstream `400` is not escalated, because the request itself is invalid. Escalation works with `failover` off. Once the gateway has sent the first response byte, it cannot escalate.
+- **Context escalation**: with `contextEscalation` on (the default), the gateway skips a model whose known context window is smaller than the estimated prompt. The estimate counts the text of every message and the system prompt at one token per four bytes, plus 1000 tokens per image. Image bytes do not count. When this check would skip every target, the gateway uses the model with the largest known context window instead of returning `404`. Set `contextEscalation: false` to turn the check off.
+- **Vision**: a request with an image skips models that set `vision: false` in `modelMeta`.
+- **Access**: a group needs access to the router name **and** to each target model it can reach. The gateway skips targets the group may not use. When the group may use none, the request returns `403`.
+- **Response**: the response body keeps the real model that served the request. Two headers report the routing. `X-Llmgw-Routed-Model` holds the canonical `provider/model` id. `X-Llmgw-Router-Tier` holds the tier name.
+- **Validation at construction**: a router needs at least one tier. A router name must not name a configured provider prefix, an explicit model id, or a model alias. A tier model must not itself be a router. A keyword rule must name a real tier.
+- **Metrics**: `llmgateway_router_requests_total{router,tier,reason}` counts each request once. `reason` is `score`, `keyword`, `floor`, `default`, or `skipped`. `skipped` means the first attempted tier is above the classified tier because lower tiers had no usable target. Such targets fail the context-window, vision, cost-budget, access, or resolution checks. `llmgateway_router_escalations_total{router,from_tier,to_tier}` counts each move to a higher tier. Same-tier failover is not counted. Labels come only from configured router and tier names.
+- **Events**: the admin events feed records a `router_escalation` event on a cross-tier escalation or when a router exhausts its attempts. A rate gate limits the events to one per 30 seconds per replica, and the next event reports how many it suppressed.
+- **Admin**: `GET /admin/api/overview` and `GET /admin/api/catalog` list routers. The Models page shows a Smart routers card, and the Config page has a Smart router helper that builds a snippet.
+
+**Limitations**
+
+- The marker lists are English only.
+- The classifier uses heuristics. There is no LLM classifier.
+- Routers serve `POST /v1/chat/completions` and `POST /v1/messages` only.
+- Embeddings requests to a router return `400`. Request an embedding model directly.
+- Image and audio endpoints return `404` for a router name. Native passthrough routes do not support routers.
 
 ## Model metadata
 
@@ -2643,6 +2700,10 @@ plugin's config.
     model)` too. These are distinct metric names, not the unlabelled pair
     re-emitted under a wider label set, so a query against the unlabelled
     families is unaffected either way.
+  - `llmgateway_router_requests_total{router,tier,reason}` /
+    `llmgateway_router_escalations_total{router,from_tier,to_tier}` —
+    per-process counters for [smart routers](#smart-routers). They
+    appear after the first routed request.
   - `llmgateway_provider_healthy{provider}` — `1`/`0` gauge from the
     discovery circuit breaker (`healthState` in the admin API); see
     [Provider health](#provider-health-discovery-circuit-breaker).
