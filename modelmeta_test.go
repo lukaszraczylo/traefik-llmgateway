@@ -1,6 +1,7 @@
 package traefikllmgateway
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -455,4 +456,56 @@ func TestPriceKnown(t *testing.T) {
 			t.Error("want unknown: a nil map entry must not be treated as free")
 		}
 	})
+}
+
+func TestModelVisionCapable(t *testing.T) {
+	t.Parallel()
+	yes, no := true, false
+	tests := []struct {
+		cfg  map[string]*ModelMetaConfig
+		name string
+		want bool
+	}{
+		{nil, "nil cfg is capable", true},
+		{map[string]*ModelMetaConfig{"other": {Vision: &no}}, "no entry is capable", true},
+		{map[string]*ModelMetaConfig{"m": nil}, "nil entry is capable", true},
+		{map[string]*ModelMetaConfig{"m": {ContextTokens: 5}}, "unset vision is capable", true},
+		{map[string]*ModelMetaConfig{"m": {Vision: &no}}, "bare false", false},
+		{map[string]*ModelMetaConfig{"m": {Vision: &yes}}, "bare true", true},
+		{map[string]*ModelMetaConfig{"p/m": {Vision: &no}, "m": {Vision: &yes}}, "exact false beats bare true", false},
+		{map[string]*ModelMetaConfig{"p/m": {Vision: &yes}, "m": {Vision: &no}}, "exact true beats bare false", true},
+		{map[string]*ModelMetaConfig{"p/m": {ContextTokens: 9}, "m": {Vision: &no}}, "exact without vision falls through to bare false", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := modelVisionCapable("p", "m", tt.cfg); got != tt.want {
+				t.Errorf("modelVisionCapable = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestModelMetaConfig_VisionJSONRoundTrip(t *testing.T) {
+	t.Parallel()
+	var unset, set ModelMetaConfig
+	if err := json.Unmarshal([]byte(`{"contextTokens":1}`), &unset); err != nil {
+		t.Fatal(err)
+	}
+	if unset.Vision != nil {
+		t.Errorf("absent vision decoded to %v, want nil", *unset.Vision)
+	}
+	if err := json.Unmarshal([]byte(`{"vision":false}`), &set); err != nil {
+		t.Fatal(err)
+	}
+	if set.Vision == nil || *set.Vision {
+		t.Errorf("vision:false decoded to %v, want pointer to false", set.Vision)
+	}
+	out, err := json.Marshal(&unset)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(out), "vision") {
+		t.Errorf("unset vision must be omitted from JSON, got %s", out)
+	}
 }

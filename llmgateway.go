@@ -614,8 +614,11 @@ type ModelPricing struct {
 // set to — a KNOWN zero cost, distinct from the "not overridden here"
 // fallback a zero cost field means when Free is false. Setting Free
 // true together with a non-zero cost field is rejected at construction
-// (validateModelMeta) as a contradictory config.
+// (validateModelMeta) as a contradictory config. Vision, when set, declares
+// whether the model accepts image input; nil means unknown, treated as
+// capable (modelVisionCapable, modelmeta.go).
 type ModelMetaConfig struct {
+	Vision                    *bool `json:"vision,omitempty"`
 	ContextTokens             int   `json:"contextTokens,omitempty"`
 	InputCostPerMTokMicroUSD  int64 `json:"inputCostPerMTokMicroUsd,omitempty"`
 	OutputCostPerMTokMicroUSD int64 `json:"outputCostPerMTokMicroUsd,omitempty"`

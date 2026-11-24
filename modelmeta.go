@@ -185,6 +185,20 @@ func lookupModelMetaConfig(provider, model string, cfg map[string]*ModelMetaConf
 	return nil
 }
 
+// modelVisionCapable reports whether (provider, model) accepts image input.
+// An unset Vision, or no modelMeta entry, counts as capable so existing
+// deployments keep today's behaviour. The exact "provider/model" key wins
+// over the bare key only when it sets Vision itself.
+func modelVisionCapable(provider, model string, cfg map[string]*ModelMetaConfig) bool {
+	if v, ok := cfg[provider+"/"+model]; ok && v != nil && v.Vision != nil {
+		return *v.Vision
+	}
+	if v, ok := cfg[model]; ok && v != nil && v.Vision != nil {
+		return *v.Vision
+	}
+	return true
+}
+
 // resolveAliasModelMeta applies modelMeta's alias-inheritance rule
 // (feature v0.23): an alias inherits its target's fully resolved
 // metadata (resolveModelMeta against the alias's resolved provider/
