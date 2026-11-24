@@ -151,6 +151,54 @@ func BenchHelperCheck() string {
 		if msg := routerFeatureCheck(); msg != "" {
 			return msg
 		}
+		if msg := firstByteHelperCheck(); msg != "" {
+			return msg
+		}
+	}
+	return ""
+}
+
+// firstByteHelperCheck replays the first-byte helpers with alternating inputs; a stale detector
+// position or a guard state kept from the previous call shows up as a mismatch.
+func firstByteHelperCheck() string {
+	var d sseDataDetector
+	if d.feed([]byte(": ping\n\n")) {
+		return "sseDataDetector matched a comment"
+	}
+	if d.feed([]byte("id: data:1\n")) {
+		return "sseDataDetector matched data inside another field"
+	}
+	if d.feed([]byte("da")) {
+		return "sseDataDetector matched a partial prefix"
+	}
+	if !d.feed([]byte("ta: x")) {
+		return "sseDataDetector missed a data line split across reads"
+	}
+	var e sseDataDetector
+	if e.feed([]byte("event: m\n")) {
+		return "sseDataDetector kept state from the previous detector"
+	}
+	if !e.feed([]byte("data: {}\n")) {
+		return "sseDataDetector missed a data line"
+	}
+	return firstByteErrCheck()
+}
+
+func firstByteErrCheck() string {
+	if !isFirstByteTimeout(&firstByteTimeoutError{provider: "p"}) {
+		return "isFirstByteTimeout missed its own type"
+	}
+	if isFirstByteTimeout(errFirstByteTimeout) {
+		return "isFirstByteTimeout matched another error"
+	}
+	if got, err := parseFirstByteTimeout("r", "40s"); err != nil || got != 40*time.Second {
+		return "parseFirstByteTimeout missed a valid value"
+	}
+	if _, err := parseFirstByteTimeout("r", "10ms"); err == nil {
+		return "parseFirstByteTimeout accepted a value under the floor"
+	}
+	if none, err := parseFirstByteTimeout("r", ""); err != nil || none != 0 {
+		return "parseFirstByteTimeout missed the empty value"
 	}
 	return ""
 }
