@@ -432,6 +432,7 @@ func upstreamBytes(ctx context.Context, client *http.Client, method, url string,
 	// captured fresh inside the closure), matching how watchdogBody
 	// itself is rebuilt fresh per attempt.
 	latRec := latencyRecorderFromContext(ctx)
+	fb := firstByteGuardFromContext(ctx)
 
 	call := func() (*http.Response, error) {
 		var r io.Reader
@@ -486,6 +487,10 @@ func upstreamBytes(ctx context.Context, client *http.Client, method, url string,
 			return nil, fmt.Errorf("%w: %w", errUpstream, err)
 		}
 		wb := newWatchdogBody(resp.Body, cancel, timeout, fmt.Sprintf("provider %q", providerName), rec)
+		if fb != nil {
+			wb.fb = fb
+			wb.streaming = isEventStreamResponse(resp)
+		}
 		if latRec != nil {
 			// streaming: derived from resp's own Content-Type, the SAME
 			// convention each adapter's forwardStream/forwardJSON split

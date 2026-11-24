@@ -413,7 +413,7 @@ func (g *Gateway) recordUpstreamEvent(scopes []limitScope, model, provider, rout
 	// scrub it.
 	ev := gatewayEvent{Model: model, Provider: provider, Route: route}
 	switch {
-	case matchesSentinel(err, errProviderTimeout) || isDeadlineExceeded(err):
+	case matchesSentinel(err, errProviderTimeout) || isDeadlineExceeded(err) || isFirstByteTimeout(err):
 		ev.Kind = eventKindTimeout
 		ev.Status = http.StatusGatewayTimeout
 		ev.Message = sanitizeProviderErr(err.Error(), g.providerBaseURL(provider))

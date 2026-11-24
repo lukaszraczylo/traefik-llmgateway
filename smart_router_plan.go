@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"net/http"
+	"time"
 )
 
 const (
@@ -47,11 +48,15 @@ type routerPlan struct {
 	entries []routerPlanEntry
 	// promptBytes is the size estimate that calibration compares with reported usage.
 	promptBytes int64
-	hasImage    bool
+	// firstByte is the router's per-attempt first-byte deadline; 0 means none.
+	firstByte time.Duration
+	hasImage  bool
 	// calibrate is true when the router counts this request's outcome for threshold calibration.
 	calibrate bool
 	// maxTokensSet is true when the client capped the output; a length cut is then its own choice.
 	maxTokensSet bool
+	// slowSeen is set when an attempt missed the first-byte deadline.
+	slowSeen bool
 }
 
 func (p *routerPlan) candidates() []resolveCandidate {
@@ -115,7 +120,7 @@ func (g *Gateway) planSmartRouter(rt *smartRouter, req map[string]any, endpoint 
 		outputTokens: requestedOutputTokens(req, endpoint),
 		costBudget:   !g.cfg.AllowUnpricedWithCostBudget && scopesHaveCostBudget(scopes),
 	}
-	plan := &routerPlan{router: rt.name, reason: reason, startTier: rt.tiers[start].name, promptBytes: promptBytes, hasImage: hasImage, maxTokensSet: facts.outputTokens > 0, sess: sess, calibrate: rt.calibState != nil, bandit: rt.bandit}
+	plan := &routerPlan{router: rt.name, reason: reason, startTier: rt.tiers[start].name, promptBytes: promptBytes, hasImage: hasImage, maxTokensSet: facts.outputTokens > 0, sess: sess, calibrate: rt.calibState != nil, bandit: rt.bandit, firstByte: rt.firstByte}
 	if cls.shadowRank >= 0 {
 		plan.shadowTier = rt.tiers[cls.shadowRank].name
 	}

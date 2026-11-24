@@ -87,6 +87,7 @@ type adminRouterView struct {
 	Selection        string                     `json:"selection"`
 	Classifier       string                     `json:"classifier"`
 	ShadowClassifier string                     `json:"shadowClassifier,omitempty"`
+	FirstByteTimeout string                     `json:"firstByteTimeout,omitempty"`
 	Tiers            []adminRouterTierView      `json:"tiers"`
 	KeywordRules     []adminRouterRuleView      `json:"keywordRules"`
 	ContextTokens    *int                       `json:"contextTokens,omitempty"`
@@ -120,6 +121,9 @@ func (g *Gateway) buildAdminRouterViews() []adminRouterView {
 			Calibration:         buildAdminRouterCalibration(rt),
 			Tiers:               make([]adminRouterTierView, len(rt.tiers)),
 			KeywordRules:        make([]adminRouterRuleView, len(rt.rules)),
+		}
+		if rt.firstByte > 0 {
+			v.FirstByteTimeout = rt.firstByte.String()
 		}
 		if rt.shadowV2 {
 			v.ShadowClassifier = smartClassifierV2

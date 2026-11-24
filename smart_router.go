@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 )
 
 const (
@@ -49,6 +50,9 @@ type SmartRouterConfig struct {
 	Classifier string `json:"classifier,omitempty"`
 	// ShadowClassifier "v2" scores each request with v2 beside a v1 router and never changes routing.
 	ShadowClassifier string `json:"shadowClassifier,omitempty"`
+	// FirstByteTimeout (Go duration, at least 1s) escalates when an upstream sends no body byte, or for a
+	// stream no data event, in time; empty means off.
+	FirstByteTimeout string `json:"firstByteTimeout,omitempty"`
 	// RiskZ scales the v2 uncertainty margin in hundredths of a sigma; nil means 128.
 	RiskZ *int `json:"riskZ,omitempty"`
 	// IntentTiers pins a v2 intent to a tier by name instead of its default ladder position.
@@ -124,6 +128,7 @@ type smartRouter struct {
 	downgradeBand     int
 	defaultRank       int
 	toolsMinRank      int
+	firstByte         time.Duration
 	maxAttempts       int
 	shadowV2          bool
 	adaptiveSet       bool
@@ -310,6 +315,11 @@ func compileSmartRouter(name string, cfg *SmartRouterConfig, routers map[string]
 		maxAttempts = defaultSmartMaxAttempts
 	}
 
+	firstByte, err := parseFirstByteTimeout(name, cfg.FirstByteTimeout)
+	if err != nil {
+		return nil, err
+	}
+
 	contextEscalation := true
 	if cfg.ContextEscalation != nil {
 		contextEscalation = *cfg.ContextEscalation
@@ -381,6 +391,7 @@ func compileSmartRouter(name string, cfg *SmartRouterConfig, routers map[string]
 		toolsMinRank:      toolsMinRank,
 		selection:         selection,
 		maxAttempts:       maxAttempts,
+		firstByte:         firstByte,
 		contextEscalation: contextEscalation,
 		rules:             rules,
 		weights:           buildSmartWeights(cfg.Weights),

@@ -633,8 +633,18 @@ func (g *Gateway) runMeteredCall(sw *statusTrackingWriter, r *http.Request, scop
 				}
 			})
 		}
+		var fbGuard *firstByteGuard
+		var fbCancel context.CancelFunc
+		if plan != nil && plan.firstByte > 0 {
+			ctx, fbCancel = context.WithCancel(ctx)
+			fbGuard = newFirstByteGuard(fbCancel, plan.firstByte)
+			ctx = withFirstByteGuard(ctx, fbGuard)
+		}
 		result, callErr := call(cand.adapter, ctx, respWriter, attemptReq)
 		endUpstream()
+		if fbGuard != nil {
+			callErr = g.finishFirstByteAttempt(fbGuard, fbCancel, ctx, r, sw, plan, i, endpoint, scopes, cand, callErr)
+		}
 		bad := plan != nil && plan.badResult(result, callErr, sw.wroteHeader)
 
 		// Request-path health, recorded ONCE per candidate per logical
@@ -1352,6 +1362,12 @@ func (g *Gateway) handleAdapterErrorEnvelope(sw *statusTrackingWriter, err error
 	if terr, ok := err.(*responseTranslationError); ok {
 		g.errorf("%s: response translation failed after a billed upstream call (provider %q): %v", logPrefix, providerName, terr.err)
 		envelope(sw, http.StatusBadGateway, "server_error", "failed to translate provider response")
+		return
+	}
+
+	if _, ok := err.(*firstByteTimeoutError); ok {
+		g.errorf("%s: %v", logPrefix, err)
+		envelope(sw, http.StatusGatewayTimeout, "timeout_error", routerSlowMessage)
 		return
 	}
 

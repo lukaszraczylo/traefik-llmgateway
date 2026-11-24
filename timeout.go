@@ -170,6 +170,7 @@ type watchdogBody struct {
 	// convention (admin.go) for the same reasoning spelled out once.
 	latencyStart    time.Time
 	rc              io.ReadCloser
+	fb              *firstByteGuard
 	cancel          context.CancelFunc
 	timer           *time.Timer
 	onTimeout       attemptRecorder
@@ -190,6 +191,9 @@ type watchdogBody struct {
 	// cleanly.
 	done      int32
 	streaming bool
+	// sse feeds the first-byte guard for a stream, where a keep-alive comment is not a first byte.
+	sse    sseDataDetector
+	fbDone bool
 }
 
 // newWatchdogBody returns a watchdogBody wrapping rc, arming its watchdog
@@ -352,6 +356,12 @@ func (wb *watchdogBody) timeoutError() error {
 // firing the instant before this branch runs.
 func (wb *watchdogBody) Read(p []byte) (int, error) {
 	n, err := wb.rc.Read(p)
+	if wb.fb != nil && !wb.fbDone && n > 0 && (!wb.streaming || wb.sse.feed(p[:n])) {
+		wb.fbDone = true
+		if !wb.fb.satisfy() {
+			return 0, errFirstByteTimeout
+		}
+	}
 	if n > 0 && wb.onLatency != nil && atomic.LoadInt32(&wb.ttfbRecorded) == 0 {
 		wb.ttfb = time.Since(wb.latencyStart)
 		atomic.StoreInt32(&wb.ttfbRecorded, 1)

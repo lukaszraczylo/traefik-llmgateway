@@ -38,9 +38,11 @@ const (
 	routerOutcomeEscalated = "escalated"
 	// routerOutcomeBad marks an answer that was cut at the output cap, empty, or broken mid-stream.
 	routerOutcomeBad = "bad"
+	// routerOutcomeSlow marks a request where an attempt missed the first-byte deadline, however it ended.
+	routerOutcomeSlow = "slow"
 )
 
-var routerOutcomeNames = [...]string{routerOutcomeOK, routerOutcomeError, routerOutcomeEscalated, routerOutcomeBad}
+var routerOutcomeNames = [...]string{routerOutcomeOK, routerOutcomeError, routerOutcomeEscalated, routerOutcomeBad, routerOutcomeSlow}
 
 // routerStats holds per-instance router counters. Keys come from router and
 // tier names in the config, so cardinality is bounded by the config.
@@ -181,6 +183,9 @@ func (g *Gateway) recordRouterOutcome(plan *routerPlan, attempt int, served, bad
 		if plan.entries[attempt].tier != plan.entries[0].tier {
 			outcome = routerOutcomeEscalated
 		}
+	}
+	if plan.slowSeen {
+		outcome = routerOutcomeSlow
 	}
 	if bad {
 		outcome = routerOutcomeBad
