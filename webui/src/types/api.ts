@@ -269,8 +269,14 @@ export interface AdminRouterView {
   defaultTier: string
   /** Floor tier for requests with tools; absent when unset. */
   toolsMinTier?: string
-  /** True when the router has shadowWeights, so the matrix is meaningful even when empty. */
+  /** True when the router has shadowWeights or shadowClassifier, so the matrix is meaningful even when empty. */
   shadowEnabled: boolean
+  /** Live classifier: "v1" or "v2". */
+  classifier: string
+  /** "v2" when the router scores each request with v2 beside a v1 live classifier; absent otherwise. */
+  shadowClassifier?: string
+  /** v2 risk margin in hundredths of a sigma. */
+  riskZ: number
   selection: string
   tiers: AdminRouterTierView[]
   keywordRules: AdminRouterRuleView[]

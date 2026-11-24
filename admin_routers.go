@@ -61,11 +61,14 @@ type adminRouterView struct {
 	DefaultTier       string                `json:"defaultTier"`
 	ToolsMinTier      string                `json:"toolsMinTier,omitempty"`
 	Selection         string                `json:"selection"`
+	Classifier        string                `json:"classifier"`
+	ShadowClassifier  string                `json:"shadowClassifier,omitempty"`
 	Tiers             []adminRouterTierView `json:"tiers"`
 	KeywordRules      []adminRouterRuleView `json:"keywordRules"`
 	ContextTokens     *int                  `json:"contextTokens,omitempty"`
 	Stats             adminRouterStatsView  `json:"stats"`
 	MaxAttempts       int                   `json:"maxAttempts"`
+	RiskZ             int                   `json:"riskZ"`
 	ContextEscalation bool                  `json:"contextEscalation"`
 	ShadowEnabled     bool                  `json:"shadowEnabled"`
 }
@@ -80,9 +83,14 @@ func (g *Gateway) buildAdminRouterViews() []adminRouterView {
 			Selection:         rt.selection,
 			MaxAttempts:       rt.maxAttempts,
 			ContextEscalation: rt.contextEscalation,
-			ShadowEnabled:     rt.shadow != nil,
+			ShadowEnabled:     rt.shadowEnabled(),
+			Classifier:        rt.classifier,
+			RiskZ:             rt.riskZ,
 			Tiers:             make([]adminRouterTierView, len(rt.tiers)),
 			KeywordRules:      make([]adminRouterRuleView, len(rt.rules)),
+		}
+		if rt.shadowV2 {
+			v.ShadowClassifier = smartClassifierV2
 		}
 		if rt.defaultRank >= 0 && rt.defaultRank < len(rt.tiers) {
 			v.DefaultTier = rt.tiers[rt.defaultRank].name

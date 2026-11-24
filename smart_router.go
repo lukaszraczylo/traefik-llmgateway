@@ -10,6 +10,14 @@ const (
 	smartSelectionOrdered = "ordered"
 	smartSelectionHash    = "hash"
 
+	smartClassifierV1 = "v1"
+	smartClassifierV2 = "v2"
+	// smartIntentForeign is the intentTiers key for text the English markers cannot classify.
+	smartIntentForeign = "foreign"
+
+	defaultSmartRiskZ = 128
+	maxSmartRiskZ     = 400
+
 	defaultSmartMaxAttempts = 4
 	maxSmartKeywords        = 64
 	maxSmartMinScore        = 1000
@@ -32,6 +40,14 @@ type SmartRouterConfig struct {
 	Weights           *SmartRouterWeights `json:"weights,omitempty"`
 	// ShadowWeights scores each request a second time for comparison; it never changes routing.
 	ShadowWeights *SmartRouterWeights `json:"shadowWeights,omitempty"`
+	// Classifier is "v1" (default) or "v2", which scores the prose of the newest ask with an uncertainty margin.
+	Classifier string `json:"classifier,omitempty"`
+	// ShadowClassifier "v2" scores each request with v2 beside a v1 router and never changes routing.
+	ShadowClassifier string `json:"shadowClassifier,omitempty"`
+	// RiskZ scales the v2 uncertainty margin in hundredths of a sigma; nil means 128.
+	RiskZ *int `json:"riskZ,omitempty"`
+	// IntentTiers pins a v2 intent to a tier by name instead of its default ladder position.
+	IntentTiers map[string]string `json:"intentTiers,omitempty"`
 	// DefaultTier serves requests with no user text; empty means the first tier.
 	DefaultTier string `json:"defaultTier,omitempty"`
 	// ToolsMinTier floors requests that carry tools or tool history; empty means no floor.
@@ -78,12 +94,17 @@ type smartRouter struct {
 	shadow            *smartWeights
 	name              string
 	selection         string
+	classifier        string
 	tiers             []smartTier
 	rules             []smartKeywordRule
 	weights           smartWeights
+	intentBase        [smartIntentCount]int
+	foreignBase       int
+	riskZ             int
 	defaultRank       int
 	toolsMinRank      int
 	maxAttempts       int
+	shadowV2          bool
 	contextEscalation bool
 }
 
@@ -286,7 +307,21 @@ func compileSmartRouter(name string, cfg *SmartRouterConfig, routers map[string]
 		shadow = &sw
 	}
 
+	classifier, shadowV2, riskZ, err := compileSmartClassifier(name, cfg)
+	if err != nil {
+		return nil, err
+	}
+	intentBase, foreignBase, err := compileSmartIntentBases(name, cfg.IntentTiers, tiers, tierRank)
+	if err != nil {
+		return nil, err
+	}
+
 	return &smartRouter{
+		classifier:        classifier,
+		shadowV2:          shadowV2,
+		riskZ:             riskZ,
+		intentBase:        intentBase,
+		foreignBase:       foreignBase,
 		name:              name,
 		tiers:             tiers,
 		defaultRank:       defaultRank,
@@ -298,6 +333,77 @@ func compileSmartRouter(name string, cfg *SmartRouterConfig, routers map[string]
 		weights:           buildSmartWeights(cfg.Weights),
 		shadow:            shadow,
 	}, nil
+}
+
+// shadowEnabled reports whether the router fills the shadow matrix, by weights or by classifier.
+func (rt *smartRouter) shadowEnabled() bool {
+	return rt.shadow != nil || rt.shadowV2
+}
+
+func compileSmartClassifier(router string, cfg *SmartRouterConfig) (classifier string, shadowV2 bool, riskZ int, err error) {
+	classifier = cfg.Classifier
+	switch classifier {
+	case "":
+		classifier = smartClassifierV1
+	case smartClassifierV1, smartClassifierV2:
+	default:
+		return "", false, 0, fmt.Errorf("llmgateway: smartRouters: router %q: classifier %q must be %q or %q", router, cfg.Classifier, smartClassifierV1, smartClassifierV2)
+	}
+	switch cfg.ShadowClassifier {
+	case "":
+	case smartClassifierV2:
+		if cfg.ShadowWeights != nil {
+			return "", false, 0, fmt.Errorf("llmgateway: smartRouters: router %q: shadowClassifier and shadowWeights cannot both be set", router)
+		}
+		shadowV2 = true
+	default:
+		return "", false, 0, fmt.Errorf("llmgateway: smartRouters: router %q: shadowClassifier %q must be empty or %q", router, cfg.ShadowClassifier, smartClassifierV2)
+	}
+	riskZ = defaultSmartRiskZ
+	if cfg.RiskZ != nil {
+		riskZ = *cfg.RiskZ
+		if riskZ < 0 || riskZ > maxSmartRiskZ {
+			return "", false, 0, fmt.Errorf("llmgateway: smartRouters: router %q: riskZ must be between 0 and %d, got %d", router, maxSmartRiskZ, riskZ)
+		}
+	}
+	return classifier, shadowV2, riskZ, nil
+}
+
+// compileSmartIntentBases maps each intent to a score on this router's own ladder, so
+// the same intent lands on the same relative tier for any minScore layout. A tier
+// named in intentTiers pins the intent to that tier's boundary instead.
+func compileSmartIntentBases(router string, pins map[string]string, tiers []smartTier, tierRank map[string]int) (bases [smartIntentCount]int, foreign int, err error) {
+	for i := 0; i < smartIntentCount; i++ {
+		bases[i] = smartLadderScore(tiers, smartIntentPos[i])
+	}
+	foreign = smartLadderScore(tiers, smartForeignPos)
+	keys := make([]string, 0, len(pins))
+	for k := range pins {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		rank, ok := tierRank[pins[key]]
+		if !ok {
+			return bases, 0, fmt.Errorf("llmgateway: smartRouters: router %q: intentTiers[%q] tier %q is not a tier of this router", router, key, pins[key])
+		}
+		score := tiers[rank].minScore
+		if key == smartIntentForeign {
+			foreign = score
+			continue
+		}
+		known := false
+		for i := smartIntentChitchat; i < smartIntentCount; i++ {
+			if smartIntentNames[i] == key {
+				bases[i] = score
+				known = true
+			}
+		}
+		if !known {
+			return bases, 0, fmt.Errorf("llmgateway: smartRouters: router %q: intentTiers key %q is not an intent (chitchat, rewrite, edit, debug, design, math, foreign)", router, key)
+		}
+	}
+	return bases, foreign, nil
 }
 
 func compileSmartTiers(router string, raw []SmartRouterTier, routers map[string]*SmartRouterConfig) ([]smartTier, map[string]int, error) {

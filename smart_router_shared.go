@@ -99,7 +99,7 @@ func (g *Gateway) readRouterShared(now time.Time) (routerCounters, bool) {
 					outNames = append(outNames, routerOutcomeKeyFor(k, bucket))
 				}
 			}
-			if rt.shadow == nil {
+			if !rt.shadowEnabled() {
 				continue
 			}
 			for _, to := range rt.tiers {

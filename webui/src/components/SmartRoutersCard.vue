@@ -56,6 +56,9 @@ function share(count: number, total: number): number {
           <span class="font-mono text-sm font-medium">{{ router.name }}</span>
           <Badge variant="outline" class="font-normal">default tier: {{ router.defaultTier }}</Badge>
           <Badge v-if="router.toolsMinTier" variant="outline" class="font-normal">tools min tier: {{ router.toolsMinTier }}</Badge>
+          <Badge variant="outline" class="font-normal">classifier: {{ router.classifier }}</Badge>
+          <Badge v-if="router.shadowClassifier" variant="outline" class="font-normal">shadow classifier: {{ router.shadowClassifier }}</Badge>
+          <Badge v-if="router.classifier === 'v2' || router.shadowClassifier" variant="outline" class="font-normal">risk z: {{ router.riskZ }}</Badge>
           <Badge variant="outline" class="font-normal">selection: {{ router.selection }}</Badge>
           <Badge variant="outline" class="font-normal">max attempts: {{ router.maxAttempts }}</Badge>
           <Badge variant="outline" class="font-normal">context escalation: {{ router.contextEscalation ? 'on' : 'off' }}</Badge>

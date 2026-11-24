@@ -12,6 +12,8 @@ const router: AdminRouterView = {
   maxAttempts: 3,
   contextEscalation: false,
   shadowEnabled: false,
+  classifier: 'v1',
+  riskZ: 128,
   tiers: [
     { name: 'small', minScore: 0, models: ['openai/gpt-5-mini'] },
     { name: 'big', minScore: 400, models: ['anthropic/claude-opus', 'openai/gpt-5'] },
@@ -60,6 +62,17 @@ describe('SmartRoutersCard', () => {
   it('shows the tools min tier only when set', async () => {
     expect(await render([{ ...router, toolsMinTier: 'big' }])).toContain('tools min tier: big')
     expect(await render([router])).not.toContain('tools min tier')
+  })
+
+  it('shows the classifier and the risk margin only when v2 is involved', async () => {
+    const plain = await render([router])
+    expect(plain).toContain('classifier: v1')
+    expect(plain).not.toContain('risk z')
+    expect(plain).not.toContain('shadow classifier')
+    const shadowed = await render([{ ...router, shadowEnabled: true, shadowClassifier: 'v2', riskZ: 90 }])
+    expect(shadowed).toContain('shadow classifier: v2')
+    expect(shadowed).toContain('risk z: 90')
+    expect(await render([{ ...router, classifier: 'v2' }])).toContain('risk z: 128')
   })
 
   it('renders the shadow agreement matrix only when shadow weights are set', async () => {

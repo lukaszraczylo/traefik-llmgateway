@@ -80,6 +80,21 @@ func classifySmartRequest(rt *smartRouter, req map[string]any, endpoint string) 
 // classifySmart is classifySmartRequest plus the shadow rank. The shadow pass
 // reuses the extracted features and only re-weights them.
 func classifySmart(rt *smartRouter, req map[string]any, endpoint string) smartClassification {
+	if rt.classifier == smartClassifierV2 {
+		out := classifySmartV2(rt, req, endpoint)
+		if rt.shadowV2 {
+			out.shadowRank = out.rank
+		}
+		return out
+	}
+	out := classifySmartV1(rt, req, endpoint)
+	if rt.shadowV2 {
+		out.shadowRank = classifySmartV2(rt, req, endpoint).rank
+	}
+	return out
+}
+
+func classifySmartV1(rt *smartRouter, req map[string]any, endpoint string) smartClassification {
 	ex := extractSmartRequest(req, endpoint)
 	top := len(rt.tiers) - 1
 	out := smartClassification{shadowRank: -1, hasImage: ex.hasImage}
@@ -410,4 +425,71 @@ func smartContentSize(content any, depth int) (chars, images int) {
 		}
 	}
 	return chars, images
+}
+
+// classifySmartV2 is the v2 counterpart of classifySmartV1: it scores the prose of
+// the newest ask with an uncertainty margin, then raises the tier for floors and
+// keyword rules. It never lowers a rank.
+func classifySmartV2(rt *smartRouter, req map[string]any, endpoint string) smartClassification {
+	f := extractSmartV2(req, endpoint)
+	top := len(rt.tiers) - 1
+	out := smartClassification{shadowRank: -1, hasImage: f.hasImage}
+
+	floorRank := 0
+	if f.hasTools || f.toolHist {
+		floorRank = rt.toolsMinRank
+	}
+	if smartWantsReasoning(req) {
+		floorRank = top
+	}
+
+	if !f.found && !f.truncated {
+		out.rank = rt.defaultRank
+		out.reason = smartReasonDefault
+		if floorRank > out.rank {
+			out.rank = floorRank
+			out.reason = smartReasonFloor
+		}
+		out.scoredText = f.system
+		if rt.shadow != nil {
+			out.shadowRank = out.rank
+		}
+		return out
+	}
+
+	out.scoredText = f.lower
+	if f.system != "" {
+		out.scoredText = f.lower + "\n" + f.system
+	}
+	if countSmartMarkers(f.lower, smartReasoningMarkers) >= smartReasoningFloor {
+		floorRank = top
+	}
+	kwRank := -1
+	for i := 0; i < len(rt.rules); i++ {
+		if rt.rules[i].rank > kwRank && containsAnySmart(f.lower, rt.rules[i].keywords) {
+			kwRank = rt.rules[i].rank
+		}
+	}
+
+	var sess smartSessionHint
+	verdict := scoreSmartV2(rt, &f, rt.weights, sess)
+	out.rank, out.reason = smartRaiseRank(verdict.rank, smartReasonScore, kwRank, floorRank)
+	if rt.shadow != nil {
+		shadow := scoreSmartV2(rt, &f, *rt.shadow, sess)
+		out.shadowRank, _ = smartRaiseRank(shadow.rank, smartReasonScore, kwRank, floorRank)
+	}
+	return out
+}
+
+// smartRaiseRank applies the keyword and floor ranks to a score rank, keeping the reason of the winner.
+func smartRaiseRank(rank int, reason string, kwRank, floorRank int) (int, string) {
+	if kwRank > rank {
+		rank = kwRank
+		reason = smartReasonKeyword
+	}
+	if floorRank > rank {
+		rank = floorRank
+		reason = smartReasonFloor
+	}
+	return rank, reason
 }

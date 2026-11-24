@@ -10,6 +10,7 @@ const (
 	smartParagraphCap     = 32
 	smartPasteDensity     = 60
 	smartPasteMinBytes    = 64
+	smartPasteSingleLine  = 400
 	smartPasteShortLines  = 6
 	smartPasteShortMean   = 40
 	smartNonLatinPerMille = 200
@@ -36,16 +37,20 @@ var smartIntentNames = [smartIntentCount]string{"unknown", "chitchat", "rewrite"
 
 // smartIntentPos places each intent on the router's ladder, in thousandths of a tier
 // step: 0 is score 0, 1000 is the first boundary above tier 0 and 2000 the top boundary.
-var smartIntentPos = [smartIntentCount]int{0, 0, 600, 1000, 1500, 1600, 2000}
+var smartIntentPos = [smartIntentCount]int{0, 0, 400, 1000, 1500, 1800, 2000}
 
 // Evidence tables are English only and lowercase; non-English text is handled structurally.
 var (
-	smartRewriteMarkers = []string{"summar", "rewrite", "rephrase", "translate", "proofread", "shorten", "tl;dr"}
-	smartEditMarkers    = []string{"implement", "refactor", "rename", "write a", "add ", "create ", "change "}
-	smartDebugMarkers   = []string{"fail", "crash", "bug", "broken", "not working", "doesn't work", "why is", "why does"}
-	smartDesignMarkers  = []string{"architecture", "design", "trade-off", "tradeoff", "approach", "migrat", "schema", "strategy", "should we"}
-	smartMathMarkers    = []string{"prove", "theorem", "lemma", "derive", "invariant", "complexity of"}
-	smartMathStructure  = []string{"$$", "\\frac", "\\sum", "∀", "∃", "≤"}
+	smartRewriteMarkers = []string{"summar", "rewrite", "rephrase", "translate", "proofread", "shorten", "tl;dr", "paraphras"}
+	// Strong edit verbs count without a paste; weak ones need code or tools in the request.
+	smartEditStrongMarkers = []string{"implement", "refactor", "rename", "write a"}
+	smartEditWeakMarkers   = []string{"add ", "create ", "change ", "convert "}
+	smartDebugMarkers      = []string{"fail", "crash", "bug", "broken", "not working", "doesn't work", "why is", "why does"}
+	smartDesignMarkers     = []string{"architecture", "design", "trade-off", "tradeoff", "approach", "migrat", "schema", "strategy", "should we", "good idea", "recommend", " versus ", " vs ", "which is better"}
+	// Math markers carry a leading space so "improve" and "approve" do not match "prove".
+	smartMathMarkers = []string{" prove", " theorem", " lemma", " derive", " invariant", " show that", " induction", " undecidab",
+		" recurrence", " closed form", " critical point", " injective", " bijective", " converge", "complexity of"}
+	smartMathStructure = []string{"$$", "\\frac", "\\sum", "∀", "∃", "≤"}
 	// smartEnglishWords are padded with spaces so they only match whole words; short words
 	// that are common in other Latin-script languages (a, i, to, do, in) are left out.
 	smartEnglishWords = []string{" the ", " and ", " of ", " is ", " it ", " you ", " me ", " my ", " how ", " what ", " why ", " can ", " this ", " that ", " with ", " for ", " are "}
@@ -81,6 +86,9 @@ type smartFeatures struct {
 	toolHist     bool
 	hasImage     bool
 	found        bool
+	// history is set when the ask follows earlier conversation turns.
+	history    bool
+	mathStruct bool
 	// intentSpread is set when two matched intents sit far apart on the ladder.
 	intentSpread bool
 }
@@ -164,11 +172,26 @@ func (f *smartFeatures) findAsk(msgs []any) string {
 			}
 			if text != "" {
 				f.found = true
+				f.history = i > leadingSystemCount(msgs)
 				return text
 			}
 		}
 	}
 	return ""
+}
+
+func leadingSystemCount(msgs []any) int {
+	if len(msgs) == 0 {
+		return 0
+	}
+	first, ok := msgs[0].(map[string]any)
+	if !ok {
+		return 0
+	}
+	if role, _ := first["role"].(string); role == "system" || role == "developer" {
+		return 1
+	}
+	return 0
 }
 
 func smartJSONModeOf(req map[string]any) int {
@@ -222,6 +245,7 @@ func smartEdgeHasLog(s string) bool {
 // splitAsk separates prose from fenced code and paste paragraphs and records the
 // structural sizes. Odd fence segments are code.
 func (f *smartFeatures) splitAsk(text string) {
+	f.mathStruct = containsAnySmart(text, smartMathStructure)
 	segs := strings.Split(text, smartFenceMarker)
 	var parts []string
 	paragraphs := 0
@@ -273,7 +297,7 @@ func smartPasteKind(p string) (isPaste, isLog bool) {
 	}
 	n := len(p)
 	lines := strings.Count(p, "\n") + 1
-	if n >= smartPasteMinBytes {
+	if n >= smartPasteMinBytes && (lines >= 2 || n >= smartPasteSingleLine) {
 		hits := 0
 		for i := 0; i < len(smartPasteChars); i++ {
 			hits += strings.Count(p, smartPasteChars[i])
@@ -305,6 +329,11 @@ func smartTrailingAsk(p string) string {
 	if strings.Count(last, " ") < 2 {
 		return ""
 	}
+	for i := 0; i < len(smartPasteChars)-1; i++ {
+		if strings.Contains(last, smartPasteChars[i]) {
+			return ""
+		}
+	}
 	return last
 }
 
@@ -312,6 +341,7 @@ func smartTrailingAsk(p string) string {
 // derives the language-agnostic signals.
 func (f *smartFeatures) classifyIntent() {
 	text := f.lower
+	padded := " " + text + " "
 	pasted := f.codeBytes > 0 || f.logBytes > 0
 	best := smartIntentUnknown
 	lo, hi, matched := smartIntentPos[smartIntentMath], 0, 0
@@ -333,7 +363,7 @@ func (f *smartFeatures) classifyIntent() {
 	if containsAnySmart(text, smartRewriteMarkers) {
 		note(smartIntentRewrite)
 	}
-	if (f.codeBytes > 0 || f.hasTools || f.toolHist) && containsAnySmart(text, smartEditMarkers) {
+	if containsAnySmart(text, smartEditStrongMarkers) || ((f.codeBytes > 0 || f.hasTools || f.toolHist) && containsAnySmart(text, smartEditWeakMarkers)) {
 		note(smartIntentEdit)
 	}
 	if f.logBytes > 0 || containsAnySmart(text, smartDebugMarkers) {
@@ -342,7 +372,7 @@ func (f *smartFeatures) classifyIntent() {
 	if containsAnySmart(text, smartDesignMarkers) {
 		note(smartIntentDesign)
 	}
-	if containsAnySmart(text, smartMathMarkers) || containsAnySmart(f.prose, smartMathStructure) {
+	if containsAnySmart(padded, smartMathMarkers) || f.mathStruct {
 		note(smartIntentMath)
 	}
 	f.intent = best
@@ -360,7 +390,7 @@ func (f *smartFeatures) classifyIntent() {
 		f.nonLatin = (n-utf8.RuneCountInString(f.prose))*smartPerMille/n > smartNonLatinPerMille
 	}
 	if best == smartIntentUnknown && len(f.prose) >= smartForeignMinBytes {
-		f.foreign = f.nonLatin || !containsAnySmart(" "+text+" ", smartEnglishWords)
+		f.foreign = f.nonLatin || !containsAnySmart(padded, smartEnglishWords)
 	}
 }
 
