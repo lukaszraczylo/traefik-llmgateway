@@ -181,6 +181,23 @@ func validateSmartRouters(raw map[string]*SmartRouterConfig, providerNames []str
 	return out, nil
 }
 
+// validateRouterModelMeta requires a router-named modelMeta entry to set a
+// positive window: the window is the only field a router uses. The upper
+// bound is not checked here because targets resolve lazily via discovery.
+func validateRouterModelMeta(routers map[string]*smartRouter, meta map[string]*ModelMetaConfig) error {
+	var bad []string
+	for name := range routers {
+		if v, ok := meta[name]; ok && v != nil && v.ContextTokens <= 0 {
+			bad = append(bad, name)
+		}
+	}
+	if len(bad) == 0 {
+		return nil
+	}
+	sort.Strings(bad)
+	return fmt.Errorf("llmgateway: modelMeta: entry %q names a smart router: contextTokens must be greater than zero", bad[0])
+}
+
 func validateSmartRouterName(name string, providerSet, explicitModels map[string]bool, aliases map[string]string) error {
 	if !isValidModelID(name) {
 		return fmt.Errorf("llmgateway: smartRouters: router %q is invalid: must be non-empty with no control characters", name)

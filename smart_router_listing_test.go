@@ -1,6 +1,8 @@
 package traefikllmgateway
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -21,7 +23,7 @@ func routerListEntry(t *testing.T, cfg *Config, name string) map[string]any {
 	return nil
 }
 
-func TestModelRegistry_ListFor_RouterAdvertisesSmallestTargetContext(t *testing.T) {
+func TestModelRegistry_ListFor_RouterAdvertisesTargetContext(t *testing.T) {
 	t.Parallel()
 	tiers := []SmartRouterTier{
 		{Name: "low", Models: []string{"openai/big"}},
@@ -34,24 +36,38 @@ func TestModelRegistry_ListFor_RouterAdvertisesSmallestTargetContext(t *testing.
 		tiers   []SmartRouterTier
 		want    int
 		known   bool
+		escOff  bool
 	}{
 		{
-			name:  "minimum across every tier, unknown and unresolved targets ignored",
+			name:  "escalation on advertises the maximum, unknown and unresolved targets ignored",
 			meta:  map[string]*ModelMetaConfig{"big": {ContextTokens: 200000}, "small": {ContextTokens: 32000}},
 			tiers: tiers,
-			want:  32000, known: true,
+			want:  200000, known: true,
 		},
 		{
-			name:  "router-level modelMeta override wins",
+			name:  "escalation off advertises the minimum",
+			meta:  map[string]*ModelMetaConfig{"big": {ContextTokens: 200000}, "small": {ContextTokens: 32000}},
+			tiers: tiers, escOff: true,
+			want: 32000, known: true,
+		},
+		{
+			name:  "router-level modelMeta override wins with escalation on",
 			meta:  map[string]*ModelMetaConfig{"big": {ContextTokens: 200000}, "small": {ContextTokens: 32000}, "smart": {ContextTokens: 16000}},
 			tiers: tiers,
 			want:  16000, known: true,
+		},
+		{
+			name:  "router-level modelMeta override wins with escalation off",
+			meta:  map[string]*ModelMetaConfig{"big": {ContextTokens: 200000}, "small": {ContextTokens: 32000}, "smart": {ContextTokens: 16000}},
+			tiers: tiers, escOff: true,
+			want: 16000, known: true,
 		},
 		{
 			name:    "alias target uses its own alias-level metadata",
 			meta:    map[string]*ModelMetaConfig{"big": {ContextTokens: 200000}, "tiny": {ContextTokens: 8000}},
 			aliases: map[string]string{"tiny": "openai/big"},
 			tiers:   []SmartRouterTier{{Name: "low", Models: []string{"openai/big", "tiny"}}},
+			escOff:  true,
 			want:    8000, known: true,
 		},
 		{
@@ -68,6 +84,10 @@ func TestModelRegistry_ListFor_RouterAdvertisesSmallestTargetContext(t *testing.
 				ModelAliases: tc.aliases,
 				SmartRouters: map[string]*SmartRouterConfig{"smart": {Tiers: tc.tiers}},
 			}
+			if tc.escOff {
+				off := false
+				cfg.SmartRouters["smart"].ContextEscalation = &off
+			}
 			entry := routerListEntry(t, cfg, "smart")
 			if !tc.known {
 				for _, k := range []string{"context_window", "context_length", "max_model_len"} {
@@ -80,5 +100,57 @@ func TestModelRegistry_ListFor_RouterAdvertisesSmallestTargetContext(t *testing.
 				assert.Equal(t, tc.want, entry[k], k)
 			}
 		})
+	}
+}
+
+func TestModelRegistry_RouterOverrideAboveLargestTargetWarnsOnce(t *testing.T) {
+	cfg := &Config{
+		Providers:    map[string]*ProviderConfig{"openai": {Models: []string{"big", "small"}}},
+		ModelMeta:    map[string]*ModelMetaConfig{"big": {ContextTokens: 200000}, "small": {ContextTokens: 32000}, "smart": {ContextTokens: 500000}},
+		SmartRouters: map[string]*SmartRouterConfig{"smart": {Tiers: []SmartRouterTier{{Name: "low", Models: []string{"openai/big", "openai/small"}}}}},
+	}
+	var logs []string
+	adapters := map[string]providerAdapter{"openai": newFakeAdapter("openai")}
+	reg, err := newModelRegistry(adapters, cfg, func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) })
+	require.NoError(t, err)
+	for i := 0; i < 3; i++ {
+		reg.listFor(allowAllGroup())
+	}
+	var warns int
+	for _, l := range logs {
+		if strings.Contains(l, "exceeds the largest known target window") {
+			warns++
+		}
+	}
+	assert.Equal(t, 1, warns, "%v", logs)
+}
+
+func TestModelRegistry_RouterOverrideWithinLargestTargetDoesNotWarn(t *testing.T) {
+	cfg := &Config{
+		Providers:    map[string]*ProviderConfig{"openai": {Models: []string{"big"}}},
+		ModelMeta:    map[string]*ModelMetaConfig{"big": {ContextTokens: 200000}, "smart": {ContextTokens: 200000}},
+		SmartRouters: map[string]*SmartRouterConfig{"smart": {Tiers: []SmartRouterTier{{Name: "low", Models: []string{"openai/big"}}}}},
+	}
+	var logs []string
+	adapters := map[string]providerAdapter{"openai": newFakeAdapter("openai")}
+	reg, err := newModelRegistry(adapters, cfg, func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) })
+	require.NoError(t, err)
+	reg.listFor(allowAllGroup())
+	for _, l := range logs {
+		assert.NotContains(t, l, "exceeds the largest known target window")
+	}
+}
+
+func TestNewModelRegistry_RouterModelMetaOverrideMustBePositive(t *testing.T) {
+	t.Parallel()
+	for _, v := range []int{0, -1} {
+		cfg := &Config{
+			Providers:    map[string]*ProviderConfig{"openai": {Models: []string{"big"}}},
+			ModelMeta:    map[string]*ModelMetaConfig{"smart": {ContextTokens: v}},
+			SmartRouters: map[string]*SmartRouterConfig{"smart": {Tiers: []SmartRouterTier{{Name: "low", Models: []string{"openai/big"}}}}},
+		}
+		adapters := map[string]providerAdapter{"openai": newFakeAdapter("openai")}
+		_, err := newModelRegistry(adapters, cfg, func(string, ...any) {})
+		require.Error(t, err, "contextTokens %d", v)
 	}
 }

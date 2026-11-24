@@ -917,6 +917,9 @@ func newModelRegistry(adapters map[string]providerAdapter, cfg *Config, log func
 		return nil, err
 	}
 	m.modelMeta = modelMeta
+	if err := validateRouterModelMeta(m.routers, m.modelMeta); err != nil {
+		return nil, err
+	}
 
 	return m, nil
 }
@@ -1801,20 +1804,36 @@ func (m *modelRegistry) routerEntriesFor(grp *group) map[string]map[string]any {
 	return entries
 }
 
-// routerMeta advertises the smallest known context window across every
-// router target, so a client never sizes a prompt that some tier cannot
-// take; a modelMeta entry keyed by the router name overrides it.
+// routerMeta advertises the largest known target context window when
+// context escalation is on (the plan routes around smaller targets), else the
+// smallest so no tier can be handed an oversized prompt. A modelMeta entry
+// keyed by the router name overrides it.
 func (m *modelRegistry) routerMeta(name string, rt *smartRouter) resolvedModelMeta {
-	var out resolvedModelMeta
+	var smallest, largest int
+	known := false
 	for _, tier := range rt.tiers {
 		for _, target := range tier.models {
 			meta := m.routerTargetMeta(target)
-			if meta.ContextKnown && (!out.ContextKnown || meta.ContextTokens < out.ContextTokens) {
-				out.ContextTokens, out.ContextKnown = meta.ContextTokens, true
+			if !meta.ContextKnown {
+				continue
 			}
+			if !known || meta.ContextTokens < smallest {
+				smallest = meta.ContextTokens
+			}
+			if !known || meta.ContextTokens > largest {
+				largest = meta.ContextTokens
+			}
+			known = true
 		}
 	}
+	out := resolvedModelMeta{ContextKnown: known, ContextTokens: smallest}
+	if rt.contextEscalation {
+		out.ContextTokens = largest
+	}
 	if override, ok := m.modelMeta[name]; ok && override != nil && override.ContextTokens > 0 {
+		if known && override.ContextTokens > largest {
+			m.warnRouterOnce("router-override:"+name, fmt.Sprintf("model registry: smart router %q modelMeta contextTokens %d exceeds the largest known target window %d", name, override.ContextTokens, largest))
+		}
 		out.ContextTokens, out.ContextKnown = override.ContextTokens, true
 	}
 	return out
