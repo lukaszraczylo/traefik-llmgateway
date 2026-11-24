@@ -36,9 +36,11 @@ const (
 	routerOutcomeOK        = "ok"
 	routerOutcomeError     = "error"
 	routerOutcomeEscalated = "escalated"
+	// routerOutcomeBad marks an answer that was cut at the output cap, empty, or broken mid-stream.
+	routerOutcomeBad = "bad"
 )
 
-var routerOutcomeNames = [...]string{routerOutcomeOK, routerOutcomeError, routerOutcomeEscalated}
+var routerOutcomeNames = [...]string{routerOutcomeOK, routerOutcomeError, routerOutcomeEscalated, routerOutcomeBad}
 
 // routerStats holds per-instance router counters. Keys come from router and
 // tier names in the config, so cardinality is bounded by the config.
@@ -171,14 +173,17 @@ func (g *Gateway) recordRouterAttempt(plan *routerPlan, i int, endpoint string, 
 }
 
 // recordRouterOutcome counts a finished request once. attempt is the plan
-// index of the last attempt; served says whether the client got a 2xx.
-func (g *Gateway) recordRouterOutcome(plan *routerPlan, attempt int, served bool) {
+// index of the last attempt; served says whether the client got a 2xx; bad overrides the other outcomes.
+func (g *Gateway) recordRouterOutcome(plan *routerPlan, attempt int, served, bad bool) {
 	outcome := routerOutcomeError
 	if served {
 		outcome = routerOutcomeOK
 		if plan.entries[attempt].tier != plan.entries[0].tier {
 			outcome = routerOutcomeEscalated
 		}
+	}
+	if bad {
+		outcome = routerOutcomeBad
 	}
 	k := routerOutcomeKey{router: plan.router, tier: plan.entries[0].tier, reason: routerRequestReason(plan), outcome: outcome}
 	if metricsEnabled(g.cfg) {

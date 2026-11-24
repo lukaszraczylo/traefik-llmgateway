@@ -112,6 +112,21 @@ func BenchHelperCheck() string {
 		if p2, _ := smartPasteKind("a plain sentence with no code in it at all, just words for a while"); p2 {
 			return "smartPasteKind kept isPaste from the previous call"
 		}
+		if chunkFinishReason([]byte("{\"choices\":[{\"finish_reason\":\"length\"}]}")) != "length" || chunkFinishReason([]byte("{\"choices\":[{\"finish_reason\":null}]}")) != "" {
+			return "chunkFinishReason changed between calls"
+		}
+		if !chunkHasOutput([]byte("{\"delta\":{\"content\":\"x\"}}")) || chunkHasOutput([]byte("{\"delta\":{\"content\":\"\"}}")) {
+			return "chunkHasOutput changed between calls"
+		}
+		if !smartJSONEmpty([]byte("null")) || smartJSONEmpty([]byte("\"x\"")) {
+			return "smartJSONEmpty changed between calls"
+		}
+		if u := withAnswerFlags(usage{}, "length", false); !u.finishLength || !u.emptyOutput {
+			return "withAnswerFlags missed a flag"
+		}
+		if u := withAnswerFlags(usage{}, "stop", true); u.finishLength || u.emptyOutput {
+			return "withAnswerFlags kept a flag from the previous call"
+		}
 	}
 	return ""
 }

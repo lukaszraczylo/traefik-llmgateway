@@ -37,6 +37,8 @@ type routerPlan struct {
 	// promptBytes is the size estimate that calibration compares with reported usage.
 	promptBytes int64
 	hasImage    bool
+	// maxTokensSet is true when the client capped the output; a length cut is then its own choice.
+	maxTokensSet bool
 }
 
 func (p *routerPlan) candidates() []resolveCandidate {
@@ -99,7 +101,7 @@ func (g *Gateway) planSmartRouter(rt *smartRouter, req map[string]any, endpoint 
 		outputTokens: requestedOutputTokens(req, endpoint),
 		costBudget:   !g.cfg.AllowUnpricedWithCostBudget && scopesHaveCostBudget(scopes),
 	}
-	plan := &routerPlan{router: rt.name, reason: reason, startTier: rt.tiers[start].name, promptBytes: promptBytes, hasImage: hasImage}
+	plan := &routerPlan{router: rt.name, reason: reason, startTier: rt.tiers[start].name, promptBytes: promptBytes, hasImage: hasImage, maxTokensSet: facts.outputTokens > 0}
 	if cls.shadowRank >= 0 {
 		plan.shadowTier = rt.tiers[cls.shadowRank].name
 	}

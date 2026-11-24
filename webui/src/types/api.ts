@@ -247,7 +247,7 @@ export interface AdminRouterShadowView {
 export interface AdminRouterOutcomeView {
   tier: string
   reason: string
-  outcome: 'ok' | 'error' | 'escalated'
+  outcome: 'ok' | 'error' | 'escalated' | 'bad'
   count: number
 }
 

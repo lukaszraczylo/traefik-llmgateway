@@ -115,6 +115,7 @@ describe('SmartRoutersCard', () => {
           { tier: 'small', reason: 'keyword', outcome: 'ok', count: 1 },
           { tier: 'small', reason: 'score', outcome: 'escalated', count: 2 },
           { tier: 'big', reason: 'score', outcome: 'error', count: 1 },
+          { tier: 'big', reason: 'score', outcome: 'bad', count: 2 },
         ],
       },
     }
@@ -123,6 +124,7 @@ describe('SmartRoutersCard', () => {
     expect(html).toMatch(/data-cell="small:ok"[^>]*>4</)
     expect(html).toMatch(/data-cell="small:escalated"[^>]*>2</)
     expect(html).toMatch(/data-cell="big:error"[^>]*>1</)
+    expect(html).toMatch(/data-cell="big:bad"[^>]*>2</)
     expect(await render([router])).not.toContain('Outcomes for')
   })
 

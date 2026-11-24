@@ -377,7 +377,7 @@ func (g *Gateway) runMeteredCall(sw *statusTrackingWriter, r *http.Request, scop
 			// perfectly healthy provider's request-health breaker.
 			if r.Context().Err() != nil {
 				if plan != nil {
-					g.recordRouterOutcome(plan, i-1, false)
+					g.recordRouterOutcome(plan, i-1, false, false)
 				}
 				g.recordUpstreamEvent(scopes, candidates[i-1].canonical, lastProviderName, eventRouteForEndpoint(endpoint), lastErr)
 				g.handleAdapterErrorEnvelope(sw, lastErr, lastProviderName, logPrefix, envelope, writeUpstream)
@@ -528,7 +528,7 @@ func (g *Gateway) runMeteredCall(sw *statusTrackingWriter, r *http.Request, scop
 					g.limiter.recordCacheHit(cand.canonical, saved)
 				}
 				if plan != nil {
-					g.recordRouterOutcome(plan, i, true)
+					g.recordRouterOutcome(plan, i, true, false)
 				}
 				return
 			}
@@ -603,7 +603,7 @@ func (g *Gateway) runMeteredCall(sw *statusTrackingWriter, r *http.Request, scop
 			envelope(sw, http.StatusPaymentRequired, "invalid_request_error",
 				fmt.Sprintf("model %q has no configured price, so the cost budget that applies to this request cannot be enforced; add a \"pricing\" entry for it, or set allowUnpricedWithCostBudget to serve it unbounded", cand.canonical))
 			if plan != nil {
-				g.recordRouterOutcome(plan, i, false)
+				g.recordRouterOutcome(plan, i, false, false)
 			}
 			return
 		}
@@ -635,6 +635,7 @@ func (g *Gateway) runMeteredCall(sw *statusTrackingWriter, r *http.Request, scop
 		}
 		result, callErr := call(cand.adapter, ctx, respWriter, attemptReq)
 		endUpstream()
+		bad := plan != nil && plan.badResult(result, callErr, sw.wroteHeader)
 
 		// Request-path health, recorded ONCE per candidate per logical
 		// request (F3/F6 fix, adversarial-review) — see
@@ -822,7 +823,7 @@ func (g *Gateway) runMeteredCall(sw *statusTrackingWriter, r *http.Request, scop
 
 		if callErr == nil {
 			if plan != nil {
-				g.recordRouterOutcome(plan, i, true)
+				g.recordRouterOutcome(plan, i, true, bad)
 			}
 			return
 		}
@@ -836,7 +837,7 @@ func (g *Gateway) runMeteredCall(sw *statusTrackingWriter, r *http.Request, scop
 		// remain.
 		if sw.wroteHeader {
 			if plan != nil {
-				g.recordRouterOutcome(plan, i, false)
+				g.recordRouterOutcome(plan, i, false, bad)
 			}
 			g.recordUpstreamEvent(scopes, cand.canonical, providerName, eventRouteForEndpoint(endpoint), callErr)
 			g.handleAdapterErrorEnvelope(sw, callErr, providerName, logPrefix, envelope, writeUpstream)
@@ -862,7 +863,7 @@ func (g *Gateway) runMeteredCall(sw *statusTrackingWriter, r *http.Request, scop
 		}
 		if !hasNext {
 			if plan != nil {
-				g.recordRouterOutcome(plan, i, false)
+				g.recordRouterOutcome(plan, i, false, bad)
 			}
 			if plan != nil && i == len(candidates)-1 && routerEscalatable(callErr, true) {
 				g.recordRouterExhausted(plan, i, endpoint, scopes)

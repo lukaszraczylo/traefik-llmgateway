@@ -21,7 +21,7 @@ const scopeLabel = computed(() =>
   props.routers.some((r) => r.stats?.scope === 'shared') ? 'Counts: All replicas, this month (UTC)' : 'Counts: This gateway instance, since start',
 )
 
-const OUTCOMES = ['ok', 'escalated', 'error'] as const
+const OUTCOMES = ['ok', 'escalated', 'error', 'bad'] as const
 
 function shadowCount(router: AdminRouterView, live: string, shadow: string): number {
   return router.stats?.shadow.find((c) => c.live === live && c.shadow === shadow)?.count ?? 0

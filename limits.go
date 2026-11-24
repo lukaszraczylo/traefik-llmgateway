@@ -555,6 +555,10 @@ type usage struct {
 	// tell an estimated cost from a provider-reported one, per the spec's
 	// "logged as estimated" requirement.
 	estimated bool
+	// finishLength and emptyOutput describe the answer, not its cost: the
+	// upstream cut it at the output cap, or returned neither text nor a tool
+	// call. Smart router outcome counters read them; billing ignores them.
+	finishLength, emptyOutput bool
 }
 
 // total returns the request's combined prompt and completion tokens.
