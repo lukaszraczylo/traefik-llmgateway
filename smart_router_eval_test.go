@@ -277,15 +277,10 @@ func BenchmarkSmartRouterFixtures(b *testing.B) {
 	}
 }
 
-// TestRouterHoldout2Report logs the frozen blind holdout; it never gates, so tuning must not read it.
-func TestRouterHoldout2Report(t *testing.T) {
+// TestRouterHoldout2Gate holds the former blind holdout, now a training set, to the same gate as the main set.
+func TestRouterHoldout2Gate(t *testing.T) {
 	t.Parallel()
-	fixtures := loadRouterFixturesGlob(t, evalHoldout2Glob)
-	for _, l := range evalLayouts {
-		v1 := runEval(evalRouter(t, l.mins, smartClassifierV1), fixtures)
-		v2 := runEval(evalRouter(t, l.mins, smartClassifierV2), fixtures)
-		t.Logf("holdout2 %s %v\nv1:\n%s\nv2:\n%s", l.name, l.mins, v1.table(), v2.table())
-	}
+	gateRouterFixtures(t, loadRouterFixturesGlob(t, evalHoldout2Glob))
 }
 
 // fixtureSession is the prior state of a session fixture. Replay derives it by running the
