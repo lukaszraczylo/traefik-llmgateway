@@ -1347,7 +1347,7 @@ func stampReleaseVersion(pkgDir string) error {
 // silently drift out of sync) every time `make pricing-sync`
 // regenerates the table against updated upstream data.
 func readBuiltinContextTokens(repoRoot, modelID string) (int, error) {
-	data, err := os.ReadFile(filepath.Join(repoRoot, "pricing_data_gen.go"))
+	data, err := os.ReadFile(filepath.Join(repoRoot, "pricing_data_gen.go")) //nolint:gosec // G703: repoRoot is the dev operator's own argv, joined with a fixed file name
 	if err != nil {
 		return 0, fmt.Errorf("read pricing_data_gen.go: %w", err)
 	}
@@ -3192,7 +3192,7 @@ func readProviderAttemptCounters(handler http.Handler, providerName string) (att
 // readModulePath returns the module path declared by goModPath's
 // "module" directive.
 func readModulePath(goModPath string) (string, error) {
-	f, err := os.Open(goModPath)
+	f, err := os.Open(goModPath) //nolint:gosec // G703: dev tool reading go.mod under the repo root given on its own command line
 	if err != nil {
 		return "", err
 	}
@@ -3237,7 +3237,7 @@ func readPackageName(dir string) (string, error) {
 
 // scanPackageDecl reads path's leading "package X" line, if any.
 func scanPackageDecl(path string) (string, error) {
-	f, err := os.Open(path)
+	f, err := os.Open(path) //nolint:gosec // G703: dev tool reading Go files under the repo root given on its own command line
 	if err != nil {
 		return "", err
 	}
@@ -3263,7 +3263,7 @@ func copyRepoSource(repoRoot, destDir string) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(destDir, 0o750); err != nil {
+	if err := os.MkdirAll(destDir, 0o750); err != nil { //nolint:gosec // G703: dev tool copying under paths from its own command line and temp dirs
 		return err
 	}
 	for _, e := range entries {
@@ -3287,7 +3287,7 @@ func copyRepoSource(repoRoot, destDir string) error {
 
 // copyDir recursively copies src to dst.
 func copyDir(src, dst string) error {
-	return filepath.WalkDir(src, func(path string, d fs.DirEntry, err error) error {
+	return filepath.WalkDir(src, func(path string, d fs.DirEntry, err error) error { //nolint:gosec // G703: dev tool copying under paths from its own command line and temp dirs
 		if err != nil {
 			return err
 		}
@@ -3297,7 +3297,7 @@ func copyDir(src, dst string) error {
 		}
 		target := filepath.Join(dst, rel)
 		if d.IsDir() {
-			return os.MkdirAll(target, 0o750)
+			return os.MkdirAll(target, 0o750) //nolint:gosec // G703: dev tool copying under paths from its own command line and temp dirs
 		}
 		return copyFile(path, target)
 	})
@@ -3305,16 +3305,16 @@ func copyDir(src, dst string) error {
 
 // copyFile copies src to dst, creating dst's parent directory if needed.
 func copyFile(src, dst string) error {
-	in, err := os.Open(src)
+	in, err := os.Open(src) //nolint:gosec // G703: dev tool copying under paths from its own command line and temp dirs
 	if err != nil {
 		return err
 	}
 	defer in.Close() //nolint:errcheck // read-side close; nothing actionable on failure
 
-	if err = os.MkdirAll(filepath.Dir(dst), 0o750); err != nil {
+	if err = os.MkdirAll(filepath.Dir(dst), 0o750); err != nil { //nolint:gosec // G703: dev tool copying under paths from its own command line and temp dirs
 		return err
 	}
-	out, err := os.Create(dst)
+	out, err := os.Create(dst) //nolint:gosec // G703: dev tool copying under paths from its own command line and temp dirs
 	if err != nil {
 		return err
 	}
@@ -3341,7 +3341,7 @@ type yamlLine struct {
 // in this harness module — the plugin module never parses YAML itself,
 // Traefik does that before handing the plugin its already-decoded Config.
 func extractTraefikYAMLTestData(path string) (map[string]any, error) {
-	raw, err := os.ReadFile(path)
+	raw, err := os.ReadFile(path) //nolint:gosec // G703: dev tool copying under paths from its own command line and temp dirs
 	if err != nil {
 		return nil, err
 	}
