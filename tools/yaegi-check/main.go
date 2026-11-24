@@ -790,7 +790,8 @@ func run() error {
 		// smartRouters: routerProbeEscalating escalates a failing tier-0 to
 		// tier-1; routerProbeHashed exercises hash selection (hash/fnv).
 		`"smartRouters":{"` + routerProbeEscalating + `":{"tiers":[{"name":"` + routerProbeTier0 + `","minScore":0,"models":["` + routerProbeBadProvider + `/rp-bad"]},{"name":"` + routerProbeTier1 + `","minScore":300,"models":["` + routerProbeOKProvider + `/rp-ok-a"]}]},` +
-		`"` + routerProbeHashed + `":{"selection":"hash","tiers":[{"name":"rp-h0","minScore":0,"models":["` + routerProbeOKProvider + `/rp-ok-a","` + routerProbeOKProvider + `/rp-ok-b"]}]}},` +
+		`"` + routerProbeHashed + `":{"selection":"hash","tiers":[{"name":"rp-h0","minScore":0,"models":["` + routerProbeOKProvider + `/rp-ok-a","` + routerProbeOKProvider + `/rp-ok-b"]}]},` +
+		`"` + routerProbeSession + `":{"classifier":"v2","session":{"enabled":true},"tiers":[{"name":"` + routerProbeTier0 + `","minScore":0,"models":["` + routerProbeBadProvider + `/rp-bad"]},{"name":"` + routerProbeTier1 + `","minScore":300,"models":["` + routerProbeOKProvider + `/rp-ok-b"]}]}},` +
 		// modelMeta (feature v0.23): a config-override entry for
 		// testDataWantModel, so exerciseHandler's GET /v1/models
 		// assertion below proves resolveModelMeta's config-override
@@ -1069,6 +1070,9 @@ func run() error {
 	// instance (own config, own fake Redis, own upstream) rather than the
 	// shared `handler` above — see that function's own doc comment for
 	// why.
+	if err := exerciseRouterV2(i, pkgName); err != nil {
+		return err
+	}
 	return exerciseAdminRedesignStats(i, pkgName)
 }
 
@@ -3992,6 +3996,7 @@ const (
 	routerProbeOKProvider  = "routerprobe-ok"
 	routerProbeEscalating  = "rp-auto"
 	routerProbeHashed      = "rp-hash"
+	routerProbeSession     = "rp-sess"
 	routerProbeTier0       = "rp-t0"
 	routerProbeTier1       = "rp-t1"
 	routerProbeDenyGroup   = "routerprobe-deny"
@@ -4029,6 +4034,10 @@ func exerciseSmartRouter(handler http.Handler) error {
 		return fmt.Errorf("router %q: X-Llmgw-Routed-Model = %q, want a %s/rp-ok-* model", routerProbeHashed, got, routerProbeOKProvider)
 	}
 
+	if err := exerciseRouterSession(handler); err != nil {
+		return err
+	}
+
 	rec = routerProbeChat(handler, routerProbeEscalating, routerProbeDenyAPIKey)
 	if rec.Code != http.StatusForbidden {
 		return fmt.Errorf("POST /v1/chat/completions (router %q, every target denied): status = %d, want 403, body=%s", routerProbeEscalating, rec.Code, rec.Body.String())
@@ -4052,6 +4061,36 @@ func exerciseSmartRouter(handler http.Handler) error {
 	}
 
 	fmt.Println("yaegi-check: smart router escalated tier-0 500 to tier-1, hash selection served, denied router returned a 403 envelope, escalation metric incremented under the interpreter")
+	return nil
+}
+
+// exerciseRouterSession drives a session-enabled v2 router under the interpreter: the first
+// request escalates past the failing tier 0, so the pin makes the second one start at tier 1.
+func exerciseRouterSession(handler http.Handler) error {
+	post := func(text string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(
+			`{"model":"`+routerProbeSession+`","metadata":{"user_id":"yaegi-probe"},"messages":[{"role":"user","content":"`+text+`"}]}`,
+		))
+		req.Header.Set("Authorization", "Bearer "+testDataUserAPIKey)
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		return rec
+	}
+	first := post("hi")
+	if first.Code != http.StatusOK || first.Header().Get("X-Llmgw-Router-Tier") != routerProbeTier1 || first.Header().Get("X-Llmgw-Router-Reason") != "score" {
+		return fmt.Errorf("router %q first request: status=%d tier=%q reason=%q, want 200 %s score", routerProbeSession, first.Code, first.Header().Get("X-Llmgw-Router-Tier"), first.Header().Get("X-Llmgw-Router-Reason"), routerProbeTier1)
+	}
+	second := post("hello again")
+	if second.Code != http.StatusOK || second.Header().Get("X-Llmgw-Router-Reason") != "session" {
+		return fmt.Errorf("router %q second request: status=%d reason=%q, want 200 session", routerProbeSession, second.Code, second.Header().Get("X-Llmgw-Router-Reason"))
+	}
+	// The same ask again inside the regenerate window is a retry of an answer the user did not take.
+	third := post("hello again")
+	if third.Code != http.StatusOK || third.Header().Get("X-Llmgw-Router-Reason") != "bump" {
+		return fmt.Errorf("router %q regenerate: status=%d reason=%q, want 200 bump", routerProbeSession, third.Code, third.Header().Get("X-Llmgw-Router-Reason"))
+	}
+	fmt.Println("yaegi-check: session router pinned the escalated tier, routed the next turn by the session and bumped a regenerate under the interpreter")
 	return nil
 }
 
