@@ -11,7 +11,10 @@ const (
 	headerRouterTier  = "X-Llmgw-Router-Tier"
 	// headerRouterReason is set only on routers that use sessions.
 	headerRouterReason = "X-Llmgw-Router-Reason"
-	routerOwnedBy      = "smart-router"
+	// headerRouterDowngraded names the tier a saturated router started below.
+	headerRouterDowngraded = "X-Llmgw-Router-Downgraded"
+	smartReasonSaturated   = "saturated"
+	routerOwnedBy          = "smart-router"
 )
 
 // routerTargetError is returned when a router cannot serve a request at all.
@@ -35,6 +38,8 @@ type routerPlan struct {
 	startTier string
 	// shadowTier is the tier the router's shadowWeights chose; empty when unset.
 	shadowTier string
+	// downgradedFrom is the classified tier a saturation downgrade started below; empty when not downgraded.
+	downgradedFrom string
 	// sess is the router's session for this request; nil when the router does not use sessions.
 	sess *smartSessionRun
 	// bandit is the router's bandit when selection is adaptive; the outcome of each attempt feeds it.
@@ -133,6 +138,15 @@ func (g *Gateway) planSmartRouter(rt *smartRouter, req map[string]any, endpoint 
 		return out
 	}
 
+	if rt.satDowngrade && reason == smartReasonScore {
+		if from, ok := g.saturationDowngrade(rt, cls, start, fresh); ok {
+			plan.downgradedFrom = rt.tiers[from].name
+			plan.startTier = rt.tiers[from-1].name
+			plan.reason = smartReasonSaturated
+			start = from - 1
+		}
+	}
+
 	for rank := start; rank < len(rt.tiers) && len(plan.entries) < rt.maxAttempts; rank++ {
 		cands := fresh(rank)
 		if len(cands) == 0 {
@@ -166,6 +180,39 @@ func (g *Gateway) planSmartRouter(rt *smartRouter, req map[string]any, endpoint 
 	}
 	g.storeSession(sess)
 	return plan, nil
+}
+
+// saturationDowngrade decides whether a score-routed request starts one tier below its classified
+// tier. It needs a lower tier that clears every floor, a score within the band above the tier's
+// threshold, a tier with no free capacity, and a usable candidate one tier down. It returns the
+// classified rank to downgrade from.
+func (g *Gateway) saturationDowngrade(rt *smartRouter, cls smartClassification, rank int, fresh func(int) []resolveCandidate) (int, bool) {
+	if rank < 1 || rank-1 < cls.hardRank || cls.score >= rt.tierMin(rank)+rt.downgradeBand {
+		return 0, false
+	}
+	cands := fresh(rank)
+	inFlight := make([]int, len(cands))
+	limit := make([]int, len(cands))
+	for i := range cands {
+		inFlight[i], limit[i] = g.providerLoad(cands[i].providerName)
+	}
+	if !smartAllSaturated(inFlight, limit) || len(fresh(rank-1)) == 0 {
+		return 0, false
+	}
+	return rank, true
+}
+
+// smartAllSaturated reports whether a tier has candidates and every one is at its known limit.
+func smartAllSaturated(inFlight, limit []int) bool {
+	if len(inFlight) == 0 || len(inFlight) != len(limit) {
+		return false
+	}
+	for i := range inFlight {
+		if !smartSaturated(inFlight[i], limit[i]) {
+			return false
+		}
+	}
+	return true
 }
 
 func routerCandidateKey(cand resolveCandidate) string {
@@ -274,6 +321,13 @@ func setRouterHeaders(h http.Header, plan *routerPlan, i int) {
 	h.Set(headerRouterTier, plan.entries[i].tier)
 	if plan.sess != nil {
 		h.Set(headerRouterReason, routerRequestReason(plan))
+	}
+	if plan.downgradedFrom != "" {
+		if plan.entries[i].tier == plan.startTier {
+			h.Set(headerRouterDowngraded, plan.downgradedFrom)
+		} else {
+			h.Del(headerRouterDowngraded)
+		}
 	}
 }
 

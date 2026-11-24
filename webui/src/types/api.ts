@@ -263,6 +263,28 @@ export interface AdminRouterStatsView {
   outcomes: AdminRouterOutcomeView[]
 }
 
+/** One tier's calibration offset: points its threshold sits below the configured minScore. */
+export interface AdminRouterDeltaView {
+  tier: string
+  delta: number
+}
+
+/** Calibration state of one router (admin_routers.go: adminRouterCalibrationView). Shadow offsets are computed, not applied. */
+export interface AdminRouterCalibrationView {
+  mode: 'off' | 'shadow' | 'live'
+  delta: AdminRouterDeltaView[]
+  maxLower: number
+  maxRaise: number
+  freeze: boolean
+}
+
+/** Settings of adaptive selection; present only when selection is "adaptive". */
+export interface AdminRouterAdaptiveView {
+  explorePct: number
+  windowHours: number
+  latencyWeightPct: number
+}
+
 /** One configured smart router, read-only (admin_routers.go: adminRouterView). */
 export interface AdminRouterView {
   name: string
@@ -278,6 +300,13 @@ export interface AdminRouterView {
   /** v2 risk margin in hundredths of a sigma. */
   riskZ: number
   selection: string
+  adaptive?: AdminRouterAdaptiveView
+  calibration: AdminRouterCalibrationView
+  /** True when a saturated tier starts score-routed requests one tier lower. */
+  saturationDowngrade: boolean
+  downgradeBand: number
+  /** Requests started one tier lower because their tier was saturated. */
+  downgraded: number
   tiers: AdminRouterTierView[]
   keywordRules: AdminRouterRuleView[]
   maxAttempts: number

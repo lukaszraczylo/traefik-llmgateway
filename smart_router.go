@@ -20,6 +20,9 @@ const (
 	defaultSmartRiskZ = 128
 	maxSmartRiskZ     = 400
 
+	defaultSmartDowngradeBand = 100
+	maxSmartDowngradeBand     = 300
+
 	defaultSmartMaxAttempts = 4
 	maxSmartKeywords        = 64
 	maxSmartMinScore        = 1000
@@ -57,6 +60,8 @@ type SmartRouterConfig struct {
 	Adaptive *SmartRouterAdaptiveConfig `json:"adaptive,omitempty"`
 	// Calibration lowers tier thresholds from outcome counters; it is off by default.
 	Calibration *SmartRouterCalibrationConfig `json:"calibration,omitempty"`
+	// DowngradeBand is how many points above a tier threshold a score may sit and still be downgraded; nil means 100.
+	DowngradeBand *int `json:"downgradeBand,omitempty"`
 	// DefaultTier serves requests with no user text; empty means the first tier.
 	DefaultTier string `json:"defaultTier,omitempty"`
 	// ToolsMinTier floors requests that carry tools or tool history; empty means no floor.
@@ -68,6 +73,8 @@ type SmartRouterConfig struct {
 	KeywordRules []SmartRouterKeywordRule `json:"keywordRules,omitempty"`
 	// MaxAttempts caps upstream attempts per request; 0 means 4.
 	MaxAttempts int `json:"maxAttempts,omitempty"`
+	// SaturationDowngrade starts a score-routed request one tier lower when its tier has no free capacity.
+	SaturationDowngrade bool `json:"saturationDowngrade,omitempty"`
 }
 
 // SmartRouterTier is one rung of a router. Models must be disjoint across tiers.
@@ -114,11 +121,13 @@ type smartRouter struct {
 	intentBase        [smartIntentCount]int
 	foreignBase       int
 	riskZ             int
+	downgradeBand     int
 	defaultRank       int
 	toolsMinRank      int
 	maxAttempts       int
 	shadowV2          bool
 	adaptiveSet       bool
+	satDowngrade      bool
 	contextEscalation bool
 	sessionEnabled    bool
 }
@@ -343,6 +352,10 @@ func compileSmartRouter(name string, cfg *SmartRouterConfig, routers map[string]
 	if err != nil {
 		return nil, err
 	}
+	downgradeBand, err := compileSmartDowngrade(name, cfg, len(tiers))
+	if err != nil {
+		return nil, err
+	}
 	var bandit *smartBandit
 	if selection == smartSelectionAdaptive {
 		bandit = newSmartBandit(adaptive)
@@ -350,6 +363,8 @@ func compileSmartRouter(name string, cfg *SmartRouterConfig, routers map[string]
 
 	return &smartRouter{
 		bandit:            bandit,
+		downgradeBand:     downgradeBand,
+		satDowngrade:      cfg.SaturationDowngrade,
 		adaptiveSet:       cfg.Adaptive != nil,
 		calib:             calib,
 		calibState:        calibState,
@@ -371,6 +386,20 @@ func compileSmartRouter(name string, cfg *SmartRouterConfig, routers map[string]
 		weights:           buildSmartWeights(cfg.Weights),
 		shadow:            shadow,
 	}, nil
+}
+
+func compileSmartDowngrade(router string, cfg *SmartRouterConfig, tiers int) (int, error) {
+	band := defaultSmartDowngradeBand
+	if cfg.DowngradeBand != nil {
+		band = *cfg.DowngradeBand
+	}
+	if band < 0 || band > maxSmartDowngradeBand {
+		return 0, fmt.Errorf("llmgateway: smartRouters: router %q: downgradeBand must be between 0 and %d, got %d", router, maxSmartDowngradeBand, band)
+	}
+	if cfg.SaturationDowngrade && tiers < 2 {
+		return 0, fmt.Errorf("llmgateway: smartRouters: router %q: saturationDowngrade needs at least two tiers", router)
+	}
+	return band, nil
 }
 
 // shadowEnabled reports whether the router fills the shadow matrix, by weights or by classifier.

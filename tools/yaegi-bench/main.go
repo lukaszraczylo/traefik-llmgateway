@@ -240,6 +240,12 @@ func banditHelperCheck() string {
 	if len(perm) != 3 || perm[0] != 2 || perm[1] != 0 || perm[2] != 1 {
 		return "smartBanditOrder missed the saturated-last order"
 	}
+	if !smartAllSaturated([]int{2, 3}, []int{2, 2}) || smartAllSaturated([]int{2, 1}, []int{2, 2}) {
+		return "smartAllSaturated changed between calls"
+	}
+	if smartAllSaturated(nil, nil) || smartAllSaturated([]int{5}, []int{0}) {
+		return "smartAllSaturated kept a result from the previous call"
+	}
 	perm = smartBanditOrder([]float64{0.2, 0.9}, []bool{false, false}, 0)
 	if len(perm) != 2 || perm[0] != 0 || perm[1] != 1 {
 		return "smartBanditOrder kept an order from the previous call"

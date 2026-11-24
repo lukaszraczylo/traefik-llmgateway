@@ -80,22 +80,26 @@ type adminRouterAdaptiveView struct {
 // adminRouterView is one smart router's read-only row. Keywords are routing
 // hints, not secrets.
 type adminRouterView struct {
-	Adaptive          *adminRouterAdaptiveView   `json:"adaptive,omitempty"`
-	Name              string                     `json:"name"`
-	DefaultTier       string                     `json:"defaultTier"`
-	ToolsMinTier      string                     `json:"toolsMinTier,omitempty"`
-	Selection         string                     `json:"selection"`
-	Classifier        string                     `json:"classifier"`
-	ShadowClassifier  string                     `json:"shadowClassifier,omitempty"`
-	Tiers             []adminRouterTierView      `json:"tiers"`
-	KeywordRules      []adminRouterRuleView      `json:"keywordRules"`
-	ContextTokens     *int                       `json:"contextTokens,omitempty"`
-	Stats             adminRouterStatsView       `json:"stats"`
-	Calibration       adminRouterCalibrationView `json:"calibration"`
-	MaxAttempts       int                        `json:"maxAttempts"`
-	RiskZ             int                        `json:"riskZ"`
-	ContextEscalation bool                       `json:"contextEscalation"`
-	ShadowEnabled     bool                       `json:"shadowEnabled"`
+	Adaptive         *adminRouterAdaptiveView   `json:"adaptive,omitempty"`
+	Name             string                     `json:"name"`
+	DefaultTier      string                     `json:"defaultTier"`
+	ToolsMinTier     string                     `json:"toolsMinTier,omitempty"`
+	Selection        string                     `json:"selection"`
+	Classifier       string                     `json:"classifier"`
+	ShadowClassifier string                     `json:"shadowClassifier,omitempty"`
+	Tiers            []adminRouterTierView      `json:"tiers"`
+	KeywordRules     []adminRouterRuleView      `json:"keywordRules"`
+	ContextTokens    *int                       `json:"contextTokens,omitempty"`
+	Stats            adminRouterStatsView       `json:"stats"`
+	Calibration      adminRouterCalibrationView `json:"calibration"`
+	MaxAttempts      int                        `json:"maxAttempts"`
+	// Downgraded counts requests a saturated tier sent one tier lower.
+	Downgraded          int64 `json:"downgraded"`
+	DowngradeBand       int   `json:"downgradeBand"`
+	RiskZ               int   `json:"riskZ"`
+	ContextEscalation   bool  `json:"contextEscalation"`
+	ShadowEnabled       bool  `json:"shadowEnabled"`
+	SaturationDowngrade bool  `json:"saturationDowngrade"`
 }
 
 // buildAdminRouterViews lists every router sorted by name; never nil.
@@ -104,16 +108,18 @@ func (g *Gateway) buildAdminRouterViews() []adminRouterView {
 	out := make([]adminRouterView, 0, len(g.registry.routers))
 	for _, rt := range g.registry.routers {
 		v := adminRouterView{
-			Name:              rt.name,
-			Selection:         rt.selection,
-			MaxAttempts:       rt.maxAttempts,
-			ContextEscalation: rt.contextEscalation,
-			ShadowEnabled:     rt.shadowEnabled(),
-			Classifier:        rt.classifier,
-			RiskZ:             rt.riskZ,
-			Calibration:       buildAdminRouterCalibration(rt),
-			Tiers:             make([]adminRouterTierView, len(rt.tiers)),
-			KeywordRules:      make([]adminRouterRuleView, len(rt.rules)),
+			Name:                rt.name,
+			Selection:           rt.selection,
+			MaxAttempts:         rt.maxAttempts,
+			ContextEscalation:   rt.contextEscalation,
+			ShadowEnabled:       rt.shadowEnabled(),
+			Classifier:          rt.classifier,
+			RiskZ:               rt.riskZ,
+			SaturationDowngrade: rt.satDowngrade,
+			DowngradeBand:       rt.downgradeBand,
+			Calibration:         buildAdminRouterCalibration(rt),
+			Tiers:               make([]adminRouterTierView, len(rt.tiers)),
+			KeywordRules:        make([]adminRouterRuleView, len(rt.rules)),
 		}
 		if rt.shadowV2 {
 			v.ShadowClassifier = smartClassifierV2
@@ -143,6 +149,11 @@ func (g *Gateway) buildAdminRouterViews() []adminRouterView {
 		}
 		v.Stats = buildAdminRouterStats(rt, counters)
 		v.Stats.Scope = counters.scope
+		for _, reason := range v.Stats.Reasons {
+			if reason.Name == smartReasonSaturated {
+				v.Downgraded = reason.Count
+			}
+		}
 		out = append(out, v)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })

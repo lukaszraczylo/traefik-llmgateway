@@ -38,6 +38,10 @@ function outcomeCount(router: AdminRouterView, tier: string, outcome: string): n
   return (router.stats?.outcomes ?? []).filter((o) => o.tier === tier && o.outcome === outcome).reduce((sum, o) => sum + o.count, 0)
 }
 
+function deltaLabel(router: AdminRouterView): string {
+  return router.calibration.delta.map((d) => `${d.tier} -${d.delta}`).join(', ')
+}
+
 function share(count: number, total: number): number {
   return total > 0 ? Math.round((count / total) * 100) : 0
 }
@@ -60,6 +64,20 @@ function share(count: number, total: number): number {
           <Badge v-if="router.shadowClassifier" variant="outline" class="font-normal">shadow classifier: {{ router.shadowClassifier }}</Badge>
           <Badge v-if="router.classifier === 'v2' || router.shadowClassifier" variant="outline" class="font-normal">risk z: {{ router.riskZ }}</Badge>
           <Badge variant="outline" class="font-normal">selection: {{ router.selection }}</Badge>
+          <Badge v-if="router.adaptive" variant="outline" class="font-normal">
+            explore {{ router.adaptive.explorePct }}%, window {{ router.adaptive.windowHours }}h
+          </Badge>
+          <Badge variant="outline" class="font-normal">calibration: {{ router.calibration.mode }}</Badge>
+          <Badge v-if="router.calibration.mode !== 'off' && router.calibration.freeze" variant="outline" class="font-normal">
+            calibration frozen
+          </Badge>
+          <Badge v-if="router.calibration.mode !== 'off'" variant="outline" class="font-normal">
+            offsets{{ router.calibration.mode === 'shadow' ? ' (not applied)' : '' }}: {{ deltaLabel(router) }}
+          </Badge>
+          <Badge variant="outline" class="font-normal">
+            saturation downgrade: {{ router.saturationDowngrade ? `on, band ${router.downgradeBand}` : 'off' }}
+          </Badge>
+          <Badge v-if="router.saturationDowngrade" variant="secondary" class="font-normal">downgraded: {{ router.downgraded }}</Badge>
           <Badge variant="outline" class="font-normal">max attempts: {{ router.maxAttempts }}</Badge>
           <Badge variant="outline" class="font-normal">context escalation: {{ router.contextEscalation ? 'on' : 'off' }}</Badge>
           <Badge v-if="router.contextTokens" variant="outline" class="font-normal">

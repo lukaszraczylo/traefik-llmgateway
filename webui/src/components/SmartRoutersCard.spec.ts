@@ -14,6 +14,10 @@ const router: AdminRouterView = {
   shadowEnabled: false,
   classifier: 'v1',
   riskZ: 128,
+  calibration: { mode: 'off', delta: [], maxLower: 150, maxRaise: 0, freeze: false },
+  saturationDowngrade: false,
+  downgradeBand: 100,
+  downgraded: 0,
   tiers: [
     { name: 'small', minScore: 0, models: ['openai/gpt-5-mini'] },
     { name: 'big', minScore: 400, models: ['anthropic/claude-opus', 'openai/gpt-5'] },
@@ -44,6 +48,31 @@ function render(routers: AdminRouterView[]): Promise<string> {
 describe('SmartRoutersCard', () => {
   it('shows an empty message with no routers', async () => {
     expect(await render([])).toContain('None configured.')
+  })
+
+  it('shows calibration, adaptive selection and downgrade settings', async () => {
+    const live: AdminRouterView = {
+      ...router,
+      selection: 'adaptive',
+      adaptive: { explorePct: 5, windowHours: 6, latencyWeightPct: 30 },
+      calibration: { mode: 'shadow', delta: [{ tier: 'big', delta: 25 }], maxLower: 150, maxRaise: 0, freeze: false },
+      saturationDowngrade: true,
+      downgradeBand: 100,
+      downgraded: 7,
+    }
+    const html = await render([live])
+    expect(html).toContain('selection: adaptive')
+    expect(html).toContain('explore 5%, window 6h')
+    expect(html).toContain('calibration: shadow')
+    expect(html).toContain('offsets (not applied): big -25')
+    expect(html).toContain('saturation downgrade: on, band 100')
+    expect(html).toContain('downgraded: 7')
+    const off = await render([router])
+    expect(off).toContain('calibration: off')
+    expect(off).toContain('saturation downgrade: off')
+    expect(off).not.toContain('offsets')
+    expect(off).not.toContain('explore')
+    expect(off).not.toContain('downgraded:')
   })
 
   it('renders router settings, tiers and keyword rules', async () => {

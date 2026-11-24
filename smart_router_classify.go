@@ -65,7 +65,11 @@ type smartClassification struct {
 	rank       int
 	// shadowRank is the rank the router's shadowWeights would have chosen, or -1 when unset.
 	shadowRank int
-	hasImage   bool
+	// score is the router's score before any risk margin, and hardRank the highest floor or keyword
+	// rank; the saturation downgrade reads both. hardRank is 0 when nothing floors the request.
+	score    int
+	hardRank int
+	hasImage bool
 }
 
 // classifySmartRequest scores req and returns the starting tier rank, why that
@@ -140,7 +144,8 @@ func classifySmartV1(rt *smartRouter, req map[string]any, endpoint string) smart
 	}
 
 	sig := smartSignalsFor(text, userLen, reasoningHits, ex.hasTools || ex.toolHist)
-	scoreRank := smartTierForScore(rt, sig.score(rt.weights))
+	out.score = sig.score(rt.weights)
+	scoreRank := smartTierForScore(rt, out.score)
 	kwRank := -1
 	for i := 0; i < len(rt.rules); i++ {
 		if rt.rules[i].rank > kwRank && containsAnySmart(text, rt.rules[i].keywords) {
@@ -148,6 +153,7 @@ func classifySmartV1(rt *smartRouter, req map[string]any, endpoint string) smart
 		}
 	}
 
+	out.hardRank = smartMaxInt(floorRank, kwRank)
 	out.rank = scoreRank
 	out.reason = smartReasonScore
 	if kwRank > out.rank {
@@ -492,6 +498,8 @@ func classifySmartV2With(rt *smartRouter, req map[string]any, endpoint string, f
 		askHash = smartAskHash(f)
 	}
 	verdict := scoreSmartV2(rt, f, rt.weights, hint)
+	out.score = verdict.score
+	out.hardRank = smartMaxInt(floorRank, kwRank)
 	rank, reason := verdict.rank, smartReasonScore
 	var next smartSession
 	if sc != nil {
