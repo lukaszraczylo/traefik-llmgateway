@@ -264,9 +264,14 @@ type ProviderConfig struct {
 // GroupConfig describes a group's access and limits. Empty/omitted
 // Providers, Models, MCPServers, Agents mean all are allowed.
 type GroupConfig struct {
-	Limits    *LimitsConfig `json:"limits,omitempty"`
-	Providers []string      `json:"providers,omitempty"`
-	Models    []string      `json:"models,omitempty"`
+	// Limits is one aggregate budget shared by every member of the group.
+	Limits *LimitsConfig `json:"limits,omitempty"`
+	// MemberLimits gives each member user their own counter with these
+	// values. A user's own non-zero limits field wins per field; a user in
+	// several groups gets the strictest non-zero value per field.
+	MemberLimits *LimitsConfig `json:"memberLimits,omitempty"`
+	Providers    []string      `json:"providers,omitempty"`
+	Models       []string      `json:"models,omitempty"`
 	// Cache overrides the global cache.enabled setting for this group's
 	// requests (spec §2): nil inherits the global setting, false opts the
 	// group out even when caching is globally enabled, and true opts the
@@ -319,6 +324,7 @@ type GroupConfig struct {
 type LimitsConfig struct {
 	RequestsPerMinute int64   `json:"requestsPerMinute,omitempty"`
 	RequestsPerDay    int64   `json:"requestsPerDay,omitempty"`
+	TokensPerMinute   int64   `json:"tokensPerMinute,omitempty"`
 	TokensPerDay      int64   `json:"tokensPerDay,omitempty"`
 	TokensPerMonth    int64   `json:"tokensPerMonth,omitempty"`
 	CostPerDayUSD     float64 `json:"costPerDayUSD,omitempty"`

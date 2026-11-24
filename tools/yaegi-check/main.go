@@ -781,7 +781,8 @@ func run() error {
 		`"` + round3P1AGroupName + `":{"providers":["round3-shared"],"models":["` + round3ModelID + `"]},` +
 		`"` + round3P1BGroupName + `":{"providers":["round3-shared"],"passthroughPaths":["v1/chat/completions"]},` +
 		`"` + round3P2HomeGroupName + `":{"providers":["round3-alpha"]},` +
-		`"` + round3P2FriendsGroupName + `":{"providers":["round3-shared"],"passthroughPaths":["v1/chat/completions"]}},` +
+		`"` + round3P2FriendsGroupName + `":{"providers":["round3-shared"],"passthroughPaths":["v1/chat/completions"]},` +
+		`"` + memberLimitsGroupName + `":{"memberLimits":{"requestsPerMinute":2}}},` +
 		// modelMeta (feature v0.23): a config-override entry for
 		// testDataWantModel, so exerciseHandler's GET /v1/models
 		// assertion below proves resolveModelMeta's config-override
@@ -863,7 +864,9 @@ func run() error {
 		// exerciseRateLimitEventAndRejections' own — group "default"
 		// (allow-all), but with its own requestsPerMinute:1 limit so a
 		// second call under this key alone 429s deterministically.
-		`{"name":"events-probe","group":"default","apiKey":"` + eventsProbeUserAPIKey + `","limits":{"requestsPerMinute":1}}]}}`
+		`{"name":"events-probe","group":"default","apiKey":"` + eventsProbeUserAPIKey + `","limits":{"requestsPerMinute":1}},` +
+		`{"name":"member-a","group":"` + memberLimitsGroupName + `","apiKey":"` + memberLimitsUserAAPIKey + `"},` +
+		`{"name":"member-b","group":"` + memberLimitsGroupName + `","apiKey":"` + memberLimitsUserBAPIKey + `"}]}}`
 	if err = json.Unmarshal([]byte(attemptAccountingOverride), cfgVal.Interface()); err != nil {
 		return fmt.Errorf("decode attempt-accounting harness override into the interpreted Config: %w", err)
 	}
@@ -1043,6 +1046,9 @@ func run() error {
 	if err := exerciseRateLimitEventAndRejections(handler); err != nil {
 		return err
 	}
+	if err := exerciseMemberLimits(handler); err != nil {
+		return err
+	}
 	// exerciseUpstreamAndTimeoutEvents (F3 hook 2, coordinator request
 	// 2026-09-23) runs LAST: each of its two assertions reads GET
 	// /admin/api/events?limit=1 for the single newest entry right after
@@ -1190,6 +1196,49 @@ const (
 	round3P2UserAPIKey       = "sk-round3-p2-user" // #nosec G101 -- test fixture literal, not a real credential
 	round3PersonalModelID    = "round3-shared/m1"
 )
+
+// memberLimitsGroupName is a group whose memberLimits (requestsPerMinute:2)
+// give each of its two users, memberLimitsUserAAPIKey/UserBAPIKey, an own
+// counter; no other probe may reuse these keys.
+const (
+	memberLimitsGroupName   = "member-limits-group"
+	memberLimitsUserAAPIKey = "sk-member-limits-a" // #nosec G101 -- test fixture literal, not a real credential
+	memberLimitsUserBAPIKey = "sk-member-limits-b" // #nosec G101 -- test fixture literal, not a real credential
+)
+
+// exerciseMemberLimits proves group memberLimits (auth.go's buildEntry,
+// member_limits.go's effectiveUserLimits) under the real interpreter: user A
+// is refused on the third request while user B, in the same group, still
+// has their own counter.
+func exerciseMemberLimits(handler http.Handler) error {
+	body := `{"model":"` + testDataWantModel + `","messages":[{"role":"user","content":"hi"}]}`
+	post := func(key string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+key)
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		return rec
+	}
+	steps := []struct {
+		label string
+		key   string
+		want  int
+	}{
+		{"A 1st", memberLimitsUserAAPIKey, http.StatusOK},
+		{"A 2nd", memberLimitsUserAAPIKey, http.StatusOK},
+		{"A 3rd (over memberLimits requestsPerMinute:2)", memberLimitsUserAAPIKey, http.StatusTooManyRequests},
+		{"B 1st (own counter)", memberLimitsUserBAPIKey, http.StatusOK},
+	}
+	for _, st := range steps {
+		rec := post(st.key)
+		if rec.Code != st.want {
+			return fmt.Errorf("memberLimits harness, %s: status = %d, want %d, body=%s", st.label, rec.Code, st.want, rec.Body.String())
+		}
+	}
+	fmt.Println("yaegi-check: group memberLimits enforced per member user under the interpreter")
+	return nil
+}
 
 // eventsProbeUserAPIKey authenticates exerciseRateLimitEventAndRejections'
 // own inline user (run()'s "users" override): group "default" (allow-all,

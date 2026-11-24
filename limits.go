@@ -219,6 +219,7 @@ func (lc *LimitsConfig) validate() error {
 	}{
 		{"requestsPerMinute", lc.RequestsPerMinute},
 		{"requestsPerDay", lc.RequestsPerDay},
+		{"tokensPerMinute", lc.TokensPerMinute},
 		{"tokensPerDay", lc.TokensPerDay},
 		{"tokensPerMonth", lc.TokensPerMonth},
 	}
@@ -1481,6 +1482,7 @@ func buildBudgetProbes(scopes []limitScope, now time.Time) (probes []budgetProbe
 				reads = append(reads, windowKey(sc.kind, sc.id, metricCost, window, now))
 			}
 		}
+		add("tokens-per-minute", windowMin, lim.TokensPerMinute, true)
 		add("tokens-per-day", windowDay, lim.TokensPerDay, true)
 		add("tokens-per-month", windowMonth, lim.TokensPerMonth, true)
 		add("cost-per-day", windowDay, usdToMicros(lim.CostPerDayUSD), false)
@@ -1883,6 +1885,16 @@ func (l *limiter) accountWith(scopes []limitScope, u usage, costMicros int64, x 
 				counterIncr{key: windowKeyForBucket(sc.kind, sc.id, metricReq, windowDay, wb.day), delta: 1, ttl: dayWindowTTL, enforceTTL: et.day},
 				counterIncr{key: windowKeyForBucket(sc.kind, sc.id, metricReq, windowMonth, wb.month), delta: 1, ttl: monthWindowTTL, enforceTTL: et.month},
 			)
+		}
+		// The per-minute token window is read only by a tokensPerMinute
+		// limit, so it is written only for scopes that set one.
+		if sc.limits != nil && sc.limits.TokensPerMinute > 0 {
+			if u.prompt != 0 {
+				entries = append(entries, counterIncr{key: windowKeyForBucket(sc.kind, sc.id, metricTokIn, windowMin, wb.min), delta: u.prompt, ttl: minWindowTTL, enforceTTL: et.min})
+			}
+			if u.completion != 0 {
+				entries = append(entries, counterIncr{key: windowKeyForBucket(sc.kind, sc.id, metricTokOut, windowMin, wb.min), delta: u.completion, ttl: minWindowTTL, enforceTTL: et.min})
+			}
 		}
 		if u.prompt != 0 {
 			entries = append(entries,

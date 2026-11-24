@@ -940,10 +940,14 @@ func (g *Gateway) serveAdminOverview(w http.ResponseWriter) {
 // dashboard can tell "explicitly restricted to these N" apart from
 // "unrestricted" without the payload growing with catalog size.
 type adminUsageEntryView struct {
-	Limits    *LimitsConfig `json:"limits,omitempty"`
-	Kind      string        `json:"kind"`
-	ID        string        `json:"id"`
-	GroupName string        `json:"groupName,omitempty"`
+	Limits *LimitsConfig `json:"limits,omitempty"`
+	// LimitSources maps each set limits field of a user to "user" or
+	// "memberLimits:<group>"; MemberLimits is a group's per-member default.
+	LimitSources map[string]string `json:"limitSources,omitempty"`
+	MemberLimits *LimitsConfig     `json:"memberLimits,omitempty"`
+	Kind         string            `json:"kind"`
+	ID           string            `json:"id"`
+	GroupName    string            `json:"groupName,omitempty"`
 	// Groups is the user's full member group list (multi-group support)
 	// — set only for a user entry, same "user-only" convention GroupName
 	// above already follows. GroupName keeps the first group for
@@ -1095,12 +1099,14 @@ func (g *Gateway) buildAdminUsage() adminUsageResponse {
 	users := make([]adminUsageEntryView, len(userUsage))
 	for i, su := range userUsage {
 		users[i] = usageEntryView(su, userSummaries[i].limits)
+		users[i].LimitSources = userSummaries[i].limitSources
 		users[i].GroupName = userSummaries[i].groupName
 		users[i].Groups = userSummaries[i].groups
 	}
 	groups := make([]adminUsageEntryView, len(groupUsage))
 	for i, su := range groupUsage {
 		groups[i] = usageEntryView(su, groupSummaries[i].limits)
+		groups[i].MemberLimits = groupSummaries[i].memberLimits
 		groups[i].Providers = groupSummaries[i].providers
 		groups[i].Models = groupSummaries[i].models
 		groups[i].MCPServers = groupSummaries[i].mcpServers
