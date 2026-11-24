@@ -1,0 +1,346 @@
+[
+ {
+  "id": "ho-dbg01",
+  "group": "debug",
+  "lang": "en",
+  "intent": "debug",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "why does this deadlock\n\nfunc (l *Ledger) Transfer(from, to int, amt int64) error {\n\tl.accts[from].mu.Lock()\n\tdefer l.accts[from].mu.Unlock()\n\tl.accts[to].mu.Lock()\n\tdefer l.accts[to].mu.Unlock()\n\tif l.accts[from].bal < amt { return ErrFunds }\n\tl.accts[from].bal -= amt\n\tl.accts[to].bal += amt\n\treturn nil\n}\n\ngoroutine 1 [semacquire, 4 minutes]:\nsync.runtime_SemacquireMutex(0xc0001a2058, 0x0, 0x1)\nsync.(*Mutex).lockSlow(0xc0001a2054)\nmain.(*Ledger).Transfer(0xc0001a2000, 0x1, 0x2, 0x64)\n\t/app/ledger.go:57 +0x8a\ngoroutine 18 [semacquire, 4 minutes]:\nsync.(*Mutex).Lock(...)\nmain.(*Ledger).Transfer(0xc0001a2000, 0x2, 0x1, 0x32)\n\t/app/ledger.go:57 +0x9c\nmain.worker(0xc00009e000)\n\t/app/main.go:31 +0x65\ncreated by main.main\n\t/app/main.go:19 +0x7d\n"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "terse; classic lock-order inversion visible in dump, needs reasoning about fix"
+ },
+ {
+  "id": "ho-dbg02",
+  "group": "debug",
+  "lang": "en",
+  "intent": "debug",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 4096,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "make it O(n log n)\n\n```python\ndef count_inversions(a):\n    c = 0\n    for i in range(len(a)):\n        for j in range(i+1, len(a)):\n            if a[i] > a[j]: c += 1\n    return c\n```"
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "merge-sort inversion counting; known algorithm but not trivial"
+ },
+ {
+  "id": "ho-dbg03",
+  "group": "debug",
+  "lang": "en",
+  "intent": "debug",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "is this migration safe to run online?\n\n```sql\nBEGIN;\nALTER TABLE payments ADD COLUMN status_v2 text NOT NULL DEFAULT 'new';\nCREATE INDEX idx_payments_status_v2 ON payments(status_v2);\nUPDATE payments SET status_v2 = status;\nALTER TABLE payments DROP COLUMN status;\nCOMMIT;\n```\npayments is ~600M rows, pg 13"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 2,
+  "maxTier": 2,
+  "notes": "index build + full-table update + drop in one txn: blocking locks, rewrites, rollback paths; must spot multiple hazards"
+ },
+ {
+  "id": "ho-dbg04",
+  "group": "debug",
+  "lang": "en",
+  "intent": "debug",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "getting 'TypeError: Cannot read properties of undefined (reading 'map')' in my react component, items comes from useQuery data. fix?\n\n```jsx\nfunction List({q}){\n  const {data} = useQuery(['items',q], fetchItems);\n  return <ul>{data.items.map(i=><li key={i.id}>{i.name}</li>)}</ul>\n}\n```"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "missing loading guard; textbook"
+ },
+ {
+  "id": "ho-dbg05",
+  "group": "debug",
+  "lang": "en",
+  "intent": "debug",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 4096,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "pod keeps CrashLoopBackOff, describe says Liveness probe failed: connection refused. app listens on 8080.\n\n```yaml\ncontainers:\n- name: api\n  image: reg/api:1.4\n  ports: [{containerPort: 8080}]\n  livenessProbe:\n    httpGet: {path: /healthz, port: 80}\n    initialDelaySeconds: 2\n    periodSeconds: 3\n    failureThreshold: 1\n```"
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "probe port 80 vs 8080 plus aggressive thresholds; easy spot"
+ },
+ {
+  "id": "ho-dbg06",
+  "group": "debug",
+  "lang": "en",
+  "intent": "debug",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "ci only: TestCacheExpiry fails ~1 in 20 runs w/ -race clean. uses time.Sleep(50ms) then asserts entry gone, ttl 40ms, janitor ticks every 25ms. laptop never fails. whats going on and how do i make it deterministic without sleeping"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "flaky timing test; needs clock injection design"
+ },
+ {
+  "id": "ho-dbg07",
+  "group": "debug",
+  "lang": "en",
+  "intent": "debug",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "we see p99 latency double after adding 2 read replicas behind pgbouncer in transaction mode. avg is flat. replicas are same size. what would you check first and why could more capacity make tails worse?"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "open-ended perf diagnosis with several plausible mechanisms (replication lag retries, pool imbalance, cache cold)"
+ },
+ {
+  "id": "ho-dbg08",
+  "group": "debug",
+  "lang": "en",
+  "intent": "debug",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "select * from users where id = 5; returns nothing but i can see user 5 in the admin page??"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "vague but typically trivial cause; mid acceptable"
+ },
+ {
+  "id": "ho-dbg09",
+  "group": "debug",
+  "lang": "en",
+  "intent": "debug",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 4096,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "regex to match an ipv4 address, not just 4 groups of digits"
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "known regex"
+ },
+ {
+  "id": "ho-dbg10",
+  "group": "debug",
+  "lang": "en",
+  "intent": "debug",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "write a regex that matches strings with balanced parentheses, any nesting depth. js flavor"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "impossible in classic regex; must explain limits and give alternative; mid can"
+ },
+ {
+  "id": "ho-dbg11",
+  "group": "debug",
+  "lang": "en",
+  "intent": "debug",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "sessionize this: events(user_id, ts) one row per click. new session when gap > 30 min. need session_id and per-session duration, postgres. also first-touch utm per session from events.utm. data has ~2B rows so no self-joins pls"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "window functions with gap detection and first_value; performance constraint"
+ },
+ {
+  "id": "ho-dbg12",
+  "group": "debug",
+  "lang": "en",
+  "intent": "debug",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "top 5 customers by total order amount last 30 days, tables customers(id,name) orders(id,customer_id,amount,created_at) postgres"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "basic aggregate"
+ },
+ {
+  "id": "ho-dbg13",
+  "group": "debug",
+  "lang": "en",
+  "intent": "debug",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "pandas: df.groupby('region')['sales'].mean() but i want it sorted desc and only top 3"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "basic pandas"
+ },
+ {
+  "id": "ho-dbg14",
+  "group": "debug",
+  "lang": "en",
+  "intent": "debug",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "A/B test, conversion 4.1% vs 4.6%, we peeked at p every day for 3 weeks and it hit p=0.04 on day 19. n=18k per arm. can we ship? what would you do"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "sequential-testing / peeking inflation reasoning"
+ },
+ {
+  "id": "ho-dbg15",
+  "group": "debug",
+  "lang": "en",
+  "intent": "debug",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 4096,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "Traceback (most recent call last):\n  File \"/srv/app/worker.py\", line 88, in run\n    result = handler(job)\n  File \"/srv/app/handlers/export.py\", line 142, in export_csv\n    writer.writerow(row)\n  File \"/usr/lib/python3.11/csv.py\", line 154, in writerow\n    return self.writer.writerow(self._dict_to_list(rowdict))\nUnicodeEncodeError: 'ascii' codec can't encode character '\\xe9' in position 12: ordinal not in range(128)\n\njust tell me which line of mine is the problem, no need for a lecture"
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "scary traceback but answer is read off: export.py:142 / open() encoding"
+ },
+ {
+  "id": "ho-dbg16",
+  "group": "debug",
+  "lang": "en",
+  "intent": "debug",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "fatal error: all goroutines are asleep - deadlock!\n\ngoroutine 1 [chan send]:\nmain.main()\n\t/tmp/x.go:9 +0x45\nexit status 2\n\nwhich line? thx"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "scary dump, trivial unbuffered send; answer is line 9"
+ }
+]

@@ -1,0 +1,158 @@
+[
+ {
+  "id": "ho-fu01",
+  "group": "followup",
+  "lang": "en",
+  "intent": "followup",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "how do i undo my last git commit but keep the changes"
+    },
+    {
+     "role": "assistant",
+     "content": "Run `git reset --soft HEAD~1`. Your changes stay staged."
+    },
+    {
+     "role": "user",
+     "content": "and?"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "one-word follow-up on easy git answer"
+ },
+ {
+  "id": "ho-fu02",
+  "group": "followup",
+  "lang": "en",
+  "intent": "followup",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "why is my kafka consumer lagging even though cpu is idle? 12 partitions, 3 consumers, max.poll.interval.ms default, handler does an http call per record"
+    },
+    {
+     "role": "assistant",
+     "content": "Likely the per-record synchronous HTTP call serialises you; with 4 partitions per consumer you are bound by round-trip latency, and slow calls can also exceed max.poll.interval.ms causing rebalances. Options: batch, async with bounded concurrency, or raise partitions/consumers."
+    },
+    {
+     "role": "user",
+     "content": "ok do it, give me the version with bounded concurrency but keep offset commits correct"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "session-required: follow-up carries a real design task: ordering plus commit correctness"
+ },
+ {
+  "id": "ho-fu03",
+  "group": "followup",
+  "lang": "en",
+  "intent": "followup",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 4096,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "write a haiku about monday"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "text",
+       "text": "Alarm bites the dawn / coffee steams, the inbox groans / week begins again"
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "another one"
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "bare follow-up on trivial creative task"
+ },
+ {
+  "id": "ho-fu04",
+  "group": "followup",
+  "lang": "en",
+  "intent": "followup",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "is it safe to run ALTER TABLE orders ADD COLUMN note text on a 400M row postgres 14 table in prod"
+    },
+    {
+     "role": "assistant",
+     "content": "Yes on PG11+: adding a nullable column with no default is a catalog-only change and takes a brief ACCESS EXCLUSIVE lock. Set lock_timeout so you do not queue behind long transactions."
+    },
+    {
+     "role": "user",
+     "content": "what if i want NOT NULL default 'n/a'"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "narrow follow-up with a known answer (PG11+ fast default)"
+ },
+ {
+  "id": "ho-fu05",
+  "group": "followup",
+  "lang": "en",
+  "intent": "followup",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "explain why this prints 3 3 3: for (var i=0;i<3;i++){setTimeout(()=>console.log(i))}"
+    },
+    {
+     "role": "assistant",
+     "content": "var is function scoped so all closures share one i, which is 3 by the time callbacks run. Use let."
+    },
+    {
+     "role": "user",
+     "content": "why"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "terse why on closure basics"
+ }
+]

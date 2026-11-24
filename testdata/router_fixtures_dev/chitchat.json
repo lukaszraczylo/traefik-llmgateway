@@ -1,0 +1,188 @@
+[
+ {
+  "id": "ho-cc01",
+  "group": "chitchat",
+  "lang": "en",
+  "intent": "chitchat",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "yo"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "one-word greeting"
+ },
+ {
+  "id": "ho-cc02",
+  "group": "chitchat",
+  "lang": "en",
+  "intent": "chitchat",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 4096,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "lol ok thx bye"
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "sign-off"
+ },
+ {
+  "id": "ho-cc03",
+  "group": "chitchat",
+  "lang": "en",
+  "intent": "chitchat",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "whats a good name for a black cat"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "light creative naming"
+ },
+ {
+  "id": "ho-cc04",
+  "group": "chitchat",
+  "lang": "en",
+  "intent": "chitchat",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "hey, i'm bored. tell me something weird about octopuses"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "trivia small talk"
+ },
+ {
+  "id": "ho-cc05",
+  "group": "chitchat",
+  "lang": "en",
+  "intent": "chitchat",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 4096,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "how tall is mt everest in feet?"
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "single fact lookup"
+ },
+ {
+  "id": "ho-cc06",
+  "group": "chitchat",
+  "lang": "en",
+  "intent": "chitchat",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "good morning! it's raining again here, any ideas for a cozy sunday?"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "small talk with mild suggestion"
+ },
+ {
+  "id": "ho-cc07",
+  "group": "chitchat",
+  "lang": "en",
+  "intent": "chitchat",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "hi"
+    },
+    {
+     "role": "assistant",
+     "content": "Hello! How can I help?"
+    },
+    {
+     "role": "user",
+     "content": "nothing really just testing if you're up"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "history small talk"
+ },
+ {
+  "id": "ho-cc08",
+  "group": "chitchat",
+  "lang": "en",
+  "intent": "chitchat",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 4096,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "recommend a sci-fi book like Dune but shorter"
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "recommendation, low can do it"
+ }
+]

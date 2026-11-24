@@ -1,0 +1,154 @@
+[
+ {
+  "id": "ho-ds01",
+  "group": "design",
+  "lang": "en",
+  "intent": "design",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "design a collaborative text editor backend with offline edits, CRDT vs OT tradeoffs, how do you GC tombstones without breaking late-joining clients? ~50k concurrent docs"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 2,
+  "maxTier": 2,
+  "notes": "deep distributed-systems tradeoffs, GC safety"
+ },
+ {
+  "id": "ho-ds02",
+  "group": "design",
+  "lang": "en",
+  "intent": "design",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 4096,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "monolith or microservices for a 6 person team building a b2b invoicing app? we're pre-seed"
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "opinion with well-known answer"
+ },
+ {
+  "id": "ho-ds03",
+  "group": "design",
+  "lang": "en",
+  "intent": "design",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "we need multi-region active-active for a payments ledger, strict no double-spend, RPO 0. sketch the architecture and say honestly what we give up. cockroach vs spanner vs rolling our own with consensus per account"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 2,
+  "maxTier": 2,
+  "notes": "consistency vs latency under partition, hard tradeoffs"
+ },
+ {
+  "id": "ho-ds04",
+  "group": "design",
+  "lang": "en",
+  "intent": "design",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "which db for a todo app, postgres or mongo"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "trivial recommendation"
+ },
+ {
+  "id": "ho-ds05",
+  "group": "design",
+  "lang": "en",
+  "intent": "design",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 4096,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "how should i structure the event schema for an audit log that must be queryable by actor, resource and time range, retained 7 years, and be tamper evident"
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "schema + hash chain design; moderate"
+ },
+ {
+  "id": "ho-ds06",
+  "group": "design",
+  "lang": "en",
+  "intent": "design",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "explain the difference between a mutex and a semaphore"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "textbook"
+ },
+ {
+  "id": "ho-ds07",
+  "group": "design",
+  "lang": "en",
+  "intent": "design",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "design the rollout for changing our primary key type from int to uuid on a table referenced by 14 other tables, zero downtime, with a 9TB database and a monthly deploy freeze"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 2,
+  "maxTier": 2,
+  "notes": "multi-table online key migration with constraints"
+ }
+]

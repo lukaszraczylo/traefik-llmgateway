@@ -1,0 +1,134 @@
+[
+ {
+  "id": "ho-rw01",
+  "group": "rewrite",
+  "lang": "en",
+  "intent": "rewrite",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Can you please fix the grammar and spelling in this email? Keep my tone, I don't want it to sound stiff. Thank you so much!\n\nHi Marcus, I hope this email finds you well and that you had a wonderful weekend. I am writing to you today because me and my colleague Sarah have been discussing the quarterly report that you sent over on Thursday and we was wondering if it would be possible for you to maybe take another look at the numbers in section three, as there seem to be a few figure's that dont quite add up with the ones from last year. We really appreciate all of your hard work on this and we know your very busy, so there is absolutely no rush, whenever you get a chance would be perfectly fine. Also, I wanted to say thanks again for helping us out with the onboarding last month, it really made a difference to the new hires and they all has said how welcoming everyone were. Please let me know if there is anything that I can do to help. Warm regards, Priya"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "grammar fix of a long but easy email"
+ },
+ {
+  "id": "ho-rw02",
+  "group": "rewrite",
+  "lang": "en",
+  "intent": "rewrite",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 4096,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "make this shorter and more direct, its going to my boss:\n\nHi Marcus, I hope this email finds you well and that you had a wonderful weekend. I am writing to you today because me and my colleague Sarah have been discussing the quarterly report that you sent over on Thursday and we was wondering if it would be possible for you to maybe take another look at the numbers in section three, as there seem to be a few figure's that dont quite add up with the ones from last year. We really appreciate all of your hard work on this and we know your very busy, so there is absolutely no rush, whenever you get a chance would be perfectly fine. Also, I wanted to say thanks again for helping us out with the onboarding last month, it really made a difference to the new hires and they all has said how welcoming everyone were. Please let me know if there is anything that I can do to help. Warm regards, Priya"
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "tighten email, light editing"
+ },
+ {
+  "id": "ho-rw03",
+  "group": "rewrite",
+  "lang": "en",
+  "intent": "rewrite",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "translate to german pls: 'Thank you for your patience. Your order has shipped and should arrive within 3-5 business days. If you have any questions, reply to this email.'"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "short translation"
+ },
+ {
+  "id": "ho-rw04",
+  "group": "rewrite",
+  "lang": "en",
+  "intent": "rewrite",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "turn these meeting notes into clean bullet points:\n\nmon call w/ acme - they want sso by q3, we said maybe q4. pricing: they push back on seat price, ask 15% off. Dana to send revised quote fri. risk: their IT freeze in aug. next sync wed 2pm"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "notes cleanup"
+ },
+ {
+  "id": "ho-rw05",
+  "group": "rewrite",
+  "lang": "en",
+  "intent": "rewrite",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 4096,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "Rewrite this product blurb so it sounds friendlier and less corporate: 'Our solution leverages synergistic paradigms to deliver best-in-class scheduling outcomes for enterprise stakeholders.'"
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "tone rewrite of one sentence"
+ },
+ {
+  "id": "ho-rw06",
+  "group": "rewrite",
+  "lang": "en",
+  "intent": "rewrite",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Could you kindly help me write a polite but firm reply to a landlord who has not fixed the heating for two weeks? I would like to mention that I have already called twice and that I know the legal deadline is 14 days. Please keep it under 150 words. Many thanks in advance."
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "verbose polite ask, simple letter drafting"
+ }
+]

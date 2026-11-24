@@ -17,6 +17,8 @@ import (
 
 const (
 	evalFixtureGlob   = "testdata/router_fixtures/*.json"
+	evalDevGlob       = "testdata/router_fixtures_dev/*.json"
+	evalSessionNote   = "session-required"
 	evalV1Golden      = "testdata/router_v1_golden.json"
 	evalMinFixtures   = 160
 	evalMaxUnderPct   = 2
@@ -56,7 +58,12 @@ func (f routerFixture) endpoint() string {
 
 func loadRouterFixtures(tb testing.TB) []routerFixture {
 	tb.Helper()
-	files, err := filepath.Glob(evalFixtureGlob)
+	return loadRouterFixturesGlob(tb, evalFixtureGlob)
+}
+
+func loadRouterFixturesGlob(tb testing.TB, glob string) []routerFixture {
+	tb.Helper()
+	files, err := filepath.Glob(glob)
 	require.NoError(tb, err)
 	sort.Strings(files)
 	var out []routerFixture
@@ -101,6 +108,9 @@ type evalResult struct {
 func runEval(rt *smartRouter, fixtures []routerFixture) evalResult {
 	res := evalResult{groups: map[string]*evalGroupStat{}}
 	for _, fx := range fixtures {
+		if strings.Contains(fx.Notes, evalSessionNote) {
+			continue
+		}
 		c := classifySmart(rt, fx.Request, fx.endpoint())
 		g := res.groups[fx.Group]
 		if g == nil {
@@ -211,6 +221,20 @@ func TestRouterFixturesGate(t *testing.T) {
 				require.NotNil(t, v2.groups[g], g)
 				assert.Zero(t, v2.groups[g].under, "%s under-route: %v", g, v2.groups[g].underIDs)
 			}
+		})
+	}
+}
+
+// TestRouterDevReport scores the dev set on both layouts; it reports and never gates.
+func TestRouterDevReport(t *testing.T) {
+	t.Parallel()
+	fixtures := loadRouterFixturesGlob(t, evalDevGlob)
+	require.NotEmpty(t, fixtures)
+	for _, l := range evalLayouts {
+		t.Run(l.name, func(t *testing.T) {
+			v1 := runEval(evalRouter(t, l.mins, smartClassifierV1), fixtures)
+			v2 := runEval(evalRouter(t, l.mins, smartClassifierV2), fixtures)
+			t.Logf("DEV layout %v v1:\n%s\nDEV layout %v v2:\n%s", l.mins, v1.table(), l.mins, v2.table())
 		})
 	}
 }

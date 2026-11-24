@@ -1,0 +1,5996 @@
+[
+ {
+  "id": "ho-tl01",
+  "group": "toolloop",
+  "lang": "en",
+  "intent": "toolloop",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are an autonomous coding agent working inside the user's repository. Use the tools to inspect and change files; prefer small targeted edits over rewrites. Always read a file before editing it. After code changes run the project's tests. Do not create files the user did not ask for. Do not run destructive git commands. When a command fails, read the error carefully before trying again. Keep replies short; the user reads the diff. Follow the conventions you see in neighbouring code. If you are unsure about a requirement, ask one concise question instead of guessing. Never print secrets found in env files. You are an autonomous coding agent working inside the user's repository. Use the tools to inspect and change files; prefer small targeted edits over rewrites. Always read a file before editing it. After code changes run the project's tests. Do not create files the user did not ask for. Do not run destructive git commands. When a command fails, read the error carefully before trying again. Keep replies short; the user reads the diff. Follow the conventions you see in neighbouring code. If you are unsure about a requirement, ask one concise question instead of guessing. Never print secrets found in env files. You are an autonomous coding agent working inside the user's repository. Use the tools to inspect and change files; prefer small targeted edits over rewrites. Always read a file before editing it. After code changes run the project's tests. Do not create files the user did not ask for. Do not run destructive git commands. When a command fails, read the error carefully before trying again. Keep replies short; the user reads the diff. Follow the conventions you see in neighbouring code. If you are unsure about a requirement, ask one concise question instead of guessing. Never print secrets found in env files. You are an autonomous coding agent working inside the user's repository. Use the tools to inspect and change files; prefer small targeted edits over rewrites. Always read a file before editing it. After code changes run the project's tests. Do not create files the user did not ask for. Do not run destructive git commands. When a command fails, read the error carefully before trying again. Keep replies short; the user reads the diff. Follow the conventions you see in neighbouring code. If you are unsure about a requirement, ask one concise question instead of guessing. Never print secrets found in env files. "
+    },
+    {
+     "role": "user",
+     "content": "fix the typo in README: 'recieve' -> 'receive'"
+    },
+    {
+     "role": "assistant",
+     "content": "Reading the next file.",
+     "tool_calls": [
+      {
+       "id": "call_000",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"internal/store/cache.go\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_000",
+     "content": "package store\n\nfunc Cache0() int {\n\treturn 0\n}\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_001",
+       "type": "function",
+       "function": {
+        "name": "edit_file",
+        "arguments": "{\"path\": \"internal/store/queue.go\", \"old_string\": \"return 0\", \"new_string\": \"return 0 // checked\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_001",
+     "content": "ok: 1 replacement"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_002",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"README.md\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_002",
+     "content": "# svc\n\nThe worker will recieve jobs from the queue.\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_003",
+       "type": "function",
+       "function": {
+        "name": "edit_file",
+        "arguments": "{\"path\": \"README.md\", \"old_string\": \"recieve\", \"new_string\": \"receive\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_003",
+     "content": "ok: 1 replacement"
+    }
+   ],
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "read_file",
+      "description": "Read a file from the workspace",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "path"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "edit_file",
+      "description": "Replace old_string with new_string in a file",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "old_string": {
+         "type": "string"
+        },
+        "new_string": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "path",
+        "old_string",
+        "new_string"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "run_command",
+      "description": "Run a shell command and return stdout/stderr",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "command": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "command"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "grep",
+      "description": "Search the workspace with a regex",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "pattern": {
+         "type": "string"
+        },
+        "path": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "pattern",
+        "path"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "list_dir",
+      "description": "List directory entries",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "path"
+       ]
+      }
+     }
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "trivial doc typo; newest message is tool result of the edit"
+ },
+ {
+  "id": "ho-tl02",
+  "group": "toolloop",
+  "lang": "en",
+  "intent": "toolloop",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 4096,
+   "system": "You are an autonomous coding agent working inside the user's repository. Use the tools to inspect and change files; prefer small targeted edits over rewrites. Always read a file before editing it. After code changes run the project's tests. Do not create files the user did not ask for. Do not run destructive git commands. When a command fails, read the error carefully before trying again. Keep replies short; the user reads the diff. Follow the conventions you see in neighbouring code. If you are unsure about a requirement, ask one concise question instead of guessing. Never print secrets found in env files. You are an autonomous coding agent working inside the user's repository. Use the tools to inspect and change files; prefer small targeted edits over rewrites. Always read a file before editing it. After code changes run the project's tests. Do not create files the user did not ask for. Do not run destructive git commands. When a command fails, read the error carefully before trying again. Keep replies short; the user reads the diff. Follow the conventions you see in neighbouring code. If you are unsure about a requirement, ask one concise question instead of guessing. Never print secrets found in env files. You are an autonomous coding agent working inside the user's repository. Use the tools to inspect and change files; prefer small targeted edits over rewrites. Always read a file before editing it. After code changes run the project's tests. Do not create files the user did not ask for. Do not run destructive git commands. When a command fails, read the error carefully before trying again. Keep replies short; the user reads the diff. Follow the conventions you see in neighbouring code. If you are unsure about a requirement, ask one concise question instead of guessing. Never print secrets found in env files. You are an autonomous coding agent working inside the user's repository. Use the tools to inspect and change files; prefer small targeted edits over rewrites. Always read a file before editing it. After code changes run the project's tests. Do not create files the user did not ask for. Do not run destructive git commands. When a command fails, read the error carefully before trying again. Keep replies short; the user reads the diff. Follow the conventions you see in neighbouring code. If you are unsure about a requirement, ask one concise question instead of guessing. Never print secrets found in env files. ",
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "rename MaxConns to MaxConnections everywhere"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "text",
+       "text": "Reading the next file."
+      },
+      {
+       "type": "tool_use",
+       "id": "toolu_000",
+       "name": "read_file",
+       "input": {
+        "path": "internal/store/cache.go"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_000",
+       "content": "package store\n\nfunc Cache0() int {\n\treturn 0\n}\n"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_001",
+       "name": "edit_file",
+       "input": {
+        "path": "internal/store/queue.go",
+        "old_string": "return 0",
+        "new_string": "return 0 // checked"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_001",
+       "content": "ok: 1 replacement"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_002",
+       "name": "run_command",
+       "input": {
+        "command": "go build ./..."
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_002",
+       "content": ""
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "text",
+       "text": "Reading the next file."
+      },
+      {
+       "type": "tool_use",
+       "id": "toolu_003",
+       "name": "read_file",
+       "input": {
+        "path": "internal/store/limits.go"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_003",
+       "content": "package store\n\nfunc Limits3() int {\n\treturn 3\n}\n"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_004",
+       "name": "edit_file",
+       "input": {
+        "path": "internal/store/audit.go",
+        "old_string": "return 3",
+        "new_string": "return 3 // checked"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_004",
+       "content": "ok: 1 replacement"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_005",
+       "name": "run_command",
+       "input": {
+        "command": "go build ./..."
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_005",
+       "content": ""
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "text",
+       "text": "Reading the next file."
+      },
+      {
+       "type": "tool_use",
+       "id": "toolu_006",
+       "name": "read_file",
+       "input": {
+        "path": "internal/store/index.go"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_006",
+       "content": "package store\n\nfunc Index6() int {\n\treturn 6\n}\n"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_007",
+       "name": "grep",
+       "input": {
+        "pattern": "MaxConns\\b",
+        "path": "."
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_007",
+       "content": "pool/pool.go:14: MaxConns int\npool/pool.go:55: if n > p.MaxConns {\nconfig/load.go:31: MaxConns: 20,"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_008",
+       "name": "run_command",
+       "input": {
+        "command": "go test ./..."
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_008",
+       "content": "ok  \tsvc/pool\t0.412s\nok  \tsvc/config\t0.101s\nPASS"
+      }
+     ]
+    }
+   ],
+   "tools": [
+    {
+     "name": "read_file",
+     "description": "Read a file from the workspace",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "path": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "path"
+      ]
+     }
+    },
+    {
+     "name": "edit_file",
+     "description": "Replace old_string with new_string in a file",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "path": {
+        "type": "string"
+       },
+       "old_string": {
+        "type": "string"
+       },
+       "new_string": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "path",
+       "old_string",
+       "new_string"
+      ]
+     }
+    },
+    {
+     "name": "run_command",
+     "description": "Run a shell command and return stdout/stderr",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "command": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "command"
+      ]
+     }
+    },
+    {
+     "name": "grep",
+     "description": "Search the workspace with a regex",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "pattern": {
+        "type": "string"
+       },
+       "path": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "pattern",
+       "path"
+      ]
+     }
+    },
+    {
+     "name": "list_dir",
+     "description": "List directory entries",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "path": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "path"
+      ]
+     }
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "mechanical rename already done, tool result shows green tests"
+ },
+ {
+  "id": "ho-tl03",
+  "group": "toolloop",
+  "lang": "en",
+  "intent": "toolloop",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are an autonomous coding agent working inside the user's repository. Use the tools to inspect and change files; prefer small targeted edits over rewrites. Always read a file before editing it. After code changes run the project's tests. Do not create files the user did not ask for. Do not run destructive git commands. When a command fails, read the error carefully before trying again. Keep replies short; the user reads the diff. Follow the conventions you see in neighbouring code. If you are unsure about a requirement, ask one concise question instead of guessing. Never print secrets found in env files. You are an autonomous coding agent working inside the user's repository. Use the tools to inspect and change files; prefer small targeted edits over rewrites. Always read a file before editing it. After code changes run the project's tests. Do not create files the user did not ask for. Do not run destructive git commands. When a command fails, read the error carefully before trying again. Keep replies short; the user reads the diff. Follow the conventions you see in neighbouring code. If you are unsure about a requirement, ask one concise question instead of guessing. Never print secrets found in env files. You are an autonomous coding agent working inside the user's repository. Use the tools to inspect and change files; prefer small targeted edits over rewrites. Always read a file before editing it. After code changes run the project's tests. Do not create files the user did not ask for. Do not run destructive git commands. When a command fails, read the error carefully before trying again. Keep replies short; the user reads the diff. Follow the conventions you see in neighbouring code. If you are unsure about a requirement, ask one concise question instead of guessing. Never print secrets found in env files. You are an autonomous coding agent working inside the user's repository. Use the tools to inspect and change files; prefer small targeted edits over rewrites. Always read a file before editing it. After code changes run the project's tests. Do not create files the user did not ask for. Do not run destructive git commands. When a command fails, read the error carefully before trying again. Keep replies short; the user reads the diff. Follow the conventions you see in neighbouring code. If you are unsure about a requirement, ask one concise question instead of guessing. Never print secrets found in env files. "
+    },
+    {
+     "role": "user",
+     "content": "go test -race is failing in the session package, fix it"
+    },
+    {
+     "role": "assistant",
+     "content": "Reading the next file.",
+     "tool_calls": [
+      {
+       "id": "call_000",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"internal/store/cache.go\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_000",
+     "content": "package store\n\nfunc Cache0() int {\n\treturn 0\n}\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_001",
+       "type": "function",
+       "function": {
+        "name": "edit_file",
+        "arguments": "{\"path\": \"internal/store/queue.go\", \"old_string\": \"return 0\", \"new_string\": \"return 0 // checked\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_001",
+     "content": "ok: 1 replacement"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_002",
+       "type": "function",
+       "function": {
+        "name": "run_command",
+        "arguments": "{\"command\": \"go build ./...\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_002",
+     "content": ""
+    },
+    {
+     "role": "assistant",
+     "content": "Reading the next file.",
+     "tool_calls": [
+      {
+       "id": "call_003",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"internal/store/limits.go\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_003",
+     "content": "package store\n\nfunc Limits3() int {\n\treturn 3\n}\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_004",
+       "type": "function",
+       "function": {
+        "name": "edit_file",
+        "arguments": "{\"path\": \"internal/store/audit.go\", \"old_string\": \"return 3\", \"new_string\": \"return 3 // checked\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_004",
+     "content": "ok: 1 replacement"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_005",
+       "type": "function",
+       "function": {
+        "name": "run_command",
+        "arguments": "{\"command\": \"go build ./...\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_005",
+     "content": ""
+    },
+    {
+     "role": "assistant",
+     "content": "Reading the next file.",
+     "tool_calls": [
+      {
+       "id": "call_006",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"internal/store/index.go\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_006",
+     "content": "package store\n\nfunc Index6() int {\n\treturn 6\n}\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_007",
+       "type": "function",
+       "function": {
+        "name": "edit_file",
+        "arguments": "{\"path\": \"internal/store/codec.go\", \"old_string\": \"return 6\", \"new_string\": \"return 6 // checked\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_007",
+     "content": "ok: 1 replacement"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_008",
+       "type": "function",
+       "function": {
+        "name": "run_command",
+        "arguments": "{\"command\": \"go build ./...\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_008",
+     "content": ""
+    },
+    {
+     "role": "assistant",
+     "content": "Reading the next file.",
+     "tool_calls": [
+      {
+       "id": "call_009",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"internal/store/clock.go\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_009",
+     "content": "package store\n\nfunc Clock9() int {\n\treturn 9\n}\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_010",
+       "type": "function",
+       "function": {
+        "name": "edit_file",
+        "arguments": "{\"path\": \"internal/store/cache1.go\", \"old_string\": \"return 9\", \"new_string\": \"return 9 // checked\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_010",
+     "content": "ok: 1 replacement"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_011",
+       "type": "function",
+       "function": {
+        "name": "run_command",
+        "arguments": "{\"command\": \"go build ./...\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_011",
+     "content": ""
+    },
+    {
+     "role": "assistant",
+     "content": "Reading the next file.",
+     "tool_calls": [
+      {
+       "id": "call_012",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"internal/store/retry1.go\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_012",
+     "content": "package store\n\nfunc Retry12() int {\n\treturn 12\n}\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_013",
+       "type": "function",
+       "function": {
+        "name": "run_command",
+        "arguments": "{\"command\": \"go test -race ./session/\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_013",
+     "content": "==================\nWARNING: DATA RACE\nWrite at 0x00c0001b4010 by goroutine 9:\n  svc/session.(*Store).touch()\n      /repo/session/store.go:88 +0x6a\nPrevious read at 0x00c0001b4010 by goroutine 8:\n  svc/session.(*Store).expireLoop()\n      /repo/session/store.go:121 +0x104\n==================\n--- FAIL: TestTouchExpire (0.03s)\n    testing.go:1465: race detected during execution of test\nFAIL\nFAIL\tsvc/session\t0.071s"
+    }
+   ],
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "read_file",
+      "description": "Read a file from the workspace",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "path"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "edit_file",
+      "description": "Replace old_string with new_string in a file",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "old_string": {
+         "type": "string"
+        },
+        "new_string": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "path",
+        "old_string",
+        "new_string"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "run_command",
+      "description": "Run a shell command and return stdout/stderr",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "command": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "command"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "grep",
+      "description": "Search the workspace with a regex",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "pattern": {
+         "type": "string"
+        },
+        "path": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "pattern",
+        "path"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "list_dir",
+      "description": "List directory entries",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "path"
+       ]
+      }
+     }
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "race between touch and expiry loop; must pick correct sync, newest message is the race report"
+ },
+ {
+  "id": "ho-tl04",
+  "group": "toolloop",
+  "lang": "en",
+  "intent": "toolloop",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 4096,
+   "system": "You are an autonomous coding agent working inside the user's repository. Use the tools to inspect and change files; prefer small targeted edits over rewrites. Always read a file before editing it. After code changes run the project's tests. Do not create files the user did not ask for. Do not run destructive git commands. When a command fails, read the error carefully before trying again. Keep replies short; the user reads the diff. Follow the conventions you see in neighbouring code. If you are unsure about a requirement, ask one concise question instead of guessing. Never print secrets found in env files. You are an autonomous coding agent working inside the user's repository. Use the tools to inspect and change files; prefer small targeted edits over rewrites. Always read a file before editing it. After code changes run the project's tests. Do not create files the user did not ask for. Do not run destructive git commands. When a command fails, read the error carefully before trying again. Keep replies short; the user reads the diff. Follow the conventions you see in neighbouring code. If you are unsure about a requirement, ask one concise question instead of guessing. Never print secrets found in env files. You are an autonomous coding agent working inside the user's repository. Use the tools to inspect and change files; prefer small targeted edits over rewrites. Always read a file before editing it. After code changes run the project's tests. Do not create files the user did not ask for. Do not run destructive git commands. When a command fails, read the error carefully before trying again. Keep replies short; the user reads the diff. Follow the conventions you see in neighbouring code. If you are unsure about a requirement, ask one concise question instead of guessing. Never print secrets found in env files. You are an autonomous coding agent working inside the user's repository. Use the tools to inspect and change files; prefer small targeted edits over rewrites. Always read a file before editing it. After code changes run the project's tests. Do not create files the user did not ask for. Do not run destructive git commands. When a command fails, read the error carefully before trying again. Keep replies short; the user reads the diff. Follow the conventions you see in neighbouring code. If you are unsure about a requirement, ask one concise question instead of guessing. Never print secrets found in env files. ",
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "service hangs under load, find the cause"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "text",
+       "text": "Reading the next file."
+      },
+      {
+       "type": "tool_use",
+       "id": "toolu_000",
+       "name": "read_file",
+       "input": {
+        "path": "internal/store/cache.go"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_000",
+       "content": "package store\n\nfunc Cache0() int {\n\treturn 0\n}\n"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_001",
+       "name": "edit_file",
+       "input": {
+        "path": "internal/store/queue.go",
+        "old_string": "return 0",
+        "new_string": "return 0 // checked"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_001",
+       "content": "ok: 1 replacement"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_002",
+       "name": "run_command",
+       "input": {
+        "command": "go build ./..."
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_002",
+       "content": ""
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "text",
+       "text": "Reading the next file."
+      },
+      {
+       "type": "tool_use",
+       "id": "toolu_003",
+       "name": "read_file",
+       "input": {
+        "path": "internal/store/limits.go"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_003",
+       "content": "package store\n\nfunc Limits3() int {\n\treturn 3\n}\n"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_004",
+       "name": "edit_file",
+       "input": {
+        "path": "internal/store/audit.go",
+        "old_string": "return 3",
+        "new_string": "return 3 // checked"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_004",
+       "content": "ok: 1 replacement"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_005",
+       "name": "run_command",
+       "input": {
+        "command": "go build ./..."
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_005",
+       "content": ""
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "text",
+       "text": "Reading the next file."
+      },
+      {
+       "type": "tool_use",
+       "id": "toolu_006",
+       "name": "read_file",
+       "input": {
+        "path": "internal/store/index.go"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_006",
+       "content": "package store\n\nfunc Index6() int {\n\treturn 6\n}\n"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_007",
+       "name": "edit_file",
+       "input": {
+        "path": "internal/store/codec.go",
+        "old_string": "return 6",
+        "new_string": "return 6 // checked"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_007",
+       "content": "ok: 1 replacement"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_008",
+       "name": "run_command",
+       "input": {
+        "command": "go build ./..."
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_008",
+       "content": ""
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "text",
+       "text": "Reading the next file."
+      },
+      {
+       "type": "tool_use",
+       "id": "toolu_009",
+       "name": "read_file",
+       "input": {
+        "path": "internal/store/clock.go"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_009",
+       "content": "package store\n\nfunc Clock9() int {\n\treturn 9\n}\n"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_010",
+       "name": "edit_file",
+       "input": {
+        "path": "internal/store/cache1.go",
+        "old_string": "return 9",
+        "new_string": "return 9 // checked"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_010",
+       "content": "ok: 1 replacement"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_011",
+       "name": "run_command",
+       "input": {
+        "command": "go build ./..."
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_011",
+       "content": ""
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "text",
+       "text": "Reading the next file."
+      },
+      {
+       "type": "tool_use",
+       "id": "toolu_012",
+       "name": "read_file",
+       "input": {
+        "path": "internal/store/retry1.go"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_012",
+       "content": "package store\n\nfunc Retry12() int {\n\treturn 12\n}\n"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_013",
+       "name": "edit_file",
+       "input": {
+        "path": "internal/store/limits1.go",
+        "old_string": "return 12",
+        "new_string": "return 12 // checked"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_013",
+       "content": "ok: 1 replacement"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_014",
+       "name": "run_command",
+       "input": {
+        "command": "go build ./..."
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_014",
+       "content": ""
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "text",
+       "text": "Reading the next file."
+      },
+      {
+       "type": "tool_use",
+       "id": "toolu_015",
+       "name": "read_file",
+       "input": {
+        "path": "internal/store/session1.go"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_015",
+       "content": "package store\n\nfunc Session15() int {\n\treturn 15\n}\n"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_016",
+       "name": "edit_file",
+       "input": {
+        "path": "internal/store/index1.go",
+        "old_string": "return 15",
+        "new_string": "return 15 // checked"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_016",
+       "content": "ok: 1 replacement"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_017",
+       "name": "run_command",
+       "input": {
+        "command": "go build ./..."
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_017",
+       "content": ""
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_018",
+       "name": "run_command",
+       "input": {
+        "command": "curl -s localhost:6060/debug/pprof/goroutine?debug=2 | head -60"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_018",
+       "content": "goroutine 41 [sync.Mutex.Lock, 6 minutes]:\nsvc/cache.(*Cache).Get(0xc000122000, {0xc0004a6000, 0x6})\n\t/repo/cache/cache.go:44 +0x71\nsvc/api.(*Handler).lookup(0xc00011c0c0, ...)\n\t/repo/api/handler.go:102 +0x5e\ngoroutine 77 [sync.Mutex.Lock, 6 minutes]:\nsvc/cache.(*Cache).evict(0xc000122000)\n\t/repo/cache/cache.go:131 +0x3a\nsvc/cache.(*Cache).Set(0xc000122000, {0xc0004a7000, 0x6}, {0x1, 0x2})\n\t/repo/cache/cache.go:71 +0x113\ngoroutine 90 [chan receive, 6 minutes]:\nsvc/cache.(*Cache).Set.func1()\n\t/repo/cache/cache.go:68 +0x2d"
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "so is that the deadlock?"
+      }
+     ]
+    }
+   ],
+   "tools": [
+    {
+     "name": "read_file",
+     "description": "Read a file from the workspace",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "path": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "path"
+      ]
+     }
+    },
+    {
+     "name": "edit_file",
+     "description": "Replace old_string with new_string in a file",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "path": {
+        "type": "string"
+       },
+       "old_string": {
+        "type": "string"
+       },
+       "new_string": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "path",
+       "old_string",
+       "new_string"
+      ]
+     }
+    },
+    {
+     "name": "run_command",
+     "description": "Run a shell command and return stdout/stderr",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "command": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "command"
+      ]
+     }
+    },
+    {
+     "name": "grep",
+     "description": "Search the workspace with a regex",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "pattern": {
+        "type": "string"
+       },
+       "path": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "pattern",
+       "path"
+      ]
+     }
+    },
+    {
+     "name": "list_dir",
+     "description": "List directory entries",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "path": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "path"
+      ]
+     }
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "goroutine dump shows Set holding lock while waiting on channel that evict needs; reasoning over dump"
+ },
+ {
+  "id": "ho-tl05",
+  "group": "toolloop",
+  "lang": "en",
+  "intent": "toolloop",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are an autonomous coding agent working inside the user's repository. Use the tools to inspect and change files; prefer small targeted edits over rewrites. Always read a file before editing it. After code changes run the project's tests. Do not create files the user did not ask for. Do not run destructive git commands. When a command fails, read the error carefully before trying again. Keep replies short; the user reads the diff. Follow the conventions you see in neighbouring code. If you are unsure about a requirement, ask one concise question instead of guessing. Never print secrets found in env files. You are an autonomous coding agent working inside the user's repository. Use the tools to inspect and change files; prefer small targeted edits over rewrites. Always read a file before editing it. After code changes run the project's tests. Do not create files the user did not ask for. Do not run destructive git commands. When a command fails, read the error carefully before trying again. Keep replies short; the user reads the diff. Follow the conventions you see in neighbouring code. If you are unsure about a requirement, ask one concise question instead of guessing. Never print secrets found in env files. You are an autonomous coding agent working inside the user's repository. Use the tools to inspect and change files; prefer small targeted edits over rewrites. Always read a file before editing it. After code changes run the project's tests. Do not create files the user did not ask for. Do not run destructive git commands. When a command fails, read the error carefully before trying again. Keep replies short; the user reads the diff. Follow the conventions you see in neighbouring code. If you are unsure about a requirement, ask one concise question instead of guessing. Never print secrets found in env files. You are an autonomous coding agent working inside the user's repository. Use the tools to inspect and change files; prefer small targeted edits over rewrites. Always read a file before editing it. After code changes run the project's tests. Do not create files the user did not ask for. Do not run destructive git commands. When a command fails, read the error carefully before trying again. Keep replies short; the user reads the diff. Follow the conventions you see in neighbouring code. If you are unsure about a requirement, ask one concise question instead of guessing. Never print secrets found in env files. "
+    },
+    {
+     "role": "user",
+     "content": "extract the retry helper into its own package like we discussed"
+    },
+    {
+     "role": "assistant",
+     "content": "Reading the next file.",
+     "tool_calls": [
+      {
+       "id": "call_000",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"internal/store/cache.go\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_000",
+     "content": "package store\n\nfunc Cache0() int {\n\treturn 0\n}\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_001",
+       "type": "function",
+       "function": {
+        "name": "edit_file",
+        "arguments": "{\"path\": \"internal/store/queue.go\", \"old_string\": \"return 0\", \"new_string\": \"return 0 // checked\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_001",
+     "content": "ok: 1 replacement"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_002",
+       "type": "function",
+       "function": {
+        "name": "run_command",
+        "arguments": "{\"command\": \"go build ./...\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_002",
+     "content": ""
+    },
+    {
+     "role": "assistant",
+     "content": "Reading the next file.",
+     "tool_calls": [
+      {
+       "id": "call_003",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"internal/store/limits.go\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_003",
+     "content": "package store\n\nfunc Limits3() int {\n\treturn 3\n}\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_004",
+       "type": "function",
+       "function": {
+        "name": "edit_file",
+        "arguments": "{\"path\": \"internal/store/audit.go\", \"old_string\": \"return 3\", \"new_string\": \"return 3 // checked\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_004",
+     "content": "ok: 1 replacement"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_005",
+       "type": "function",
+       "function": {
+        "name": "run_command",
+        "arguments": "{\"command\": \"go build ./...\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_005",
+     "content": ""
+    },
+    {
+     "role": "assistant",
+     "content": "Reading the next file.",
+     "tool_calls": [
+      {
+       "id": "call_006",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"internal/store/index.go\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_006",
+     "content": "package store\n\nfunc Index6() int {\n\treturn 6\n}\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_007",
+       "type": "function",
+       "function": {
+        "name": "edit_file",
+        "arguments": "{\"path\": \"internal/store/codec.go\", \"old_string\": \"return 6\", \"new_string\": \"return 6 // checked\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_007",
+     "content": "ok: 1 replacement"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_008",
+       "type": "function",
+       "function": {
+        "name": "run_command",
+        "arguments": "{\"command\": \"go build ./...\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_008",
+     "content": ""
+    },
+    {
+     "role": "assistant",
+     "content": "Reading the next file.",
+     "tool_calls": [
+      {
+       "id": "call_009",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"internal/store/clock.go\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_009",
+     "content": "package store\n\nfunc Clock9() int {\n\treturn 9\n}\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_010",
+       "type": "function",
+       "function": {
+        "name": "edit_file",
+        "arguments": "{\"path\": \"internal/store/cache1.go\", \"old_string\": \"return 9\", \"new_string\": \"return 9 // checked\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_010",
+     "content": "ok: 1 replacement"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_011",
+       "type": "function",
+       "function": {
+        "name": "run_command",
+        "arguments": "{\"command\": \"go build ./...\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_011",
+     "content": ""
+    },
+    {
+     "role": "assistant",
+     "content": "Reading the next file.",
+     "tool_calls": [
+      {
+       "id": "call_012",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"internal/store/retry1.go\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_012",
+     "content": "package store\n\nfunc Retry12() int {\n\treturn 12\n}\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_013",
+       "type": "function",
+       "function": {
+        "name": "edit_file",
+        "arguments": "{\"path\": \"internal/store/limits1.go\", \"old_string\": \"return 12\", \"new_string\": \"return 12 // checked\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_013",
+     "content": "ok: 1 replacement"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_014",
+       "type": "function",
+       "function": {
+        "name": "run_command",
+        "arguments": "{\"command\": \"go build ./...\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_014",
+     "content": ""
+    },
+    {
+     "role": "assistant",
+     "content": "Reading the next file.",
+     "tool_calls": [
+      {
+       "id": "call_015",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"internal/store/session1.go\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_015",
+     "content": "package store\n\nfunc Session15() int {\n\treturn 15\n}\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_016",
+       "type": "function",
+       "function": {
+        "name": "edit_file",
+        "arguments": "{\"path\": \"internal/store/index1.go\", \"old_string\": \"return 15\", \"new_string\": \"return 15 // checked\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_016",
+     "content": "ok: 1 replacement"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_017",
+       "type": "function",
+       "function": {
+        "name": "run_command",
+        "arguments": "{\"command\": \"go build ./...\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_017",
+     "content": ""
+    },
+    {
+     "role": "assistant",
+     "content": "Reading the next file.",
+     "tool_calls": [
+      {
+       "id": "call_018",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"internal/store/pool1.go\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_018",
+     "content": "package store\n\nfunc Pool18() int {\n\treturn 18\n}\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_019",
+       "type": "function",
+       "function": {
+        "name": "edit_file",
+        "arguments": "{\"path\": \"internal/store/clock1.go\", \"old_string\": \"return 18\", \"new_string\": \"return 18 // checked\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_019",
+     "content": "ok: 1 replacement"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_020",
+       "type": "function",
+       "function": {
+        "name": "run_command",
+        "arguments": "{\"command\": \"go build ./...\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_020",
+     "content": ""
+    },
+    {
+     "role": "assistant",
+     "content": "Reading the next file.",
+     "tool_calls": [
+      {
+       "id": "call_021",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"internal/store/queue2.go\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_021",
+     "content": "package store\n\nfunc Queue21() int {\n\treturn 21\n}\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_022",
+       "type": "function",
+       "function": {
+        "name": "edit_file",
+        "arguments": "{\"path\": \"internal/store/retry2.go\", \"old_string\": \"return 21\", \"new_string\": \"return 21 // checked\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_022",
+     "content": "ok: 1 replacement"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_023",
+       "type": "function",
+       "function": {
+        "name": "run_command",
+        "arguments": "{\"command\": \"go build ./...\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_023",
+     "content": ""
+    },
+    {
+     "role": "assistant",
+     "content": "Reading the next file.",
+     "tool_calls": [
+      {
+       "id": "call_024",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"internal/store/audit2.go\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_024",
+     "content": "package store\n\nfunc Audit24() int {\n\treturn 24\n}\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_025",
+       "type": "function",
+       "function": {
+        "name": "edit_file",
+        "arguments": "{\"path\": \"internal/store/session2.go\", \"old_string\": \"return 24\", \"new_string\": \"return 24 // checked\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_025",
+     "content": "ok: 1 replacement"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_026",
+       "type": "function",
+       "function": {
+        "name": "run_command",
+        "arguments": "{\"command\": \"go build ./...\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_026",
+     "content": ""
+    },
+    {
+     "role": "assistant",
+     "content": "Reading the next file.",
+     "tool_calls": [
+      {
+       "id": "call_027",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"internal/store/codec2.go\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_027",
+     "content": "package store\n\nfunc Codec27() int {\n\treturn 27\n}\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_028",
+       "type": "function",
+       "function": {
+        "name": "run_command",
+        "arguments": "{\"command\": \"go test ./... 2>&1 | tail -5\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_028",
+     "content": "ok  \tsvc/store\t0.9s\nok  \tsvc/retry\t0.2s\nok  \tsvc/api\t1.1s\nPASS"
+    }
+   ],
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "read_file",
+      "description": "Read a file from the workspace",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "path"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "edit_file",
+      "description": "Replace old_string with new_string in a file",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "old_string": {
+         "type": "string"
+        },
+        "new_string": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "path",
+        "old_string",
+        "new_string"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "run_command",
+      "description": "Run a shell command and return stdout/stderr",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "command": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "command"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "grep",
+      "description": "Search the workspace with a regex",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "pattern": {
+         "type": "string"
+        },
+        "path": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "pattern",
+        "path"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "list_dir",
+      "description": "List directory entries",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "path"
+       ]
+      }
+     }
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "long loop but newest result is green; remaining work is a summary"
+ },
+ {
+  "id": "ho-tl06",
+  "group": "toolloop",
+  "lang": "en",
+  "intent": "toolloop",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 4096,
+   "system": "You are an autonomous coding agent working inside the user's repository. Use the tools to inspect and change files; prefer small targeted edits over rewrites. Always read a file before editing it. After code changes run the project's tests. Do not create files the user did not ask for. Do not run destructive git commands. When a command fails, read the error carefully before trying again. Keep replies short; the user reads the diff. Follow the conventions you see in neighbouring code. If you are unsure about a requirement, ask one concise question instead of guessing. Never print secrets found in env files. You are an autonomous coding agent working inside the user's repository. Use the tools to inspect and change files; prefer small targeted edits over rewrites. Always read a file before editing it. After code changes run the project's tests. Do not create files the user did not ask for. Do not run destructive git commands. When a command fails, read the error carefully before trying again. Keep replies short; the user reads the diff. Follow the conventions you see in neighbouring code. If you are unsure about a requirement, ask one concise question instead of guessing. Never print secrets found in env files. You are an autonomous coding agent working inside the user's repository. Use the tools to inspect and change files; prefer small targeted edits over rewrites. Always read a file before editing it. After code changes run the project's tests. Do not create files the user did not ask for. Do not run destructive git commands. When a command fails, read the error carefully before trying again. Keep replies short; the user reads the diff. Follow the conventions you see in neighbouring code. If you are unsure about a requirement, ask one concise question instead of guessing. Never print secrets found in env files. You are an autonomous coding agent working inside the user's repository. Use the tools to inspect and change files; prefer small targeted edits over rewrites. Always read a file before editing it. After code changes run the project's tests. Do not create files the user did not ask for. Do not run destructive git commands. When a command fails, read the error carefully before trying again. Keep replies short; the user reads the diff. Follow the conventions you see in neighbouring code. If you are unsure about a requirement, ask one concise question instead of guessing. Never print secrets found in env files. ",
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "add the missing strings import"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "text",
+       "text": "Reading the next file."
+      },
+      {
+       "type": "tool_use",
+       "id": "toolu_000",
+       "name": "read_file",
+       "input": {
+        "path": "internal/store/cache.go"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_000",
+       "content": "package store\n\nfunc Cache0() int {\n\treturn 0\n}\n"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_001",
+       "name": "edit_file",
+       "input": {
+        "path": "internal/store/queue.go",
+        "old_string": "return 0",
+        "new_string": "return 0 // checked"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_001",
+       "content": "ok: 1 replacement"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_002",
+       "name": "run_command",
+       "input": {
+        "command": "go build ./..."
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_002",
+       "content": ""
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "text",
+       "text": "Reading the next file."
+      },
+      {
+       "type": "tool_use",
+       "id": "toolu_003",
+       "name": "read_file",
+       "input": {
+        "path": "internal/store/limits.go"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_003",
+       "content": "package store\n\nfunc Limits3() int {\n\treturn 3\n}\n"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_004",
+       "name": "run_command",
+       "input": {
+        "command": "go build ./..."
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_004",
+       "content": "# svc/util\nutil/slug.go:9:12: undefined: strings\n"
+      }
+     ]
+    }
+   ],
+   "tools": [
+    {
+     "name": "read_file",
+     "description": "Read a file from the workspace",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "path": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "path"
+      ]
+     }
+    },
+    {
+     "name": "edit_file",
+     "description": "Replace old_string with new_string in a file",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "path": {
+        "type": "string"
+       },
+       "old_string": {
+        "type": "string"
+       },
+       "new_string": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "path",
+       "old_string",
+       "new_string"
+      ]
+     }
+    },
+    {
+     "name": "run_command",
+     "description": "Run a shell command and return stdout/stderr",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "command": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "command"
+      ]
+     }
+    },
+    {
+     "name": "grep",
+     "description": "Search the workspace with a regex",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "pattern": {
+        "type": "string"
+       },
+       "path": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "pattern",
+       "path"
+      ]
+     }
+    },
+    {
+     "name": "list_dir",
+     "description": "List directory entries",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "path": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "path"
+      ]
+     }
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "compile error with obvious one-line fix"
+ },
+ {
+  "id": "ho-tl07",
+  "group": "toolloop",
+  "lang": "en",
+  "intent": "toolloop",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are an autonomous coding agent working inside the user's repository. Use the tools to inspect and change files; prefer small targeted edits over rewrites. Always read a file before editing it. After code changes run the project's tests. Do not create files the user did not ask for. Do not run destructive git commands. When a command fails, read the error carefully before trying again. Keep replies short; the user reads the diff. Follow the conventions you see in neighbouring code. If you are unsure about a requirement, ask one concise question instead of guessing. Never print secrets found in env files. You are an autonomous coding agent working inside the user's repository. Use the tools to inspect and change files; prefer small targeted edits over rewrites. Always read a file before editing it. After code changes run the project's tests. Do not create files the user did not ask for. Do not run destructive git commands. When a command fails, read the error carefully before trying again. Keep replies short; the user reads the diff. Follow the conventions you see in neighbouring code. If you are unsure about a requirement, ask one concise question instead of guessing. Never print secrets found in env files. You are an autonomous coding agent working inside the user's repository. Use the tools to inspect and change files; prefer small targeted edits over rewrites. Always read a file before editing it. After code changes run the project's tests. Do not create files the user did not ask for. Do not run destructive git commands. When a command fails, read the error carefully before trying again. Keep replies short; the user reads the diff. Follow the conventions you see in neighbouring code. If you are unsure about a requirement, ask one concise question instead of guessing. Never print secrets found in env files. You are an autonomous coding agent working inside the user's repository. Use the tools to inspect and change files; prefer small targeted edits over rewrites. Always read a file before editing it. After code changes run the project's tests. Do not create files the user did not ask for. Do not run destructive git commands. When a command fails, read the error carefully before trying again. Keep replies short; the user reads the diff. Follow the conventions you see in neighbouring code. If you are unsure about a requirement, ask one concise question instead of guessing. Never print secrets found in env files. "
+    },
+    {
+     "role": "user",
+     "content": "TestWorkerShutdown fails sometimes, make it pass reliably"
+    },
+    {
+     "role": "assistant",
+     "content": "Reading the next file.",
+     "tool_calls": [
+      {
+       "id": "call_000",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"internal/store/cache.go\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_000",
+     "content": "package store\n\nfunc Cache0() int {\n\treturn 0\n}\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_001",
+       "type": "function",
+       "function": {
+        "name": "edit_file",
+        "arguments": "{\"path\": \"internal/store/queue.go\", \"old_string\": \"return 0\", \"new_string\": \"return 0 // checked\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_001",
+     "content": "ok: 1 replacement"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_002",
+       "type": "function",
+       "function": {
+        "name": "run_command",
+        "arguments": "{\"command\": \"go build ./...\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_002",
+     "content": ""
+    },
+    {
+     "role": "assistant",
+     "content": "Reading the next file.",
+     "tool_calls": [
+      {
+       "id": "call_003",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"internal/store/limits.go\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_003",
+     "content": "package store\n\nfunc Limits3() int {\n\treturn 3\n}\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_004",
+       "type": "function",
+       "function": {
+        "name": "edit_file",
+        "arguments": "{\"path\": \"internal/store/audit.go\", \"old_string\": \"return 3\", \"new_string\": \"return 3 // checked\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_004",
+     "content": "ok: 1 replacement"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_005",
+       "type": "function",
+       "function": {
+        "name": "run_command",
+        "arguments": "{\"command\": \"go build ./...\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_005",
+     "content": ""
+    },
+    {
+     "role": "assistant",
+     "content": "Reading the next file.",
+     "tool_calls": [
+      {
+       "id": "call_006",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"internal/store/index.go\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_006",
+     "content": "package store\n\nfunc Index6() int {\n\treturn 6\n}\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_007",
+       "type": "function",
+       "function": {
+        "name": "edit_file",
+        "arguments": "{\"path\": \"internal/store/codec.go\", \"old_string\": \"return 6\", \"new_string\": \"return 6 // checked\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_007",
+     "content": "ok: 1 replacement"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_008",
+       "type": "function",
+       "function": {
+        "name": "run_command",
+        "arguments": "{\"command\": \"go build ./...\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_008",
+     "content": ""
+    },
+    {
+     "role": "assistant",
+     "content": "Reading the next file.",
+     "tool_calls": [
+      {
+       "id": "call_009",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"internal/store/clock.go\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_009",
+     "content": "package store\n\nfunc Clock9() int {\n\treturn 9\n}\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_010",
+       "type": "function",
+       "function": {
+        "name": "run_command",
+        "arguments": "{\"command\": \"go test -run TestWorkerShutdown -count=30 ./worker/\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_010",
+     "content": "--- FAIL: TestWorkerShutdown (0.51s)\n    worker_test.go:61: expected 3 completed jobs, got 2\n--- FAIL: TestWorkerShutdown (0.50s)\n    worker_test.go:61: expected 3 completed jobs, got 1\nFAIL\nok count: 27/30"
+    }
+   ],
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "read_file",
+      "description": "Read a file from the workspace",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "path"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "edit_file",
+      "description": "Replace old_string with new_string in a file",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "old_string": {
+         "type": "string"
+        },
+        "new_string": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "path",
+        "old_string",
+        "new_string"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "run_command",
+      "description": "Run a shell command and return stdout/stderr",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "command": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "command"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "grep",
+      "description": "Search the workspace with a regex",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "pattern": {
+         "type": "string"
+        },
+        "path": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "pattern",
+        "path"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "list_dir",
+      "description": "List directory entries",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "path"
+       ]
+      }
+     }
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "flaky shutdown ordering bug; needs concurrency reasoning"
+ },
+ {
+  "id": "ho-tl08",
+  "group": "toolloop",
+  "lang": "en",
+  "intent": "toolloop",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 4096,
+   "system": "You are an autonomous coding agent working inside the user's repository. Use the tools to inspect and change files; prefer small targeted edits over rewrites. Always read a file before editing it. After code changes run the project's tests. Do not create files the user did not ask for. Do not run destructive git commands. When a command fails, read the error carefully before trying again. Keep replies short; the user reads the diff. Follow the conventions you see in neighbouring code. If you are unsure about a requirement, ask one concise question instead of guessing. Never print secrets found in env files. You are an autonomous coding agent working inside the user's repository. Use the tools to inspect and change files; prefer small targeted edits over rewrites. Always read a file before editing it. After code changes run the project's tests. Do not create files the user did not ask for. Do not run destructive git commands. When a command fails, read the error carefully before trying again. Keep replies short; the user reads the diff. Follow the conventions you see in neighbouring code. If you are unsure about a requirement, ask one concise question instead of guessing. Never print secrets found in env files. You are an autonomous coding agent working inside the user's repository. Use the tools to inspect and change files; prefer small targeted edits over rewrites. Always read a file before editing it. After code changes run the project's tests. Do not create files the user did not ask for. Do not run destructive git commands. When a command fails, read the error carefully before trying again. Keep replies short; the user reads the diff. Follow the conventions you see in neighbouring code. If you are unsure about a requirement, ask one concise question instead of guessing. Never print secrets found in env files. You are an autonomous coding agent working inside the user's repository. Use the tools to inspect and change files; prefer small targeted edits over rewrites. Always read a file before editing it. After code changes run the project's tests. Do not create files the user did not ask for. Do not run destructive git commands. When a command fails, read the error carefully before trying again. Keep replies short; the user reads the diff. Follow the conventions you see in neighbouring code. If you are unsure about a requirement, ask one concise question instead of guessing. Never print secrets found in env files. ",
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "thread context.Context through the whole storage layer so queries are cancellable"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "text",
+       "text": "Reading the next file."
+      },
+      {
+       "type": "tool_use",
+       "id": "toolu_000",
+       "name": "read_file",
+       "input": {
+        "path": "internal/store/cache.go"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_000",
+       "content": "package store\n\nfunc Cache0() int {\n\treturn 0\n}\n"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_001",
+       "name": "edit_file",
+       "input": {
+        "path": "internal/store/queue.go",
+        "old_string": "return 0",
+        "new_string": "return 0 // checked"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_001",
+       "content": "ok: 1 replacement"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_002",
+       "name": "run_command",
+       "input": {
+        "command": "go build ./..."
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_002",
+       "content": ""
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "text",
+       "text": "Reading the next file."
+      },
+      {
+       "type": "tool_use",
+       "id": "toolu_003",
+       "name": "read_file",
+       "input": {
+        "path": "internal/store/limits.go"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_003",
+       "content": "package store\n\nfunc Limits3() int {\n\treturn 3\n}\n"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_004",
+       "name": "edit_file",
+       "input": {
+        "path": "internal/store/audit.go",
+        "old_string": "return 3",
+        "new_string": "return 3 // checked"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_004",
+       "content": "ok: 1 replacement"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_005",
+       "name": "run_command",
+       "input": {
+        "command": "go build ./..."
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_005",
+       "content": ""
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "text",
+       "text": "Reading the next file."
+      },
+      {
+       "type": "tool_use",
+       "id": "toolu_006",
+       "name": "read_file",
+       "input": {
+        "path": "internal/store/index.go"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_006",
+       "content": "package store\n\nfunc Index6() int {\n\treturn 6\n}\n"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_007",
+       "name": "edit_file",
+       "input": {
+        "path": "internal/store/codec.go",
+        "old_string": "return 6",
+        "new_string": "return 6 // checked"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_007",
+       "content": "ok: 1 replacement"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_008",
+       "name": "run_command",
+       "input": {
+        "command": "go build ./..."
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_008",
+       "content": ""
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "text",
+       "text": "Reading the next file."
+      },
+      {
+       "type": "tool_use",
+       "id": "toolu_009",
+       "name": "read_file",
+       "input": {
+        "path": "internal/store/clock.go"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_009",
+       "content": "package store\n\nfunc Clock9() int {\n\treturn 9\n}\n"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_010",
+       "name": "edit_file",
+       "input": {
+        "path": "internal/store/cache1.go",
+        "old_string": "return 9",
+        "new_string": "return 9 // checked"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_010",
+       "content": "ok: 1 replacement"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_011",
+       "name": "run_command",
+       "input": {
+        "command": "go build ./..."
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_011",
+       "content": ""
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "text",
+       "text": "Reading the next file."
+      },
+      {
+       "type": "tool_use",
+       "id": "toolu_012",
+       "name": "read_file",
+       "input": {
+        "path": "internal/store/retry1.go"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_012",
+       "content": "package store\n\nfunc Retry12() int {\n\treturn 12\n}\n"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_013",
+       "name": "edit_file",
+       "input": {
+        "path": "internal/store/limits1.go",
+        "old_string": "return 12",
+        "new_string": "return 12 // checked"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_013",
+       "content": "ok: 1 replacement"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_014",
+       "name": "run_command",
+       "input": {
+        "command": "go build ./..."
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_014",
+       "content": ""
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "text",
+       "text": "Reading the next file."
+      },
+      {
+       "type": "tool_use",
+       "id": "toolu_015",
+       "name": "read_file",
+       "input": {
+        "path": "internal/store/session1.go"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_015",
+       "content": "package store\n\nfunc Session15() int {\n\treturn 15\n}\n"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_016",
+       "name": "edit_file",
+       "input": {
+        "path": "internal/store/index1.go",
+        "old_string": "return 15",
+        "new_string": "return 15 // checked"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_016",
+       "content": "ok: 1 replacement"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_017",
+       "name": "run_command",
+       "input": {
+        "command": "go build ./..."
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_017",
+       "content": ""
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "text",
+       "text": "Reading the next file."
+      },
+      {
+       "type": "tool_use",
+       "id": "toolu_018",
+       "name": "read_file",
+       "input": {
+        "path": "internal/store/pool1.go"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_018",
+       "content": "package store\n\nfunc Pool18() int {\n\treturn 18\n}\n"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_019",
+       "name": "edit_file",
+       "input": {
+        "path": "internal/store/clock1.go",
+        "old_string": "return 18",
+        "new_string": "return 18 // checked"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_019",
+       "content": "ok: 1 replacement"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_020",
+       "name": "run_command",
+       "input": {
+        "command": "go build ./..."
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_020",
+       "content": ""
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "text",
+       "text": "Reading the next file."
+      },
+      {
+       "type": "tool_use",
+       "id": "toolu_021",
+       "name": "read_file",
+       "input": {
+        "path": "internal/store/queue2.go"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_021",
+       "content": "package store\n\nfunc Queue21() int {\n\treturn 21\n}\n"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_022",
+       "name": "edit_file",
+       "input": {
+        "path": "internal/store/retry2.go",
+        "old_string": "return 21",
+        "new_string": "return 21 // checked"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_022",
+       "content": "ok: 1 replacement"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_023",
+       "name": "grep",
+       "input": {
+        "pattern": "db\\.(Query|Exec)\\(",
+        "path": "storage/"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_023",
+       "content": "storage/users.go:22:\trows, err := db.Query(q, id)\nstorage/orders.go:41:\t_, err := db.Exec(upd, id)\nstorage/audit.go:19:\t_, err := db.Exec(ins, ev)\n...(31 more)"
+      }
+     ]
+    }
+   ],
+   "tools": [
+    {
+     "name": "read_file",
+     "description": "Read a file from the workspace",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "path": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "path"
+      ]
+     }
+    },
+    {
+     "name": "edit_file",
+     "description": "Replace old_string with new_string in a file",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "path": {
+        "type": "string"
+       },
+       "old_string": {
+        "type": "string"
+       },
+       "new_string": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "path",
+       "old_string",
+       "new_string"
+      ]
+     }
+    },
+    {
+     "name": "run_command",
+     "description": "Run a shell command and return stdout/stderr",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "command": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "command"
+      ]
+     }
+    },
+    {
+     "name": "grep",
+     "description": "Search the workspace with a regex",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "pattern": {
+        "type": "string"
+       },
+       "path": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "pattern",
+       "path"
+      ]
+     }
+    },
+    {
+     "name": "list_dir",
+     "description": "List directory entries",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "path": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "path"
+      ]
+     }
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "wide refactor across many call sites, mid-loop"
+ },
+ {
+  "id": "ho-tl09",
+  "group": "toolloop",
+  "lang": "en",
+  "intent": "toolloop",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are an autonomous coding agent working inside the user's repository. Use the tools to inspect and change files; prefer small targeted edits over rewrites. Always read a file before editing it. After code changes run the project's tests. Do not create files the user did not ask for. Do not run destructive git commands. When a command fails, read the error carefully before trying again. Keep replies short; the user reads the diff. Follow the conventions you see in neighbouring code. If you are unsure about a requirement, ask one concise question instead of guessing. Never print secrets found in env files. You are an autonomous coding agent working inside the user's repository. Use the tools to inspect and change files; prefer small targeted edits over rewrites. Always read a file before editing it. After code changes run the project's tests. Do not create files the user did not ask for. Do not run destructive git commands. When a command fails, read the error carefully before trying again. Keep replies short; the user reads the diff. Follow the conventions you see in neighbouring code. If you are unsure about a requirement, ask one concise question instead of guessing. Never print secrets found in env files. You are an autonomous coding agent working inside the user's repository. Use the tools to inspect and change files; prefer small targeted edits over rewrites. Always read a file before editing it. After code changes run the project's tests. Do not create files the user did not ask for. Do not run destructive git commands. When a command fails, read the error carefully before trying again. Keep replies short; the user reads the diff. Follow the conventions you see in neighbouring code. If you are unsure about a requirement, ask one concise question instead of guessing. Never print secrets found in env files. You are an autonomous coding agent working inside the user's repository. Use the tools to inspect and change files; prefer small targeted edits over rewrites. Always read a file before editing it. After code changes run the project's tests. Do not create files the user did not ask for. Do not run destructive git commands. When a command fails, read the error carefully before trying again. Keep replies short; the user reads the diff. Follow the conventions you see in neighbouring code. If you are unsure about a requirement, ask one concise question instead of guessing. Never print secrets found in env files. "
+    },
+    {
+     "role": "user",
+     "content": "set the log level in config.yaml to debug for staging"
+    },
+    {
+     "role": "assistant",
+     "content": "Reading the next file.",
+     "tool_calls": [
+      {
+       "id": "call_000",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"internal/store/cache.go\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_000",
+     "content": "package store\n\nfunc Cache0() int {\n\treturn 0\n}\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_001",
+       "type": "function",
+       "function": {
+        "name": "edit_file",
+        "arguments": "{\"path\": \"internal/store/queue.go\", \"old_string\": \"return 0\", \"new_string\": \"return 0 // checked\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_001",
+     "content": "ok: 1 replacement"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_002",
+       "type": "function",
+       "function": {
+        "name": "run_command",
+        "arguments": "{\"command\": \"go build ./...\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_002",
+     "content": ""
+    },
+    {
+     "role": "assistant",
+     "content": "Reading the next file.",
+     "tool_calls": [
+      {
+       "id": "call_003",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"internal/store/limits.go\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_003",
+     "content": "package store\n\nfunc Limits3() int {\n\treturn 3\n}\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_004",
+       "type": "function",
+       "function": {
+        "name": "edit_file",
+        "arguments": "{\"path\": \"internal/store/audit.go\", \"old_string\": \"return 3\", \"new_string\": \"return 3 // checked\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_004",
+     "content": "ok: 1 replacement"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_005",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"config.yaml\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_005",
+     "content": "env: staging\nlog:\n  level: info\n  json: true\n"
+    },
+    {
+     "role": "user",
+     "content": "ok do it"
+    }
+   ],
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "read_file",
+      "description": "Read a file from the workspace",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "path"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "edit_file",
+      "description": "Replace old_string with new_string in a file",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "old_string": {
+         "type": "string"
+        },
+        "new_string": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "path",
+        "old_string",
+        "new_string"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "run_command",
+      "description": "Run a shell command and return stdout/stderr",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "command": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "command"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "grep",
+      "description": "Search the workspace with a regex",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "pattern": {
+         "type": "string"
+        },
+        "path": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "pattern",
+        "path"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "list_dir",
+      "description": "List directory entries",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "path"
+       ]
+      }
+     }
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "trivial config edit; terse confirmation turn"
+ },
+ {
+  "id": "ho-tl10",
+  "group": "toolloop",
+  "lang": "en",
+  "intent": "toolloop",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 4096,
+   "system": "You are an autonomous coding agent working inside the user's repository. Use the tools to inspect and change files; prefer small targeted edits over rewrites. Always read a file before editing it. After code changes run the project's tests. Do not create files the user did not ask for. Do not run destructive git commands. When a command fails, read the error carefully before trying again. Keep replies short; the user reads the diff. Follow the conventions you see in neighbouring code. If you are unsure about a requirement, ask one concise question instead of guessing. Never print secrets found in env files. You are an autonomous coding agent working inside the user's repository. Use the tools to inspect and change files; prefer small targeted edits over rewrites. Always read a file before editing it. After code changes run the project's tests. Do not create files the user did not ask for. Do not run destructive git commands. When a command fails, read the error carefully before trying again. Keep replies short; the user reads the diff. Follow the conventions you see in neighbouring code. If you are unsure about a requirement, ask one concise question instead of guessing. Never print secrets found in env files. You are an autonomous coding agent working inside the user's repository. Use the tools to inspect and change files; prefer small targeted edits over rewrites. Always read a file before editing it. After code changes run the project's tests. Do not create files the user did not ask for. Do not run destructive git commands. When a command fails, read the error carefully before trying again. Keep replies short; the user reads the diff. Follow the conventions you see in neighbouring code. If you are unsure about a requirement, ask one concise question instead of guessing. Never print secrets found in env files. You are an autonomous coding agent working inside the user's repository. Use the tools to inspect and change files; prefer small targeted edits over rewrites. Always read a file before editing it. After code changes run the project's tests. Do not create files the user did not ask for. Do not run destructive git commands. When a command fails, read the error carefully before trying again. Keep replies short; the user reads the diff. Follow the conventions you see in neighbouring code. If you are unsure about a requirement, ask one concise question instead of guessing. Never print secrets found in env files. ",
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "is there an authz bypass in our auth middleware? be thorough"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "text",
+       "text": "Reading the next file."
+      },
+      {
+       "type": "tool_use",
+       "id": "toolu_000",
+       "name": "read_file",
+       "input": {
+        "path": "internal/store/cache.go"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_000",
+       "content": "package store\n\nfunc Cache0() int {\n\treturn 0\n}\n"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_001",
+       "name": "edit_file",
+       "input": {
+        "path": "internal/store/queue.go",
+        "old_string": "return 0",
+        "new_string": "return 0 // checked"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_001",
+       "content": "ok: 1 replacement"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_002",
+       "name": "run_command",
+       "input": {
+        "command": "go build ./..."
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_002",
+       "content": ""
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "text",
+       "text": "Reading the next file."
+      },
+      {
+       "type": "tool_use",
+       "id": "toolu_003",
+       "name": "read_file",
+       "input": {
+        "path": "internal/store/limits.go"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_003",
+       "content": "package store\n\nfunc Limits3() int {\n\treturn 3\n}\n"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_004",
+       "name": "edit_file",
+       "input": {
+        "path": "internal/store/audit.go",
+        "old_string": "return 3",
+        "new_string": "return 3 // checked"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_004",
+       "content": "ok: 1 replacement"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_005",
+       "name": "run_command",
+       "input": {
+        "command": "go build ./..."
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_005",
+       "content": ""
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "text",
+       "text": "Reading the next file."
+      },
+      {
+       "type": "tool_use",
+       "id": "toolu_006",
+       "name": "read_file",
+       "input": {
+        "path": "internal/store/index.go"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_006",
+       "content": "package store\n\nfunc Index6() int {\n\treturn 6\n}\n"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_007",
+       "name": "edit_file",
+       "input": {
+        "path": "internal/store/codec.go",
+        "old_string": "return 6",
+        "new_string": "return 6 // checked"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_007",
+       "content": "ok: 1 replacement"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_008",
+       "name": "run_command",
+       "input": {
+        "command": "go build ./..."
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_008",
+       "content": ""
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "text",
+       "text": "Reading the next file."
+      },
+      {
+       "type": "tool_use",
+       "id": "toolu_009",
+       "name": "read_file",
+       "input": {
+        "path": "internal/store/clock.go"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_009",
+       "content": "package store\n\nfunc Clock9() int {\n\treturn 9\n}\n"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_010",
+       "name": "edit_file",
+       "input": {
+        "path": "internal/store/cache1.go",
+        "old_string": "return 9",
+        "new_string": "return 9 // checked"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_010",
+       "content": "ok: 1 replacement"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_011",
+       "name": "run_command",
+       "input": {
+        "command": "go build ./..."
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_011",
+       "content": ""
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "text",
+       "text": "Reading the next file."
+      },
+      {
+       "type": "tool_use",
+       "id": "toolu_012",
+       "name": "read_file",
+       "input": {
+        "path": "internal/store/retry1.go"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_012",
+       "content": "package store\n\nfunc Retry12() int {\n\treturn 12\n}\n"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_013",
+       "name": "edit_file",
+       "input": {
+        "path": "internal/store/limits1.go",
+        "old_string": "return 12",
+        "new_string": "return 12 // checked"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_013",
+       "content": "ok: 1 replacement"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_014",
+       "name": "run_command",
+       "input": {
+        "command": "go build ./..."
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_014",
+       "content": ""
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "text",
+       "text": "Reading the next file."
+      },
+      {
+       "type": "tool_use",
+       "id": "toolu_015",
+       "name": "read_file",
+       "input": {
+        "path": "internal/store/session1.go"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_015",
+       "content": "package store\n\nfunc Session15() int {\n\treturn 15\n}\n"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_016",
+       "name": "read_file",
+       "input": {
+        "path": "middleware/auth.go"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_016",
+       "content": "func RequireOwner(next http.Handler) http.Handler {\n\treturn http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {\n\t\tid := r.URL.Query().Get(\"project\")\n\t\tif strings.HasPrefix(r.URL.Path, \"/admin\") { next.ServeHTTP(w, r); return }\n\t\tp, _ := store.Project(id)\n\t\tif p.OwnerID != userFrom(r.Context()).ID { http.Error(w, \"forbidden\", 403); return }\n\t\tnext.ServeHTTP(w, r)\n\t})\n}\n// router: mux.Handle(\"/admin/\", AdminAuth(h)); mux.Handle(\"/projects/\", RequireOwner(h))\n// note: AdminAuth checks the session cookie only; /admin/../projects/ is cleaned by mux AFTER middleware chain"
+      }
+     ]
+    }
+   ],
+   "tools": [
+    {
+     "name": "read_file",
+     "description": "Read a file from the workspace",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "path": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "path"
+      ]
+     }
+    },
+    {
+     "name": "edit_file",
+     "description": "Replace old_string with new_string in a file",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "path": {
+        "type": "string"
+       },
+       "old_string": {
+        "type": "string"
+       },
+       "new_string": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "path",
+       "old_string",
+       "new_string"
+      ]
+     }
+    },
+    {
+     "name": "run_command",
+     "description": "Run a shell command and return stdout/stderr",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "command": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "command"
+      ]
+     }
+    },
+    {
+     "name": "grep",
+     "description": "Search the workspace with a regex",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "pattern": {
+        "type": "string"
+       },
+       "path": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "pattern",
+       "path"
+      ]
+     }
+    },
+    {
+     "name": "list_dir",
+     "description": "List directory entries",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "path": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "path"
+      ]
+     }
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 2,
+  "maxTier": 2,
+  "notes": "subtle path-prefix and error-ignoring authz flaws needing adversarial analysis"
+ },
+ {
+  "id": "ho-tl11",
+  "group": "toolloop",
+  "lang": "en",
+  "intent": "toolloop",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are an autonomous coding agent working inside the user's repository. Use the tools to inspect and change files; prefer small targeted edits over rewrites. Always read a file before editing it. After code changes run the project's tests. Do not create files the user did not ask for. Do not run destructive git commands. When a command fails, read the error carefully before trying again. Keep replies short; the user reads the diff. Follow the conventions you see in neighbouring code. If you are unsure about a requirement, ask one concise question instead of guessing. Never print secrets found in env files. You are an autonomous coding agent working inside the user's repository. Use the tools to inspect and change files; prefer small targeted edits over rewrites. Always read a file before editing it. After code changes run the project's tests. Do not create files the user did not ask for. Do not run destructive git commands. When a command fails, read the error carefully before trying again. Keep replies short; the user reads the diff. Follow the conventions you see in neighbouring code. If you are unsure about a requirement, ask one concise question instead of guessing. Never print secrets found in env files. You are an autonomous coding agent working inside the user's repository. Use the tools to inspect and change files; prefer small targeted edits over rewrites. Always read a file before editing it. After code changes run the project's tests. Do not create files the user did not ask for. Do not run destructive git commands. When a command fails, read the error carefully before trying again. Keep replies short; the user reads the diff. Follow the conventions you see in neighbouring code. If you are unsure about a requirement, ask one concise question instead of guessing. Never print secrets found in env files. You are an autonomous coding agent working inside the user's repository. Use the tools to inspect and change files; prefer small targeted edits over rewrites. Always read a file before editing it. After code changes run the project's tests. Do not create files the user did not ask for. Do not run destructive git commands. When a command fails, read the error carefully before trying again. Keep replies short; the user reads the diff. Follow the conventions you see in neighbouring code. If you are unsure about a requirement, ask one concise question instead of guessing. Never print secrets found in env files. "
+    },
+    {
+     "role": "user",
+     "content": "what files are in src/ ?"
+    },
+    {
+     "role": "assistant",
+     "content": "Reading the next file.",
+     "tool_calls": [
+      {
+       "id": "call_000",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"internal/store/cache.go\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_000",
+     "content": "package store\n\nfunc Cache0() int {\n\treturn 0\n}\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_001",
+       "type": "function",
+       "function": {
+        "name": "edit_file",
+        "arguments": "{\"path\": \"internal/store/queue.go\", \"old_string\": \"return 0\", \"new_string\": \"return 0 // checked\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_001",
+     "content": "ok: 1 replacement"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_002",
+       "type": "function",
+       "function": {
+        "name": "list_dir",
+        "arguments": "{\"path\": \"src/\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_002",
+     "content": "main.go\nutil.go\nutil_test.go\nREADME.md"
+    }
+   ],
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "read_file",
+      "description": "Read a file from the workspace",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "path"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "edit_file",
+      "description": "Replace old_string with new_string in a file",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "old_string": {
+         "type": "string"
+        },
+        "new_string": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "path",
+        "old_string",
+        "new_string"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "run_command",
+      "description": "Run a shell command and return stdout/stderr",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "command": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "command"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "grep",
+      "description": "Search the workspace with a regex",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "pattern": {
+         "type": "string"
+        },
+        "path": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "pattern",
+        "path"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "list_dir",
+      "description": "List directory entries",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "path"
+       ]
+      }
+     }
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "directory listing summary"
+ },
+ {
+  "id": "ho-tl12",
+  "group": "toolloop",
+  "lang": "en",
+  "intent": "toolloop",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 4096,
+   "system": "You are an autonomous coding agent working inside the user's repository. Use the tools to inspect and change files; prefer small targeted edits over rewrites. Always read a file before editing it. After code changes run the project's tests. Do not create files the user did not ask for. Do not run destructive git commands. When a command fails, read the error carefully before trying again. Keep replies short; the user reads the diff. Follow the conventions you see in neighbouring code. If you are unsure about a requirement, ask one concise question instead of guessing. Never print secrets found in env files. You are an autonomous coding agent working inside the user's repository. Use the tools to inspect and change files; prefer small targeted edits over rewrites. Always read a file before editing it. After code changes run the project's tests. Do not create files the user did not ask for. Do not run destructive git commands. When a command fails, read the error carefully before trying again. Keep replies short; the user reads the diff. Follow the conventions you see in neighbouring code. If you are unsure about a requirement, ask one concise question instead of guessing. Never print secrets found in env files. You are an autonomous coding agent working inside the user's repository. Use the tools to inspect and change files; prefer small targeted edits over rewrites. Always read a file before editing it. After code changes run the project's tests. Do not create files the user did not ask for. Do not run destructive git commands. When a command fails, read the error carefully before trying again. Keep replies short; the user reads the diff. Follow the conventions you see in neighbouring code. If you are unsure about a requirement, ask one concise question instead of guessing. Never print secrets found in env files. You are an autonomous coding agent working inside the user's repository. Use the tools to inspect and change files; prefer small targeted edits over rewrites. Always read a file before editing it. After code changes run the project's tests. Do not create files the user did not ask for. Do not run destructive git commands. When a command fails, read the error carefully before trying again. Keep replies short; the user reads the diff. Follow the conventions you see in neighbouring code. If you are unsure about a requirement, ask one concise question instead of guessing. Never print secrets found in env files. ",
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "make this O(n log n), it times out on 1e5 inputs"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "text",
+       "text": "Reading the next file."
+      },
+      {
+       "type": "tool_use",
+       "id": "toolu_000",
+       "name": "read_file",
+       "input": {
+        "path": "internal/store/cache.go"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_000",
+       "content": "package store\n\nfunc Cache0() int {\n\treturn 0\n}\n"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_001",
+       "name": "edit_file",
+       "input": {
+        "path": "internal/store/queue.go",
+        "old_string": "return 0",
+        "new_string": "return 0 // checked"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_001",
+       "content": "ok: 1 replacement"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_002",
+       "name": "run_command",
+       "input": {
+        "command": "go build ./..."
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_002",
+       "content": ""
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "text",
+       "text": "Reading the next file."
+      },
+      {
+       "type": "tool_use",
+       "id": "toolu_003",
+       "name": "read_file",
+       "input": {
+        "path": "internal/store/limits.go"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_003",
+       "content": "package store\n\nfunc Limits3() int {\n\treturn 3\n}\n"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_004",
+       "name": "edit_file",
+       "input": {
+        "path": "internal/store/audit.go",
+        "old_string": "return 3",
+        "new_string": "return 3 // checked"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_004",
+       "content": "ok: 1 replacement"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_005",
+       "name": "run_command",
+       "input": {
+        "command": "go build ./..."
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_005",
+       "content": ""
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "text",
+       "text": "Reading the next file."
+      },
+      {
+       "type": "tool_use",
+       "id": "toolu_006",
+       "name": "read_file",
+       "input": {
+        "path": "internal/store/index.go"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_006",
+       "content": "package store\n\nfunc Index6() int {\n\treturn 6\n}\n"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_007",
+       "name": "edit_file",
+       "input": {
+        "path": "internal/store/codec.go",
+        "old_string": "return 6",
+        "new_string": "return 6 // checked"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_007",
+       "content": "ok: 1 replacement"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_008",
+       "name": "run_command",
+       "input": {
+        "command": "go build ./..."
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_008",
+       "content": ""
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "text",
+       "text": "Reading the next file."
+      },
+      {
+       "type": "tool_use",
+       "id": "toolu_009",
+       "name": "read_file",
+       "input": {
+        "path": "internal/store/clock.go"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_009",
+       "content": "package store\n\nfunc Clock9() int {\n\treturn 9\n}\n"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_010",
+       "name": "edit_file",
+       "input": {
+        "path": "internal/store/cache1.go",
+        "old_string": "return 9",
+        "new_string": "return 9 // checked"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_010",
+       "content": "ok: 1 replacement"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_011",
+       "name": "run_command",
+       "input": {
+        "command": "go build ./..."
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_011",
+       "content": ""
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_012",
+       "name": "read_file",
+       "input": {
+        "path": "solve.py"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_012",
+       "content": "def best_pairs(a, k):\n    out = 0\n    for i in range(len(a)):\n        for j in range(i+1, len(a)):\n            if abs(a[i]-a[j]) <= k and a[i] % 3 == a[j] % 3:\n                out += 1\n    return out\n"
+      }
+     ]
+    }
+   ],
+   "tools": [
+    {
+     "name": "read_file",
+     "description": "Read a file from the workspace",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "path": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "path"
+      ]
+     }
+    },
+    {
+     "name": "edit_file",
+     "description": "Replace old_string with new_string in a file",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "path": {
+        "type": "string"
+       },
+       "old_string": {
+        "type": "string"
+       },
+       "new_string": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "path",
+       "old_string",
+       "new_string"
+      ]
+     }
+    },
+    {
+     "name": "run_command",
+     "description": "Run a shell command and return stdout/stderr",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "command": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "command"
+      ]
+     }
+    },
+    {
+     "name": "grep",
+     "description": "Search the workspace with a regex",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "pattern": {
+        "type": "string"
+       },
+       "path": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "pattern",
+       "path"
+      ]
+     }
+    },
+    {
+     "name": "list_dir",
+     "description": "List directory entries",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "path": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "path"
+      ]
+     }
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "counting pairs with window and residue constraint needs sort+two-pointer per residue class"
+ },
+ {
+  "id": "ho-tl13",
+  "group": "toolloop",
+  "lang": "en",
+  "intent": "toolloop",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are an autonomous coding agent working inside the user's repository. Use the tools to inspect and change files; prefer small targeted edits over rewrites. Always read a file before editing it. After code changes run the project's tests. Do not create files the user did not ask for. Do not run destructive git commands. When a command fails, read the error carefully before trying again. Keep replies short; the user reads the diff. Follow the conventions you see in neighbouring code. If you are unsure about a requirement, ask one concise question instead of guessing. Never print secrets found in env files. You are an autonomous coding agent working inside the user's repository. Use the tools to inspect and change files; prefer small targeted edits over rewrites. Always read a file before editing it. After code changes run the project's tests. Do not create files the user did not ask for. Do not run destructive git commands. When a command fails, read the error carefully before trying again. Keep replies short; the user reads the diff. Follow the conventions you see in neighbouring code. If you are unsure about a requirement, ask one concise question instead of guessing. Never print secrets found in env files. You are an autonomous coding agent working inside the user's repository. Use the tools to inspect and change files; prefer small targeted edits over rewrites. Always read a file before editing it. After code changes run the project's tests. Do not create files the user did not ask for. Do not run destructive git commands. When a command fails, read the error carefully before trying again. Keep replies short; the user reads the diff. Follow the conventions you see in neighbouring code. If you are unsure about a requirement, ask one concise question instead of guessing. Never print secrets found in env files. You are an autonomous coding agent working inside the user's repository. Use the tools to inspect and change files; prefer small targeted edits over rewrites. Always read a file before editing it. After code changes run the project's tests. Do not create files the user did not ask for. Do not run destructive git commands. When a command fails, read the error carefully before trying again. Keep replies short; the user reads the diff. Follow the conventions you see in neighbouring code. If you are unsure about a requirement, ask one concise question instead of guessing. Never print secrets found in env files. "
+    },
+    {
+     "role": "user",
+     "content": "CI is red, fix it"
+    },
+    {
+     "role": "assistant",
+     "content": "Reading the next file.",
+     "tool_calls": [
+      {
+       "id": "call_000",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"internal/store/cache.go\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_000",
+     "content": "package store\n\nfunc Cache0() int {\n\treturn 0\n}\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_001",
+       "type": "function",
+       "function": {
+        "name": "edit_file",
+        "arguments": "{\"path\": \"internal/store/queue.go\", \"old_string\": \"return 0\", \"new_string\": \"return 0 // checked\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_001",
+     "content": "ok: 1 replacement"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_002",
+       "type": "function",
+       "function": {
+        "name": "run_command",
+        "arguments": "{\"command\": \"go build ./...\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_002",
+     "content": ""
+    },
+    {
+     "role": "assistant",
+     "content": "Reading the next file.",
+     "tool_calls": [
+      {
+       "id": "call_003",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"internal/store/limits.go\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_003",
+     "content": "package store\n\nfunc Limits3() int {\n\treturn 3\n}\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_004",
+       "type": "function",
+       "function": {
+        "name": "edit_file",
+        "arguments": "{\"path\": \"internal/store/audit.go\", \"old_string\": \"return 3\", \"new_string\": \"return 3 // checked\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_004",
+     "content": "ok: 1 replacement"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_005",
+       "type": "function",
+       "function": {
+        "name": "run_command",
+        "arguments": "{\"command\": \"go build ./...\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_005",
+     "content": ""
+    },
+    {
+     "role": "assistant",
+     "content": "Reading the next file.",
+     "tool_calls": [
+      {
+       "id": "call_006",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"internal/store/index.go\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_006",
+     "content": "package store\n\nfunc Index6() int {\n\treturn 6\n}\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_007",
+       "type": "function",
+       "function": {
+        "name": "edit_file",
+        "arguments": "{\"path\": \"internal/store/codec.go\", \"old_string\": \"return 6\", \"new_string\": \"return 6 // checked\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_007",
+     "content": "ok: 1 replacement"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_008",
+       "type": "function",
+       "function": {
+        "name": "run_command",
+        "arguments": "{\"command\": \"go build ./...\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_008",
+     "content": ""
+    },
+    {
+     "role": "assistant",
+     "content": "Reading the next file.",
+     "tool_calls": [
+      {
+       "id": "call_009",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"internal/store/clock.go\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_009",
+     "content": "package store\n\nfunc Clock9() int {\n\treturn 9\n}\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_010",
+       "type": "function",
+       "function": {
+        "name": "edit_file",
+        "arguments": "{\"path\": \"internal/store/cache1.go\", \"old_string\": \"return 9\", \"new_string\": \"return 9 // checked\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_010",
+     "content": "ok: 1 replacement"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_011",
+       "type": "function",
+       "function": {
+        "name": "run_command",
+        "arguments": "{\"command\": \"go build ./...\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_011",
+     "content": ""
+    },
+    {
+     "role": "assistant",
+     "content": "Reading the next file.",
+     "tool_calls": [
+      {
+       "id": "call_012",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"internal/store/retry1.go\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_012",
+     "content": "package store\n\nfunc Retry12() int {\n\treturn 12\n}\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_013",
+       "type": "function",
+       "function": {
+        "name": "edit_file",
+        "arguments": "{\"path\": \"internal/store/limits1.go\", \"old_string\": \"return 12\", \"new_string\": \"return 12 // checked\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_013",
+     "content": "ok: 1 replacement"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_014",
+       "type": "function",
+       "function": {
+        "name": "run_command",
+        "arguments": "{\"command\": \"go build ./...\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_014",
+     "content": ""
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_015",
+       "type": "function",
+       "function": {
+        "name": "run_command",
+        "arguments": "{\"command\": \"make test\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_015",
+     "content": "go vet ./...\n# svc/api\napi/handler.go:77:3: unusedresult: result of fmt.Sprintf call not used\nmake: *** [test] Error 2"
+    }
+   ],
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "read_file",
+      "description": "Read a file from the workspace",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "path"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "edit_file",
+      "description": "Replace old_string with new_string in a file",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "old_string": {
+         "type": "string"
+        },
+        "new_string": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "path",
+        "old_string",
+        "new_string"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "run_command",
+      "description": "Run a shell command and return stdout/stderr",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "command": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "command"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "grep",
+      "description": "Search the workspace with a regex",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "pattern": {
+         "type": "string"
+        },
+        "path": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "pattern",
+        "path"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "list_dir",
+      "description": "List directory entries",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "path"
+       ]
+      }
+     }
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "vet complaint with one-line fix"
+ },
+ {
+  "id": "ho-tl14",
+  "group": "toolloop",
+  "lang": "en",
+  "intent": "toolloop",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 4096,
+   "system": "You are an autonomous coding agent working inside the user's repository. Use the tools to inspect and change files; prefer small targeted edits over rewrites. Always read a file before editing it. After code changes run the project's tests. Do not create files the user did not ask for. Do not run destructive git commands. When a command fails, read the error carefully before trying again. Keep replies short; the user reads the diff. Follow the conventions you see in neighbouring code. If you are unsure about a requirement, ask one concise question instead of guessing. Never print secrets found in env files. You are an autonomous coding agent working inside the user's repository. Use the tools to inspect and change files; prefer small targeted edits over rewrites. Always read a file before editing it. After code changes run the project's tests. Do not create files the user did not ask for. Do not run destructive git commands. When a command fails, read the error carefully before trying again. Keep replies short; the user reads the diff. Follow the conventions you see in neighbouring code. If you are unsure about a requirement, ask one concise question instead of guessing. Never print secrets found in env files. You are an autonomous coding agent working inside the user's repository. Use the tools to inspect and change files; prefer small targeted edits over rewrites. Always read a file before editing it. After code changes run the project's tests. Do not create files the user did not ask for. Do not run destructive git commands. When a command fails, read the error carefully before trying again. Keep replies short; the user reads the diff. Follow the conventions you see in neighbouring code. If you are unsure about a requirement, ask one concise question instead of guessing. Never print secrets found in env files. You are an autonomous coding agent working inside the user's repository. Use the tools to inspect and change files; prefer small targeted edits over rewrites. Always read a file before editing it. After code changes run the project's tests. Do not create files the user did not ask for. Do not run destructive git commands. When a command fails, read the error carefully before trying again. Keep replies short; the user reads the diff. Follow the conventions you see in neighbouring code. If you are unsure about a requirement, ask one concise question instead of guessing. Never print secrets found in env files. ",
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "the nightly export OOMs on prod-size data, fix it without changing output format"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "text",
+       "text": "Reading the next file."
+      },
+      {
+       "type": "tool_use",
+       "id": "toolu_000",
+       "name": "read_file",
+       "input": {
+        "path": "internal/store/cache.go"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_000",
+       "content": "package store\n\nfunc Cache0() int {\n\treturn 0\n}\n"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_001",
+       "name": "edit_file",
+       "input": {
+        "path": "internal/store/queue.go",
+        "old_string": "return 0",
+        "new_string": "return 0 // checked"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_001",
+       "content": "ok: 1 replacement"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_002",
+       "name": "run_command",
+       "input": {
+        "command": "go build ./..."
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_002",
+       "content": ""
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "text",
+       "text": "Reading the next file."
+      },
+      {
+       "type": "tool_use",
+       "id": "toolu_003",
+       "name": "read_file",
+       "input": {
+        "path": "internal/store/limits.go"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_003",
+       "content": "package store\n\nfunc Limits3() int {\n\treturn 3\n}\n"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_004",
+       "name": "edit_file",
+       "input": {
+        "path": "internal/store/audit.go",
+        "old_string": "return 3",
+        "new_string": "return 3 // checked"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_004",
+       "content": "ok: 1 replacement"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_005",
+       "name": "run_command",
+       "input": {
+        "command": "go build ./..."
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_005",
+       "content": ""
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "text",
+       "text": "Reading the next file."
+      },
+      {
+       "type": "tool_use",
+       "id": "toolu_006",
+       "name": "read_file",
+       "input": {
+        "path": "internal/store/index.go"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_006",
+       "content": "package store\n\nfunc Index6() int {\n\treturn 6\n}\n"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_007",
+       "name": "edit_file",
+       "input": {
+        "path": "internal/store/codec.go",
+        "old_string": "return 6",
+        "new_string": "return 6 // checked"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_007",
+       "content": "ok: 1 replacement"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_008",
+       "name": "run_command",
+       "input": {
+        "command": "go build ./..."
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_008",
+       "content": ""
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "text",
+       "text": "Reading the next file."
+      },
+      {
+       "type": "tool_use",
+       "id": "toolu_009",
+       "name": "read_file",
+       "input": {
+        "path": "internal/store/clock.go"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_009",
+       "content": "package store\n\nfunc Clock9() int {\n\treturn 9\n}\n"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_010",
+       "name": "edit_file",
+       "input": {
+        "path": "internal/store/cache1.go",
+        "old_string": "return 9",
+        "new_string": "return 9 // checked"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_010",
+       "content": "ok: 1 replacement"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_011",
+       "name": "run_command",
+       "input": {
+        "command": "go build ./..."
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_011",
+       "content": ""
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "text",
+       "text": "Reading the next file."
+      },
+      {
+       "type": "tool_use",
+       "id": "toolu_012",
+       "name": "read_file",
+       "input": {
+        "path": "internal/store/retry1.go"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_012",
+       "content": "package store\n\nfunc Retry12() int {\n\treturn 12\n}\n"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_013",
+       "name": "edit_file",
+       "input": {
+        "path": "internal/store/limits1.go",
+        "old_string": "return 12",
+        "new_string": "return 12 // checked"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_013",
+       "content": "ok: 1 replacement"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_014",
+       "name": "run_command",
+       "input": {
+        "command": "go build ./..."
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_014",
+       "content": ""
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "text",
+       "text": "Reading the next file."
+      },
+      {
+       "type": "tool_use",
+       "id": "toolu_015",
+       "name": "read_file",
+       "input": {
+        "path": "internal/store/session1.go"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_015",
+       "content": "package store\n\nfunc Session15() int {\n\treturn 15\n}\n"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_016",
+       "name": "edit_file",
+       "input": {
+        "path": "internal/store/index1.go",
+        "old_string": "return 15",
+        "new_string": "return 15 // checked"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_016",
+       "content": "ok: 1 replacement"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_017",
+       "name": "run_command",
+       "input": {
+        "command": "go build ./..."
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_017",
+       "content": ""
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "text",
+       "text": "Reading the next file."
+      },
+      {
+       "type": "tool_use",
+       "id": "toolu_018",
+       "name": "read_file",
+       "input": {
+        "path": "internal/store/pool1.go"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_018",
+       "content": "package store\n\nfunc Pool18() int {\n\treturn 18\n}\n"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_019",
+       "name": "edit_file",
+       "input": {
+        "path": "internal/store/clock1.go",
+        "old_string": "return 18",
+        "new_string": "return 18 // checked"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_019",
+       "content": "ok: 1 replacement"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_020",
+       "name": "read_file",
+       "input": {
+        "path": "export/run.go"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_020",
+       "content": "func Run(ctx context.Context, db *sql.DB, w io.Writer) error {\n\trows, _ := db.QueryContext(ctx, \"SELECT * FROM events\")\n\tvar all []Event\n\tfor rows.Next() { var e Event; rows.Scan(&e.ID,&e.Payload,&e.TS); all = append(all, e) }\n\tsort.Slice(all, func(i,j int) bool { return all[i].TS.Before(all[j].TS) })\n\treturn json.NewEncoder(w).Encode(all)\n}"
+      }
+     ]
+    }
+   ],
+   "tools": [
+    {
+     "name": "read_file",
+     "description": "Read a file from the workspace",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "path": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "path"
+      ]
+     }
+    },
+    {
+     "name": "edit_file",
+     "description": "Replace old_string with new_string in a file",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "path": {
+        "type": "string"
+       },
+       "old_string": {
+        "type": "string"
+       },
+       "new_string": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "path",
+       "old_string",
+       "new_string"
+      ]
+     }
+    },
+    {
+     "name": "run_command",
+     "description": "Run a shell command and return stdout/stderr",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "command": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "command"
+      ]
+     }
+    },
+    {
+     "name": "grep",
+     "description": "Search the workspace with a regex",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "pattern": {
+        "type": "string"
+       },
+       "path": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "pattern",
+       "path"
+      ]
+     }
+    },
+    {
+     "name": "list_dir",
+     "description": "List directory entries",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "path": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "path"
+      ]
+     }
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "streaming rewrite but output must stay a single JSON array sorted by TS; non-trivial"
+ }
+]

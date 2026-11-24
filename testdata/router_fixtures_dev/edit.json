@@ -1,0 +1,134 @@
+[
+ {
+  "id": "ho-ed01",
+  "group": "edit",
+  "lang": "en",
+  "intent": "edit",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "rename the variable `x` to `count` in this function\n\n```js\nfunction tally(list){ let x=0; for(const i of list){ if(i.ok) x++; } return x; }\n```"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "mechanical rename"
+ },
+ {
+  "id": "ho-ed02",
+  "group": "edit",
+  "lang": "en",
+  "intent": "edit",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 4096,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "add retry w/ exponential backoff + jitter to this, max 5 tries, only on 5xx/timeouts\n\n```go\nfunc fetch(ctx context.Context, url string) ([]byte, error) {\n\tresp, err := http.Get(url)\n\tif err != nil { return nil, err }\n\tdefer resp.Body.Close()\n\treturn io.ReadAll(resp.Body)\n}\n```"
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "small well-known pattern"
+ },
+ {
+  "id": "ho-ed03",
+  "group": "edit",
+  "lang": "en",
+  "intent": "edit",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "convert to async/await:\n\n```js\nfunction load(id, cb){ getUser(id, (e,u)=>{ if(e) return cb(e); getOrders(u.id,(e2,o)=>{ if(e2) return cb(e2); cb(null,{u,o}); }); }); }\n```"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "mechanical conversion"
+ },
+ {
+  "id": "ho-ed04",
+  "group": "edit",
+  "lang": "en",
+  "intent": "edit",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "we have a package-level `var db *sql.DB` and `var cfg Config` used from ~40 funcs across handlers/, jobs/ and billing/. refactor to constructor injection so each package is unit-testable, without a big-bang change. give me the migration plan in steps that each compile and pass tests, plus the target struct layout for the 3 packages"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "incremental DI refactor plan, needs design judgement but mid-tier workable"
+ },
+ {
+  "id": "ho-ed05",
+  "group": "edit",
+  "lang": "en",
+  "intent": "edit",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "add a docstring to this\n\n```python\ndef f(a, b=None):\n    return [x for x in a if x != b]\n```"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "docstring only"
+ },
+ {
+  "id": "ho-ed06",
+  "group": "edit",
+  "lang": "en",
+  "intent": "edit",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 4096,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "add cursor pagination to GET /orders (currently returns all rows ordered by created_at desc, id is uuid v4). must be stable under concurrent inserts and not use OFFSET. show sql + handler changes + response shape"
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 1,
+  "notes": "keyset on (created_at,id) tuple; mid-level standard task"
+ }
+]
