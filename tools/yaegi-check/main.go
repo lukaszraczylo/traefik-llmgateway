@@ -724,6 +724,10 @@ func run() error {
 		// — see its own const block doc comment above for why this
 		// provider carries no failover candidate.
 		`"` + eventsUpstreamErrorProviderName + `":{"type":"openai","baseUrl":"` + eventsUpstreamErrorUpstream.URL + `","apiKey":"sk-up","models":["` + eventsUpstreamErrorProviderModel + `"]},` +
+		// routerProbeBadProvider/routerProbeOKProvider back exerciseSmartRouter:
+		// they reuse the always-500 and always-200 upstreams above.
+		`"` + routerProbeBadProvider + `":{"type":"openai","baseUrl":"` + eventsUpstreamErrorUpstream.URL + `","apiKey":"sk-up","models":["rp-bad"]},` +
+		`"` + routerProbeOKProvider + `":{"type":"openai","baseUrl":"` + upstream.URL + `","apiKey":"sk-up","models":["rp-ok-a","rp-ok-b"]},` +
 		// "anthropic" backs the /v1/messages passthrough probes
 		// (exerciseMessagesRoute, below): a real anthropic-type provider,
 		// interpreted end to end through
@@ -781,7 +785,12 @@ func run() error {
 		`"` + round3P1AGroupName + `":{"providers":["round3-shared"],"models":["` + round3ModelID + `"]},` +
 		`"` + round3P1BGroupName + `":{"providers":["round3-shared"],"passthroughPaths":["v1/chat/completions"]},` +
 		`"` + round3P2HomeGroupName + `":{"providers":["round3-alpha"]},` +
-		`"` + round3P2FriendsGroupName + `":{"providers":["round3-shared"],"passthroughPaths":["v1/chat/completions"]}},` +
+		`"` + round3P2FriendsGroupName + `":{"providers":["round3-shared"],"passthroughPaths":["v1/chat/completions"]},` +
+		`"` + routerProbeDenyGroup + `":{"models":["` + routerProbeEscalating + `"]}},` +
+		// smartRouters: routerProbeEscalating escalates a failing tier-0 to
+		// tier-1; routerProbeHashed exercises hash selection (hash/fnv).
+		`"smartRouters":{"` + routerProbeEscalating + `":{"tiers":[{"name":"` + routerProbeTier0 + `","minScore":0,"models":["` + routerProbeBadProvider + `/rp-bad"]},{"name":"` + routerProbeTier1 + `","minScore":300,"models":["` + routerProbeOKProvider + `/rp-ok-a"]}]},` +
+		`"` + routerProbeHashed + `":{"selection":"hash","tiers":[{"name":"rp-h0","minScore":0,"models":["` + routerProbeOKProvider + `/rp-ok-a","` + routerProbeOKProvider + `/rp-ok-b"]}]}},` +
 		// modelMeta (feature v0.23): a config-override entry for
 		// testDataWantModel, so exerciseHandler's GET /v1/models
 		// assertion below proves resolveModelMeta's config-override
@@ -863,7 +872,8 @@ func run() error {
 		// exerciseRateLimitEventAndRejections' own — group "default"
 		// (allow-all), but with its own requestsPerMinute:1 limit so a
 		// second call under this key alone 429s deterministically.
-		`{"name":"events-probe","group":"default","apiKey":"` + eventsProbeUserAPIKey + `","limits":{"requestsPerMinute":1}}]}}`
+		`{"name":"events-probe","group":"default","apiKey":"` + eventsProbeUserAPIKey + `","limits":{"requestsPerMinute":1}},` +
+		`{"name":"router-deny","group":"` + routerProbeDenyGroup + `","apiKey":"` + routerProbeDenyAPIKey + `"}]}}`
 	if err = json.Unmarshal([]byte(attemptAccountingOverride), cfgVal.Interface()); err != nil {
 		return fmt.Errorf("decode attempt-accounting harness override into the interpreted Config: %w", err)
 	}
@@ -1034,6 +1044,9 @@ func run() error {
 		return err
 	}
 	if err := exerciseUsageModelsSpan(handler); err != nil {
+		return err
+	}
+	if err := exerciseSmartRouter(handler); err != nil {
 		return err
 	}
 	// exerciseRateLimitEventAndRejections (F3/F4, v0.3 dashboard task)
@@ -3971,6 +3984,74 @@ func exerciseUpstreamAndTimeoutEvents(handler http.Handler) error {
 	}
 
 	fmt.Println("yaegi-check: recordUpstreamEvent classified a real 500 as kind \"upstream\"/500 and a real request-timeout abort as kind \"timeout\"/504 under the interpreter")
+	return nil
+}
+
+const (
+	routerProbeBadProvider = "routerprobe-bad"
+	routerProbeOKProvider  = "routerprobe-ok"
+	routerProbeEscalating  = "rp-auto"
+	routerProbeHashed      = "rp-hash"
+	routerProbeTier0       = "rp-t0"
+	routerProbeTier1       = "rp-t1"
+	routerProbeDenyGroup   = "routerprobe-deny"
+	routerProbeDenyAPIKey  = "sk-router-deny" // #nosec G101 -- test fixture literal, not a real credential
+)
+
+func routerProbeChat(handler http.Handler, model, key string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(
+		`{"model":"`+model+`","messages":[{"role":"user","content":"hi"}]}`,
+	))
+	req.Header.Set("Authorization", "Bearer "+key)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	return rec
+}
+
+// exerciseSmartRouter drives the smart router under the interpreter: tier
+// escalation after a 500, hash selection (hash/fnv), the escalation metric,
+// and the *routerTargetError type assertion on a denied router.
+func exerciseSmartRouter(handler http.Handler) error {
+	rec := routerProbeChat(handler, routerProbeEscalating, testDataUserAPIKey)
+	if rec.Code != http.StatusOK {
+		return fmt.Errorf("POST /v1/chat/completions (router %q, tier-0 upstream 500): status = %d, want 200 via escalation, body=%s", routerProbeEscalating, rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("X-Llmgw-Router-Tier"); got != routerProbeTier1 {
+		return fmt.Errorf("router %q: X-Llmgw-Router-Tier = %q, want %q", routerProbeEscalating, got, routerProbeTier1)
+	}
+
+	rec = routerProbeChat(handler, routerProbeHashed, testDataUserAPIKey)
+	if rec.Code != http.StatusOK {
+		return fmt.Errorf("POST /v1/chat/completions (router %q, hash selection): status = %d, want 200, body=%s", routerProbeHashed, rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("X-Llmgw-Routed-Model"); !strings.HasPrefix(got, routerProbeOKProvider+"/rp-ok-") {
+		return fmt.Errorf("router %q: X-Llmgw-Routed-Model = %q, want a %s/rp-ok-* model", routerProbeHashed, got, routerProbeOKProvider)
+	}
+
+	rec = routerProbeChat(handler, routerProbeEscalating, routerProbeDenyAPIKey)
+	if rec.Code != http.StatusForbidden {
+		return fmt.Errorf("POST /v1/chat/completions (router %q, every target denied): status = %d, want 403, body=%s", routerProbeEscalating, rec.Code, rec.Body.String())
+	}
+	var env struct {
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil || env.Error.Message == "" {
+		return fmt.Errorf("denied router response is not an error envelope: err=%v body=%s", err, rec.Body.String())
+	}
+
+	metricsReq := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	metricsReq.Header.Set("Authorization", "Bearer "+attemptAccountingAdminAPIKey)
+	metricsRec := httptest.NewRecorder()
+	handler.ServeHTTP(metricsRec, metricsReq)
+	want := `llmgateway_router_escalations_total{router="` + routerProbeEscalating + `",from_tier="` + routerProbeTier0 + `",to_tier="` + routerProbeTier1 + `"} 1`
+	if !strings.Contains(metricsRec.Body.String(), want) {
+		return fmt.Errorf("GET /metrics: missing %q; body=%s", want, metricsRec.Body.String())
+	}
+
+	fmt.Println("yaegi-check: smart router escalated tier-0 500 to tier-1, hash selection served, denied router returned a 403 envelope, escalation metric incremented under the interpreter")
 	return nil
 }
 
