@@ -80,8 +80,14 @@ func classifySmartRequest(rt *smartRouter, req map[string]any, endpoint string) 
 // classifySmart is classifySmartRequest plus the shadow rank. The shadow pass
 // reuses the extracted features and only re-weights them.
 func classifySmart(rt *smartRouter, req map[string]any, endpoint string) smartClassification {
+	return classifySmartWith(rt, req, endpoint, nil, nil)
+}
+
+// classifySmartWith classifies with optional pre-extracted v2 features and session state.
+// A v1 router passes the session to the shadow pass only, so it never routes on it.
+func classifySmartWith(rt *smartRouter, req map[string]any, endpoint string, f *smartFeatures, sc *smartSessionRun) smartClassification {
 	if rt.classifier == smartClassifierV2 {
-		out := classifySmartV2(rt, req, endpoint)
+		out := classifySmartV2With(rt, req, endpoint, f, sc)
 		if rt.shadowV2 {
 			out.shadowRank = out.rank
 		}
@@ -89,7 +95,7 @@ func classifySmart(rt *smartRouter, req map[string]any, endpoint string) smartCl
 	}
 	out := classifySmartV1(rt, req, endpoint)
 	if rt.shadowV2 {
-		out.shadowRank = classifySmartV2(rt, req, endpoint).rank
+		out.shadowRank = classifySmartV2With(rt, req, endpoint, f, sc).rank
 	}
 	return out
 }
@@ -431,11 +437,15 @@ func smartContentSize(content any, depth int) (chars, images int) {
 	return chars, images
 }
 
-// classifySmartV2 is the v2 counterpart of classifySmartV1: it scores the prose of
+// classifySmartV2With is the v2 counterpart of classifySmartV1: it scores the prose of
 // the newest ask with an uncertainty margin, then raises the tier for floors and
 // keyword rules. It never lowers a rank.
-func classifySmartV2(rt *smartRouter, req map[string]any, endpoint string) smartClassification {
-	f := extractSmartV2(req, endpoint)
+// It takes optional pre-extracted features and session state.
+func classifySmartV2With(rt *smartRouter, req map[string]any, endpoint string, f *smartFeatures, sc *smartSessionRun) smartClassification {
+	if f == nil {
+		ext := extractSmartV2(req, endpoint)
+		f = &ext
+	}
 	top := len(rt.tiers) - 1
 	out := smartClassification{shadowRank: -1, hasImage: f.hasImage}
 
@@ -475,12 +485,29 @@ func classifySmartV2(rt *smartRouter, req map[string]any, endpoint string) smart
 		}
 	}
 
-	var sess smartSessionHint
-	verdict := scoreSmartV2(rt, &f, rt.weights, sess)
-	out.rank, out.reason = smartRaiseRank(verdict.rank, smartReasonScore, kwRank, floorRank)
+	var hint smartSessionHint
+	askHash := 0
+	if sc != nil {
+		hint = sc.hint()
+		askHash = smartAskHash(f)
+	}
+	verdict := scoreSmartV2(rt, f, rt.weights, hint)
+	rank, reason := verdict.rank, smartReasonScore
+	var next smartSession
+	if sc != nil {
+		rank, reason, next = smartSessionRoute(&rt.session, top, f, sc.sess, verdict, sc.now, askHash)
+	}
+	out.rank, out.reason = smartRaiseRank(rank, reason, kwRank, floorRank)
+	if sc != nil {
+		sc.finish(next, out.rank)
+	}
 	if rt.shadow != nil {
-		shadow := scoreSmartV2(rt, &f, *rt.shadow, sess)
-		out.shadowRank, _ = smartRaiseRank(shadow.rank, smartReasonScore, kwRank, floorRank)
+		shadow := scoreSmartV2(rt, f, *rt.shadow, hint)
+		shadowRank := shadow.rank
+		if sc != nil {
+			shadowRank, _, _ = smartSessionRoute(&rt.session, top, f, sc.sess, shadow, sc.now, askHash)
+		}
+		out.shadowRank, _ = smartRaiseRank(shadowRank, smartReasonScore, kwRank, floorRank)
 	}
 	return out
 }

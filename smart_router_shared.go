@@ -12,10 +12,10 @@ const (
 	metricRouterShd  = "rshd"
 	metricRouterOut  = "rout"
 	routerKeySep     = "/"
-	routerReasonsMax = 5
+	routerReasonsMax = 8
 )
 
-var routerReasonNames = [routerReasonsMax]string{smartReasonScore, smartReasonKeyword, smartReasonFloor, smartReasonDefault, routerReasonSkipped}
+var routerReasonNames = [routerReasonsMax]string{smartReasonScore, smartReasonKeyword, smartReasonFloor, smartReasonDefault, routerReasonSkipped, smartReasonSession, smartReasonLoop, smartReasonBump}
 
 func routerReqKeyFor(k routerRequestKey, bucket string) string {
 	return windowKeyForBucket(kindRouter, k.router, metricRouterReq+routerKeySep+k.tier+routerKeySep+k.reason, windowMonth, bucket)

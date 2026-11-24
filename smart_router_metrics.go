@@ -190,6 +190,7 @@ func (g *Gateway) recordRouterOutcome(plan *routerPlan, attempt int, served, bad
 		g.routerStats.addOutcome(k)
 	}
 	g.countRouterShared(func(bucket string) string { return routerOutcomeKeyFor(k, bucket) })
+	g.onRouterOutcome(plan, attempt, served, bad)
 }
 
 // recordRouterExhausted records an event when the last plan entry failed.

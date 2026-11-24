@@ -65,9 +65,9 @@ func TestPlanSmartRouter_ShadowNeverChangesRouting(t *testing.T) {
 	withShadow, rtShadow := planTestGateway(t, func(c *Config) { c.SmartRouters[routerName].ShadowWeights = zeroCodeShadow() })
 	without, rtPlain := planTestGateway(t, nil)
 	for _, text := range []string{shadowCodeAsk, strongAsk, "hello"} {
-		a, err := withShadow.planSmartRouter(rtShadow, userReq(text), cacheEndpointChat, &group{}, nil)
+		a, err := withShadow.planSmartRouter(rtShadow, userReq(text), cacheEndpointChat, nil, &group{}, nil)
 		require.NoError(t, err)
-		b, err := without.planSmartRouter(rtPlain, userReq(text), cacheEndpointChat, &group{}, nil)
+		b, err := without.planSmartRouter(rtPlain, userReq(text), cacheEndpointChat, nil, &group{}, nil)
 		require.NoError(t, err)
 		assert.Equal(t, b.startTier, a.startTier, text)
 		assert.Equal(t, b.reason, a.reason, text)
@@ -77,7 +77,7 @@ func TestPlanSmartRouter_ShadowNeverChangesRouting(t *testing.T) {
 			assert.Equal(t, b.entries[i].tier, a.entries[i].tier, text)
 		}
 	}
-	p, err := withShadow.planSmartRouter(rtShadow, userReq(shadowCodeAsk), cacheEndpointChat, &group{}, nil)
+	p, err := withShadow.planSmartRouter(rtShadow, userReq(shadowCodeAsk), cacheEndpointChat, nil, &group{}, nil)
 	require.NoError(t, err)
 	assert.Equal(t, "t1", p.startTier)
 	assert.Equal(t, "t0", p.shadowTier)

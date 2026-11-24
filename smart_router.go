@@ -48,6 +48,9 @@ type SmartRouterConfig struct {
 	RiskZ *int `json:"riskZ,omitempty"`
 	// IntentTiers pins a v2 intent to a tier by name instead of its default ladder position.
 	IntentTiers map[string]string `json:"intentTiers,omitempty"`
+	// Session keeps an upward-ratcheting tier pin per conversation. It needs classifier v2 to
+	// route live; with only shadowClassifier v2 it changes the shadow rank and never live routing.
+	Session *SmartRouterSessionConfig `json:"session,omitempty"`
 	// DefaultTier serves requests with no user text; empty means the first tier.
 	DefaultTier string `json:"defaultTier,omitempty"`
 	// ToolsMinTier floors requests that carry tools or tool history; empty means no floor.
@@ -97,6 +100,7 @@ type smartRouter struct {
 	classifier        string
 	tiers             []smartTier
 	rules             []smartKeywordRule
+	session           smartSessionCfg
 	weights           smartWeights
 	intentBase        [smartIntentCount]int
 	foreignBase       int
@@ -106,6 +110,7 @@ type smartRouter struct {
 	maxAttempts       int
 	shadowV2          bool
 	contextEscalation bool
+	sessionEnabled    bool
 }
 
 type smartTier struct {
@@ -315,11 +320,17 @@ func compileSmartRouter(name string, cfg *SmartRouterConfig, routers map[string]
 	if err != nil {
 		return nil, err
 	}
+	session, err := compileSmartSession(name, cfg.Session, classifier, shadowV2)
+	if err != nil {
+		return nil, err
+	}
 
 	return &smartRouter{
 		classifier:        classifier,
 		shadowV2:          shadowV2,
 		riskZ:             riskZ,
+		session:           session,
+		sessionEnabled:    cfg.Session != nil && cfg.Session.Enabled,
 		intentBase:        intentBase,
 		foreignBase:       foreignBase,
 		name:              name,

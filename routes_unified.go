@@ -289,7 +289,7 @@ func (g *Gateway) runMeteredCall(sw *statusTrackingWriter, r *http.Request, scop
 	var candidates []resolveCandidate
 	if rt := g.registry.routers[requestedModel]; rt != nil {
 		var planErr error
-		plan, planErr = g.planSmartRouter(rt, req, endpoint, grp, scopes)
+		plan, planErr = g.planSmartRouter(rt, req, endpoint, r.Header, grp, scopes)
 		if planErr != nil {
 			writeModelResolveErrorEnvelope(sw, planErr, envelope)
 			return

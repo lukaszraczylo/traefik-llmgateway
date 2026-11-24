@@ -50,7 +50,7 @@
     }
    ]
   },
-  "session": null,
+  "session": {"replay": true},
   "minTier": 1,
   "maxTier": 2,
   "notes": "session-required: follow-up carries a real design task: ordering plus commit correctness"

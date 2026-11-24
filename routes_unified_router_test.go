@@ -464,9 +464,9 @@ func TestPlanSmartRouter_HashSelectionDedupeAndCap(t *testing.T) {
 	first := map[string]bool{}
 	for _, prompt := range []string{"alpha one", "beta two", "gamma three", "delta four", "epsilon five", "zeta six", "eta seven", "theta eight"} {
 		req := map[string]any{"messages": []any{map[string]any{"role": "user", "content": prompt}}}
-		p1, err := gw.planSmartRouter(rt, req, cacheEndpointChat, grp, nil)
+		p1, err := gw.planSmartRouter(rt, req, cacheEndpointChat, nil, grp, nil)
 		require.NoError(t, err)
-		p2, err := gw.planSmartRouter(rt, req, cacheEndpointChat, grp, nil)
+		p2, err := gw.planSmartRouter(rt, req, cacheEndpointChat, nil, grp, nil)
 		require.NoError(t, err)
 		require.Equal(t, p1.candidates(), p2.candidates(), "hash selection must be deterministic")
 		first[p1.entries[0].cand.canonical] = true
@@ -481,7 +481,7 @@ func TestPlanSmartRouter_HashSelectionDedupeAndCap(t *testing.T) {
 
 	rt.maxAttempts = 2
 	req := map[string]any{"messages": []any{map[string]any{"role": "user", "content": "hi"}}}
-	p, err := gw.planSmartRouter(rt, req, cacheEndpointChat, grp, nil)
+	p, err := gw.planSmartRouter(rt, req, cacheEndpointChat, nil, grp, nil)
 	require.NoError(t, err)
 	assert.Len(t, p.entries, 2, "plan must be capped at maxAttempts")
 }

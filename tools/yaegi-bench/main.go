@@ -33,6 +33,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"time"
 )
 
 type benchFixture struct {
@@ -44,6 +45,7 @@ type benchFixture struct {
 var (
 	benchFixtures []benchFixture
 	benchRouter   *smartRouter
+	benchSessions *routerSessions
 )
 
 func BenchSetup(dir string, classifier string, mid int, top int) int {
@@ -61,11 +63,18 @@ func BenchSetup(dir string, classifier string, mid int, top int) int {
 		}
 		benchFixtures = append(benchFixtures, items...)
 	}
-	rt, err := compileSmartRouter("bench", &SmartRouterConfig{Classifier: classifier, Tiers: []SmartRouterTier{
+	cfg := &SmartRouterConfig{Classifier: classifier, Tiers: []SmartRouterTier{
 		{Name: "a", MinScore: 0, Models: []string{"p/a"}},
 		{Name: "b", MinScore: mid, Models: []string{"p/b"}},
 		{Name: "c", MinScore: top, Models: []string{"p/c"}},
-	}}, nil)
+	}}
+	benchSessions = nil
+	if classifier == "v2s" {
+		cfg.Classifier = "v2"
+		cfg.Session = &SmartRouterSessionConfig{Enabled: true}
+		benchSessions = newRouterSessions(nil, nil, time.Now, nil)
+	}
+	rt, err := compileSmartRouter("bench", cfg, nil)
 	if err != nil {
 		panic(err)
 	}
@@ -127,6 +136,55 @@ func BenchHelperCheck() string {
 		if u := withAnswerFlags(usage{}, "stop", true); u.finishLength || u.emptyOutput {
 			return "withAnswerFlags kept a flag from the previous call"
 		}
+		if msg := sessionHelperCheck(); msg != "" {
+			return msg
+		}
+	}
+	return ""
+}
+
+// sessionHelperCheck replays the session helpers with known answers; yaegi v0.16.1 leaks
+// named results between calls, so each pure helper runs twice with different inputs.
+func sessionHelperCheck() string {
+	cfg := &smartSessionCfg{idle: 1800, decayAsks: 3, regen: 120, toolStreak: 3}
+	enc := smartSessionEncode(smartSession{pin: 2, loop: 1, streak: 1, calm: 2, lastScore: 300, msgCount: 7, askHash: 99, askAt: 5, seenAt: 6})
+	if string(enc) != "v1|2|1|1|2|300|7|99|5|6" {
+		return "smartSessionEncode changed between calls"
+	}
+	if got, ok := smartSessionDecode(enc); !ok || got.pin != 2 || got.seenAt != 6 || !got.found {
+		return "smartSessionDecode missed a value"
+	}
+	if _, ok := smartSessionDecode([]byte("v1|1")); ok {
+		return "smartSessionDecode kept ok from the previous call"
+	}
+	loopFeat := &smartFeatures{found: true, toolLoopTurn: true, msgCount: 9}
+	loopSess := smartSession{found: true, pin: 1, loop: 2, askHash: 5, msgCount: 8, seenAt: 1}
+	if rank, reason, _ := smartSessionRoute(cfg, 2, loopFeat, loopSess, smartVerdict{rank: 0}, 2, 5); rank != 2 || reason != "loop" {
+		return "smartSessionRoute lost loop inheritance"
+	}
+	regenSess := smartSession{found: true, askHash: 9, askAt: 100, msgCount: 3, seenAt: 100}
+	if rank, reason, _ := smartSessionRoute(cfg, 2, &smartFeatures{found: true, msgCount: 3}, regenSess, smartVerdict{}, 110, 9); rank != 1 || reason != "bump" {
+		return "smartSessionRoute lost the regenerate bump"
+	}
+	if rank, reason, _ := smartSessionRoute(cfg, 2, &smartFeatures{found: true, msgCount: 5}, regenSess, smartVerdict{}, 110, 7); rank != 0 || reason != "score" {
+		return "smartSessionRoute kept a bump from the previous call"
+	}
+	if s, changed := smartSessionOutcome(smartSession{found: true}, 0, 1, 2, true, false); !changed || s.pin != 1 {
+		return "smartSessionOutcome missed an escalation"
+	}
+	if _, changed := smartSessionOutcome(smartSession{found: true}, 0, 0, 2, true, false); changed {
+		return "smartSessionOutcome kept changed from the previous call"
+	}
+	if h := smartSessionHash("r", "u", "c", "s"); h != "f1968510ce9e8987eb3987daa6ba2c0d" || smartSessionHash("r", "u", "c", "t") == h {
+		return "smartSessionHash changed between calls"
+	}
+	l := newSessionLRU()
+	l.put("a", smartSession{found: true, pin: 1})
+	if got, ok := l.get("a"); !ok || got.pin != 1 {
+		return "sessionLRU lost an entry"
+	}
+	if _, ok := l.get("b"); ok {
+		return "sessionLRU kept ok from the previous call"
 	}
 	return ""
 }
@@ -162,6 +220,15 @@ func BenchRun(n int) int {
 		endpoint := cacheEndpointChat
 		if fx.Wire == "anthropic" {
 			endpoint = cacheEndpointMessages
+		}
+		if benchSessions != nil {
+			f := extractSmartV2(fx.Request, endpoint)
+			sc := benchSessions.open(benchRouter, fx.Request, &f, nil, nil)
+			sum += classifySmartWith(benchRouter, fx.Request, endpoint, &f, sc).rank + 1
+			if sc.dirty {
+				benchSessions.put(sc.key, sc.next, time.Hour)
+			}
+			continue
 		}
 		sum += classifySmart(benchRouter, fx.Request, endpoint).rank + 1
 	}
@@ -259,13 +326,13 @@ func run(root, fixtureDir string, minDPS float64, passes int, dump bool) error {
 
 	layouts := []benchLayout{{"deployed", 150, 350}, {"wide", 300, 600}}
 	var failures []string
-	for _, classifier := range []string{"v1", "v2"} {
+	for _, classifier := range []string{"v1", "v2", "v2s"} {
 		for _, l := range layouts {
 			n := setup(filepath.Join(root, fixtureDir), classifier, l.mid, l.top)
 			if n == 0 {
 				return fmt.Errorf("no fixtures under %s", fixtureDir)
 			}
-			if bad := unstable(); bad > 0 {
+			if bad := unstable(); bad > 0 && classifier != "v2s" {
 				return fmt.Errorf("%s %s: %d fixtures changed rank between a forward and a reverse pass", classifier, l.name, bad)
 			}
 			if dump {
@@ -283,7 +350,7 @@ func run(root, fixtureDir string, minDPS float64, passes int, dump bool) error {
 			}
 			dps := float64(n) / best.Seconds()
 			fmt.Printf("yaegi %s %-8s fixtures=%d pass=%v decisions/s=%.0f rank-sum=%d\n", classifier, l.name, n, best.Round(time.Millisecond), dps, sum)
-			if classifier == "v2" && dps < minDPS {
+			if classifier != "v1" && dps < minDPS {
 				failures = append(failures, fmt.Sprintf("%s %.0f < %.0f", l.name, dps, minDPS))
 			}
 		}

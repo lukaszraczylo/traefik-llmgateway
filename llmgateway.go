@@ -831,6 +831,7 @@ type Gateway struct {
 	targetClient                  *http.Client
 	provenance                    *provenanceStore
 	routerStats                   *routerStats
+	routerSessions                *routerSessions
 	tokenCalib                    *smartTokenCalibrator
 	name                          string
 	replica                       string
@@ -1168,6 +1169,11 @@ func newGateway(ctx context.Context, next http.Handler, config *Config, name str
 		return nil, err
 	}
 	g.cache = cache
+	var sessionStore routerStateStore
+	if redisClient != nil {
+		sessionStore = redisClient
+	}
+	g.routerSessions = newRouterSessions(sessionStore, lim.spawn, lim.now, g.errorf)
 
 	adapters, err := buildAdapters(config)
 	if err != nil {
@@ -1242,6 +1248,7 @@ func newGateway(ctx context.Context, next http.Handler, config *Config, name str
 	// is accepted.
 	registry.warmFill(ctx)
 	g.registry = registry
+	g.warnRouterSessions()
 
 	// F10 (v0.3 dashboard task): construction is finished — every warnf
 	// call from here on is a runtime warning, not a config warning, and

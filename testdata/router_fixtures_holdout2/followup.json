@@ -30,7 +30,7 @@
     }
    ]
   },
-  "session": null,
+  "session": {"replay": true},
   "minTier": 1,
   "maxTier": 2,
   "notes": "session-required: semver precedence rule for identifiers; mid"
@@ -58,7 +58,7 @@
     }
    ]
   },
-  "session": null,
+  "session": {"replay": true},
   "minTier": 0,
   "maxTier": 0,
   "notes": "session-required: follow-up on definitions; low"
@@ -98,7 +98,7 @@
     }
    ]
   },
-  "session": null,
+  "session": {"replay": true},
   "minTier": 1,
   "maxTier": 2,
   "notes": "session-required: flat heap with growing RSS (mmap, cgo, fragmentation); alone it is terse"
@@ -126,7 +126,7 @@
     }
    ]
   },
-  "session": null,
+  "session": {"replay": true},
   "minTier": 0,
   "maxTier": 0,
   "notes": "session-required: tiny translation follow-up"
@@ -155,7 +155,7 @@
     }
    ]
   },
-  "session": null,
+  "session": {"replay": true},
   "minTier": 1,
   "maxTier": 2,
   "notes": "session-required: needs context of the schema and role inheritance modelling"
@@ -187,7 +187,7 @@
     }
    ]
   },
-  "session": null,
+  "session": {"replay": true},
   "minTier": 0,
   "maxTier": 1,
   "notes": "session-required: analogous proof; low plausible, mid safe"

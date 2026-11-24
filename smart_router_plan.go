@@ -9,7 +9,9 @@ import (
 const (
 	headerRoutedModel = "X-Llmgw-Routed-Model"
 	headerRouterTier  = "X-Llmgw-Router-Tier"
-	routerOwnedBy     = "smart-router"
+	// headerRouterReason is set only on routers that use sessions.
+	headerRouterReason = "X-Llmgw-Router-Reason"
+	routerOwnedBy      = "smart-router"
 )
 
 // routerTargetError is returned when a router cannot serve a request at all.
@@ -33,7 +35,9 @@ type routerPlan struct {
 	startTier string
 	// shadowTier is the tier the router's shadowWeights chose; empty when unset.
 	shadowTier string
-	entries    []routerPlanEntry
+	// sess is the router's session for this request; nil when the router does not use sessions.
+	sess    *smartSessionRun
+	entries []routerPlanEntry
 	// promptBytes is the size estimate that calibration compares with reported usage.
 	promptBytes int64
 	hasImage    bool
@@ -82,7 +86,7 @@ func smartTextHash(s string) int {
 // planSmartRouter validates access and builds the attempt list: tiers from the
 // classified rank upward, never below it. A tier never takes the last slot while
 // a higher tier has a usable candidate, so escalation stays reachable.
-func (g *Gateway) planSmartRouter(rt *smartRouter, req map[string]any, endpoint string, grp *group, scopes []limitScope) (*routerPlan, error) {
+func (g *Gateway) planSmartRouter(rt *smartRouter, req map[string]any, endpoint string, hdr http.Header, grp *group, scopes []limitScope) (*routerPlan, error) {
 	if !grp.allowsModelName(rt.name) {
 		return nil, errModelDenied
 	}
@@ -91,7 +95,7 @@ func (g *Gateway) planSmartRouter(rt *smartRouter, req map[string]any, endpoint 
 	}
 	g.registry.noteRouterShadow(rt.name, grp)
 
-	cls := classifySmart(rt, req, endpoint)
+	cls, sess := g.classifyWithSession(rt, req, endpoint, hdr, scopes)
 	start, reason, scored, hasImage := cls.rank, cls.reason, cls.scoredText, cls.hasImage
 	promptBytes, imageTokens := smartPromptBytes(req, endpoint)
 	facts := routerRequestFacts{
@@ -101,7 +105,7 @@ func (g *Gateway) planSmartRouter(rt *smartRouter, req map[string]any, endpoint 
 		outputTokens: requestedOutputTokens(req, endpoint),
 		costBudget:   !g.cfg.AllowUnpricedWithCostBudget && scopesHaveCostBudget(scopes),
 	}
-	plan := &routerPlan{router: rt.name, reason: reason, startTier: rt.tiers[start].name, promptBytes: promptBytes, hasImage: hasImage, maxTokensSet: facts.outputTokens > 0}
+	plan := &routerPlan{router: rt.name, reason: reason, startTier: rt.tiers[start].name, promptBytes: promptBytes, hasImage: hasImage, maxTokensSet: facts.outputTokens > 0, sess: sess}
 	if cls.shadowRank >= 0 {
 		plan.shadowTier = rt.tiers[cls.shadowRank].name
 	}
@@ -155,6 +159,7 @@ func (g *Gateway) planSmartRouter(rt *smartRouter, req map[string]any, endpoint 
 		}
 		return nil, &routerTargetError{status: http.StatusNotFound, message: fmt.Sprintf("smart router %q has no usable target", rt.name)}
 	}
+	g.storeSession(sess)
 	return plan, nil
 }
 
@@ -259,6 +264,9 @@ func (g *Gateway) routerCandidateSkipped(cand resolveCandidate, tier string, rt 
 func setRouterHeaders(h http.Header, plan *routerPlan, i int) {
 	h.Set(headerRoutedModel, plan.entries[i].cand.canonical)
 	h.Set(headerRouterTier, plan.entries[i].tier)
+	if plan.sess != nil {
+		h.Set(headerRouterReason, routerRequestReason(plan))
+	}
 }
 
 // smartImageTokens is the flat token cost of one image part: its base64 bytes

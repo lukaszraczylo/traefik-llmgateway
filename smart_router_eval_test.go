@@ -283,3 +283,131 @@ func TestRouterHoldout2Report(t *testing.T) {
 		t.Logf("holdout2 %s %v\nv1:\n%s\nv2:\n%s", l.name, l.mins, v1.table(), v2.table())
 	}
 }
+
+// fixtureSession is the prior state of a session fixture. Replay derives it by running the
+// conversation's earlier asks through the router; explicit pin, loop and lastScore (per-mille)
+// set it by hand. The main and dev gates skip these fixtures.
+type fixtureSession struct {
+	Pin       int  `json:"pin"`
+	Loop      int  `json:"loop"`
+	LastScore int  `json:"lastScore"`
+	Replay    bool `json:"replay"`
+}
+
+const evalSessionStep = 30
+
+func evalSessionRouter(tb testing.TB, mins [3]int) *smartRouter {
+	tb.Helper()
+	cfg := &SmartRouterConfig{
+		Classifier: smartClassifierV2,
+		Session:    &SmartRouterSessionConfig{Enabled: true},
+		Tiers: []SmartRouterTier{
+			{Name: "cheap", MinScore: mins[0], Models: []string{"a/x"}},
+			{Name: "mid", MinScore: mins[1], Models: []string{"a/y"}},
+			{Name: "top", MinScore: mins[2], Models: []string{"a/z"}},
+		},
+	}
+	rt, err := compileSmartRouter("smart/auto", cfg, nil)
+	require.NoError(tb, err)
+	return rt
+}
+
+// classifyInSession classifies req against a session state at a fixed clock, the way the gateway does.
+func classifyInSession(rt *smartRouter, req map[string]any, endpoint string, st smartSession, now int64) (smartClassification, *smartSessionRun) {
+	f := extractSmartV2(req, endpoint)
+	sc := &smartSessionRun{rt: rt, key: "eval", sess: st, now: now}
+	return classifySmartWith(rt, req, endpoint, &f, sc), sc
+}
+
+// replaySession runs every earlier user ask of the fixture's conversation through the router in order.
+func replaySession(rt *smartRouter, fx routerFixture) (smartSession, int64) {
+	msgs, _ := fx.Request["messages"].([]any)
+	var st smartSession
+	now := int64(1_000_000)
+	for i := 0; i < len(msgs)-1; i++ {
+		m, _ := msgs[i].(map[string]any)
+		if role, _ := m["role"].(string); role != "user" {
+			continue
+		}
+		prefix := map[string]any{}
+		for k, v := range fx.Request {
+			prefix[k] = v
+		}
+		prefix["messages"] = msgs[:i+1]
+		_, sc := classifyInSession(rt, prefix, fx.endpoint(), st, now)
+		if sc.dirty {
+			st = sc.next
+		}
+		now += evalSessionStep
+	}
+	return st, now
+}
+
+// fixtureSessionState resolves a fixture's session field into a state and a clock.
+func fixtureSessionState(tb testing.TB, rt *smartRouter, fx routerFixture) (smartSession, int64) {
+	tb.Helper()
+	var fs fixtureSession
+	require.NoError(tb, json.Unmarshal(fx.Session, &fs), fx.ID)
+	if fs.Replay {
+		return replaySession(rt, fx)
+	}
+	now := int64(1_000_000)
+	return smartSession{found: true, pin: fs.Pin, loop: fs.Loop, lastScore: fs.LastScore, seenAt: now, askAt: now}, now + evalSessionStep
+}
+
+func sessionRequiredFixtures(tb testing.TB) []routerFixture {
+	tb.Helper()
+	var out []routerFixture
+	for _, glob := range []string{evalHoldout2Glob, evalDevGlob} {
+		for _, fx := range loadRouterFixturesGlob(tb, glob) {
+			if strings.Contains(fx.Notes, evalSessionNote) {
+				out = append(out, fx)
+			}
+		}
+	}
+	return out
+}
+
+func TestRouterSessionFixtureSchema(t *testing.T) {
+	t.Parallel()
+	fixtures := sessionRequiredFixtures(t)
+	require.Len(t, fixtures, 7, "6 holdout2 and 1 dev fixtures need a session")
+	for _, fx := range fixtures {
+		require.NotEmpty(t, fx.Session, fx.ID)
+		assert.NotEqual(t, "null", string(fx.Session), fx.ID)
+	}
+}
+
+// TestRouterSessionFixturesReport logs the session-required fixtures with and without session
+// state. It never gates: a known session removes the short-follow-up doubt margin, so its rank
+// can sit below the stateless one. TestSessionMissMatchesStateless pins the cold-state case.
+func TestRouterSessionFixturesReport(t *testing.T) {
+	t.Parallel()
+	fixtures := sessionRequiredFixtures(t)
+	for _, l := range evalLayouts {
+		plain := evalRouter(t, l.mins, smartClassifierV2)
+		withSess := evalSessionRouter(t, l.mins)
+		var b strings.Builder
+		underPlain, underSess, overPlain, overSess := 0, 0, 0, 0
+		for _, fx := range fixtures {
+			noSess := classifySmart(plain, fx.Request, fx.endpoint())
+			st, now := fixtureSessionState(t, withSess, fx)
+			got, sc := classifyInSession(withSess, fx.Request, fx.endpoint(), st, now)
+			underPlain, underSess = underPlain+boolInt(noSess.rank < fx.MinTier), underSess+boolInt(got.rank < fx.MinTier)
+			overPlain, overSess = overPlain+boolInt(noSess.rank > fx.MaxTier), overSess+boolInt(got.rank > fx.MaxTier)
+			fmt.Fprintf(&b, "  %-8s want %d..%d  v2 %d  v2+session %d (%s) prior pin=%d loop=%d lastScore=%d\n",
+				fx.ID, fx.MinTier, fx.MaxTier, noSess.rank, got.rank, got.reason, st.pin, st.loop, st.lastScore)
+			_ = sc
+		}
+		require.Equal(t, len(fixtures), len(strings.Split(strings.TrimSpace(b.String()), "\n")))
+		t.Logf("session-required fixtures on %s %v (report only, not gated)\n%s  under: v2=%d v2+session=%d  over: v2=%d v2+session=%d  of %d",
+			l.name, l.mins, b.String(), underPlain, underSess, overPlain, overSess, len(fixtures))
+	}
+}
+
+func boolInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
