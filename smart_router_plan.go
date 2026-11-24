@@ -1,0 +1,257 @@
+package traefikllmgateway
+
+import (
+	"fmt"
+	"hash/fnv"
+	"net/http"
+)
+
+const (
+	headerRoutedModel = "X-Llmgw-Routed-Model"
+	headerRouterTier  = "X-Llmgw-Router-Tier"
+	routerOwnedBy     = "smart-router"
+)
+
+// routerTargetError is returned when a router cannot serve a request at all.
+// Callers detect it by type assertion; errors.As panics under yaegi.
+type routerTargetError struct {
+	message string
+	status  int
+}
+
+func (e *routerTargetError) Error() string { return e.message }
+
+type routerPlanEntry struct {
+	tier string
+	cand resolveCandidate
+}
+
+// routerPlan is the ordered attempt list for one routed request.
+type routerPlan struct {
+	router    string
+	reason    string
+	startTier string
+	entries   []routerPlanEntry
+}
+
+func (p *routerPlan) candidates() []resolveCandidate {
+	out := make([]resolveCandidate, len(p.entries))
+	for i := range p.entries {
+		out[i] = p.entries[i].cand
+	}
+	return out
+}
+
+type routerSkips struct {
+	// largest is the context-skipped candidate with the biggest known window.
+	largest                                       *routerPlanEntry
+	denied, unresolved, vision, context, unpriced int
+	largestCtx                                    int
+}
+
+func (s routerSkips) total() int {
+	return s.denied + s.unresolved + s.vision + s.context + s.unpriced
+}
+
+func (s routerSkips) detail() string {
+	return fmt.Sprintf("skipped: %d denied, %d unresolved, %d without vision, %d too small for the prompt, %d unpriced under a cost budget",
+		s.denied, s.unresolved, s.vision, s.context, s.unpriced)
+}
+
+type routerRequestFacts struct {
+	promptTokens int64
+	hasImage     bool
+	costBudget   bool
+}
+
+func smartTextHash(s string) int {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(s))
+	return int(h.Sum32() & 0x7fffffff)
+}
+
+// planSmartRouter validates access and builds the attempt list: tiers from the
+// classified rank upward, never below it. A tier never takes the last slot while
+// a higher tier has a usable candidate, so escalation stays reachable.
+func (g *Gateway) planSmartRouter(rt *smartRouter, req map[string]any, endpoint string, grp *group, scopes []limitScope) (*routerPlan, error) {
+	if !grp.allowsModelName(rt.name) {
+		return nil, errModelDenied
+	}
+	if endpoint == cacheEndpointEmbeddings {
+		return nil, &routerTargetError{status: http.StatusBadRequest, message: fmt.Sprintf("smart router %q does not support embeddings; request an embedding model directly", rt.name)}
+	}
+	g.registry.noteRouterShadow(rt.name, grp)
+
+	start, reason, scored, hasImage := classifySmartRequest(rt, req, endpoint)
+	facts := routerRequestFacts{
+		hasImage:     hasImage,
+		promptTokens: estimateSmartPromptTokens(req, endpoint),
+		costBudget:   !g.cfg.AllowUnpricedWithCostBudget && scopesHaveCostBudget(scopes),
+	}
+	plan := &routerPlan{router: rt.name, reason: reason, startTier: rt.tiers[start].name}
+	seen := make(map[string]bool)
+	var skips routerSkips
+
+	lists := make([][]resolveCandidate, len(rt.tiers))
+	built := make([]bool, len(rt.tiers))
+	fresh := func(rank int) []resolveCandidate {
+		if !built[rank] {
+			built[rank] = true
+			lists[rank] = g.routerTierCandidates(rt, rank, scored, facts, grp, &skips)
+		}
+		out := make([]resolveCandidate, 0, len(lists[rank]))
+		for _, cand := range lists[rank] {
+			if !seen[routerCandidateKey(cand)] {
+				out = append(out, cand)
+			}
+		}
+		return out
+	}
+
+	for rank := start; rank < len(rt.tiers) && len(plan.entries) < rt.maxAttempts; rank++ {
+		cands := fresh(rank)
+		if len(cands) == 0 {
+			continue
+		}
+		room := rt.maxAttempts - len(plan.entries)
+		take := len(cands)
+		if take >= room && g.routerHigherTierUsable(rt, rank, fresh) {
+			take = room - 1
+		}
+		if take < 1 {
+			take = 1
+		}
+		for _, cand := range cands[:take] {
+			seen[routerCandidateKey(cand)] = true
+			plan.entries = append(plan.entries, routerPlanEntry{tier: rt.tiers[rank].name, cand: cand})
+		}
+	}
+
+	// Context skips alone emptied the plan: the largest known window beats a 404.
+	if len(plan.entries) == 0 && skips.largest != nil {
+		plan.entries = append(plan.entries, *skips.largest)
+	}
+
+	if len(plan.entries) == 0 {
+		g.registry.warnRouterOnce("router-empty:"+rt.name, fmt.Sprintf("model registry: smart router %q has no usable target (%s)", rt.name, skips.detail()))
+		if skips.denied > 0 && skips.denied == skips.total() {
+			return nil, &routerTargetError{status: http.StatusForbidden, message: "model access denied"}
+		}
+		return nil, &routerTargetError{status: http.StatusNotFound, message: fmt.Sprintf("smart router %q has no usable target", rt.name)}
+	}
+	return plan, nil
+}
+
+func routerCandidateKey(cand resolveCandidate) string {
+	return cand.providerName + "\x00" + cand.upstreamModel
+}
+
+// routerHigherTierUsable reports whether any tier above rank still has a candidate to try.
+func (g *Gateway) routerHigherTierUsable(rt *smartRouter, rank int, fresh func(int) []resolveCandidate) bool {
+	for r := rank + 1; r < len(rt.tiers); r++ {
+		if len(fresh(r)) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// routerTierCandidates returns one tier's usable candidates in attempt order,
+// deduplicated within the tier; the plan dedupes across tiers.
+func (g *Gateway) routerTierCandidates(rt *smartRouter, rank int, scored string, facts routerRequestFacts, grp *group, skips *routerSkips) []resolveCandidate {
+	tier := rt.tiers[rank]
+	n := len(tier.models)
+	offset := 0
+	if rt.selection == smartSelectionHash && n > 1 {
+		offset = smartTextHash(scored) % n
+	}
+	var out []resolveCandidate
+	inTier := make(map[string]bool)
+	for k := 0; k < n; k++ {
+		target := tier.models[(offset+k)%n]
+		for _, cand := range g.routerTargetCandidates(rt, tier.name, target, facts, grp, skips) {
+			key := routerCandidateKey(cand)
+			if inTier[key] {
+				continue
+			}
+			inTier[key] = true
+			out = append(out, cand)
+		}
+	}
+	return out
+}
+
+// routerTargetCandidates resolves one target into its usable candidates.
+// Ordering, cost filtering and capping run per model, never across tiers.
+func (g *Gateway) routerTargetCandidates(rt *smartRouter, tier, target string, facts routerRequestFacts, grp *group, skips *routerSkips) []resolveCandidate {
+	var primary resolveCandidate
+	var extra []resolveCandidate
+	var err error
+	if g.failover.enabled {
+		primary, extra, err = g.registry.resolveWithCandidates(target, grp)
+	} else {
+		primary, err = g.registry.resolvePrimaryOnly(target, grp)
+	}
+	if err != nil {
+		if err == errModelDenied {
+			skips.denied++
+			return nil
+		}
+		skips.unresolved++
+		g.registry.warnRouterTargetOnce(rt.name, target)
+		return nil
+	}
+
+	ordered := g.orderedFailoverCandidates(primary, extra)
+	usable := make([]resolveCandidate, 0, len(ordered))
+	for _, cand := range ordered {
+		if g.routerCandidateSkipped(cand, tier, rt, facts, skips) {
+			continue
+		}
+		usable = append(usable, cand)
+	}
+	usable = g.filterCandidatesByCost(usable, target)
+	return capFailoverCandidates(usable, g.failover.maxAttempts)
+}
+
+func (g *Gateway) routerCandidateSkipped(cand resolveCandidate, tier string, rt *smartRouter, facts routerRequestFacts, skips *routerSkips) bool {
+	if facts.hasImage && !modelVisionCapable(cand.providerName, cand.upstreamModel, g.cfg.ModelMeta) {
+		skips.vision++
+		return true
+	}
+	if facts.costBudget && !priceKnown(cand.canonical, cand.upstreamModel, g.cfg.Pricing, g.cfg.ModelMeta) {
+		skips.unpriced++
+		return true
+	}
+	// Checked last so the fallback candidate already passed vision and cost.
+	if rt.contextEscalation {
+		meta := g.registry.resolveMetaFor(cand.providerName, cand.upstreamModel)
+		if meta.ContextKnown && int64(meta.ContextTokens) < facts.promptTokens {
+			skips.context++
+			if skips.largest == nil || meta.ContextTokens > skips.largestCtx {
+				skips.largest = &routerPlanEntry{tier: tier, cand: cand}
+				skips.largestCtx = meta.ContextTokens
+			}
+			return true
+		}
+	}
+	return false
+}
+
+// setRouterHeaders is the single per-attempt seam for routing: router, reason,
+// this attempt's tier and the previous attempt's tier (escalation) are all known here.
+func setRouterHeaders(h http.Header, plan *routerPlan, i int) {
+	h.Set(headerRoutedModel, plan.entries[i].cand.canonical)
+	h.Set(headerRouterTier, plan.entries[i].tier)
+}
+
+// smartImageTokens is the flat token cost of one image part: its base64 bytes
+// say nothing about what the provider bills or fits in the window.
+const smartImageTokens = 1000
+
+// estimateSmartPromptTokens estimates prompt tokens from extracted text, one
+// per four bytes, plus a flat cost per image.
+func estimateSmartPromptTokens(req map[string]any, endpoint string) int64 {
+	chars, images := smartPromptSize(req, endpoint)
+	return int64(chars+3)/4 + int64(images)*smartImageTokens
+}

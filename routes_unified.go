@@ -285,26 +285,38 @@ func (g *Gateway) runMeteredCall(sw *statusTrackingWriter, r *http.Request, scop
 	// failoverCandidates' own provider scan entirely, so a config that
 	// never opted into failover pays nothing extra for a pool it will
 	// never use.
-	var primary resolveCandidate
-	var extra []resolveCandidate
-	var err error
-	if g.failover.enabled {
-		primary, extra, err = g.registry.resolveWithCandidates(requestedModel, grp)
+	var plan *routerPlan
+	var candidates []resolveCandidate
+	if rt := g.registry.routers[requestedModel]; rt != nil {
+		var planErr error
+		plan, planErr = g.planSmartRouter(rt, req, endpoint, grp, scopes)
+		if planErr != nil {
+			writeModelResolveErrorEnvelope(sw, planErr, envelope)
+			return
+		}
+		candidates = plan.candidates()
 	} else {
-		primary, err = g.registry.resolvePrimaryOnly(requestedModel, grp)
+		var primary resolveCandidate
+		var extra []resolveCandidate
+		var err error
+		if g.failover.enabled {
+			primary, extra, err = g.registry.resolveWithCandidates(requestedModel, grp)
+		} else {
+			primary, err = g.registry.resolvePrimaryOnly(requestedModel, grp)
+		}
+		if err != nil {
+			writeModelResolveErrorEnvelope(sw, err, envelope)
+			return
+		}
+		// Sequence matters (each step's own doc comment explains why):
+		// health/discovery ordering first, so candidates[0] below is the
+		// ACTUAL first-attempted candidate the cost guard compares everyone
+		// else against; cost filtering second; the maxAttempts cap last, so
+		// it never re-admits a candidate the cost guard already removed.
+		candidates = g.orderedFailoverCandidates(primary, extra)
+		candidates = g.filterCandidatesByCost(candidates, requestedModel)
+		candidates = capFailoverCandidates(candidates, g.failover.maxAttempts)
 	}
-	if err != nil {
-		writeModelResolveErrorEnvelope(sw, err, envelope)
-		return
-	}
-	// Sequence matters (each step's own doc comment explains why):
-	// health/discovery ordering first, so candidates[0] below is the
-	// ACTUAL first-attempted candidate the cost guard compares everyone
-	// else against; cost filtering second; the maxAttempts cap last, so
-	// it never re-admits a candidate the cost guard already removed.
-	candidates := g.orderedFailoverCandidates(primary, extra)
-	candidates = g.filterCandidatesByCost(candidates, requestedModel)
-	candidates = capFailoverCandidates(candidates, g.failover.maxAttempts)
 
 	// cacheable/streaming gate every cache step below on spec §2's scope,
 	// exactly as before this feature: a non-streaming request, with a
@@ -453,6 +465,9 @@ func (g *Gateway) runMeteredCall(sw *statusTrackingWriter, r *http.Request, scop
 			cacheKeyStr = cacheKey(cand.providerName, cand.upstreamModel, requestedModel, endpoint, attemptReq)
 		}
 		attemptReq[gatewayAliasKey] = requestedModel
+		if plan != nil {
+			setRouterHeaders(sw.Header(), plan, i)
+		}
 
 		// Cache lookup for THIS candidate, immediately before its own
 		// attempt (adversarial-review round 2 ruling — supersedes the
@@ -1133,6 +1148,10 @@ func unifiedCostMicros(canonical, bare string, u usage, overrides map[string]*Mo
 // only these sentinels/types, so reaching this branch would be a
 // programming error, not a client mistake.
 func writeModelResolveErrorEnvelope(w http.ResponseWriter, err error, envelope envelopeWriter) {
+	if rerr, ok := err.(*routerTargetError); ok {
+		envelope(w, rerr.status, "invalid_request_error", rerr.message)
+		return
+	}
 	if aerr, ok := err.(*aliasTargetError); ok {
 		envelope(w, http.StatusNotFound, "invalid_request_error", aerr.Error())
 		return

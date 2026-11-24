@@ -687,6 +687,8 @@ type modelRegistry struct {
 	modelMeta map[string]*ModelMetaConfig
 	nowFn     func() time.Time
 	warned    map[string]bool
+	// routerShadowClean maps a router name to modelsGen+1 of its last collision-free scan; guarded by warnedMu.
+	routerShadowClean map[string]int64
 	// modelsCache holds one encoded GET /v1/models response body per
 	// group, tagged with the modelsGen it was built from (perf finding 3,
 	// 2026-08-2x audit: 15.9ms/21.3MB/552,884 allocs per uncached call at
@@ -828,6 +830,7 @@ func newModelRegistry(adapters map[string]providerAdapter, cfg *Config, log func
 		warmFillRetryDelay: warmFillRetryDelay,
 		warmFillTimeout:    warmFillTimeout,
 		warned:             make(map[string]bool),
+		routerShadowClean:  make(map[string]int64),
 		providerNames:      make([]string, 0, len(adapters)),
 		modelsCache:        make(map[string]modelsCacheEntry),
 	}
@@ -1744,6 +1747,71 @@ func (m *modelRegistry) warnAliasShadowsDiscoveredOnce(alias string) {
 	m.log("%s", fmt.Sprintf("model registry: alias %q also names a discovered model; the alias takes precedence", alias))
 }
 
+// noteRouterShadow warns once when a router name also names a discovered
+// model; the router always wins.
+func (m *modelRegistry) noteRouterShadow(name string, grp *group) {
+	key := "router-shadow:" + name
+	gen := atomic.LoadInt64(&m.modelsGen) + 1
+	m.warnedMu.Lock()
+	skip := m.warned[key] || m.routerShadowClean[name] == gen
+	m.warnedMu.Unlock()
+	if skip {
+		return
+	}
+	if _, collides := m.bareWinner(name, grp); !collides {
+		// gen was read before the scan, so a refresh racing it only forces a rescan.
+		m.warnedMu.Lock()
+		m.routerShadowClean[name] = gen
+		m.warnedMu.Unlock()
+		return
+	}
+	m.warnRouterOnce(key, fmt.Sprintf("model registry: smart router %q also names a discovered model; the router takes precedence", name))
+}
+
+// warnRouterTargetOnce warns once per router target that does not resolve.
+func (m *modelRegistry) warnRouterTargetOnce(router, target string) {
+	m.warnRouterOnce("router-target:"+router+":"+target, fmt.Sprintf("model registry: smart router %q target %q does not resolve to a known model; skipping it", router, target))
+}
+
+func (m *modelRegistry) warnRouterOnce(key, msg string) {
+	m.warnedMu.Lock()
+	defer m.warnedMu.Unlock()
+	if m.warned[key] {
+		return
+	}
+	m.warned[key] = true
+	m.log("%s", msg)
+}
+
+// routerEntriesFor lists every router grp may use: the router name must be
+// allowed and at least one target must resolve for grp.
+func (m *modelRegistry) routerEntriesFor(grp *group) map[string]map[string]any {
+	if len(m.routers) == 0 {
+		return nil
+	}
+	entries := make(map[string]map[string]any, len(m.routers))
+	for name, rt := range m.routers {
+		if !grp.allowsModelName(name) {
+			continue
+		}
+		if m.routerHasAllowedTarget(rt, grp) {
+			entries[name] = modelObject(name, routerOwnedBy, resolvedModelMeta{})
+		}
+	}
+	return entries
+}
+
+func (m *modelRegistry) routerHasAllowedTarget(rt *smartRouter, grp *group) bool {
+	for _, tier := range rt.tiers {
+		for _, target := range tier.models {
+			if _, _, _, err := m.resolve(target, grp); err == nil {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // resolveAgainst finishes resolve for a providerName already chosen (either
 // the explicit prefix or the bare-id collision winner): it checks
 // upstreamModel is actually known to that provider, then checks
@@ -1954,6 +2022,7 @@ func (m *modelRegistry) listFor(grp *group) []map[string]any {
 	// and shadows nothing — the discovered model keeps its own bare entry
 	// in that case.
 	aliasEntries := m.aliasEntriesFor(grp)
+	routerEntries := m.routerEntriesFor(grp)
 	visible := make([]string, 0, 4) // reused per id; provs is at most len(m.providerNames) long
 	for id, provs := range owners {
 		// warnCollisionOnce stays keyed on the GLOBAL owner set, not grp's
@@ -1987,6 +2056,10 @@ func (m *modelRegistry) listFor(grp *group) []map[string]any {
 		// "provider/id" form below, which is exactly how a client must
 		// address it once the alias owns the bare id.
 		_, shadowed := aliasEntries[id]
+		// resolve routes every request naming a router to it, listed for this caller or not.
+		if _, routed := m.routers[id]; routed {
+			shadowed = true
+		}
 
 		// bareEntryWinner (HIGH-2 fix, review round 2), the same shared
 		// helper bareWinner uses: for a single-grant grp this is exactly
@@ -2046,6 +2119,9 @@ func (m *modelRegistry) listFor(grp *group) []map[string]any {
 	// prefixed entry either (validateModelAliases rejects an alias whose
 	// prefix names a configured provider at construction).
 	for _, entry := range aliasEntries {
+		out = append(out, entry)
+	}
+	for _, entry := range routerEntries {
 		out = append(out, entry)
 	}
 

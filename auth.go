@@ -188,6 +188,20 @@ func (grp *group) allowsProviderModel(provider string, ids ...string) bool {
 	return false
 }
 
+// allowsModelName reports whether SOME grant's model globs match id, ignoring
+// providers: a smart router has no provider of its own.
+func (grp *group) allowsModelName(id string) bool {
+	if grp.grants == nil {
+		return matchesGlob(grp.models, id)
+	}
+	for _, g := range grp.grants {
+		if matchesGlob(g.models, id) {
+			return true
+		}
+	}
+	return false
+}
+
 // memberScopeGroups returns the *group values buildLimitScopes (routes_
 // unified.go) builds one "group" limit scope per: grp.memberGroups for a
 // synthetic multi-membership/personal-grant principal (effectiveGroup,
