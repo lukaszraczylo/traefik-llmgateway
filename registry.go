@@ -1795,10 +1795,43 @@ func (m *modelRegistry) routerEntriesFor(grp *group) map[string]map[string]any {
 			continue
 		}
 		if m.routerHasAllowedTarget(rt, grp) {
-			entries[name] = modelObject(name, routerOwnedBy, resolvedModelMeta{})
+			entries[name] = modelObject(name, routerOwnedBy, m.routerMeta(name, rt))
 		}
 	}
 	return entries
+}
+
+// routerMeta advertises the smallest known context window across every
+// router target, so a client never sizes a prompt that some tier cannot
+// take; a modelMeta entry keyed by the router name overrides it.
+func (m *modelRegistry) routerMeta(name string, rt *smartRouter) resolvedModelMeta {
+	var out resolvedModelMeta
+	for _, tier := range rt.tiers {
+		for _, target := range tier.models {
+			meta := m.routerTargetMeta(target)
+			if meta.ContextKnown && (!out.ContextKnown || meta.ContextTokens < out.ContextTokens) {
+				out.ContextTokens, out.ContextKnown = meta.ContextTokens, true
+			}
+		}
+	}
+	if override, ok := m.modelMeta[name]; ok && override != nil && override.ContextTokens > 0 {
+		out.ContextTokens, out.ContextKnown = override.ContextTokens, true
+	}
+	return out
+}
+
+// routerTargetMeta resolves a target without group restriction: the
+// advertised window must not change with the caller's grants.
+func (m *modelRegistry) routerTargetMeta(target string) resolvedModelMeta {
+	if _, isAlias := m.aliases[target]; isAlias {
+		return m.resolveMetaForAliasName(target)
+	}
+	_, _, canonical, err := m.resolve(target, &group{})
+	if err != nil {
+		return resolvedModelMeta{}
+	}
+	providerName, bareModel, _ := strings.Cut(canonical, "/")
+	return m.resolveMetaFor(providerName, bareModel)
 }
 
 func (m *modelRegistry) routerHasAllowedTarget(rt *smartRouter, grp *group) bool {
