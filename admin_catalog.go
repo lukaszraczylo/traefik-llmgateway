@@ -52,7 +52,9 @@ type adminCatalogModel struct {
 	Kind             string   `json:"kind,omitempty"`
 	PriceSource      string   `json:"priceSource"`
 	Aliases          []string `json:"aliases,omitempty"`
-	DisplayFree      bool     `json:"displayFree,omitempty"`
+	// Routers names the smart routers that list this model as a target.
+	Routers     []string `json:"routers,omitempty"`
+	DisplayFree bool     `json:"displayFree,omitempty"`
 	// Endpoint marks a pseudo-model row for a pathBaseUrls key: shown in
 	// the catalog, but never routable as a model and never priced.
 	Endpoint bool `json:"endpoint,omitempty"`
@@ -84,6 +86,7 @@ type adminCatalogProvider struct {
 type adminCatalogResponse struct {
 	Providers []adminCatalogProvider `json:"providers"`
 	Aliases   []adminAliasView       `json:"aliases"`
+	Routers   []adminRouterView      `json:"routers"`
 }
 
 // buildAdminCatalog assembles adminCatalogResponse from the SAME
@@ -103,6 +106,9 @@ func (g *Gateway) buildAdminCatalog() adminCatalogResponse {
 	for _, a := range g.registry.aliasSnapshot() {
 		aliasesByTarget[a.Target] = append(aliasesByTarget[a.Target], a.Alias)
 	}
+
+	routers := g.buildAdminRouterViews()
+	routersFor := routersByTarget(routers)
 
 	providers := make([]adminCatalogProvider, len(snaps))
 	for i, s := range snaps {
@@ -151,6 +157,7 @@ func (g *Gateway) buildAdminCatalog() adminCatalogResponse {
 				PriceSource:      source,
 				DisplayFree:      displayFree,
 				Aliases:          aliases,
+				Routers:          routerNamesFor(routersFor, canonical, model),
 				Kind:             kinds[model],
 			}
 		}
@@ -174,7 +181,7 @@ func (g *Gateway) buildAdminCatalog() adminCatalogResponse {
 		}
 	}
 
-	return adminCatalogResponse{Providers: providers, Aliases: g.buildAdminAliasViews()}
+	return adminCatalogResponse{Providers: providers, Aliases: g.buildAdminAliasViews(), Routers: routers}
 }
 
 // sortedKeys returns m's keys in ascending order, nil for an empty map.
@@ -332,4 +339,20 @@ func (g *Gateway) buildAdminConsumers() adminConsumersResponse {
 func (g *Gateway) serveAdminConsumers(w http.ResponseWriter) {
 	setAdminJSONHeaders(w)
 	_ = json.NewEncoder(w).Encode(g.buildAdminConsumers())
+}
+
+// routerNamesFor returns the routers that target a model by canonical id or bare name.
+func routerNamesFor(by map[string][]string, canonical, model string) []string {
+	names := append(append([]string{}, by[canonical]...), by[model]...)
+	if len(names) == 0 {
+		return nil
+	}
+	sort.Strings(names)
+	out := names[:1]
+	for _, n := range names[1:] {
+		if n != out[len(out)-1] {
+			out = append(out, n)
+		}
+	}
+	return out
 }

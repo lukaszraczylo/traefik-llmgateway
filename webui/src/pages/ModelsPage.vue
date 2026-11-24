@@ -3,6 +3,7 @@ import { computed, onMounted, watch } from 'vue'
 
 import ModelCatalogTable from '@/components/ModelCatalogTable.vue'
 import ProviderHealthPanel from '@/components/ProviderHealthPanel.vue'
+import SmartRoutersCard from '@/components/SmartRoutersCard.vue'
 import { useFiltersStore } from '@/stores/filters'
 import { useModelsStore } from '@/stores/models'
 import { useNavStore } from '@/stores/nav'
@@ -54,6 +55,7 @@ watch(
 <template>
   <div class="flex flex-col gap-6">
     <ProviderHealthPanel />
+    <SmartRoutersCard v-if="models.routers.length > 0" :routers="models.routers" />
     <!-- verify-ui-states-2.md #8: shown only for a BACKGROUND failure
     (rows already on screen) — a first-load failure already renders via
     ModelCatalogTable's own ErrorState below, and showing both duplicated

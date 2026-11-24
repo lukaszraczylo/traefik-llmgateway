@@ -210,6 +210,30 @@ export interface AdminGroupView {
   memberCount: number
 }
 
+/** One tier of a smart router (admin_routers.go: adminRouterTierView). */
+export interface AdminRouterTierView {
+  name: string
+  models: string[]
+  minScore: number
+}
+
+/** One keyword rule of a smart router (admin_routers.go: adminRouterRuleView). */
+export interface AdminRouterRuleView {
+  tier: string
+  keywords: string[]
+}
+
+/** One configured smart router, read-only (admin_routers.go: adminRouterView). */
+export interface AdminRouterView {
+  name: string
+  defaultTier: string
+  selection: string
+  tiers: AdminRouterTierView[]
+  keywordRules: AdminRouterRuleView[]
+  maxAttempts: number
+  contextEscalation: boolean
+}
+
 export interface AdminAliasView {
   alias: string
   target: string
@@ -275,6 +299,7 @@ export interface AdminOverviewResponse {
   providers: AdminProviderView[]
   groups: AdminGroupView[]
   aliases: AdminAliasView[]
+  routers?: AdminRouterView[]
   redis: AdminRedisView
   cache: AdminCacheView
   retry: AdminRetryView
@@ -707,6 +732,8 @@ export interface AdminCatalogModel {
   /** True for a pseudo-model row built from a `pathBaseUrls` key — not a routable model, never priced. */
   endpoint?: boolean
   aliases?: string[]
+  /** Smart routers that list this model as a target (admin_catalog.go: adminCatalogModel.Routers). */
+  routers?: string[]
 }
 
 /** One provider's full catalog listing (admin.go: adminCatalogProvider — phase 2 redesign), on-demand only (never part of the 5s overview poll). */
@@ -724,6 +751,7 @@ export interface AdminCatalogProvider {
 export interface AdminCatalogResponse {
   providers: AdminCatalogProvider[]
   aliases: AdminAliasView[]
+  routers?: AdminRouterView[]
 }
 
 /**

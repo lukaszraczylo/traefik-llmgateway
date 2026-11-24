@@ -5,12 +5,13 @@ import GrantForm from '@/components/forms/GrantForm.vue'
 import LimitsForm from '@/components/forms/LimitsForm.vue'
 import ModelMetaForm from '@/components/forms/ModelMetaForm.vue'
 import PricingForm from '@/components/forms/PricingForm.vue'
+import RouterForm from '@/components/forms/RouterForm.vue'
 import UserForm from '@/components/forms/UserForm.vue'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { useNavStore } from '@/stores/nav'
 
-/** HELPER_IDS mirrors the Config page's own `helper` hash param (redesign-plan.md section 3.1: `helper=limits|grant|pricing|model|user`) — the single source of truth for which tab is selected and which form renders. */
-const HELPER_IDS = ['limits', 'grant', 'pricing', 'model', 'user'] as const
+/** HELPER_IDS mirrors the Config page's own `helper` hash param (redesign-plan.md section 3.1: `helper=limits|grant|pricing|model|router|user`) — the single source of truth for which tab is selected and which form renders. */
+const HELPER_IDS = ['limits', 'grant', 'pricing', 'model', 'router', 'user'] as const
 type HelperId = (typeof HELPER_IDS)[number]
 
 const HELPER_LABEL: Record<HelperId, string> = {
@@ -18,13 +19,14 @@ const HELPER_LABEL: Record<HelperId, string> = {
   grant: 'Access grant',
   pricing: 'Pricing',
   model: 'Model metadata',
+  router: 'Smart router',
   user: 'New user',
 }
 
 /**
  * ChangeHelper (redesign-plan.md section 3.4) is the Config page's
- * snippet-building surface: five forms (LimitsForm, GrantForm,
- * PricingForm, ModelMetaForm, UserForm), each producing a paste-ready
+ * snippet-building surface: six forms (LimitsForm, GrantForm,
+ * PricingForm, ModelMetaForm, RouterForm, UserForm), each producing a paste-ready
  * YAML/users.json fragment via lib/snippets.ts, switched by the page's own
  * `helper` hash param so a shared link opens the same tab.
  */
@@ -58,6 +60,7 @@ function setHelper(next: unknown): void {
     <GrantForm v-else-if="helper === 'grant'" :group-names="props.groupNames" :user-names="props.userNames" />
     <PricingForm v-else-if="helper === 'pricing'" />
     <ModelMetaForm v-else-if="helper === 'model'" />
+    <RouterForm v-else-if="helper === 'router'" />
     <UserForm v-else :group-names="props.groupNames" />
   </div>
 </template>

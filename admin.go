@@ -661,6 +661,7 @@ type adminOverviewResponse struct {
 	Providers []adminProviderView `json:"providers"`
 	Groups    []adminGroupView    `json:"groups"`
 	Aliases   []adminAliasView    `json:"aliases"`
+	Routers   []adminRouterView   `json:"routers"`
 	Redis     adminRedisView      `json:"redis"`
 	Cache     adminCacheView      `json:"cache"`
 	Retry     adminRetryView      `json:"retry"`
@@ -885,6 +886,7 @@ func (g *Gateway) buildAdminOverview() adminOverviewResponse {
 		Retry:           retryView,
 		Groups:          groups,
 		Aliases:         aliases,
+		Routers:         g.buildAdminRouterViews(),
 		Features:        g.buildAdminFeatures(),
 		Pricing:         buildAdminPricingSummary(snaps, g.cfg.Pricing, g.cfg.ModelMeta),
 		Version:         pluginVersion,
