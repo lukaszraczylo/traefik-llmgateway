@@ -145,6 +145,26 @@ func BenchHelperCheck() string {
 		if msg := banditHelperCheck(); msg != "" {
 			return msg
 		}
+		if msg := classifierHelperCheck(); msg != "" {
+			return msg
+		}
+	}
+	return ""
+}
+
+// classifierHelperCheck compiles a router with a shadow classifier and then one without;
+// yaegi v0.16.1 would leak the named shadowV2 result from the first call into the second.
+func classifierHelperCheck() string {
+	z := 3
+	if _, shadow, _, err := compileSmartClassifier("r", &SmartRouterConfig{ShadowClassifier: smartClassifierV2, RiskZ: &z}); err != nil || !shadow {
+		return "compileSmartClassifier missed the shadow classifier"
+	}
+	cls, shadow, riskZ, err := compileSmartClassifier("r", &SmartRouterConfig{})
+	if err != nil || shadow {
+		return "compileSmartClassifier kept shadowV2 from the previous call"
+	}
+	if cls != smartClassifierV1 || riskZ != defaultSmartRiskZ {
+		return "compileSmartClassifier kept a result from the previous call"
 	}
 	return ""
 }
