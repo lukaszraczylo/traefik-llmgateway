@@ -31,8 +31,10 @@ func testDataConfig(t *testing.T) *Config {
 	// Drift check: every top-level key and scalar value referenced by the
 	// mirror blob below must appear in the raw manifest bytes.
 	mirrorTokens := []string{
-		"providers", "groups", "users", // top-level testData keys
-		"openai", "type: openai", "test-key", "gpt-test", // providers.openai
+		"providers", "groups", "users", "smartRouters", // top-level testData keys
+		"openai", "type: openai", "test-key", "gpt-test", "gpt-test-large", // providers.openai
+		"auto", "classifier: v2", "name: small", "name: large", "minScore: 400", // smartRouters.auto
+		"[openai/gpt-test]", "[openai/gpt-test-large]", // smartRouters.auto tier models
 		"default",       // groups.default and users.inline[0].group
 		"providers: []", // groups.default.providers — zero-semantic hedge, not bare {}
 		"tester",        // users.inline[0].name
@@ -50,7 +52,10 @@ func testDataConfig(t *testing.T) *Config {
 
 	cfg := CreateConfig()
 	// mirror of testData, kept in sync by this test living next to the manifest
-	blob := `{"providers":{"openai":{"type":"openai","apiKey":"test-key","models":["gpt-test"]}},
+	blob := `{"providers":{"openai":{"type":"openai","apiKey":"test-key","models":["gpt-test","gpt-test-large"]}},
+	  "smartRouters":{"auto":{"classifier":"v2","tiers":[
+	    {"name":"small","minScore":0,"models":["openai/gpt-test"]},
+	    {"name":"large","minScore":400,"models":["openai/gpt-test-large"]}]}},
 	  "groups":{"default":{"providers":[]}},
 	  "users":{"inline":[{"name":"tester","group":"default","apiKey":"test-user-key"}]}}`
 	if err := json.Unmarshal([]byte(blob), cfg); err != nil {
@@ -61,7 +66,11 @@ func testDataConfig(t *testing.T) *Config {
 
 func TestNewFromTestData(t *testing.T) {
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
-	h, err := New(context.Background(), next, testDataConfig(t), "llmgw")
+	cfg := testDataConfig(t)
+	if router := cfg.SmartRouters["auto"]; router == nil || len(router.Tiers) != 2 {
+		t.Fatalf("testData must declare the two-tier smart router %q, got %+v", "auto", router)
+	}
+	h, err := New(context.Background(), next, cfg, "llmgw")
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

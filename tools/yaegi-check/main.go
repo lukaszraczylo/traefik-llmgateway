@@ -3464,8 +3464,8 @@ func parseList(lines []yamlLine, pos *int, indent int) []any {
 }
 
 // collectionOrScalar maps a "key: value" line's already-trimmed val to
-// an empty map/slice for "{}"/"[]", or to parseScalar(val) otherwise. It
-// does not recurse into a further nested block — no key in this file's
+// an empty map/slice for "{}"/"[]", a one-line "[a, b]" list of scalars,
+// or parseScalar(val) otherwise. It does not recurse into a further nested block — no key in this file's
 // testData needs a map/list value inside a list item's own fields, and
 // this harness parses only what .traefik.yml actually contains.
 func collectionOrScalar(val string) any {
@@ -3474,9 +3474,15 @@ func collectionOrScalar(val string) any {
 		return map[string]any{}
 	case "[]":
 		return []any{}
-	default:
-		return parseScalar(val)
 	}
+	if strings.HasPrefix(val, "[") && strings.HasSuffix(val, "]") {
+		var items []any
+		for _, part := range strings.Split(val[1:len(val)-1], ",") {
+			items = append(items, parseScalar(strings.TrimSpace(part)))
+		}
+		return items
+	}
+	return parseScalar(val)
 }
 
 // parseScalar converts a YAML scalar token to a bool, int64, float64, or
