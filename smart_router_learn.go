@@ -294,7 +294,7 @@ func newRouterLearner() *routerLearner {
 
 // learns reports whether the router has anything for the background refresh to do.
 func (rt *smartRouter) learns() bool {
-	return rt.calibState != nil
+	return rt.calibState != nil || rt.bandit != nil
 }
 
 // touchRouterLearning notes a routed request and starts the refresh goroutine if it is not running.
@@ -368,6 +368,9 @@ func (g *Gateway) refreshRouterLearning(now time.Time) {
 		if rt.calibState != nil {
 			g.refreshCalibration(rt, now)
 		}
+		if rt.bandit != nil {
+			g.refreshBandit(rt, now)
+		}
 	}
 }
 
@@ -379,7 +382,11 @@ func (g *Gateway) warnRouterLearning() {
 	}
 	sort.Strings(names)
 	for _, name := range names {
-		if g.registry.routers[name].learns() && g.redisClient == nil {
+		rt := g.registry.routers[name]
+		if rt.adaptiveSet && rt.bandit == nil {
+			g.warnf("config: smartRouters %q: adaptive has no effect unless selection is %q", name, smartSelectionAdaptive)
+		}
+		if rt.learns() && g.redisClient == nil {
 			g.warnf("config: smartRouters %q: calibration and adaptive selection learn per gateway instance because redis is not configured", name)
 		}
 	}

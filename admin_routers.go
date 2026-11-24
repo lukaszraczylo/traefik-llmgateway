@@ -70,9 +70,17 @@ type adminRouterStatsView struct {
 	Requests    int64                       `json:"requests"`
 }
 
+// adminRouterAdaptiveView shows the settings of adaptive selection.
+type adminRouterAdaptiveView struct {
+	ExplorePct       int `json:"explorePct"`
+	WindowHours      int `json:"windowHours"`
+	LatencyWeightPct int `json:"latencyWeightPct"`
+}
+
 // adminRouterView is one smart router's read-only row. Keywords are routing
 // hints, not secrets.
 type adminRouterView struct {
+	Adaptive          *adminRouterAdaptiveView   `json:"adaptive,omitempty"`
 	Name              string                     `json:"name"`
 	DefaultTier       string                     `json:"defaultTier"`
 	ToolsMinTier      string                     `json:"toolsMinTier,omitempty"`
@@ -109,6 +117,9 @@ func (g *Gateway) buildAdminRouterViews() []adminRouterView {
 		}
 		if rt.shadowV2 {
 			v.ShadowClassifier = smartClassifierV2
+		}
+		if rt.bandit != nil {
+			v.Adaptive = &adminRouterAdaptiveView{ExplorePct: rt.bandit.cfg.explorePct, WindowHours: rt.bandit.cfg.windowHours, LatencyWeightPct: rt.bandit.cfg.latencyPct}
 		}
 		if rt.defaultRank >= 0 && rt.defaultRank < len(rt.tiers) {
 			v.DefaultTier = rt.tiers[rt.defaultRank].name

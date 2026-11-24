@@ -9,6 +9,8 @@ import (
 const (
 	smartSelectionOrdered = "ordered"
 	smartSelectionHash    = "hash"
+	// smartSelectionAdaptive orders each tier's candidates with a Thompson bandit.
+	smartSelectionAdaptive = "adaptive"
 
 	smartClassifierV1 = "v1"
 	smartClassifierV2 = "v2"
@@ -51,13 +53,15 @@ type SmartRouterConfig struct {
 	// Session keeps an upward-ratcheting tier pin per conversation. It needs classifier v2 to
 	// route live; with only shadowClassifier v2 it changes the shadow rank and never live routing.
 	Session *SmartRouterSessionConfig `json:"session,omitempty"`
+	// Adaptive tunes selection "adaptive"; it has no effect with another selection.
+	Adaptive *SmartRouterAdaptiveConfig `json:"adaptive,omitempty"`
 	// Calibration lowers tier thresholds from outcome counters; it is off by default.
 	Calibration *SmartRouterCalibrationConfig `json:"calibration,omitempty"`
 	// DefaultTier serves requests with no user text; empty means the first tier.
 	DefaultTier string `json:"defaultTier,omitempty"`
 	// ToolsMinTier floors requests that carry tools or tool history; empty means no floor.
 	ToolsMinTier string `json:"toolsMinTier,omitempty"`
-	// Selection is "ordered" (default) or "hash".
+	// Selection is "ordered" (default), "hash" or "adaptive".
 	Selection string `json:"selection,omitempty"`
 	// Tiers is ordered cheapest first; list position is the rank.
 	Tiers        []SmartRouterTier        `json:"tiers"`
@@ -98,6 +102,7 @@ type SmartRouterWeights struct {
 type smartRouter struct {
 	shadow            *smartWeights
 	calibState        *smartCalibState
+	bandit            *smartBandit
 	calib             smartCalibCfg
 	name              string
 	selection         string
@@ -113,6 +118,7 @@ type smartRouter struct {
 	toolsMinRank      int
 	maxAttempts       int
 	shadowV2          bool
+	adaptiveSet       bool
 	contextEscalation bool
 	sessionEnabled    bool
 }
@@ -282,9 +288,9 @@ func compileSmartRouter(name string, cfg *SmartRouterConfig, routers map[string]
 	switch selection {
 	case "":
 		selection = smartSelectionOrdered
-	case smartSelectionOrdered, smartSelectionHash:
+	case smartSelectionOrdered, smartSelectionHash, smartSelectionAdaptive:
 	default:
-		return nil, fmt.Errorf("llmgateway: smartRouters: router %q: selection %q must be %q or %q", name, cfg.Selection, smartSelectionOrdered, smartSelectionHash)
+		return nil, fmt.Errorf("llmgateway: smartRouters: router %q: selection %q must be %q, %q or %q", name, cfg.Selection, smartSelectionOrdered, smartSelectionHash, smartSelectionAdaptive)
 	}
 
 	if cfg.MaxAttempts < 0 {
@@ -333,8 +339,18 @@ func compileSmartRouter(name string, cfg *SmartRouterConfig, routers map[string]
 	if err != nil {
 		return nil, err
 	}
+	adaptive, err := compileSmartAdaptive(name, cfg.Adaptive)
+	if err != nil {
+		return nil, err
+	}
+	var bandit *smartBandit
+	if selection == smartSelectionAdaptive {
+		bandit = newSmartBandit(adaptive)
+	}
 
 	return &smartRouter{
+		bandit:            bandit,
+		adaptiveSet:       cfg.Adaptive != nil,
 		calib:             calib,
 		calibState:        calibState,
 		classifier:        classifier,

@@ -134,6 +134,20 @@ func (c *concurrencyLearner) limit(provider string) int {
 	}
 }
 
+// load returns the provider's in-flight count and its effective limit (0 when unknown).
+func (c *concurrencyLearner) load(provider string) (int, int) {
+	c.mu.Lock()
+	inFlight, learned := 0, 0
+	if s := c.byProvider[provider]; s != nil {
+		inFlight, learned = s.inFlight, s.learned
+	}
+	c.mu.Unlock()
+	if c.explicit > 0 && (learned == 0 || c.explicit < learned) {
+		return inFlight, c.explicit
+	}
+	return inFlight, learned
+}
+
 // setConcurrencyHeader sets or clears the RateLimit-Policy header on h.
 func setConcurrencyHeader(h http.Header, n int) {
 	if n > 0 {

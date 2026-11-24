@@ -36,7 +36,9 @@ type routerPlan struct {
 	// shadowTier is the tier the router's shadowWeights chose; empty when unset.
 	shadowTier string
 	// sess is the router's session for this request; nil when the router does not use sessions.
-	sess    *smartSessionRun
+	sess *smartSessionRun
+	// bandit is the router's bandit when selection is adaptive; the outcome of each attempt feeds it.
+	bandit  *smartBandit
 	entries []routerPlanEntry
 	// promptBytes is the size estimate that calibration compares with reported usage.
 	promptBytes int64
@@ -108,7 +110,7 @@ func (g *Gateway) planSmartRouter(rt *smartRouter, req map[string]any, endpoint 
 		outputTokens: requestedOutputTokens(req, endpoint),
 		costBudget:   !g.cfg.AllowUnpricedWithCostBudget && scopesHaveCostBudget(scopes),
 	}
-	plan := &routerPlan{router: rt.name, reason: reason, startTier: rt.tiers[start].name, promptBytes: promptBytes, hasImage: hasImage, maxTokensSet: facts.outputTokens > 0, sess: sess, calibrate: rt.calibState != nil}
+	plan := &routerPlan{router: rt.name, reason: reason, startTier: rt.tiers[start].name, promptBytes: promptBytes, hasImage: hasImage, maxTokensSet: facts.outputTokens > 0, sess: sess, calibrate: rt.calibState != nil, bandit: rt.bandit}
 	if cls.shadowRank >= 0 {
 		plan.shadowTier = rt.tiers[cls.shadowRank].name
 	}
@@ -201,6 +203,9 @@ func (g *Gateway) routerTierCandidates(rt *smartRouter, rank int, scored string,
 			inTier[key] = true
 			out = append(out, cand)
 		}
+	}
+	if rt.bandit != nil {
+		out = g.banditOrder(rt, tier.name, out)
 	}
 	return out
 }

@@ -142,6 +142,9 @@ func BenchHelperCheck() string {
 		if msg := learnHelperCheck(); msg != "" {
 			return msg
 		}
+		if msg := banditHelperCheck(); msg != "" {
+			return msg
+		}
 	}
 	return ""
 }
@@ -209,6 +212,37 @@ func learnHelperCheck() string {
 	}
 	if got := smartCalibStep(10, 0, 100, c); got != 10 {
 		return "smartCalibStep kept a step from the previous call"
+	}
+	return ""
+}
+
+// banditHelperCheck replays the bandit and saturation helpers with known answers, twice with different inputs.
+func banditHelperCheck() string {
+	if got := smartThompsonScore(0, 0, 0, 0); got < 0.6666 || got > 0.6667 {
+		return "smartThompsonScore changed between calls"
+	}
+	if got := smartThompsonScore(90, 100, 0, 1); got < 0.4466 || got > 0.4467 {
+		return "smartThompsonScore kept a value from the previous call"
+	}
+	if smartBanditReward(true, 1, 1, 30) != 0 || smartBanditReward(false, 5, 1, 30) != 0.7 {
+		return "smartBanditReward changed between calls"
+	}
+	if smartBanditReward(false, 0, 1, 30) != 1 {
+		return "smartBanditReward kept a penalty from the previous call"
+	}
+	if !smartSaturated(4, 4) || smartSaturated(3, 4) || smartSaturated(9, 0) {
+		return "smartSaturated changed between calls"
+	}
+	if smartUtil(2, 4) != 0.5 || smartUtil(9, 4) != 1 || smartUtil(1, 0) != 0 {
+		return "smartUtil changed between calls"
+	}
+	perm := smartBanditOrder([]float64{0.2, 0.9, 0.5}, []bool{false, true, false}, -1)
+	if len(perm) != 3 || perm[0] != 2 || perm[1] != 0 || perm[2] != 1 {
+		return "smartBanditOrder missed the saturated-last order"
+	}
+	perm = smartBanditOrder([]float64{0.2, 0.9}, []bool{false, false}, 0)
+	if len(perm) != 2 || perm[0] != 0 || perm[1] != 1 {
+		return "smartBanditOrder kept an order from the previous call"
 	}
 	return ""
 }

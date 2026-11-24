@@ -624,7 +624,7 @@ func (g *Gateway) runMeteredCall(sw *statusTrackingWriter, r *http.Request, scop
 		// metrics are off.
 		var latSample latencySample
 		var hasLat bool
-		if metricsEnabled(g.cfg) || g.limiter.statsLatency {
+		if metricsEnabled(g.cfg) || g.limiter.statsLatency || (plan != nil && plan.bandit != nil) {
 			ctx = withLatencyRecorder(ctx, func(sample latencySample) {
 				latSample = sample
 				hasLat = true
@@ -774,6 +774,9 @@ func (g *Gateway) runMeteredCall(sw *statusTrackingWriter, r *http.Request, scop
 
 		if plan != nil && callErr == nil && !plan.hasImage && !result.estimated {
 			g.tokenCalib.observe(providerName, cand.upstreamModel, plan.promptBytes, result.prompt)
+		}
+		if plan != nil && plan.bandit != nil {
+			g.observeBandit(plan, i, callErr, bad, latSample, hasLat)
 		}
 
 		// Usage provenance (feat: expose token-accounting provenance),
