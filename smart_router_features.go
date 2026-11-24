@@ -137,7 +137,8 @@ func extractSmartV2(req map[string]any, endpoint string) smartFeatures {
 }
 
 // findAsk scans newest first for the user message that carries text and no tool
-// parts, and records tool-loop state on the way.
+// parts, and records tool-loop state on the way. It avoids `continue` inside the
+// switch: yaegi v0.16.1 ends the whole loop there.
 func (f *smartFeatures) findAsk(msgs []any) string {
 	stop := len(msgs) - smartAskScanMax
 	if stop < 0 {
@@ -168,9 +169,7 @@ func (f *smartFeatures) findAsk(msgs []any) string {
 					f.toolLoopTurn = true
 					f.toolErr = smartToolResultFailed(msg["content"])
 				}
-				continue
-			}
-			if text != "" {
+			} else if text != "" {
 				f.found = true
 				f.history = i > leadingSystemCount(msgs)
 				return text
@@ -291,23 +290,25 @@ func (f *smartFeatures) addPaste(n int, isLog bool) {
 }
 
 // smartPasteKind reports whether a paragraph is pasted material and whether it is a log.
-func smartPasteKind(p string) (isPaste, isLog bool) {
+// It uses plain locals: yaegi v0.16.1 keeps named results from the previous call.
+func smartPasteKind(p string) (bool, bool) {
 	if containsAnySmart(p, smartStrongLogSigs) {
 		return true, true
 	}
 	n := len(p)
 	lines := strings.Count(p, "\n") + 1
+	paste := false
 	if n >= smartPasteMinBytes && (lines >= 2 || n >= smartPasteSingleLine) {
 		hits := 0
 		for i := 0; i < len(smartPasteChars); i++ {
 			hits += strings.Count(p, smartPasteChars[i])
 		}
-		isPaste = hits*smartPerMille >= n*smartPasteDensity
+		paste = hits*smartPerMille >= n*smartPasteDensity
 	}
-	if !isPaste && lines >= smartPasteShortLines && n/lines < smartPasteShortMean && !containsAnySmart(p, smartListMarkers) {
-		isPaste = true
+	if !paste && lines >= smartPasteShortLines && n/lines < smartPasteShortMean && !containsAnySmart(p, smartListMarkers) {
+		paste = true
 	}
-	if !isPaste {
+	if !paste {
 		return false, false
 	}
 	return true, containsAnySmart(p, smartWeakLogSigs)

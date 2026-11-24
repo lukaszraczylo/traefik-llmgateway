@@ -1,0 +1,370 @@
+[
+ {
+  "id": "des-01",
+  "group": "design",
+  "lang": "en",
+  "intent": "design",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "We run a monolith with 40 engineers. Should we migrate to microservices? Compare the trade-offs for deploy velocity, operational cost and team boundaries."
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 2,
+  "maxTier": 2,
+  "notes": "multi-axis architecture decision"
+ },
+ {
+  "id": "des-02",
+  "group": "design",
+  "lang": "en",
+  "intent": "design",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 1024,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "What is a sensible schema for storing multi-tenant audit logs in Postgres that must be queryable per tenant for 7 years?"
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "schema design"
+ },
+ {
+  "id": "des-03",
+  "group": "design",
+  "lang": "en",
+  "intent": "design",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Design the architecture for a notification service that fans out to email, SMS and push at 50k messages per second."
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 2,
+  "maxTier": 2,
+  "notes": "high-scale design"
+ },
+ {
+  "id": "des-04",
+  "group": "design",
+  "lang": "en",
+  "intent": "design",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 1024,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "Should we use Kafka or NATS JetStream for our event backbone? We have 20 services, at-least-once delivery needs and a small platform team."
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "technology choice with constraints"
+ },
+ {
+  "id": "des-05",
+  "group": "design",
+  "lang": "en",
+  "intent": "design",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Which approach is better for caching user profiles, write-through or cache-aside? We read 100x more than we write."
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "common design question"
+ },
+ {
+  "id": "des-06",
+  "group": "design",
+  "lang": "en",
+  "intent": "design",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 1024,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "Describe a migration strategy to move 2 TB of data from MySQL to Postgres with less than 5 minutes of downtime."
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 2,
+  "maxTier": 2,
+  "notes": "risky migration plan"
+ },
+ {
+  "id": "des-07",
+  "group": "design",
+  "lang": "en",
+  "intent": "design",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "What's your recommended design for an offline-first mobile app that syncs with a REST API and resolves conflicts?"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "sync design"
+ },
+ {
+  "id": "des-08",
+  "group": "design",
+  "lang": "en",
+  "intent": "design",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 1024,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "Design a database schema for a library system: books, copies, members and loans."
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "textbook schema design"
+ },
+ {
+  "id": "des-09",
+  "group": "design",
+  "lang": "en",
+  "intent": "design",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Plan the rollout strategy for replacing our auth provider while keeping existing sessions valid. We cannot force users to log in again."
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 2,
+  "maxTier": 2,
+  "notes": "rollout with constraints"
+ },
+ {
+  "id": "des-10",
+  "group": "design",
+  "lang": "en",
+  "intent": "design",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 1024,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "Evaluate the approach of storing feature flags in the database versus a dedicated service. Think through failure modes."
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 2,
+  "maxTier": 2,
+  "notes": "explicit reasoning request"
+ },
+ {
+  "id": "des-11",
+  "group": "design",
+  "lang": "en",
+  "intent": "design",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "How should we structure a Go monorepo with 12 services and shared libraries? What are the downsides of each layout?"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "repo structure design"
+ },
+ {
+  "id": "des-12",
+  "group": "design",
+  "lang": "en",
+  "intent": "design",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 1024,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "We need multi-region active-active for our SaaS. Explain the architecture options for the data layer and which one you would pick."
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 2,
+  "maxTier": 2,
+  "notes": "multi-region design"
+ },
+ {
+  "id": "des-13",
+  "group": "design",
+  "lang": "en",
+  "intent": "design",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Is it a good idea to use GraphQL for our public API? Our clients are mostly mobile apps."
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "api style decision"
+ },
+ {
+  "id": "des-14",
+  "group": "design",
+  "lang": "en",
+  "intent": "design",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 1024,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "What is the approach for idempotent payment webhooks?"
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "short design question"
+ },
+ {
+  "id": "des-15",
+  "group": "design",
+  "lang": "en",
+  "intent": "design",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Design a rate limiting strategy for a public API with free and paid tiers, burst allowances and per-endpoint costs."
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "rate limit design"
+ },
+ {
+  "id": "des-16",
+  "group": "design",
+  "lang": "en",
+  "intent": "design",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 1024,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "Sketch a schema and an indexing strategy for a time-series metrics store with 90 days of retention and per-label queries."
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "time series schema"
+ }
+]

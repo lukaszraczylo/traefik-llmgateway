@@ -1,0 +1,528 @@
+[
+ {
+  "id": "edit-01",
+  "group": "edit",
+  "lang": "en",
+  "intent": "edit",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Refactor this Go method to avoid holding the read lock while checking expiry:\n\n```go\nfunc (c *Cache) Get(key string) (string, bool) {\n\tc.mu.RLock()\n\tdefer c.mu.RUnlock()\n\tv, ok := c.items[key]\n\tif !ok || time.Now().After(v.expires) {\n\t\treturn \"\", false\n\t}\n\treturn v.val, true\n}\n```"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "refactor a fenced snippet"
+ },
+ {
+  "id": "edit-02",
+  "group": "edit",
+  "lang": "en",
+  "intent": "edit",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 1024,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "Implement a function that returns the nth Fibonacci number iteratively in Python."
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "small self-contained function"
+ },
+ {
+  "id": "edit-03",
+  "group": "edit",
+  "lang": "en",
+  "intent": "edit",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Rename the variable cleaned to digits in this code:\n\n```python\ndef parse_price(raw):\n    cleaned = raw.replace('$', '').replace(',', '')\n    if not cleaned:\n        return None\n    return round(float(cleaned) * 100)\n\ndef total(items):\n    return sum(parse_price(i['price']) for i in items)\n```"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "trivial rename in a snippet"
+ },
+ {
+  "id": "edit-04",
+  "group": "edit",
+  "lang": "en",
+  "intent": "edit",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 1024,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "Write a TypeScript function that debounces another function with a configurable delay, and add unit tests."
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "write plus tests"
+ },
+ {
+  "id": "edit-05",
+  "group": "edit",
+  "lang": "en",
+  "intent": "edit",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Add retries with exponential backoff to this fetch helper:\n\n```ts\nexport async function fetchUser(id: string): Promise<User> {\n  const res = await fetch(`/api/users/${id}`);\n  if (!res.ok) {\n    throw new Error('failed');\n  }\n  return (await res.json()) as User;\n}\n```"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "add retry logic to a snippet"
+ },
+ {
+  "id": "edit-06",
+  "group": "edit",
+  "lang": "en",
+  "intent": "edit",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 1024,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "Create a Dockerfile for a Go service that builds statically and runs as a non-root user."
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "write a Dockerfile"
+ },
+ {
+  "id": "edit-07",
+  "group": "edit",
+  "lang": "en",
+  "intent": "edit",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Change this query to also return the order status and paginate with a cursor:\n\n```sql\nSELECT o.id, o.total, c.email\nFROM orders o\nJOIN customers c ON c.id = o.customer_id\nWHERE o.created_at > now() - interval '7 days'\nORDER BY o.total DESC;\n```"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "modify a SQL query"
+ },
+ {
+  "id": "edit-08",
+  "group": "edit",
+  "lang": "en",
+  "intent": "edit",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 1024,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "Implement an LRU cache in Go with generics and a configurable capacity. Include benchmarks."
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "implement a data structure"
+ },
+ {
+  "id": "edit-09",
+  "group": "edit",
+  "lang": "en",
+  "intent": "edit",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Refactor the following into smaller functions and keep behavior identical.\n\ndef parse_price(raw):\n    cleaned = raw.replace('$', '').replace(',', '')\n    if not cleaned:\n        return None\n    return round(float(cleaned) * 100)\n\ndef total(items):\n    return sum(parse_price(i['price']) for i in items)"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "refactor an unfenced snippet"
+ },
+ {
+  "id": "edit-10",
+  "group": "edit",
+  "lang": "en",
+  "intent": "edit",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 1024,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "Write a bash script that rotates logs older than 7 days and compresses them."
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "small script"
+ },
+ {
+  "id": "edit-11",
+  "group": "edit",
+  "lang": "en",
+  "intent": "edit",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Add input validation to this handler and return 400 with a JSON error body.\n\n```go\nfunc handle(w http.ResponseWriter, r *http.Request) {\n\tvar in Input\n\tjson.NewDecoder(r.Body).Decode(&in)\n\tsave(in)\n\tw.WriteHeader(201)\n}\n```"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "harden a handler"
+ },
+ {
+  "id": "edit-12",
+  "group": "edit",
+  "lang": "en",
+  "intent": "edit",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 1024,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "write a regex that matches ISO 8601 dates with optional time zone"
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "small regex"
+ },
+ {
+  "id": "edit-13",
+  "group": "edit",
+  "lang": "en",
+  "intent": "edit",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Implement a rate limiter middleware using a token bucket for this Express app and wire it into the router."
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "feature implementation"
+ },
+ {
+  "id": "edit-14",
+  "group": "edit",
+  "lang": "en",
+  "intent": "edit",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 1024,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "Convert this class component to a React function component with hooks.\n\n```jsx\nclass Counter extends React.Component {\n  state = { n: 0 };\n  inc = () => this.setState({ n: this.state.n + 1 });\n  render() { return <button onClick={this.inc}>{this.state.n}</button>; }\n}\n```"
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "mechanical conversion"
+ },
+ {
+  "id": "edit-15",
+  "group": "edit",
+  "lang": "en",
+  "intent": "edit",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Create a Terraform module for an S3 bucket with versioning, encryption, and a lifecycle rule."
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "infra module"
+ },
+ {
+  "id": "edit-16",
+  "group": "edit",
+  "lang": "en",
+  "intent": "edit",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 1024,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "Refactor the payment service to use the strategy pattern for the three payment providers and update the tests accordingly."
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "multi-file refactor described in prose"
+ },
+ {
+  "id": "edit-17",
+  "group": "edit",
+  "lang": "en",
+  "intent": "edit",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Add a docstring to this function:\n\n```python\ndef add(a, b):\n    return a + b\n```"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "trivial docstring"
+ },
+ {
+  "id": "edit-18",
+  "group": "edit",
+  "lang": "en",
+  "intent": "edit",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 1024,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "Implement pagination for the /orders endpoint, then write migration SQL to add the index it needs."
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "endpoint plus migration"
+ },
+ {
+  "id": "edit-19",
+  "group": "edit",
+  "lang": "en",
+  "intent": "edit",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Change the default timeout from 30 seconds to 10 seconds in this config loader and update its tests."
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "small config change"
+ },
+ {
+  "id": "edit-20",
+  "group": "edit",
+  "lang": "en",
+  "intent": "edit",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 1024,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "Write a unit test for this function using table-driven style.\n\n```go\nfunc (c *Cache) Get(key string) (string, bool) {\n\tc.mu.RLock()\n\tdefer c.mu.RUnlock()\n\tv, ok := c.items[key]\n\tif !ok || time.Now().After(v.expires) {\n\t\treturn \"\", false\n\t}\n\treturn v.val, true\n}\n```"
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "write a test for a snippet"
+ },
+ {
+  "id": "edit-21",
+  "group": "edit",
+  "lang": "en",
+  "intent": "edit",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Implement a concurrent web crawler in Go with a bounded worker pool, politeness delay per host and context cancellation."
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "concurrent implementation"
+ },
+ {
+  "id": "edit-22",
+  "group": "edit",
+  "lang": "en",
+  "intent": "edit",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 1024,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "Rename the package from utils to helpers and fix all the imports."
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "mechanical rename"
+ },
+ {
+  "id": "edit-23",
+  "group": "edit",
+  "lang": "en",
+  "intent": "edit",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Refactor this 400-line function into a state machine. Here is the first part:\n\n```c\nswitch (state) {\ncase 0: if (c == '{') state = 1; break;\ncase 1: if (c == '}') state = 0; break;\n}\nswitch (state) {\ncase 0: if (c == '{') state = 1; break;\ncase 1: if (c == '}') state = 0; break;\n}\nswitch (state) {\ncase 0: if (c == '{') state = 1; break;\ncase 1: if (c == '}') state = 0; break;\n}\nswitch (state) {\ncase 0: if (c == '{') state = 1; break;\ncase 1: if (c == '}') state = 0; break;\n}\nswitch (state) {\ncase 0: if (c == '{') state = 1; break;\ncase 1: if (c == '}') state = 0; break;\n}\nswitch (state) {\ncase 0: if (c == '{') state = 1; break;\ncase 1: if (c == '}') state = 0; break;\n}\n```"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "state machine refactor"
+ }
+]

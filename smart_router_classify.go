@@ -337,6 +337,8 @@ func extractSmartRequest(req map[string]any, endpoint string) smartExtract {
 // typed parts) into its text, counting image parts and reporting whether any
 // part is a tool call or tool result.
 func smartContentText(content any) (text string, images int, toolParts bool) {
+	// yaegi v0.16.1 keeps named results from the previous call, so reset them.
+	images, toolParts = 0, false
 	switch c := content.(type) {
 	case string:
 		return c, 0, false
@@ -378,6 +380,7 @@ func smartPromptSize(req map[string]any, endpoint string) (chars, images int) {
 // returns the text and tool-argument length and the image-part count. Images
 // inside tool_result content are included.
 func smartMessagesSize(req map[string]any, endpoint string) (chars, images int) {
+	chars, images = 0, 0
 	if endpoint == cacheEndpointMessages {
 		c, i := smartContentSize(req["system"], 0)
 		chars, images = chars+c, images+i
@@ -397,6 +400,7 @@ func smartMessagesSize(req map[string]any, endpoint string) (chars, images int) 
 // smartContentSize measures a content value; nested tool_result content is
 // followed one level deep.
 func smartContentSize(content any, depth int) (chars, images int) {
+	chars, images = 0, 0
 	switch c := content.(type) {
 	case string:
 		return len(c), 0

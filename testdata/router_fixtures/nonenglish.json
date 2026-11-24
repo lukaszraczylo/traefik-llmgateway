@@ -1,0 +1,324 @@
+[
+ {
+  "id": "ne-01",
+  "group": "nonenglish",
+  "lang": "pl",
+  "intent": "nonenglish",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Cześć! Jak się masz dzisiaj?"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "polish greeting"
+ },
+ {
+  "id": "ne-02",
+  "group": "nonenglish",
+  "lang": "pl",
+  "intent": "nonenglish",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 1024,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "Zaprojektuj architekturę systemu płatności, który obsłuży 10 tysięcy transakcji na sekundę i będzie odporny na awarie jednego regionu."
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "polish architecture design"
+ },
+ {
+  "id": "ne-03",
+  "group": "nonenglish",
+  "lang": "de",
+  "intent": "nonenglish",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Warum stürzt mein Programm ab? Ich bekomme immer wieder einen Segmentation Fault, wenn ich die Liste sortiere."
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "german crash question"
+ },
+ {
+  "id": "ne-04",
+  "group": "nonenglish",
+  "lang": "de",
+  "intent": "nonenglish",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 1024,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "Schreibe eine Funktion in Python, die prüft, ob ein String ein Palindrom ist, und füge Tests hinzu."
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "german code request"
+ },
+ {
+  "id": "ne-05",
+  "group": "nonenglish",
+  "lang": "zh",
+  "intent": "nonenglish",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "请证明根号2是无理数。"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "chinese short proof"
+ },
+ {
+  "id": "ne-06",
+  "group": "nonenglish",
+  "lang": "zh",
+  "intent": "nonenglish",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 1024,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "我的服务在高并发下偶尔出现死锁，请帮我分析可能的原因并给出排查步骤。"
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "chinese concurrency debugging"
+ },
+ {
+  "id": "ne-07",
+  "group": "nonenglish",
+  "lang": "ja",
+  "intent": "nonenglish",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "このPythonコードをリファクタリングして、関数を小さく分割してください。テストも追加してください。"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "japanese refactor"
+ },
+ {
+  "id": "ne-08",
+  "group": "nonenglish",
+  "lang": "ja",
+  "intent": "nonenglish",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 1024,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "今日の天気はどうですか？"
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "japanese small talk"
+ },
+ {
+  "id": "ne-09",
+  "group": "nonenglish",
+  "lang": "ru",
+  "intent": "nonenglish",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Объясни, чем отличается оптимистичная блокировка от пессимистичной, и когда лучше выбирать каждую в системе с высокой конкуренцией."
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "russian design question"
+ },
+ {
+  "id": "ne-10",
+  "group": "nonenglish",
+  "lang": "ru",
+  "intent": "nonenglish",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 1024,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "Доказать, что для любого натурального n сумма первых n нечётных чисел равна n^2."
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "russian proof"
+ },
+ {
+  "id": "ne-11",
+  "group": "nonenglish",
+  "lang": "ar",
+  "intent": "nonenglish",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "ما هي عاصمة مصر؟"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "arabic trivia"
+ },
+ {
+  "id": "ne-12",
+  "group": "nonenglish",
+  "lang": "ar",
+  "intent": "nonenglish",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 1024,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "اشرح لي كيف أصمم قاعدة بيانات لنظام حجز فنادق يدعم ملايين الحجوزات ويتجنب الحجز المزدوج."
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "arabic schema design"
+ },
+ {
+  "id": "ne-13",
+  "group": "nonenglish",
+  "lang": "zh",
+  "intent": "nonenglish",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "把下面这段话翻译成英文：今天下午的会议改到明天上午十点。"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "chinese translation"
+ },
+ {
+  "id": "ne-14",
+  "group": "nonenglish",
+  "lang": "pl",
+  "intent": "nonenglish",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 1024,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "Poniższy test pada losowo, raz na dziesięć uruchomień:\n\n--- FAIL: TestWorker (0.31s)\n    worker_test.go:58: expected 3 results, got 2\nFAIL\nexit status 1\n\nCo może być przyczyną?"
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "polish flaky test with a log"
+ }
+]

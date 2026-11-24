@@ -1,0 +1,278 @@
+[
+ {
+  "id": "math-01",
+  "group": "math",
+  "lang": "en",
+  "intent": "math",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Prove that the square root of 2 is irrational."
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "classic short proof, mid tier can do it"
+ },
+ {
+  "id": "math-02",
+  "group": "math",
+  "lang": "en",
+  "intent": "math",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 1024,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "Prove that for all n >= 1, the sum of the first n odd numbers equals n^2, using induction."
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "induction proof"
+ },
+ {
+  "id": "math-03",
+  "group": "math",
+  "lang": "en",
+  "intent": "math",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Derive the closed form of the sum $\\sum_{k=1}^{n} k^2$ and prove it by induction."
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 2,
+  "maxTier": 2,
+  "notes": "derivation plus proof with notation"
+ },
+ {
+  "id": "math-04",
+  "group": "math",
+  "lang": "en",
+  "intent": "math",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 1024,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "State and prove the pigeonhole principle, then use it to show that among any 5 integers two have a difference divisible by 4."
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 2,
+  "maxTier": 2,
+  "notes": "two-step proof"
+ },
+ {
+  "id": "math-05",
+  "group": "math",
+  "lang": "en",
+  "intent": "math",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Show that the halting problem is undecidable. Give the full diagonalization argument."
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 2,
+  "maxTier": 2,
+  "notes": "formal argument"
+ },
+ {
+  "id": "math-06",
+  "group": "math",
+  "lang": "en",
+  "intent": "math",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 1024,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "What is the complexity of merge sort and why? Prove the O(n log n) bound with the recurrence."
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 2,
+  "maxTier": 2,
+  "notes": "recurrence proof"
+ },
+ {
+  "id": "math-07",
+  "group": "math",
+  "lang": "en",
+  "intent": "math",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Let $f(x) = x^3 - 3x$. Find all critical points and classify them; then show f is not injective on $\\mathbb{R}$."
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "calculus exercise with notation"
+ },
+ {
+  "id": "math-08",
+  "group": "math",
+  "lang": "en",
+  "intent": "math",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 1024,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "Prove the lemma: if a graph has n vertices and more than n-1 edges, it contains a cycle."
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 2,
+  "maxTier": 2,
+  "notes": "graph lemma"
+ },
+ {
+  "id": "math-09",
+  "group": "math",
+  "lang": "en",
+  "intent": "math",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Derive the invariant that makes binary search correct, then prove the loop terminates."
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 2,
+  "maxTier": 2,
+  "notes": "loop invariant proof"
+ },
+ {
+  "id": "math-10",
+  "group": "math",
+  "lang": "en",
+  "intent": "math",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 1024,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "∀ε>0 ∃δ>0 such that |x-a|<δ ⟹ |f(x)-f(a)|<ε. Use this to prove that the sum of two continuous functions is continuous."
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 2,
+  "maxTier": 2,
+  "notes": "epsilon-delta proof"
+ },
+ {
+  "id": "math-11",
+  "group": "math",
+  "lang": "en",
+  "intent": "math",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "what is 17 * 23?"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "plain arithmetic, no proof"
+ },
+ {
+  "id": "math-12",
+  "group": "math",
+  "lang": "en",
+  "intent": "math",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 1024,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "Compute the expected number of coin flips until two consecutive heads appear, and derive the recurrence you use."
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 2,
+  "maxTier": 2,
+  "notes": "probability derivation"
+ }
+]

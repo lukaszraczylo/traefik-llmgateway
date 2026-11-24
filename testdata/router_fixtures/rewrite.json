@@ -1,0 +1,306 @@
+[
+ {
+  "id": "rw-01",
+  "group": "rewrite",
+  "lang": "en",
+  "intent": "rewrite",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Summarize this article in three bullet points:\n\nThe city council met on Tuesday to discuss the proposed transit levy. Supporters argued that the new bus lines would cut commute times, while opponents said the funding formula placed too much weight on property owners. After three hours of public comment the council voted five to four to send the measure to voters in the spring. Several members said they expected a close result. The city council met on Tuesday to discuss the proposed transit levy. Supporters argued that the new bus lines would cut commute times, while opponents said the funding formula placed too much weight on property owners. After three hours of public comment the council voted five to four to send the measure to voters in the spring. Several members said they expected a close result. The city council met on Tuesday to discuss the proposed transit levy. Supporters argued that the new bus lines would cut commute times, while opponents said the funding formula placed too much weight on property owners. After three hours of public comment the council voted five to four to send the measure to voters in the spring. Several members said they expected a close result. The city council met on Tuesday to discuss the proposed transit levy. Supporters argued that the new bus lines would cut commute times, while opponents said the funding formula placed too much weight on property owners. After three hours of public comment the council voted five to four to send the measure to voters in the spring. Several members said they expected a close result. The city council met on Tuesday to discuss the proposed transit levy. Supporters argued that the new bus lines would cut commute times, while opponents said the funding formula placed too much weight on property owners. After three hours of public comment the council voted five to four to send the measure to voters in the spring. Several members said they expected a close result. The city council met on Tuesday to discuss the proposed transit levy. Supporters argued that the new bus lines would cut commute times, while opponents said the funding formula placed too much weight on property owners. After three hours of public comment the council voted five to four to send the measure to voters in the spring. Several members said they expected a close result. "
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "summary of a plain-text paste"
+ },
+ {
+  "id": "rw-02",
+  "group": "rewrite",
+  "lang": "en",
+  "intent": "rewrite",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Rewrite this paragraph to sound more formal: hey team, the deploy slipped to friday because the vendor was late, sorry about that."
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "short tone rewrite"
+ },
+ {
+  "id": "rw-03",
+  "group": "rewrite",
+  "lang": "en",
+  "intent": "rewrite",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 1024,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "Translate to Spanish: The meeting has been moved to Thursday at noon."
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "short translation"
+ },
+ {
+  "id": "rw-04",
+  "group": "rewrite",
+  "lang": "en",
+  "intent": "rewrite",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Proofread the following and fix typos: Their going to the libary tomorow to returne the books."
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "short proofread"
+ },
+ {
+  "id": "rw-05",
+  "group": "rewrite",
+  "lang": "en",
+  "intent": "rewrite",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Shorten this to one sentence:\n\nThe city council met on Tuesday to discuss the proposed transit levy. Supporters argued that the new bus lines would cut commute times, while opponents said the funding formula placed too much weight on property owners. After three hours of public comment the council voted five to four to send the measure to voters in the spring. Several members said they expected a close result. The city council met on Tuesday to discuss the proposed transit levy. Supporters argued that the new bus lines would cut commute times, while opponents said the funding formula placed too much weight on property owner"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "shorten a paste"
+ },
+ {
+  "id": "rw-06",
+  "group": "rewrite",
+  "lang": "en",
+  "intent": "rewrite",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 1024,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "tl;dr of the text below please\n\nThe city council met on Tuesday to discuss the proposed transit levy. Supporters argued that the new bus lines would cut commute times, while opponents said the funding formula placed too much weight on property owners. After three hours of public comment the council voted five to four to send the measure to voters in the spring. Several members said they expected a close result. The city council met on Tuesday to discuss the proposed transit levy. Supporters argued that the new bus lines would cut commute times, while opponents said the funding formula placed too much weight on property owners. After three hours of public comment the council voted five to four to send the measure to voters in the spring. Several members said they expected a close result. The city council met on Tuesday to discuss the proposed transit levy. Supporters argued that the new bus lines would cut commute times, while opponents said the funding formula placed too much weight on property owners. After three hours of public comment the council voted five to four to send the measure to voters in the spring. Several members said they expected a close result. The city council met on Tuesday to discuss the proposed transit levy. Supporters argued that the new bus lines would cut commute times, while opponents said the funding formula placed too much weight on property owners. After three hours of public comment the council voted five to four to send the measure to voters in the spring. Several members said they expected a close result. The city council met on Tuesday to discuss the proposed transit levy. Supporters argued that the new bus lines would cut commute times, while opponents said the funding formula placed too much weight on property owners. After three hours of public comment the council voted five to four to send the measure to voters in the spring. Several members said they expected a close result. The city council met on Tuesday to discuss the proposed transit levy. Supporters argued that the new bus lines would cut commute times, while opponents said the funding formula placed too much weight on property owners. After three hours of public comment the council voted five to four to send the measure to voters in the spring. Several members said they expected a close result. "
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "tl;dr of a paste"
+ },
+ {
+  "id": "rw-07",
+  "group": "rewrite",
+  "lang": "en",
+  "intent": "rewrite",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Rephrase this error message so a non-technical user understands it: 'Connection refused: upstream unavailable'"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "rewrite of a short message"
+ },
+ {
+  "id": "rw-08",
+  "group": "rewrite",
+  "lang": "en",
+  "intent": "rewrite",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Summarize the following meeting notes into action items.\n\nAlice: we need to finish the budget draft by Friday.\nBob: I will contact the vendor about the late shipment.\nCarol: the Q3 slides still need review."
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "short notes summary"
+ },
+ {
+  "id": "rw-09",
+  "group": "rewrite",
+  "lang": "en",
+  "intent": "rewrite",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 1024,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "Can you rewrite my cover letter intro to be more concise? 'I am writing to express my sincere interest in the position of Senior Analyst at your esteemed company, which I have admired for many years.'"
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "short rewrite"
+ },
+ {
+  "id": "rw-10",
+  "group": "rewrite",
+  "lang": "en",
+  "intent": "rewrite",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Translate this paragraph into German and keep the tone friendly:\n\nThe city council met on Tuesday to discuss the proposed transit levy. Supporters argued that the new bus lines would cut commute times, while opponents said the funding formula placed too much weight on property owners. After three hours of public comment the council voted five to four to send the measure to voters in the spring. Several members said they expected a close result. The city council met on Tuesday to discuss the proposed transit levy. Supporters argued that the new bus lines would "
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "translation of a paste"
+ },
+ {
+  "id": "rw-11",
+  "group": "rewrite",
+  "lang": "en",
+  "intent": "rewrite",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Summarize the key points of this changelog for release notes:\n\n- Fixed crash on startup when config is empty\n- Added dark mode\n- Improved search latency by 30%\n- Removed deprecated v1 API"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "summarize a short list"
+ },
+ {
+  "id": "rw-12",
+  "group": "rewrite",
+  "lang": "en",
+  "intent": "rewrite",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 1024,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "Paraphrase the following sentence three different ways: The quick brown fox jumps over the lazy dog."
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "paraphrase a sentence"
+ },
+ {
+  "id": "rw-13",
+  "group": "rewrite",
+  "lang": "en",
+  "intent": "rewrite",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "summarise this email thread for my manager, keep it under 100 words:\n\nThe city council met on Tuesday to discuss the proposed transit levy. Supporters argued that the new bus lines would cut commute times, while opponents said the funding formula placed too much weight on property owners. After three hours of public comment the council voted five to four to send the measure to voters in the spring. Several members said they expected a close result. The city council met on Tuesday to discuss the proposed transit levy. Supporters argued that the new bus lines would cut commute times, while opponents said the funding formula placed too much weight on property owners. After three hours of public comment the council voted five to four to send the measure to voters in the spring. Several members said they expected a close result. The city council met on Tuesday to discuss the proposed transit levy. Supporters argued that the new bus lines would cut commute times"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "summarise a paste"
+ },
+ {
+  "id": "rw-14",
+  "group": "rewrite",
+  "lang": "en",
+  "intent": "rewrite",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Proofread and shorten this product description: Our amazing blender is the very best blender that you can possibly buy for the money, it blends everything."
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "short proofread and shorten"
+ }
+]
