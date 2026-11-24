@@ -18,6 +18,7 @@ var (
 		"distributed transaction", "snapshot isolation",
 		"authz bypass", "authn bypass", "auth bypass", "authorization bypass", "authentication bypass",
 		"jwt|", "ssrf|", "csrf|", "xss|", "privilege escalation", "exploitable", "vulnerab",
+		"threat model", "fencing token", "leader election",
 		"lock-free", "lockfree", "wait-free", "zero-downtime", "zero downtime", "online migration",
 		// Native-script terms: zh, ru, ar, ja, hi.
 		"幂等", "冪等", "一致性", "分布式", "分散", "死锁", "证明", "証明", "并发", "並行", "漏洞",
@@ -32,6 +33,8 @@ var (
 		"o(n", "big-o", "big o|", "complexity", "optimal",
 		"billion", "million rows", "window function", "partition", "p99", "latency", "pagination", "sessioniz", "oom|", "ooms|",
 		"replica", "cache invalidation", "load balancer", "migration", "backfill",
+		"lease|", "fencing", "zookeeper", "etcd|", "clock skew", "gc pause",
+		"versioning", "version a public", "backward compat", "breaking change",
 		"consisten", "transacci", "transaç", "transaktion",
 	}
 	// smartEasyMarkers name a trivial extraction or a one-line answer; a scary paste next to them does not make the ask hard.
@@ -56,6 +59,12 @@ var (
 	}
 	// smartRewriteVetoes turn a transform ask into a judgement ask.
 	smartRewriteVetoes = []string{"recommend", "should we", "which is better", "good idea", "root cause"}
+	// smartTerseDebugCues are short-hand failure reports a debug marker list misses; they match at a word start.
+	smartTerseDebugCues = []string{"flagging", "is red", "build red", "hang|", "hangs|", "hung|", "stuck", "flaky", "sort it out", "find out why"}
+	// smartReviewSubjects make "review" a security review when they appear beside it.
+	smartReviewSubjects = []string{"auth|", "authn|", "authz|", "authentication", "authorization", "security", "permission", "injection", "access control"}
+	// smartFormConstraints name a form the translation or rewrite must keep, which a plain transform ask does not carry.
+	smartFormConstraints = []string{"rhyme", "rhyming", "meter|", "metre|", "iambic", "keep the tone", "keeping the tone", "keep the voice", "syllable"}
 	// smartFidelityMarkers name text whose meaning must survive a rewrite exactly.
 	smartFidelityMarkers = []string{"legal", "clause", "contract", "obligation", "liability", "medical", "dosage", "compliance", "statute"}
 	// smartNativeDebugTokens keep a short non-English question about a failure from reading as chit-chat.
@@ -103,6 +112,24 @@ func hasSmartTerm(text, term string) bool {
 		from = at + 1
 	}
 	return false
+}
+
+// hasAnySmartTerm reports whether any of terms occurs in text at a word start.
+func hasAnySmartTerm(text string, terms []string) bool {
+	for i := 0; i < len(terms); i++ {
+		if hasSmartTerm(text, terms[i]) {
+			return true
+		}
+	}
+	return false
+}
+
+// isSmartFailureAsk reports a terse failure report or a security review of the change.
+func isSmartFailureAsk(lower string) bool {
+	if hasAnySmartTerm(lower, smartTerseDebugCues) {
+		return true
+	}
+	return hasSmartTerm(lower, "review") && hasAnySmartTerm(lower, smartReviewSubjects)
 }
 
 func countSmartTerms(text string, terms []string) int {

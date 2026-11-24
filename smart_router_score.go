@@ -182,6 +182,10 @@ func smartHardFloor(rt *smartRouter, f *smartFeatures, score int) int {
 	if f.outTokens >= smartHardOutTokens && f.intent == smartIntentEdit {
 		floor = rt.intentBase[smartIntentDesign]
 	}
+	// A failing tool result is a debug signal whatever the terse ask says.
+	if f.toolFail && f.found && floor < rt.intentBase[smartIntentEdit] {
+		floor = rt.intentBase[smartIntentEdit]
+	}
 	if floor > score {
 		return floor
 	}

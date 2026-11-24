@@ -143,3 +143,79 @@ func TestShortForeignQuestionIsChat(t *testing.T) {
 	assert.True(t, greeting("thanks a lot"))
 	assert.False(t, greeting("and the leader?"))
 }
+
+// toolRun builds a chat tool loop whose tool results come in the given order, oldest first.
+func toolRun(ask string, outs ...string) map[string]any {
+	msgs := []any{msg("user", ask)}
+	for _, out := range outs {
+		msgs = append(msgs,
+			map[string]any{"role": "assistant", "tool_calls": []any{map[string]any{"id": "c", "type": "function"}}},
+			map[string]any{"role": "tool", "tool_call_id": "c", "content": out})
+	}
+	req := chatMsgs(msgs...)
+	req["tools"] = []any{map[string]any{"type": "function"}}
+	return req
+}
+
+func TestRecentToolFailureIsADebugSignal(t *testing.T) {
+	t.Parallel()
+	fails := []string{
+		"WARNING: DATA RACE\nWrite at 0x00c0001 by goroutine 9", "--- FAIL: TestPool (0.01s)", "FAIL\texample.com/pool\t0.1s", "./a.go:3:2: undefined: Foo",
+		"cannot use x (variable of type int) as string value", "src/repo.ts(22,30): error TS2322: bad", "context deadline exceeded",
+		"goroutine 5 [chan receive, 10 minutes]:", "goroutine 7 [semacquire]:", "AssertionError: 1 != 2", "test timed out after 10m0s",
+	}
+	for _, l := range evalLayouts {
+		rt := evalRouter(t, l.mins, smartClassifierV2)
+		for _, out := range fails {
+			// The failure sits two results back; the newest result passes.
+			c := classifySmart(rt, toolRun("ok go", out, "read ok", "read ok"), cacheEndpointChat)
+			assert.GreaterOrEqual(t, c.rank, 1, "%q on %s", out, l.name)
+			assert.Less(t, c.rank, 2, "%q on %s", out, l.name)
+		}
+		c := classifySmart(rt, toolRun("ok go", "ok", "read ok", "read ok"), cacheEndpointChat)
+		assert.Zero(t, c.rank, "passing output stays routine on %s", l.name)
+		c = classifySmart(rt, toolRun("ok go", fails[0], "read ok", "read ok", "read ok"), cacheEndpointChat)
+		assert.Zero(t, c.rank, "a failure older than the newest three results is ignored on %s", l.name)
+	}
+	f := extractSmartV2(toolRun("ok go", fails[1], "read ok"), cacheEndpointChat)
+	assert.True(t, f.toolFail)
+	assert.False(t, f.toolErr, "toolErr still reads only the newest result")
+	assert.False(t, f.routineToolStep())
+}
+
+func TestTerseFailureAndReviewCues(t *testing.T) {
+	t.Parallel()
+	for _, ask := range []string{"go test -race keeps flagging this", "build is red after the generics change", "integration tests hang on ci",
+		"the job is stuck again", "this test is flaky", "can you sort it out", "find out why", "review this PR for auth issues", "review the security of the login"} {
+		assert.True(t, isSmartFailureAsk(ask), ask)
+	}
+	for _, ask := range []string{"change the color", "review this poem", "the author wrote a book", "the red house", "review the pricing page"} {
+		assert.False(t, isSmartFailureAsk(ask), ask)
+	}
+}
+
+func TestDesignDepthTermsRaiseTheTier(t *testing.T) {
+	t.Parallel()
+	rt := evalRouter(t, evalLayouts[0].mins, smartClassifierV2)
+	for ask, want := range map[string]int{
+		"threat model the device flow for our cli":           2,
+		"leader election for a job scheduler with postgres":  2,
+		"how to version a public REST api for 300 customers": 1,
+	} {
+		c := classifySmart(rt, chatMsgs(msg("user", ask)), cacheEndpointChat)
+		assert.GreaterOrEqual(t, c.rank, want, ask)
+	}
+	c := classifySmart(rt, chatMsgs(msg("user", "what is a lease agreement")), cacheEndpointChat)
+	assert.LessOrEqual(t, c.rank, 1, "one weak term raises at most to the middle tier")
+}
+
+func TestRewriteWithFormConstraintNeedsMiddleTier(t *testing.T) {
+	t.Parallel()
+	for _, l := range evalLayouts {
+		rt := evalRouter(t, l.mins, smartClassifierV2)
+		c := classifySmart(rt, chatMsgs(msg("user", "translate this poem to spanish keeping the rhyme and meter:\n\nThe evening settles soft and slow,\nthe river hums a quiet tune.")), cacheEndpointChat)
+		assert.GreaterOrEqual(t, c.rank, 1, l.name)
+		c = classifySmart(rt, chatMsgs(msg("user", "translate this to spanish: the parameter list is empty")), cacheEndpointChat)
+		assert.Zero(t, c.rank, "parameter is not meter on %s", l.name)
+	}
+}

@@ -188,13 +188,13 @@ func TestClassifyV2FloorsAndKeywords(t *testing.T) {
 	t.Parallel()
 	rt := v2Router(t, []int{0, 150, 350}, func(c *SmartRouterConfig) {
 		c.ToolsMinTier = "t1"
-		c.KeywordRules = []SmartRouterKeywordRule{{Tier: "t2", Keywords: []string{"security review"}}}
+		c.KeywordRules = []SmartRouterKeywordRule{{Tier: "t2", Keywords: []string{"compliance audit"}}}
 	})
 	c := classifySmart(rt, chatMsgs(msg("user", "hello")), cacheEndpointChat)
 	assert.Equal(t, 0, c.rank)
 	assert.Equal(t, smartReasonScore, c.reason)
 
-	c = classifySmart(rt, chatMsgs(msg("user", "hello there, please start the security review")), cacheEndpointChat)
+	c = classifySmart(rt, chatMsgs(msg("user", "hello there, please start the compliance audit")), cacheEndpointChat)
 	assert.Equal(t, 2, c.rank)
 	assert.Equal(t, smartReasonKeyword, c.reason)
 

@@ -189,6 +189,22 @@ func routerFeatureCheck() string {
 	if smartHead("abcdef", 3) != "abc" || smartHead("ab", 3) != "ab" || smartHead("abcdef", 2) != "ab" {
 		return "smartHead changed between calls"
 	}
+	if !hasAnySmartTerm("the build hangs", smartTerseDebugCues) || hasAnySmartTerm("change it", smartTerseDebugCues) || !hasAnySmartTerm("the build hangs", smartTerseDebugCues) {
+		return "hasAnySmartTerm changed between calls"
+	}
+	if !isSmartFailureAsk("review this for auth issues") || isSmartFailureAsk("review the pricing page") || !isSmartFailureAsk("it is flaky") {
+		return "isSmartFailureAsk changed between calls"
+	}
+	run := func(out string) smartFeatures {
+		return extractSmartV2(map[string]any{"messages": []any{
+			map[string]any{"role": "user", "content": "format the files"},
+			map[string]any{"role": "tool", "content": out},
+			map[string]any{"role": "tool", "content": "ok"},
+		}}, cacheEndpointChat)
+	}
+	if failed, passed := run("--- FAIL: TestX"), run("ok"); !failed.toolFail || passed.toolFail || !run("WARNING: DATA RACE").toolFail {
+		return "noteToolResult kept toolFail from the previous call"
+	}
 	rt := &smartRouter{tiers: []smartTier{{}, {minScore: 300}, {minScore: 600}}}
 	if smartScaled(rt, 100, 0) != 200 || smartScaled(rt, 100, 300) != 150 || smartScaled(rt, 100, 0) != 200 {
 		return "smartScaled changed between calls"

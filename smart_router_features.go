@@ -15,6 +15,8 @@ const (
 	smartPasteShortMean   = 40
 	smartNonLatinPerMille = 200
 	smartToolResultEdge   = 2048
+	// smartToolFailScan is how many of the newest tool results the failure signal reads.
+	smartToolFailScan     = 3
 	smartChitchatMaxBytes = 240
 	smartForeignMinBytes  = 24
 	smartFenceMarker      = "```"
@@ -59,6 +61,11 @@ var (
 	// A strong signature marks a paragraph as a log on its own; a weak one needs the paragraph to look like a paste.
 	smartStrongLogSigs = []string{"Traceback (most recent", "panic:", "\tat ", "npm ERR!", "error[E", "exit status"}
 	smartWeakLogSigs   = []string{"error:", "FAIL", "Exception", "SyntaxError"}
+	// smartToolFailSigs are failure markers of test, build and hang output; they count in tool results only.
+	smartToolFailSigs = []string{
+		"WARNING: DATA RACE", "--- FAIL", "FAIL\t", "undefined:", "cannot use", "error TS", "timed out", "deadline exceeded", "context deadline",
+		"[semacquire", "[chan receive", "AssertionError",
+	}
 	smartPasteChars    = []string{"{", "}", ";", "(", ")", "=", "<", ">", "|", "\t", "    "}
 	smartListMarkers   = []string{"\n1.", "\n2.", "\n- ", "\n* "}
 	smartQuestionMarks = []string{"?", "？", "؟"}
@@ -75,6 +82,7 @@ type smartFeatures struct {
 	logBytes     int
 	msgCount     int
 	questions    int
+	toolSeen     int
 	lists        int
 	promptBytes  int
 	outTokens    int64
@@ -85,10 +93,12 @@ type smartFeatures struct {
 	truncated    bool
 	toolLoopTurn bool
 	toolErr      bool
-	hasTools     bool
-	toolHist     bool
-	hasImage     bool
-	found        bool
+	// toolFail is set when any of the newest tool results shows a failure, not only the last one.
+	toolFail bool
+	hasTools bool
+	toolHist bool
+	hasImage bool
+	found    bool
 	// history is set when the ask follows earlier conversation turns.
 	history    bool
 	mathStruct bool
@@ -166,18 +176,12 @@ func (f *smartFeatures) findAsk(msgs []any) string {
 		switch role {
 		case "tool", "function":
 			f.toolHist = true
-			if newest {
-				f.toolLoopTurn = true
-				f.toolErr = smartToolResultFailed(msg["content"])
-			}
+			f.noteToolResult(msg["content"], newest)
 		case "user":
 			text, _, toolParts := smartContentText(msg["content"])
 			if toolParts {
 				f.toolHist = true
-				if newest {
-					f.toolLoopTurn = true
-					f.toolErr = smartToolResultFailed(msg["content"])
-				}
+				f.noteToolResult(msg["content"], newest)
 			} else if text != "" {
 				f.found = true
 				f.history = i > leadingSystemCount(msgs)
@@ -186,6 +190,24 @@ func (f *smartFeatures) findAsk(msgs []any) string {
 		}
 	}
 	return ""
+}
+
+// noteToolResult records the loop state and, for the newest few results, whether they failed.
+func (f *smartFeatures) noteToolResult(content any, newest bool) {
+	if newest {
+		f.toolLoopTurn = true
+	}
+	if f.toolSeen >= smartToolFailScan {
+		return
+	}
+	f.toolSeen++
+	failed := smartToolResultFailed(content)
+	if newest {
+		f.toolErr = failed
+	}
+	if failed {
+		f.toolFail = true
+	}
 }
 
 func leadingSystemCount(msgs []any) int {
@@ -247,7 +269,7 @@ func smartEdgeHasLog(s string) bool {
 	if len(s) > 2*smartToolResultEdge {
 		s = s[:smartToolResultEdge] + "\n" + s[len(s)-smartToolResultEdge:]
 	}
-	return containsAnySmart(s, smartStrongLogSigs) || containsAnySmart(s, smartWeakLogSigs)
+	return containsAnySmart(s, smartStrongLogSigs) || containsAnySmart(s, smartWeakLogSigs) || containsAnySmart(s, smartToolFailSigs)
 }
 
 // splitAsk separates prose from fenced code and paste paragraphs and records the
@@ -377,7 +399,7 @@ func (f *smartFeatures) classifyIntent() {
 	if containsAnySmart(text, smartEditStrongMarkers) || ((f.codeBytes > 0 || f.hasTools || f.toolHist) && containsAnySmart(text, smartEditWeakMarkers)) {
 		note(smartIntentEdit)
 	}
-	if f.logBytes > 0 || containsAnySmart(text, smartDebugMarkers) {
+	if f.logBytes > 0 || containsAnySmart(text, smartDebugMarkers) || isSmartFailureAsk(text) {
 		note(smartIntentDebug)
 	}
 	if containsAnySmart(text, smartDesignMarkers) {
@@ -394,7 +416,7 @@ func (f *smartFeatures) classifyIntent() {
 	f.scanRewrite()
 	if f.rewrite && best <= smartIntentDesign {
 		best, matched = smartIntentRewrite, 0
-		if containsAnySmart(text, smartFidelityMarkers) {
+		if containsAnySmart(text, smartFidelityMarkers) || hasAnySmartTerm(text, smartFormConstraints) {
 			best = smartIntentEdit
 		} else {
 			f.easy = true
@@ -423,9 +445,9 @@ func (f *smartFeatures) classifyIntent() {
 const smartSpreadPos = 1000
 
 // routineToolStep reports a tool-loop turn that follows a short, plainly worded ask: the newest
-// message is passing tool output, with no error signal and no hard subject. Tools and history
+// message is passing tool output, with no failure in the newest tool results and no hard subject. Tools and history
 // depth alone do not make such a step hard.
 func (f *smartFeatures) routineToolStep() bool {
-	return f.toolLoopTurn && !f.toolErr && f.found && !f.foreign && f.hard == 0 &&
+	return f.toolLoopTurn && !f.toolFail && f.found && !f.foreign && f.hard == 0 &&
 		f.intent <= smartIntentRewrite && len(f.prose) < smartShortProseBytes
 }
