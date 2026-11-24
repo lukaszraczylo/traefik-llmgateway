@@ -242,7 +242,7 @@ func smartHitFraction(hits int) int {
 func smartTierForScore(rt *smartRouter, score int) int {
 	rank := 0
 	for i := 0; i < len(rt.tiers); i++ {
-		if rt.tiers[i].minScore <= score {
+		if rt.tierMin(i) <= score {
 			rank = i
 		}
 	}

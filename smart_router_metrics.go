@@ -190,6 +190,7 @@ func (g *Gateway) recordRouterOutcome(plan *routerPlan, attempt int, served, bad
 		g.routerStats.addOutcome(k)
 	}
 	g.countRouterShared(func(bucket string) string { return routerOutcomeKeyFor(k, bucket) })
+	g.countCalibration(plan, attempt, served, bad)
 	g.onRouterOutcome(plan, attempt, served, bad)
 }
 
@@ -223,6 +224,7 @@ func (g *Gateway) recordRouterEvent(plan *routerPlan, i int, endpoint string, sc
 
 // writeRouterMetrics emits the router counter families; absent until the first observation.
 func (g *Gateway) writeRouterMetrics(m *metricWriter) {
+	g.writeRouterCalibrationMetrics(m)
 	reqs, escs := g.routerStats.snapshot()
 	if len(reqs) > 0 {
 		keys := make([]routerRequestKey, 0, len(reqs))

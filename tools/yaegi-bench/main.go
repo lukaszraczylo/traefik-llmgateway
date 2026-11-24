@@ -139,6 +139,9 @@ func BenchHelperCheck() string {
 		if msg := sessionHelperCheck(); msg != "" {
 			return msg
 		}
+		if msg := learnHelperCheck(); msg != "" {
+			return msg
+		}
 	}
 	return ""
 }
@@ -185,6 +188,27 @@ func sessionHelperCheck() string {
 	}
 	if _, ok := l.get("b"); ok {
 		return "sessionLRU kept ok from the previous call"
+	}
+	return ""
+}
+
+// learnHelperCheck replays the calibration helpers with known answers, twice with different inputs.
+func learnHelperCheck() string {
+	if lo, hi := smartWilsonBounds(5, 10, 1.96); lo < 0.236 || lo > 0.237 || hi < 0.763 || hi > 0.764 {
+		return "smartWilsonBounds changed between calls"
+	}
+	if lo, hi := smartWilsonBounds(0, 0, 1.96); lo != 0 || hi != 1 {
+		return "smartWilsonBounds kept bounds from the previous call"
+	}
+	c := &smartCalibCfg{maxLower: 150, step: 25, targetBadPct: 3, minSamples: 200}
+	if got := smartCalibStep(0, 30, 200, c); got != 25 {
+		return "smartCalibStep missed a step up"
+	}
+	if got := smartCalibStep(40, 0, 5000, c); got != 30 {
+		return "smartCalibStep missed a relax step"
+	}
+	if got := smartCalibStep(10, 0, 100, c); got != 10 {
+		return "smartCalibStep kept a step from the previous call"
 	}
 	return ""
 }

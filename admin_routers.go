@@ -42,6 +42,22 @@ type adminRouterOutcomeView struct {
 	Count   int64  `json:"count"`
 }
 
+// adminRouterDeltaView is one tier's calibration offset: points its threshold sits below the configured minScore.
+type adminRouterDeltaView struct {
+	Tier  string `json:"tier"`
+	Delta int    `json:"delta"`
+}
+
+// adminRouterCalibrationView shows calibration mode and the offsets it computed. In
+// shadow mode the offsets are computed but not applied.
+type adminRouterCalibrationView struct {
+	Mode     string                 `json:"mode"`
+	Delta    []adminRouterDeltaView `json:"delta"`
+	MaxLower int                    `json:"maxLower"`
+	MaxRaise int                    `json:"maxRaise"`
+	Freeze   bool                   `json:"freeze"`
+}
+
 // adminRouterStatsView holds router counters. Scope "shared" sums all gateway
 // instances this month (Redis); "instance" is this process since start.
 type adminRouterStatsView struct {
@@ -57,20 +73,21 @@ type adminRouterStatsView struct {
 // adminRouterView is one smart router's read-only row. Keywords are routing
 // hints, not secrets.
 type adminRouterView struct {
-	Name              string                `json:"name"`
-	DefaultTier       string                `json:"defaultTier"`
-	ToolsMinTier      string                `json:"toolsMinTier,omitempty"`
-	Selection         string                `json:"selection"`
-	Classifier        string                `json:"classifier"`
-	ShadowClassifier  string                `json:"shadowClassifier,omitempty"`
-	Tiers             []adminRouterTierView `json:"tiers"`
-	KeywordRules      []adminRouterRuleView `json:"keywordRules"`
-	ContextTokens     *int                  `json:"contextTokens,omitempty"`
-	Stats             adminRouterStatsView  `json:"stats"`
-	MaxAttempts       int                   `json:"maxAttempts"`
-	RiskZ             int                   `json:"riskZ"`
-	ContextEscalation bool                  `json:"contextEscalation"`
-	ShadowEnabled     bool                  `json:"shadowEnabled"`
+	Name              string                     `json:"name"`
+	DefaultTier       string                     `json:"defaultTier"`
+	ToolsMinTier      string                     `json:"toolsMinTier,omitempty"`
+	Selection         string                     `json:"selection"`
+	Classifier        string                     `json:"classifier"`
+	ShadowClassifier  string                     `json:"shadowClassifier,omitempty"`
+	Tiers             []adminRouterTierView      `json:"tiers"`
+	KeywordRules      []adminRouterRuleView      `json:"keywordRules"`
+	ContextTokens     *int                       `json:"contextTokens,omitempty"`
+	Stats             adminRouterStatsView       `json:"stats"`
+	Calibration       adminRouterCalibrationView `json:"calibration"`
+	MaxAttempts       int                        `json:"maxAttempts"`
+	RiskZ             int                        `json:"riskZ"`
+	ContextEscalation bool                       `json:"contextEscalation"`
+	ShadowEnabled     bool                       `json:"shadowEnabled"`
 }
 
 // buildAdminRouterViews lists every router sorted by name; never nil.
@@ -86,6 +103,7 @@ func (g *Gateway) buildAdminRouterViews() []adminRouterView {
 			ShadowEnabled:     rt.shadowEnabled(),
 			Classifier:        rt.classifier,
 			RiskZ:             rt.riskZ,
+			Calibration:       buildAdminRouterCalibration(rt),
 			Tiers:             make([]adminRouterTierView, len(rt.tiers)),
 			KeywordRules:      make([]adminRouterRuleView, len(rt.rules)),
 		}
@@ -118,6 +136,17 @@ func (g *Gateway) buildAdminRouterViews() []adminRouterView {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out
+}
+
+func buildAdminRouterCalibration(rt *smartRouter) adminRouterCalibrationView {
+	v := adminRouterCalibrationView{Mode: rt.calib.mode, Delta: []adminRouterDeltaView{}, MaxLower: rt.calib.maxLower, MaxRaise: rt.calib.maxRaise, Freeze: rt.calib.freeze}
+	if rt.calibState == nil {
+		return v
+	}
+	for i := 1; i < len(rt.tiers); i++ {
+		v.Delta = append(v.Delta, adminRouterDeltaView{Tier: rt.tiers[i].name, Delta: rt.calibState.get(i)})
+	}
+	return v
 }
 
 // buildAdminRouterStats zero-fills every configured tier and sorts reasons and

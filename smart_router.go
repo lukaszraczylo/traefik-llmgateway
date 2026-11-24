@@ -51,6 +51,8 @@ type SmartRouterConfig struct {
 	// Session keeps an upward-ratcheting tier pin per conversation. It needs classifier v2 to
 	// route live; with only shadowClassifier v2 it changes the shadow rank and never live routing.
 	Session *SmartRouterSessionConfig `json:"session,omitempty"`
+	// Calibration lowers tier thresholds from outcome counters; it is off by default.
+	Calibration *SmartRouterCalibrationConfig `json:"calibration,omitempty"`
 	// DefaultTier serves requests with no user text; empty means the first tier.
 	DefaultTier string `json:"defaultTier,omitempty"`
 	// ToolsMinTier floors requests that carry tools or tool history; empty means no floor.
@@ -95,6 +97,8 @@ type SmartRouterWeights struct {
 // keywords lowercased; it is immutable after construction.
 type smartRouter struct {
 	shadow            *smartWeights
+	calibState        *smartCalibState
+	calib             smartCalibCfg
 	name              string
 	selection         string
 	classifier        string
@@ -325,7 +329,14 @@ func compileSmartRouter(name string, cfg *SmartRouterConfig, routers map[string]
 		return nil, err
 	}
 
+	calib, calibState, err := compileSmartCalibration(name, cfg.Calibration, tiers)
+	if err != nil {
+		return nil, err
+	}
+
 	return &smartRouter{
+		calib:             calib,
+		calibState:        calibState,
 		classifier:        classifier,
 		shadowV2:          shadowV2,
 		riskZ:             riskZ,

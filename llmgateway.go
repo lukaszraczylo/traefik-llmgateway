@@ -832,6 +832,7 @@ type Gateway struct {
 	provenance                    *provenanceStore
 	routerStats                   *routerStats
 	routerSessions                *routerSessions
+	routerLearn                   *routerLearner
 	tokenCalib                    *smartTokenCalibrator
 	name                          string
 	replica                       string
@@ -956,6 +957,7 @@ func New(ctx context.Context, next http.Handler, config *Config, name string) (h
 // finding 1), because nothing in Traefik's own contract gives this
 // plugin a way to do better.
 func (g *Gateway) Close() error {
+	g.closeRouterLearning()
 	if g.redisClient == nil {
 		return nil
 	}
@@ -1053,6 +1055,7 @@ func newGateway(ctx context.Context, next http.Handler, config *Config, name str
 	g.provenance = newProvenanceStore()
 	g.routerStats = newRouterStats()
 	g.tokenCalib = newSmartTokenCalibrator()
+	g.routerLearn = newRouterLearner()
 
 	// A malformed Config.Metrics.AllowedCIDRs entry is a constructor
 	// error (validate-at-construction), not a silently-ignored allowlist
@@ -1249,6 +1252,7 @@ func newGateway(ctx context.Context, next http.Handler, config *Config, name str
 	registry.warmFill(ctx)
 	g.registry = registry
 	g.warnRouterSessions()
+	g.warnRouterLearning()
 
 	// F10 (v0.3 dashboard task): construction is finished — every warnf
 	// call from here on is a runtime warning, not a config warning, and

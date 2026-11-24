@@ -41,6 +41,8 @@ type routerPlan struct {
 	// promptBytes is the size estimate that calibration compares with reported usage.
 	promptBytes int64
 	hasImage    bool
+	// calibrate is true when the router counts this request's outcome for threshold calibration.
+	calibrate bool
 	// maxTokensSet is true when the client capped the output; a length cut is then its own choice.
 	maxTokensSet bool
 }
@@ -94,6 +96,7 @@ func (g *Gateway) planSmartRouter(rt *smartRouter, req map[string]any, endpoint 
 		return nil, &routerTargetError{status: http.StatusBadRequest, message: fmt.Sprintf("smart router %q does not support embeddings; request an embedding model directly", rt.name)}
 	}
 	g.registry.noteRouterShadow(rt.name, grp)
+	g.touchRouterLearning(rt)
 
 	cls, sess := g.classifyWithSession(rt, req, endpoint, hdr, scopes)
 	start, reason, scored, hasImage := cls.rank, cls.reason, cls.scoredText, cls.hasImage
@@ -105,7 +108,7 @@ func (g *Gateway) planSmartRouter(rt *smartRouter, req map[string]any, endpoint 
 		outputTokens: requestedOutputTokens(req, endpoint),
 		costBudget:   !g.cfg.AllowUnpricedWithCostBudget && scopesHaveCostBudget(scopes),
 	}
-	plan := &routerPlan{router: rt.name, reason: reason, startTier: rt.tiers[start].name, promptBytes: promptBytes, hasImage: hasImage, maxTokensSet: facts.outputTokens > 0, sess: sess}
+	plan := &routerPlan{router: rt.name, reason: reason, startTier: rt.tiers[start].name, promptBytes: promptBytes, hasImage: hasImage, maxTokensSet: facts.outputTokens > 0, sess: sess, calibrate: rt.calibState != nil}
 	if cls.shadowRank >= 0 {
 		plan.shadowTier = rt.tiers[cls.shadowRank].name
 	}
