@@ -55,6 +55,10 @@ type Config struct {
 	// (validateModelAliases, registry.go).
 	ModelAliases map[string]string          `json:"modelAliases,omitempty"`
 	Providers    map[string]*ProviderConfig `json:"providers,omitempty"`
+	// SmartRouters defines virtual models that route each request to a real
+	// model by estimated complexity (validateSmartRouters, smart_router.go).
+	// nil/omitted adds no routers and changes no resolution.
+	SmartRouters map[string]*SmartRouterConfig `json:"smartRouters,omitempty"`
 	// ModelMeta declares per-model metadata overrides (feature v0.23):
 	// context window size and per-token cost, keyed by an exact
 	// "provider/model" id or a bare model id (applying wherever that bare

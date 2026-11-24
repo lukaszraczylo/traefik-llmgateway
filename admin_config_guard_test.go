@@ -16,6 +16,7 @@ var nonSecretConfigKeys = map[string]bool{
 	"openDuration": true, "passthroughPaths": true, "path": true, "pathBaseUrls": true,
 	"probeInterval": true, "providers": true, "requestTimeout": true,
 	"ttl": true, "type": true,
+	"defaultTier": true, "keywords": true, "selection": true, "tier": true,
 }
 
 func collectStringKeys(t reflect.Type, seen map[reflect.Type]bool, out map[string]bool) {

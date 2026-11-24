@@ -673,6 +673,9 @@ type modelRegistry struct {
 	// cheap nil-map lookup (always false/zero) that adds no branching
 	// cost to the v0.1 no-aliases case.
 	aliases map[string]string
+	// routers is the compiled Config.SmartRouters, keyed by router name;
+	// nil when none are configured. Never mutated after construction.
+	routers map[string]*smartRouter
 	// modelMeta is the validated Config.ModelMeta config-override map
 	// (feature v0.23), built once by newModelRegistry via
 	// validateModelMeta and never mutated afterward. nil (not merely
@@ -893,11 +896,17 @@ func newModelRegistry(adapters map[string]providerAdapter, cfg *Config, log func
 		}
 	}
 
-	aliases, err := validateModelAliases(cfg.ModelAliases, m.providerNames, explicitModels)
+	aliases, err := validateModelAliases(cfg.ModelAliases, m.providerNames, explicitModels, cfg.SmartRouters)
 	if err != nil {
 		return nil, err
 	}
 	m.aliases = aliases
+
+	routers, err := validateSmartRouters(cfg.SmartRouters, m.providerNames, explicitModels, cfg.ModelAliases)
+	if err != nil {
+		return nil, err
+	}
+	m.routers = routers
 	m.requirePrefix = cfg.RequireModelPrefix
 
 	modelMeta, err := validateModelMeta(cfg.ModelMeta)
@@ -941,7 +950,7 @@ func isValidModelID(id string) bool {
 // raw is iterated in sorted alias-key order, not Go's randomized map
 // order, so a config with more than one invalid alias always reports the
 // same one first, deterministically, across repeated runs.
-func validateModelAliases(raw map[string]string, providerNames []string, explicitModels map[string]bool) (map[string]string, error) {
+func validateModelAliases(raw map[string]string, providerNames []string, explicitModels map[string]bool, routers map[string]*SmartRouterConfig) (map[string]string, error) {
 	if len(raw) == 0 {
 		return nil, nil
 	}
@@ -974,6 +983,9 @@ func validateModelAliases(raw map[string]string, providerNames []string, explici
 		}
 		if _, targetIsAlias := raw[target]; targetIsAlias {
 			return nil, fmt.Errorf("llmgateway: modelAliases: alias %q targets %q, which is itself an alias (alias chains are not allowed)", alias, target)
+		}
+		if _, targetIsRouter := routers[target]; targetIsRouter {
+			return nil, fmt.Errorf("llmgateway: modelAliases: alias %q targets %q, which is a smart router (routers cannot be alias targets)", alias, target)
 		}
 		out[alias] = target
 	}
