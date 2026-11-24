@@ -101,6 +101,9 @@ type adminRouterView struct {
 	ContextEscalation   bool  `json:"contextEscalation"`
 	ShadowEnabled       bool  `json:"shadowEnabled"`
 	SaturationDowngrade bool  `json:"saturationDowngrade"`
+	TimeoutFallback     bool  `json:"timeoutFallback"`
+	// FellBack counts requests that took the extra timeout-fallback attempt.
+	FellBack int64 `json:"fellBack"`
 }
 
 // buildAdminRouterViews lists every router sorted by name; never nil.
@@ -117,6 +120,7 @@ func (g *Gateway) buildAdminRouterViews() []adminRouterView {
 			Classifier:          rt.classifier,
 			RiskZ:               rt.riskZ,
 			SaturationDowngrade: rt.satDowngrade,
+			TimeoutFallback:     rt.timeoutFallback,
 			DowngradeBand:       rt.downgradeBand,
 			Calibration:         buildAdminRouterCalibration(rt),
 			Tiers:               make([]adminRouterTierView, len(rt.tiers)),
@@ -158,6 +162,7 @@ func (g *Gateway) buildAdminRouterViews() []adminRouterView {
 				v.Downgraded = reason.Count
 			}
 		}
+		v.FellBack = routerFallbackCount(rt.name, counters.outcomes)
 		out = append(out, v)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })

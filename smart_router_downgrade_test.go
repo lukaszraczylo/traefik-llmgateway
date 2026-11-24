@@ -284,7 +284,7 @@ func TestDowngradeConfigValidation(t *testing.T) {
 
 func TestRouterReasonNamesIncludeSaturated(t *testing.T) {
 	t.Parallel()
-	assert.Equal(t, smartReasonSaturated, routerReasonNames[routerReasonsMax-1])
+	assert.Equal(t, smartReasonSaturated, routerReasonNames[routerReasonsMax-2])
 	assert.Equal(t, smartReasonScore, routerReasonNames[0])
 }
 

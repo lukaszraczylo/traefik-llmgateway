@@ -838,6 +838,7 @@ type Gateway struct {
 	replica                       string
 	failoverLogGate               logGate
 	routerEventGate               logGate
+	routerFallbackGate            logGate
 	metricsNets                   []*net.IPNet
 	configWarnings                []string
 	targetHealthCfg               targetHealthConfig

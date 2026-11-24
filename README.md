@@ -868,6 +868,7 @@ http:
               saturationDowngrade: true
               maxAttempts: 4
               firstByteTimeout: 40s
+              timeoutFallback: true
               contextEscalation: true
 ```
 
@@ -912,6 +913,7 @@ All keys sit under `smartRouters.<name>`. The gateway refuses the config when a 
 | `adaptive.latencyWeightPct` | `30` | Share of the reward a slow first byte can remove, 0 to 100. |
 | `maxAttempts` | `4` | Upstream attempts per request. |
 | `firstByteTimeout` | off | Go duration of at least `1s`. Escalate when an attempt starts too slowly. |
+| `timeoutFallback` | `false` | After every attempt misses `firstByteTimeout`, add one attempt on a lower tier. Needs `firstByteTimeout` and two tiers. |
 | `contextEscalation` | `true` | Skip models whose known context window is too small. |
 | `saturationDowngrade` | `false` | Start one tier lower when the classified tier is full. Needs two tiers. |
 | `downgradeBand` | `100` | Points above a threshold in which a downgrade can happen, 0 to 300. |
@@ -977,6 +979,8 @@ Each request counts once by first attempted tier, routing reason, and outcome.
 | `bad` | The answer was cut at the output cap, came back empty, or broke after the first byte. |
 | `slow` | An attempt missed `firstByteTimeout`, whatever the final result. |
 
+A request that took the timeout-fallback attempt counts under the routing reason `fallback`, with outcome `slow`.
+
 `bad` overrides `slow`, and `slow` overrides the other three. A length cut counts as bad only when the completion has at least 512 tokens or the client sent no `max_tokens`. A short answer cut by a small client limit is the client's choice. `bad` changes routing only through live session pins and live calibration.
 
 ### Calibration
@@ -1021,7 +1025,7 @@ The request moves down at most one tier. The higher tiers stay in the plan, so a
 
 ### Escalation and first-byte timeout
 
-- **Escalation**: on a retryable failure, the gateway tries the next model in the same tier, then the first model of the next tier. It never moves down. It stops after `maxAttempts` upstream attempts. When a higher tier has a usable model, the plan keeps one attempt for it, so same-tier failover cannot use every attempt. Escalation works with `failover` off. Once the gateway sends the first response byte, it cannot escalate.
+- **Escalation**: on a retryable failure, the gateway tries the next model in the same tier, then the first model of the next tier. It never moves down, except `saturationDowngrade` at the start and the one extra `timeoutFallback` attempt. It stops after `maxAttempts` upstream attempts. When a higher tier has a usable model, the plan keeps one attempt for it, so same-tier failover cannot use every attempt. Escalation works with `failover` off. Once the gateway sends the first response byte, it cannot escalate.
 - **Client errors**: an upstream `400` does not escalate, because the request is invalid. The exception is a context overflow. Before the first response byte, a `400` body can name an overflow: `context_length_exceeded`, "maximum context length", "prompt is too long", "context window", "is longer than the model's", or "too many tokens". The router then moves to the next candidate and counts an escalation. Direct model requests never do this.
 - **`firstByteTimeout`**: set a Go duration of at least `1s`, such as `40s`, to escalate when an upstream starts too slowly. It is off by default.
   - **Scope**: the deadline applies to each upstream attempt of the router, and only to requests sent to the router name. A direct model request has no deadline.
@@ -1029,7 +1033,28 @@ The request moves down at most one tier. The higher tiers stay in the plan, so a
   - **On a miss**: the gateway cancels that attempt, never the client request, and tries the next candidate under the normal escalation rules. A slow attempt counts as a failed attempt for health tracking. After the first byte arrives, the deadline is over.
   - **Provider limit**: the value must not exceed the `requestTimeout` of a provider that a tier model names. The gateway refuses the config otherwise.
   - **CDN limits**: a CDN or proxy in front of the gateway can cut a request first. Cloudflare closes at about 100 seconds with HTTP `524`. Each attempt can take up to `firstByteTimeout`, so keep `firstByteTimeout` times `maxAttempts` below that limit.
-  - **No candidate starts**: when the last candidate also misses the deadline, the gateway answers `504`. The error type is `timeout_error` and the message is "the router's models did not start responding in time". The body uses the OpenAI error shape on `/v1/chat/completions` and the Anthropic shape on `/v1/messages`.
+  - **No candidate starts**: when the last candidate also misses the deadline, the gateway answers `504`, unless `timeoutFallback` adds one more attempt. The error type is `timeout_error` and the message is "the router's models did not start responding in time". The body uses the OpenAI error shape on `/v1/chat/completions` and the Anthropic shape on `/v1/messages`.
+
+### Timeout fallback
+
+Set `timeoutFallback: true` to answer a request that every candidate was too slow for, instead of the `504`. It is off by default. The key follows `saturationDowngrade` and `contextEscalation`: a camelCase switch named for what it does. The gateway refuses the config without `firstByteTimeout` or with fewer than two tiers.
+
+The plan still only goes upward. This is the one exception to "never moves down", next to `saturationDowngrade`. The extra attempt happens only when all of these hold:
+
+- **Slow**: every candidate in the plan has been tried and at least one of them missed `firstByteTimeout`.
+- **Retryable**: the last failure still allows a retry. A `400` client error, or any other non-timeout failure as the last result, ends the request as before.
+- **Nothing sent**: no byte has reached the client, and the client is still connected.
+- **Room below**: some tier below the first attempted tier has a usable candidate.
+
+The gateway picks the highest tier below the first attempted tier, and goes lower only when that tier has no usable candidate. Inside the tier it takes the first usable candidate in the normal order. Access, vision, cost-budget and context-fit checks apply as usual, so a model that is too small for the prompt or denied to the caller is never used. With `contextEscalation: false` the context check is off, as everywhere else.
+
+- **Floors and pins**: the extra attempt can go below a keyword, reasoning or tools floor and below a session pin. The alternative is an error. Nothing else about the floors changes.
+- **Deadline**: the extra attempt keeps `firstByteTimeout`. If it also fails, the request ends with the existing error: `504` for a slow attempt, the upstream error otherwise. There is never a second extra attempt.
+- **`maxAttempts`**: the extra attempt can exceed `maxAttempts` by exactly one. The plan holds at most `maxAttempts + 1` attempts, and only on a router with `timeoutFallback`.
+- **Reporting**: the response carries `X-Llmgw-Router-Downgraded` with the first attempted tier, and `X-Llmgw-Router-Tier` with the serving tier. The request counts with reason `fallback` and outcome `slow`. The admin router row shows `timeoutFallback` and the count as `fellBack`. The events feed records a rate-gated `router_timeout_fallback` event, with its own 30-second gate. The attempt is not counted as an escalation.
+- **Sessions**: a fallback never raises the session pin, even when the lower tier gives a bad answer. The next turn plans normally.
+- **Learning**: calibration does not count the request. The bandit records the slow attempts as failures, as without the flag.
+- **Cloudflare and CDNs**: the extra attempt adds one more `firstByteTimeout` to the worst case. Keep `firstByteTimeout` times `(maxAttempts + 1)` below the CDN limit, about 100 seconds for Cloudflare, or the CDN answers `524` first.
 
 ### Context windows
 
@@ -1059,7 +1084,7 @@ The response body keeps the real model that served the request.
 
 - **Metrics**: `llmgateway_router_requests_total{router,tier,reason}` counts each request once. `llmgateway_router_escalations_total{router,from_tier,to_tier}` counts each move to a higher tier. Same-tier failover does not count. `llmgateway_router_calibration_delta{router,tier,mode}` is a gauge of the calibration offsets. Labels come only from configured names.
 - **Events**: the admin events feed records a `router_escalation` event on a cross-tier escalation or when a router exhausts its attempts. A rate gate allows one event per 30 seconds on each instance. The next event reports how many it suppressed. The event names the slow model after a first-byte miss.
-- **Admin API**: `GET /admin/api/overview` and `GET /admin/api/catalog` list routers. Each router row shows its tiers, keyword rules, `selection`, `classifier`, `shadowClassifier`, `riskZ`, `toolsMinTier`, `firstByteTimeout`, `maxAttempts`, `saturationDowngrade`, `downgradeBand`, and `downgraded`. It also shows `calibration` (mode and offset per tier) and the `adaptive` settings.
+- **Admin API**: `GET /admin/api/overview` and `GET /admin/api/catalog` list routers. Each router row shows its tiers, keyword rules, `selection`, `classifier`, `shadowClassifier`, `riskZ`, `toolsMinTier`, `firstByteTimeout`, `maxAttempts`, `saturationDowngrade`, `downgradeBand`, `downgraded`, `timeoutFallback`, and `fellBack`. It also shows `calibration` (mode and offset per tier) and the `adaptive` settings.
 - **Admin stats**: each row has `stats` with request counts per tier and reason, escalations, the shadow matrix, and the outcome counts. `stats.scope` is `shared` when the counters come from Redis, summed over all instances this month. It is `instance` when they come from this process since start.
 - **Admin UI**: the Models page shows a Smart routers card with the tiers, the shadow agreement matrix, the outcome table, and `firstByteTimeout` when set. The Config page has a Smart router helper that builds a snippet.
 

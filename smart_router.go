@@ -79,6 +79,9 @@ type SmartRouterConfig struct {
 	MaxAttempts int `json:"maxAttempts,omitempty"`
 	// SaturationDowngrade starts a score-routed request one tier lower when its tier has no free capacity.
 	SaturationDowngrade bool `json:"saturationDowngrade,omitempty"`
+	// TimeoutFallback adds one attempt on the highest usable tier below the first attempted tier when every
+	// attempt missed firstByteTimeout. It needs firstByteTimeout and two tiers.
+	TimeoutFallback bool `json:"timeoutFallback,omitempty"`
 }
 
 // SmartRouterTier is one rung of a router. Models must be disjoint across tiers.
@@ -133,6 +136,7 @@ type smartRouter struct {
 	shadowV2          bool
 	adaptiveSet       bool
 	satDowngrade      bool
+	timeoutFallback   bool
 	contextEscalation bool
 	sessionEnabled    bool
 }
@@ -366,6 +370,9 @@ func compileSmartRouter(name string, cfg *SmartRouterConfig, routers map[string]
 	if err != nil {
 		return nil, err
 	}
+	if err = validateSmartTimeoutFallback(name, cfg, len(tiers), firstByte); err != nil {
+		return nil, err
+	}
 	var bandit *smartBandit
 	if selection == smartSelectionAdaptive {
 		bandit = newSmartBandit(adaptive)
@@ -375,6 +382,7 @@ func compileSmartRouter(name string, cfg *SmartRouterConfig, routers map[string]
 		bandit:            bandit,
 		downgradeBand:     downgradeBand,
 		satDowngrade:      cfg.SaturationDowngrade,
+		timeoutFallback:   cfg.TimeoutFallback,
 		adaptiveSet:       cfg.Adaptive != nil,
 		calib:             calib,
 		calibState:        calibState,

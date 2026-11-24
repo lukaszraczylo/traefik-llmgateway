@@ -618,7 +618,7 @@ func (rt *smartRouter) rankOf(tier string) int {
 // onRouterOutcome feeds a finished request back into its session.
 func (g *Gateway) onRouterOutcome(plan *routerPlan, attempt int, served, bad bool) {
 	sc := plan.sess
-	if sc == nil || !sc.dirty || g.routerSessions == nil || !sc.rt.session.live {
+	if sc == nil || !sc.dirty || g.routerSessions == nil || !sc.rt.session.live || plan.fallbackAt > 0 {
 		return
 	}
 	rt := sc.rt

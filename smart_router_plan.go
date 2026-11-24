@@ -34,29 +34,35 @@ type routerPlanEntry struct {
 
 // routerPlan is the ordered attempt list for one routed request.
 type routerPlan struct {
-	router    string
+	// pickFallback returns the timeout-fallback entry; nil unless the router has timeoutFallback.
+	pickFallback func() (routerPlanEntry, bool)
+	// sess is the router's session for this request; nil when the router does not use sessions.
+	sess *smartSessionRun
+	// bandit is the router's bandit when selection is adaptive; the outcome of each attempt feeds it.
+	bandit    *smartBandit
 	reason    string
 	startTier string
 	// shadowTier is the tier the router's shadowWeights chose; empty when unset.
 	shadowTier string
 	// downgradedFrom is the classified tier a saturation downgrade started below; empty when not downgraded.
 	downgradedFrom string
-	// sess is the router's session for this request; nil when the router does not use sessions.
-	sess *smartSessionRun
-	// bandit is the router's bandit when selection is adaptive; the outcome of each attempt feeds it.
-	bandit  *smartBandit
-	entries []routerPlanEntry
+	router         string
+	// fallbackFrom is the first attempted tier once the extra attempt was added; empty before.
+	fallbackFrom string
+	entries      []routerPlanEntry
 	// promptBytes is the size estimate that calibration compares with reported usage.
 	promptBytes int64
 	// firstByte is the router's per-attempt first-byte deadline; 0 means none.
 	firstByte time.Duration
-	hasImage  bool
+	// fallbackAt is the index of the extra attempt in entries; 0 means none.
+	fallbackAt int
 	// calibrate is true when the router counts this request's outcome for threshold calibration.
 	calibrate bool
 	// maxTokensSet is true when the client capped the output; a length cut is then its own choice.
 	maxTokensSet bool
 	// slowSeen is set when an attempt missed the first-byte deadline.
 	slowSeen bool
+	hasImage bool
 }
 
 func (p *routerPlan) candidates() []resolveCandidate {
@@ -100,6 +106,9 @@ func smartTextHash(s string) int {
 // planSmartRouter validates access and builds the attempt list: tiers from the
 // classified rank upward, never below it. A tier never takes the last slot while
 // a higher tier has a usable candidate, so escalation stays reachable.
+// Invariants plan_bounded (at most maxAttempts entries) and downgrade_gated (a lower start needs the
+// saturation gate) have one runtime exception: with timeoutFallback, addTimeoutFallback appends one
+// lower-tier entry after an all-slow plan, so entries can reach maxAttempts+1.
 func (g *Gateway) planSmartRouter(rt *smartRouter, req map[string]any, endpoint string, hdr http.Header, grp *group, scopes []limitScope) (*routerPlan, error) {
 	if !grp.allowsModelName(rt.name) {
 		return nil, errModelDenied
@@ -185,6 +194,15 @@ func (g *Gateway) planSmartRouter(rt *smartRouter, req map[string]any, endpoint 
 			return nil, &routerTargetError{status: http.StatusForbidden, message: "model access denied"}
 		}
 		return nil, &routerTargetError{status: http.StatusNotFound, message: fmt.Sprintf("smart router %q has no usable target", rt.name)}
+	}
+	if rt.timeoutFallback && plan.firstByte > 0 {
+		plan.pickFallback = func() (routerPlanEntry, bool) {
+			rank := routerFallbackRank(rt.rankOf(plan.entries[0].tier), func(r int) bool { return len(fresh(r)) > 0 })
+			if rank < 0 {
+				return routerPlanEntry{}, false
+			}
+			return routerPlanEntry{tier: rt.tiers[rank].name, cand: fresh(rank)[0]}, true
+		}
 	}
 	g.storeSession(sess)
 	return plan, nil
@@ -338,7 +356,9 @@ func setRouterHeaders(h http.Header, plan *routerPlan, i int) {
 	if plan.sess != nil && plan.sess.rt.session.live {
 		h.Set(headerRouterReason, routerRequestReason(plan))
 	}
-	if plan.downgradedFrom != "" {
+	if plan.fallbackAt > 0 && i == plan.fallbackAt {
+		h.Set(headerRouterDowngraded, plan.fallbackFrom)
+	} else if plan.downgradedFrom != "" {
 		if plan.entries[i].tier == plan.startTier {
 			h.Set(headerRouterDowngraded, plan.downgradedFrom)
 		} else {

@@ -12,6 +12,11 @@ const (
 	// routerReasonSkipped marks a request whose first attempted tier is above
 	// the classified tier because lower tiers had no usable target.
 	routerReasonSkipped = "skipped"
+
+	// routerReasonFallback marks a request served, or last tried, on the extra timeout-fallback attempt.
+	routerReasonFallback = "fallback"
+
+	eventKindRouterTimeoutFallback = "router_timeout_fallback"
 )
 
 type routerRequestKey struct {
@@ -138,6 +143,9 @@ func (s *routerStats) snapshot() (map[routerRequestKey]int64, map[routerEscalati
 // attempted tier is above the classified one: lower tiers lost every target
 // to context-window, vision, cost-budget, access or resolution skips.
 func routerRequestReason(plan *routerPlan) string {
+	if plan.fallbackAt > 0 {
+		return routerReasonFallback
+	}
 	if plan.entries[0].tier != plan.startTier {
 		return routerReasonSkipped
 	}
@@ -160,6 +168,9 @@ func (g *Gateway) recordRouterAttempt(plan *routerPlan, i int, endpoint string, 
 			}
 			g.countRouterShared(func(bucket string) string { return routerShadowKeyFor(sk, bucket) })
 		}
+		return
+	}
+	if i == plan.fallbackAt {
 		return
 	}
 	from, to := plan.entries[i-1].tier, plan.entries[i].tier
@@ -205,11 +216,15 @@ func (g *Gateway) recordRouterExhausted(plan *routerPlan, i int, endpoint string
 }
 
 func (g *Gateway) recordRouterEvent(plan *routerPlan, i int, endpoint string, scopes []limitScope, msg string) {
+	g.recordRouterEventKind(plan, i, endpoint, scopes, eventKindRouterEscalation, &g.routerEventGate, msg)
+}
+
+func (g *Gateway) recordRouterEventKind(plan *routerPlan, i int, endpoint string, scopes []limitScope, kind string, gate *logGate, msg string) {
 	el := g.events
 	if el == nil {
 		return
 	}
-	log, suppressed := g.routerEventGate.shouldLog(el.nowFn())
+	log, suppressed := gate.shouldLog(el.nowFn())
 	if !log {
 		return
 	}
@@ -220,7 +235,7 @@ func (g *Gateway) recordRouterEvent(plan *routerPlan, i int, endpoint string, sc
 		Model:    plan.entries[i].cand.canonical,
 		Provider: plan.entries[i].cand.providerName,
 		Route:    eventRouteForEndpoint(endpoint),
-		Kind:     eventKindRouterEscalation,
+		Kind:     kind,
 		Message:  msg,
 	}
 	applyScopeAttribution(&ev, scopes)

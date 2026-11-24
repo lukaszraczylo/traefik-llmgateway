@@ -362,7 +362,8 @@ func (g *Gateway) runMeteredCall(sw *statusTrackingWriter, r *http.Request, scop
 
 	var lastErr error
 	var lastProviderName string
-	for i, cand := range candidates {
+	for i := 0; i < len(candidates); i++ {
+		cand := candidates[i]
 		if i > 0 {
 			// F4 fix (adversarial-review): a shared request context an
 			// EARLIER candidate already exhausted must never be
@@ -873,6 +874,10 @@ func (g *Gateway) runMeteredCall(sw *statusTrackingWriter, r *http.Request, scop
 			// failoverLogGate (operator ruling: this one must always
 			// log).
 			g.errorf("%s: provider %q returned 404 for model %q; failing over to %q — this usually means a real provider/model configuration mistake, not a transient outage", logPrefix, providerName, requestedModel, candidates[i+1].providerName)
+		}
+		if !hasNext && plan != nil && i == len(candidates)-1 && g.addTimeoutFallback(plan, r, i, endpoint, scopes, callErr) {
+			candidates = plan.candidates()
+			continue
 		}
 		if !hasNext {
 			if plan != nil {
