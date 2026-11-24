@@ -309,6 +309,10 @@ export interface AdminRouterView {
   downgradeBand: number
   /** Requests started one tier lower because their tier was saturated. */
   downgraded: number
+  /** True when a router whose every attempt was slow tries one tier below its first attempted tier. */
+  timeoutFallback: boolean
+  /** Requests that took the extra timeout-fallback attempt. */
+  fellBack: number
   tiers: AdminRouterTierView[]
   keywordRules: AdminRouterRuleView[]
   maxAttempts: number

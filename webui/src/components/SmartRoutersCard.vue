@@ -78,6 +78,8 @@ function share(count: number, total: number): number {
             saturation downgrade: {{ router.saturationDowngrade ? `on, band ${router.downgradeBand}` : 'off' }}
           </Badge>
           <Badge v-if="router.saturationDowngrade" variant="secondary" class="font-normal">downgraded: {{ router.downgraded }}</Badge>
+          <Badge variant="outline" class="font-normal">timeout fallback: {{ router.timeoutFallback ? 'on' : 'off' }}</Badge>
+          <Badge v-if="router.timeoutFallback" variant="secondary" class="font-normal">fell back: {{ router.fellBack }}</Badge>
           <Badge variant="outline" class="font-normal">max attempts: {{ router.maxAttempts }}</Badge>
           <Badge v-if="router.firstByteTimeout" variant="outline" class="font-normal">
             first byte timeout: {{ router.firstByteTimeout }}

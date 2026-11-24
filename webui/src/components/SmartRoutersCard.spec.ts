@@ -18,6 +18,8 @@ const router: AdminRouterView = {
   saturationDowngrade: false,
   downgradeBand: 100,
   downgraded: 0,
+  timeoutFallback: false,
+  fellBack: 0,
   tiers: [
     { name: 'small', minScore: 0, models: ['openai/gpt-5-mini'] },
     { name: 'big', minScore: 400, models: ['anthropic/claude-opus', 'openai/gpt-5'] },
@@ -73,6 +75,15 @@ describe('SmartRoutersCard', () => {
     expect(off).not.toContain('offsets')
     expect(off).not.toContain('explore')
     expect(off).not.toContain('downgraded:')
+  })
+
+  it('shows the timeout fallback flag and its count only when on', async () => {
+    const on = await render([{ ...router, timeoutFallback: true, fellBack: 3 }])
+    expect(on).toContain('timeout fallback: on')
+    expect(on).toContain('fell back: 3')
+    const off = await render([router])
+    expect(off).toContain('timeout fallback: off')
+    expect(off).not.toContain('fell back:')
   })
 
   it('renders router settings, tiers and keyword rules', async () => {
