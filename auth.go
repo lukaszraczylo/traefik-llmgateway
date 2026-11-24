@@ -1245,14 +1245,19 @@ func (a *authStore) identify(r *http.Request) (*user, *group, bool) {
 // presentedKey extracts the API key from r's Authorization Bearer header or
 // its x-api-key header. Bearer takes priority when both are set.
 func presentedKey(r *http.Request) (string, bool) {
-	if authz := r.Header.Get("Authorization"); authz != "" {
+	return presentedKeyFromHeader(r.Header)
+}
+
+// presentedKeyFromHeader is presentedKey over a bare header set.
+func presentedKeyFromHeader(h http.Header) (string, bool) {
+	if authz := h.Get("Authorization"); authz != "" {
 		if scheme, rest, found := strings.Cut(authz, " "); found && strings.EqualFold(scheme, "bearer") {
 			if key := strings.TrimSpace(rest); key != "" {
 				return key, true
 			}
 		}
 	}
-	if key := strings.TrimSpace(r.Header.Get("x-api-key")); key != "" {
+	if key := strings.TrimSpace(h.Get("x-api-key")); key != "" {
 		return key, true
 	}
 	return "", false

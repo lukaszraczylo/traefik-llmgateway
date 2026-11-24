@@ -706,3 +706,24 @@ func TestSessionMergeNewerWinsOutright(t *testing.T) {
 	tie := smartSession{found: true, pin: 2, seenAt: 20}
 	assert.Equal(t, 2, smartSessionMerge(newer, tie).pin, "equal times fail up")
 }
+
+func TestSessionKeyScopedToCaller(t *testing.T) {
+	t.Parallel()
+	gw, rt, _ := sessionGateway(t, nil)
+	req := sessionReq("shared-id", "explain raft")
+	f := extractSmartV2(req, cacheEndpointChat)
+	keyFor := func(hdr http.Header, scopes []limitScope) string {
+		return gw.routerSessions.open(rt, req, &f, hdr, scopes).key
+	}
+	bearer := func(k string) http.Header { return http.Header{"Authorization": []string{"Bearer " + k}} }
+
+	alice, bob := keyFor(bearer("sk-alice"), nil), keyFor(bearer("sk-bob"), nil)
+	assert.NotEqual(t, alice, bob, "two callers with the same client id must not share a pin")
+	assert.Equal(t, alice, keyFor(bearer("sk-alice"), nil), "one caller keeps one key")
+	assert.Equal(t, alice, keyFor(http.Header{"X-Api-Key": []string{"sk-alice"}}, nil), "either credential header names the same caller")
+	assert.NotContains(t, alice, "sk-alice", "the raw key never appears")
+
+	scoped := []limitScope{{kind: "user", id: "alice"}}
+	assert.Equal(t, keyFor(bearer("sk-alice"), scoped), keyFor(bearer("sk-rotated"), scoped), "a user scope names the caller, so a key rotation keeps the pin")
+	assert.NotEqual(t, keyFor(nil, scoped), keyFor(nil, []limitScope{{kind: "user", id: "bob"}}))
+}

@@ -275,6 +275,23 @@ func smartUserScopeID(scopes []limitScope) string {
 	return ""
 }
 
+// smartCallerID names the caller for a session key: the user scope, else a digest of the
+// presented API key, so callers without a user scope never share a pin. Never the raw key.
+func smartCallerID(scopes []limitScope, hdr http.Header) string {
+	if id := smartUserScopeID(scopes); id != "" {
+		return id
+	}
+	if hdr == nil {
+		return ""
+	}
+	key, ok := presentedKeyFromHeader(hdr)
+	if !ok {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(key))
+	return "key" + sessionSep + hex.EncodeToString(sum[:sessionHashBytes])
+}
+
 // smartAskHash fingerprints the newest ask by its prose and paste sizes; 0 when no ask was found.
 func smartAskHash(f *smartFeatures) int {
 	if !f.found {
@@ -563,7 +580,7 @@ func (rs *routerSessions) open(rt *smartRouter, req map[string]any, f *smartFeat
 	if client == "" {
 		client = smartCut(f.system, sessionDerivedSys) + sessionSep + smartCut(smartFirstUserText(req), sessionDerivedUser)
 	}
-	key := sessionRedisKey(rt.name, smartSessionHash(rt.name, smartUserScopeID(scopes), client, f.system))
+	key := sessionRedisKey(rt.name, smartSessionHash(rt.name, smartCallerID(scopes, hdr), client, f.system))
 	sess := smartSessionIdle(&rt.session, rs.get(key), now)
 	if top := len(rt.tiers) - 1; sess.pin > top || sess.loop > top {
 		sess.pin, sess.loop = smartMinInt(sess.pin, top), smartMinInt(sess.loop, top)
