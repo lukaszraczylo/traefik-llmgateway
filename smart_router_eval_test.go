@@ -19,6 +19,7 @@ const (
 	evalFixtureGlob   = "testdata/router_fixtures/*.json"
 	evalDevGlob       = "testdata/router_fixtures_dev/*.json"
 	evalHoldout2Glob  = "testdata/router_fixtures_holdout2/*.json"
+	evalHoldout3Glob  = "testdata/router_fixtures_holdout3/*.json"
 	evalSessionNote   = "session-required"
 	evalV1Golden      = "testdata/router_v1_golden.json"
 	evalMinFixtures   = 160
@@ -281,6 +282,12 @@ func BenchmarkSmartRouterFixtures(b *testing.B) {
 func TestRouterHoldout2Gate(t *testing.T) {
 	t.Parallel()
 	gateRouterFixtures(t, loadRouterFixturesGlob(t, evalHoldout2Glob))
+}
+
+// TestRouterHoldout3Gate holds the second former blind holdout, now a training set, to the same gate.
+func TestRouterHoldout3Gate(t *testing.T) {
+	t.Parallel()
+	gateRouterFixtures(t, loadRouterFixturesGlob(t, evalHoldout3Glob))
 }
 
 // fixtureSession is the prior state of a session fixture. Replay derives it by running the

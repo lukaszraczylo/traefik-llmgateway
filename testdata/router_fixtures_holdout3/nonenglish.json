@@ -1,0 +1,550 @@
+[
+ {
+  "id": "h3-n01",
+  "group": "nonenglish",
+  "lang": "pl",
+  "intent": "nonenglish",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Jak zrobić backup bazy postgres z linii poleceń?"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "pg_dump"
+ },
+ {
+  "id": "h3-n02",
+  "group": "nonenglish",
+  "lang": "de",
+  "intent": "nonenglish",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Kannst du mir kurz erklären, was der Unterschied zwischen == und === in JavaScript ist?"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "basic js"
+ },
+ {
+  "id": "h3-n03",
+  "group": "nonenglish",
+  "lang": "es",
+  "intent": "nonenglish",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 4096,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "hola, me puedes ayudar a escribir un correo para pedir vacaciones la semana que viene?"
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "email"
+ },
+ {
+  "id": "h3-n04",
+  "group": "nonenglish",
+  "lang": "fr",
+  "intent": "nonenglish",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Traduis 'merci beaucoup pour votre aide' en anglais"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "tiny translation"
+ },
+ {
+  "id": "h3-n05",
+  "group": "nonenglish",
+  "lang": "it",
+  "intent": "nonenglish",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Qual è la capitale della Lombardia e quanti abitanti ha più o meno?"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "lookup"
+ },
+ {
+  "id": "h3-n06",
+  "group": "nonenglish",
+  "lang": "pt",
+  "intent": "nonenglish",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 4096,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "como faço pra ordenar uma lista de dicionários por uma chave em python?"
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "sorted key"
+ },
+ {
+  "id": "h3-n07",
+  "group": "nonenglish",
+  "lang": "nl",
+  "intent": "nonenglish",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Kun je deze zin corrigeren: 'ik heb gisteren naar de winkel gegaan'"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "grammar"
+ },
+ {
+  "id": "h3-n08",
+  "group": "nonenglish",
+  "lang": "sv",
+  "intent": "nonenglish",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Vad är skillnaden mellan en lista och en tupel i Python?"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "basic python"
+ },
+ {
+  "id": "h3-n09",
+  "group": "nonenglish",
+  "lang": "zh",
+  "intent": "nonenglish",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 4096,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "帮我把这段话改得更正式一点：明天开会别迟到啊"
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "formal rewrite"
+ },
+ {
+  "id": "h3-n10",
+  "group": "nonenglish",
+  "lang": "ja",
+  "intent": "nonenglish",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Gitで直前のコミットメッセージを修正する方法を教えて"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "commit --amend"
+ },
+ {
+  "id": "h3-n11",
+  "group": "nonenglish",
+  "lang": "ko",
+  "intent": "nonenglish",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "파이썬에서 리스트 중복 제거하는 가장 간단한 방법이 뭐야?"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "set/dict.fromkeys"
+ },
+ {
+  "id": "h3-n12",
+  "group": "nonenglish",
+  "lang": "ru",
+  "intent": "nonenglish",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 4096,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "Привет! Подскажи, как переименовать ветку в git?"
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "branch -m"
+ },
+ {
+  "id": "h3-n13",
+  "group": "nonenglish",
+  "lang": "uk",
+  "intent": "nonenglish",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Допоможи скласти коротке привітання колезі з днем народження"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "greeting"
+ },
+ {
+  "id": "h3-n14",
+  "group": "nonenglish",
+  "lang": "ar",
+  "intent": "nonenglish",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "ما الفرق بين الذكاء الاصطناعي والتعلم الآلي باختصار؟"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "short explanation"
+ },
+ {
+  "id": "h3-n15",
+  "group": "nonenglish",
+  "lang": "he",
+  "intent": "nonenglish",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 4096,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "תוכל לסכם לי בשתי שורות מה זה REST API?"
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "short explanation"
+ },
+ {
+  "id": "h3-n16",
+  "group": "nonenglish",
+  "lang": "hi",
+  "intent": "nonenglish",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "मुझे एक छोटा सा Python प्रोग्राम लिखकर दो जो 1 से 10 तक की संख्याएँ प्रिंट करे"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "trivial code"
+ },
+ {
+  "id": "h3-n17",
+  "group": "nonenglish",
+  "lang": "tr",
+  "intent": "nonenglish",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Bugün canım sıkkın, bana izlemesi rahat bir film önerir misin?"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "chitchat"
+ },
+ {
+  "id": "h3-n18",
+  "group": "nonenglish",
+  "lang": "vi",
+  "intent": "nonenglish",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 4096,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "Giải thích giúp mình sự khác nhau giữa TCP và UDP nhé"
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "basic networking"
+ },
+ {
+  "id": "h3-n19",
+  "group": "nonenglish",
+  "lang": "id",
+  "intent": "nonenglish",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Tolong terjemahkan ke bahasa Inggris: 'Saya sedang belajar memasak'"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "tiny translation"
+ },
+ {
+  "id": "h3-n20",
+  "group": "nonenglish",
+  "lang": "th",
+  "intent": "nonenglish",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "ช่วยเขียนข้อความขอบคุณลูกค้าสั้นๆ ให้หน่อย"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "short message"
+ },
+ {
+  "id": "h3-n21",
+  "group": "nonenglish",
+  "lang": "de",
+  "intent": "nonenglish",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 4096,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "Wir haben einen verteilten Cache mit Write-Behind und sehen nach einem Netzwerk-Split gelegentlich verlorene Updates. Entwirf ein Verfahren, das Konsistenz garantiert, ohne den Durchsatz stark zu senken, und begründe die Abwägungen (CAP, Quorum, Versionsvektoren)."
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 2,
+  "maxTier": 2,
+  "notes": "hard distributed design"
+ },
+ {
+  "id": "h3-n22",
+  "group": "nonenglish",
+  "lang": "es",
+  "intent": "nonenglish",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Tengo una tabla ventas(vendedor, fecha, monto). Con SQL de Postgres necesito el top 3 de vendedores por mes y el porcentaje de crecimiento respecto al mes anterior. ¿Cómo lo escribo?"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "window functions"
+ },
+ {
+  "id": "h3-n23",
+  "group": "nonenglish",
+  "lang": "zh",
+  "intent": "nonenglish",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "给定一个有向图，有负权边但没有负环，要求所有点对最短路径。请解释为什么 Johnson 算法重新赋权之后用 Dijkstra 是正确的，并给出复杂度分析。"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "Johnson proof"
+ },
+ {
+  "id": "h3-n24",
+  "group": "nonenglish",
+  "lang": "ru",
+  "intent": "nonenglish",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 4096,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "Объясни, почему в Go чтение из map из нескольких горутин без мьютекса иногда приводит к fatal error, и чем это отличается от обычной гонки данных. Как внутри устроен sync.Map?"
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "runtime map checks + sync.Map internals"
+ },
+ {
+  "id": "h3-n25",
+  "group": "nonenglish",
+  "lang": "fr",
+  "intent": "nonenglish",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Mon pod Kubernetes redémarre en boucle (OOMKilled, limite 512Mi, appli Node). Que faire en premier ?"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "memory limit/heap"
+ }
+]

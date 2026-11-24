@@ -1,0 +1,108 @@
+[
+ {
+  "id": "h3-o01",
+  "group": "output",
+  "lang": "en",
+  "intent": "format",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "extract from this and reply with ONLY valid json {\"vendor\":str,\"total\":number,\"currency\":str,\"due\":\"YYYY-MM-DD\"}:\n\nInvoice from Northwind Traders Ltd. Total due: EUR 1,284.50, payable by 3 Feb 2026. Thanks for your business!"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "json extraction"
+ },
+ {
+  "id": "h3-o02",
+  "group": "output",
+  "lang": "en",
+  "intent": "format",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "answer yes or no only: is 91 prime"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "7*13, one word"
+ },
+ {
+  "id": "h3-o03",
+  "group": "output",
+  "lang": "en",
+  "intent": "format",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 4096,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "give me a markdown table comparing sqlite, postgres and mysql on: concurrency, setup effort, best for. keep cells short"
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "table"
+ },
+ {
+  "id": "h3-o04",
+  "group": "output",
+  "lang": "en",
+  "intent": "format",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "exactly 3 bullet points, max 8 words each: why do code reviews matter"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "length constraint"
+ },
+ {
+  "id": "h3-o05",
+  "group": "output",
+  "lang": "en",
+  "intent": "format",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "reply with just the regex, nothing else: match ISO-8601 dates like 2026-03-07 but reject month 13 and day 32"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "regex only"
+ }
+]

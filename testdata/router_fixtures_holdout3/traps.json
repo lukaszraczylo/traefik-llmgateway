@@ -1,0 +1,108 @@
+[
+ {
+  "id": "h3-x01",
+  "group": "trap",
+  "lang": "en",
+  "intent": "trap",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "which line number in my code is the error on? just that.\n\nException in thread \"pool-3-thread-7\" java.lang.IllegalStateException: Invoice 8812 already closed\n\tat com.acme.billing.InvoiceService.process(InvoiceService.java:100)\n\tat com.acme.core.Pipeline.run(Pipeline.java:40)\n\tat java.base/java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1144)\n\tat com.acme.billing.InvoiceService.process(InvoiceService.java:101)\n\tat com.acme.core.Pipeline.run(Pipeline.java:41)\n\tat java.base/java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1144)\n\tat com.acme.billing.InvoiceService.process(InvoiceService.java:102)\n\tat com.acme.core.Pipeline.run(Pipeline.java:42)\n\tat java.base/java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1144)\n\tat com.acme.billing.InvoiceService.process(InvoiceService.java:103)\n\tat com.acme.core.Pipeline.run(Pipeline.java:43)\n\tat java.base/java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1144)\n\tat com.acme.billing.InvoiceService.process(InvoiceService.java:104)\n\tat com.acme.core.Pipeline.run(Pipeline.java:44)\n\tat java.base/java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1144)\n\tat com.acme.billing.InvoiceService.process(InvoiceService.java:105)\n\tat com.acme.core.Pipeline.run(Pipeline.java:45)\n\tat java.base/java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1144)\n\tat com.acme.billing.InvoiceService.process(InvoiceService.java:106)\n\tat com.acme.core.Pipeline.run(Pipeline.java:46)\n\tat java.base/java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1144)\n\tat com.acme.billing.InvoiceService.process(InvoiceService.java:107)\n\tat com.acme.core.Pipeline.run(Pipeline.java:47)\n\tat java.base/java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1144)\n\tat com.acme.billing.InvoiceService.process(InvoiceService.java:108)\n\tat com.acme.core.Pipeline.run(Pipeline.java:48)\n\tat java.base/java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1144)\n\tat com.acme.billing.InvoiceService.process(InvoiceService.java:109)\n\tat com.acme.core.Pipeline.run(Pipeline.java:49)\n\tat java.base/java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1144)\n\tat com.acme.billing.InvoiceService.process(InvoiceService.java:110)\n\tat com.acme.core.Pipeline.run(Pipeline.java:50)\n\tat java.base/java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1144)\n\tat com.acme.billing.InvoiceService.process(InvoiceService.java:111)\n\tat com.acme.core.Pipeline.run(Pipeline.java:51)\n\tat java.base/java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1144)\n\tat com.acme.billing.InvoiceService.process(InvoiceService.java:112)\n\tat com.acme.core.Pipeline.run(Pipeline.java:52)\n\tat java.base/java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1144)\n\tat com.acme.billing.InvoiceService.process(InvoiceService.java:113)\n\tat com.acme.core.Pipeline.run(Pipeline.java:53)\n\tat java.base/java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1144)"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "scary stack trace, trivial lookup"
+ },
+ {
+  "id": "h3-x02",
+  "group": "trap",
+  "lang": "en",
+  "intent": "trap",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "just rename try_push_0 to ring_push in this, nothing else\n\n/* lock-free ring: producer/consumer, hazard pointers */\nstatic inline bool try_push_0(ring_t *r, void *p) { size_t t = atomic_load_explicit(&r->tail, memory_order_acquire); if (t - atomic_load_explicit(&r->head, memory_order_relaxed) == r->cap) return false; r->slot[t & r->mask] = p; atomic_store_explicit(&r->tail, t + 1, memory_order_release); return true; }\nstatic inline bool try_push_1(ring_t *r, void *p) { size_t t = atomic_load_explicit(&r->tail, memory_order_acquire); if (t - atomic_load_explicit(&r->head, memory_order_relaxed) == r->cap) return false; r->slot[t & r->mask] = p; atomic_store_explicit(&r->tail, t + 1, memory_order_release); return true; }\nstatic inline bool try_push_2(ring_t *r, void *p) { size_t t = atomic_load_explicit(&r->tail, memory_order_acquire); if (t - atomic_load_explicit(&r->head, memory_order_relaxed) == r->cap) return false; r->slot[t & r->mask] = p; atomic_store_explicit(&r->tail, t + 1, memory_order_release); return true; }\nstatic inline bool try_push_3(ring_t *r, void *p) { size_t t = atomic_load_explicit(&r->tail, memory_order_acquire); if (t - atomic_load_explicit(&r->head, memory_order_relaxed) == r->cap) return false; r->slot[t & r->mask] = p; atomic_store_explicit(&r->tail, t + 1, memory_order_release); return true; }\nstatic inline bool try_push_4(ring_t *r, void *p) { size_t t = atomic_load_explicit(&r->tail, memory_order_acquire); if (t - atomic_load_explicit(&r->head, memory_order_relaxed) == r->cap) return false; r->slot[t & r->mask] = p; atomic_store_explicit(&r->tail, t + 1, memory_order_release); return true; }\nstatic inline bool try_push_5(ring_t *r, void *p) { size_t t = atomic_load_explicit(&r->tail, memory_order_acquire); if (t - atomic_load_explicit(&r->head, memory_order_relaxed) == r->cap) return false; r->slot[t & r->mask] = p; atomic_store_explicit(&r->tail, t + 1, memory_order_release); return true; }\nstatic inline bool try_push_6(ring_t *r, void *p) { size_t t = atomic_load_explicit(&r->tail, memory_order_acquire); if (t - atomic_load_explicit(&r->head, memory_order_relaxed) == r->cap) return false; r->slot[t & r->mask] = p; atomic_store_explicit(&r->tail, t + 1, memory_order_release); return true; }\nstatic inline bool try_push_7(ring_t *r, void *p) { size_t t = atomic_load_explicit(&r->tail, memory_order_acquire); if (t - atomic_load_explicit(&r->head, memory_order_relaxed) == r->cap) return false; r->slot[t & r->mask] = p; atomic_store_explicit(&r->tail, t + 1, memory_order_release); return true; }"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "mechanical rename inside gnarly code"
+ },
+ {
+  "id": "h3-x03",
+  "group": "trap",
+  "lang": "en",
+  "intent": "trap",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 4096,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "what programming language is this?\n\nsection .text\nglobal _start\n_start:\n  mov rax, 1\n  mov rdi, 1\n  lea rsi, [rel msg]\n  mov rdx, 13\n  syscall\n  mov rax, 60\n  xor rdi, rdi\n  syscall\nsection .data\nmsg: db 'Hello, World!', 10"
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "asm paste, trivial id"
+ },
+ {
+  "id": "h3-x04",
+  "group": "trap",
+  "lang": "en",
+  "intent": "trap",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "translate this error to spanish pls: 'CVE-2024-3094 detected: liblzma backdoor in sshd, upgrade xz-utils immediately and rotate host keys'"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "security-looking sentence, plain translation"
+ },
+ {
+  "id": "h3-x05",
+  "group": "trap",
+  "lang": "en",
+  "intent": "trap",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "fix the typo in the heading only, it says 'Indemnfication'. return the heading\n\nIndemnfication and Liability\n\nSection 1. The Contractor shall indemnify the Owner against claims arising from Subcontractor performance, subject to clause 4(b) and the limitations of liability in Schedule 2, save where gross negligence is established by final judgment.\nSection 2. The Contractor shall indemnify the Owner against claims arising from Subcontractor performance, subject to clause 5(b) and the limitations of liability in Schedule 3, save where gross negligence is established by final judgment.\nSection 3. The Contractor shall indemnify the Owner against claims arising from Subcontractor performance, subject to clause 6(b) and the limitations of liability in Schedule 4, save where gross negligence is established by final judgment.\nSection 4. The Contractor shall indemnify the Owner against claims arising from Subcontractor performance, subject to clause 7(b) and the limitations of liability in Schedule 1, save where gross negligence is established by final judgment.\nSection 5. The Contractor shall indemnify the Owner against claims arising from Subcontractor performance, subject to clause 8(b) and the limitations of liability in Schedule 2, save where gross negligence is established by final judgment.\nSection 6. The Contractor shall indemnify the Owner against claims arising from Subcontractor performance, subject to clause 9(b) and the limitations of liability in Schedule 3, save where gross negligence is established by final judgment.\nSection 7. The Contractor shall indemnify the Owner against claims arising from Subcontractor performance, subject to clause 10(b) and the limitations of liability in Schedule 4, save where gross negligence is established by final judgment.\nSection 8. The Contractor shall indemnify the Owner against claims arising from Subcontractor performance, subject to clause 11(b) and the limitations of liability in Schedule 1, save where gross negligence is established by final judgment."
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "long legal paste, one-word typo"
+ }
+]

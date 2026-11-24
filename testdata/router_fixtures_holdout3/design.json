@@ -1,0 +1,266 @@
+[
+ {
+  "id": "h3-g01",
+  "group": "design",
+  "lang": "en",
+  "intent": "design",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "what folder structure would you use for a small flask app with a few blueprints"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "easy structure advice"
+ },
+ {
+  "id": "h3-g02",
+  "group": "design",
+  "lang": "en",
+  "intent": "design",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "rest or graphql for an internal admin dashboard, 3 devs. short answer"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "quick tradeoff"
+ },
+ {
+  "id": "h3-g03",
+  "group": "design",
+  "lang": "en",
+  "intent": "design",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 4096,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "need a schema for a todo app with users, lists, tasks and tags. postgres"
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "simple schema"
+ },
+ {
+  "id": "h3-g04",
+  "group": "design",
+  "lang": "en",
+  "intent": "design",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "design a payment ledger with exactly-once effect semantics when the PSP webhook can arrive twice, out of order, or never, and our worker can crash between calling the PSP and committing. need reconciliation too"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 2,
+  "maxTier": 2,
+  "notes": "hard distributed correctness"
+ },
+ {
+  "id": "h3-g05",
+  "group": "design",
+  "lang": "en",
+  "intent": "design",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "multi-tenant saas on postgres, ~2k tenants, a few whales with 1000x the data. row-level security vs schema-per-tenant vs db-per-tenant. noisy neighbours, backups, migrations. recommend one"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "tradeoff analysis"
+ },
+ {
+  "id": "h3-g06",
+  "group": "design",
+  "lang": "en",
+  "intent": "design",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 4096,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "we have a 10 year old rails monolith, 4 teams. how should we approach carving out services without a rewrite? what order"
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "strangler strategy"
+ },
+ {
+  "id": "h3-g07",
+  "group": "design",
+  "lang": "en",
+  "intent": "design",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "design outbound webhook delivery for 50k customers: retries, ordering per customer, signature, replay, dead letter, customer endpoint slow/down. what do we build"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "webhook platform"
+ },
+ {
+  "id": "h3-g08",
+  "group": "design",
+  "lang": "en",
+  "intent": "design",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "design the sync layer for a collaborative whiteboard that works offline. CRDT vs OT, how to handle deletes and moves of nested shapes, compaction of history, and presence. be specific"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 2,
+  "maxTier": 2,
+  "notes": "hard CRDT design"
+ },
+ {
+  "id": "h3-g09",
+  "group": "design",
+  "lang": "en",
+  "intent": "design",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 4096,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "cache invalidation strategy for product pages served via CDN + redis + app. price changes must show within 5s, 20k rps peak. avoid stampede"
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "layered cache"
+ },
+ {
+  "id": "h3-g10",
+  "group": "design",
+  "lang": "en",
+  "intent": "design",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "leader election for our 5 node job scheduler without zookeeper/etcd, using only postgres. need to handle GC pauses and clock skew: how to make fencing correct"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 2,
+  "maxTier": 2,
+  "notes": "lease + fencing tokens"
+ },
+ {
+  "id": "h3-g11",
+  "group": "design",
+  "lang": "en",
+  "intent": "design",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "how to version a public REST api, we've got ~300 customers on v1 and want to break the shape of /invoices"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "versioning strategy"
+ },
+ {
+  "id": "h3-g12",
+  "group": "design",
+  "lang": "en",
+  "intent": "design",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 4096,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "name 3 options for where to store user uploads for a small app and which you'd pick, just a few lines"
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "easy"
+ }
+]

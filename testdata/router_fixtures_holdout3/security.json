@@ -1,0 +1,140 @@
+[
+ {
+  "id": "h3-s01",
+  "group": "security",
+  "lang": "en",
+  "intent": "security",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "what is xss in simple words, and how to avoid it in react"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "basic"
+ },
+ {
+  "id": "h3-s02",
+  "group": "security",
+  "lang": "en",
+  "intent": "security",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "is md5 ok to hash passwords if i salt it"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "no, use argon2/bcrypt"
+ },
+ {
+  "id": "h3-s03",
+  "group": "security",
+  "lang": "en",
+  "intent": "security",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 4096,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "is this login safe?\n\ndef login(u,p):\n    q = \"SELECT * FROM users WHERE name='%s' AND pw='%s'\" % (u, hashlib.md5(p.encode()).hexdigest())\n    return db.execute(q).fetchone()"
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "sqli + md5; obvious but multi-issue"
+ },
+ {
+  "id": "h3-s04",
+  "group": "security",
+  "lang": "en",
+  "intent": "security",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 4096,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "audit this jwt verify:\n\nfunc verify(tok string) (*Claims, error) {\n  t, err := jwt.Parse(tok, func(t *jwt.Token) (interface{}, error) {\n     if k, ok := keys[t.Header[\"kid\"].(string)]; ok { return k.Public, nil }\n     return []byte(secret), nil\n  })\n  if err != nil { return nil, err }\n  return claims(t), nil\n}\n\nkeys holds RSA public keys. what can an attacker do"
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 2,
+  "maxTier": 2,
+  "notes": "alg confusion RS->HS with public key, kid fallback; subtle"
+ },
+ {
+  "id": "h3-s05",
+  "group": "security",
+  "lang": "en",
+  "intent": "security",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "threat model the oauth device authorization flow for a CLI we ship: phishing of the user_code, polling abuse, token storage on disk, shared machines. rank the risks and give mitigations"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 2,
+  "maxTier": 2,
+  "notes": "deep threat model"
+ },
+ {
+  "id": "h3-s06",
+  "group": "security",
+  "lang": "en",
+  "intent": "security",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 4096,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "i accidentally pushed an aws access key to a public repo 10 min ago. what do i do"
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "rotate, revoke, scrub, audit"
+ }
+]
