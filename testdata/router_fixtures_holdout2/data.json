@@ -1,0 +1,168 @@
+[
+ {
+  "id": "h2-q01",
+  "group": "data",
+  "lang": "en",
+  "intent": "data",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "select all users who signed up this month"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "trivial sql"
+ },
+ {
+  "id": "h2-q02",
+  "group": "data",
+  "lang": "en",
+  "intent": "data",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "this query takes 40s on 80M rows, what index\n\nSELECT * FROM events WHERE account_id = 42 AND created_at > now() - interval '7 days' ORDER BY created_at DESC LIMIT 50;"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "composite index (account_id, created_at desc)"
+ },
+ {
+  "id": "h2-q03",
+  "group": "data",
+  "lang": "en",
+  "intent": "data",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 4096,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "need daily retention cohorts (d1,d7,d30) from events(user_id, ts) and users(id, signup_ts) in bigquery, 3B events, cost matters, users can have timezone shifts. write it and explain the cost choices"
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "cohort sql with partition pruning; mid ok"
+ },
+ {
+  "id": "h2-q04",
+  "group": "data",
+  "lang": "en",
+  "intent": "data",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "explain analyze shows seq scan on orders though there is an index on customer_id. table 200 rows. why"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "tiny table: planner prefers seq scan"
+ },
+ {
+  "id": "h2-q05",
+  "group": "data",
+  "lang": "en",
+  "intent": "data",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "We backfill a 2TB table from mysql to clickhouse with CDC running concurrently. How do I guarantee no gaps or dupes during cutover, with ReplacingMergeTree? give the sequence"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 2,
+  "maxTier": 2,
+  "notes": "cutover with ordering/version columns; hard data-engineering reasoning"
+ },
+ {
+  "id": "h2-q06",
+  "group": "data",
+  "lang": "en",
+  "intent": "data",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "pandas: drop rows where col 'email' is null and dedupe on email keep latest by 'updated'"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "simple pandas"
+ },
+ {
+  "id": "h2-q07",
+  "group": "data",
+  "lang": "en",
+  "intent": "data",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "window function to get each customer's 2nd purchase date"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "row_number"
+ },
+ {
+  "id": "h2-q08",
+  "group": "data",
+  "lang": "en",
+  "intent": "data",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "our nightly dbt job got 3x slower after we switched to incremental models with merge strategy on snowflake, row counts the same. 140 models. how do i find which ones and why"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "investigation approach; mid fine"
+ }
+]

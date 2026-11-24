@@ -18,6 +18,7 @@ import (
 const (
 	evalFixtureGlob   = "testdata/router_fixtures/*.json"
 	evalDevGlob       = "testdata/router_fixtures_dev/*.json"
+	evalHoldout2Glob  = "testdata/router_fixtures_holdout2/*.json"
 	evalSessionNote   = "session-required"
 	evalV1Golden      = "testdata/router_v1_golden.json"
 	evalMinFixtures   = 160
@@ -269,5 +270,16 @@ func BenchmarkSmartRouterFixtures(b *testing.B) {
 			b.ReportMetric(float64(b.Elapsed().Nanoseconds())/float64(b.N*len(fixtures)), "ns/decision")
 			_ = sum
 		})
+	}
+}
+
+// TestRouterHoldout2Report logs the frozen blind holdout; it never gates, so tuning must not read it.
+func TestRouterHoldout2Report(t *testing.T) {
+	t.Parallel()
+	fixtures := loadRouterFixturesGlob(t, evalHoldout2Glob)
+	for _, l := range evalLayouts {
+		v1 := runEval(evalRouter(t, l.mins, smartClassifierV1), fixtures)
+		v2 := runEval(evalRouter(t, l.mins, smartClassifierV2), fixtures)
+		t.Logf("holdout2 %s %v\nv1:\n%s\nv2:\n%s", l.name, l.mins, v1.table(), v2.table())
 	}
 }

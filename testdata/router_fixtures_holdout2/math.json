@@ -1,0 +1,208 @@
+[
+ {
+  "id": "h2-m01",
+  "group": "math",
+  "lang": "en",
+  "intent": "math",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "what's 15% of 240"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "arithmetic"
+ },
+ {
+  "id": "h2-m02",
+  "group": "math",
+  "lang": "en",
+  "intent": "math",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "prove that the sum of two odd integers is even"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "one-line proof"
+ },
+ {
+  "id": "h2-m03",
+  "group": "math",
+  "lang": "en",
+  "intent": "math",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Prove that for any graph with n >= 2 vertices, there exist two vertices with the same degree. Then say whether the statement holds for multigraphs with loops, justify."
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "pigeonhole proof then extension; mid can with care"
+ },
+ {
+  "id": "h2-m04",
+  "group": "math",
+  "lang": "en",
+  "intent": "math",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "given an array of n ints, find the longest subarray with sum exactly k, negatives allowed. need O(n). code in python"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "prefix sum hashmap, well-known"
+ },
+ {
+  "id": "h2-m05",
+  "group": "math",
+  "lang": "en",
+  "intent": "math",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 4096,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "we have n tasks with durations and a dependency DAG, k identical machines. min makespan? i know it's np-hard but what's the best practical approximation and what's the guarantee. then sketch the proof of the guarantee"
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 2,
+  "maxTier": 2,
+  "notes": "Graham list scheduling 2-1/k with proof sketch; hard"
+ },
+ {
+  "id": "h2-m06",
+  "group": "math",
+  "lang": "en",
+  "intent": "math",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "integral of x*e^x dx"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "by parts, standard"
+ },
+ {
+  "id": "h2-m07",
+  "group": "math",
+  "lang": "en",
+  "intent": "math",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "expected number of coin flips until I see HH vs HT? why are they different, intuitively and with a computation"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "classic but needs a correct derivation; mid ok"
+ },
+ {
+  "id": "h2-m08",
+  "group": "math",
+  "lang": "en",
+  "intent": "math",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Show that the number of binary strings of length n with no two consecutive 1s is F(n+2). And give closed form via recurrence."
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "standard induction"
+ },
+ {
+  "id": "h2-m09",
+  "group": "math",
+  "lang": "en",
+  "intent": "math",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "I have 10^9 integers in a file, 8GB of ram, need median. how"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "known: counting buckets / two-pass; mid max"
+ },
+ {
+  "id": "h2-m10",
+  "group": "math",
+  "lang": "en",
+  "intent": "math",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Let f: [0,1]->R be continuous with f(0)=f(1). Prove that for every n there's x with f(x)=f(x+1/n). Is it true for non-integer 1/c?"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "universal chord theorem; proof and counterexample; hard"
+ }
+]

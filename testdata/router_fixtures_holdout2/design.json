@@ -1,0 +1,254 @@
+[
+ {
+  "id": "h2-a01",
+  "group": "design",
+  "lang": "en",
+  "intent": "design",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "we're at 300 rps on a single postgres, monolith in rails. product wants multi-tenant white-label, tenants range from 10 users to 400k. how should i think about tenant isolation"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "architecture tradeoffs; mid can give solid, top better"
+ },
+ {
+  "id": "h2-a02",
+  "group": "design",
+  "lang": "en",
+  "intent": "design",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "should I use a message queue or just call the other service over http? it's an email sender, we send maybe 2k/day"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "small-scale simple tradeoff"
+ },
+ {
+  "id": "h2-a03",
+  "group": "design",
+  "lang": "en",
+  "intent": "design",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 4096,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "design a rate limiter for an api gateway that runs as 12 replicas, limits per api key and must tolerate redis outages without letting everything through or blocking everything. also want burst allowance. walk me through the failure modes"
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "distributed rate limiting with degradation modes; deep design"
+ },
+ {
+  "id": "h2-a04",
+  "group": "design",
+  "lang": "en",
+  "intent": "design",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "folder structure for a small next.js blog?"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "trivial"
+ },
+ {
+  "id": "h2-a05",
+  "group": "design",
+  "lang": "en",
+  "intent": "design",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "We have an event-sourced order system. Need to add GDPR erasure. Events are immutable and replicated to 3 downstream read models and a data lake. Propose an approach and the trade-offs, including how replay stays correct afterwards."
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 2,
+  "maxTier": 2,
+  "notes": "crypto-shredding vs tombstones; hard design with replay correctness"
+ },
+ {
+  "id": "h2-a06",
+  "group": "design",
+  "lang": "en",
+  "intent": "design",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "rest or graphql for a mobile app with ~15 screens, 3 devs?"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "opinion question with known answers"
+ },
+ {
+  "id": "h2-a07",
+  "group": "design",
+  "lang": "en",
+  "intent": "design",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "how would you shard a chat message table, 4B rows, 90% reads are last 50 msgs of a conversation, some group chats hit 100k members"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "sharding key and hot partitions; mid fine"
+ },
+ {
+  "id": "h2-a08",
+  "group": "design",
+  "lang": "en",
+  "intent": "design",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "explain to me what a circuit breaker is and when i'd add one"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "definition-level"
+ },
+ {
+  "id": "h2-a09",
+  "group": "design",
+  "lang": "en",
+  "intent": "design",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 4096,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "our deploys take 40min and we want zero-downtime db migrations with a 20 service fleet that shares one schema. no big bang. whats the plan"
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "expand-contract coordination across services"
+ },
+ {
+  "id": "h2-a10",
+  "group": "design",
+  "lang": "en",
+  "intent": "design",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "is it ok to put business logic in postgres functions?"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "opinion with known tradeoffs"
+ },
+ {
+  "id": "h2-a11",
+  "group": "design",
+  "lang": "en",
+  "intent": "design",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "I need exactly-once-ish delivery of billing events from our app to a ledger service that sometimes times out after committing. Outline the protocol (ids, retries, reconciliation) and what invariants the ledger must enforce."
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 2,
+  "maxTier": 2,
+  "notes": "idempotency + reconciliation; money; critical design"
+ },
+ {
+  "id": "h2-a12",
+  "group": "design",
+  "lang": "en",
+  "intent": "design",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "naming: is `UserManagerFactoryHelper` bad? what would you call a class that builds user objects from db rows"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "naming quip"
+ }
+]

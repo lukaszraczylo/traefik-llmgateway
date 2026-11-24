@@ -1,0 +1,128 @@
+[
+ {
+  "id": "h2-s01",
+  "group": "security",
+  "lang": "en",
+  "intent": "security",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "review this endpoint for security problems\n\n```py\n@app.get('/download')\ndef dl():\n    name = request.args['f']\n    return send_file('/srv/files/' + name)\n```"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "obvious path traversal"
+ },
+ {
+  "id": "h2-s02",
+  "group": "security",
+  "lang": "en",
+  "intent": "security",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "is it safe to store jwt in localStorage"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "well-known tradeoff"
+ },
+ {
+  "id": "h2-s03",
+  "group": "security",
+  "lang": "en",
+  "intent": "security",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 4096,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "we verify webhook sigs with `if sig == hmac(secret, body).hexdigest()`. pen tester flagged it medium. we compare as strings, whats the real attack and is it exploitable over the internet through our cloudflare->nginx->app path?"
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "timing attack practicality discussion; nuanced"
+ },
+ {
+  "id": "h2-s04",
+  "group": "security",
+  "lang": "en",
+  "intent": "security",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "audit this oauth redirect handler, there's something off but i can't see it\n\n```js\napp.get('/cb', (req,res)=>{\n  const next = req.query.next || '/';\n  if (next.startsWith('/') ) return res.redirect(next);\n  res.redirect('/');\n});\n```"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "`//evil.com` and `/\\evil.com` open redirect bypass; subtle but classic"
+ },
+ {
+  "id": "h2-s05",
+  "group": "security",
+  "lang": "en",
+  "intent": "security",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "what does `chmod 777` do and why do people say its bad"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "basic"
+ },
+ {
+  "id": "h2-s06",
+  "group": "security",
+  "lang": "en",
+  "intent": "security",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "We deserialize user-supplied YAML with `yaml.load(data)` in a PyYAML 5.x service behind auth, and the same service signs JWTs with a key in env. Assess realistic impact and order of mitigation."
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "RCE via unsafe load + secret access chain; mid can do"
+ }
+]

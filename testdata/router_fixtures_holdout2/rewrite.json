@@ -1,0 +1,208 @@
+[
+ {
+  "id": "h2-r01",
+  "group": "rewrite",
+  "lang": "en",
+  "intent": "rewrite",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "make this sound less angry: 'your team broke prod again and nobody told us. fix it today'"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "tone rewrite"
+ },
+ {
+  "id": "h2-r02",
+  "group": "rewrite",
+  "lang": "en",
+  "intent": "rewrite",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "translate to spanish: where is the nearest pharmacy"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "trivial translation"
+ },
+ {
+  "id": "h2-r03",
+  "group": "rewrite",
+  "lang": "en",
+  "intent": "rewrite",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Summarize this in 3 bullets:\n\nThe committee met on Tuesday to discuss the quarterly budget. Marketing requested a 12% increase citing the new product launch, while engineering asked for headcount for two backend roles. Finance noted that revenue was 4% below forecast and recommended holding all discretionary spend until Q1. The motion to defer was carried 5-2."
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "short summary"
+ },
+ {
+  "id": "h2-r04",
+  "group": "rewrite",
+  "lang": "en",
+  "intent": "rewrite",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "fix grammar only, dont change meaning: 'me and him goes to the store yesterday and buyed three apple'"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "grammar fix"
+ },
+ {
+  "id": "h2-r05",
+  "group": "rewrite",
+  "lang": "en",
+  "intent": "rewrite",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "convert this json to yaml\n{\"a\":{\"b\":[1,2,{\"c\":null}]},\"d\":\"x: y\"}"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "mechanical, quote trap tiny"
+ },
+ {
+  "id": "h2-r06",
+  "group": "rewrite",
+  "lang": "en",
+  "intent": "rewrite",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 4096,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "Rewrite this legal clause in plain english but keep every obligation and exception exactly: 'Notwithstanding the foregoing, Licensee shall not, save where expressly authorised in writing by Licensor, sublicense, assign or otherwise transfer any right hereunder, except to an Affiliate that has assumed in writing all obligations hereof, provided Licensor is notified within thirty (30) days.'"
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 1,
+  "notes": "fidelity-critical legal paraphrase; low risks dropping the exception"
+ },
+ {
+  "id": "h2-r07",
+  "group": "rewrite",
+  "lang": "en",
+  "intent": "rewrite",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "tl;dr this stack trace thing im scared of\n\nERROR 2026-11-20 java.lang.OutOfMemoryError: Java heap space\n at java.util.Arrays.copyOf(Arrays.java:3236)\n at java.io.ByteArrayOutputStream.grow(ByteArrayOutputStream.java:118)\n at com.acme.report.PdfBuilder.render(PdfBuilder.java:204)\n at com.acme.report.ReportJob.run(ReportJob.java:77)"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "scary paste, summarising is easy"
+ },
+ {
+  "id": "h2-r08",
+  "group": "rewrite",
+  "lang": "en",
+  "intent": "rewrite",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "make the email shorter and more friendly\n\nDear Mr. Hargreaves, I am writing to inform you that your invoice #4471 remains unpaid beyond the agreed term. Kindly remit payment at your earliest convenience to avoid further action."
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "email rewrite"
+ },
+ {
+  "id": "h2-r09",
+  "group": "rewrite",
+  "lang": "en",
+  "intent": "rewrite",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Translate this README section to french, keep the code blocks and markdown intact\n\n## Install\nRun `npm i -g tool` then `tool init --force`. If you see `EACCES`, don't use sudo; fix npm prefix instead."
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "translation w/ preservation"
+ },
+ {
+  "id": "h2-r10",
+  "group": "rewrite",
+  "lang": "en",
+  "intent": "rewrite",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Condense these 14 review comments into a prioritised list of what the author must change vs nice to have. 1) rename x 2) this leaks the file handle on error path 3) missing test 4) typo 5) race on cache map 6) nit spacing 7) consider interface 8) sql built via fmt.Sprintf with user id 9) docs 10) dead code 11) log level 12) magic number 13) n+1 query in loop 14) change error wrapping"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "classification of review comments, some judgment"
+ }
+]

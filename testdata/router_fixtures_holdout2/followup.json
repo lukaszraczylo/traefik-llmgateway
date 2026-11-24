@@ -1,0 +1,195 @@
+[
+ {
+  "id": "h2-f01",
+  "group": "followup",
+  "lang": "en",
+  "intent": "followup",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "write a go function that parses semver strings with optional prerelease and build metadata, return a struct"
+    },
+    {
+     "role": "assistant",
+     "content": "```go\ntype Version struct{Major,Minor,Patch int; Pre, Build string}\nfunc Parse(s string)(Version,error){ ... }\n```"
+    },
+    {
+     "role": "user",
+     "content": "ok now make it compare per the spec"
+    },
+    {
+     "role": "assistant",
+     "content": "```go\nfunc (v Version) Compare(o Version) int { ... }\n```"
+    },
+    {
+     "role": "user",
+     "content": "prerelease ordering is wrong for numeric vs alpha ids, fix"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "session-required: semver precedence rule for identifiers; mid"
+ },
+ {
+  "id": "h2-f02",
+  "group": "followup",
+  "lang": "en",
+  "intent": "followup",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "can you explain what a mutex is"
+    },
+    {
+     "role": "assistant",
+     "content": "A mutex is a lock that lets only one thread enter a critical section at a time."
+    },
+    {
+     "role": "user",
+     "content": "and a semaphore?"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "session-required: follow-up on definitions; low"
+ },
+ {
+  "id": "h2-f03",
+  "group": "followup",
+  "lang": "en",
+  "intent": "followup",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "our k8s pods get OOMKilled, limit 512Mi, node has plenty"
+    },
+    {
+     "role": "assistant",
+     "content": "Check whether the JVM heap is sized relative to the container limit; -Xmx plus metaspace and threads can exceed 512Mi."
+    },
+    {
+     "role": "user",
+     "content": "its go not java"
+    },
+    {
+     "role": "assistant",
+     "content": "In Go, GOMEMLIMIT unset means the runtime ignores the cgroup limit; also check goroutine stacks and cgo."
+    },
+    {
+     "role": "user",
+     "content": "still dies, heap profile flat. rss grows"
+    },
+    {
+     "role": "assistant",
+     "content": "what then"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "session-required: flat heap with growing RSS (mmap, cgo, fragmentation); alone it is terse"
+ },
+ {
+  "id": "h2-f04",
+  "group": "followup",
+  "lang": "en",
+  "intent": "followup",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "translate 'good luck' to german"
+    },
+    {
+     "role": "assistant",
+     "content": "Viel Glück!"
+    },
+    {
+     "role": "user",
+     "content": "and italian"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "session-required: tiny translation follow-up"
+ },
+ {
+  "id": "h2-f05",
+  "group": "followup",
+  "lang": "en",
+  "intent": "followup",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 4096,
+   "messages": [
+    {
+     "role": "user",
+     "content": "design the schema for a multi tenant saas with rbac and audit log"
+    },
+    {
+     "role": "assistant",
+     "content": "[long schema omitted: tenants, users, roles, permissions, audit_events with partitioning by month]"
+    },
+    {
+     "role": "user",
+     "content": "can tenants share a role definition but override one permission?"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "session-required: needs context of the schema and role inheritance modelling"
+ },
+ {
+  "id": "h2-f06",
+  "group": "followup",
+  "lang": "en",
+  "intent": "followup",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "here is my proof that sqrt(2) is irrational: assume a/b lowest terms, a^2=2b^2, so a even, a=2c, 4c^2=2b^2, b^2=2c^2, b even, contradiction"
+    },
+    {
+     "role": "assistant",
+     "content": "Correct."
+    },
+    {
+     "role": "user",
+     "content": "now do cube root of 2"
+    },
+    {
+     "role": "assistant",
+     "content": "same?"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "session-required: analogous proof; low plausible, mid safe"
+ }
+]

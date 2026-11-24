@@ -1,0 +1,408 @@
+[
+ {
+  "id": "h2-n01",
+  "group": "nonenglish",
+  "lang": "pl",
+  "intent": "nonenglish",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "hej, jak sie masz? polecisz jakis fajny serial na wieczor"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "small talk polish"
+ },
+ {
+  "id": "h2-n02",
+  "group": "nonenglish",
+  "lang": "pl",
+  "intent": "nonenglish",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "mam w postgresie tabele z 200 mln wierszy i partycjonowanie po dacie, ale zapytania po user_id i tak skanuja wszystkie partycje. jak to ugryzc bez przepisywania calej aplikacji?"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "partitioning vs access pattern; polish"
+ },
+ {
+  "id": "h2-n04",
+  "group": "nonenglish",
+  "lang": "de",
+  "intent": "nonenglish",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Warum ist mein Go-Programm mit 16 statt 4 Goroutinen langsamer? Jede Goroutine schreibt in ein gemeinsames []int an Index i*8+k und summiert später. Keine Locks. Ergebnis stimmt, aber 3x langsamer."
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "false sharing / cache line; no keyword, German"
+ },
+ {
+  "id": "h2-n05",
+  "group": "nonenglish",
+  "lang": "es",
+  "intent": "nonenglish",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "necesito un script en bash que renombre todos los .jpeg a .jpg en una carpeta"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "simple script"
+ },
+ {
+  "id": "h2-n06",
+  "group": "nonenglish",
+  "lang": "es",
+  "intent": "nonenglish",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 4096,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "Estoy diseñando un sistema de reservas para hoteles con overbooking controlado. ¿Cómo modelo la consistencia entre inventario por noche y reservas concurrentes para que nunca pasemos de un límite del 105% pero tampoco perdamos ventas por locks largos?"
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 2,
+  "maxTier": 2,
+  "notes": "bounded-overbooking concurrency design; hard"
+ },
+ {
+  "id": "h2-n07",
+  "group": "nonenglish",
+  "lang": "fr",
+  "intent": "nonenglish",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "salut, tu peux me dire c'est quoi la difference entre let et const en js"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "basic js"
+ },
+ {
+  "id": "h2-n08",
+  "group": "nonenglish",
+  "lang": "fr",
+  "intent": "nonenglish",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Mon job cron tourne deux fois quand je déploie sur 3 replicas Kubernetes. J'ai mis concurrencyPolicy: Forbid mais ça continue. Voici le manifest:\n```yaml\nkind: Deployment\nspec:\n  replicas: 3\n  template:\n    spec:\n      containers:\n      - name: app\n        command: [\"sh\",\"-c\",\"while true; do ./job; sleep 3600; done\"]\n```"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "concurrencyPolicy is for CronJob not Deployment; spot the manifest"
+ },
+ {
+  "id": "h2-n10",
+  "group": "nonenglish",
+  "lang": "it",
+  "intent": "nonenglish",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Dimostra che ogni sottogruppo di un gruppo ciclico è ciclico, e dimmi quanti sottogruppi ha Z_36."
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 1,
+  "notes": "standard algebra proof + divisor count 9; mid for rigor"
+ },
+ {
+  "id": "h2-n11",
+  "group": "nonenglish",
+  "lang": "pt",
+  "intent": "nonenglish",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "ei, como faço pra pegar o ultimo item de uma lista em python? e o penultimo"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "basic python"
+ },
+ {
+  "id": "h2-n12",
+  "group": "nonenglish",
+  "lang": "pt",
+  "intent": "nonenglish",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Nosso serviço em Node usa um pool de 10 conexões e sob carga as requisições ficam em fila e dão timeout, mas o CPU do banco está em 15%. O que investigar primeiro? Segue o trecho:\n```js\nconst c = await pool.connect();\nconst r = await c.query(sql);\nres.json(r.rows);\n```"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "missing release() leak; visible in snippet"
+ },
+ {
+  "id": "h2-n13",
+  "group": "nonenglish",
+  "lang": "zh",
+  "intent": "nonenglish",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "帮我把这句话翻译成英文：我们下周三下午三点开会，请准时参加。"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "short translation zh"
+ },
+ {
+  "id": "h2-n14",
+  "group": "nonenglish",
+  "lang": "zh",
+  "intent": "nonenglish",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "我们的分布式任务调度系统用 Redis 做分布式锁（SET NX PX），任务执行时间有时超过锁的过期时间，结果同一个任务被两个节点同时执行。除了加大过期时间，还有什么可靠方案？请分析 fencing token 是否真的能解决问题。"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 2,
+  "maxTier": 2,
+  "notes": "fencing token reasoning (Kleppmann) — hard"
+ },
+ {
+  "id": "h2-n16",
+  "group": "nonenglish",
+  "lang": "ja",
+  "intent": "nonenglish",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "このSQLが遅いです。EXPLAINではSeq Scanになっています。\nSELECT * FROM orders WHERE DATE(created_at) = '2026-11-01';\nインデックスはcreated_atにあります。"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "function on column kills index; range rewrite"
+ },
+ {
+  "id": "h2-n17",
+  "group": "nonenglish",
+  "lang": "ko",
+  "intent": "nonenglish",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "파이썬에서 리스트를 중복 없이 순서 유지하면서 만드는 법 알려줘"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "basic python ko"
+ },
+ {
+  "id": "h2-n18",
+  "group": "nonenglish",
+  "lang": "ru",
+  "intent": "nonenglish",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Объясни, почему в Go срез, полученный из append внутри функции, иногда меняет исходный массив вызывающей стороны, а иногда нет. Приведи пример с cap."
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "slice aliasing; well-known"
+ },
+ {
+  "id": "h2-n20",
+  "group": "nonenglish",
+  "lang": "ar",
+  "intent": "nonenglish",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "عندي نظام فيه عدة خدمات تكتب في نفس قاعدة البيانات وأحيانا تحدث تحديثات ضائعة رغم أننا نستخدم المعاملات. كيف أصمم حلا يمنع ذلك دون قفل الجداول بالكامل؟"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "isolation / optimistic concurrency; arabic"
+ },
+ {
+  "id": "h2-n21",
+  "group": "nonenglish",
+  "lang": "he",
+  "intent": "nonenglish",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "מה ההבדל בין TCP ל-UDP בקצרה?"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "basic networking he"
+ },
+ {
+  "id": "h2-n22",
+  "group": "nonenglish",
+  "lang": "hi",
+  "intent": "nonenglish",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "मुझे अपने बॉस को छुट्टी के लिए एक छोटा ईमेल लिखना है, दो दिन की, बुखार है।"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "short email hi"
+ },
+ {
+  "id": "h2-n23",
+  "group": "nonenglish",
+  "lang": "tr",
+  "intent": "nonenglish",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "bu regex ne yapiyor: ^(?=.*[A-Z])(?=.*\\d).{8,}$"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "explain regex tr"
+ },
+ {
+  "id": "h2-n24",
+  "group": "nonenglish",
+  "lang": "vi",
+  "intent": "nonenglish",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Hệ thống của mình dùng Kafka, consumer group có 6 consumer nhưng topic chỉ có 4 partition, và thỉnh thoảng bị rebalance liên tục khi deploy. Làm sao để giảm rebalance và đảm bảo không xử lý trùng message?"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "static membership / cooperative rebalance / idempotency; vi"
+ }
+]

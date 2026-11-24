@@ -1,0 +1,314 @@
+[
+ {
+  "id": "h2-d01",
+  "group": "debug",
+  "lang": "en",
+  "intent": "debug",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "why is this slower with more workers\n\n```go\nvar mu sync.Mutex\nvar total int\nfunc work(items []int, n int) int {\n  var wg sync.WaitGroup\n  ch := make(chan int)\n  for i:=0;i<n;i++ { wg.Add(1); go func(){ defer wg.Done(); for x := range ch { mu.Lock(); total += expensive(x); mu.Unlock() } }() }\n  for _, x := range items { ch <- x }\n  close(ch); wg.Wait(); return total\n}\n```\n1 worker 2s, 8 workers 5s"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "no keywords; expensive() inside the lock serialises plus contention; mid can see it"
+ },
+ {
+  "id": "h2-d02",
+  "group": "debug",
+  "lang": "en",
+  "intent": "debug",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "segfault in prod, only on arm64 pods, amd64 fine. same image tag. core says SIGBUS in memcpy. what are the options"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "SIGBUS alignment/unaligned access/mmap truncation reasoning; open-ended"
+ },
+ {
+  "id": "h2-d03",
+  "group": "debug",
+  "lang": "en",
+  "intent": "debug",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "TypeError: Cannot read properties of undefined (reading 'map') at UserList.jsx:14\n\nconst UserList = ({users}) => <ul>{users.map(u => <li>{u.name}</li>)}</ul>\n\nfix pls"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "classic undefined prop; easy fix despite stack-trace style"
+ },
+ {
+  "id": "h2-d04",
+  "group": "debug",
+  "lang": "en",
+  "intent": "debug",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "This is the full log of a crash loop, pod keeps restarting. just tell me what the root cause is\n\n2026-11-02T10:01:11Z starting svc\n2026-11-02T10:01:11Z loading config /etc/svc/config.yaml\n2026-11-02T10:01:11Z fatal: open /etc/svc/config.yaml: no such file or directory\n2026-11-02T10:01:12Z starting svc\n2026-11-02T10:01:12Z loading config /etc/svc/config.yaml\n2026-11-02T10:01:12Z fatal: open /etc/svc/config.yaml: no such file or directory"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "scary-length log but trivial: missing file/ConfigMap mount"
+ },
+ {
+  "id": "h2-d05",
+  "group": "debug",
+  "lang": "en",
+  "intent": "debug",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 4096,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "counter is off by a few after we deploy new version. we do `UPDATE stats SET n = n + 1` in a handler and also a nightly job that reads n then writes n back with the recomputed value. total drift is small. whats up"
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "lost update between read-modify-write job and increments; mid ok"
+ },
+ {
+  "id": "h2-d06",
+  "group": "debug",
+  "lang": "en",
+  "intent": "debug",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "python: `for i in range(3): fns.append(lambda: i)` then calling all gives 2,2,2. why"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "classic late-binding closure, well known"
+ },
+ {
+  "id": "h2-d07",
+  "group": "debug",
+  "lang": "en",
+  "intent": "debug",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "sometimes the same webhook gets processed twice even tho we dedupe by event id in redis with SETNX + 5min ttl. provider says they retry up to 24h. where's the hole?"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "ttl shorter than retry window, plus crash between setnx and handling; reasoning but approachable"
+ },
+ {
+  "id": "h2-d08",
+  "group": "debug",
+  "lang": "en",
+  "intent": "debug",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "git bisect says the bad commit is a docs-only change but test fails before and passes after repeatedly. nothing flaky locally. 3 devs same result. help"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "build cache / generated files / test depends on timestamp or file listing; open-ended hunting"
+ },
+ {
+  "id": "h2-d09",
+  "group": "debug",
+  "lang": "en",
+  "intent": "debug",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "my docker compose service can't reach postgres: `could not translate host name \"db\" to address`. both in same compose file, db service is named `postgres` not `db`"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "service name mismatch given in the question"
+ },
+ {
+  "id": "h2-d10",
+  "group": "debug",
+  "lang": "en",
+  "intent": "debug",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "```\nfatal error: all goroutines are asleep - deadlock!\ngoroutine 1 [semacquire]:\nsync.runtime_Semacquire(0xc00001c0a8)\nsync.(*WaitGroup).Wait(0xc00001c0a0)\nmain.main()\n\t/app/main.go:31 +0x9b\n```\nmain.go:\n```go\nvar wg sync.WaitGroup\nfor _, u := range urls {\n    go func(u string){ wg.Add(1); defer wg.Done(); fetch(u) }(u)\n}\nwg.Wait()\n```"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "Add inside goroutine; well-known; low should manage"
+ },
+ {
+  "id": "h2-d11",
+  "group": "debug",
+  "lang": "de",
+  "intent": "debug",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Unser Service hängt nach ca. 20 Minuten unter Last, CPU fällt auf 0, Threaddump zeigt 200 Threads im Pool 'http-nio-exec' alle WAITING auf HikariPool.getConnection. DB-Verbindungen aber nur 12 von 50 aktiv laut Postgres. Was kann das sein?"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "connection leak or nested pool acquisition deadlock; German; reasoning"
+ },
+ {
+  "id": "h2-d12",
+  "group": "debug",
+  "lang": "en",
+  "intent": "debug",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "jest test passes alone, fails when whole suite runs. error is 'Cannot log after tests are done'. no idea"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "common async cleanup issue; known pattern"
+ },
+ {
+  "id": "h2-d13",
+  "group": "debug",
+  "lang": "en",
+  "intent": "debug",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "rust borrow checker error E0502: cannot borrow `v` as mutable because it is also borrowed as immutable, at `for x in &v { if *x > 3 { v.push(*x) } }`. simplest fix?"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "textbook"
+ },
+ {
+  "id": "h2-d14",
+  "group": "debug",
+  "lang": "en",
+  "intent": "debug",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 4096,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "two services each cache user perms for 60s, perm revoke propagates via kafka. a user got access for ~4min after revoke in one incident. consumer lag was fine. possible causes?"
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "layered cache TTLs, negative caching, read-through repopulating stale; reasoning across layers"
+ },
+ {
+  "id": "h2-d15",
+  "group": "debug",
+  "lang": "en",
+  "intent": "debug",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "can two of these run at once safely?\n\n```bash\n#!/bin/bash\nf=/tmp/lock_$$\nif [ ! -e /var/run/job.pid ]; then\n  echo $$ > /var/run/job.pid\n  do_the_thing\n  rm /var/run/job.pid\nfi\n```"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "TOCTOU check-then-create trap with no keywords; stale pid on crash too"
+ }
+]
