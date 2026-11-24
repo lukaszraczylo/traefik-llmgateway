@@ -831,6 +831,10 @@ http:
 
 A smart router is a virtual model. The client requests the router name, such as `auto`. The gateway scores the request, picks a tier of real models, and escalates to a higher tier when the upstream fails. A router costs nothing when `smartRouters` is empty.
 
+### Smart router example
+
+Three tiers, several models in the upper tiers, and every optional key at a useful value. Remove the keys you do not need. Each tier model must name a model the gateway can serve.
+
 ```yaml
 http:
   middlewares:
@@ -846,81 +850,247 @@ http:
                   models: ["openai/gpt-5-mini"]
                 - name: medium
                   minScore: 300
-                  models: ["anthropic/claude-sonnet-4-5"]
+                  models: ["anthropic/claude-sonnet-4-5", "openai/gpt-5"]
                 - name: large
                   minScore: 600
-                  models: ["anthropic/claude-opus-4-5", "openai/gpt-5"]
+                  models: ["anthropic/claude-opus-4-5", "openai/gpt-5-pro"]
               keywordRules:
                 - tier: large
                   keywords: ["security review", "architecture"]
               defaultTier: small
-              # toolsMinTier: medium   # optional: floor for requests with tools
-              # shadowWeights: {code: 0}   # optional: compare weights without routing on them
-              # classifier: v2             # optional: v2 scoring, default v1
-              # shadowClassifier: v2       # optional: compare v2 without routing on it
-              # riskZ: 128                 # optional: v2 uncertainty margin
-              # intentTiers: {debug: large}  # optional: pin a v2 intent to a tier
-              # session: {enabled: true}    # optional: per-conversation tier pin, needs v2
-              # calibration: {mode: shadow}  # optional: learn threshold offsets from bad answers
-              # saturationDowngrade: true    # optional: start one tier lower when the tier is full
-              selection: ordered           # ordered, hash, or adaptive
+              toolsMinTier: medium
+              classifier: v2
+              riskZ: 128
+              intentTiers: {debug: large}
+              session: {enabled: true}
+              calibration: {mode: shadow}
+              selection: adaptive
+              saturationDowngrade: true
               maxAttempts: 4
-              # firstByteTimeout: 40s      # optional: escalate when an upstream starts too slowly
+              firstByteTimeout: 40s
               contextEscalation: true
 ```
 
-- **Tiers**: list tiers cheapest first. The list position is the rank. The first tier must have `minScore: 0`, and each later `minScore` must be higher. Scores run from 0 to 1000. A request goes to the highest tier whose `minScore` its score reaches. Tiers must not share a model.
-- **Classifier signals**: the gateway scores the newest user text. It adds points for length, code markers, reasoning markers, technical vocabulary, multi-step phrasing, and several questions. It subtracts points for short, simple questions. A request with `tools`, or tool calls in its history, adds the `tools` weight (default 100) and nothing else, so a simple agent turn can use the lowest tier. Override the weights with `weights`.
-- **Floors**: a floor raises the tier but never lowers it. `reasoning_effort` of `medium` or `high`, or `thinking.type: enabled`, starts at the top tier. Two or more reasoning markers also start at the top tier. Set `toolsMinTier` to a tier name to floor every request with tools or tool history at that tier. It is unset by default. A keyword rule raises the request to its tier when the text contains one of its keywords.
-- **Empty text**: a request with no user text uses `defaultTier`. The default is the first tier.
-- **Selection**: `ordered` tries the models of a tier in the listed order. `hash` starts at a model chosen from the request text, which spreads load but keeps the choice stable per prompt. `adaptive` orders the models of a tier with a bandit, as described under Adaptive selection.
-- **Escalation**: on a retryable failure, the gateway tries the next model in the same tier, then the first model of the next tier. It never moves down. It stops after `maxAttempts` upstream attempts (default 4). When a higher tier has a usable model, the plan keeps one attempt for it, so same-tier failover cannot fill every attempt. An upstream `400` is not escalated, because the request itself is invalid. Escalation works with `failover` off. Once the gateway has sent the first response byte, it cannot escalate.
-- **First-byte timeout**: set `firstByteTimeout` (a Go duration such as `40s`, at least `1s`) to escalate when an upstream starts too slowly. It is off by default, and without it the router behaves as before. The deadline applies to each upstream attempt of the router, and only to requests sent to the router name, never to a direct model request. The first byte is the first byte of the response body for a non-stream request, and the first SSE `data:` event for a stream. Response headers, and SSE comment lines such as keep-alive pings, do not count. When an attempt misses the deadline, the gateway cancels that attempt only, never the client request, and tries the next candidate under the normal escalation rules. A slow attempt counts as a failed attempt for health tracking, like an upstream that stalls mid-body. Once the first byte is in, the deadline is over and no escalation happens. The value must not exceed the `requestTimeout` of a provider that a tier model names, and the gateway refuses the config otherwise.
-  - **CDN limits**: a CDN or proxy in front of the gateway can cut a request before the gateway answers (Cloudflare closes at about 100 seconds with HTTP `524`). Each attempt can take up to `firstByteTimeout`, so keep `firstByteTimeout` times `maxAttempts` below that limit.
-  - **No candidate starts in time**: when the last candidate also misses the deadline, the gateway answers `504` with an error of type `timeout_error` and the message "the router's models did not start responding in time". The body uses the OpenAI error shape on `/v1/chat/completions` and the Anthropic shape on `/v1/messages`. The client gets this error before the CDN gives up.
-  - **Observe**: a request where any attempt missed the deadline counts under the `slow` outcome in the admin router stats (unless the answer was bad, which counts as `bad`). A slow attempt that moves the request to a higher tier also counts as an escalation. The adaptive selection counts a slow attempt as a failure, so its arm gets reward 0. The rate-gated `router_escalation` event reports the slow model. The admin router view shows `firstByteTimeout`.
-- **Context escalation**: with `contextEscalation` on (the default), the gateway skips a model when the estimated prompt plus the requested output tokens exceed 90% of its known context window. The requested output is `max_completion_tokens`, then `max_tokens` on chat, and `max_tokens` on `/v1/messages`; it counts as 0 when absent. The prompt estimate counts the text of every message and the system prompt, the `tools` schema, OpenAI `tool_calls` arguments, and Anthropic `tool_use` input at one token per four bytes, plus 1000 tokens per image. After 50 served requests with provider-reported usage, the gateway learns bytes per token for each upstream model (clamped to 1.5 to 6.0, kept in memory on each replica) and uses that ratio for the model's own context check. Structured tool payloads are sized by a bounded walk, so a very large one counts as a lower bound. Image bytes do not count. When this check would skip every target, the gateway uses the model with the largest known context window instead of returning `404`. Set `contextEscalation: false` to turn the check off.
-- **Vision**: a request with an image skips models that set `vision: false` in `modelMeta`.
-- **Access**: a group needs access to the router name **and** to each target model it can reach. The gateway skips targets the group may not use. When the group may use none, the request returns `403`.
-- **Response**: the response body keeps the real model that served the request. Two headers report the routing. `X-Llmgw-Routed-Model` holds the canonical `provider/model` id. `X-Llmgw-Router-Tier` holds the tier name.
-- **Context overflow escalation**: before the first response byte, a smart router moves to the next candidate when an upstream `400` body names a context overflow (`context_length_exceeded`, "maximum context length", "prompt is too long", "context window", "is longer than the model's", "too many tokens"). The gateway counts it as a tier escalation. Every other `400`, and every `400` on a direct model request, goes to the client unchanged.
-- **Model list**: `GET /v1/models` lists a router when the group may use its name and at least one target. The entry advertises the largest known context window of all router targets in `context_window`, `context_length`, and `max_model_len` when `contextEscalation` is on (the default), because the router skips targets that are too small. With `contextEscalation: false` it advertises the smallest known window. Targets with an unknown context window do not count. A `modelMeta` entry keyed by the router name overrides the value. It needs `contextTokens` above zero, or the gateway refuses the config. The gateway logs a one-time warning when the override exceeds the largest known target window. When no target has a known context window, the fields are omitted.
-- **Validation at construction**: a router needs at least one tier. A router name must not name a configured provider prefix, an explicit model id, or a model alias. A tier model must not itself be a router. A keyword rule must name a real tier.
-- **Metrics**: `llmgateway_router_requests_total{router,tier,reason}` counts each request once. `reason` is `score`, `keyword`, `floor`, `default`, `skipped`, `session`, `loop`, `bump`, or `saturated`. `skipped` means the first attempted tier is above the classified tier because lower tiers had no usable target. Such targets fail the context-window, vision, cost-budget, access, or resolution checks. `llmgateway_router_escalations_total{router,from_tier,to_tier}` counts each move to a higher tier. Same-tier failover is not counted. Labels come only from configured router and tier names.
-- **Events**: the admin events feed records a `router_escalation` event on a cross-tier escalation or when a router exhausts its attempts. A rate gate limits the events to one per 30 seconds per replica, and the next event reports how many it suppressed.
-- **Shadow weights**: set `shadowWeights` (same shape as `weights`) to score each request a second time with other weights. The shadow result never changes routing. The gateway counts only totals: how often the live tier and the shadow tier agree, and how each request ended. It stores no prompt text and no per-request record. The counters use the same monthly buckets as the other router counters, shared through Redis when available and kept per instance otherwise.
-- **Classifier v2**: set `classifier: v2` to score the newest real ask instead of the whole text. The default is `v1`, and v1 output does not change. v2 looks back up to 400 messages for the ask, so a tool loop keeps the tier of the ask that started it. A user turn that carries tool results is never the ask. v2 splits the ask into prose and pasted material. Fenced code, dense or short-line paragraphs, and logs are pasted material. Markers and keyword rules read only the prose, so a marker inside a paste cannot move the tier. v2 also reads the request shape: size, history length, requested output, JSON mode, and a non-Latin or unrecognised language. The prose gets an intent: chit-chat, rewrite, edit, debug, design or math. Each intent has a base score on the router's own ladder, so the same intent lands on the same relative tier for any `minScore` layout. The v1 score is a lower bound. Floors and keyword rules still raise the tier last.
-- **Intent placement**: a position runs from 0 (score 0) to 1000 (the first boundary above tier 0) to 2000 (the top boundary). The defaults are chit-chat 0, rewrite 400, edit 1000, debug 1500, design 1800, math 2000, and text the English markers cannot classify 1000. Set `intentTiers` (intent to tier name; keys `chitchat`, `rewrite`, `edit`, `debug`, `design`, `math`, `foreign`) to pin an intent to the lowest score of a tier. A name that is not a tier fails validation.
-- **Risk margin**: v2 adds an uncertainty `sigma` to the score and routes on `score + riskZ * sigma / 100`, so doubt routes up. `riskZ` runs from 0 to 400 and defaults to 128, a 10% under-route target. Sigma grows for non-Latin text, long text with no recognised intent, a truncated history, a very short follow-up, and conflicting intents. `riskZ: 0` turns the margin off.
-- **Shadow classifier**: set `shadowClassifier: v2` on a v1 router to score each request with v2 as well. It fills the same shadow matrix as `shadowWeights` and never changes routing. It cannot be set together with `shadowWeights`. Roll v2 out in this order: shadow first, then `classifier: v2`.
-- **Sessions**: set `session.enabled: true` to keep a tier pin per conversation. Sessions work only with `classifier: v2`. With only `shadowClassifier: v2`, the session changes the shadow rank and never changes live routing, so a v1 router never routes on a session. The setting has no effect on a router that uses neither, and the gateway logs a warning. The default is off.
-  - **Key**: the conversation key is a SHA-256 of the router, the caller (the user scope, else a digest of the presented API key), a client id, and the first 256 bytes of the system prompt. The client id is `metadata.user_id`, else `prompt_cache_key`, else the `session.header` request header (default `X-Session-Id`). With none of them, it is the system prompt and the first user message. The gateway stores only the 32-character digest and a few small numbers, never prompt text.
-  - **Storage**: with Redis, the value lives at `llmgw:rsess:{router}:{hash}` as `v1|pin|loop|streak|calm|score|msgs|askHash|askAt|seenAt` (under 96 bytes). Each turn does one `GET` and renews the TTL with an async `SET`. A bounded in-process cache of 4096 sessions sits in front, and it is the only store without Redis. Then each gateway instance keeps its own sessions. A Redis error counts as a session miss and never fails a request. A shadow-only session still does that one `GET` per request, so the shadow rank can follow the pin. Remove `session.enabled` to drop the call. When several instances share Redis, the newest record wins, so a decay on one instance applies on the others.
-  - **Pin**: the pin only rises within a conversation. A bad answer pins the next turn one tier above the tier that gave it. An escalation pins the tier that served it. A repeat of the same ask inside `regenWindowSeconds` (default 120) goes up one tier, with reason `bump`. After `decayAsks` (default 3) new asks that classify below the pin, the pin drops one tier. After `idleResetSeconds` (default 1800) of silence, it resets.
-  - **Tool loops**: a turn that carries tool results keeps the tier of the ask that started the loop, with reason `loop`. `toolFailStreak` (default 3) failing tool results in a row raise the loop one tier, with reason `bump`. A very short follow-up such as "ok do it" starts from the score of the previous ask.
-  - **Observe**: the reasons `session`, `loop`, and `bump` appear in the routing counters. Routers whose sessions change live routing (`classifier: v2`) also send `X-Llmgw-Router-Reason`. A shadow-only router sends no header. `ttlSeconds` (default 21600, range 60 to 604800) sets how long an idle session lives.
-- **Calibration**: `calibration.mode` is `off` (default), `shadow` or `live`. A background job runs every 60 seconds and reads the last 24 hourly counters of each tier. When the 95% Wilson lower bound of a tier's bad share exceeds `targetBadPct` (default 3) over at least `minSamples` requests (default 200), the threshold of the next tier up drops by `step` points (default 25), at most `maxLower` (default 150, reduced to one less than the smallest `minScore` gap when not set). When the upper bound stays under 1% over 500 requests, the offset relaxes by 10. `maxRaise` (default 0) lets an offset go negative, so by default calibration only lowers thresholds and routes more requests up. `maxLower` plus `maxRaise` must stay below the smallest gap between two `minScore` values, so the effective thresholds always increase. `shadow` computes the offsets and exports them but never changes routing. `live` routes on `minScore - offset`. `freeze: true` sets every offset to zero at once.
-  - **Counted requests**: only requests routed by `score` count, and only when the first attempted tier served them or gave a bad answer. Upstream errors, `429` responses, escalations, and keyword, floor, session and loop routes are left out, because they measure capacity or a forced tier, not the classifier.
-  - **Storage**: counters live at `llmgw:router:{router}:cal/{tier}/n` and `cal/{tier}/bad`, with `:hour:{yyyymmddhh}` appended and a 48 hour TTL. They use the same shared store as the other router counters, and each instance keeps its own without Redis. The refresh goroutine starts with the first routed request and stops on `Close` or after 10 minutes without a routed request.
-  - **Observe**: the admin router view lists `calibration` with the mode and the offset per tier. `llmgateway_router_calibration_delta{router,tier,mode}` is a gauge of the same offsets.
-- **Adaptive selection**: set `selection: adaptive` to order the candidates of each tier by learned reward. The default stays `ordered`. The bandit only permutes the candidates of one tier. It never adds or removes a candidate and never moves one to another tier, so the set of models a request can reach does not change.
-  - **Reward**: a bad answer or an upstream error earns 0. Any other attempt earns `1 - latencyWeightPct/100 * clamp(ttfb / tierAverage - 1, 0, 1)`, where the tier average is the mean of the per-candidate first-byte averages. A client cancel or an upstream `400` is not counted.
-  - **Order**: each candidate draws a score from a normal approximation of Beta(2+a, 1+n-a), where a and n are the reward sum and attempt count of the last `windowHours` hourly buckets. The optimistic prior means a new candidate gets tried. With `concurrencyAutodetect` on, the score drops by `0.5 * utilisation^2` of the candidate's provider, and a provider at its known limit goes last. With probability `explorePct` percent, a random unsaturated candidate goes first.
-  - **Settings**: `adaptive.explorePct` (default 5, range 0 to 50), `adaptive.windowHours` (default 6, range 1 to 12), and `adaptive.latencyWeightPct` (default 30, range 0 to 100). They have no effect with another selection, and the gateway logs a warning.
-  - **Storage**: counters live at `llmgw:router:{router}:bd/{tier}/{candidateHash}/a` and `/n`, with `:hour:{yyyymmddhh}` appended, a 12 hour TTL, and rewards in thousandths. The reward window refreshes every 60 seconds with the calibration job. Until the first refresh a candidate uses the prior. A router keeps at most 256 candidates. Each instance keeps its own counters without Redis.
-- **Saturation downgrade**: set `saturationDowngrade: true` to start a request one tier below its classified tier when the classified tier has no free capacity. The default is off. The tier counts as saturated when every usable candidate has a known concurrency limit and has reached it. The limit comes from `maxConcurrency` or from `concurrencyAutodetect`, so without them nothing is ever saturated. A request moves down only when all of these hold:
-  - **Reason**: the tier came from the score alone. A keyword, a floor, the default tier, a session pin, a tool loop, or a bump never moves down.
-  - **Floors**: the lower tier is not below any floor or keyword tier of the request.
-  - **Band**: the score is less than the tier's threshold plus `downgradeBand` (default 100, range 0 to 300). A score deep inside the tier stays.
-  - **Fit**: the lower tier has a candidate that fits the context window, vision and cost checks.
-  The request moves down at most one tier. The higher tiers stay in the plan, so a failure still escalates up. The response then carries `X-Llmgw-Router-Downgraded` with the classified tier name, as long as the serving tier is the lower one. The request counts with reason `saturated`, and the admin router view lists the count as `downgraded`. `saturationDowngrade` needs at least two tiers.
-- **Outcomes**: each request counts once by first attempted tier, routing reason, and outcome. `ok` means the first attempted tier served a 2xx. `escalated` means a higher tier served it. `error` means the final response was not a 2xx. `bad` means the answer was cut at the output cap, came back empty, or broke after the first byte. A length cut counts as bad only when the completion has at least 512 tokens or the client sent no `max_tokens`. The `bad` count changes routing only through session pins and live calibration.
-- **Admin**: `GET /admin/api/overview` and `GET /admin/api/catalog` list routers. The overview lists `toolsMinTier`, `shadowEnabled`, `classifier`, `shadowClassifier`, `riskZ`, and the `shadow` and `outcomes` counts. The Models page shows a Smart routers card with a shadow agreement matrix and outcome table, and the Config page has a Smart router helper that builds a snippet.
+Clients send `"model": "auto"`. The router name must not collide with a provider prefix, an explicit model id, or a model alias.
 
-**Limitations**
+### Configuration keys
+
+All keys sit under `smartRouters.<name>`. The gateway refuses the config when a value is out of range.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `tiers` | required | List of tiers, cheapest first. The position is the rank. |
+| `tiers[].name` | required | Tier name. Must be unique in the router. |
+| `tiers[].models` | required | Models of the tier. A model appears in one tier only. A router cannot name another router. |
+| `tiers[].minScore` | required | Lowest score the tier serves, 0 to 1000. The first tier needs 0. Each later value must be higher. |
+| `keywordRules` | none | Raise a request to `tier` when its text holds one of the `keywords`. At most 64 keywords in total. |
+| `defaultTier` | first tier | Tier for a request with no user text. |
+| `toolsMinTier` | none | Floor for a request that carries tools or tool history. |
+| `weights` | see [Tiers, scoring and floors](#tiers-scoring-and-floors) | Override the v1 weights, each 0 to 1000. |
+| `classifier` | `v1` | `v1` or `v2`. |
+| `riskZ` | `128` | v2 uncertainty margin, 0 to 400. `0` turns the margin off. |
+| `intentTiers` | none | Pin a v2 intent to a tier by name. |
+| `shadowWeights` | none | Second v1 scoring for comparison. Never changes routing. |
+| `shadowClassifier` | none | `v2` scores each request with v2 for comparison. Cannot be set with `shadowWeights`. |
+| `session.enabled` | `false` | Keep a tier pin per conversation. |
+| `session.header` | `X-Session-Id` | Request header that carries a client session id. |
+| `session.ttlSeconds` | `21600` | Idle lifetime of a session record, 60 to 604800. |
+| `session.idleResetSeconds` | `1800` | Silence after which the pin resets, 1 to 604800. Must not exceed `ttlSeconds`. |
+| `session.decayAsks` | `3` | Calm new asks that lower the pin one tier, 1 to 50. |
+| `session.regenWindowSeconds` | `120` | Window in which a repeated ask counts as a regenerate, 5 to 3600. |
+| `session.toolFailStreak` | `3` | Failing tool results in a row that raise a tool loop one tier, 2 to 20. |
+| `calibration.mode` | `off` | `off`, `shadow`, or `live`. |
+| `calibration.targetBadPct` | `3` | Bad-answer share a tier must stay under, 1 to 50. |
+| `calibration.minSamples` | `200` | Requests a boundary needs before it moves, 50 or more. |
+| `calibration.step` | `25` | Points added to an offset per refresh, 1 to 100. |
+| `calibration.maxLower` | `150`, reduced to fit tier gaps | Largest drop of a threshold, 0 to 300. |
+| `calibration.maxRaise` | `0` | Largest rise of a threshold, 0 to 100. |
+| `calibration.freeze` | `false` | Set every offset to zero. |
+| `selection` | `ordered` | `ordered`, `hash`, or `adaptive`. |
+| `adaptive.explorePct` | `5` | Chance in percent that a random candidate goes first, 0 to 50. |
+| `adaptive.windowHours` | `6` | Hours of reward counters that count, 1 to 12. |
+| `adaptive.latencyWeightPct` | `30` | Share of the reward a slow first byte can remove, 0 to 100. |
+| `maxAttempts` | `4` | Upstream attempts per request. |
+| `firstByteTimeout` | off | Go duration of at least `1s`. Escalate when an attempt starts too slowly. |
+| `contextEscalation` | `true` | Skip models whose known context window is too small. |
+| `saturationDowngrade` | `false` | Start one tier lower when the classified tier is full. Needs two tiers. |
+| `downgradeBand` | `100` | Points above a threshold in which a downgrade can happen, 0 to 300. |
+
+### Tiers, scoring and floors
+
+Scores run from 0 to 1000. A request goes to the highest tier whose `minScore` its score reaches. The default classifier is `v1`.
+
+- **v1 signals**: the gateway scores the newest user text, looking back up to 32 messages. It adds points for length, code markers, reasoning markers, technical vocabulary, multi-step phrasing, and several questions. It subtracts points for short, simple questions. A request with `tools`, or tool calls in its history, also adds the `tools` weight.
+- **v1 weights**: `weights` overrides the defaults `length` 100, `code` 300, `reasoning` 250, `technical` 250, `multiStep` 30, `multiQuestion` 20, `simple` 50 (a penalty), and `tools` 100. The score stays between 0 and 1000.
+- **Floors**: a floor raises the tier and never lowers it. `reasoning_effort` of `medium` or `high`, or `thinking.type: enabled`, starts at the top tier. Two or more reasoning markers also start at the top tier. `toolsMinTier` floors every request with tools or tool history. A keyword rule raises the request to its tier.
+- **Empty text**: a request with no user text uses `defaultTier`.
+- **Reasons**: each routed request carries one reason: `score`, `keyword`, `floor`, `default`, `skipped`, `session`, `loop`, `bump`, or `saturated`. `skipped` means the first attempted tier sits above the classified tier because lower tiers had no usable target.
+
+### Classifier v2
+
+Set `classifier: v2` to score the newest real ask. The v1 output does not change when you leave the default. Floors and keyword rules still raise the tier last, and v2 never lowers a rank.
+
+- **Ask search**: v2 looks back up to 400 messages. A tool loop keeps the tier of the ask that started it, because a user turn that carries tool results is never the ask.
+- **Prose and paste**: v2 splits the ask into prose and pasted material. Fenced code, dense or short-line paragraphs, and logs count as paste. Markers and keyword rules read only the prose, so a marker inside a paste cannot move the tier.
+- **Request shape**: v2 also reads the size, the history length, the requested output, JSON mode, and non-Latin or unrecognised language.
+- **Intents**: the prose gets one intent: chit-chat, rewrite, edit, debug, design, or math. Each intent has a base score on the router's own ladder. The same intent lands on the same relative tier for any `minScore` layout. The v1 score is a lower bound.
+- **Hard subjects**: a request whose subject needs a stronger model, whatever its wording, lifts the score to the `debug` or `design` base.
+- **Tool-output failure**: when one of the newest three tool results shows an error, v2 raises the score to at least the `edit` base. An Anthropic `is_error` result or a log signature at the head or tail of the text counts as a failure.
+- **Ladder positions**: a position runs from 0 (score 0) to 1000 (the first boundary above tier 0) to 2000 (the top boundary). The defaults are chit-chat 0, rewrite 400, edit 1000, debug 1500, design 1800, math 2000. Text the English markers cannot classify uses 1000.
+- **`intentTiers`**: map an intent to a tier name to pin it to that tier's `minScore`. The keys are `chitchat`, `rewrite`, `edit`, `debug`, `design`, `math`, and `foreign`. A key that is not an intent, or a name that is not a tier, fails validation.
+- **Uncertainty margin**: v2 computes a spread `sigma` and routes on `score + riskZ * sigma / 100`, scaled to the router's tier spacing. Doubt routes up. `sigma` grows for non-Latin text, long text with no recognised intent, a truncated history, a very short follow-up, and conflicting intents. The default `riskZ` of 128 means 1.28 sigma. Set `riskZ: 0` to turn the margin off.
+
+### Shadow comparison
+
+A shadow scoring runs beside the live one and never changes routing. Use one of two keys. They exclude each other, and the gateway refuses a router that sets both.
+
+- **`shadowWeights`**: scores each request a second time with other v1 weights, for example `{code: 0}`.
+- **`shadowClassifier: v2`**: scores each request with v2 on a v1 router.
+
+For each request the gateway counts the live tier against the shadow tier. It stores no prompt text and no per-request record. The counters use monthly buckets, shared through Redis when configured and kept per instance otherwise. The admin Models page shows the counts as an agreement matrix: rows hold the live tier, columns hold the shadow tier, and the diagonal holds the requests where both agree. Mass below the diagonal means the shadow routes lower. Mass above it means the shadow routes higher.
+
+### Sessions
+
+Set `session.enabled: true` to keep a tier pin per conversation. The default is off.
+
+- **Needs v2**: sessions change live routing only with `classifier: v2`. With only `shadowClassifier: v2`, the session changes the shadow rank and never live routing. A router with neither ignores the setting, and the gateway logs a warning.
+- **Key**: the conversation key is a SHA-256 of the router, the caller, a client id, and the first 256 bytes of the system prompt. The caller is the user scope, else a digest of the presented API key. The client id is `metadata.user_id`, else `prompt_cache_key`, else the `session.header` header. With none of them, the key uses the system prompt and the first user message.
+- **Privacy**: the gateway stores the 32-character digest and a few small numbers. It stores no prompt text.
+- **Storage**: with Redis, the value lives at `llmgw:rsess:{router}:{hash}` and expires after `ttlSeconds`. Each turn does one `GET` and renews the expiry with an asynchronous `SET`. A bounded in-process cache of 4096 sessions sits in front. Without Redis it is the only store, and each instance keeps its own sessions. A Redis error counts as a session miss and never fails a request. A shadow-only router still does the `GET` on each request.
+- **Ratchet**: the pin only rises within a conversation. A bad answer pins the next turn one tier above the tier that gave it. An escalation pins the tier that served it. These outcome pins apply to routers with live sessions only.
+- **Regenerate**: a repeat of the same ask inside `regenWindowSeconds` goes up one tier, with reason `bump`.
+- **Decay**: after `decayAsks` new asks that classify below the pin, the pin drops one tier.
+- **Idle reset**: after `idleResetSeconds` of silence, the session resets.
+- **Tool loops**: a turn that carries tool results keeps the tier of the ask that started the loop, with reason `loop`. `toolFailStreak` failing tool results in a row raise the loop one tier, with reason `bump`.
+- **Short follow-ups**: a very short follow-up such as "ok do it" starts from the score of the previous ask.
+- **Several instances**: when instances share Redis, the newest record wins, so a decay on one instance applies on the others.
+
+### Outcomes
+
+Each request counts once by first attempted tier, routing reason, and outcome.
+
+| Outcome | Meaning |
+|---|---|
+| `ok` | The first attempted tier served a 2xx. |
+| `escalated` | A higher tier served a 2xx. |
+| `error` | The final response was not a 2xx. |
+| `bad` | The answer was cut at the output cap, came back empty, or broke after the first byte. |
+| `slow` | An attempt missed `firstByteTimeout`, whatever the final result. |
+
+`bad` overrides `slow`, and `slow` overrides the other three. A length cut counts as bad only when the completion has at least 512 tokens or the client sent no `max_tokens`. A short answer cut by a small client limit is the client's choice. `bad` changes routing only through live session pins and live calibration.
+
+### Calibration
+
+Calibration lowers tier thresholds when a tier gives too many bad answers, so more requests route up. It is off by default.
+
+- **Modes**: `off`, `shadow`, or `live`. `shadow` computes and exports the offsets and never changes routing. `live` routes on `minScore - offset`. `freeze: true` sets every offset to zero.
+- **Refresh**: a background job runs every 60 seconds. It reads the last 24 hourly counters of each tier.
+- **Raise rule**: take the 95% Wilson lower bound of a tier's bad share. When it exceeds `targetBadPct` over at least `minSamples` requests, the threshold of the next tier up drops by `step` points.
+- **Relax rule**: when the upper bound stays under 1% over at least 500 requests, the offset relaxes by 10.
+- **Limits**: an offset stays between `-maxRaise` and `maxLower`. `maxRaise` is 0 by default, so thresholds only drop. `maxLower` plus `maxRaise` must stay below the smallest gap between two `minScore` values. Without an explicit `maxLower`, the gateway lowers the default of 150 to fit tight gaps.
+- **Counted requests**: only requests routed by `score` count, and only when the first attempted tier served them or gave a bad answer. Upstream errors, `429` responses, escalations, and keyword, floor, session, and loop routes are left out. They measure capacity or a forced tier, not the classifier.
+- **Storage**: counters live at `llmgw:router:{router}:cal/{tier}/n` and `cal/{tier}/bad`, with `:hour:{yyyymmddhh}` appended and a 48 hour expiry. They use the shared store of the other router counters, and each instance keeps its own without Redis. The refresh goroutine starts with the first routed request. It stops on `Close` or after 10 minutes without a routed request.
+
+### Model selection
+
+`selection` sets the order of the models inside one tier.
+
+- **`ordered`** (default): try the models in the listed order.
+- **`hash`**: start at a model chosen from the request text. This spreads load and keeps the choice stable per prompt.
+- **`adaptive`**: order the models with a Thompson-sampling bandit. The bandit only permutes the candidates of one tier. It never adds a candidate, removes one, or moves one to another tier.
+
+Adaptive details:
+
+- **Reward**: a bad answer or an upstream error earns 0. A slow attempt that missed `firstByteTimeout` counts as a failure. Any other attempt earns `1 - latencyWeightPct/100 * clamp(ttfb / tierAverage - 1, 0, 1)`. A client cancel or an upstream `400` is not counted.
+- **Order**: each candidate draws a score from a normal approximation of Beta(2+a, 1+n-a). Here a is the reward sum and n the attempt count over the last `windowHours` hourly buckets. The optimistic prior means a new candidate gets tried.
+- **Load**: with `concurrencyAutodetect` on, the score drops by `0.5 * utilisation^2` of the candidate's provider. A provider at its known limit goes last.
+- **Explore**: with probability `explorePct` percent, a random unsaturated candidate goes first.
+- **Storage**: counters live at `llmgw:router:{router}:bd/{tier}/{candidateHash}/a` and `/n`, with `:hour:{yyyymmddhh}` appended, a 12 hour expiry, and rewards in thousandths. The window refreshes every 60 seconds with the calibration job. A router keeps at most 256 candidates. Each instance keeps its own counters without Redis.
+- **Warning**: the `adaptive` settings have no effect with another selection, and the gateway logs a warning.
+
+### Saturation downgrade
+
+Set `saturationDowngrade: true` to start a request one tier below its classified tier when the classified tier has no free capacity. The tier counts as saturated when every usable candidate has a known concurrency limit and has reached it. The limit comes from `maxConcurrency` or `concurrencyAutodetect`. Without them, nothing is saturated. A request moves down only when all of these hold:
+
+- **Reason**: the tier came from the score alone. A keyword, a floor, the default tier, a session pin, a tool loop, or a bump never moves down.
+- **Floors**: the lower tier is not below any floor or keyword tier of the request.
+- **Band**: the score is less than the tier threshold plus `downgradeBand`. A score deep inside the tier stays.
+- **Fit**: the lower tier has a candidate that fits the context window, vision, and cost checks.
+
+The request moves down at most one tier. The higher tiers stay in the plan, so a failure still escalates up. The response carries `X-Llmgw-Router-Downgraded` with the classified tier name while the lower tier serves it. The request counts with reason `saturated`, and the admin view lists the count as `downgraded`.
+
+### Escalation and first-byte timeout
+
+- **Escalation**: on a retryable failure, the gateway tries the next model in the same tier, then the first model of the next tier. It never moves down. It stops after `maxAttempts` upstream attempts. When a higher tier has a usable model, the plan keeps one attempt for it, so same-tier failover cannot use every attempt. Escalation works with `failover` off. Once the gateway sends the first response byte, it cannot escalate.
+- **Client errors**: an upstream `400` does not escalate, because the request is invalid. The exception is a context overflow. Before the first response byte, a `400` body can name an overflow: `context_length_exceeded`, "maximum context length", "prompt is too long", "context window", "is longer than the model's", or "too many tokens". The router then moves to the next candidate and counts an escalation. Direct model requests never do this.
+- **`firstByteTimeout`**: set a Go duration of at least `1s`, such as `40s`, to escalate when an upstream starts too slowly. It is off by default.
+  - **Scope**: the deadline applies to each upstream attempt of the router, and only to requests sent to the router name. A direct model request has no deadline.
+  - **First byte**: for a non-stream request, the first byte is the first byte of the response body. For a stream, it is the first SSE `data:` event. Response headers and SSE comment lines such as keep-alive pings do not count.
+  - **On a miss**: the gateway cancels that attempt, never the client request, and tries the next candidate under the normal escalation rules. A slow attempt counts as a failed attempt for health tracking. After the first byte arrives, the deadline is over.
+  - **Provider limit**: the value must not exceed the `requestTimeout` of a provider that a tier model names. The gateway refuses the config otherwise.
+  - **CDN limits**: a CDN or proxy in front of the gateway can cut a request first. Cloudflare closes at about 100 seconds with HTTP `524`. Each attempt can take up to `firstByteTimeout`, so keep `firstByteTimeout` times `maxAttempts` below that limit.
+  - **No candidate starts**: when the last candidate also misses the deadline, the gateway answers `504`. The error type is `timeout_error` and the message is "the router's models did not start responding in time". The body uses the OpenAI error shape on `/v1/chat/completions` and the Anthropic shape on `/v1/messages`.
+
+### Context windows
+
+- **Escalation**: with `contextEscalation` on (the default), the gateway skips a model when the estimated prompt plus the requested output exceeds 90% of its known context window. The requested output is `max_completion_tokens`, then `max_tokens` on chat, and `max_tokens` on `/v1/messages`. It counts as 0 when absent.
+- **Estimate**: the prompt estimate counts one token per four bytes of these inputs: message text, the system prompt, the `tools` schema, OpenAI `tool_calls` arguments, and Anthropic `tool_use` input. Each image adds 1000 tokens. Very large structured payloads count as a lower bound.
+- **Learned ratio**: after 50 served requests with provider-reported usage, the gateway learns bytes per token for each upstream model. The ratio stays between 1.5 and 6.0 and lives in memory on each instance.
+- **No fit**: when the check would skip every target, the gateway uses the model with the largest known window instead of returning `404`.
+- **Vision**: a request with an image skips models that set `vision: false` in `modelMeta`.
+- **Advertised window**: `GET /v1/models` lists a router when the group may use its name and at least one target. With `contextEscalation` on, the entry advertises the largest known window of all targets in `context_window`, `context_length`, and `max_model_len`. With `contextEscalation: false`, it advertises the smallest known window. Targets with an unknown window do not count. When no target has a known window, the fields are omitted.
+- **Override**: a `modelMeta` entry keyed by the router name replaces the value. It needs `contextTokens` above zero. The gateway logs a one-time warning when the override exceeds the largest known target window.
+
+### Access and response headers
+
+- **Access**: a group needs access to the router name and to each target model it can reach. The gateway skips targets the group may not use. When the group may use none, the request returns `403`.
+- **Validation**: at construction, a router needs at least one tier. A keyword rule, `defaultTier`, `toolsMinTier`, and `intentTiers` must name real tiers.
+
+| Header | Value |
+|---|---|
+| `X-Llmgw-Routed-Model` | Canonical `provider/model` id that served the request. |
+| `X-Llmgw-Router-Tier` | Name of the serving tier. |
+| `X-Llmgw-Router-Reason` | Routing reason. Sent only by routers with live sessions (`classifier: v2` and `session.enabled`). |
+| `X-Llmgw-Router-Downgraded` | Classified tier name, when saturation moved the request down and the lower tier serves it. |
+
+The response body keeps the real model that served the request.
+
+### Observability
+
+- **Metrics**: `llmgateway_router_requests_total{router,tier,reason}` counts each request once. `llmgateway_router_escalations_total{router,from_tier,to_tier}` counts each move to a higher tier. Same-tier failover does not count. `llmgateway_router_calibration_delta{router,tier,mode}` is a gauge of the calibration offsets. Labels come only from configured names.
+- **Events**: the admin events feed records a `router_escalation` event on a cross-tier escalation or when a router exhausts its attempts. A rate gate allows one event per 30 seconds on each instance. The next event reports how many it suppressed. The event names the slow model after a first-byte miss.
+- **Admin API**: `GET /admin/api/overview` and `GET /admin/api/catalog` list routers. Each router row shows its tiers, keyword rules, `selection`, `classifier`, `shadowClassifier`, `riskZ`, `toolsMinTier`, `firstByteTimeout`, `maxAttempts`, `saturationDowngrade`, `downgradeBand`, and `downgraded`. It also shows `calibration` (mode and offset per tier) and the `adaptive` settings.
+- **Admin stats**: each row has `stats` with request counts per tier and reason, escalations, the shadow matrix, and the outcome counts. `stats.scope` is `shared` when the counters come from Redis, summed over all instances this month. It is `instance` when they come from this process since start.
+- **Admin UI**: the Models page shows a Smart routers card with the tiers, the shadow agreement matrix, the outcome table, and `firstByteTimeout` when set. The Config page has a Smart router helper that builds a snippet.
+
+### Evaluation harness
+
+The classifier ships with fixture sets and gates in Go tests. Run them with `go test -run 'Router|ScoreV2' ./...`.
+
+- **Fixtures**: each file under `testdata/router_fixtures*/` holds a JSON array of requests with an expected tier range. A fixture has `id`, `group`, `lang`, `intent`, `wire` (`openai` or `anthropic`), `request`, `minTier`, `maxTier`, `notes`, and an optional `session`.
+- **Sets**: `router_fixtures` is the main set. `router_fixtures_dev` holds the dev set. `router_fixtures_holdout2` and `router_fixtures_holdout3` are former blind holdouts, now training sets.
+- **Gates**: `TestRouterFixturesGate`, `TestRouterDevGate`, `TestRouterHoldout2Gate`, and `TestRouterHoldout3Gate` run v2 on two layouts, `deployed` (tiers at 0, 150, 350) and `wide` (0, 300, 600). Each gate allows at most 2% under-routes and 25% over-routes overall. The `toolloop` and `nonenglish` groups allow no under-route. v1 results print without a gate.
+- **Pins**: `TestRouterFixturesV1Unchanged` pins v1 output against `testdata/router_v1_golden.json`. `TestScoreV2NeverBelowV1Fixtures` checks that v2 never scores below the v1 signals.
+- **Interpreter speed**: `make yaegi-bench` times v2 decisions under Yaegi, as Traefik loads the plugin. It fails below 2000 decisions per second. To time another set, run `cd tools/yaegi-bench && GOWORK=off go run . -fixtures testdata/router_fixtures_dev ../..`.
+- **Add a blind holdout**: write the fixtures in a new `testdata/router_fixtures_holdoutN/` directory before you read any classifier output for them. Add a glob constant and a gate test next to `TestRouterHoldout3Gate`. Run it once. A pass is the honest result. After you tune the classifier on a failure, treat the set as a training set and write a fresh holdout for the next change.
+
+### Rollout order
+
+This order changes one thing at a time and keeps a way back at each step.
+
+1. Define the tiers with the default classifier. Check the admin tier counts.
+2. Add `shadowClassifier: v2`. Read the agreement matrix and the outcome table for a few days.
+3. Switch to `classifier: v2`. Set `riskZ` and `intentTiers` only if the counts call for it.
+4. Add `session.enabled: true`. Use Redis so several instances share sessions.
+5. Add `calibration: {mode: shadow}`. Read the offsets, then move to `live` if they look right.
+6. Add `selection: adaptive` when a tier has several models.
+7. Add `saturationDowngrade: true` when you set concurrency limits.
+8. Add `firstByteTimeout` last. Check it against `requestTimeout` and the CDN limit.
+
+### Limitations
 
 - The marker lists are English only.
-- The classifier uses heuristics. There is no LLM classifier.
+- The classifier uses heuristics. It has no LLM classifier.
 - Routers serve `POST /v1/chat/completions` and `POST /v1/messages` only.
 - Embeddings requests to a router return `400`. Request an embedding model directly.
 - Image and audio endpoints return `404` for a router name. Native passthrough routes do not support routers.
