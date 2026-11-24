@@ -9,7 +9,7 @@ import (
 const (
 	headerRoutedModel = "X-Llmgw-Routed-Model"
 	headerRouterTier  = "X-Llmgw-Router-Tier"
-	// headerRouterReason is set only on routers that use sessions.
+	// headerRouterReason is set only on routers whose sessions change live routing.
 	headerRouterReason = "X-Llmgw-Router-Reason"
 	// headerRouterDowngraded names the tier a saturated router started below.
 	headerRouterDowngraded = "X-Llmgw-Router-Downgraded"
@@ -319,7 +319,7 @@ func (g *Gateway) routerCandidateSkipped(cand resolveCandidate, tier string, rt 
 func setRouterHeaders(h http.Header, plan *routerPlan, i int) {
 	h.Set(headerRoutedModel, plan.entries[i].cand.canonical)
 	h.Set(headerRouterTier, plan.entries[i].tier)
-	if plan.sess != nil {
+	if plan.sess != nil && plan.sess.rt.session.live {
 		h.Set(headerRouterReason, routerRequestReason(plan))
 	}
 	if plan.downgradedFrom != "" {

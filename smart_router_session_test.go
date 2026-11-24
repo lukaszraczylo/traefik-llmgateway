@@ -321,16 +321,6 @@ func TestSessionEncodeDecode(t *testing.T) {
 	}
 }
 
-func TestSessionMergeKeepsNewerAndHigherPin(t *testing.T) {
-	t.Parallel()
-	older := smartSession{found: true, pin: 2, seenAt: 10, askHash: 1}
-	newer := smartSession{found: true, pin: 0, seenAt: 20, askHash: 2}
-	m := smartSessionMerge(older, newer)
-	assert.Equal(t, 2, m.askHash, "the newer record is the base")
-	assert.Equal(t, 2, m.pin, "the higher pin survives")
-	assert.Equal(t, m, smartSessionMerge(newer, older), "merge is symmetric")
-}
-
 func TestSessionLRUBounded(t *testing.T) {
 	t.Parallel()
 	l := newSessionLRU()
@@ -656,4 +646,63 @@ func TestSessionBadOutcomeRaisesPinForNextTurn(t *testing.T) {
 	rec = routerChat(t, h, routerName, "hello again", meta)
 	assert.Equal(t, "t1", rec.Header().Get(headerRouterTier))
 	assert.Equal(t, smartReasonSession, rec.Header().Get(headerRouterReason))
+}
+
+func TestSessionShadowOutcomeLeavesShadowPin(t *testing.T) {
+	gw, rt := planTestGateway(t, func(c *Config) {
+		c.SmartRouters[routerName].ShadowClassifier = smartClassifierV2
+		c.SmartRouters[routerName].Session = &SmartRouterSessionConfig{Enabled: true}
+	})
+	gw.routerSessions = newRouterSessions(nil, syncSpawn, time.Now, nil)
+	plan := planOf(t, gw, rt, sessionReq("u1", "hi"))
+	require.Greater(t, len(plan.entries), 1)
+	require.NotEqual(t, plan.entries[0].tier, plan.entries[1].tier)
+	before := onlySession(t, gw)
+	gw.onRouterOutcome(plan, 1, true, true)
+	assert.Equal(t, before, onlySession(t, gw), "a live escalation or bad answer must not move the shadow pin")
+}
+
+func TestSessionShadowOnlyNoReasonHeader(t *testing.T) {
+	gw, rt := planTestGateway(t, func(c *Config) {
+		c.SmartRouters[routerName].ShadowClassifier = smartClassifierV2
+		c.SmartRouters[routerName].Session = &SmartRouterSessionConfig{Enabled: true}
+	})
+	gw.routerSessions = newRouterSessions(nil, syncSpawn, time.Now, nil)
+	plan := planOf(t, gw, rt, sessionReq("u1", "hi"))
+	require.NotNil(t, plan.sess)
+	h := http.Header{}
+	setRouterHeaders(h, plan, 0)
+	assert.Empty(t, h.Get(headerRouterReason), "a shadow-only session must not show on live responses")
+	assert.NotEmpty(t, h.Get(headerRouterTier))
+}
+
+func TestSessionDecayOnOtherInstanceWins(t *testing.T) {
+	store := newStubStore()
+	mut := func(c *SmartRouterConfig) { c.Session.DecayAsks = 1 }
+	a, rtA, _ := sessionGateway(t, mut)
+	b, rtB, _ := sessionGateway(t, mut)
+	var now int64 = 1_000_000
+	clock := func() time.Time { return time.Unix(now, 0) }
+	a.routerSessions = newRouterSessions(store, syncSpawn, clock, nil)
+	b.routerSessions = newRouterSessions(store, syncSpawn, clock, nil)
+
+	planOf(t, a, rtA, sessionReq("u1", routerKeyword))
+	now++
+	decayed := planOf(t, b, rtB, sessionReq("u1", routerKeyword, "thanks"))
+	require.Equal(t, "t1", decayed.startTier, "one calm ask decays the pin by one tier")
+	now++
+	planOf(t, b, rtB, sessionReq("u1", routerKeyword, "thanks", "hello there"))
+	now++
+	got := planOf(t, a, rtA, sessionReq("u1", routerKeyword, "thanks", "hello there", "ok"))
+	assert.Equal(t, "t0", got.startTier, "instance A must follow the decay recorded by B, not its own stale pin")
+}
+
+func TestSessionMergeNewerWinsOutright(t *testing.T) {
+	t.Parallel()
+	older := smartSession{found: true, pin: 2, seenAt: 10, askHash: 1}
+	newer := smartSession{found: true, pin: 1, seenAt: 20, askHash: 2}
+	assert.Equal(t, newer, smartSessionMerge(older, newer), "the newer record keeps its decayed pin")
+	assert.Equal(t, newer, smartSessionMerge(newer, older))
+	tie := smartSession{found: true, pin: 2, seenAt: 20}
+	assert.Equal(t, 2, smartSessionMerge(newer, tie).pin, "equal times fail up")
 }

@@ -177,18 +177,22 @@ func smartSessionDecode(b []byte) (smartSession, bool) {
 	}, true
 }
 
-// smartSessionMerge keeps the newer record and the higher pin of two views of one session.
+// smartSessionMerge returns the newer of two views of one session, so a decay recorded
+// elsewhere is not undone. Equal times keep the higher pin.
 func smartSessionMerge(a, b smartSession) smartSession {
-	out := a
-	if b.seenAt > a.seenAt {
-		out = b
+	switch {
+	case b.seenAt > a.seenAt:
+		return b
+	case b.seenAt == a.seenAt && b.pin > a.pin:
+		return b
 	}
-	if a.pin > out.pin {
-		out.pin = a.pin
-	}
-	if b.pin > out.pin {
-		out.pin = b.pin
-	}
+	return a
+}
+
+// smartSessionRaisePin merges two views of one session and keeps the higher pin of the two.
+func smartSessionRaisePin(a, b smartSession) smartSession {
+	out := smartSessionMerge(a, b)
+	out.pin = smartMaxInt(a.pin, b.pin)
 	return out
 }
 
@@ -597,7 +601,7 @@ func (rt *smartRouter) rankOf(tier string) int {
 // onRouterOutcome feeds a finished request back into its session.
 func (g *Gateway) onRouterOutcome(plan *routerPlan, attempt int, served, bad bool) {
 	sc := plan.sess
-	if sc == nil || !sc.dirty || g.routerSessions == nil {
+	if sc == nil || !sc.dirty || g.routerSessions == nil || !sc.rt.session.live {
 		return
 	}
 	rt := sc.rt
@@ -607,7 +611,7 @@ func (g *Gateway) onRouterOutcome(plan *routerPlan, attempt int, served, bad boo
 	}
 	st := sc.next
 	if mem, ok := g.routerSessions.lru.get(sc.key); ok {
-		st = smartSessionMerge(mem, st)
+		st = smartSessionRaisePin(mem, st)
 	}
 	st, changed := smartSessionOutcome(st, first, servedRank, len(rt.tiers)-1, served, bad)
 	if changed {
