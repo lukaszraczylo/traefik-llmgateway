@@ -49,8 +49,8 @@ var (
 	smartDesignMarkers     = []string{"architecture", "design", "trade-off", "tradeoff", "approach", "migrat", "schema", "strategy", "should we", "good idea", "recommend", " versus ", " vs ", "which is better"}
 	// Math markers carry a leading space so "improve" and "approve" do not match "prove".
 	smartMathMarkers = []string{" prove", " theorem", " lemma", " derive", " invariant", " show that", " induction", " undecidab",
-		" recurrence", " closed form", " critical point", " injective", " bijective", " converge", "complexity of"}
-	smartMathStructure = []string{"$$", "\\frac", "\\sum", "∀", "∃", "≤"}
+		" recurrence", " closed form", " critical point", " injective", " bijective", " converge", "complexity of", " proof ", " proofs", " functional equation", " continuous on"}
+	smartMathStructure = []string{"$$", "\\frac", "\\sum", "∀", "∃", "≤", "f(x", "f(f("}
 	// smartEnglishWords are padded with spaces so they only match whole words; short words
 	// that are common in other Latin-script languages (a, i, to, do, in) are left out.
 	smartEnglishWords = []string{" the ", " and ", " of ", " is ", " it ", " you ", " me ", " my ", " how ", " what ", " why ", " can ", " this ", " that ", " with ", " for ", " are "}
@@ -68,6 +68,7 @@ type smartFeatures struct {
 	prose, lower string
 	system       string
 	intent       int
+	hard         int
 	codeBytes    int
 	logBytes     int
 	msgCount     int
@@ -91,6 +92,10 @@ type smartFeatures struct {
 	mathStruct bool
 	// intentSpread is set when two matched intents sit far apart on the ladder.
 	intentSpread bool
+	// easy marks a trivial ask; native marks a greeting or rewrite worded in a language the English
+	// markers cannot read. hard (above) is the weighted count of hard-subject terms.
+	easy   bool
+	native bool
 }
 
 const (
@@ -375,6 +380,11 @@ func (f *smartFeatures) classifyIntent() {
 	}
 	if containsAnySmart(padded, smartMathMarkers) || f.mathStruct {
 		note(smartIntentMath)
+	}
+	f.scanHard()
+	if (f.easy || f.native) && f.hard == 0 && best <= smartIntentDebug && (!pasted || f.easy) {
+		best = smartIntentChitchat
+		matched = 0
 	}
 	f.intent = best
 	f.intentSpread = matched >= 2 && hi-lo >= smartSpreadPos

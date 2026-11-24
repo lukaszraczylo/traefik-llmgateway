@@ -4,8 +4,10 @@ const (
 	// smartForeignPos places text the English markers cannot classify on the ladder.
 	smartForeignPos = 1000
 
-	smartSigmaBase      = 60
-	smartSigmaNonLatin  = 80
+	smartSigmaBase     = 60
+	smartSigmaNonLatin = 80
+	// smartSigmaNative is taken back when a native-script greeting or rewrite word names the ask.
+	smartSigmaNative    = 40
 	smartSigmaUnknown   = 60
 	smartSigmaTruncated = 60
 	smartSigmaShort     = 100
@@ -68,7 +70,7 @@ func scoreSmartV2(rt *smartRouter, f *smartFeatures, w smartWeights, sess smartS
 		base = rt.foreignBase
 	}
 	score := base
-	if f.found {
+	if f.found && (!f.easy || f.hard > 0) {
 		reasoningHits := countSmartMarkers(f.lower, smartReasoningMarkers)
 		sig := smartSignalsFor(f.lower, len(f.prose), reasoningHits, f.hasTools || f.toolHist)
 		if s := sig.score(w); s > score {
@@ -76,6 +78,7 @@ func scoreSmartV2(rt *smartRouter, f *smartFeatures, w smartWeights, sess smartS
 		}
 	}
 	score += smartScoreBonuses(f)
+	score = smartHardFloor(rt, f, score)
 	// A long requested output is a generation-quality risk the wording does not show.
 	if f.outTokens >= smartBonusOutputTokens && score < rt.intentBase[smartIntentEdit] {
 		score = rt.intentBase[smartIntentEdit]
@@ -92,6 +95,9 @@ func scoreSmartV2(rt *smartRouter, f *smartFeatures, w smartWeights, sess smartS
 	sigma := smartSigmaBase
 	if f.nonLatin {
 		sigma += smartSigmaNonLatin
+		if f.native {
+			sigma -= smartSigmaNative
+		}
 	}
 	if f.intent == smartIntentUnknown && !f.foreign && len(f.prose) >= smartUnknownProseBytes {
 		sigma += smartSigmaUnknown
@@ -131,8 +137,26 @@ func smartScoreBonuses(f *smartFeatures) int {
 		code = smartBonusCodeCap
 	}
 	n += code
-	if f.logBytes > 0 {
+	if f.logBytes > 0 && (!f.easy || f.hard > 0) {
 		n += smartBonusLog
 	}
 	return n
+}
+
+// smartHardFloor lifts the score to the tier the subject of the ask needs, whatever its wording.
+func smartHardFloor(rt *smartRouter, f *smartFeatures, score int) int {
+	floor := 0
+	switch {
+	case f.hard >= smartHardStrongScore:
+		floor = rt.intentBase[smartIntentDesign]
+	case f.hard >= smartHardWeakScore:
+		floor = rt.intentBase[smartIntentDebug]
+	}
+	if f.outTokens >= smartHardOutTokens && f.intent == smartIntentEdit {
+		floor = rt.intentBase[smartIntentDesign]
+	}
+	if floor > score {
+		return floor
+	}
+	return score
 }

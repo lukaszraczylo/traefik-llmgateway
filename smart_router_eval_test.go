@@ -208,7 +208,17 @@ func TestRouterFixturesV1Unchanged(t *testing.T) {
 
 func TestRouterFixturesGate(t *testing.T) {
 	t.Parallel()
-	fixtures := loadRouterFixtures(t)
+	gateRouterFixtures(t, loadRouterFixtures(t))
+}
+
+// TestRouterDevGate holds the blind dev set to the same gate as the main set.
+func TestRouterDevGate(t *testing.T) {
+	t.Parallel()
+	gateRouterFixtures(t, loadRouterFixturesGlob(t, evalDevGlob))
+}
+
+func gateRouterFixtures(t *testing.T, fixtures []routerFixture) {
+	t.Helper()
 	for _, l := range evalLayouts {
 		t.Run(l.name, func(t *testing.T) {
 			v1 := runEval(evalRouter(t, l.mins, smartClassifierV1), fixtures)
@@ -221,20 +231,6 @@ func TestRouterFixturesGate(t *testing.T) {
 				require.NotNil(t, v2.groups[g], g)
 				assert.Zero(t, v2.groups[g].under, "%s under-route: %v", g, v2.groups[g].underIDs)
 			}
-		})
-	}
-}
-
-// TestRouterDevReport scores the dev set on both layouts; it reports and never gates.
-func TestRouterDevReport(t *testing.T) {
-	t.Parallel()
-	fixtures := loadRouterFixturesGlob(t, evalDevGlob)
-	require.NotEmpty(t, fixtures)
-	for _, l := range evalLayouts {
-		t.Run(l.name, func(t *testing.T) {
-			v1 := runEval(evalRouter(t, l.mins, smartClassifierV1), fixtures)
-			v2 := runEval(evalRouter(t, l.mins, smartClassifierV2), fixtures)
-			t.Logf("DEV layout %v v1:\n%s\nDEV layout %v v2:\n%s", l.mins, v1.table(), l.mins, v2.table())
 		})
 	}
 }
