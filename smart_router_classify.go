@@ -66,7 +66,7 @@ type smartClassification struct {
 	// shadowRank is the rank the router's shadowWeights would have chosen, or -1 when unset.
 	shadowRank int
 	// score is the router's score before any risk margin, and hardRank the highest floor or keyword
-	// rank; the saturation downgrade reads both. hardRank is 0 when nothing floors the request.
+	// rank; the saturation downgrade reads both. hardRank is 0 when nothing floors the request and includes the session pin.
 	score    int
 	hardRank int
 	hasImage bool
@@ -504,6 +504,7 @@ func classifySmartV2With(rt *smartRouter, req map[string]any, endpoint string, f
 	var next smartSession
 	if sc != nil {
 		rank, reason, next = smartSessionRoute(&rt.session, top, f, sc.sess, verdict, sc.now, askHash)
+		out.hardRank = smartMaxInt(out.hardRank, next.pin)
 	}
 	out.rank, out.reason = smartRaiseRank(rank, reason, kwRank, floorRank)
 	if sc != nil {

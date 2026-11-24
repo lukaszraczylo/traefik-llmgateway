@@ -287,3 +287,26 @@ func TestRouterReasonNamesIncludeSaturated(t *testing.T) {
 	assert.Equal(t, smartReasonSaturated, routerReasonNames[routerReasonsMax-1])
 	assert.Equal(t, smartReasonScore, routerReasonNames[0])
 }
+
+func TestDowngradeNeverStartsBelowSessionPin(t *testing.T) {
+	gw, rt, _ := sessionGateway(t, func(c *SmartRouterConfig) {
+		c.KeywordRules = nil
+		c.SaturationDowngrade = true
+		band := 150
+		c.DowngradeBand = &band
+		c.Tiers = []SmartRouterTier{
+			{Name: "t0", MinScore: 0, Models: []string{"a1"}},
+			{Name: "t1", MinScore: 200, Models: []string{"b1"}},
+			{Name: "t2", MinScore: 400, Models: []string{"c1"}},
+		}
+	})
+	gw.concurrency = newConcurrencyLearner(1)
+	first := planOf(t, gw, rt, sessionReq("u1", downgradeAsk))
+	require.Equal(t, "t1", first.startTier)
+	require.Equal(t, 1, onlySession(t, gw).pin)
+
+	saturate(t, gw, "beta")
+	second := planOf(t, gw, rt, sessionReq("u1", "an earlier question", downgradeAsk))
+	assert.Equal(t, "t1", second.startTier, "the session pin is a floor the downgrade cannot cross")
+	assert.Empty(t, second.downgradedFrom)
+}
