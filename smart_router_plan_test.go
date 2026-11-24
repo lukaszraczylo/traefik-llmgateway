@@ -159,3 +159,58 @@ func TestModelRegistry_ListFor_RouterHidesBareDiscoveredIDForEveryCaller(t *test
 	assert.False(t, ids["auto"], "bare id is served by the router for every caller, so it must not be listed")
 	assert.True(t, ids["acme/auto"], "provider-prefixed form stays addressable")
 }
+
+func firstPlanModel(t *testing.T, gw *Gateway, rt *smartRouter, req map[string]any, endpoint string) string {
+	t.Helper()
+	plan, err := gw.planSmartRouter(rt, req, endpoint, &group{}, nil)
+	require.NoError(t, err)
+	return plan.entries[0].cand.canonical
+}
+
+func TestPlanSmartRouter_ContextCheckIncludesRequestedOutput(t *testing.T) {
+	gw, rt := planTestGateway(t, func(c *Config) {
+		c.ModelMeta = map[string]*ModelMetaConfig{"a1": {ContextTokens: 32000}, "c1": {ContextTokens: 200000}}
+		twoTiers(c, "a1")
+	})
+	prompt := strings.Repeat("a", 4*30000)
+	req := userReq(prompt)
+	req["max_tokens"] = float64(8000)
+	assert.Equal(t, "gamma/c1", firstPlanModel(t, gw, rt, req, cacheEndpointChat), "30K prompt plus 8K output must skip a 32K model")
+
+	short := userReq(strings.Repeat("a", 4*20000))
+	short["max_tokens"] = float64(8000)
+	assert.Equal(t, "alpha/a1", firstPlanModel(t, gw, rt, short, cacheEndpointChat), "28K total fits 90% of 32K")
+}
+
+func TestPlanSmartRouter_ContextCheckMargin(t *testing.T) {
+	gw, rt := planTestGateway(t, func(c *Config) {
+		c.ModelMeta = map[string]*ModelMetaConfig{"a1": {ContextTokens: 1000}, "c1": {ContextTokens: 200000}}
+		twoTiers(c, "a1")
+	})
+	tests := []struct {
+		extra    map[string]any
+		name     string
+		endpoint string
+		want     string
+		tokens   int
+	}{
+		{name: "exactly 90% fits", tokens: 900, endpoint: cacheEndpointChat, want: "alpha/a1"},
+		{name: "just over 90% does not fit", tokens: 901, endpoint: cacheEndpointChat, want: "gamma/c1"},
+		{name: "max_completion_tokens counts", tokens: 800, endpoint: cacheEndpointChat, extra: map[string]any{"max_completion_tokens": float64(101)}, want: "gamma/c1"},
+		{name: "max_completion_tokens wins over max_tokens", tokens: 800, endpoint: cacheEndpointChat, extra: map[string]any{"max_completion_tokens": float64(100), "max_tokens": float64(5000)}, want: "alpha/a1"},
+		{name: "max_tokens counts on chat", tokens: 800, endpoint: cacheEndpointChat, extra: map[string]any{"max_tokens": float64(101)}, want: "gamma/c1"},
+		{name: "max_tokens counts on messages", tokens: 800, endpoint: cacheEndpointMessages, extra: map[string]any{"max_tokens": float64(101)}, want: "gamma/c1"},
+		{name: "messages ignores max_completion_tokens", tokens: 800, endpoint: cacheEndpointMessages, extra: map[string]any{"max_completion_tokens": float64(5000)}, want: "alpha/a1"},
+		{name: "negative output counts as zero", tokens: 900, endpoint: cacheEndpointChat, extra: map[string]any{"max_tokens": float64(-50)}, want: "alpha/a1"},
+		{name: "huge output does not overflow", tokens: 10, endpoint: cacheEndpointChat, extra: map[string]any{"max_tokens": float64(9e18)}, want: "gamma/c1"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := userReq(strings.Repeat("a", 4*tt.tokens))
+			for k, v := range tt.extra {
+				req[k] = v
+			}
+			assert.Equal(t, tt.want, firstPlanModel(t, gw, rt, req, tt.endpoint))
+		})
+	}
+}

@@ -60,6 +60,7 @@ func (s routerSkips) detail() string {
 
 type routerRequestFacts struct {
 	promptTokens int64
+	outputTokens int64
 	hasImage     bool
 	costBudget   bool
 }
@@ -86,6 +87,7 @@ func (g *Gateway) planSmartRouter(rt *smartRouter, req map[string]any, endpoint 
 	facts := routerRequestFacts{
 		hasImage:     hasImage,
 		promptTokens: estimateSmartPromptTokens(req, endpoint),
+		outputTokens: requestedOutputTokens(req, endpoint),
 		costBudget:   !g.cfg.AllowUnpricedWithCostBudget && scopesHaveCostBudget(scopes),
 	}
 	plan := &routerPlan{router: rt.name, reason: reason, startTier: rt.tiers[start].name}
@@ -226,7 +228,7 @@ func (g *Gateway) routerCandidateSkipped(cand resolveCandidate, tier string, rt 
 	// Checked last so the fallback candidate already passed vision and cost.
 	if rt.contextEscalation {
 		meta := g.registry.resolveMetaFor(cand.providerName, cand.upstreamModel)
-		if meta.ContextKnown && int64(meta.ContextTokens) < facts.promptTokens {
+		if meta.ContextKnown && !contextFits(facts, int64(meta.ContextTokens)) {
 			skips.context++
 			if skips.largest == nil || meta.ContextTokens > skips.largestCtx {
 				skips.largest = &routerPlanEntry{tier: tier, cand: cand}
@@ -254,4 +256,39 @@ const smartImageTokens = 1000
 func estimateSmartPromptTokens(req map[string]any, endpoint string) int64 {
 	chars, images := smartPromptSize(req, endpoint)
 	return int64(chars+3)/4 + int64(images)*smartImageTokens
+}
+
+// smartContextHeadroomPct caps prompt plus output at this share of a window:
+// the token estimate is a byte heuristic and can undercount.
+const smartContextHeadroomPct = 90
+
+// smartOutputTokensCap keeps the fit arithmetic far from int64 overflow.
+const smartOutputTokensCap = 1 << 40
+
+// requestedOutputTokens reads the output budget the client asked for, 0 when absent.
+func requestedOutputTokens(req map[string]any, endpoint string) int64 {
+	keys := []string{"max_completion_tokens", "max_tokens"}
+	if endpoint == cacheEndpointMessages {
+		keys = keys[1:]
+	}
+	for _, k := range keys {
+		v, present := req[k]
+		if !present {
+			continue
+		}
+		n, ok := toInt64(v)
+		if !ok || n < 0 {
+			return 0
+		}
+		if n > smartOutputTokensCap {
+			return smartOutputTokensCap
+		}
+		return n
+	}
+	return 0
+}
+
+// contextFits reports whether prompt plus requested output stays within the headroom share of window.
+func contextFits(facts routerRequestFacts, window int64) bool {
+	return (facts.promptTokens+facts.outputTokens)*100 <= window*smartContextHeadroomPct
 }
