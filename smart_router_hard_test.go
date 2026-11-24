@@ -1,6 +1,7 @@
 package traefikllmgateway
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -72,4 +73,73 @@ func TestHardnessLargeImplementationOutputNeedsTop(t *testing.T) {
 	req["max_tokens"] = 4096
 	f = extractSmartV2(req, cacheEndpointChat)
 	assert.Less(t, scoreSmartV2(rt, &f, rt.weights, smartSessionHint{}).rank, 2)
+}
+
+func toolStepRequest(ask, toolOut string) map[string]any {
+	req := chatMsgs(
+		msg("user", ask),
+		map[string]any{"role": "assistant", "tool_calls": []any{map[string]any{"id": "c1", "type": "function"}}},
+		map[string]any{"role": "tool", "tool_call_id": "c1", "content": toolOut},
+	)
+	req["tools"] = []any{map[string]any{"type": "function"}}
+	return req
+}
+
+func TestRoutineToolStepStaysLow(t *testing.T) {
+	t.Parallel()
+	for _, l := range evalLayouts {
+		rt := evalRouter(t, l.mins, smartClassifierV2)
+		for _, ask := range []string{"format the new files", "did the tests pass?", "update the changelog with the fix for #231", "delete the unused import in main.go"} {
+			c := classifySmart(rt, toolStepRequest(ask, "ok"), cacheEndpointChat)
+			assert.Zero(t, c.rank, "%s on %s", ask, l.name)
+		}
+	}
+	routine := func(ask, out string) bool {
+		f := extractSmartV2(toolStepRequest(ask, out), cacheEndpointChat)
+		return f.routineToolStep()
+	}
+	assert.True(t, routine("format the new files", "ok"))
+	assert.False(t, routine("format the new files", "panic: runtime error\ngoroutine 1 [running]:"), "an error result is not routine")
+	assert.False(t, routine("check whether the raft log can diverge", "ok"), "a hard subject is not routine")
+	assert.False(t, routine(strings.Repeat("port the sync script to go and keep the rate limiting ", 2), "ok"), "a long ask is not routine")
+	f := extractSmartV2(chatMsgs(msg("user", "format the new files")), cacheEndpointChat)
+	assert.False(t, f.routineToolStep(), "not a tool-loop turn")
+}
+
+func TestRewriteAskStaysLowWhateverTheMaterial(t *testing.T) {
+	t.Parallel()
+	body := strings.Repeat("The design review approach changed and the new strategy was agreed after a long meeting about the schema of the report. ", 6)
+	for _, l := range evalLayouts {
+		rt := evalRouter(t, l.mins, smartClassifierV2)
+		rank := func(text string) int { return classifySmart(rt, chatMsgs(msg("user", text)), cacheEndpointChat).rank }
+		assert.Zero(t, rank("Summarize this in 3 bullets:\n\n"+body), l.name)
+		assert.Zero(t, rank("make this sound less angry: 'your team broke prod again and nobody told us'"), l.name)
+		assert.Zero(t, rank("fix grammar only, dont change meaning: 'me and him goes to the store yesterday'"), l.name)
+		assert.Positive(t, rank("Summarize the options below and recommend one:\n\n"+body), "a judgement ask is not a plain rewrite on "+l.name)
+		assert.Positive(t, rank("Rewrite this legal clause in plain english but keep every obligation exactly: 'Licensee shall not sublicense'"), "fidelity-critical text on "+l.name)
+		assert.Positive(t, rank("Summarize this and prove that the bound holds:\n\n"+body), "a math ask is not a plain rewrite on "+l.name)
+	}
+}
+
+func TestShortForeignQuestionIsChat(t *testing.T) {
+	t.Parallel()
+	for _, l := range evalLayouts {
+		rt := evalRouter(t, l.mins, smartClassifierV2)
+		rank := func(text string) int { return classifySmart(rt, chatMsgs(msg("user", text)), cacheEndpointChat).rank }
+		assert.Zero(t, rank("ei, como faço pra pegar o ultimo item de uma lista em python? e o penultimo"), l.name)
+		assert.Zero(t, rank("מה ההבדל בין TCP ל-UDP בקצרה?"), l.name)
+		assert.Positive(t, rank("Warum stürzt mein Programm ab?"), "a failure question is not chat on "+l.name)
+		assert.Positive(t, rank("Dlaczego mój program w Go się zawiesza? Dwie gorutyny, jedna trzyma mutex A i czeka na B"), l.name)
+	}
+	f := hardFeatures("what is the capital of france? and what time is it there")
+	assert.False(t, f.shortForeignQuestion(), "English words keep the English path")
+	long := hardFeatures(strings.Repeat("¿Cómo se hace esto bien? ", 5))
+	assert.False(t, long.shortForeignQuestion(), "a long question is not short chat")
+	greeting := func(text string) bool {
+		g := hardFeatures(text)
+		return g.isGreeting()
+	}
+	assert.True(t, greeting("你好吗？"))
+	assert.True(t, greeting("thanks a lot"))
+	assert.False(t, greeting("and the leader?"))
 }

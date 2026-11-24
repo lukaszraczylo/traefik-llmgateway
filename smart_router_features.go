@@ -98,6 +98,8 @@ type smartFeatures struct {
 	// markers cannot read. hard (above) is the weighted count of hard-subject terms.
 	easy   bool
 	native bool
+	// rewrite marks a transform ask whose supplied text, however long, is not what makes it hard.
+	rewrite bool
 }
 
 const (
@@ -389,6 +391,15 @@ func (f *smartFeatures) classifyIntent() {
 		best = smartIntentChitchat
 		matched = 0
 	}
+	f.scanRewrite()
+	if f.rewrite && best <= smartIntentDesign {
+		best, matched = smartIntentRewrite, 0
+		if containsAnySmart(text, smartFidelityMarkers) {
+			best = smartIntentEdit
+		} else {
+			f.easy = true
+		}
+	}
 	f.intent = best
 	f.intentSpread = matched >= 2 && hi-lo >= smartSpreadPos
 
@@ -410,3 +421,11 @@ func (f *smartFeatures) classifyIntent() {
 
 // smartSpreadPos is the position gap that counts as two clearly different asks.
 const smartSpreadPos = 1000
+
+// routineToolStep reports a tool-loop turn that follows a short, plainly worded ask: the newest
+// message is passing tool output, with no error signal and no hard subject. Tools and history
+// depth alone do not make such a step hard.
+func (f *smartFeatures) routineToolStep() bool {
+	return f.toolLoopTurn && !f.toolErr && f.found && !f.foreign && f.hard == 0 &&
+		f.intent <= smartIntentRewrite && len(f.prose) < smartShortProseBytes
+}

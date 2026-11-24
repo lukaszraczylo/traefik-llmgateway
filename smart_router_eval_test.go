@@ -246,8 +246,12 @@ func TestScoreV2NeverBelowV1Fixtures(t *testing.T) {
 				continue
 			}
 			v := scoreSmartV2(rt, &f, rt.weights, smartSessionHint{})
-			sig := smartSignalsFor(f.lower, len(f.prose), countSmartMarkers(f.lower, smartReasoningMarkers), f.hasTools || f.toolHist)
-			assert.GreaterOrEqual(t, v.score, sig.score(rt.weights), "%s on %s", fx.ID, l.name)
+			// Routine tool steps and plain transform asks ignore the v1 signals on purpose: tools
+			// and pasted length alone do not make them hard.
+			if !f.routineToolStep() && (!f.easy || f.hard > 0) {
+				sig := smartSignalsFor(f.lower, len(f.prose), countSmartMarkers(f.lower, smartReasoningMarkers), f.hasTools || f.toolHist)
+				assert.GreaterOrEqual(t, v.score, sig.score(rt.weights), "%s on %s", fx.ID, l.name)
+			}
 			assert.GreaterOrEqual(t, v.score, rt.intentBase[f.intent], "%s on %s", fx.ID, l.name)
 		}
 	}

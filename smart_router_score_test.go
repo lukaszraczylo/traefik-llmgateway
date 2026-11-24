@@ -132,7 +132,9 @@ func TestScoreSigmaTerms(t *testing.T) {
 
 	base := score(smartFeatures{found: true, prose: "hi", lower: "hi"}, smartSessionHint{})
 	assert.Equal(t, smartSigmaBase, base.sigma)
-	long := "x" + string(make([]byte, 80))
+	mid := "x" + string(make([]byte, 80))
+	assert.Equal(t, smartSigmaBase+smartSigmaUnknownShort, score(smartFeatures{found: true, prose: mid, lower: mid}, smartSessionHint{}).sigma)
+	long := "x" + string(make([]byte, smartUnknownLongBytes))
 	assert.Equal(t, smartSigmaBase+smartSigmaUnknown, score(smartFeatures{found: true, prose: long, lower: long}, smartSessionHint{}).sigma)
 	assert.Equal(t, smartSigmaBase+smartSigmaNonLatin, score(smartFeatures{found: true, prose: "hi", lower: "hi", nonLatin: true}, smartSessionHint{}).sigma)
 	assert.Equal(t, smartSigmaBase+smartSigmaTruncated, score(smartFeatures{truncated: true}, smartSessionHint{}).sigma)
@@ -148,15 +150,15 @@ func TestScoreSigmaTerms(t *testing.T) {
 
 func TestScoreBonuses(t *testing.T) {
 	t.Parallel()
-	assert.Equal(t, smartBonusPrompt, smartScoreBonuses(&smartFeatures{promptBytes: 4*smartBonusPromptTokens + 8}))
-	assert.Equal(t, smartBonusHistory, smartScoreBonuses(&smartFeatures{msgCount: smartLongHistory + 1}))
-	assert.Equal(t, smartBonusOutput, smartScoreBonuses(&smartFeatures{outTokens: smartBonusOutputTokens}))
-	assert.Equal(t, smartBonusSchema, smartScoreBonuses(&smartFeatures{jsonMode: smartJSONSchema}))
-	assert.Equal(t, smartBonusJSONObject, smartScoreBonuses(&smartFeatures{jsonMode: smartJSONObject}))
-	assert.Equal(t, 5, smartScoreBonuses(&smartFeatures{codeBytes: 1000}))
-	assert.Equal(t, smartBonusCodeCap, smartScoreBonuses(&smartFeatures{codeBytes: 10_000_000}))
-	assert.Equal(t, smartBonusLog, smartScoreBonuses(&smartFeatures{logBytes: 1}))
-	assert.Zero(t, smartScoreBonuses(&smartFeatures{}))
+	assert.Equal(t, smartBonusPrompt, smartScoreBonuses(&smartFeatures{promptBytes: 4*smartBonusPromptTokens + 8}, false))
+	assert.Equal(t, smartBonusHistory, smartScoreBonuses(&smartFeatures{msgCount: smartLongHistory + 1}, false))
+	assert.Equal(t, smartBonusOutput, smartScoreBonuses(&smartFeatures{outTokens: smartBonusOutputTokens}, false))
+	assert.Equal(t, smartBonusSchema, smartScoreBonuses(&smartFeatures{jsonMode: smartJSONSchema}, false))
+	assert.Equal(t, smartBonusJSONObject, smartScoreBonuses(&smartFeatures{jsonMode: smartJSONObject}, false))
+	assert.Equal(t, 5, smartScoreBonuses(&smartFeatures{codeBytes: 1000}, false))
+	assert.Equal(t, smartBonusCodeCap, smartScoreBonuses(&smartFeatures{codeBytes: 10_000_000}, false))
+	assert.Equal(t, smartBonusLog, smartScoreBonuses(&smartFeatures{logBytes: 1}, false))
+	assert.Zero(t, smartScoreBonuses(&smartFeatures{}, false))
 
 	rt := v2Router(t, []int{0, 150, 350}, nil)
 	f := smartFeatures{found: true, prose: "write", lower: "write", outTokens: smartBonusOutputTokens}
@@ -313,6 +315,19 @@ func TestShadowClassifierMatrix(t *testing.T) {
 	}
 }
 
+func TestScoreShortFollowUpDoesNotLiftGreeting(t *testing.T) {
+	t.Parallel()
+	rt := v2Router(t, []int{0, 150, 350}, nil)
+	score := func(text string) smartVerdict {
+		f := extractSmartV2(chatMsgs(msg("user", "tell me about raft"), msg("assistant", "ok"), msg("user", text)), cacheEndpointChat)
+		return scoreSmartV2(rt, &f, rt.weights, smartSessionHint{})
+	}
+	assert.Equal(t, smartSigmaBase, score("thanks!").sigma, "thanks is not a doubtful follow-up")
+	assert.Equal(t, smartSigmaBase, score("gracias, muchas gracias").sigma, "native-script thanks drops the follow-up doubt")
+	assert.Equal(t, smartSigmaBase+smartSigmaShort, score("and the leader?").sigma, "a bare follow-up keeps the doubt")
+	assert.Zero(t, score("thanks!").rank)
+}
+
 // TestScoreMarginIsLayoutRelative pins that doubt and request-shape bonuses move a request the
 // same share of a tier on a wide layout as on the reference one.
 func TestScoreMarginIsLayoutRelative(t *testing.T) {
@@ -331,17 +346,4 @@ func TestScoreMarginIsLayoutRelative(t *testing.T) {
 	} {
 		assert.Equal(t, verdictFor(ref, text).rank, verdictFor(wide, text).rank, text)
 	}
-}
-
-func TestScoreShortFollowUpDoesNotLiftGreeting(t *testing.T) {
-	t.Parallel()
-	rt := v2Router(t, []int{0, 150, 350}, nil)
-	score := func(text string) smartVerdict {
-		f := extractSmartV2(chatMsgs(msg("user", "tell me about raft"), msg("assistant", "ok"), msg("user", text)), cacheEndpointChat)
-		return scoreSmartV2(rt, &f, rt.weights, smartSessionHint{})
-	}
-	assert.Equal(t, smartSigmaBase, score("thanks!").sigma, "thanks is not a doubtful follow-up")
-	assert.Equal(t, smartSigmaBase, score("gracias, muchas gracias").sigma, "native-script thanks drops the follow-up doubt")
-	assert.Equal(t, smartSigmaBase+smartSigmaShort, score("and the leader?").sigma, "a bare follow-up keeps the doubt")
-	assert.Zero(t, score("thanks!").rank)
 }

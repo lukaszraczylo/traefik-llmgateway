@@ -158,11 +158,36 @@ func BenchHelperCheck() string {
 // routerFeatureCheck replays the v2 feature helpers with alternating inputs; yaegi v0.16.1 keeps
 // named results and struct fields from the previous call, so a stale answer shows up as a mismatch.
 func routerFeatureCheck() string {
+	loop := func(ask, out string) smartFeatures {
+		return extractSmartV2(map[string]any{
+			"tools": []any{map[string]any{"type": "function"}},
+			"messages": []any{
+				map[string]any{"role": "user", "content": ask},
+				map[string]any{"role": "assistant", "tool_calls": []any{map[string]any{"id": "c"}}},
+				map[string]any{"role": "tool", "content": out},
+			},
+		}, cacheEndpointChat)
+	}
 	plain := func(ask string) smartFeatures {
 		return extractSmartV2(map[string]any{"messages": []any{map[string]any{"role": "user", "content": ask}}}, cacheEndpointChat)
 	}
+	ok, bad := loop("format the new files", "ok"), loop("format the new files", "panic: boom")
+	if !ok.routineToolStep() || bad.routineToolStep() || !ok.routineToolStep() {
+		return "routineToolStep changed between calls"
+	}
+	rw, judge := plain("Summarize this in 3 bullets:\n\nThe design approach changed."), plain("Summarize the options and recommend one")
+	if !rw.rewrite || judge.rewrite || !rw.rewrite {
+		return "scanRewrite kept a flag from the previous call"
+	}
+	q, long := plain("ei, como faço pra pegar o ultimo item de uma lista?"), plain("what is the capital of france?")
+	if !q.shortForeignQuestion() || long.shortForeignQuestion() || !q.shortForeignQuestion() {
+		return "shortForeignQuestion changed between calls"
+	}
 	if g, n := plain("thanks a lot"), plain("and the leader?"); !g.isGreeting() || n.isGreeting() {
 		return "isGreeting changed between calls"
+	}
+	if smartHead("abcdef", 3) != "abc" || smartHead("ab", 3) != "ab" || smartHead("abcdef", 2) != "ab" {
+		return "smartHead changed between calls"
 	}
 	rt := &smartRouter{tiers: []smartTier{{}, {minScore: 300}, {minScore: 600}}}
 	if smartScaled(rt, 100, 0) != 200 || smartScaled(rt, 100, 300) != 150 || smartScaled(rt, 100, 0) != 200 {

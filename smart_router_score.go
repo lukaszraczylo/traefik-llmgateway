@@ -7,14 +7,17 @@ const (
 	smartSigmaBase     = 60
 	smartSigmaNonLatin = 80
 	// smartSigmaNative is taken back when a native-script greeting or rewrite word names the ask.
-	smartSigmaNative    = 40
-	smartSigmaUnknown   = 60
-	smartSigmaTruncated = 60
-	smartSigmaShort     = 100
-	smartSigmaSpread    = 50
+	smartSigmaNative  = 40
+	smartSigmaUnknown = 60
+	// smartSigmaUnknownShort is the unknown-intent doubt for a prose too short to hold much unexplained detail.
+	smartSigmaUnknownShort = 30
+	smartSigmaTruncated    = 60
+	smartSigmaShort        = 100
+	smartSigmaSpread       = 50
 
 	smartShortProseBytes   = 80
 	smartUnknownProseBytes = 60
+	smartUnknownLongBytes  = 120
 	smartLongHistory       = 20
 	smartBytesPerToken     = 4
 
@@ -89,14 +92,15 @@ func scoreSmartV2(rt *smartRouter, f *smartFeatures, w smartWeights, sess smartS
 		base = rt.foreignBase
 	}
 	score := base
-	if f.found && (!f.easy || f.hard > 0) {
+	routine := f.routineToolStep()
+	if f.found && !routine && (!f.easy || f.hard > 0) {
 		reasoningHits := countSmartMarkers(f.lower, smartReasoningMarkers)
 		sig := smartSignalsFor(f.lower, len(f.prose), reasoningHits, f.hasTools || f.toolHist)
 		if s := sig.score(w); s > score {
 			score = s
 		}
 	}
-	score += smartScaled(rt, smartScoreBonuses(f), score)
+	score += smartScaled(rt, smartScoreBonuses(f, routine), score)
 	score = smartHardFloor(rt, f, score)
 	// A long requested output is a generation-quality risk the wording does not show.
 	if f.outTokens >= smartBonusOutputTokens && score < rt.intentBase[smartIntentEdit] {
@@ -118,8 +122,12 @@ func scoreSmartV2(rt *smartRouter, f *smartFeatures, w smartWeights, sess smartS
 			sigma -= smartSigmaNative
 		}
 	}
-	if f.intent == smartIntentUnknown && !f.foreign && len(f.prose) >= smartUnknownProseBytes {
-		sigma += smartSigmaUnknown
+	if f.intent == smartIntentUnknown && !f.foreign && !routine && len(f.prose) >= smartUnknownProseBytes {
+		if len(f.prose) < smartUnknownLongBytes {
+			sigma += smartSigmaUnknownShort
+		} else {
+			sigma += smartSigmaUnknown
+		}
 	}
 	if f.truncated {
 		sigma += smartSigmaTruncated
@@ -134,12 +142,12 @@ func scoreSmartV2(rt *smartRouter, f *smartFeatures, w smartWeights, sess smartS
 }
 
 // smartScoreBonuses adds the request-shape points that do not depend on the wording.
-func smartScoreBonuses(f *smartFeatures) int {
+func smartScoreBonuses(f *smartFeatures, routine bool) int {
 	n := 0
 	if f.promptBytes/smartBytesPerToken > smartBonusPromptTokens {
 		n += smartBonusPrompt
 	}
-	if f.msgCount > smartLongHistory {
+	if f.msgCount > smartLongHistory && !routine {
 		n += smartBonusHistory
 	}
 	if f.outTokens >= smartBonusOutputTokens {
