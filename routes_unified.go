@@ -827,7 +827,8 @@ func (g *Gateway) runMeteredCall(sw *statusTrackingWriter, r *http.Request, scop
 		lastErr = callErr
 		lastProviderName = providerName
 
-		hasNext := i < len(candidates)-1 && failoverEligible(callErr)
+		// Past the sw.wroteHeader return above: a router's context-overflow 400 escalates only before any byte is written.
+		hasNext := i < len(candidates)-1 && routerEscalatable(callErr, plan != nil)
 		if hasNext && isProviderNotFoundError(callErr) {
 			// Loud, non-suppressed log line (brief: "Failover after a 404
 			// must log loudly ... a 404 usually means a real
@@ -841,7 +842,7 @@ func (g *Gateway) runMeteredCall(sw *statusTrackingWriter, r *http.Request, scop
 			g.errorf("%s: provider %q returned 404 for model %q; failing over to %q — this usually means a real provider/model configuration mistake, not a transient outage", logPrefix, providerName, requestedModel, candidates[i+1].providerName)
 		}
 		if !hasNext {
-			if plan != nil && i == len(candidates)-1 && failoverEligible(callErr) {
+			if plan != nil && i == len(candidates)-1 && routerEscalatable(callErr, true) {
 				g.recordRouterExhausted(plan, i, endpoint, scopes)
 			}
 			g.recordUpstreamEvent(scopes, cand.canonical, providerName, eventRouteForEndpoint(endpoint), callErr)

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 )
@@ -766,4 +767,48 @@ func (t *requestHealthTracker) healthy(provider string) bool {
 		return true
 	}
 	return !t.nowFn().Before(st.openUntil)
+}
+
+// contextOverflowScanBytes bounds how much of an upstream 400 body is scanned.
+const contextOverflowScanBytes = 4096
+
+// contextOverflowSignatures are lowercase fragments providers put in a 400
+// when the prompt does not fit: OpenAI code and message, Anthropic, vLLM.
+var contextOverflowSignatures = []string{
+	"context_length_exceeded",
+	"maximum context length",
+	"prompt is too long",
+	"context window",
+	"is longer than the model's",
+	"too many tokens",
+}
+
+// isContextOverflowBody reports whether an upstream error body names a
+// context-window overflow, scanning only a bounded prefix.
+func isContextOverflowBody(body []byte) bool {
+	if len(body) > contextOverflowScanBytes {
+		body = body[:contextOverflowScanBytes]
+	}
+	lower := strings.ToLower(string(body))
+	for i := 0; i < len(contextOverflowSignatures); i++ {
+		if strings.Contains(lower, contextOverflowSignatures[i]) {
+			return true
+		}
+	}
+	return false
+}
+
+// routerEscalatable extends failoverEligible for smart-router plans: a 400
+// that names a context overflow moves to the next candidate, because a
+// higher tier can have a larger window. Callers reach it only while
+// sw.wroteHeader is false, so no byte has reached the client.
+func routerEscalatable(callErr error, isRouter bool) bool {
+	if failoverEligible(callErr) {
+		return true
+	}
+	if !isRouter {
+		return false
+	}
+	perr, ok := callErr.(*providerHTTPError)
+	return ok && perr.status == http.StatusBadRequest && isContextOverflowBody(perr.body)
 }

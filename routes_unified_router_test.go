@@ -485,3 +485,117 @@ func TestPlanSmartRouter_HashSelectionDedupeAndCap(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, p.entries, 2, "plan must be capped at maxAttempts")
 }
+
+const routerOverflowBody = `{"error":{"message":"This model's maximum context length is 8192 tokens.","type":"invalid_request_error","code":"context_length_exceeded"}}`
+
+func routerMetricsConfig(a, b, c *routerBackend) *Config {
+	cfg := routerTestConfig(a, b, c, threeTiers())
+	cfg.Metrics = &MetricsConfig{Enabled: true}
+	return cfg
+}
+
+func TestRouter_ContextOverflow400EscalatesToNextTier(t *testing.T) {
+	a := newRouterBackend(400, routerOverflowBody)
+	b := newRouterBackend(200, successRespBody)
+	c := newRouterBackend(200, successRespBody)
+	defer closeBackends(a, b, c)
+	h, gw := buildRouterGateway(t, routerMetricsConfig(a, b, c))
+	require.False(t, gw.failover.enabled)
+
+	rec := routerChat(t, h, routerName, "hi", nil)
+	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Equal(t, "t1", rec.Header().Get("X-Llmgw-Router-Tier"))
+	assert.Equal(t, [3]int64{1, 1, 0}, [3]int64{a.count(), b.count(), c.count()})
+	_, escs := gw.routerStats.snapshot()
+	assert.Equal(t, int64(1), escs[routerEscalationKey{router: routerName, from: "t0", to: "t1"}])
+}
+
+func TestRouter_ContextOverflow400EscalatesOnStreamBeforeFirstByte(t *testing.T) {
+	a := newRouterBackend(400, routerOverflowBody)
+	b := newRouterBackend(200, successRespBody)
+	c := newRouterBackend(200, successRespBody)
+	defer closeBackends(a, b, c)
+	h, _ := buildRouterGateway(t, routerMetricsConfig(a, b, c))
+
+	rec := routerChat(t, h, routerName, "hi", map[string]any{"stream": true})
+	assert.Equal(t, [3]int64{1, 1, 0}, [3]int64{a.count(), b.count(), c.count()}, rec.Body.String())
+}
+
+func TestRouter_Other400DoesNotEscalate(t *testing.T) {
+	a := newRouterBackend(400, `{"error":{"message":"invalid temperature","type":"invalid_request_error"}}`)
+	b := newRouterBackend(200, successRespBody)
+	c := newRouterBackend(200, successRespBody)
+	defer closeBackends(a, b, c)
+	h, gw := buildRouterGateway(t, routerMetricsConfig(a, b, c))
+
+	rec := routerChat(t, h, routerName, "hi", nil)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Equal(t, [3]int64{1, 0, 0}, [3]int64{a.count(), b.count(), c.count()})
+	_, escs := gw.routerStats.snapshot()
+	assert.Empty(t, escs)
+}
+
+func TestRouter_ContextOverflow400OnDirectRequestIsUnchanged(t *testing.T) {
+	a := newRouterBackend(400, routerOverflowBody)
+	b := newRouterBackend(200, successRespBody)
+	c := newRouterBackend(200, successRespBody)
+	defer closeBackends(a, b, c)
+	h, _ := buildRouterGateway(t, routerMetricsConfig(a, b, c))
+
+	rec := routerChat(t, h, "a1", "hi", nil)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Equal(t, [3]int64{1, 0, 0}, [3]int64{a.count(), b.count(), c.count()})
+}
+
+func TestRouter_ContextOverflowAfterBytesWrittenDoesNotEscalate(t *testing.T) {
+	const firstChunk = "data: {\"error\":{\"code\":\"context_length_exceeded\"}}\n\n"
+	alphaSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(firstChunk))
+		w.(http.Flusher).Flush()
+		if conn, _, err := w.(http.Hijacker).Hijack(); err == nil {
+			_ = conn.Close()
+		}
+	}))
+	defer alphaSrv.Close()
+	a := &routerBackend{srv: alphaSrv}
+	b := newRouterBackend(200, successRespBody)
+	c := newRouterBackend(200, successRespBody)
+	defer closeBackends(b, c)
+	h, _ := buildRouterGateway(t, routerMetricsConfig(a, b, c))
+
+	rec := routerChat(t, h, routerName, "hi", map[string]any{"stream": true})
+	assert.True(t, strings.HasPrefix(rec.Body.String(), firstChunk))
+	assert.Equal(t, int64(0), b.count()+c.count())
+}
+
+func TestIsContextOverflowBody(t *testing.T) {
+	yes := []string{
+		`{"error":{"code":"context_length_exceeded"}}`,
+		"This model's Maximum Context Length is 8192 tokens",
+		"prompt is too long: 250000 tokens > 200000 maximum",
+		"exceeds the CONTEXT WINDOW of this model",
+		"This prompt (12000 tokens) is longer than the model's max length",
+		"Request has too many tokens",
+	}
+	for _, s := range yes {
+		assert.True(t, isContextOverflowBody([]byte(s)), s)
+	}
+	for _, s := range []string{"", `{"error":{"message":"invalid temperature"}}`, "bad request"} {
+		assert.False(t, isContextOverflowBody([]byte(s)), s)
+	}
+	late := strings.Repeat("x", contextOverflowScanBytes) + "context_length_exceeded"
+	assert.False(t, isContextOverflowBody([]byte(late)), "only a bounded prefix is scanned")
+}
+
+func TestRouterEscalatable(t *testing.T) {
+	overflow := &providerHTTPError{status: http.StatusBadRequest, body: []byte(routerOverflowBody)}
+	plain := &providerHTTPError{status: http.StatusBadRequest, body: []byte("nope")}
+	assert.True(t, routerEscalatable(overflow, true))
+	assert.False(t, routerEscalatable(overflow, false), "non-router requests keep the 400 rule")
+	assert.False(t, routerEscalatable(plain, true))
+	assert.True(t, routerEscalatable(&providerHTTPError{status: 503}, true))
+	assert.True(t, routerEscalatable(&providerHTTPError{status: 503}, false))
+	assert.False(t, routerEscalatable(nil, true))
+}
