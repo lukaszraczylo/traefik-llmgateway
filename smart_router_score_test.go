@@ -312,3 +312,36 @@ func TestShadowClassifierMatrix(t *testing.T) {
 		assert.Equal(t, "t0", o.Tier, "live routing stays on v1")
 	}
 }
+
+// TestScoreMarginIsLayoutRelative pins that doubt and request-shape bonuses move a request the
+// same share of a tier on a wide layout as on the reference one.
+func TestScoreMarginIsLayoutRelative(t *testing.T) {
+	t.Parallel()
+	ref := v2Router(t, []int{0, 150, 350}, nil)
+	wide := v2Router(t, []int{0, 300, 600}, nil)
+	assert.Equal(t, 100, smartScaled(ref, 100, 0))
+	assert.Equal(t, 200, smartScaled(wide, 100, 0), "below the first boundary the margin follows it")
+	assert.Equal(t, 150, smartScaled(wide, 100, 300), "above it the margin follows the span to the top boundary")
+	one := v2Router(t, []int{0}, nil)
+	assert.Equal(t, 100, smartScaled(one, 100, 0))
+	for _, text := range []string{
+		"my queue consumer sometimes drops a message after the broker restarts and nobody knows why",
+		"how do i sort a list of dicts by a key in python and keep it stable across runs of the job",
+		"audit this oauth redirect handler, there is something off but i cannot see it",
+	} {
+		assert.Equal(t, verdictFor(ref, text).rank, verdictFor(wide, text).rank, text)
+	}
+}
+
+func TestScoreShortFollowUpDoesNotLiftGreeting(t *testing.T) {
+	t.Parallel()
+	rt := v2Router(t, []int{0, 150, 350}, nil)
+	score := func(text string) smartVerdict {
+		f := extractSmartV2(chatMsgs(msg("user", "tell me about raft"), msg("assistant", "ok"), msg("user", text)), cacheEndpointChat)
+		return scoreSmartV2(rt, &f, rt.weights, smartSessionHint{})
+	}
+	assert.Equal(t, smartSigmaBase, score("thanks!").sigma, "thanks is not a doubtful follow-up")
+	assert.Equal(t, smartSigmaBase, score("gracias, muchas gracias").sigma, "native-script thanks drops the follow-up doubt")
+	assert.Equal(t, smartSigmaBase+smartSigmaShort, score("and the leader?").sigma, "a bare follow-up keeps the doubt")
+	assert.Zero(t, score("thanks!").rank)
+}

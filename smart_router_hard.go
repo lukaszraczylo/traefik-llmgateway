@@ -44,6 +44,8 @@ var (
 		"korrigier", "übersetz", "résumer", "reformul", "traduire", "traduc", "resumir", "cómo se dice", "wie sagt man", "tłumacz", "przepisz", "riassum", "correggi",
 		"直して", "修正", "翻译", "翻訳", "润色", "改写", "переведи", "перепиши", "исправ", "сократ", "صحح", "ترجم", "لخص", "अनुवाद", "सारांश",
 	}
+	// smartGreetingMarkers name a greeting or thanks, which a short follow-up cannot turn into a hard ask.
+	smartGreetingMarkers = []string{"hello", "thanks", "thank you", "how are you", "good morning", "good night"}
 	// smartTechTokens keep a short greeting from reading as chit-chat when a technical subject follows.
 	smartTechTokens = []string{"kafka", "sql", "api", "http", "docker", "kubernetes", "k8s", "redis", "postgres", "golang", "python", "json", "error", "bug"}
 )
@@ -103,4 +105,9 @@ func (f *smartFeatures) scanHard() {
 		f.hard = 0
 	}
 	f.native = f.hard == 0 && len(f.prose) < smartChitchatMaxBytes*2 && containsAnySmart(f.lower, smartNativeEasyMarkers) && !containsAnySmart(f.lower, smartTechTokens)
+}
+
+// isGreeting reports a greeting or thanks in any language the markers cover.
+func (f *smartFeatures) isGreeting() bool {
+	return f.native || containsAnySmart(f.lower, smartGreetingMarkers)
 }

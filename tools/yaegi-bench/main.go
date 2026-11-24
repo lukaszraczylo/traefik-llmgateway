@@ -148,6 +148,25 @@ func BenchHelperCheck() string {
 		if msg := classifierHelperCheck(); msg != "" {
 			return msg
 		}
+		if msg := routerFeatureCheck(); msg != "" {
+			return msg
+		}
+	}
+	return ""
+}
+
+// routerFeatureCheck replays the v2 feature helpers with alternating inputs; yaegi v0.16.1 keeps
+// named results and struct fields from the previous call, so a stale answer shows up as a mismatch.
+func routerFeatureCheck() string {
+	plain := func(ask string) smartFeatures {
+		return extractSmartV2(map[string]any{"messages": []any{map[string]any{"role": "user", "content": ask}}}, cacheEndpointChat)
+	}
+	if g, n := plain("thanks a lot"), plain("and the leader?"); !g.isGreeting() || n.isGreeting() {
+		return "isGreeting changed between calls"
+	}
+	rt := &smartRouter{tiers: []smartTier{{}, {minScore: 300}, {minScore: 600}}}
+	if smartScaled(rt, 100, 0) != 200 || smartScaled(rt, 100, 300) != 150 || smartScaled(rt, 100, 0) != 200 {
+		return "smartScaled changed between calls"
 	}
 	return ""
 }

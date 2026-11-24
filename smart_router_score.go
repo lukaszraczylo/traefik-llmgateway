@@ -29,6 +29,10 @@ const (
 	smartBonusCodeBytes    = 200
 	smartBonusLog          = 80
 	smartCarryPct          = 80
+	// smartRefBoundary is the first tier boundary the point constants above were tuned on.
+	smartRefBoundary = 150
+	// smartRefSpan is the distance from the first to the top boundary on that layout.
+	smartRefSpan = 200
 )
 
 // smartSessionHint carries session-derived inputs to the scorer; the zero value means no session.
@@ -62,6 +66,21 @@ func smartLadderScore(tiers []smartTier, pos int) int {
 	return first + (tiers[top].minScore-first)*(pos-smartForeignPos)/smartForeignPos
 }
 
+// smartScaled stretches a point count tuned on the reference layout onto the router's own
+// tiers, so a margin or bonus moves a request the same share of a tier on any layout. Below the
+// first boundary it follows that boundary; above, the span up to the top boundary.
+func smartScaled(rt *smartRouter, points, at int) int {
+	top := len(rt.tiers) - 1
+	if top < 1 || rt.tiers[1].minScore <= 0 {
+		return points
+	}
+	first := rt.tiers[1].minScore
+	if at >= first && rt.tiers[top].minScore > first {
+		return points * (rt.tiers[top].minScore - first) / smartRefSpan
+	}
+	return points * first / smartRefBoundary
+}
+
 // scoreSmartV2 scores the extracted features. The v1 signal score is a lower bound:
 // the intent base can only raise it. Doubt routes up through the sigma margin.
 func scoreSmartV2(rt *smartRouter, f *smartFeatures, w smartWeights, sess smartSessionHint) smartVerdict {
@@ -77,7 +96,7 @@ func scoreSmartV2(rt *smartRouter, f *smartFeatures, w smartWeights, sess smartS
 			score = s
 		}
 	}
-	score += smartScoreBonuses(f)
+	score += smartScaled(rt, smartScoreBonuses(f), score)
 	score = smartHardFloor(rt, f, score)
 	// A long requested output is a generation-quality risk the wording does not show.
 	if f.outTokens >= smartBonusOutputTokens && score < rt.intentBase[smartIntentEdit] {
@@ -105,13 +124,13 @@ func scoreSmartV2(rt *smartRouter, f *smartFeatures, w smartWeights, sess smartS
 	if f.truncated {
 		sigma += smartSigmaTruncated
 	}
-	if len(f.prose) < smartShortProseBytes && f.history && !sess.found {
+	if len(f.prose) < smartShortProseBytes && f.history && !sess.found && !f.isGreeting() {
 		sigma += smartSigmaShort
 	}
 	if f.intentSpread {
 		sigma += smartSigmaSpread
 	}
-	return smartVerdict{score: score, sigma: sigma, rank: smartTierForScore(rt, score+rt.riskZ*sigma/100), reason: smartReasonScore}
+	return smartVerdict{score: score, sigma: sigma, rank: smartTierForScore(rt, score+smartScaled(rt, rt.riskZ*sigma/100, score)), reason: smartReasonScore}
 }
 
 // smartScoreBonuses adds the request-shape points that do not depend on the wording.
