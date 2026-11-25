@@ -1,9 +1,9 @@
 <script setup lang="ts">
+import { Callout, Input } from '@perfect-design/ui'
 import { computed, ref } from 'vue'
 
+import NumberField from '@/components/NumberField.vue'
 import SnippetBlock from '@/components/SnippetBlock.vue'
-import { Alert, AlertDescription } from '@/components/ui/alert'
-import { Input } from '@/components/ui/input'
 import { isValidNonNegativeInt, modelMetaSnippet } from '@/lib/snippets'
 
 /**
@@ -48,10 +48,9 @@ const snippet = computed<string | null>(() => {
     <div class="grid grid-cols-1 gap-3 sm:grid-cols-2 sm:items-end">
       <div class="flex flex-col gap-1">
         <label for="modelmeta-context" class="text-xs font-medium text-muted-foreground">Context window (tokens)</label>
-        <Input
+        <NumberField
           id="modelmeta-context"
           v-model="contextRaw"
-          type="number"
           min="1"
           step="1"
           placeholder="131072"
@@ -65,9 +64,7 @@ const snippet = computed<string | null>(() => {
       </label>
     </div>
 
-    <Alert v-if="contextEntered && !contextValid" id="modelmeta-context-error" variant="destructive">
-      <AlertDescription>Context window must be a positive whole number of tokens.</AlertDescription>
-    </Alert>
+    <Callout v-if="contextEntered && !contextValid" id="modelmeta-context-error" type="danger" role="alert" size="sm">Context window must be a positive whole number of tokens.</Callout>
 
     <SnippetBlock v-if="snippet" label="Paste into middleware.yaml" :text="snippet" />
     <p v-else class="text-sm text-muted-foreground">Enter a model id and set a context window and/or free to build a snippet.</p>

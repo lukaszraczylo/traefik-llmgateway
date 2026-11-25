@@ -1,6 +1,4 @@
 @import "tailwindcss";
-@import "tw-animate-css";
-@import "shadcn-vue/tailwind.css";
 @import "@perfect-design/ui/theme.css";
 @import "@perfect-design/ui/packs.css";
 /* Tailwind scans only the perfect-design components this app bundles; scanning all of dist adds ~15 KB gzip of unused utilities. Add a component's directory here when a new one is imported. */
@@ -62,7 +60,7 @@
 @source "../../node_modules/@perfect-design/ui/dist/components/primitives/Spinner";
 @source "../../node_modules/@perfect-design/ui/dist/components/primitives/StatusBadge";
 @source "../../node_modules/@perfect-design/ui/dist/components/primitives/StatusDot";
-@source "../../node_modules/@perfect-design/ui/dist/components/typography/RelativeTime/**/*.js";
+@source "../../node_modules/@perfect-design/ui/dist/components/typography/RelativeTime";
 
 /*
  * The base palette (background, primary, border, radius, ...) now comes from
@@ -70,10 +68,7 @@
  * Dark mode follows the `.dark` class that perfect-design's theme store (and its
  * boot script) maintains on <html>, including the "system" mode.
  *
- * Theme tokens (design note, not slop-by-default): shadcn-vue's `init`
- * scaffolds an achromatic "stone" palette (chroma 0 everywhere), a Google
- * Fonts Inter import, and a Geist Variable heading font. All three are
- * rewritten below:
+ * Local theme tokens, rewritten here rather than inherited:
  *
  * - No Google Fonts import, no Geist. The admin CSP (admin.go) ships
  *   style-src 'self' with no external host allowed, and the panel must load
@@ -86,13 +81,8 @@
  * - Chart series use the Okabe & Ito (2008) colorblind-safe qualitative
  *   palette rather than picking hues by eye — distinguishable under
  *   protanopia, deuteranopia, and tritanopia alike.
- * - Dark mode is driven by `prefers-color-scheme`, not a `.dark` class
- *   toggle: this panel has no theme switcher, so the OS setting is the only
- *   signal there is. Tailwind v4's default `dark:` variant already means
- *   "@media (prefers-color-scheme: dark)" — shadcn-vue's init overrides it
- *   to a `.dark`-class variant for apps with a manual theme toggle; that
- *   override is dropped here so any `dark:` utility (ours or a generated
- *   ui/ primitive's) follows the OS setting, same as the CSS variables below.
+ * - Dark mode follows the `.dark` class (see above), so `dark:` utilities and the CSS
+ *   variables below switch together.
  */
 
 @theme inline {

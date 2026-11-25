@@ -43,8 +43,7 @@ export function kindLabel(kind: string): string {
 }
 
 /**
- * eventKindVariant maps a kind to the shadcn-vue Badge variant its row
- * renders (lib/events-columns.ts): destructive for the three kinds where a
+ * eventKindVariant maps a kind to the Badge variant its row renders: destructive for the three kinds where a
  * request was actually DENIED (rate_limit, budget, capacity — money or
  * quota was protected), secondary for an infra/upstream failure that is
  * not itself a policy decision (store_down, upstream, timeout), outline

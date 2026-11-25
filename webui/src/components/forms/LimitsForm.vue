@@ -1,10 +1,10 @@
 <script setup lang="ts">
+import { Callout } from '@perfect-design/ui'
 import { computed, reactive, ref } from 'vue'
 
 import TargetPicker from '@/components/forms/TargetPicker.vue'
+import NumberField from '@/components/NumberField.vue'
 import SnippetBlock from '@/components/SnippetBlock.vue'
-import { Alert, AlertDescription } from '@/components/ui/alert'
-import { Input } from '@/components/ui/input'
 import { useTargetPicker } from '@/composables/useTargetPicker'
 import { groupLimitsSnippet, groupMemberLimitsSnippet, isValidNonNegative, isValidNonNegativeInt, userLimitsJsonFragment } from '@/lib/snippets'
 import type { LimitKey, LimitsConfig } from '@/types/api'
@@ -120,10 +120,9 @@ const snippet = computed<string | null>(() => {
     <div class="grid grid-cols-1 gap-3 sm:grid-cols-3">
       <div v-for="field in FIELDS" :key="field.key" class="flex flex-col gap-1">
         <label :for="`limits-${field.key}`" class="text-xs font-medium text-muted-foreground">{{ field.label }}</label>
-        <Input
+        <NumberField
           :id="`limits-${field.key}`"
           v-model="raw[field.key]"
-          type="number"
           min="0"
           :step="INTEGER_FIELDS.has(field.key) ? '1' : 'any'"
           placeholder="unset"
@@ -133,12 +132,10 @@ const snippet = computed<string | null>(() => {
       </div>
     </div>
 
-    <Alert v-if="invalidFields.length" id="limits-errors" variant="destructive">
-      <AlertDescription>
+    <Callout v-if="invalidFields.length" id="limits-errors" type="danger" role="alert" size="sm">
         <p v-if="invalidIntegerFields.length">Enter a non-negative whole number for: {{ invalidIntegerFields.join(', ') }}.</p>
         <p v-if="invalidDecimalFields.length">Enter a non-negative number for: {{ invalidDecimalFields.join(', ') }}.</p>
-      </AlertDescription>
-    </Alert>
+      </Callout>
 
     <SnippetBlock v-if="snippet" :label="snippetLabel" :text="snippet" />
     <p v-else class="text-sm text-muted-foreground">Pick a target and at least one limit to build a snippet.</p>

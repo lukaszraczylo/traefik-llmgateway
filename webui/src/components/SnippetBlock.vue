@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { faCheck, faCopy, faTriangleExclamation } from '@fortawesome/free-solid-svg-icons'
+import { Button } from '@perfect-design/ui'
 import { useTemplateRef } from 'vue'
 
-import { Button } from '@/components/ui/button'
 import { useCopyFeedback } from '@/composables/useCopyFeedback'
 import { copyText } from '@/lib/clipboard'
 import { useToastsStore } from '@/stores/toasts'

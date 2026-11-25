@@ -1,10 +1,9 @@
 <script setup lang="ts">
+import { Callout, Input } from '@perfect-design/ui'
 import { computed, ref } from 'vue'
 
 import TargetPicker from '@/components/forms/TargetPicker.vue'
 import SnippetBlock from '@/components/SnippetBlock.vue'
-import { Alert, AlertDescription } from '@/components/ui/alert'
-import { Input } from '@/components/ui/input'
 import { useTargetPicker } from '@/composables/useTargetPicker'
 import { groupGrantSnippet, parseList, userGrantJsonFragment, validatePersonalGrant } from '@/lib/snippets'
 
@@ -16,7 +15,7 @@ import { groupGrantSnippet, parseList, userGrantJsonFragment, validatePersonalGr
  * as a bare JSON fragment for an existing users.json entry.
  *
  * Every list field is a comma-separated text Input rather than a proper
- * multi-select (no such shadcn-vue primitive is installed in this panel) —
+ * multi-select (a multi-select is not worth the weight here) —
  * parsed, trimmed, and de-duplicated below.
  */
 const props = defineProps<{
@@ -103,9 +102,7 @@ const snippet = computed<string | null>(() => {
       </template>
     </div>
 
-    <Alert v-if="grantError" id="grant-error" variant="destructive">
-      <AlertDescription>{{ grantError }}</AlertDescription>
-    </Alert>
+    <Callout v-if="grantError" id="grant-error" type="danger" role="alert" size="sm">{{ grantError }}</Callout>
 
     <SnippetBlock v-if="snippet" :label="snippetLabel" :text="snippet" />
     <p v-else class="text-sm text-muted-foreground">Pick a target and at least one list to build a snippet.</p>

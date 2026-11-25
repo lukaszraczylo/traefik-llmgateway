@@ -1,9 +1,9 @@
 <script setup lang="ts">
+import { Callout, Input } from '@perfect-design/ui'
 import { computed, ref } from 'vue'
 
+import NumberField from '@/components/NumberField.vue'
 import SnippetBlock from '@/components/SnippetBlock.vue'
-import { Alert, AlertDescription } from '@/components/ui/alert'
-import { Input } from '@/components/ui/input'
 import { isValidNonNegative, pricingSnippet } from '@/lib/snippets'
 
 /**
@@ -56,10 +56,9 @@ const snippet = computed<string | null>(() => {
     <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
       <div class="flex flex-col gap-1">
         <label for="pricing-input" class="text-xs font-medium text-muted-foreground">Input price / MTok (USD)</label>
-        <Input
+        <NumberField
           id="pricing-input"
           v-model="inputRaw"
-          type="number"
           min="0"
           step="any"
           placeholder="0.50"
@@ -69,10 +68,9 @@ const snippet = computed<string | null>(() => {
       </div>
       <div class="flex flex-col gap-1">
         <label for="pricing-output" class="text-xs font-medium text-muted-foreground">Output price / MTok (USD)</label>
-        <Input
+        <NumberField
           id="pricing-output"
           v-model="outputRaw"
-          type="number"
           min="0"
           step="any"
           placeholder="1.50"
@@ -82,11 +80,9 @@ const snippet = computed<string | null>(() => {
       </div>
     </div>
 
-    <Alert v-if="errors.length" id="pricing-errors" variant="destructive">
-      <AlertDescription>
+    <Callout v-if="errors.length" id="pricing-errors" type="danger" role="alert" size="sm">
         <p v-for="(error, index) in errors" :key="index">{{ error }}</p>
-      </AlertDescription>
-    </Alert>
+      </Callout>
 
     <SnippetBlock v-if="snippet" label="Paste into middleware.yaml" :text="snippet" />
     <p v-else class="text-sm text-muted-foreground">Enter a model id and both prices to build a snippet.</p>

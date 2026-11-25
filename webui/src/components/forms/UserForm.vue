@@ -1,11 +1,9 @@
 <script setup lang="ts">
+import { Button, Callout, Input } from '@perfect-design/ui'
 import { computed, ref } from 'vue'
 
 import LabeledSelect from '@/components/LabeledSelect.vue'
 import SnippetBlock from '@/components/SnippetBlock.vue'
-import { Alert, AlertDescription } from '@/components/ui/alert'
-import { Button } from '@/components/ui/button'
-import { Input } from '@/components/ui/input'
 import { API_KEY_PLACEHOLDER, generateApiKey, isValidUserName, parseList, userJsonLine, validatePersonalGrant } from '@/lib/snippets'
 import { useToastsStore } from '@/stores/toasts'
 
@@ -123,9 +121,7 @@ const snippet = computed<string | null>(() => {
       Admin (full access to /admin/api/*)
     </label>
 
-    <Alert v-if="grantError" variant="destructive">
-      <AlertDescription>{{ grantError }}</AlertDescription>
-    </Alert>
+    <Callout v-if="grantError" type="danger" role="alert" size="sm">{{ grantError }}</Callout>
 
     <SnippetBlock v-if="snippet" label="Add as a new line in users.json" :text="snippet" />
     <p v-else class="text-sm text-muted-foreground">Fill in a name, group, and a real (generated) API key to build a snippet.</p>

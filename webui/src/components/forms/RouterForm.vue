@@ -1,9 +1,9 @@
 <script setup lang="ts">
+import { Callout, Input } from '@perfect-design/ui'
 import { computed, ref } from 'vue'
 
+import NumberField from '@/components/NumberField.vue'
 import SnippetBlock from '@/components/SnippetBlock.vue'
-import { Alert, AlertDescription } from '@/components/ui/alert'
-import { Input } from '@/components/ui/input'
 import { isValidName, parseList, routerSnippet, validateRouter } from '@/lib/snippets'
 import type { RouterInput } from '@/lib/snippets'
 
@@ -75,7 +75,7 @@ const snippet = computed<string | null>(() => {
       </div>
       <div class="flex flex-col gap-1">
         <label :for="`router-tier-score-${index}`" class="text-xs font-medium text-muted-foreground">Min score (0-1000)</label>
-        <Input :id="`router-tier-score-${index}`" v-model="row.minScore" type="number" min="0" max="1000" step="1" />
+        <NumberField :id="`router-tier-score-${index}`" v-model="row.minScore" min="0" max="1000" step="1" />
       </div>
       <div class="flex flex-col gap-1">
         <label :for="`router-tier-models-${index}`" class="text-xs font-medium text-muted-foreground">Models (comma-separated)</label>
@@ -104,7 +104,7 @@ const snippet = computed<string | null>(() => {
       </div>
       <div class="flex flex-col gap-1">
         <label for="router-max-attempts" class="text-xs font-medium text-muted-foreground">Max attempts (blank = 4)</label>
-        <Input id="router-max-attempts" v-model="maxAttemptsRaw" type="number" min="0" step="1" placeholder="4" />
+        <NumberField id="router-max-attempts" v-model="maxAttemptsRaw" min="0" step="1" placeholder="4" />
       </div>
       <div class="flex items-center gap-2">
         <input id="router-context-escalation" v-model="contextEscalation" type="checkbox" class="size-4 rounded border-input" />
@@ -112,11 +112,9 @@ const snippet = computed<string | null>(() => {
       </div>
     </div>
 
-    <Alert v-if="errors.length" id="router-errors" variant="destructive">
-      <AlertDescription>
+    <Callout v-if="errors.length" id="router-errors" type="danger" role="alert" size="sm">
         <p v-for="(error, index) in errors" :key="index">{{ error }}</p>
-      </AlertDescription>
-    </Alert>
+      </Callout>
 
     <SnippetBlock v-if="snippet" label="Paste into middleware.yaml" :text="snippet" />
     <p v-else class="text-sm text-muted-foreground">Enter a router name and at least one tier with models to build a snippet.</p>

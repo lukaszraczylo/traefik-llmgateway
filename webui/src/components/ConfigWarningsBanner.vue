@@ -1,9 +1,6 @@
 <script setup lang="ts">
-import { faTriangleExclamation } from '@fortawesome/free-solid-svg-icons'
+import { Button, Callout } from '@perfect-design/ui'
 import { ref } from 'vue'
-
-import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
-import { Button } from '@/components/ui/button'
 
 /**
  * ConfigWarningsBanner surfaces GET /admin/api/overview's `warnings`/
@@ -30,19 +27,19 @@ function toggleExpanded(): void {
 </script>
 
 <template>
-  <Alert v-if="props.warnings.length > 0" variant="warn">
-    <FontAwesomeIcon :icon="faTriangleExclamation" class="size-4" aria-hidden="true" />
-    <AlertTitle class="flex items-center justify-between gap-2">
-      <span>{{ props.warnings.length }} configuration {{ props.warnings.length === 1 ? 'warning' : 'warnings' }}</span>
-      <!--
-        P11 review fix (WCAG 2.5.3 Label in Name): the aria-label used to
-        be the fixed text "Toggle configuration warning details", which
-        shares NO words with the visible "Show"/"Hide" label a sighted
-        reader sees — a speech-input user saying "click show" would not
-        match this control's accessible name at all. The aria-label now
-        STARTS WITH the same word the button visibly displays, so the
-        accessible name always contains the visible label.
-      -->
+  <Callout
+    v-if="props.warnings.length > 0"
+    type="warning"
+    :title="`${props.warnings.length} configuration ${props.warnings.length === 1 ? 'warning' : 'warnings'}`"
+  >
+    <template v-if="expanded">
+      <ul class="mt-1 list-disc space-y-0.5 pl-4 font-mono text-xs">
+        <li v-for="(warning, i) in props.warnings" :key="i">{{ warning }}</li>
+      </ul>
+      <p v-if="props.warningsDropped" class="mt-1 text-xs">and {{ props.warningsDropped }} more were not kept</p>
+    </template>
+    <template #actions>
+      <!-- The aria-label starts with the visible word (WCAG 2.5.3 Label in Name). -->
       <Button
         type="button"
         variant="ghost"
@@ -53,12 +50,6 @@ function toggleExpanded(): void {
       >
         {{ expanded ? 'Hide' : 'Show' }}
       </Button>
-    </AlertTitle>
-    <AlertDescription v-if="expanded">
-      <ul class="mt-1 list-disc space-y-0.5 pl-4 font-mono text-xs">
-        <li v-for="(warning, i) in props.warnings" :key="i">{{ warning }}</li>
-      </ul>
-      <p v-if="props.warningsDropped" class="mt-1 text-xs">and {{ props.warningsDropped }} more were not kept</p>
-    </AlertDescription>
-  </Alert>
+    </template>
+  </Callout>
 </template>

@@ -1,9 +1,7 @@
 <script setup lang="ts">
-import { faCheck, faCircleInfo, faTriangleExclamation, faXmark } from '@fortawesome/free-solid-svg-icons'
-import type { IconDefinition } from '@fortawesome/free-solid-svg-icons'
+import { ToastItem } from '@perfect-design/ui'
 import { computed } from 'vue'
 
-import { Button } from '@/components/ui/button'
 import type { Toast, ToastKind } from '@/stores/toasts'
 import { useToastsStore } from '@/stores/toasts'
 
@@ -32,16 +30,10 @@ import { useToastsStore } from '@/stores/toasts'
  */
 const toasts = useToastsStore()
 
-const ICON: Record<ToastKind, IconDefinition> = {
-  success: faCheck,
-  error: faTriangleExclamation,
-  info: faCircleInfo,
-}
-
-const ICON_CLASS: Record<ToastKind, string> = {
-  success: 'text-chart-requests',
-  error: 'text-destructive',
-  info: 'text-muted-foreground',
+const VARIANT: Record<ToastKind, 'success' | 'danger' | 'info'> = {
+  success: 'success',
+  error: 'danger',
+  info: 'info',
 }
 
 /** politeToasts/assertiveToasts split the store's single ordered list by kind — success/info are politely announced, error assertively, matching each region's own aria-live level. */
@@ -66,23 +58,14 @@ function onDismiss(toast: Toast): void {
         leave-active-class="transition duration-150 ease-in motion-reduce:transition-none"
         leave-to-class="opacity-0"
       >
-        <div
-          v-for="toast in assertiveToasts"
-          :key="toast.id"
-          class="pointer-events-auto flex items-start gap-2 rounded-lg border bg-popover px-3 py-2.5 text-popover-foreground shadow-lg"
-        >
-          <FontAwesomeIcon :icon="ICON[toast.kind]" class="mt-0.5 size-3.5 shrink-0" :class="ICON_CLASS[toast.kind]" aria-hidden="true" />
-          <p class="min-w-0 flex-1 text-sm">{{ toast.message }}</p>
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon"
-            class="-mt-1 -mr-1 size-6 shrink-0 text-muted-foreground hover:text-foreground"
-            :aria-label="`Dismiss: ${toast.message}`"
-            @click="onDismiss(toast)"
-          >
-            <FontAwesomeIcon :icon="faXmark" class="size-3" aria-hidden="true" />
-          </Button>
+        <div v-for="toast in assertiveToasts" :key="toast.id" class="pointer-events-auto">
+          <ToastItem
+            :title="toast.message"
+            :variant="VARIANT[toast.kind]"
+            :announce="false"
+            :dismiss-label="`Dismiss: ${toast.message}`"
+            @dismiss="onDismiss(toast)"
+          />
         </div>
       </TransitionGroup>
     </div>
@@ -95,23 +78,14 @@ function onDismiss(toast: Toast): void {
         leave-active-class="transition duration-150 ease-in motion-reduce:transition-none"
         leave-to-class="opacity-0"
       >
-        <div
-          v-for="toast in politeToasts"
-          :key="toast.id"
-          class="pointer-events-auto flex items-start gap-2 rounded-lg border bg-popover px-3 py-2.5 text-popover-foreground shadow-lg"
-        >
-          <FontAwesomeIcon :icon="ICON[toast.kind]" class="mt-0.5 size-3.5 shrink-0" :class="ICON_CLASS[toast.kind]" aria-hidden="true" />
-          <p class="min-w-0 flex-1 text-sm">{{ toast.message }}</p>
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon"
-            class="-mt-1 -mr-1 size-6 shrink-0 text-muted-foreground hover:text-foreground"
-            :aria-label="`Dismiss: ${toast.message}`"
-            @click="onDismiss(toast)"
-          >
-            <FontAwesomeIcon :icon="faXmark" class="size-3" aria-hidden="true" />
-          </Button>
+        <div v-for="toast in politeToasts" :key="toast.id" class="pointer-events-auto">
+          <ToastItem
+            :title="toast.message"
+            :variant="VARIANT[toast.kind]"
+            :announce="false"
+            :dismiss-label="`Dismiss: ${toast.message}`"
+            @dismiss="onDismiss(toast)"
+          />
         </div>
       </TransitionGroup>
     </div>

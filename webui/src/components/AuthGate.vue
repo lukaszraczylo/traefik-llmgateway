@@ -1,11 +1,8 @@
 <script setup lang="ts">
 import { faCheck, faEye, faEyeSlash, faKey } from '@fortawesome/free-solid-svg-icons'
+import { Button, Callout, Card, CardContent, CardDescription, CardHeader, CardTitle, Input } from '@perfect-design/ui'
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
 
-import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
-import { Button } from '@/components/ui/button'
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
-import { Input } from '@/components/ui/input'
 import { useAuthStore } from '@/stores/auth'
 import { useDashboardStore } from '@/stores/dashboard'
 
@@ -119,10 +116,7 @@ watch(() => auth.error, (err) => {
             Continue
           </Button>
         </form>
-        <Alert v-if="auth.error" id="authgate-error" variant="destructive">
-          <AlertTitle>Authentication failed</AlertTitle>
-          <AlertDescription>{{ auth.error }}</AlertDescription>
-        </Alert>
+        <Callout v-if="auth.error" id="authgate-error" type="danger" role="alert" title="Authentication failed">{{ auth.error }}</Callout>
       </CardContent>
     </Card>
   </div>
@@ -134,8 +128,7 @@ watch(() => auth.error, (err) => {
  * needs one yet (grep confirms) but nothing in the Vite/@vitejs/plugin-vue
  * pipeline forbids it, and the alternative (Tailwind-only) has no shake
  * keyframe to compose from: Tailwind v4 core ships only pulse/bounce/spin/
- * ping (node_modules/tailwindcss/theme.css), and tw-animate-css adds
- * accordion/collapsible/enter/exit/caret-blink, none of which reads as
+ * ping (node_modules/tailwindcss/theme.css), none of which reads as
  * "rejected". Contained to this file per the task's file-scope constraint.
  *
  * Applied only while auth.error is set (a failed submit), not on every
