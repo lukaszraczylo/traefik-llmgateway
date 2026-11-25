@@ -95,10 +95,11 @@ function onRange(value: string): void {
       />
       <OfflineIndicator variant="pill" />
       <span v-if="dashboard.error" class="text-destructive text-xs" role="status">refresh failed</span>
-      <Button variant="outline" size="sm" aria-label="Search ⌘K" @click="emit('openPalette')">
+      <Button variant="outline" size="sm" aria-label="Search" aria-keyshortcuts="Meta+K" @click="emit('openPalette')">
         <Icon :icon="faMagnifyingGlass" size="sm" />
         <span class="hidden sm:inline">Search</span>
-        <Kbd>⌘K</Kbd>
+        <!-- shortcut hint is CSS content so it stays out of the visible text axe compares with the aria-label -->
+        <Kbd aria-hidden="true" class="after:content-['⌘K']" />
       </Button>
       <ThemeToggle />
       <span v-if="dashboard.overview?.version" class="text-muted-foreground hidden text-xs md:inline">

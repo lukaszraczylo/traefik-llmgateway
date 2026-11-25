@@ -16,8 +16,6 @@ const THEMES = ['light', 'dark'] as const
 const KEY_STORAGE = 'llmgwAdminKey'
 const OUT = join(import.meta.dirname, '..', '.screenshots')
 const SETTLE_MS = 600
-// Chromium logs every 401 fetch as a console error; auth-401 forces one by design.
-const AUTH_401_NOISE = /Failed to load resource.*status of 40[13]/
 
 async function sampleIds(page: Page): Promise<Record<string, string>> {
   const key = { 'x-api-key': 'e2e-dummy-key' }
@@ -53,14 +51,17 @@ async function visit(page: Page, hash: string, scenario: string, theme: string):
 }
 
 async function exercise(page: Page, label: string, hash: string, scenario: string, viewport: keyof typeof VIEWPORTS, theme: string): Promise<void> {
-  const errors = collectConsoleErrors(page, scenario === 'auth-401' ? [AUTH_401_NOISE] : [])
+  const errors = collectConsoleErrors(page, scenario)
+  const diag = { navigationsAfterSettle: 0, crashed: false }
+  page.on('crash', () => (diag.crashed = true))
   await visit(page, hash, scenario, theme)
+  page.on('framenavigated', () => diag.navigationsAfterSettle++)
   mkdirSync(OUT, { recursive: true })
   const name = `${label}-${scenario}-${viewport}-${theme}`
   await page.screenshot({ path: join(OUT, `${name}.png`), fullPage: true })
   const results = await runChecks(page, errors())
   mkdirSync(join(OUT, 'results'), { recursive: true })
-  writeFileSync(join(OUT, 'results', `${name}.json`), JSON.stringify({ label, scenario, viewport, theme, results }))
+  writeFileSync(join(OUT, 'results', `${name}.json`), JSON.stringify({ label, scenario, viewport, theme, results, diag }))
   for (const r of results) expect.soft(r.ok, `${r.name}: ${r.detail}`).toBe(true)
 }
 
