@@ -95,7 +95,7 @@ function onRange(value: string): void {
       />
       <OfflineIndicator variant="pill" />
       <span v-if="dashboard.error" class="text-destructive text-xs" role="status">refresh failed</span>
-      <Button variant="outline" size="sm" aria-label="Open command palette" @click="emit('openPalette')">
+      <Button variant="outline" size="sm" aria-label="Search ⌘K" @click="emit('openPalette')">
         <Icon :icon="faMagnifyingGlass" size="sm" />
         <span class="hidden sm:inline">Search</span>
         <Kbd>⌘K</Kbd>

@@ -5,6 +5,11 @@ import type { PageId } from '@/lib/pages'
 import { formatSel, parseSel } from '@/lib/panel-selection'
 import type { PanelKind, PanelSelection } from '@/lib/panel-selection'
 
+function sameParams(a: Record<string, string>, b: Record<string, string>): boolean {
+  const keys = Object.keys(a)
+  return keys.length === Object.keys(b).length && keys.every((k) => a[k] === b[k])
+}
+
 /**
  * useNavStore is the redesign's single navigation store (redesign-plan.md
  * section 3.3, replacing the old activeTab/usageQuery shape): which page
@@ -45,9 +50,11 @@ export const useNavStore = defineStore('nav', {
      * one hash rewrite — composables/useHashState.ts's own watcher).
      */
     goTo(page: PageId, params: Record<string, string> = {}, opts: { replace?: boolean } = {}): void {
+      const unchanged = this.page === page && sameParams(this.params, params)
       this.page = page
       this.params = params
-      this.pushPending = opts.replace === false
+      // An unchanged hash never reaches useHashState's watcher, which is what clears this flag.
+      this.pushPending = opts.replace === false && !unchanged
       this.panelPushed = false
     },
     /** Opens a detail panel and pushes a history entry, so Back closes it. */

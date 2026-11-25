@@ -49,12 +49,12 @@ function onNavigate(item: { id?: string }, event: MouseEvent): void {
 </script>
 
 <template>
-  <AppShell v-model:collapsed="collapsed" v-model:open="open" drawer-breakpoint="lg" sidebar-label="Primary">
+  <AppShell v-model:collapsed="collapsed" v-model:open="open" drawer-breakpoint="lg" sidebar-width="lg" sidebar-label="Primary">
     <template #header="{ toggle, triggerProps }">
       <AppHeader :trigger-props="triggerProps" @toggle-sidebar="toggle" @open-palette="paletteOpen = true" />
     </template>
     <template #sidebar>
-      <SidebarNav v-model:collapsed="collapsed" :groups="groups" :current="nav.page" label="Primary" @navigate="onNavigate" />
+      <SidebarNav v-model:collapsed="collapsed" class="w-full" :groups="groups" :current="nav.page" label="Primary" @navigate="onNavigate" />
     </template>
     <div class="min-w-0 p-4">
       <slot />

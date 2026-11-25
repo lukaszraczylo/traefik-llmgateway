@@ -91,3 +91,19 @@ describe('useNavStore panels', () => {
     expect(nav.panelPushed).toBe(false)
   })
 })
+
+describe('useNavStore no-op navigation', () => {
+  it('goTo to the identical page and params with replace:false does not leave a push pending', () => {
+    const nav = useNavStore()
+    nav.goTo('users', { q: 'a' })
+    nav.goTo('users', { q: 'a' }, { replace: false })
+    expect(nav.pushPending).toBe(false)
+  })
+
+  it('goTo that changes params still pushes with replace:false', () => {
+    const nav = useNavStore()
+    nav.goTo('users', { q: 'a' })
+    nav.goTo('users', { q: 'b' }, { replace: false })
+    expect(nav.pushPending).toBe(true)
+  })
+})

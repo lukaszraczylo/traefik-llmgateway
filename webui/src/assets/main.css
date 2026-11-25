@@ -197,3 +197,13 @@
     radial-gradient(farthest-side at 0 50%, oklch(0 0 0 / 0.22), transparent) 0 0 / 0.6rem 100% no-repeat scroll,
     radial-gradient(farthest-side at 100% 50%, oklch(0 0 0 / 0.22), transparent) 100% 0 / 0.6rem 100% no-repeat scroll;
 }
+
+/* Workbench table: 8px grid, 12px cell inset, 32px body rows, 30px header row. */
+.wb-table table { table-layout: auto; }
+.wb-table :is(th, td) { padding-inline: 12px; }
+.wb-table thead :is(th) { height: 30px; padding-block: 0; }
+.wb-table tbody :is(td, th) { height: 32px; padding-block: 0; }
+.wb-table [data-numeric] { display: block; text-align: right; font-family: var(--font-mono); font-variant-numeric: tabular-nums; line-height: 20px; }
+.wb-table :is(th, td).wb-num { text-align: right; }
+.wb-table th.wb-num > * { justify-content: flex-end; }
+.wb-table .wb-share-bar { min-width: 96px; }
