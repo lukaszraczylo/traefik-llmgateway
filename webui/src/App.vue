@@ -44,7 +44,7 @@ function lazyPage(loader: () => Promise<Component>): Component {
 // Legacy pages stand in until their redesigned replacements land: routers
 // still lives inside the Models page and events inside Reliability.
 const PAGES: Record<PageId, Component> = {
-  overview: lazyPage(() => import('@/pages/HomePage.vue')),
+  overview: lazyPage(() => import('@/pages/OverviewPage.vue')),
   usage: lazyPage(() => import('@/pages/SpendPage.vue')),
   reliability: lazyPage(() => import('@/pages/ReliabilityPage.vue')),
   users: lazyPage(() => import('@/pages/ConsumersPage.vue')),
