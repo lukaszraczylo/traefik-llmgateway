@@ -1,5 +1,6 @@
 import { matchFixture, nearestFixture, normaliseQuery, type Fixture } from './match.ts'
 import { applyScenarios, errorEnvelope, hotUserIds, scenarioDelayMs } from './scenarios.ts'
+import { seriesQueryError } from './series-rules.ts'
 import { fitSeriesScopes, synthesise } from './synth.ts'
 import { CAPTURE_AT, shiftTimestamps } from './time-shift.ts'
 
@@ -23,7 +24,7 @@ export interface MockResponse {
 
 const SERIES = '/admin/api/usage/series'
 const MODELS = '/admin/api/usage/models'
-const SERIES_SCOPE = /^(model|provider|group|user):.+$|^total$/
+const SERIES_SCOPE = /^(model|provider|provmodel|group|user):.+$|^total$/
 const WINDOWS = ['hour', 'day', 'month']
 const JITTER = 0.15
 const RANGE_TOO_LARGE = 'range too large; narrow span or filter'
@@ -56,6 +57,10 @@ function limitRows(path: string, query: URLSearchParams, body: Obj): Obj {
 function resolveBase(i: RespondInput): { status: number; body: unknown } {
   const { manifest, path, query, now } = i
   if (!manifest.some((f) => f.path === path)) return notFound(`unknown admin route ${path}`)
+  if (path === SERIES) {
+    const invalid = seriesQueryError(query)
+    if (invalid) return { status: 400, body: errorEnvelope(400, 'invalid_request_error', invalid) }
+  }
   const bad = validQuery(path, query)
   if (bad) return notFound(bad)
 

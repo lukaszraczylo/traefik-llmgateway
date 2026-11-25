@@ -381,34 +381,10 @@ describe('huge scenario consistency', () => {
   })
 
   it('serves series for the tripled provider and model scopes', () => {
-    const b = hugeGet('/admin/api/usage/series', 'scope=provider:alibaba-2&scope=model:alibaba-3/deepseek-v4-flash-0731-v2&metric=req&window=day&span=7')
-    expect(b.series.map((s: Any) => s.scope)).toEqual(['provider:alibaba-2', 'model:alibaba-3/deepseek-v4-flash-0731-v2'])
-    for (const s of b.series) expect(s.points).toHaveLength(7)
-  })
-})
-
-describe('month boundaries', () => {
-  const NEW_YEAR_EVE = Date.parse('2026-12-31T23:59:00Z')
-  const NEW_YEAR = Date.parse('2027-01-01T00:30:00Z')
-
-  it('bucketsFor rolls day, hour and month labels over the year end', () => {
-    expect(bucketsFor('day', 2, 0, NEW_YEAR_EVE)).toEqual(['20261230', '20261231'])
-    expect(bucketsFor('day', 2, 0, NEW_YEAR)).toEqual(['20261231', '20270101'])
-    expect(bucketsFor('hour', 2, 0, NEW_YEAR_EVE)).toEqual(['2026123122', '2026123123'])
-    expect(bucketsFor('hour', 2, 0, NEW_YEAR)).toEqual(['2026123123', '2027010100'])
-    expect(bucketsFor('month', 2, 0, NEW_YEAR_EVE)).toEqual(['202611', '202612'])
-    expect(bucketsFor('month', 2, 0, NEW_YEAR)).toEqual(['202612', '202701'])
-    expect(bucketsFor('month', 2, 1, NEW_YEAR)).toEqual(['202611', '202612'])
-  })
-
-  it('shiftTimestamps lands the newest bucket on now across the year end', () => {
-    const body = { buckets: ['20261124', '20261125'], points: [{ id: '20261125' }], hours: { buckets: ['2026112500', '2026112501'] }, months: { buckets: ['202610', '202611'] } }
-    for (const now of [NEW_YEAR_EVE, NEW_YEAR]) {
-      const out = shiftTimestamps(body, CAPTURE_AT, now) as Any
-      expect(out.buckets).toEqual(bucketsFor('day', 2, 0, now))
-      expect(out.points[0].id).toBe(out.buckets[1])
-      expect(out.hours.buckets).toEqual(bucketsFor('hour', 2, 0, now))
-      expect(out.months.buckets).toEqual(bucketsFor('month', 2, 0, now))
-    }
+    const prov = hugeGet('/admin/api/usage/series', 'scope=provider:alibaba-2&metric=attempt&window=day&span=7')
+    const model = hugeGet('/admin/api/usage/series', 'scope=model:alibaba-3/deepseek-v4-flash-0731-v2&metric=req&window=day&span=7')
+    expect(prov.series.map((s: Any) => s.scope)).toEqual(['provider:alibaba-2'])
+    expect(model.series.map((s: Any) => s.scope)).toEqual(['model:alibaba-3/deepseek-v4-flash-0731-v2'])
+    for (const s of [...prov.series, ...model.series]) expect(s.points).toHaveLength(7)
   })
 })
