@@ -155,7 +155,11 @@ export function nearestFixture(manifest: Fixture[], path: string, query: URLSear
       for (const k of ID_PARAMS[path]!) if (want[k]?.join() === have[k]?.join()) score += 30
       score += need.length === got.length ? 10 : 0
     } else if (path === '/admin/api/usage/models') {
-      if (!want.detail !== !have.detail) continue
+      // A detail fixture holds the full ranking, so it can answer a plain request for any metric; a
+      // plain fixture is a top-N cut of one metric and only answers that metric.
+      if (want.detail && !have.detail) continue
+      if (!have.detail && have.metric?.[0] !== want.metric?.[0]) continue
+      score += have.metric?.[0] === want.metric?.[0] ? 100 : 0
     } else if (path === '/admin/api/performance') {
       if (want.kind?.[0] !== have.kind?.[0] || !want.series !== !have.series) continue
       if (!want.id !== !have.id) continue

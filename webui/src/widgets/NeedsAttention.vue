@@ -24,7 +24,7 @@ const { openLink } = useEntityLinks()
         @click="openLink(item.link)"
       >
         <StatusDot class="mt-1.5 shrink-0" :tone="TONE[item.severity]" size="md" />
-        <span class="min-w-0 break-words">{{ item.text }}</span>
+        <span class="line-clamp-2 min-w-0 break-words" :title="item.text">{{ item.text }}</span>
       </button>
     </li>
   </ul>

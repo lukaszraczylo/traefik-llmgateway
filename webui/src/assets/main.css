@@ -207,3 +207,7 @@
 .wb-table :is(th, td).wb-num { text-align: right; }
 .wb-table th.wb-num > * { justify-content: flex-end; }
 .wb-table .wb-share-bar { min-width: 96px; }
+
+/* Phone cards layout: drop the share bar from compact top lists. */
+@media (max-width: 639px) { .wb-hide-share-sm .wb-share { display: none; } }
+@media (min-width: 640px) { .wb-clip td.wb-text { max-width: 9rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } }

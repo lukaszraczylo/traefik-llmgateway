@@ -39,10 +39,10 @@ describe('useOverviewStore.refresh', () => {
     await s.refresh()
     expect(s.totals.req).toEqual([1, 2])
     expect(s.topModelSeries.map((m) => m.scope)).toEqual(['model:p/m1', 'model:p/m2'])
-    expect(s.topModelsByCost.map((m) => m.id)).toEqual(['p/m1', 'p/m2'])
+    expect(s.topModels.map((m) => m.id)).toEqual(['p/m1', 'p/m2'])
     expect(s.topUserRows).toHaveLength(1)
     expect(s.previous).toBeNull()
-    expect(s.error).toEqual({ traffic: '', models: '', users: '' })
+    expect(s.error).toEqual({ traffic: '', users: '' })
     expect(s.lastUpdated).not.toBeNull()
   })
 

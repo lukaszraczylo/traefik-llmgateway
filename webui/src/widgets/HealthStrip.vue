@@ -2,8 +2,8 @@
 import { StatusDot } from '@perfect-design/ui'
 import { computed } from 'vue'
 
-import { useEntityLinks } from '@/composables/useEntityLinks'
 import { openBreakerCount } from '@/lib/kpi'
+import { useNavStore } from '@/stores/nav'
 import type { AdminProviderView, AdminRedisView } from '@/types/api'
 
 type ChipTone = 'success' | 'warning' | 'danger' | 'neutral'
@@ -12,13 +12,11 @@ interface Chip {
   tone: ChipTone
   text: string
   title?: string
-  provider?: string
+  link?: boolean
 }
 
-const MAX_FAILING_CHIPS = 3
-
 const props = defineProps<{ providers: AdminProviderView[]; redis: AdminRedisView; eventsSource: 'redis' | 'replica' | null }>()
-const { openEntity } = useEntityLinks()
+const nav = useNavStore()
 
 const failing = computed(() => props.providers.filter((p) => p.healthState !== 'closed' || !!p.lastErr))
 const healthy = computed(() => props.providers.length - failing.value.length)
@@ -29,12 +27,7 @@ const chips = computed<Chip[]>(() => {
   const out: Chip[] = []
   const providerTone: ChipTone = total === 0 ? 'neutral' : healthy.value === total ? 'success' : healthy.value === 0 ? 'danger' : 'warning'
   out.push({ key: 'providers', tone: providerTone, text: total === 0 ? 'No providers' : `${healthy.value} of ${total} providers healthy` })
-  for (const p of failing.value.slice(0, MAX_FAILING_CHIPS)) {
-    const reason = p.lastErr || 'breaker open'
-    out.push({ key: `fail-${p.name}`, tone: 'danger', text: `${p.name}: ${reason}`, title: `${p.name}: ${reason}`, provider: p.name })
-  }
-  const more = failing.value.length - MAX_FAILING_CHIPS
-  if (more > 0) out.push({ key: 'more', tone: 'danger', text: `+${more} more failing` })
+  if (failing.value.length > 0) out.push({ key: 'failing', tone: 'danger', text: `${failing.value.length} failing`, link: true })
   if (!props.redis.configured) out.push({ key: 'redis', tone: 'neutral', text: 'Redis not configured' })
   else if (props.eventsSource === null) out.push({ key: 'redis', tone: 'neutral', text: 'Redis checking' })
   else if (props.eventsSource === 'redis') out.push({ key: 'redis', tone: 'success', text: 'Redis connected' })
@@ -52,12 +45,12 @@ const chips = computed<Chip[]>(() => {
   <ul class="m-0 flex list-none flex-wrap gap-2 p-0" aria-label="Fleet health">
     <li v-for="chip in chips" :key="chip.key" class="min-w-0 max-w-full">
       <component
-        :is="chip.provider ? 'button' : 'span'"
+        :is="chip.link ? 'button' : 'span'"
         class="border-border bg-card text-foreground inline-flex h-8 max-w-full sm:max-w-md items-center gap-2 rounded-md border px-3 text-sm"
-        :class="chip.provider ? 'hover:bg-accent cursor-pointer' : ''"
+        :class="chip.link ? 'hover:bg-accent cursor-pointer' : ''"
         :title="chip.title"
-        :type="chip.provider ? 'button' : undefined"
-        @click="chip.provider && openEntity('provider', chip.provider)"
+        :type="chip.link ? 'button' : undefined"
+        @click="chip.link && nav.goTo('reliability', {}, { replace: false })"
       >
         <StatusDot :tone="chip.tone" size="md" />
         <span class="truncate">{{ chip.text }}</span>

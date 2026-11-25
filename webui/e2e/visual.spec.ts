@@ -89,3 +89,12 @@ for (const { page: pageId, kind } of PANEL_PAGES) {
     }
   }
 }
+
+// Compare mode: tiles show a delta and the chart adds a dashed previous-period series.
+for (const theme of THEMES) {
+  test(`overview-cmp live desktop ${theme}`, async ({ page }) => {
+    await page.setViewportSize(VIEWPORTS.desktop)
+    await exercise(page, 'overview-cmp', '#overview?cmp=prev', 'live', 'desktop', theme)
+    await expect(page.locator('text=Previous period >> visible=true').first()).toBeVisible()
+  })
+}

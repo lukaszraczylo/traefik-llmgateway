@@ -21,7 +21,7 @@ type TotalMetric = (typeof TOTAL_METRICS)[number]
 type Points = Record<TotalMetric, number[]>
 
 const emptyPoints = (): Points => ({ req: [], tokin: [], tokout: [], cost: [] })
-const emptyError = () => ({ traffic: '', models: '', users: '' })
+const emptyError = () => ({ traffic: '', users: '' })
 
 export const RANGE_TOO_LARGE = 'Too many configured users to rank for this range. Pick a shorter range.'
 
@@ -31,10 +31,9 @@ export const useOverviewStore = defineStore('overview', {
     totals: emptyPoints(),
     previous: null as Pick<Points, 'req' | 'tokin' | 'cost'> | null,
     topModelSeries: [] as Series[],
-    topModelsByCost: [] as AdminUsageModelsResponse['models'],
+    topModels: [] as AdminUsageModelsResponse['models'],
     topUserRows: [] as AdminTotalsResponse['rows'],
     trafficLoaded: false,
-    modelsLoaded: false,
     usersLoaded: false,
     error: emptyError(),
     lastUpdated: null as Date | null,
@@ -52,7 +51,7 @@ export const useOverviewStore = defineStore('overview', {
       const id = ++this.reqId
       const { window, span } = filters
       const offset = filters.cmpSpec.requested ? filters.cmpSpec.offset : 0
-      await Promise.all([this.loadTraffic(id, window, span, offset), this.loadModels(id, window, span), this.loadUsers(id, window, span)])
+      await Promise.all([this.loadTraffic(id, window, span, offset), this.loadUsers(id, window, span)])
       if (id === this.reqId) this.lastUpdated = new Date()
     },
     clearData(): void {
@@ -60,9 +59,9 @@ export const useOverviewStore = defineStore('overview', {
       this.totals = emptyPoints()
       this.previous = null
       this.topModelSeries = []
-      this.topModelsByCost = []
+      this.topModels = []
       this.topUserRows = []
-      this.trafficLoaded = this.modelsLoaded = this.usersLoaded = false
+      this.trafficLoaded = this.usersLoaded = false
       this.error = emptyError()
     },
     async series(scope: string[], metric: HistoryMetric, window: HistoryWindow, span: number, offset: number): Promise<AdminSeriesResponse> {
@@ -85,24 +84,12 @@ export const useOverviewStore = defineStore('overview', {
         this.buckets = current[0]?.buckets ?? []
         this.totals = { req: current[0]!.points, tokin: current[1]!.points, tokout: current[2]!.points, cost: current[3]!.points }
         this.previous = prior ? { req: prior[0]!.points, tokin: prior[1]!.points, cost: prior[2]!.points } : null
+        this.topModels = ranking.models
         this.topModelSeries = top
         this.trafficLoaded = true
         this.error.traffic = ''
       } catch (err) {
         if (id === this.reqId && !isAuthRejection(err)) this.error.traffic = messageOf(err)
-      }
-    },
-    async loadModels(id: number, window: HistoryWindow, span: number): Promise<void> {
-      try {
-        const res = await adminFetch<AdminUsageModelsResponse>(
-          `/admin/api/usage/models?metric=cost&window=${window}&span=${span}&limit=${TOP_N}`,
-        )
-        if (id !== this.reqId) return
-        this.topModelsByCost = res.models
-        this.modelsLoaded = true
-        this.error.models = ''
-      } catch (err) {
-        if (id === this.reqId && !isAuthRejection(err)) this.error.models = messageOf(err)
       }
     },
     async loadUsers(id: number, window: HistoryWindow, span: number): Promise<void> {

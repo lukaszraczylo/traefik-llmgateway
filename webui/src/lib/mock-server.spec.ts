@@ -89,6 +89,14 @@ describe('respond', () => {
     expect(r.body).toEqual({ error: { message: expect.any(String), type: 'invalid_request_error', code: '404' } })
   })
 
+  it('ranks usage/models by the requested metric, not by a top-N cut of another one', () => {
+    const r = get('/admin/api/usage/models', 'metric=req&window=day&span=7&limit=5')
+    const ids = ((r.body as Any).models as Any[]).map((m) => m.id)
+    expect(ids[0]).toBe('uni/text-embedding-multilingual-e5-base')
+    expect(ids).toHaveLength(5)
+    expect(ids).toContain('uni/deepseek-v4-flash-0731')
+  })
+
   it('404s an unknown path', () => {
     expect(get('/admin/api/nope').status).toBe(404)
   })

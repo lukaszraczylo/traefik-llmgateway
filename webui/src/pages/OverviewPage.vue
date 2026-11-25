@@ -1,11 +1,9 @@
 <script setup lang="ts">
-import { ActivityFeed, Button, Card, CardAction, CardContent, CardHeader, CardTitle, KpiTile, LineChart, StatGroup } from '@perfect-design/ui'
-import type { ActivityEvent } from '@perfect-design/ui'
+import { Button, Card, CardAction, CardContent, CardHeader, CardTitle, KpiTile, LineChart, StatGroup } from '@perfect-design/ui'
 import { computed, onMounted, onUnmounted, watch } from 'vue'
 
 import { useEntityLinks } from '@/composables/useEntityLinks'
 import { deriveAttention } from '@/lib/attention'
-import { eventKindVariant, kindLabel } from '@/lib/events-filter'
 import { formatBucketLabel, formatCompactCount, formatCostDisplay } from '@/lib/format'
 import { errorRateTier, fleetErrorRate } from '@/lib/kpi'
 import { loadState } from '@/lib/load-state'
@@ -20,15 +18,13 @@ import { useNavStore } from '@/stores/nav'
 import { useOverviewStore } from '@/stores/overview'
 import HealthStrip from '@/widgets/HealthStrip.vue'
 import NeedsAttention from '@/widgets/NeedsAttention.vue'
+import RecentEvents from '@/widgets/RecentEvents.vue'
 import StateView from '@/widgets/StateView.vue'
 import type { ViewState } from '@/widgets/StateView.vue'
 import WbTable from '@/widgets/WbTable.vue'
 
-const EVENT_ROWS = 8
+const EVENT_ROWS = 6
 const MIN_SPARK_POINTS = 2
-
-type FeedTone = NonNullable<ActivityEvent['tone']>
-const EVENT_TONE: Record<string, FeedTone> = { rate_limit: 'warning', budget: 'warning', timeout: 'warning', capacity: 'warning', store_down: 'danger', upstream: 'danger', unpriced: 'info', paced: 'info' }
 
 interface RankRow {
   id: string
@@ -106,7 +102,7 @@ const userColumns = wbColumns<RankRow>([
 ])
 const modelColumns = wbColumns<RankRow>([
   { key: 'name', header: 'Model', kind: 'text', sortable: false },
-  { key: 'value', header: 'Spend', kind: 'number', sortable: false },
+  { key: 'value', header: 'Requests', kind: 'number', sortable: false },
   { key: 'share', header: 'Share', kind: 'share', sortable: false },
 ])
 
@@ -119,39 +115,20 @@ const topUsers = computed<RankRow[]>(() => {
   return rankTopUsers(data.topUserRows, 'req', TOP_USERS_RANK_LIMIT).map((r) => ({ id: r.id, name: r.id, value: r.value, share: share(r.value, total) }))
 })
 const topModels = computed<RankRow[]>(() => {
-  const total = sumPoints(data.totals.cost)
-  return data.topModelsByCost.filter((m) => m.value > 0).map((m) => ({ id: m.id, name: m.id, value: m.value, share: share(m.value, total) }))
+  const total = sumPoints(data.totals.req)
+  return data.topModels.filter((m) => m.value > 0).map((m) => ({ id: m.id, name: m.id, value: m.value, share: share(m.value, total) }))
 })
 const usersState = computed(() => sectionState(data.usersLoaded, data.error.users, topUsers.value.length === 0))
-const modelsState = computed(() => sectionState(data.modelsLoaded, data.error.models, topModels.value.length === 0))
+const modelsState = computed(() => sectionState(data.trafficLoaded, data.error.traffic, topModels.value.length === 0))
 
 // --- Recent events ----------------------------------------------------------
 
-const feed = computed<ActivityEvent[]>(() =>
-  events.events.slice(0, EVENT_ROWS).map((e, i) => ({
-    id: `${e.time}-${e.replica}-${i}`,
-    actor: e.user,
-    action: `${kindLabel(e.kind)}: ${e.message}`,
-    time: e.time,
-    tone: EVENT_TONE[e.kind] ?? (eventKindVariant(e.kind) === 'destructive' ? 'danger' : 'neutral'),
-    details: [e.provider, e.model, e.route].filter(Boolean).join(' · ') || e.route,
-  })),
-)
+const recent = computed(() => events.events.slice(0, EVENT_ROWS))
 const eventsState = computed<ViewState>(() => {
   const s = loadState({ loading: events.refreshing, hasData: events.lastUpdated !== null, error: events.error })
-  if (s === 'ready') return feed.value.length === 0 ? 'empty' : 'ready'
+  if (s === 'ready') return recent.value.length === 0 ? 'empty' : 'ready'
   return s === 'skeleton' ? 'loading' : s === 'error' ? 'error' : 'empty'
 })
-const eventById = computed(() => new Map(feed.value.map((f, i) => [f.id, events.events[i]])))
-
-function eventLinks(id: string | number): Array<{ label: string; open: () => void }> {
-  const e = eventById.value.get(String(id))
-  if (!e) return []
-  const out: Array<{ label: string; open: () => void }> = []
-  if (e.user) out.push({ label: `Open ${e.user}`, open: () => openEntity('user', e.user as string) })
-  if (e.provider) out.push({ label: `Open ${e.provider}`, open: () => openEntity('provider', e.provider as string) })
-  return out
-}
 
 // --- Lifecycle --------------------------------------------------------------
 
@@ -228,7 +205,7 @@ onUnmounted(() => {
           :value="count(throttledTotal)"
           :loading="events.lastUpdated === null && !events.error"
           good-when="down"
-          :hint="`${throttled.rateLimited} rate limited · ${throttled.paced} paced`"
+          :hint="`${throttled.rateLimited} rate limited · ${throttled.paced} paced, recent events`"
         />
       </StatGroup>
 
@@ -264,9 +241,9 @@ onUnmounted(() => {
 
       <div class="grid grid-cols-1 items-start gap-4 lg:grid-cols-3">
         <Card size="sm">
-          <CardHeader>
+          <CardHeader class="items-center">
             <CardTitle>Top users</CardTitle>
-            <CardAction><Button variant="ghost" size="sm" @click="nav.goTo('users', {}, { replace: false })">View all</Button></CardAction>
+            <CardAction class="self-center"><Button variant="ghost" size="sm" @click="nav.goTo('users', {}, { replace: false })">View all</Button></CardAction>
           </CardHeader>
           <CardContent>
             <StateView
@@ -277,6 +254,7 @@ onUnmounted(() => {
               @retry="data.refresh()"
             >
               <WbTable
+                class="wb-hide-share-sm wb-clip"
                 :columns="userColumns"
                 :rows="topUsers"
                 row-key="id"
@@ -289,44 +267,38 @@ onUnmounted(() => {
           </CardContent>
         </Card>
         <Card size="sm">
-          <CardHeader>
+          <CardHeader class="items-center">
             <CardTitle>Top models</CardTitle>
-            <CardAction><Button variant="ghost" size="sm" @click="nav.goTo('models', {}, { replace: false })">View all</Button></CardAction>
+            <CardAction class="self-center"><Button variant="ghost" size="sm" @click="nav.goTo('models', {}, { replace: false })">View all</Button></CardAction>
           </CardHeader>
           <CardContent>
             <StateView
               :state="modelsState"
-              empty-title="No model spend in this range"
-              :error-message="data.error.models"
+              empty-title="No model traffic in this range"
+              :error-message="data.error.traffic"
               @retry="data.refresh()"
             >
               <WbTable
+                class="wb-hide-share-sm wb-clip"
                 :columns="modelColumns"
                 :rows="topModels"
                 row-key="id"
-                label="Top models by spend"
+                label="Top models by requests"
                 @row-activate="(row: RankRow) => openEntity('model', row.id)"
               >
-                <template #cell-value="{ value }">{{ formatCostDisplay(value as number) }}</template>
+                <template #cell-value="{ value }">{{ formatCompactCount(value as number) }}</template>
               </WbTable>
             </StateView>
           </CardContent>
         </Card>
         <Card size="sm">
-          <CardHeader>
+          <CardHeader class="items-center">
             <CardTitle>Recent events</CardTitle>
-            <CardAction><Button variant="ghost" size="sm" @click="nav.goTo('events', {}, { replace: false })">View all</Button></CardAction>
+            <CardAction class="self-center"><Button variant="ghost" size="sm" @click="nav.goTo('events', {}, { replace: false })">View all</Button></CardAction>
           </CardHeader>
           <CardContent>
             <StateView :state="eventsState" empty-title="No events recorded" :error-message="events.error" @retry="events.refresh()">
-              <ActivityFeed :events="feed" label="Recent events" variant="compact" size="sm" density="compact">
-                <template #details="{ event }">
-                  <p class="text-muted-foreground m-0 text-xs">{{ event.details }}</p>
-                  <div class="flex flex-wrap gap-2 pt-1">
-                    <Button v-for="l in eventLinks(event.id)" :key="l.label" variant="outline" size="sm" @click="l.open()">{{ l.label }}</Button>
-                  </div>
-                </template>
-              </ActivityFeed>
+              <RecentEvents :events="recent" />
             </StateView>
           </CardContent>
         </Card>
