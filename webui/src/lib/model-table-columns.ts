@@ -43,6 +43,8 @@ export interface ModelCatalogRow {
   /** True for a ':free' suffix model — display-only; priceSource carries the real billing truth regardless (types/api.ts's own AdminCatalogModel doc comment). */
   displayFree?: boolean
   aliases: string[]
+  /** Smart routers that target this model. */
+  routers?: string[]
   requests: number
   tokensIn: number
   tokensOut: number
@@ -83,6 +85,7 @@ export function buildModelCatalogRows(
         priceSource: m.priceSource,
         displayFree: m.displayFree,
         aliases: m.aliases ?? [],
+        routers: m.routers ?? [],
         requests: usage?.requests ?? 0,
         tokensIn: usage?.tokensIn ?? 0,
         tokensOut: usage?.tokensOut ?? 0,
@@ -191,6 +194,21 @@ export function modelCatalogColumns(): ColumnDef<ModelCatalogRow, unknown>[] {
           'div',
           { class: 'flex flex-wrap gap-1' },
           aliases.map((a) => h(Badge, { key: a, as: 'span', variant: 'outline', class: 'font-mono font-normal' }, () => a)),
+        )
+      },
+    },
+    {
+      id: 'routers',
+      header: 'Routers',
+      enableSorting: false,
+      accessorFn: (r) => (r.routers ?? []).join(', '),
+      cell: ({ row }) => {
+        const routers = row.original.routers ?? []
+        if (routers.length === 0) return h('span', { class: 'text-muted-foreground' }, EMPTY_CELL)
+        return h(
+          'div',
+          { class: 'flex flex-wrap gap-1' },
+          routers.map((r) => h(Badge, { key: r, as: 'span', variant: 'secondary', class: 'font-mono font-normal', title: 'Smart router target' }, () => r)),
         )
       },
     },

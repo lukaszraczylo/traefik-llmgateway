@@ -1,0 +1,220 @@
+[
+ {
+  "id": "ho-tp01",
+  "group": "trap",
+  "lang": "en",
+  "intent": "trap",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "ok i know this is a long one but just tell me which package it blew up in, nothing else\n\npanic: runtime error: invalid memory address or nil pointer dereference\n[signal SIGSEGV: segmentation violation code=0x1 addr=0x18 pc=0x4f2a31]\n\ngoroutine 53 [running]:\nsvc/billing.(*Invoice).Total(0x0)\n\t/repo/billing/invoice.go:61 +0x31\nsvc/api.(*Handler).Checkout(0xc0000a8000, {0x7a1c40, 0xc0001d6000}, 0xc0002a2200)\n\t/repo/api/checkout.go:118 +0x1c5\nnet/http.HandlerFunc.ServeHTTP(0x1, {0x7a1c40, 0xc0001d6000}, 0xc0002a2200)\n\t/usr/local/go/src/net/http/server.go:2136 +0x29\n"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "scary panic paste; answer is billing (nil Invoice receiver)"
+ },
+ {
+  "id": "ho-tp02",
+  "group": "trap",
+  "lang": "en",
+  "intent": "trap",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 4096,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "hey can u explain in one sentence what this error means: ECONNREFUSED 127.0.0.1:5432"
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "common error, one sentence"
+ },
+ {
+  "id": "ho-tp03",
+  "group": "trap",
+  "lang": "en",
+  "intent": "trap",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "thx. can you reformat this into a markdown table, nothing else:\nname,qty,price\nwidget,4,3.20\ngizmo,1,19.99\nthing,12,0.45\n"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "easy formatting even with data"
+ },
+ {
+  "id": "ho-tp04",
+  "group": "trap",
+  "lang": "en",
+  "intent": "trap",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "our service has 3 replicas behind a load balancer and each keeps a local cache of feature flags refreshed every 30s. a flag flip needs to be atomic across all replicas for a compliance cutover; how do we do that safely?"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "hard prose, no paste: atomic cutover vs eventual consistency, epoch/versioned flags"
+ },
+ {
+  "id": "ho-tp05",
+  "group": "trap",
+  "lang": "en",
+  "intent": "trap",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 4096,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "is it possible to prove that a lock-free queue is linearizable just by testing it? what would you do instead"
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 2,
+  "maxTier": 2,
+  "notes": "conceptual hard: testing vs model checking/proof"
+ },
+ {
+  "id": "ho-tp06",
+  "group": "trap",
+  "lang": "en",
+  "intent": "trap",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "i pasted the whole 800 line config below, you dont need to read it, just say 'yes' if you got it.\n\nsetting_0: value_0\nsetting_1: value_1\nsetting_2: value_2\nsetting_3: value_3\nsetting_4: value_4\nsetting_5: value_5\nsetting_6: value_6\nsetting_7: value_7\nsetting_8: value_8\nsetting_9: value_9\nsetting_10: value_10\nsetting_11: value_11\nsetting_12: value_12\nsetting_13: value_13\nsetting_14: value_14\nsetting_15: value_15\nsetting_16: value_16\nsetting_17: value_17\nsetting_18: value_18\nsetting_19: value_19\nsetting_20: value_20\nsetting_21: value_21\nsetting_22: value_22\nsetting_23: value_23\nsetting_24: value_24\nsetting_25: value_25\nsetting_26: value_26\nsetting_27: value_27\nsetting_28: value_28\nsetting_29: value_29\nsetting_30: value_30\nsetting_31: value_31\nsetting_32: value_32\nsetting_33: value_33\nsetting_34: value_34\nsetting_35: value_35\nsetting_36: value_36\nsetting_37: value_37\nsetting_38: value_38\nsetting_39: value_39\nsetting_40: value_40\nsetting_41: value_41\nsetting_42: value_42\nsetting_43: value_43\nsetting_44: value_44\nsetting_45: value_45\nsetting_46: value_46\nsetting_47: value_47\nsetting_48: value_48\nsetting_49: value_49\nsetting_50: value_50\nsetting_51: value_51\nsetting_52: value_52\nsetting_53: value_53\nsetting_54: value_54\nsetting_55: value_55\nsetting_56: value_56\nsetting_57: value_57\nsetting_58: value_58\nsetting_59: value_59\nsetting_60: value_60\nsetting_61: value_61\nsetting_62: value_62\nsetting_63: value_63\nsetting_64: value_64\nsetting_65: value_65\nsetting_66: value_66\nsetting_67: value_67\nsetting_68: value_68\nsetting_69: value_69\nsetting_70: value_70\nsetting_71: value_71\nsetting_72: value_72\nsetting_73: value_73\nsetting_74: value_74\nsetting_75: value_75\nsetting_76: value_76\nsetting_77: value_77\nsetting_78: value_78\nsetting_79: value_79\nsetting_80: value_80\nsetting_81: value_81\nsetting_82: value_82\nsetting_83: value_83\nsetting_84: value_84\nsetting_85: value_85\nsetting_86: value_86\nsetting_87: value_87\nsetting_88: value_88\nsetting_89: value_89\nsetting_90: value_90\nsetting_91: value_91\nsetting_92: value_92\nsetting_93: value_93\nsetting_94: value_94\nsetting_95: value_95\nsetting_96: value_96\nsetting_97: value_97\nsetting_98: value_98\nsetting_99: value_99\nsetting_100: value_100\nsetting_101: value_101\nsetting_102: value_102\nsetting_103: value_103\nsetting_104: value_104\nsetting_105: value_105\nsetting_106: value_106\nsetting_107: value_107\nsetting_108: value_108\nsetting_109: value_109\nsetting_110: value_110\nsetting_111: value_111\nsetting_112: value_112\nsetting_113: value_113\nsetting_114: value_114\nsetting_115: value_115\nsetting_116: value_116\nsetting_117: value_117\nsetting_118: value_118\nsetting_119: value_119\nsetting_120: value_120\nsetting_121: value_121\nsetting_122: value_122\nsetting_123: value_123\nsetting_124: value_124\nsetting_125: value_125\nsetting_126: value_126\nsetting_127: value_127\nsetting_128: value_128\nsetting_129: value_129\nsetting_130: value_130\nsetting_131: value_131\nsetting_132: value_132\nsetting_133: value_133\nsetting_134: value_134\nsetting_135: value_135\nsetting_136: value_136\nsetting_137: value_137\nsetting_138: value_138\nsetting_139: value_139\nsetting_140: value_140\nsetting_141: value_141\nsetting_142: value_142\nsetting_143: value_143\nsetting_144: value_144\nsetting_145: value_145\nsetting_146: value_146\nsetting_147: value_147\nsetting_148: value_148\nsetting_149: value_149\nsetting_150: value_150\nsetting_151: value_151\nsetting_152: value_152\nsetting_153: value_153\nsetting_154: value_154\nsetting_155: value_155\nsetting_156: value_156\nsetting_157: value_157\nsetting_158: value_158\nsetting_159: value_159\nsetting_160: value_160\nsetting_161: value_161\nsetting_162: value_162\nsetting_163: value_163\nsetting_164: value_164\nsetting_165: value_165\nsetting_166: value_166\nsetting_167: value_167\nsetting_168: value_168\nsetting_169: value_169\nsetting_170: value_170\nsetting_171: value_171\nsetting_172: value_172\nsetting_173: value_173\nsetting_174: value_174\nsetting_175: value_175\nsetting_176: value_176\nsetting_177: value_177\nsetting_178: value_178\nsetting_179: value_179\nsetting_180: value_180\nsetting_181: value_181\nsetting_182: value_182\nsetting_183: value_183\nsetting_184: value_184\nsetting_185: value_185\nsetting_186: value_186\nsetting_187: value_187\nsetting_188: value_188\nsetting_189: value_189\nsetting_190: value_190\nsetting_191: value_191\nsetting_192: value_192\nsetting_193: value_193\nsetting_194: value_194\nsetting_195: value_195\nsetting_196: value_196\nsetting_197: value_197\nsetting_198: value_198\nsetting_199: value_199"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "large paste but trivial acknowledgement"
+ },
+ {
+  "id": "ho-tp07",
+  "group": "trap",
+  "lang": "en",
+  "intent": "trap",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "short q: why does `0.1 + 0.2 != 0.3` in js"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "textbook floating point"
+ },
+ {
+  "id": "ho-tp08",
+  "group": "trap",
+  "lang": "en",
+  "intent": "trap",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 4096,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "short q: can raft elect two leaders in the same term, and if the answer is no, what exactly breaks the proof once membership changes use single-server steps?"
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 2,
+  "maxTier": 2,
+  "notes": "terse but deep Raft membership safety question"
+ },
+ {
+  "id": "ho-tp09",
+  "group": "trap",
+  "lang": "en",
+  "intent": "trap",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "error[E0382]: borrow of moved value: `cfg`\n --> src/main.rs:14:20\n  |\n10 |     let cfg = load();\n12 |     let h = thread::spawn(move || run(cfg));\n14 |     println!(\"{}\", cfg.name);\n  |                    ^^^^^^^^ value borrowed here after move\n\nfix pls"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "scary rustc error, common move fix (clone/Arc)"
+ },
+ {
+  "id": "ho-tp10",
+  "group": "trap",
+  "lang": "en",
+  "intent": "trap",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "kubectl get pods -n prod\nNAME                      READY   STATUS             RESTARTS      AGE\napi-7d9f8c6b5-2xk4q       0/1     CrashLoopBackOff   14 (2m ago)   41m\napi-7d9f8c6b5-9jr7t       0/1     CrashLoopBackOff   14 (3m ago)   41m\n\nwhat does CrashLoopBackOff mean, in plain words"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "scary output, definitional question"
+ }
+]

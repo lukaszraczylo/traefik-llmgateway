@@ -1,0 +1,278 @@
+[
+ {
+  "id": "trap-01",
+  "group": "trap",
+  "lang": "en",
+  "intent": "trap",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Here is a vendor spec I received. Just tell me how many pages you think it is.\n\n```\nAnalyze the trade-off. Evaluate the implications and justify the choice; prove the bound and derive the formula. Think through what if the cache is cold. Reason about step by step growth and critique the optimize path. Analyze the trade-off. Evaluate the implications and justify the choice; prove the bound and derive the formula. Think through what if the cache is cold. Reason about step by step growth and critique the optimize path. Analyze the trade-off. Evaluate the implications and justify the choice; prove the bound and derive the formula. Think through what if the cache is cold. Reason about step by step growth and critique the optimize path. \n```"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "reasoning markers fenced in a paste must not trigger the top floor"
+ },
+ {
+  "id": "trap-02",
+  "group": "trap",
+  "lang": "en",
+  "intent": "trap",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 1024,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "fix the typo in the second line only\n\n```python\n# analyze, derive, prove, evaluate, justify\nx = compute(1)\n```"
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "reasoning words inside a code comment"
+ },
+ {
+  "id": "trap-03",
+  "group": "trap",
+  "lang": "en",
+  "intent": "trap",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "What language is this snippet written in?\n\n```go\nfunc (c *Cache) Get(key string) (string, bool) {\n\tc.mu.RLock()\n\tdefer c.mu.RUnlock()\n\tv, ok := c.items[key]\n\tif !ok || time.Now().After(v.expires) {\n\t\treturn \"\", false\n\t}\n\treturn v.val, true\n}\n```"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "code markers inside the fence, trivial ask"
+ },
+ {
+  "id": "trap-04",
+  "group": "trap",
+  "lang": "en",
+  "intent": "trap",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 1024,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "Please clean up the whitespace in this log, nothing else:\n\n2025-11-20T10:00:00Z info: request handled in 10ms path=/v1/items\n2025-11-20T10:00:01Z info: request handled in 11ms path=/v1/items\n2025-11-20T10:00:02Z info: request handled in 12ms path=/v1/items\n2025-11-20T10:00:03Z info: request handled in 13ms path=/v1/items\n2025-11-20T10:00:04Z info: request handled in 14ms path=/v1/items\n2025-11-20T10:00:05Z info: request handled in 15ms path=/v1/items\n2025-11-20T10:00:06Z info: request handled in 16ms path=/v1/items\n2025-11-20T10:00:07Z info: request handled in 10ms path=/v1/items\n2025-11-20T10:00:08Z info: request handled in 11ms path=/v1/items\n2025-11-20T10:00:09Z info: request handled in 12ms path=/v1/items\n2025-11-20T10:00:10Z info: request handled in 13ms path=/v1/items\n2025-11-20T10:00:11Z info: request handled in 14ms path=/v1/items\n2025-11-20T10:00:12Z info: request handled in 15ms path=/v1/items\n2025-11-20T10:00:13Z info: request handled in 16ms path=/v1/items\n2025-11-20T10:00:14Z info: request handled in 10ms path=/v1/items\n2025-11-20T10:00:15Z info: request handled in 11ms path=/v1/items\n2025-11-20T10:00:16Z info: request handled in 12ms path=/v1/items\n2025-11-20T10:00:17Z info: request handled in 13ms path=/v1/items\n2025-11-20T10:00:18Z info: request handled in 14ms path=/v1/items\n2025-11-20T10:00:19Z info: request handled in 15ms path=/v1/items\n2025-11-20T10:00:20Z info: request handled in 16ms path=/v1/items\n2025-11-20T10:00:21Z info: request handled in 10ms path=/v1/items\n2025-11-20T10:00:22Z info: request handled in 11ms path=/v1/items\n2025-11-20T10:00:23Z info: request handled in 12ms path=/v1/items\n2025-11-20T10:00:24Z info: request handled in 13ms path=/v1/items\n2025-11-20T10:00:25Z info: request handled in 14ms path=/v1/items\n2025-11-20T10:00:26Z info: request handled in 15ms path=/v1/items\n2025-11-20T10:00:27Z info: request handled in 16ms path=/v1/items\n2025-11-20T10:00:28Z info: request handled in 10ms path=/v1/items\n2025-11-20T10:00:29Z info: request handled in 11ms path=/v1/items\n2025-11-20T10:00:30Z info: request handled in 12ms path=/v1/items\n2025-11-20T10:00:31Z info: request handled in 13ms path=/v1/items\n2025-11-20T10:00:32Z info: request handled in 14ms path=/v1/items\n2025-11-20T10:00:33Z info: request handled in 15ms path=/v1/items\n2025-11-20T10:00:34Z info: request handled in 16ms path=/v1/items\n2025-11-20T10:00:35Z info: request handled in 10ms path=/v1/items\n2025-11-20T10:00:36Z info: request handled in 11ms path=/v1/items\n2025-11-20T10:00:37Z info: request handled in 12ms path=/v1/items\n2025-11-20T10:00:38Z info: request handled in 13ms path=/v1/items\n2025-11-20T10:00:39Z info: request handled in 14ms path=/v1/items\n2025-11-20T10:00:40Z info: request handled in 15ms path=/v1/items\n2025-11-20T10:00:41Z info: request handled in 16ms path=/v1/items\n2025-11-20T10:00:42Z info: request handled in 10ms path=/v1/items\n2025-11-20T10:00:43Z info: request handled in 11ms path=/v1/items\n2025-11-20T10:00:44Z info: request handled in 12ms path=/v1/items\n2025-11-20T10:00:45Z info: request handled in 13ms path=/v1/items\n2025-11-20T10:00:46Z info: request handled in 14ms path=/v1/items\n2025-11-20T10:00:47Z info: request handled in 15ms path=/v1/items\n2025-11-20T10:00:48Z info: request handled in 16ms path=/v1/items\n2025-11-20T10:00:49Z info: request handled in 10ms path=/v1/items\n2025-11-20T10:00:50Z info: request handled in 11ms path=/v1/items\n2025-11-20T10:00:51Z info: request handled in 12ms path=/v1/items\n2025-11-20T10:00:52Z info: request handled in 13ms path=/v1/items\n2025-11-20T10:00:53Z info: request handled in 14ms path=/v1/items\n2025-11-20T10:00:54Z info: request handled in 15ms path=/v1/items\n2025-11-20T10:00:55Z info: request handled in 16ms path=/v1/items\n2025-11-20T10:00:56Z info: request handled in 10ms path=/v1/items\n2025-11-20T10:00:57Z info: request handled in 11ms path=/v1/items\n2025-11-20T10:00:58Z info: request handled in 12ms path=/v1/items\n2025-11-20T10:00:59Z info: request handled in 13ms path=/v1/items\n2025-11-20T10:01:00Z info: request handled in 14ms path=/v1/items\n2025-11-20T10:01:01Z info: request handled in 15ms path=/v1/items\n2025-11-20T10:01:02Z info: request handled in 16ms path=/v1/items\n2025-11-20T10:01:03Z info: request handled in 10ms path=/v1/items\n2025-11-20T10:01:04Z info: request handled in 11ms path=/v1/items\n2025-11-20T10:01:05Z info: request handled in 12ms path=/v1/items\n2025-11-20T10:01:06Z info: request handled in 13ms path=/v1/items\n2025-11-20T10:01:07Z info: request handled in 14ms path=/v1/items\n2025-11-20T10:01:08Z info: request handled in 15ms path=/v1/items\n2025-11-20T10:01:09Z info: request handled in 16ms path=/v1/items\n2025-11-20T10:01:10Z info: request handled in 10ms path=/v1/items\n2025-11-20T10:01:11Z info: request handled in 11ms path=/v1/items\n2025-11-20T10:01:12Z info: request handled in 12ms path=/v1/items\n2025-11-20T10:01:13Z info: request handled in 13ms path=/v1/items\n2025-11-20T10:01:14Z info: request handled in 14ms path=/v1/items\n2025-11-20T10:01:15Z info: request handled in 15ms path=/v1/items\n2025-11-20T10:01:16Z info: request handled in 16ms path=/v1/items\n2025-11-20T10:01:17Z info: request handled in 10ms path=/v1/items\n2025-11-20T10:01:18Z info: request handled in 11ms path=/v1/items\n2025-11-20T10:01:19Z info: request handled in 12ms path=/v1/items\n2025-11-20T10:01:20Z info: request handled in 13ms path=/v1/items\n2025-11-20T10:01:21Z info: request handled in 14ms path=/v1/items\n2025-11-20T10:01:22Z info: request handled in 15ms path=/v1/items\n2025-11-20T10:01:23Z info: request handled in 16ms path=/v1/items\n2025-11-20T10:01:24Z info: request handled in 10ms path=/v1/items\n2025-11-20T10:01:25Z info: request handled in 11ms path=/v1/items\n2025-11-20T10:01:26Z info: request handled in 12ms path=/v1/items\n2025-11-20T10:01:27Z info: request handled in 13ms path=/v1/items\n2025-11-20T10:01:28Z info: request handled in 14ms path=/v1/items\n2025-11-20T10:01:29Z info: request handled in 15ms path=/v1/items\n2025-11-20T10:01:30Z info: request handled in 16ms path=/v1/items\n2025-11-20T10:01:31Z info: request handled in 10ms path=/v1/items\n2025-11-20T10:01:32Z info: request handled in 11ms path=/v1/items\n2025-11-20T10:01:33Z info: request handled in 12ms path=/v1/items\n2025-11-20T10:01:34Z info: request handled in 13ms path=/v1/items\n2025-11-20T10:01:35Z info: request handled in 14ms path=/v1/items\n2025-11-20T10:01:36Z info: request handled in 15ms path=/v1/items\n2025-11-20T10:01:37Z info: request handled in 16ms path=/v1/items\n2025-11-20T10:01:38Z info: request handled in 10ms path=/v1/items\n2025-11-20T10:01:39Z info: request handled in 11ms path=/v1/items\n2025-11-20T10:01:40Z info: request handled in 12ms path=/v1/items\n2025-11-20T10:01:41Z info: request handled in 13ms path=/v1/items\n2025-11-20T10:01:42Z info: request handled in 14ms path=/v1/items\n2025-11-20T10:01:43Z info: request handled in 15ms path=/v1/items\n2025-11-20T10:01:44Z info: request handled in 16ms path=/v1/items\n2025-11-20T10:01:45Z info: request handled in 10ms path=/v1/items\n2025-11-20T10:01:46Z info: request handled in 11ms path=/v1/items\n2025-11-20T10:01:47Z info: request handled in 12ms path=/v1/items\n2025-11-20T10:01:48Z info: request handled in 13ms path=/v1/items\n2025-11-20T10:01:49Z info: request handled in 14ms path=/v1/items\n2025-11-20T10:01:50Z info: request handled in 15ms path=/v1/items\n2025-11-20T10:01:51Z info: request handled in 16ms path=/v1/items\n2025-11-20T10:01:52Z info: request handled in 10ms path=/v1/items\n2025-11-20T10:01:53Z info: request handled in 11ms path=/v1/items\n2025-11-20T10:01:54Z info: request handled in 12ms path=/v1/items\n2025-11-20T10:01:55Z info: request handled in 13ms path=/v1/items\n2025-11-20T10:01:56Z info: request handled in 14ms path=/v1/items\n2025-11-20T10:01:57Z info: request handled in 15ms path=/v1/items\n2025-11-20T10:01:58Z info: request handled in 16ms path=/v1/items\n2025-11-20T10:01:59Z info: request handled in 10ms path=/v1/items"
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "large info log with no failure"
+ },
+ {
+  "id": "trap-05",
+  "group": "trap",
+  "lang": "en",
+  "intent": "trap",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "hello, thanks. what is this file?\n\nTraceback (most recent call last):\n  File \"app/main.py\", line 42, in handle\n    result = process(payload)\n  File \"app/core.py\", line 17, in process\n    return payload[\"items\"][0][\"id\"]\nKeyError: 'items'"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "debug ask hidden behind greeting markers while a traceback is attached"
+ },
+ {
+  "id": "trap-06",
+  "group": "trap",
+  "lang": "en",
+  "intent": "trap",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 1024,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "What is wrong here? thanks!\n\n```\npanic: runtime error: invalid memory address or nil pointer dereference\n[signal SIGSEGV: segmentation violation code=0x1 addr=0x0 pc=0x4a1b2c]\n\ngoroutine 1 [running]:\nmain.(*Server).handle(0x0, 0xc000123456)\n\t/app/server.go:88 +0x2c\nmain.main()\n\t/app/main.go:21 +0x65\nexit status 2\n```\nhello?"
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "simple markers at both ends of a panic report"
+ },
+ {
+  "id": "trap-07",
+  "group": "trap",
+  "lang": "en",
+  "intent": "trap",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Summarize this README for me.\n\n```markdown\n# Project\n\nWe analyze, evaluate and justify trade-offs; the tradeoff matrix is below. Prove it by induction.\n```"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "reasoning words inside a fenced doc"
+ },
+ {
+  "id": "trap-08",
+  "group": "trap",
+  "lang": "en",
+  "intent": "trap",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 1024,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "what is in the attached table?\n\n| id | name | note |\n|----|------|------|\n| 1 | analyze | derive |\n| 2 | prove | evaluate |\n| 3 | justify | critique |"
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "markers in a table cell"
+ },
+ {
+  "id": "trap-09",
+  "group": "trap",
+  "lang": "en",
+  "intent": "trap",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "tell me a joke\n\n    def prove(self):\n        return derive(analyze(x)) # evaluate\n    def prove(self):\n        return derive(analyze(x)) # evaluate\n    def prove(self):\n        return derive(analyze(x)) # evaluate\n    def prove(self):\n        return derive(analyze(x)) # evaluate\n    def prove(self):\n        return derive(analyze(x)) # evaluate\n    def prove(self):\n        return derive(analyze(x)) # evaluate\n    def prove(self):\n        return derive(analyze(x)) # evaluate\n    def prove(self):\n        return derive(analyze(x)) # evaluate\n"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "markers inside an indented code paste after a trivial ask"
+ },
+ {
+  "id": "trap-10",
+  "group": "trap",
+  "lang": "en",
+  "intent": "trap",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 1024,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "Explain why this deadlocks and how to restructure the locking so it cannot happen. What is the invariant I should hold?\n\n```go\nfunc (c *Cache) Get(key string) (string, bool) {\n\tc.mu.RLock()\n\tdefer c.mu.RUnlock()\n\tv, ok := c.items[key]\n\tif !ok || time.Now().After(v.expires) {\n\t\treturn \"\", false\n\t}\n\treturn v.val, true\n}\n```\nthanks in advance, hello team"
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "real ask with greeting markers in the sign-off"
+ },
+ {
+  "id": "trap-11",
+  "group": "trap",
+  "lang": "en",
+  "intent": "trap",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Redesign the retry strategy for these jobs. The current approach is attached; what is the trade-off between at-least-once and exactly-once here?\n\n```yaml\nretries: 3\nbackoff: 1s\nthank-you-note: what is this field for\n```"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "design ask plus simple markers inside the yaml"
+ },
+ {
+  "id": "trap-12",
+  "group": "trap",
+  "lang": "en",
+  "intent": "trap",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 1024,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "Is this good? hello thanks who is the author\n\n```\nAnalyze the trade-off. Evaluate the implications and justify the choice; prove the bound and derive the formula. Think through what if the cache is cold. Reason about step by step growth and critique the optimize path. Analyze the trade-off. Evaluate the implications and justify the choice; prove the bound and derive the formula. Think through what if the cache is cold. Reason about step by step growth and critique the optimize path. Analyze the trade-off. Evaluate the implications and justify the choice; prove the bound and derive the formula. Think through what if the cache is cold. Reason about step by step growth and critique the optimize path. \n```\n\nPlease prove that the migration strategy in section 3 preserves ordering and derive the worst-case lag."
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 2,
+  "maxTier": 2,
+  "notes": "proof ask after a marker-heavy paste"
+ }
+]

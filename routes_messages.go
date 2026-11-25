@@ -104,10 +104,11 @@ func (g *Gateway) handleMessages(w http.ResponseWriter, r *http.Request, u *user
 		return
 	}
 
-	scopes, ok := g.admitRequestForRoute(sw, u, grp, writeAnthropicError, routeMessages)
+	scopes, ok := g.admitRequestForRoute(r.Context(), sw, u, grp, writeAnthropicError, routeMessages, int64(len(body)), "")
 	if !ok {
 		return
 	}
+	defer g.limiter.releaseReservations(scopes)
 
 	g.runMeteredCall(sw, r, scopes, body, req, requestedModel, grp, cacheEndpointMessages, "messages route", writeAnthropicError, writeAnthropicProviderUpstreamError,
 		func(a providerAdapter, ctx context.Context, w http.ResponseWriter, req map[string]any) (usage, error) {
@@ -270,7 +271,7 @@ func (g *Gateway) callAnthropicMessagesPassthrough(ctx context.Context, w http.R
 		// own doc comment, translate_anthropic.go, for why dropping them
 		// under-bills a cache-heavy caller (the common case for Claude
 		// Code) by orders of magnitude.
-		billed = usage{prompt: parsed.Usage.totalInputTokens(), completion: parsed.Usage.OutputTokens}
+		billed = withAnswerFlags(usage{prompt: parsed.Usage.totalInputTokens(), completion: parsed.Usage.OutputTokens, cached: parsed.Usage.CacheReadInputTokens}, anthropicFinishReason(parsed.StopReason), anthropicHasOutput(parsed.Content))
 	}
 
 	out, err := rewriteModelField(raw, requestedModel)

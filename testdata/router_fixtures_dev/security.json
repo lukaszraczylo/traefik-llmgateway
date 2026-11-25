@@ -1,0 +1,88 @@
+[
+ {
+  "id": "ho-sec01",
+  "group": "security",
+  "lang": "en",
+  "intent": "security",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "security review pls, anything exploitable?\n\n```go\nfunc verify(tok string) (*Claims, error) {\n\tparsed, _ := jwt.Parse(tok, func(t *jwt.Token) (interface{}, error) {\n\t\tif t.Header[\"alg\"] == \"none\" { return nil, nil }\n\t\treturn publicKeyPEM, nil\n\t})\n\tc := parsed.Claims.(jwt.MapClaims)\n\treturn &Claims{Sub: c[\"sub\"].(string), Admin: c[\"admin\"] == true}, nil\n}\n```\nwe issue RS256 tokens, publicKeyPEM is a []byte of our RSA public key"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 2,
+  "maxTier": 2,
+  "notes": "alg confusion (HS256 with public key as HMAC secret), swallowed error, nil key, unchecked type assertions panic"
+ },
+ {
+  "id": "ho-sec02",
+  "group": "security",
+  "lang": "en",
+  "intent": "security",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 4096,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "```python\n@app.get('/user')\ndef user():\n    name = request.args['name']\n    cur.execute(\"SELECT * FROM users WHERE name = '%s'\" % name)\n    return jsonify(cur.fetchall())\n```\nwhats wrong here"
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "textbook SQL injection"
+ },
+ {
+  "id": "ho-sec03",
+  "group": "security",
+  "lang": "en",
+  "intent": "security",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "our webhook endpoint verifies HMAC with `if sig == expected:` and then json.loads the body, also fetches `payload['callback_url']` to post status. threat model this for me, what are the real risks and which should we fix first"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "timing compare, replay, SSRF; prioritisation"
+ },
+ {
+  "id": "ho-sec04",
+  "group": "security",
+  "lang": "en",
+  "intent": "security",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "is it ok to store user passwords as sha256(password + salt) with a per-user random salt? just curious"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "known guidance: use argon2/bcrypt"
+ }
+]

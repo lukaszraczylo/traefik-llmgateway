@@ -3,7 +3,7 @@
 # two of them concurrently would corrupt each other's containers.
 .NOTPARALLEL:
 
-.PHONY: test lint yaegi-check admin-ui pricing-sync integration integration-keep integration-up integration-wait integration-down build-binary docker-build run-local
+.PHONY: test lint yaegi-check yaegi-bench admin-ui pricing-sync integration integration-keep integration-up integration-wait integration-down build-binary docker-build run-local
 
 test:
 	go test ./... -count=1
@@ -31,6 +31,11 @@ admin-ui:
 
 yaegi-check:
 	cd tools/yaegi-check && GOWORK=off go run . $(CURDIR)
+
+# yaegi-bench times smart router classification under the interpreter and
+# fails below the decisions-per-second gate. Not part of CI: it takes a minute.
+yaegi-bench:
+	cd tools/yaegi-bench && GOWORK=off go run . $(CURDIR)
 
 # pricing-sync regenerates the repo-root pricing_data_gen.go: the
 # built-in, LiteLLM-synced per-model context/cost table feature v0.23's

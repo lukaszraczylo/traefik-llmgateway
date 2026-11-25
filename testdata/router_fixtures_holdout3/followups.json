@@ -1,0 +1,262 @@
+[
+ {
+  "id": "h3-f01",
+  "group": "followup",
+  "lang": "en",
+  "intent": "followup",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "how do i center a div"
+    },
+    {
+     "role": "assistant",
+     "content": "Use flexbox: display:flex; justify-content:center; align-items:center on the parent."
+    },
+    {
+     "role": "user",
+     "content": "thx"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "gratitude"
+ },
+ {
+  "id": "h3-f02",
+  "group": "followup",
+  "lang": "en",
+  "intent": "followup",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 4096,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "explain what a reverse proxy is"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "text",
+       "text": "A reverse proxy sits in front of one or more servers, accepts client requests and forwards them to the right backend, often adding TLS termination, caching and load balancing."
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "shorter pls"
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "shorten"
+ },
+ {
+  "id": "h3-f03",
+  "group": "followup",
+  "lang": "en",
+  "intent": "followup",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "write an lru cache in python"
+    },
+    {
+     "role": "assistant",
+     "content": "class LRU:\n    def __init__(self, n):\n        self.n=n; self.d=OrderedDict()\n    def get(self,k):\n        if k not in self.d: return None\n        self.d.move_to_end(k); return self.d[k]\n    def put(self,k,v):\n        self.d[k]=v; self.d.move_to_end(k)\n        if len(self.d)>self.n: self.d.popitem(last=False)"
+    },
+    {
+     "role": "user",
+     "content": "now in rust"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "port small class"
+ },
+ {
+  "id": "h3-f04",
+  "group": "followup",
+  "lang": "en",
+  "intent": "followup",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "we run 5 replicas of a service that does read-modify-write on a counter in redis. i want exactly-once increments even if a replica dies mid-operation, and no lost updates under partition. what's the right design?"
+    },
+    {
+     "role": "assistant",
+     "content": "You need an atomic server-side operation plus idempotency keys: use a Lua script or INCR keyed by request id with a dedupe set, and accept that Redis failover can lose acknowledged writes unless you use WAIT or move to a consensus store."
+    },
+    {
+     "role": "user",
+     "content": "why not just use a lock"
+    }
+   ]
+  },
+  "session": {
+   "replay": true
+  },
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "session-required: 'why not a lock' follows a hard consensus/idempotency question"
+ },
+ {
+  "id": "h3-f05",
+  "group": "followup",
+  "lang": "en",
+  "intent": "followup",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "this function is messy, can you refactor?\n\ndef f(a):\n    r=[]\n    for x in a:\n        if x>0:\n            r.append(x*2)\n    return r"
+    },
+    {
+     "role": "assistant",
+     "content": "Sure. Want me to rewrite it as a list comprehension and add type hints?"
+    },
+    {
+     "role": "user",
+     "content": "do it"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "confirmation of trivial action"
+ },
+ {
+  "id": "h3-f06",
+  "group": "followup",
+  "lang": "en",
+  "intent": "followup",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 4096,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "test_login fails:\nAssertionError: assert 401 == 200"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "text",
+       "text": "Can you paste the test and the handler?"
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "fix"
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "under-specified, no content, cheap model should ask"
+ },
+ {
+  "id": "h3-f07",
+  "group": "followup",
+  "lang": "en",
+  "intent": "followup",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "prove that for a connected planar graph V - E + F = 2 by induction on edges, being careful about the base case and why removing an edge from a cycle merges two faces"
+    },
+    {
+     "role": "assistant",
+     "content": "Base case: a tree has E = V-1 and one face, so V-E+F = 2. Inductive step: pick an edge on a cycle; deleting it merges the two faces on its sides, reducing E and F by one each."
+    },
+    {
+     "role": "user",
+     "content": "ok but what if the graph has a bridge and you delete that one instead"
+    }
+   ]
+  },
+  "session": {
+   "replay": true
+  },
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "session-required: refers to earlier proof structure"
+ },
+ {
+  "id": "h3-f08",
+  "group": "followup",
+  "lang": "en",
+  "intent": "followup",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "run the tests"
+    },
+    {
+     "role": "assistant",
+     "content": "I can run `go test ./...` for you. Want me to go ahead?"
+    },
+    {
+     "role": "user",
+     "content": "yes"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "yes"
+ }
+]

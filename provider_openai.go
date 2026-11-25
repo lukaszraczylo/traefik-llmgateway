@@ -109,8 +109,14 @@ func (a *openaiAdapter) requestHeaders(hasBody bool) http.Header {
 // choices-empty chunk when the client (or this adapter, see chatCompletion)
 // requested it via stream_options.include_usage.
 type chatStreamUsage struct {
-	PromptTokens     int64 `json:"prompt_tokens"`
-	CompletionTokens int64 `json:"completion_tokens"`
+	PromptTokens     int64              `json:"prompt_tokens"`
+	CompletionTokens int64              `json:"completion_tokens"`
+	PromptDetails    promptTokenDetails `json:"prompt_tokens_details"`
+}
+
+// promptTokenDetails is OpenAI's prompt_tokens_details object.
+type promptTokenDetails struct {
+	CachedTokens int64 `json:"cached_tokens"`
 }
 
 // chatStreamChunk is the subset of one SSE chunk's JSON payload
@@ -208,7 +214,17 @@ func (a *openaiAdapter) embeddings(ctx context.Context, w http.ResponseWriter, r
 // responses both carry a top-level "usage" object, embeddings' simply
 // omitting completion_tokens (it decodes as its zero value).
 type chatUsagePayload struct {
-	Usage chatStreamUsage `json:"usage"`
+	Choices []chatChoice    `json:"choices"`
+	Usage   chatStreamUsage `json:"usage"`
+}
+
+// chatChoice is the part of a non-streaming choice the router outcome counters read.
+type chatChoice struct {
+	FinishReason string `json:"finish_reason"`
+	Message      struct {
+		Content   json.RawMessage `json:"content"`
+		ToolCalls json.RawMessage `json:"tool_calls"`
+	} `json:"message"`
 }
 
 // forwardJSON reads resp's full body (capped at maxResponseBytes),
@@ -233,7 +249,12 @@ func (a *openaiAdapter) forwardJSON(w http.ResponseWriter, resp *http.Response) 
 	w.WriteHeader(resp.StatusCode)
 	_, _ = w.Write(body)
 
-	return usage{prompt: payload.Usage.PromptTokens, completion: payload.Usage.CompletionTokens}, nil
+	u := usage{prompt: payload.Usage.PromptTokens, completion: payload.Usage.CompletionTokens, cached: payload.Usage.PromptDetails.CachedTokens}
+	if len(payload.Choices) > 0 {
+		c := payload.Choices[0]
+		u = withAnswerFlags(u, c.FinishReason, !smartJSONEmpty(c.Message.Content) || !smartJSONEmpty(c.Message.ToolCalls))
+	}
+	return u, nil
 }
 
 // sseDoneMarker is the exact data payload readSSE hands forwardStream for
@@ -254,11 +275,19 @@ const sseDoneMarker = "[DONE]"
 func (a *openaiAdapter) forwardStream(w http.ResponseWriter, body io.Reader, clientAskedUsage bool) (usage, error) {
 	sw := newSSEWriter(w)
 	var u usage
+	finish := ""
+	hasOutput := false
 
 	err := readSSE(body, func(ev sseEvent) error {
 		if string(ev.data) == sseDoneMarker {
 			sw.writeDone()
 			return nil
+		}
+		if f := chunkFinishReason(ev.data); f != "" {
+			finish = f
+		}
+		if !hasOutput {
+			hasOutput = chunkHasOutput(ev.data)
 		}
 
 		var chunk chatStreamChunk
@@ -266,6 +295,7 @@ func (a *openaiAdapter) forwardStream(w http.ResponseWriter, body io.Reader, cli
 		if hasUsage {
 			u.prompt = chunk.Usage.PromptTokens
 			u.completion = chunk.Usage.CompletionTokens
+			u.cached = chunk.Usage.PromptDetails.CachedTokens
 		}
 
 		isUsageOnlyChunk := hasUsage && len(chunk.Choices) == 0
@@ -280,7 +310,7 @@ func (a *openaiAdapter) forwardStream(w http.ResponseWriter, body io.Reader, cli
 		// must not report as zero and get treated as an unbilled request.
 		return u, fmt.Errorf("%w: stream: %w", errUpstream, err)
 	}
-	return u, nil
+	return withAnswerFlags(u, finish, hasOutput), nil
 }
 
 // imagesGeneration implements providerAdapter: a native forward to

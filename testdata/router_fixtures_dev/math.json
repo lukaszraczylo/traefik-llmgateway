@@ -1,0 +1,168 @@
+[
+ {
+  "id": "ho-ma01",
+  "group": "math",
+  "lang": "en",
+  "intent": "math",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "prove that sum of first n odd numbers is n^2"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "induction textbook"
+ },
+ {
+  "id": "ho-ma02",
+  "group": "math",
+  "lang": "en",
+  "intent": "math",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "∫ x e^x dx"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "integration by parts"
+ },
+ {
+  "id": "ho-ma03",
+  "group": "math",
+  "lang": "en",
+  "intent": "math",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 4096,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "prove there are infinitely many primes congruent to 3 mod 4"
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "Euclid-style proof with a mod-4 argument"
+ },
+ {
+  "id": "ho-ma04",
+  "group": "math",
+  "lang": "en",
+  "intent": "math",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "number of ways to tile a 2xn strip with 1x2 dominoes and 2x2 squares? give recurrence, closed form, and prove it"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "Jacobsthal recurrence derivation and closed form"
+ },
+ {
+  "id": "ho-ma05",
+  "group": "math",
+  "lang": "en",
+  "intent": "math",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "find all functions f:N->N such that f(f(n)) + f(n) = 2n + 3 for all n. full proof"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 2,
+  "maxTier": 2,
+  "notes": "functional equation; needs careful proof"
+ },
+ {
+  "id": "ho-ma06",
+  "group": "math",
+  "lang": "en",
+  "intent": "math",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "expected number of draws to collect all 10 distinct coupons"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "coupon collector, 10*H_10"
+ },
+ {
+  "id": "ho-ma07",
+  "group": "math",
+  "lang": "en",
+  "intent": "math",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "let f be continuous on R with f(x+y)=f(x)+f(y). show f(x)=cx. then what breaks if we drop continuity?"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "Cauchy equation; discussion of Hamel basis"
+ },
+ {
+  "id": "ho-ma08",
+  "group": "math",
+  "lang": "en",
+  "intent": "math",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "whats 17% of 240"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "arithmetic"
+ }
+]

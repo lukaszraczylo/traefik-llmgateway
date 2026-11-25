@@ -1,0 +1,145 @@
+[
+ {
+  "id": "h2-o01",
+  "group": "output",
+  "lang": "en",
+  "intent": "output",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "extract {name, email, company} from: 'Reach out to Dana Whitfield (dana@brightline.io), she runs ops at Brightline.'"
+    }
+   ],
+   "response_format": {
+    "type": "json_schema",
+    "json_schema": {
+     "name": "contact",
+     "strict": true,
+     "schema": {
+      "type": "object",
+      "properties": {
+       "name": {
+        "type": "string"
+       },
+       "email": {
+        "type": "string"
+       },
+       "company": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "name",
+       "email",
+       "company"
+      ],
+      "additionalProperties": false
+     }
+    }
+   }
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "tiny extraction w/ strict schema"
+ },
+ {
+  "id": "h2-o02",
+  "group": "output",
+  "lang": "en",
+  "intent": "output",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 32000,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "write the full test suite for a shopping cart class: add, remove, quantity, discount codes, rounding, concurrency, in pytest, thorough"
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "long output but mid-level work"
+ },
+ {
+  "id": "h2-o03",
+  "group": "output",
+  "lang": "en",
+  "intent": "output",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Classify each of these 25 support tickets into {billing, bug, feature, abuse} and a severity 1-5 and a one-line reason. Tickets: 1 'charged twice' 2 'cant login after reset' 3 'add dark mode' 4 'someone is spamming my dms' 5 'export csv is broken for >10k rows' ..."
+    }
+   ],
+   "response_format": {
+    "type": "json_object"
+   }
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "bulk classification, structured output"
+ },
+ {
+  "id": "h2-o04",
+  "group": "output",
+  "lang": "en",
+  "intent": "output",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "write a 6000 word story about a lighthouse keeper who finds a door in the sea"
+    }
+   ],
+   "max_tokens": 16000
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "long creative; low can, mid better"
+ },
+ {
+  "id": "h2-o05",
+  "group": "output",
+  "lang": "en",
+  "intent": "output",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 24000,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "Generate a typed OpenAPI 3.1 spec for our billing API with idempotency keys, pagination, webhooks and error model. Return as JSON matching the schema provided."
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "large structured spec requiring consistency"
+ }
+]

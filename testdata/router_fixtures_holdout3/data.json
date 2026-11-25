@@ -1,0 +1,180 @@
+[
+ {
+  "id": "h3-q01",
+  "group": "data",
+  "lang": "en",
+  "intent": "sql",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "select all users created in the last 7 days postgres"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "trivial"
+ },
+ {
+  "id": "h3-q02",
+  "group": "data",
+  "lang": "en",
+  "intent": "sql",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "tables orders(id, customer_id, total) and customers(id, name). total spend per customer name, highest first, top 10"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "join group by"
+ },
+ {
+  "id": "h3-q03",
+  "group": "data",
+  "lang": "en",
+  "intent": "sql",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 4096,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "running total of daily revenue per store, table sales(store_id, day, revenue). postgres"
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "window sum"
+ },
+ {
+  "id": "h3-q04",
+  "group": "data",
+  "lang": "en",
+  "intent": "sql",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "this takes 40s, how do i speed up\n\nEXPLAIN ANALYZE SELECT * FROM events WHERE user_id = 77 ORDER BY created_at DESC LIMIT 20;\n Limit  (cost=412000..412001 rows=20)\n   -> Sort (actual time=39120 rows=1840000)\n        Sort Key: created_at DESC\n        -> Seq Scan on events (actual time=0.1..31000 rows=1840000)\n             Filter: (user_id = 77)\n             Rows Removed by Filter: 98000000"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "composite index (user_id, created_at desc)"
+ },
+ {
+  "id": "h3-q05",
+  "group": "data",
+  "lang": "en",
+  "intent": "sql",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 4096,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "employees(id, name, manager_id). give me everyone under manager 12 at any depth with their depth, postgres recursive cte"
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "recursive CTE"
+ },
+ {
+  "id": "h3-q06",
+  "group": "data",
+  "lang": "en",
+  "intent": "data",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 4096,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "convert this csv to json array of objects:\nname,age\nann,31\nbob,27"
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "trivial"
+ },
+ {
+  "id": "h3-q07",
+  "group": "data",
+  "lang": "en",
+  "intent": "data",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "pandas: group df by 'region', mean of 'sales', then bar plot sorted desc"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "basic pandas"
+ },
+ {
+  "id": "h3-q08",
+  "group": "data",
+  "lang": "en",
+  "intent": "sql",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "events(user_id, ts, type). sessionize with a 30 min inactivity gap, count sessions and avg duration per user per day, events can arrive late up to 2 days so we need an incremental version that recomputes only affected users. clickhouse or postgres, your pick"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "gaps-and-islands + incremental design"
+ }
+]

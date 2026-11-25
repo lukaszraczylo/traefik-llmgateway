@@ -697,7 +697,7 @@ func run() error {
 		return fmt.Errorf("marshal metrics escaping probe user name: %w", err)
 	}
 
-	attemptAccountingOverride := `{"maxConcurrency":4,"concurrencyAutodetect":true,"failover":{"enabled":true},"breaker":{"failureThreshold":2,"openDuration":"3s","maxOpenDuration":"6s"},` +
+	attemptAccountingOverride := `{"rateLimitHeaders":true,"limitExemptKinds":["embedding","reranking"],"maxConcurrency":4,"concurrencyAutodetect":true,"failover":{"enabled":true},"breaker":{"failureThreshold":2,"openDuration":"3s","maxOpenDuration":"6s"},` +
 		`"providers":{"openai":{"type":"openai","baseUrl":"` + upstream.URL + `","apiKey":"sk-up","models":["` + testDataWantModel + `","` + builtinLookupModelID + `"]},` +
 		`"brk":{"type":"openai","baseUrl":"` + brkUpstream.URL + `","apiKey":"sk-up","discovery":true,"discoveryInterval":"1ms"},` +
 		// "warmretry" backs exerciseWarmFillRetry (production incident fix,
@@ -724,6 +724,10 @@ func run() error {
 		// — see its own const block doc comment above for why this
 		// provider carries no failover candidate.
 		`"` + eventsUpstreamErrorProviderName + `":{"type":"openai","baseUrl":"` + eventsUpstreamErrorUpstream.URL + `","apiKey":"sk-up","models":["` + eventsUpstreamErrorProviderModel + `"]},` +
+		// routerProbeBadProvider/routerProbeOKProvider back exerciseSmartRouter:
+		// they reuse the always-500 and always-200 upstreams above.
+		`"` + routerProbeBadProvider + `":{"type":"openai","baseUrl":"` + eventsUpstreamErrorUpstream.URL + `","apiKey":"sk-up","models":["rp-bad"]},` +
+		`"` + routerProbeOKProvider + `":{"type":"openai","baseUrl":"` + upstream.URL + `","apiKey":"sk-up","models":["rp-ok-a","rp-ok-b"]},` +
 		// "anthropic" backs the /v1/messages passthrough probes
 		// (exerciseMessagesRoute, below): a real anthropic-type provider,
 		// interpreted end to end through
@@ -781,7 +785,14 @@ func run() error {
 		`"` + round3P1AGroupName + `":{"providers":["round3-shared"],"models":["` + round3ModelID + `"]},` +
 		`"` + round3P1BGroupName + `":{"providers":["round3-shared"],"passthroughPaths":["v1/chat/completions"]},` +
 		`"` + round3P2HomeGroupName + `":{"providers":["round3-alpha"]},` +
-		`"` + round3P2FriendsGroupName + `":{"providers":["round3-shared"],"passthroughPaths":["v1/chat/completions"]}},` +
+		`"` + round3P2FriendsGroupName + `":{"providers":["round3-shared"],"passthroughPaths":["v1/chat/completions"]},` +
+		`"` + memberLimitsGroupName + `":{"memberLimits":{"requestsPerMinute":2,"pacing":{"startPct":50,"maxDelay":"20ms"}}},` +
+		`"` + routerProbeDenyGroup + `":{"models":["` + routerProbeEscalating + `"]}},` +
+		// smartRouters: routerProbeEscalating escalates a failing tier-0 to
+		// tier-1; routerProbeHashed exercises hash selection (hash/fnv).
+		`"smartRouters":{"` + routerProbeEscalating + `":{"tiers":[{"name":"` + routerProbeTier0 + `","minScore":0,"models":["` + routerProbeBadProvider + `/rp-bad"]},{"name":"` + routerProbeTier1 + `","minScore":300,"models":["` + routerProbeOKProvider + `/rp-ok-a"]}]},` +
+		`"` + routerProbeHashed + `":{"selection":"hash","tiers":[{"name":"rp-h0","minScore":0,"models":["` + routerProbeOKProvider + `/rp-ok-a","` + routerProbeOKProvider + `/rp-ok-b"]}]},` +
+		`"` + routerProbeSession + `":{"classifier":"v2","session":{"enabled":true},"tiers":[{"name":"` + routerProbeTier0 + `","minScore":0,"models":["` + routerProbeBadProvider + `/rp-bad"]},{"name":"` + routerProbeTier1 + `","minScore":300,"models":["` + routerProbeOKProvider + `/rp-ok-b"]}]}},` +
 		// modelMeta (feature v0.23): a config-override entry for
 		// testDataWantModel, so exerciseHandler's GET /v1/models
 		// assertion below proves resolveModelMeta's config-override
@@ -863,7 +874,11 @@ func run() error {
 		// exerciseRateLimitEventAndRejections' own — group "default"
 		// (allow-all), but with its own requestsPerMinute:1 limit so a
 		// second call under this key alone 429s deterministically.
-		`{"name":"events-probe","group":"default","apiKey":"` + eventsProbeUserAPIKey + `","limits":{"requestsPerMinute":1}}]}}`
+		`{"name":"events-probe","group":"default","apiKey":"` + eventsProbeUserAPIKey + `","limits":{"requestsPerMinute":1}},` +
+		`{"name":"exempt-probe","group":"default","apiKey":"` + limitExemptProbeAPIKey + `","limits":{"requestsPerMinute":1,"tokensPerMinute":50}},` +
+		`{"name":"member-a","group":"` + memberLimitsGroupName + `","apiKey":"` + memberLimitsUserAAPIKey + `"},` +
+		`{"name":"member-b","group":"` + memberLimitsGroupName + `","apiKey":"` + memberLimitsUserBAPIKey + `"},` +
+		`{"name":"router-deny","group":"` + routerProbeDenyGroup + `","apiKey":"` + routerProbeDenyAPIKey + `"}]}}`
 	if err = json.Unmarshal([]byte(attemptAccountingOverride), cfgVal.Interface()); err != nil {
 		return fmt.Errorf("decode attempt-accounting harness override into the interpreted Config: %w", err)
 	}
@@ -1036,11 +1051,20 @@ func run() error {
 	if err := exerciseUsageModelsSpan(handler); err != nil {
 		return err
 	}
+	if err := exerciseSmartRouter(handler); err != nil {
+		return err
+	}
 	// exerciseRateLimitEventAndRejections (F3/F4, v0.3 dashboard task)
 	// runs next, against its own dedicated requestsPerMinute:1 user
 	// (eventsProbeUserAPIKey), so its two calls cannot perturb any earlier
 	// probe's own per-user counters.
 	if err := exerciseRateLimitEventAndRejections(handler); err != nil {
+		return err
+	}
+	if err := exerciseMemberLimits(handler); err != nil {
+		return err
+	}
+	if err := exerciseLimitExempt(handler); err != nil {
 		return err
 	}
 	// exerciseUpstreamAndTimeoutEvents (F3 hook 2, coordinator request
@@ -1056,6 +1080,12 @@ func run() error {
 	// instance (own config, own fake Redis, own upstream) rather than the
 	// shared `handler` above — see that function's own doc comment for
 	// why.
+	if err := exerciseRouterV2(i, pkgName); err != nil {
+		return err
+	}
+	if err := exerciseRouterFirstByte(i, pkgName); err != nil {
+		return err
+	}
 	return exerciseAdminRedesignStats(i, pkgName)
 }
 
@@ -1190,6 +1220,102 @@ const (
 	round3P2UserAPIKey       = "sk-round3-p2-user" // #nosec G101 -- test fixture literal, not a real credential
 	round3PersonalModelID    = "round3-shared/m1"
 )
+
+// memberLimitsGroupName is a group whose memberLimits (requestsPerMinute:2)
+// give each of its two users, memberLimitsUserAAPIKey/UserBAPIKey, an own
+// counter; no other probe may reuse these keys.
+const (
+	memberLimitsGroupName   = "member-limits-group"
+	memberLimitsUserAAPIKey = "sk-member-limits-a" // #nosec G101 -- test fixture literal, not a real credential
+	memberLimitsUserBAPIKey = "sk-member-limits-b" // #nosec G101 -- test fixture literal, not a real credential
+)
+
+// exerciseMemberLimits proves group memberLimits (auth.go's buildEntry,
+// member_limits.go's effectiveUserLimits) under the real interpreter: user A
+// is refused on the third request while user B, in the same group, still
+// has their own counter.
+func exerciseMemberLimits(handler http.Handler) error {
+	body := `{"model":"` + testDataWantModel + `","messages":[{"role":"user","content":"hi"}]}`
+	post := func(key string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+key)
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		return rec
+	}
+	steps := []struct {
+		label string
+		key   string
+		want  int
+	}{
+		{"A 1st", memberLimitsUserAAPIKey, http.StatusOK},
+		{"A 2nd", memberLimitsUserAAPIKey, http.StatusOK},
+		{"A 3rd (over memberLimits requestsPerMinute:2)", memberLimitsUserAAPIKey, http.StatusTooManyRequests},
+		{"B 1st (own counter)", memberLimitsUserBAPIKey, http.StatusOK},
+	}
+	for i, st := range steps {
+		rec := post(st.key)
+		if rec.Code != st.want {
+			return fmt.Errorf("memberLimits harness, %s: status = %d, want %d, body=%s", st.label, rec.Code, st.want, rec.Body.String())
+		}
+		if got := rec.Header().Get("x-ratelimit-limit-requests"); got != "2" {
+			return fmt.Errorf("memberLimits harness, %s: x-ratelimit-limit-requests = %q, want 2", st.label, got)
+		}
+		if i == 1 && rec.Header().Get("X-Llmgw-Paced-Ms") == "" {
+			return fmt.Errorf("memberLimits harness, %s: X-Llmgw-Paced-Ms missing at 100%% of the limit", st.label)
+		}
+	}
+	fmt.Println("yaegi-check: group memberLimits enforced per member user, with rate-limit headers and pacing, under the interpreter")
+	return nil
+}
+
+// limitExemptProbeAPIKey authenticates exerciseLimitExempt's own inline user,
+// limited to requestsPerMinute:1; no other probe may reuse it.
+const limitExemptProbeAPIKey = "sk-limit-exempt-probe" // #nosec G101 -- test fixture literal, not a real credential
+
+// exerciseLimitExempt proves limitExemptKinds under the real interpreter:
+// embedding (the /v1/embeddings route) and reranking (a native passthrough
+// /rerank path) requests are never refused or given rate-limit headers,
+// while the same user's chat request is refused.
+func exerciseLimitExempt(handler http.Handler) error {
+	post := func(path, body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+limitExemptProbeAPIKey)
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		return rec
+	}
+	chat := `{"model":"` + testDataWantModel + `","messages":[{"role":"user","content":"hi"}]}`
+	if rec := post("/v1/chat/completions", chat); rec.Code != http.StatusOK {
+		return fmt.Errorf("limitExempt harness, chat 1st: status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	exempt := []struct{ label, path, body string }{
+		{"embeddings", "/v1/embeddings", `{"model":"` + testDataWantModel + `","input":"hi"}`},
+		{"rerank passthrough", "/openai/v1/rerank", `{"query":"q","documents":["a"]}`},
+	}
+	for _, e := range exempt {
+		for i := 0; i < 3; i++ {
+			rec := post(e.path, e.body)
+			if rec.Code != http.StatusOK {
+				return fmt.Errorf("limitExempt harness, %s #%d: status = %d, want 200, body=%s", e.label, i+1, rec.Code, rec.Body.String())
+			}
+			for k := range rec.Header() {
+				lk := strings.ToLower(k)
+				// RateLimit-Policy stays: it carries the global maxConcurrency member.
+				if strings.HasPrefix(lk, "x-ratelimit-") || strings.HasPrefix(lk, "anthropic-ratelimit-") || lk == "ratelimit" || lk == "x-llmgw-paced-ms" {
+					return fmt.Errorf("limitExempt harness, %s #%d: unexpected header %s on an exempt response", e.label, i+1, k)
+				}
+			}
+		}
+	}
+	if rec := post("/v1/chat/completions", chat); rec.Code != http.StatusTooManyRequests {
+		return fmt.Errorf("limitExempt harness, chat 2nd: status = %d, want 429, body=%s", rec.Code, rec.Body.String())
+	}
+	fmt.Println("yaegi-check: limitExemptKinds exempts embedding and reranking requests from limits, under the interpreter")
+	return nil
+}
 
 // eventsProbeUserAPIKey authenticates exerciseRateLimitEventAndRejections'
 // own inline user (run()'s "users" override): group "default" (allow-all,
@@ -1330,7 +1456,7 @@ func stampReleaseVersion(pkgDir string) error {
 // silently drift out of sync) every time `make pricing-sync`
 // regenerates the table against updated upstream data.
 func readBuiltinContextTokens(repoRoot, modelID string) (int, error) {
-	data, err := os.ReadFile(filepath.Join(repoRoot, "pricing_data_gen.go"))
+	data, err := os.ReadFile(filepath.Join(repoRoot, "pricing_data_gen.go")) //nolint:gosec // G703: repoRoot is the dev operator's own argv, joined with a fixed file name
 	if err != nil {
 		return 0, fmt.Errorf("read pricing_data_gen.go: %w", err)
 	}
@@ -3175,7 +3301,7 @@ func readProviderAttemptCounters(handler http.Handler, providerName string) (att
 // readModulePath returns the module path declared by goModPath's
 // "module" directive.
 func readModulePath(goModPath string) (string, error) {
-	f, err := os.Open(goModPath)
+	f, err := os.Open(goModPath) //nolint:gosec // G703: dev tool reading go.mod under the repo root given on its own command line
 	if err != nil {
 		return "", err
 	}
@@ -3220,7 +3346,7 @@ func readPackageName(dir string) (string, error) {
 
 // scanPackageDecl reads path's leading "package X" line, if any.
 func scanPackageDecl(path string) (string, error) {
-	f, err := os.Open(path)
+	f, err := os.Open(path) //nolint:gosec // G703: dev tool reading Go files under the repo root given on its own command line
 	if err != nil {
 		return "", err
 	}
@@ -3246,7 +3372,7 @@ func copyRepoSource(repoRoot, destDir string) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(destDir, 0o750); err != nil {
+	if err := os.MkdirAll(destDir, 0o750); err != nil { //nolint:gosec // G703: dev tool copying under paths from its own command line and temp dirs
 		return err
 	}
 	for _, e := range entries {
@@ -3270,7 +3396,7 @@ func copyRepoSource(repoRoot, destDir string) error {
 
 // copyDir recursively copies src to dst.
 func copyDir(src, dst string) error {
-	return filepath.WalkDir(src, func(path string, d fs.DirEntry, err error) error {
+	return filepath.WalkDir(src, func(path string, d fs.DirEntry, err error) error { //nolint:gosec // G703: dev tool copying under paths from its own command line and temp dirs
 		if err != nil {
 			return err
 		}
@@ -3280,7 +3406,7 @@ func copyDir(src, dst string) error {
 		}
 		target := filepath.Join(dst, rel)
 		if d.IsDir() {
-			return os.MkdirAll(target, 0o750)
+			return os.MkdirAll(target, 0o750) //nolint:gosec // G703: dev tool copying under paths from its own command line and temp dirs
 		}
 		return copyFile(path, target)
 	})
@@ -3288,16 +3414,16 @@ func copyDir(src, dst string) error {
 
 // copyFile copies src to dst, creating dst's parent directory if needed.
 func copyFile(src, dst string) error {
-	in, err := os.Open(src)
+	in, err := os.Open(src) //nolint:gosec // G703: dev tool copying under paths from its own command line and temp dirs
 	if err != nil {
 		return err
 	}
 	defer in.Close() //nolint:errcheck // read-side close; nothing actionable on failure
 
-	if err = os.MkdirAll(filepath.Dir(dst), 0o750); err != nil {
+	if err = os.MkdirAll(filepath.Dir(dst), 0o750); err != nil { //nolint:gosec // G703: dev tool copying under paths from its own command line and temp dirs
 		return err
 	}
-	out, err := os.Create(dst)
+	out, err := os.Create(dst) //nolint:gosec // G703: dev tool copying under paths from its own command line and temp dirs
 	if err != nil {
 		return err
 	}
@@ -3324,7 +3450,7 @@ type yamlLine struct {
 // in this harness module — the plugin module never parses YAML itself,
 // Traefik does that before handing the plugin its already-decoded Config.
 func extractTraefikYAMLTestData(path string) (map[string]any, error) {
-	raw, err := os.ReadFile(path)
+	raw, err := os.ReadFile(path) //nolint:gosec // G703: dev tool copying under paths from its own command line and temp dirs
 	if err != nil {
 		return nil, err
 	}
@@ -3444,8 +3570,8 @@ func parseList(lines []yamlLine, pos *int, indent int) []any {
 }
 
 // collectionOrScalar maps a "key: value" line's already-trimmed val to
-// an empty map/slice for "{}"/"[]", or to parseScalar(val) otherwise. It
-// does not recurse into a further nested block — no key in this file's
+// an empty map/slice for "{}"/"[]", a one-line "[a, b]" list of scalars,
+// or parseScalar(val) otherwise. It does not recurse into a further nested block — no key in this file's
 // testData needs a map/list value inside a list item's own fields, and
 // this harness parses only what .traefik.yml actually contains.
 func collectionOrScalar(val string) any {
@@ -3454,9 +3580,15 @@ func collectionOrScalar(val string) any {
 		return map[string]any{}
 	case "[]":
 		return []any{}
-	default:
-		return parseScalar(val)
 	}
+	if strings.HasPrefix(val, "[") && strings.HasSuffix(val, "]") {
+		var items []any
+		for _, part := range strings.Split(val[1:len(val)-1], ",") {
+			items = append(items, parseScalar(strings.TrimSpace(part)))
+		}
+		return items
+	}
+	return parseScalar(val)
 }
 
 // parseScalar converts a YAML scalar token to a bool, int64, float64, or
@@ -3971,6 +4103,109 @@ func exerciseUpstreamAndTimeoutEvents(handler http.Handler) error {
 	}
 
 	fmt.Println("yaegi-check: recordUpstreamEvent classified a real 500 as kind \"upstream\"/500 and a real request-timeout abort as kind \"timeout\"/504 under the interpreter")
+	return nil
+}
+
+const (
+	routerProbeBadProvider = "routerprobe-bad"
+	routerProbeOKProvider  = "routerprobe-ok"
+	routerProbeEscalating  = "rp-auto"
+	routerProbeHashed      = "rp-hash"
+	routerProbeSession     = "rp-sess"
+	routerProbeTier0       = "rp-t0"
+	routerProbeTier1       = "rp-t1"
+	routerProbeDenyGroup   = "routerprobe-deny"
+	routerProbeDenyAPIKey  = "sk-router-deny" // #nosec G101 -- test fixture literal, not a real credential
+)
+
+func routerProbeChat(handler http.Handler, model, key string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(
+		`{"model":"`+model+`","messages":[{"role":"user","content":"hi"}]}`,
+	))
+	req.Header.Set("Authorization", "Bearer "+key)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	return rec
+}
+
+// exerciseSmartRouter drives the smart router under the interpreter: tier
+// escalation after a 500, hash selection (hash/fnv), the escalation metric,
+// and the *routerTargetError type assertion on a denied router.
+func exerciseSmartRouter(handler http.Handler) error {
+	rec := routerProbeChat(handler, routerProbeEscalating, testDataUserAPIKey)
+	if rec.Code != http.StatusOK {
+		return fmt.Errorf("POST /v1/chat/completions (router %q, tier-0 upstream 500): status = %d, want 200 via escalation, body=%s", routerProbeEscalating, rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("X-Llmgw-Router-Tier"); got != routerProbeTier1 {
+		return fmt.Errorf("router %q: X-Llmgw-Router-Tier = %q, want %q", routerProbeEscalating, got, routerProbeTier1)
+	}
+
+	rec = routerProbeChat(handler, routerProbeHashed, testDataUserAPIKey)
+	if rec.Code != http.StatusOK {
+		return fmt.Errorf("POST /v1/chat/completions (router %q, hash selection): status = %d, want 200, body=%s", routerProbeHashed, rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("X-Llmgw-Routed-Model"); !strings.HasPrefix(got, routerProbeOKProvider+"/rp-ok-") {
+		return fmt.Errorf("router %q: X-Llmgw-Routed-Model = %q, want a %s/rp-ok-* model", routerProbeHashed, got, routerProbeOKProvider)
+	}
+
+	if err := exerciseRouterSession(handler); err != nil {
+		return err
+	}
+
+	rec = routerProbeChat(handler, routerProbeEscalating, routerProbeDenyAPIKey)
+	if rec.Code != http.StatusForbidden {
+		return fmt.Errorf("POST /v1/chat/completions (router %q, every target denied): status = %d, want 403, body=%s", routerProbeEscalating, rec.Code, rec.Body.String())
+	}
+	var env struct {
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil || env.Error.Message == "" {
+		return fmt.Errorf("denied router response is not an error envelope: err=%v body=%s", err, rec.Body.String())
+	}
+
+	metricsReq := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	metricsReq.Header.Set("Authorization", "Bearer "+attemptAccountingAdminAPIKey)
+	metricsRec := httptest.NewRecorder()
+	handler.ServeHTTP(metricsRec, metricsReq)
+	want := `llmgateway_router_escalations_total{router="` + routerProbeEscalating + `",from_tier="` + routerProbeTier0 + `",to_tier="` + routerProbeTier1 + `"} 1`
+	if !strings.Contains(metricsRec.Body.String(), want) {
+		return fmt.Errorf("GET /metrics: missing %q; body=%s", want, metricsRec.Body.String())
+	}
+
+	fmt.Println("yaegi-check: smart router escalated tier-0 500 to tier-1, hash selection served, denied router returned a 403 envelope, escalation metric incremented under the interpreter")
+	return nil
+}
+
+// exerciseRouterSession drives a session-enabled v2 router under the interpreter: the first
+// request escalates past the failing tier 0, so the pin makes the second one start at tier 1.
+func exerciseRouterSession(handler http.Handler) error {
+	post := func(text string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(
+			`{"model":"`+routerProbeSession+`","metadata":{"user_id":"yaegi-probe"},"messages":[{"role":"user","content":"`+text+`"}]}`,
+		))
+		req.Header.Set("Authorization", "Bearer "+testDataUserAPIKey)
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		return rec
+	}
+	first := post("hi")
+	if first.Code != http.StatusOK || first.Header().Get("X-Llmgw-Router-Tier") != routerProbeTier1 || first.Header().Get("X-Llmgw-Router-Reason") != "score" {
+		return fmt.Errorf("router %q first request: status=%d tier=%q reason=%q, want 200 %s score", routerProbeSession, first.Code, first.Header().Get("X-Llmgw-Router-Tier"), first.Header().Get("X-Llmgw-Router-Reason"), routerProbeTier1)
+	}
+	second := post("hello again")
+	if second.Code != http.StatusOK || second.Header().Get("X-Llmgw-Router-Reason") != "session" {
+		return fmt.Errorf("router %q second request: status=%d reason=%q, want 200 session", routerProbeSession, second.Code, second.Header().Get("X-Llmgw-Router-Reason"))
+	}
+	// The same ask again inside the regenerate window is a retry of an answer the user did not take.
+	third := post("hello again")
+	if third.Code != http.StatusOK || third.Header().Get("X-Llmgw-Router-Reason") != "bump" {
+		return fmt.Errorf("router %q regenerate: status=%d reason=%q, want 200 bump", routerProbeSession, third.Code, third.Header().Get("X-Llmgw-Router-Reason"))
+	}
+	fmt.Println("yaegi-check: session router pinned the escalated tier, routed the next turn by the session and bumped a regenerate under the interpreter")
 	return nil
 }
 

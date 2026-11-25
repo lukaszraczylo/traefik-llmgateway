@@ -1,13 +1,13 @@
 <script setup lang="ts">
-import { computed, reactive } from 'vue'
+import { computed, reactive, ref } from 'vue'
 
 import TargetPicker from '@/components/forms/TargetPicker.vue'
 import SnippetBlock from '@/components/SnippetBlock.vue'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Input } from '@/components/ui/input'
 import { useTargetPicker } from '@/composables/useTargetPicker'
-import { groupLimitsSnippet, isValidNonNegative, isValidNonNegativeInt, userLimitsJsonFragment } from '@/lib/snippets'
-import type { LimitsConfig } from '@/types/api'
+import { groupLimitsSnippet, groupMemberLimitsSnippet, isValidNonNegative, isValidNonNegativeInt, userLimitsJsonFragment } from '@/lib/snippets'
+import type { LimitKey, LimitsConfig } from '@/types/api'
 
 /**
  * LimitsForm (ChangeHelper, redesign-plan.md section 3.4) builds a
@@ -29,25 +29,27 @@ const { targetKind, targetName, targetNames, nameValid, snippetLabel } = useTarg
 )
 
 /** INTEGER_FIELDS is every LimitsConfig field Go decodes as `int64` (llmgateway.go) — requestsPerMinute/requestsPerDay/tokensPerDay/tokensPerMonth reject a fractional value like "1.5" at json.Unmarshal outright (P2 item 12), unlike costPerDayUSD/costPerMonthUSD, which are `float64`. */
-const INTEGER_FIELDS = new Set<keyof LimitsConfig>(['requestsPerMinute', 'requestsPerDay', 'tokensPerDay', 'tokensPerMonth'])
+const INTEGER_FIELDS = new Set<LimitKey>(['requestsPerMinute', 'requestsPerDay', 'tokensPerMinute', 'tokensPerDay', 'tokensPerMonth'])
 
 /** fieldValid applies isValidNonNegativeInt to the four int64 fields and isValidNonNegative (fractions allowed) to the two float64 cost fields — the ONE gate both invalidFields and limits below share, so they can never disagree on which fields are int-only. */
-function fieldValid(key: keyof LimitsConfig, value: number): boolean {
+function fieldValid(key: LimitKey, value: number): boolean {
   return INTEGER_FIELDS.has(key) ? isValidNonNegativeInt(value) : isValidNonNegative(value)
 }
 
-const FIELDS: { key: keyof LimitsConfig; label: string }[] = [
+const FIELDS: { key: LimitKey; label: string }[] = [
   { key: 'requestsPerMinute', label: 'Requests/minute' },
   { key: 'requestsPerDay', label: 'Requests/day' },
+  { key: 'tokensPerMinute', label: 'Tokens/minute (in+out)' },
   { key: 'tokensPerDay', label: 'Tokens/day (in+out)' },
   { key: 'tokensPerMonth', label: 'Tokens/month (in+out)' },
   { key: 'costPerDayUSD', label: 'Cost/day (USD)' },
   { key: 'costPerMonthUSD', label: 'Cost/month (USD)' },
 ]
 
-const raw = reactive<Record<keyof LimitsConfig, string>>({
+const raw = reactive<Record<LimitKey, string>>({
   requestsPerMinute: '',
   requestsPerDay: '',
+  tokensPerMinute: '',
   tokensPerDay: '',
   tokensPerMonth: '',
   costPerDayUSD: '',
@@ -78,12 +80,16 @@ const limits = computed<LimitsConfig>(() => {
   return out
 })
 
+/** perMember emits the group's values as `memberLimits` (one counter per member user) instead of the shared aggregate `limits`; only meaningful for a group target. */
+const perMember = ref(false)
+
 const snippet = computed<string | null>(() => {
   if (!nameValid.value || invalidFields.value.length > 0) return null
   if (Object.keys(limits.value).length === 0) return null
-  return targetKind.value === 'group'
-    ? groupLimitsSnippet(targetName.value.trim(), limits.value)
-    : userLimitsJsonFragment(limits.value)
+  if (targetKind.value !== 'group') return userLimitsJsonFragment(limits.value)
+  return perMember.value
+    ? groupMemberLimitsSnippet(targetName.value.trim(), limits.value)
+    : groupLimitsSnippet(targetName.value.trim(), limits.value)
 })
 </script>
 
@@ -97,6 +103,11 @@ const snippet = computed<string | null>(() => {
       @update:target-kind="targetKind = $event"
       @update:target-name="targetName = $event"
     />
+
+    <label v-if="targetKind === 'group'" class="flex items-center gap-2 text-sm">
+      <input id="limits-per-member" v-model="perMember" type="checkbox" />
+      Per member (each user gets their own counter) instead of one shared group total
+    </label>
 
     <div class="grid grid-cols-1 gap-3 sm:grid-cols-3">
       <div v-for="field in FIELDS" :key="field.key" class="flex flex-col gap-1">

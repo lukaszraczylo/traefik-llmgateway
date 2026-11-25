@@ -1,0 +1,332 @@
+[
+ {
+  "id": "h3-d01",
+  "group": "debug",
+  "lang": "en",
+  "intent": "debug",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "getting TypeError: Cannot read properties of undefined (reading 'map') in my react component\n\nfunction List({items}) {\n  return <ul>{items.map(i => <li key={i.id}>{i.name}</li>)}</ul>\n}\n\nit works after the 2nd render. why"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "classic undefined prop before data loads"
+ },
+ {
+  "id": "h3-d02",
+  "group": "debug",
+  "lang": "en",
+  "intent": "debug",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "ModuleNotFoundError: No module named 'requests' but i pip installed it??"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "wrong interpreter/venv"
+ },
+ {
+  "id": "h3-d03",
+  "group": "debug",
+  "lang": "en",
+  "intent": "debug",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 4096,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "git push says ! [rejected] main -> main (non-fast-forward). what do i do"
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "pull --rebase"
+ },
+ {
+  "id": "h3-d04",
+  "group": "debug",
+  "lang": "en",
+  "intent": "debug",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "IndentationError: unexpected indent line 12\n\n10 def f(x):\n11     y = x + 1\n12       return y"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "obvious"
+ },
+ {
+  "id": "h3-d05",
+  "group": "debug",
+  "lang": "en",
+  "intent": "debug",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "fetch from localhost:3000 to my api on :8080 gives 'blocked by CORS policy: No Access-Control-Allow-Origin header'. express backend"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "cors middleware"
+ },
+ {
+  "id": "h3-d06",
+  "group": "debug",
+  "lang": "en",
+  "intent": "debug",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 4096,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "my useEffect runs forever and spams the api\n\nuseEffect(() => {\n  fetch('/api/x?f=' + JSON.stringify(filters)).then(r=>r.json()).then(setData)\n}, [filters, data])\n\n(filters is an object built inline in the parent each render)"
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "deps array with state set inside + unstable object identity"
+ },
+ {
+  "id": "h3-d07",
+  "group": "debug",
+  "lang": "en",
+  "intent": "debug",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "go service goroutine count climbs from 200 to 40k over a day, pprof goroutine shows most parked in chan receive inside our worker.run(). where do i look"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "goroutine leak hunting"
+ },
+ {
+  "id": "h3-d08",
+  "group": "debug",
+  "lang": "en",
+  "intent": "debug",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "node api rss grows ~50MB/h, heap snapshots show growing Map of 'Socket' objects retained by an EventEmitter listener list. we add a 'close' handler per request. is that it?"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "listener leak"
+ },
+ {
+  "id": "h3-d09",
+  "group": "debug",
+  "lang": "en",
+  "intent": "debug",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 4096,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "we have an MPSC lock-free queue (Vyukov style) and under 64 producers consumer sometimes sees a node whose next is non-null but data is garbage, only on arm64, never on x86. i've read the code three times. memory ordering? here's push:\n\nvoid push(Node* n){ n->next.store(nullptr, std::memory_order_relaxed); Node* prev = head.exchange(n, std::memory_order_acq_rel); prev->next.store(n, std::memory_order_release); }\n\nand pop reads tail->next with relaxed"
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 2,
+  "maxTier": 2,
+  "notes": "relaxed load of next in consumer: needs acquire; subtle memory-model reasoning"
+ },
+ {
+  "id": "h3-d10",
+  "group": "debug",
+  "lang": "en",
+  "intent": "debug",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "segfault only in -O2 release build of our C parser, debug build fine, asan clean, valgrind clean. gdb shows crash in a memcpy with len computed from `(uint16_t)(a+b)` where a,b are size_t from the header. what class of bug is this and how would you chase it down properly"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "UB/overflow truncation under optimisation"
+ },
+ {
+  "id": "h3-d11",
+  "group": "debug",
+  "lang": "en",
+  "intent": "debug",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "postgres log: 'deadlock detected. Process 4412 waits for ShareLock on transaction 8812; blocked by process 4398. Process 4398 waits for ShareLock on transaction 8809; blocked by 4412'. two workers both do UPDATE accounts ... WHERE id IN (...) in batches. how do i stop it"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "consistent lock ordering"
+ },
+ {
+  "id": "h3-d12",
+  "group": "debug",
+  "lang": "en",
+  "intent": "debug",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 4096,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "test passes alone but fails when whole suite runs, jest, something to do with a shared module-level cache i think. how do i find which test pollutes it"
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 2,
+  "notes": "test isolation bisect"
+ },
+ {
+  "id": "h3-d13",
+  "group": "debug",
+  "lang": "en",
+  "intent": "debug",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "pod is CrashLoopBackOff, describe says Last State: Terminated Reason: OOMKilled, limit 256Mi. app is a spring boot thing"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "raise limit / tune heap"
+ },
+ {
+  "id": "h3-d14",
+  "group": "debug",
+  "lang": "en",
+  "intent": "debug",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "my pagination skips the last item. page size 10, 25 items: page 3 shows 4 items instead of 5\n\nstart = page*size\nitems[start:start+size-1]"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "slice end off by one"
+ },
+ {
+  "id": "h3-d15",
+  "group": "debug",
+  "lang": "en",
+  "intent": "debug",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 4096,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "docker run -p 8080:8080 app, curl localhost:8080 gives connection reset. app logs say listening on 127.0.0.1:8080"
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "bind 0.0.0.0"
+ }
+]

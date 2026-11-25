@@ -673,6 +673,9 @@ type modelRegistry struct {
 	// cheap nil-map lookup (always false/zero) that adds no branching
 	// cost to the v0.1 no-aliases case.
 	aliases map[string]string
+	// routers is the compiled Config.SmartRouters, keyed by router name;
+	// nil when none are configured. Never mutated after construction.
+	routers map[string]*smartRouter
 	// modelMeta is the validated Config.ModelMeta config-override map
 	// (feature v0.23), built once by newModelRegistry via
 	// validateModelMeta and never mutated afterward. nil (not merely
@@ -684,6 +687,8 @@ type modelRegistry struct {
 	modelMeta map[string]*ModelMetaConfig
 	nowFn     func() time.Time
 	warned    map[string]bool
+	// routerShadowClean maps a router name to modelsGen+1 of its last collision-free scan; guarded by warnedMu.
+	routerShadowClean map[string]int64
 	// modelsCache holds one encoded GET /v1/models response body per
 	// group, tagged with the modelsGen it was built from (perf finding 3,
 	// 2026-08-2x audit: 15.9ms/21.3MB/552,884 allocs per uncached call at
@@ -825,6 +830,7 @@ func newModelRegistry(adapters map[string]providerAdapter, cfg *Config, log func
 		warmFillRetryDelay: warmFillRetryDelay,
 		warmFillTimeout:    warmFillTimeout,
 		warned:             make(map[string]bool),
+		routerShadowClean:  make(map[string]int64),
 		providerNames:      make([]string, 0, len(adapters)),
 		modelsCache:        make(map[string]modelsCacheEntry),
 	}
@@ -893,11 +899,20 @@ func newModelRegistry(adapters map[string]providerAdapter, cfg *Config, log func
 		}
 	}
 
-	aliases, err := validateModelAliases(cfg.ModelAliases, m.providerNames, explicitModels)
+	aliases, err := validateModelAliases(cfg.ModelAliases, m.providerNames, explicitModels, cfg.SmartRouters)
 	if err != nil {
 		return nil, err
 	}
 	m.aliases = aliases
+
+	routers, err := validateSmartRouters(cfg.SmartRouters, m.providerNames, explicitModels, cfg.ModelAliases)
+	if err != nil {
+		return nil, err
+	}
+	if err = validateRouterFirstByte(routers, cfg); err != nil {
+		return nil, err
+	}
+	m.routers = routers
 	m.requirePrefix = cfg.RequireModelPrefix
 
 	modelMeta, err := validateModelMeta(cfg.ModelMeta)
@@ -905,6 +920,9 @@ func newModelRegistry(adapters map[string]providerAdapter, cfg *Config, log func
 		return nil, err
 	}
 	m.modelMeta = modelMeta
+	if err := validateRouterModelMeta(m.routers, m.modelMeta); err != nil {
+		return nil, err
+	}
 
 	return m, nil
 }
@@ -941,7 +959,7 @@ func isValidModelID(id string) bool {
 // raw is iterated in sorted alias-key order, not Go's randomized map
 // order, so a config with more than one invalid alias always reports the
 // same one first, deterministically, across repeated runs.
-func validateModelAliases(raw map[string]string, providerNames []string, explicitModels map[string]bool) (map[string]string, error) {
+func validateModelAliases(raw map[string]string, providerNames []string, explicitModels map[string]bool, routers map[string]*SmartRouterConfig) (map[string]string, error) {
 	if len(raw) == 0 {
 		return nil, nil
 	}
@@ -974,6 +992,9 @@ func validateModelAliases(raw map[string]string, providerNames []string, explici
 		}
 		if _, targetIsAlias := raw[target]; targetIsAlias {
 			return nil, fmt.Errorf("llmgateway: modelAliases: alias %q targets %q, which is itself an alias (alias chains are not allowed)", alias, target)
+		}
+		if _, targetIsRouter := routers[target]; targetIsRouter {
+			return nil, fmt.Errorf("llmgateway: modelAliases: alias %q targets %q, which is a smart router (routers cannot be alias targets)", alias, target)
 		}
 		out[alias] = target
 	}
@@ -1732,6 +1753,120 @@ func (m *modelRegistry) warnAliasShadowsDiscoveredOnce(alias string) {
 	m.log("%s", fmt.Sprintf("model registry: alias %q also names a discovered model; the alias takes precedence", alias))
 }
 
+// noteRouterShadow warns once when a router name also names a discovered
+// model; the router always wins.
+func (m *modelRegistry) noteRouterShadow(name string, grp *group) {
+	key := "router-shadow:" + name
+	gen := atomic.LoadInt64(&m.modelsGen) + 1
+	m.warnedMu.Lock()
+	skip := m.warned[key] || m.routerShadowClean[name] == gen
+	m.warnedMu.Unlock()
+	if skip {
+		return
+	}
+	if _, collides := m.bareWinner(name, grp); !collides {
+		// gen was read before the scan, so a refresh racing it only forces a rescan.
+		m.warnedMu.Lock()
+		m.routerShadowClean[name] = gen
+		m.warnedMu.Unlock()
+		return
+	}
+	m.warnRouterOnce(key, fmt.Sprintf("model registry: smart router %q also names a discovered model; the router takes precedence", name))
+}
+
+// warnRouterTargetOnce warns once per router target that does not resolve.
+func (m *modelRegistry) warnRouterTargetOnce(router, target string) {
+	m.warnRouterOnce("router-target:"+router+":"+target, fmt.Sprintf("model registry: smart router %q target %q does not resolve to a known model; skipping it", router, target))
+}
+
+func (m *modelRegistry) warnRouterOnce(key, msg string) {
+	m.warnedMu.Lock()
+	defer m.warnedMu.Unlock()
+	if m.warned[key] {
+		return
+	}
+	m.warned[key] = true
+	m.log("%s", msg)
+}
+
+// routerEntriesFor lists every router grp may use: the router name must be
+// allowed and at least one target must resolve for grp.
+func (m *modelRegistry) routerEntriesFor(grp *group) map[string]map[string]any {
+	if len(m.routers) == 0 {
+		return nil
+	}
+	entries := make(map[string]map[string]any, len(m.routers))
+	for name, rt := range m.routers {
+		if !grp.allowsModelName(name) {
+			continue
+		}
+		if m.routerHasAllowedTarget(rt, grp) {
+			entries[name] = modelObject(name, routerOwnedBy, m.routerMeta(name, rt))
+		}
+	}
+	return entries
+}
+
+// routerMeta advertises the largest known target context window when
+// context escalation is on (the plan routes around smaller targets), else the
+// smallest so no tier can be handed an oversized prompt. A modelMeta entry
+// keyed by the router name overrides it.
+func (m *modelRegistry) routerMeta(name string, rt *smartRouter) resolvedModelMeta {
+	var smallest, largest int
+	known := false
+	for _, tier := range rt.tiers {
+		for _, target := range tier.models {
+			meta := m.routerTargetMeta(target)
+			if !meta.ContextKnown {
+				continue
+			}
+			if !known || meta.ContextTokens < smallest {
+				smallest = meta.ContextTokens
+			}
+			if !known || meta.ContextTokens > largest {
+				largest = meta.ContextTokens
+			}
+			known = true
+		}
+	}
+	out := resolvedModelMeta{ContextKnown: known, ContextTokens: smallest}
+	if rt.contextEscalation {
+		out.ContextTokens = largest
+	}
+	if override, ok := m.modelMeta[name]; ok && override != nil && override.ContextTokens > 0 {
+		if known && override.ContextTokens > largest {
+			m.warnRouterOnce("router-override:"+name, fmt.Sprintf("model registry: smart router %q modelMeta contextTokens %d exceeds the largest known target window %d", name, override.ContextTokens, largest))
+		}
+		out.ContextTokens, out.ContextKnown = override.ContextTokens, true
+	}
+	return out
+}
+
+// routerTargetMeta resolves a target without group restriction: the
+// advertised window must not change with the caller's grants.
+func (m *modelRegistry) routerTargetMeta(target string) resolvedModelMeta {
+	if _, isAlias := m.aliases[target]; isAlias {
+		return m.resolveMetaForAliasName(target)
+	}
+	_, _, canonical, err := m.resolve(target, &group{})
+	if err != nil {
+		return resolvedModelMeta{}
+	}
+	providerName, bareModel, _ := strings.Cut(canonical, "/")
+	return m.resolveMetaFor(providerName, bareModel)
+}
+
+func (m *modelRegistry) routerHasAllowedTarget(rt *smartRouter, grp *group) bool {
+	for _, tier := range rt.tiers {
+		for _, target := range tier.models {
+			if _, _, _, err := m.resolve(target, grp); err == nil {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // resolveAgainst finishes resolve for a providerName already chosen (either
 // the explicit prefix or the bare-id collision winner): it checks
 // upstreamModel is actually known to that provider, then checks
@@ -1942,6 +2077,7 @@ func (m *modelRegistry) listFor(grp *group) []map[string]any {
 	// and shadows nothing — the discovered model keeps its own bare entry
 	// in that case.
 	aliasEntries := m.aliasEntriesFor(grp)
+	routerEntries := m.routerEntriesFor(grp)
 	visible := make([]string, 0, 4) // reused per id; provs is at most len(m.providerNames) long
 	for id, provs := range owners {
 		// warnCollisionOnce stays keyed on the GLOBAL owner set, not grp's
@@ -1975,6 +2111,10 @@ func (m *modelRegistry) listFor(grp *group) []map[string]any {
 		// "provider/id" form below, which is exactly how a client must
 		// address it once the alias owns the bare id.
 		_, shadowed := aliasEntries[id]
+		// resolve routes every request naming a router to it, listed for this caller or not.
+		if _, routed := m.routers[id]; routed {
+			shadowed = true
+		}
 
 		// bareEntryWinner (HIGH-2 fix, review round 2), the same shared
 		// helper bareWinner uses: for a single-grant grp this is exactly
@@ -2034,6 +2174,9 @@ func (m *modelRegistry) listFor(grp *group) []map[string]any {
 	// prefixed entry either (validateModelAliases rejects an alias whose
 	// prefix names a configured provider at construction).
 	for _, entry := range aliasEntries {
+		out = append(out, entry)
+	}
+	for _, entry := range routerEntries {
 		out = append(out, entry)
 	}
 

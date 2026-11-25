@@ -1,0 +1,117 @@
+[
+ {
+  "id": "out-01",
+  "group": "output",
+  "lang": "en",
+  "intent": "output",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Write the complete API documentation for our billing module."
+    }
+   ],
+   "max_tokens": 16000
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "very large requested output"
+ },
+ {
+  "id": "out-02",
+  "group": "output",
+  "lang": "en",
+  "intent": "output",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Extract the invoice number, date and total from this text: Invoice 1042 dated 2025-03-04 total 118.50 EUR."
+    }
+   ],
+   "response_format": {
+    "type": "json_schema",
+    "json_schema": {
+     "name": "invoice",
+     "schema": {
+      "type": "object",
+      "properties": {
+       "number": {
+        "type": "string"
+       },
+       "date": {
+        "type": "string"
+       },
+       "total": {
+        "type": "number"
+       }
+      },
+      "required": [
+       "number",
+       "date",
+       "total"
+      ]
+     }
+    }
+   }
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "strict json schema with extraction"
+ },
+ {
+  "id": "out-03",
+  "group": "output",
+  "lang": "en",
+  "intent": "output",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Give me three name ideas for a bakery as JSON."
+    }
+   ],
+   "response_format": {
+    "type": "json_object"
+   }
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "json_object for a trivial ask"
+ },
+ {
+  "id": "out-04",
+  "group": "output",
+  "lang": "en",
+  "intent": "output",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 9000,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "Write a detailed short story about a lighthouse keeper, about 4000 words."
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "long output demand for creative text"
+ }
+]

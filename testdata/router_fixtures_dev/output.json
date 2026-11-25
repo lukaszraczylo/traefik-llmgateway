@@ -1,0 +1,126 @@
+[
+ {
+  "id": "ho-out01",
+  "group": "output",
+  "lang": "en",
+  "intent": "output",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Extract the fields from this: 'Invoice 4411 from Nordwind GmbH dated 2025-03-02, total EUR 1,284.50, due in 30 days.'"
+    }
+   ],
+   "response_format": {
+    "type": "json_schema",
+    "json_schema": {
+     "name": "inv",
+     "schema": {
+      "type": "object",
+      "properties": {
+       "number": {
+        "type": "string"
+       },
+       "vendor": {
+        "type": "string"
+       },
+       "date": {
+        "type": "string"
+       },
+       "total": {
+        "type": "number"
+       },
+       "currency": {
+        "type": "string"
+       },
+       "due_days": {
+        "type": "integer"
+       }
+      },
+      "required": [
+       "number",
+       "vendor",
+       "total"
+      ]
+     }
+    }
+   }
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "simple extraction into schema"
+ },
+ {
+  "id": "ho-out02",
+  "group": "output",
+  "lang": "en",
+  "intent": "output",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 32000,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "write me a haiku about autumn"
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "large max_tokens must not inflate a haiku"
+ },
+ {
+  "id": "ho-out03",
+  "group": "output",
+  "lang": "en",
+  "intent": "output",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "implement raft leader election and log replication in go, with a test harness that injects partitions and checks the log matching property"
+    }
+   ],
+   "max_tokens": 16000
+  },
+  "session": null,
+  "minTier": 2,
+  "maxTier": 2,
+  "notes": "large distributed-systems implementation with correctness property"
+ },
+ {
+  "id": "ho-out04",
+  "group": "output",
+  "lang": "en",
+  "intent": "output",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "give me a json list of 5 fruit names"
+    }
+   ],
+   "response_format": {
+    "type": "json_object"
+   }
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "trivial json output"
+ }
+]

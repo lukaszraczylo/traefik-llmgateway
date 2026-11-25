@@ -1,0 +1,266 @@
+[
+ {
+  "id": "h3-c01",
+  "group": "chitchat",
+  "lang": "en",
+  "intent": "chitchat",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "hey"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "casual"
+ },
+ {
+  "id": "h3-c02",
+  "group": "chitchat",
+  "lang": "en",
+  "intent": "chitchat",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "lol that was a long day"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "casual"
+ },
+ {
+  "id": "h3-c03",
+  "group": "chitchat",
+  "lang": "en",
+  "intent": "chitchat",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 4096,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "whats a good name for a black cat"
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "casual"
+ },
+ {
+  "id": "h3-c04",
+  "group": "chitchat",
+  "lang": "en",
+  "intent": "chitchat",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "can you recommend a sci-fi book like the martian"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "casual"
+ },
+ {
+  "id": "h3-c05",
+  "group": "chitchat",
+  "lang": "en",
+  "intent": "chitchat",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "i'm bored"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "casual"
+ },
+ {
+  "id": "h3-c06",
+  "group": "chitchat",
+  "lang": "en",
+  "intent": "chitchat",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 4096,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "tell me a fun fact"
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "casual"
+ },
+ {
+  "id": "h3-c07",
+  "group": "chitchat",
+  "lang": "en",
+  "intent": "chitchat",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "good night!"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "casual"
+ },
+ {
+  "id": "h3-c08",
+  "group": "chitchat",
+  "lang": "en",
+  "intent": "chitchat",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "who would win, a gorilla or 100 ducks"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "casual"
+ },
+ {
+  "id": "h3-c09",
+  "group": "chitchat",
+  "lang": "en",
+  "intent": "chitchat",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 4096,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "what do you think about pineapple on pizza"
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "casual"
+ },
+ {
+  "id": "h3-c10",
+  "group": "chitchat",
+  "lang": "en",
+  "intent": "chitchat",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "how are you today"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "casual"
+ },
+ {
+  "id": "h3-c11",
+  "group": "chitchat",
+  "lang": "en",
+  "intent": "chitchat",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "do you think ai will take over my job"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "casual"
+ },
+ {
+  "id": "h3-c12",
+  "group": "chitchat",
+  "lang": "en",
+  "intent": "chitchat",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 4096,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "my friend keeps cancelling plans, should i be annoyed"
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "casual"
+ }
+]

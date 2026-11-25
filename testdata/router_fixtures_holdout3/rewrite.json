@@ -1,0 +1,312 @@
+[
+ {
+  "id": "h3-r01",
+  "group": "rewrite",
+  "lang": "en",
+  "intent": "rewrite",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "make this shorter and more polite: hey, you still havent sent the report, i need it today or the client will freak out"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "short email rewrite"
+ },
+ {
+  "id": "h3-r02",
+  "group": "rewrite",
+  "lang": "en",
+  "intent": "rewrite",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "fix grammar: me and him goes to the store yesterday and buyed some apple"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "grammar"
+ },
+ {
+  "id": "h3-r03",
+  "group": "rewrite",
+  "lang": "en",
+  "intent": "summarise",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 4096,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "summarise in 2 sentences:\n\nThe city council voted on Tuesday to approve a new bike lane network spanning 40 kilometres across the downtown core. Supporters argued that the lanes will reduce traffic fatalities, which rose 12 percent last year, and cut commuting times for the roughly 18,000 residents who already cycle daily. Opponents, mostly local business owners, warned that removing street parking could hurt sales, citing a similar project in a neighbouring town where foot traffic dipped for six months before recovering. The final plan includes protected barriers on major arteries, 600 new bike racks, and a pilot loading-zone programme for delivery trucks. Construction begins in March and is expected to take two years, funded by a mix of federal transit grants and a modest increase in parking fees."
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "short article summary"
+ },
+ {
+  "id": "h3-r04",
+  "group": "rewrite",
+  "lang": "en",
+  "intent": "translate",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "translate to french: the meeting has been moved to thursday at 3pm"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "short translation"
+ },
+ {
+  "id": "h3-r05",
+  "group": "rewrite",
+  "lang": "en",
+  "intent": "translate",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "translate to german, keep it technical: the service retries failed requests with exponential backoff and falls back to the replica after three attempts"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "tech translation"
+ },
+ {
+  "id": "h3-r06",
+  "group": "rewrite",
+  "lang": "en",
+  "intent": "rewrite",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 4096,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "make this more formal: gonna be late, traffic is crazy, start without me"
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "formal"
+ },
+ {
+  "id": "h3-r07",
+  "group": "rewrite",
+  "lang": "en",
+  "intent": "rewrite",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "turn into meeting minutes:\n- jan: db migration slipped a week\n- priya: needs 2 more devs for q3\n- decided: freeze features on the 14th\n- todo: tom to email vendor"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "notes to minutes"
+ },
+ {
+  "id": "h3-r08",
+  "group": "rewrite",
+  "lang": "en",
+  "intent": "rewrite",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "better commit message for: changed the thing in login so it doesnt crash when email null"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "commit msg"
+ },
+ {
+  "id": "h3-r09",
+  "group": "rewrite",
+  "lang": "en",
+  "intent": "rewrite",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 4096,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "explain what a mutex is like im 5"
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "eli5"
+ },
+ {
+  "id": "h3-r10",
+  "group": "rewrite",
+  "lang": "en",
+  "intent": "summarise",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "summarise this chat log:\ndev0: we should retry the cache and move on\ndev1: we should skip it the deploy and move on\ndev2: we should ask ops the invoice job and move on\ndev0: we should roll back the flaky test and move on\ndev1: we should pin the version the vpn and move on\ndev2: we should retry the cache and move on\ndev0: we should skip it the deploy and move on\ndev1: we should ask ops the invoice job and move on\ndev2: we should roll back the flaky test and move on\ndev0: we should pin the version the vpn and move on\ndev1: we should retry the cache and move on\ndev2: we should skip it the deploy and move on\ndev0: we should ask ops the invoice job and move on\ndev1: we should roll back the flaky test and move on\ndev2: we should pin the version the vpn and move on\ndev0: we should retry the cache and move on\ndev1: we should skip it the deploy and move on\ndev2: we should ask ops the invoice job and move on\ndev0: we should roll back the flaky test and move on\ndev1: we should pin the version the vpn and move on\ndev2: we should retry the cache and move on\ndev0: we should skip it the deploy and move on\ndev1: we should ask ops the invoice job and move on\ndev2: we should roll back the flaky test and move on\ndev0: we should pin the version the vpn and move on\ndev1: we should retry the cache and move on\ndev2: we should skip it the deploy and move on\ndev0: we should ask ops the invoice job and move on\ndev1: we should roll back the flaky test and move on\ndev2: we should pin the version the vpn and move on\ndev0: we should retry the cache and move on\ndev1: we should skip it the deploy and move on\ndev2: we should ask ops the invoice job and move on\ndev0: we should roll back the flaky test and move on\ndev1: we should pin the version the vpn and move on\ndev2: we should retry the cache and move on\ndev0: we should skip it the deploy and move on\ndev1: we should ask ops the invoice job and move on\ndev2: we should roll back the flaky test and move on\ndev0: we should pin the version the vpn and move on"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "chat-log summary"
+ },
+ {
+  "id": "h3-r11",
+  "group": "rewrite",
+  "lang": "en",
+  "intent": "summarise",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "summarise this clause and tell me what is risky for us as the supplier:\n\n\"Supplier shall indemnify Customer against all losses, whether direct or indirect, arising from any delay in delivery, notwithstanding Customer's own contributory negligence. Liability shall be uncapped. Customer may terminate for convenience on 5 days notice without payment for work in progress.\""
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "legal risk reading"
+ },
+ {
+  "id": "h3-r12",
+  "group": "rewrite",
+  "lang": "en",
+  "intent": "rewrite",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 4096,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "translate this poem to spanish keeping the rhyme and meter (a-b-a-b, iambic tetrameter):\n\nThe evening settles soft and slow,\nthe river hums a quiet tune,\nand lanterns on the water glow\nbeneath a thin and silver moon."
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "constrained creative translation"
+ },
+ {
+  "id": "h3-r13",
+  "group": "rewrite",
+  "lang": "en",
+  "intent": "rewrite",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "5 headline options for a blog post about switching our team to trunk-based development"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "headlines"
+ },
+ {
+  "id": "h3-r14",
+  "group": "rewrite",
+  "lang": "en",
+  "intent": "summarise",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 4096,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "tl;dr this paragraph in one line: The city council voted on Tuesday to approve a new bike lane network spanning 40 kilometres across the downtown core. Supporters argued that the lanes will reduce traffic fatalities, which rose 12 percent last year, and cut commuting times for the roughly 18,000 residents who already cycle daily"
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "one-liner"
+ }
+]

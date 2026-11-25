@@ -1,0 +1,5811 @@
+[
+ {
+  "id": "h3-t01",
+  "group": "toolloop",
+  "lang": "en",
+  "intent": "tool-read",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a coding agent working in the user's repository. Use the tools to inspect and edit files. Be concise."
+    },
+    {
+     "role": "user",
+     "content": "read cmd/main.go and tell me what it does"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_0",
+       "type": "function",
+       "function": {
+        "name": "run",
+        "arguments": "{\"cmd\": \"pwd\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_0",
+     "content": "/home/dev/repo"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "run",
+        "arguments": "{\"cmd\": \"git status --short\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_1",
+     "content": ""
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_2",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"cmd/main.go\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_2",
+     "content": "package main\n\nimport (\n\t\"log\"\n\t\"net/http\"\n)\n\nfunc main() {\n\thttp.HandleFunc(\"/healthz\", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte(\"ok\")) })\n\tlog.Fatal(http.ListenAndServe(\":8080\", nil))\n}"
+    }
+   ],
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "read_file",
+      "description": "Read a file",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "cmd": {
+         "type": "string"
+        }
+       }
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "run",
+      "description": "Run a shell command",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "cmd": {
+         "type": "string"
+        }
+       }
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "write_file",
+      "description": "Write a file",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "cmd": {
+         "type": "string"
+        }
+       }
+      }
+     }
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "read one small file, summarise"
+ },
+ {
+  "id": "h3-t02",
+  "group": "toolloop",
+  "lang": "en",
+  "intent": "tool-test",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a coding agent working in the user's repository. Use the tools to inspect and edit files. Be concise."
+    },
+    {
+     "role": "user",
+     "content": "run the tests"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_0",
+       "type": "function",
+       "function": {
+        "name": "run",
+        "arguments": "{\"cmd\": \"pwd\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_0",
+     "content": "/home/dev/repo"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "run",
+        "arguments": "{\"cmd\": \"git status --short\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_1",
+     "content": ""
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_2",
+       "type": "function",
+       "function": {
+        "name": "run",
+        "arguments": "{\"cmd\": \"go test ./...\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_2",
+     "content": "ok  \tgithub.com/acme/api/internal/store\t0.412s\nok  \tgithub.com/acme/api/internal/http\t0.288s\nPASS"
+    }
+   ],
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "read_file",
+      "description": "Read a file",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "cmd": {
+         "type": "string"
+        }
+       }
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "run",
+      "description": "Run a shell command",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "cmd": {
+         "type": "string"
+        }
+       }
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "write_file",
+      "description": "Write a file",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "cmd": {
+         "type": "string"
+        }
+       }
+      }
+     }
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "passing test output, just report"
+ },
+ {
+  "id": "h3-t03",
+  "group": "toolloop",
+  "lang": "en",
+  "intent": "tool-read",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 4096,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "what npm scripts do we have"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_0",
+       "name": "run",
+       "input": {
+        "cmd": "pwd"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_0",
+       "content": "/home/dev/repo"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_1",
+       "name": "run",
+       "input": {
+        "cmd": "git status --short"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_1",
+       "content": ""
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_2",
+       "name": "run",
+       "input": {
+        "cmd": "ls"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_2",
+       "content": "README.md\npackage.json\nsrc\ntsconfig.json"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_3",
+       "name": "read_file",
+       "input": {
+        "path": "package.json"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_3",
+       "content": "{\"name\":\"web\",\"scripts\":{\"dev\":\"vite\",\"build\":\"tsc && vite build\",\"test\":\"vitest run\",\"lint\":\"eslint src\"}}"
+      }
+     ]
+    }
+   ],
+   "system": "You are a coding agent working in the user's repository. Use the tools to inspect and edit files. Be concise.",
+   "tools": [
+    {
+     "name": "read_file",
+     "description": "Read a file",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "path": {
+        "type": "string"
+       },
+       "cmd": {
+        "type": "string"
+       }
+      }
+     }
+    },
+    {
+     "name": "run",
+     "description": "Run a shell command",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "path": {
+        "type": "string"
+       },
+       "cmd": {
+        "type": "string"
+       }
+      }
+     }
+    },
+    {
+     "name": "write_file",
+     "description": "Write a file",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "path": {
+        "type": "string"
+       },
+       "cmd": {
+        "type": "string"
+       }
+      }
+     }
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "list scripts from package.json"
+ },
+ {
+  "id": "h3-t04",
+  "group": "toolloop",
+  "lang": "en",
+  "intent": "tool-mechanical",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a coding agent working in the user's repository. Use the tools to inspect and edit files. Be concise."
+    },
+    {
+     "role": "user",
+     "content": "replace legacyFetch with httpClient.fetch everywhere in src, same signature, then run tests"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_0",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"src/auth/auth.ts\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_0",
+     "content": "import { legacyFetch } from '../http'\nexport function authLoad(url: string) {\n  return legacyFetch(url, {})\n}\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"src/cache/cache.ts\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_1",
+     "content": "import { legacyFetch } from '../http'\nexport function cacheLoad(url: string) {\n  return legacyFetch(url, {})\n}\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_2",
+       "type": "function",
+       "function": {
+        "name": "run",
+        "arguments": "{\"cmd\": \"grep -rn \\\"legacyFetch\\\" src/config\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_2",
+     "content": "src/config/config.ts:12:  return legacyFetch(url, opts)"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_3",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"src/db/db.ts\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_3",
+     "content": "import { legacyFetch } from '../http'\nexport function dbLoad(url: string) {\n  return legacyFetch(url, {})\n}\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_4",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"src/errors/errors.ts\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_4",
+     "content": "import { legacyFetch } from '../http'\nexport function errorsLoad(url: string) {\n  return legacyFetch(url, {})\n}\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_5",
+       "type": "function",
+       "function": {
+        "name": "run",
+        "arguments": "{\"cmd\": \"grep -rn \\\"legacyFetch\\\" src/handlers\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_5",
+     "content": "src/handlers/handlers.ts:15:  return legacyFetch(url, opts)"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_6",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"src/logger/logger.ts\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_6",
+     "content": "import { legacyFetch } from '../http'\nexport function loggerLoad(url: string) {\n  return legacyFetch(url, {})\n}\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_7",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"src/metrics/metrics.ts\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_7",
+     "content": "import { legacyFetch } from '../http'\nexport function metricsLoad(url: string) {\n  return legacyFetch(url, {})\n}\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_8",
+       "type": "function",
+       "function": {
+        "name": "run",
+        "arguments": "{\"cmd\": \"grep -rn \\\"legacyFetch\\\" src/router\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_8",
+     "content": "src/router/router.ts:18:  return legacyFetch(url, opts)"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_9",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"src/utils/utils.ts\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_9",
+     "content": "import { legacyFetch } from '../http'\nexport function utilsLoad(url: string) {\n  return legacyFetch(url, {})\n}\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_10",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"src/queue/queue.ts\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_10",
+     "content": "import { legacyFetch } from '../http'\nexport function queueLoad(url: string) {\n  return legacyFetch(url, {})\n}\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_11",
+       "type": "function",
+       "function": {
+        "name": "run",
+        "arguments": "{\"cmd\": \"grep -rn \\\"legacyFetch\\\" src/store\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_11",
+     "content": "src/store/store.ts:21:  return legacyFetch(url, opts)"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_12",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"src/client/client.ts\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_12",
+     "content": "import { legacyFetch } from '../http'\nexport function clientLoad(url: string) {\n  return legacyFetch(url, {})\n}\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_13",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"src/server/server.ts\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_13",
+     "content": "import { legacyFetch } from '../http'\nexport function serverLoad(url: string) {\n  return legacyFetch(url, {})\n}\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_14",
+       "type": "function",
+       "function": {
+        "name": "run",
+        "arguments": "{\"cmd\": \"grep -rn \\\"legacyFetch\\\" src/models\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_14",
+     "content": "src/models/models.ts:24:  return legacyFetch(url, opts)"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_15",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"src/jobs/jobs.ts\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_15",
+     "content": "import { legacyFetch } from '../http'\nexport function jobsLoad(url: string) {\n  return legacyFetch(url, {})\n}\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_16",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"src/mail/mail.ts\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_16",
+     "content": "import { legacyFetch } from '../http'\nexport function mailLoad(url: string) {\n  return legacyFetch(url, {})\n}\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_17",
+       "type": "function",
+       "function": {
+        "name": "run",
+        "arguments": "{\"cmd\": \"grep -rn \\\"legacyFetch\\\" src/limits\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_17",
+     "content": "src/limits/limits.ts:27:  return legacyFetch(url, opts)"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_18",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"src/session/session.ts\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_18",
+     "content": "import { legacyFetch } from '../http'\nexport function sessionLoad(url: string) {\n  return legacyFetch(url, {})\n}\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_19",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"src/hooks/hooks.ts\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_19",
+     "content": "import { legacyFetch } from '../http'\nexport function hooksLoad(url: string) {\n  return legacyFetch(url, {})\n}\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_20",
+       "type": "function",
+       "function": {
+        "name": "run",
+        "arguments": "{\"cmd\": \"grep -rn \\\"legacyFetch\\\" src/auth\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_20",
+     "content": "src/auth/auth.ts:30:  return legacyFetch(url, opts)"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_21",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"src/cache/cache.ts\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_21",
+     "content": "import { legacyFetch } from '../http'\nexport function cacheLoad(url: string) {\n  return legacyFetch(url, {})\n}\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_22",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"src/config/config.ts\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_22",
+     "content": "import { legacyFetch } from '../http'\nexport function configLoad(url: string) {\n  return legacyFetch(url, {})\n}\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_23",
+       "type": "function",
+       "function": {
+        "name": "run",
+        "arguments": "{\"cmd\": \"grep -rn \\\"legacyFetch\\\" src/db\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_23",
+     "content": "src/db/db.ts:33:  return legacyFetch(url, opts)"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_24",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"src/errors/errors.ts\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_24",
+     "content": "import { legacyFetch } from '../http'\nexport function errorsLoad(url: string) {\n  return legacyFetch(url, {})\n}\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_25",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"src/handlers/handlers.ts\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_25",
+     "content": "import { legacyFetch } from '../http'\nexport function handlersLoad(url: string) {\n  return legacyFetch(url, {})\n}\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_26",
+       "type": "function",
+       "function": {
+        "name": "run",
+        "arguments": "{\"cmd\": \"grep -rn \\\"legacyFetch\\\" src/logger\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_26",
+     "content": "src/logger/logger.ts:36:  return legacyFetch(url, opts)"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_27",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"src/metrics/metrics.ts\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_27",
+     "content": "import { legacyFetch } from '../http'\nexport function metricsLoad(url: string) {\n  return legacyFetch(url, {})\n}\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_28",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"src/router/router.ts\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_28",
+     "content": "import { legacyFetch } from '../http'\nexport function routerLoad(url: string) {\n  return legacyFetch(url, {})\n}\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_29",
+       "type": "function",
+       "function": {
+        "name": "run",
+        "arguments": "{\"cmd\": \"grep -rn \\\"legacyFetch\\\" src/utils\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_29",
+     "content": "src/utils/utils.ts:39:  return legacyFetch(url, opts)"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_30",
+       "type": "function",
+       "function": {
+        "name": "run",
+        "arguments": "{\"cmd\": \"sed -i 's/legacyFetch/httpClient.fetch/g' $(grep -rl legacyFetch src)\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_30",
+     "content": ""
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_31",
+       "type": "function",
+       "function": {
+        "name": "run",
+        "arguments": "{\"cmd\": \"npm test\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_31",
+     "content": "Test Files  14 passed (14)\n     Tests  96 passed (96)"
+    }
+   ],
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "read_file",
+      "description": "Read a file",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "cmd": {
+         "type": "string"
+        }
+       }
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "run",
+      "description": "Run a shell command",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "cmd": {
+         "type": "string"
+        }
+       }
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "write_file",
+      "description": "Write a file",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "cmd": {
+         "type": "string"
+        }
+       }
+      }
+     }
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "mechanical rename loop 60+ msgs passing tests"
+ },
+ {
+  "id": "h3-t05",
+  "group": "toolloop",
+  "lang": "en",
+  "intent": "tool-format",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 4096,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "pretty print config.json in place"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_0",
+       "name": "run",
+       "input": {
+        "cmd": "pwd"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_0",
+       "content": "/home/dev/repo"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_1",
+       "name": "run",
+       "input": {
+        "cmd": "git status --short"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_1",
+       "content": ""
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_2",
+       "name": "read_file",
+       "input": {
+        "path": "config.json"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_2",
+       "content": "{\"port\":8080,\"debug\":false,\"hosts\":[\"a.example.com\",\"b.example.com\"],\"retry\":{\"max\":3,\"backoff\":200}}"
+      }
+     ]
+    }
+   ],
+   "system": "You are a coding agent working in the user's repository. Use the tools to inspect and edit files. Be concise.",
+   "tools": [
+    {
+     "name": "read_file",
+     "description": "Read a file",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "path": {
+        "type": "string"
+       },
+       "cmd": {
+        "type": "string"
+       }
+      }
+     }
+    },
+    {
+     "name": "run",
+     "description": "Run a shell command",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "path": {
+        "type": "string"
+       },
+       "cmd": {
+        "type": "string"
+       }
+      }
+     }
+    },
+    {
+     "name": "write_file",
+     "description": "Write a file",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "path": {
+        "type": "string"
+       },
+       "cmd": {
+        "type": "string"
+       }
+      }
+     }
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "format json"
+ },
+ {
+  "id": "h3-t06",
+  "group": "toolloop",
+  "lang": "en",
+  "intent": "tool-git",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a coding agent working in the user's repository. Use the tools to inspect and edit files. Be concise."
+    },
+    {
+     "role": "user",
+     "content": "commit what we have with a sensible message"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_0",
+       "type": "function",
+       "function": {
+        "name": "run",
+        "arguments": "{\"cmd\": \"pwd\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_0",
+     "content": "/home/dev/repo"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "run",
+        "arguments": "{\"cmd\": \"git status --short\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_1",
+     "content": ""
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_2",
+       "type": "function",
+       "function": {
+        "name": "run",
+        "arguments": "{\"cmd\": \"git status --short\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_2",
+     "content": "M  internal/store/user.go\nM  internal/store/user_test.go"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_3",
+       "type": "function",
+       "function": {
+        "name": "run",
+        "arguments": "{\"cmd\": \"git diff --cached --stat\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_3",
+     "content": "internal/store/user.go      | 6 +++---\ninternal/store/user_test.go | 12 ++++++++++++\n2 files changed, 15 insertions(+), 3 deletions(-)"
+    }
+   ],
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "read_file",
+      "description": "Read a file",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "cmd": {
+         "type": "string"
+        }
+       }
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "run",
+      "description": "Run a shell command",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "cmd": {
+         "type": "string"
+        }
+       }
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "write_file",
+      "description": "Write a file",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "cmd": {
+         "type": "string"
+        }
+       }
+      }
+     }
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "trivial git commit"
+ },
+ {
+  "id": "h3-t07",
+  "group": "toolloop",
+  "lang": "en",
+  "intent": "tool-fix-simple",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a coding agent working in the user's repository. Use the tools to inspect and edit files. Be concise."
+    },
+    {
+     "role": "user",
+     "content": "tests fail, fix them"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_0",
+       "type": "function",
+       "function": {
+        "name": "run",
+        "arguments": "{\"cmd\": \"pwd\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_0",
+     "content": "/home/dev/repo"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "run",
+        "arguments": "{\"cmd\": \"git status --short\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_1",
+     "content": ""
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_2",
+       "type": "function",
+       "function": {
+        "name": "run",
+        "arguments": "{\"cmd\": \"go test ./...\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_2",
+     "content": "# github.com/acme/api/internal/store\ninternal/store/user.go:41:15: undefined: usrName\nFAIL\tgithub.com/acme/api/internal/store [build failed]"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_3",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"internal/store/user.go\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_3",
+     "content": "func (s *Store) Rename(id int, userName string) error {\n\t_, err := s.db.Exec(\"UPDATE users SET name=$1 WHERE id=$2\", usrName, id)\n\treturn err\n}"
+    }
+   ],
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "read_file",
+      "description": "Read a file",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "cmd": {
+         "type": "string"
+        }
+       }
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "run",
+      "description": "Run a shell command",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "cmd": {
+         "type": "string"
+        }
+       }
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "write_file",
+      "description": "Write a file",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "cmd": {
+         "type": "string"
+        }
+       }
+      }
+     }
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "obvious typo undefined var"
+ },
+ {
+  "id": "h3-t08",
+  "group": "toolloop",
+  "lang": "en",
+  "intent": "tool-race",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 4096,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "go test -race keeps flagging this, find out why and fix"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_0",
+       "name": "run",
+       "input": {
+        "cmd": "pwd"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_0",
+       "content": "/home/dev/repo"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_1",
+       "name": "run",
+       "input": {
+        "cmd": "git status --short"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_1",
+       "content": ""
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_2",
+       "name": "run",
+       "input": {
+        "cmd": "go test -race ./internal/pool"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_2",
+       "content": "WARNING: DATA RACE\nWrite at 0x00c0001a4090 by goroutine 9:\n  pool.(*Pool).Put()  pool.go:88\nPrevious read at 0x00c0001a4090 by goroutine 8:\n  pool.(*Pool).Get()  pool.go:61\nFAIL"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_3",
+       "name": "read_file",
+       "input": {
+        "path": "internal/pool/pool.go"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_3",
+       "content": "type Pool struct {\n\tmu    sync.Mutex\n\titems []*Conn\n\tclosed bool\n}\nfunc (p *Pool) Get() *Conn {\n\tif p.closed { return nil }\n\tp.mu.Lock(); defer p.mu.Unlock()\n\t...\n}\nfunc (p *Pool) Put(c *Conn) {\n\tp.mu.Lock(); defer p.mu.Unlock()\n\tif p.closed { c.Close(); return }\n\tp.items = append(p.items, c)\n}\nfunc (p *Pool) Close() { p.closed = true; ... }"
+      }
+     ]
+    }
+   ],
+   "system": "You are a coding agent working in the user's repository. Use the tools to inspect and edit files. Be concise.",
+   "tools": [
+    {
+     "name": "read_file",
+     "description": "Read a file",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "path": {
+        "type": "string"
+       },
+       "cmd": {
+        "type": "string"
+       }
+      }
+     }
+    },
+    {
+     "name": "run",
+     "description": "Run a shell command",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "path": {
+        "type": "string"
+       },
+       "cmd": {
+        "type": "string"
+       }
+      }
+     }
+    },
+    {
+     "name": "write_file",
+     "description": "Write a file",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "path": {
+        "type": "string"
+       },
+       "cmd": {
+        "type": "string"
+       }
+      }
+     }
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "data race on closed flag, moderate"
+ },
+ {
+  "id": "h3-t09",
+  "group": "toolloop",
+  "lang": "en",
+  "intent": "tool-build-fail",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 4096,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "build is red after the generics change, sort it out"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_0",
+       "name": "run",
+       "input": {
+        "cmd": "pwd"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_0",
+       "content": "/home/dev/repo"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_1",
+       "name": "run",
+       "input": {
+        "cmd": "git status --short"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_1",
+       "content": ""
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_2",
+       "name": "run",
+       "input": {
+        "cmd": "npx tsc --noEmit"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_2",
+       "content": "src/repo.ts(22,30): error TS2322: Type 'T | undefined' is not assignable to type 'T'.\nsrc/repo.ts(41,12): error TS2345: Argument of type 'Partial<T>' is not assignable to parameter of type 'Omit<T, \"id\">'.\n  Type 'Partial<T>' is not assignable to type 'Omit<T, \"id\">'.\n    Type 'T[Exclude<keyof T, \"id\">]' is not assignable to ..."
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_3",
+       "name": "read_file",
+       "input": {
+        "path": "src/repo.ts"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_3",
+       "content": "export class Repo<T extends {id: string}> {\n  private rows = new Map<string, T>()\n  get(id: string): T { return this.rows.get(id) }\n  update(id: string, patch: Partial<T>) { return this.save({...this.get(id), ...patch}) }\n  save(row: Omit<T,'id'>) { ... }\n}"
+      }
+     ]
+    }
+   ],
+   "system": "You are a coding agent working in the user's repository. Use the tools to inspect and edit files. Be concise.",
+   "tools": [
+    {
+     "name": "read_file",
+     "description": "Read a file",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "path": {
+        "type": "string"
+       },
+       "cmd": {
+        "type": "string"
+       }
+      }
+     }
+    },
+    {
+     "name": "run",
+     "description": "Run a shell command",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "path": {
+        "type": "string"
+       },
+       "cmd": {
+        "type": "string"
+       }
+      }
+     }
+    },
+    {
+     "name": "write_file",
+     "description": "Write a file",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "path": {
+        "type": "string"
+       },
+       "cmd": {
+        "type": "string"
+       }
+      }
+     }
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "generic type errors"
+ },
+ {
+  "id": "h3-t10",
+  "group": "toolloop",
+  "lang": "en",
+  "intent": "tool-refactor",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a coding agent working in the user's repository. Use the tools to inspect and edit files. Be concise."
+    },
+    {
+     "role": "user",
+     "content": "convert the services dir from callbacks to async/await. keep behaviour, keep tests green"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_0",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"services/auth/auth.ts\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_0",
+     "content": "import { legacyFetch } from '../http'\nexport function authLoad(url: string) {\n  return legacyFetch(url, {})\n}\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"services/cache/cache.ts\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_1",
+     "content": "import { legacyFetch } from '../http'\nexport function cacheLoad(url: string) {\n  return legacyFetch(url, {})\n}\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_2",
+       "type": "function",
+       "function": {
+        "name": "run",
+        "arguments": "{\"cmd\": \"grep -rn \\\"legacyFetch\\\" services/config\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_2",
+     "content": "services/config/config.ts:12:  return legacyFetch(url, opts)"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_3",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"services/db/db.ts\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_3",
+     "content": "import { legacyFetch } from '../http'\nexport function dbLoad(url: string) {\n  return legacyFetch(url, {})\n}\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_4",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"services/errors/errors.ts\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_4",
+     "content": "import { legacyFetch } from '../http'\nexport function errorsLoad(url: string) {\n  return legacyFetch(url, {})\n}\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_5",
+       "type": "function",
+       "function": {
+        "name": "run",
+        "arguments": "{\"cmd\": \"grep -rn \\\"legacyFetch\\\" services/handlers\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_5",
+     "content": "services/handlers/handlers.ts:15:  return legacyFetch(url, opts)"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_6",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"services/logger/logger.ts\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_6",
+     "content": "import { legacyFetch } from '../http'\nexport function loggerLoad(url: string) {\n  return legacyFetch(url, {})\n}\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_7",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"services/metrics/metrics.ts\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_7",
+     "content": "import { legacyFetch } from '../http'\nexport function metricsLoad(url: string) {\n  return legacyFetch(url, {})\n}\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_8",
+       "type": "function",
+       "function": {
+        "name": "run",
+        "arguments": "{\"cmd\": \"grep -rn \\\"legacyFetch\\\" services/router\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_8",
+     "content": "services/router/router.ts:18:  return legacyFetch(url, opts)"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_9",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"services/utils/utils.ts\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_9",
+     "content": "import { legacyFetch } from '../http'\nexport function utilsLoad(url: string) {\n  return legacyFetch(url, {})\n}\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_10",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"services/queue/queue.ts\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_10",
+     "content": "import { legacyFetch } from '../http'\nexport function queueLoad(url: string) {\n  return legacyFetch(url, {})\n}\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_11",
+       "type": "function",
+       "function": {
+        "name": "run",
+        "arguments": "{\"cmd\": \"grep -rn \\\"legacyFetch\\\" services/store\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_11",
+     "content": "services/store/store.ts:21:  return legacyFetch(url, opts)"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_12",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"services/client/client.ts\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_12",
+     "content": "import { legacyFetch } from '../http'\nexport function clientLoad(url: string) {\n  return legacyFetch(url, {})\n}\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_13",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"services/server/server.ts\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_13",
+     "content": "import { legacyFetch } from '../http'\nexport function serverLoad(url: string) {\n  return legacyFetch(url, {})\n}\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_14",
+       "type": "function",
+       "function": {
+        "name": "run",
+        "arguments": "{\"cmd\": \"npm test\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_14",
+     "content": "FAIL services/queue.test.ts\n  ● retries on error › calls back once after 3 attempts\n    expect(received).toBe(expected)\n    Expected: 3\n    Received: 1"
+    }
+   ],
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "read_file",
+      "description": "Read a file",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "cmd": {
+         "type": "string"
+        }
+       }
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "run",
+      "description": "Run a shell command",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "cmd": {
+         "type": "string"
+        }
+       }
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "write_file",
+      "description": "Write a file",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "cmd": {
+         "type": "string"
+        }
+       }
+      }
+     }
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "multi-file refactor with a behavioural test failure"
+ },
+ {
+  "id": "h3-t11",
+  "group": "toolloop",
+  "lang": "en",
+  "intent": "tool-hang",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 4096,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "integration tests hang forever on CI but not locally, find it"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_0",
+       "name": "run",
+       "input": {
+        "cmd": "pwd"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_0",
+       "content": "/home/dev/repo"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_1",
+       "name": "run",
+       "input": {
+        "cmd": "git status --short"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_1",
+       "content": ""
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_2",
+       "name": "run",
+       "input": {
+        "cmd": "go test ./it -timeout 30s"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_2",
+       "content": "panic: test timed out after 30s\n\ngoroutine 18 [semacquire, 29 minutes]:\nsync.(*RWMutex).RLock(...)\ngithub.com/acme/api/internal/cache.(*Cache).Get(0xc0000b2000)\n\tcache.go:57 +0x9b\ngithub.com/acme/api/internal/cache.(*Cache).refreshLocked(0xc0000b2000)\n\tcache.go:112 +0x1f4\ngoroutine 19 [sync.Mutex.Lock]:\ncache.(*Cache).Set\n\tcache.go:80"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_3",
+       "name": "read_file",
+       "input": {
+        "path": "internal/cache/cache.go",
+        "offset": 50
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_3",
+       "content": "func (c *Cache) Get(k string) any {\n\tc.mu.RLock(); defer c.mu.RUnlock()\n\tif v, ok := c.m[k]; ok && !c.stale(v) { return v.val }\n\treturn c.refreshLocked(k)\n}\nfunc (c *Cache) refreshLocked(k string) any {\n\tv := c.loader(k)\n\tc.Set(k, v)\n\treturn v\n}"
+      }
+     ]
+    }
+   ],
+   "system": "You are a coding agent working in the user's repository. Use the tools to inspect and edit files. Be concise.",
+   "tools": [
+    {
+     "name": "read_file",
+     "description": "Read a file",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "path": {
+        "type": "string"
+       },
+       "cmd": {
+        "type": "string"
+       }
+      }
+     }
+    },
+    {
+     "name": "run",
+     "description": "Run a shell command",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "path": {
+        "type": "string"
+       },
+       "cmd": {
+        "type": "string"
+       }
+      }
+     }
+    },
+    {
+     "name": "write_file",
+     "description": "Write a file",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "path": {
+        "type": "string"
+       },
+       "cmd": {
+        "type": "string"
+       }
+      }
+     }
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "rwlock re-entry deadlock"
+ },
+ {
+  "id": "h3-t12",
+  "group": "toolloop",
+  "lang": "en",
+  "intent": "tool-edit",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a coding agent working in the user's repository. Use the tools to inspect and edit files. Be concise."
+    },
+    {
+     "role": "user",
+     "content": "add a line to the README saying we need go 1.22+"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_0",
+       "type": "function",
+       "function": {
+        "name": "run",
+        "arguments": "{\"cmd\": \"pwd\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_0",
+     "content": "/home/dev/repo"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "run",
+        "arguments": "{\"cmd\": \"git status --short\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_1",
+     "content": ""
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_2",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"README.md\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_2",
+     "content": "# api\n\nSmall HTTP service.\n\n## Build\n\n    make build\n"
+    }
+   ],
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "read_file",
+      "description": "Read a file",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "cmd": {
+         "type": "string"
+        }
+       }
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "run",
+      "description": "Run a shell command",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "cmd": {
+         "type": "string"
+        }
+       }
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "write_file",
+      "description": "Write a file",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "cmd": {
+         "type": "string"
+        }
+       }
+      }
+     }
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "one-line doc edit"
+ },
+ {
+  "id": "h3-t13",
+  "group": "toolloop",
+  "lang": "en",
+  "intent": "tool-rename",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 4096,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "rename the function getUsr to getUser in internal/users"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_0",
+       "name": "run",
+       "input": {
+        "cmd": "pwd"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_0",
+       "content": "/home/dev/repo"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_1",
+       "name": "run",
+       "input": {
+        "cmd": "git status --short"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_1",
+       "content": ""
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_2",
+       "name": "run",
+       "input": {
+        "cmd": "grep -rn getUsr internal/users"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_2",
+       "content": "internal/users/users.go:14:func getUsr(id int) *User {\ninternal/users/users.go:30:\treturn getUsr(id)\ninternal/users/users_test.go:9:\tu := getUsr(1)"
+      }
+     ]
+    }
+   ],
+   "system": "You are a coding agent working in the user's repository. Use the tools to inspect and edit files. Be concise.",
+   "tools": [
+    {
+     "name": "read_file",
+     "description": "Read a file",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "path": {
+        "type": "string"
+       },
+       "cmd": {
+        "type": "string"
+       }
+      }
+     }
+    },
+    {
+     "name": "run",
+     "description": "Run a shell command",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "path": {
+        "type": "string"
+       },
+       "cmd": {
+        "type": "string"
+       }
+      }
+     }
+    },
+    {
+     "name": "write_file",
+     "description": "Write a file",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "path": {
+        "type": "string"
+       },
+       "cmd": {
+        "type": "string"
+       }
+      }
+     }
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "3-site rename"
+ },
+ {
+  "id": "h3-t14",
+  "group": "toolloop",
+  "lang": "en",
+  "intent": "tool-run",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a coding agent working in the user's repository. Use the tools to inspect and edit files. Be concise."
+    },
+    {
+     "role": "user",
+     "content": "install deps then lint"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_0",
+       "type": "function",
+       "function": {
+        "name": "run",
+        "arguments": "{\"cmd\": \"pwd\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_0",
+     "content": "/home/dev/repo"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "run",
+        "arguments": "{\"cmd\": \"git status --short\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_1",
+     "content": ""
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_2",
+       "type": "function",
+       "function": {
+        "name": "run",
+        "arguments": "{\"cmd\": \"npm install\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_2",
+     "content": "added 312 packages in 9s"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_3",
+       "type": "function",
+       "function": {
+        "name": "run",
+        "arguments": "{\"cmd\": \"npm run lint\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_3",
+     "content": "> eslint src\n\n(no problems)"
+    }
+   ],
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "read_file",
+      "description": "Read a file",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "cmd": {
+         "type": "string"
+        }
+       }
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "run",
+      "description": "Run a shell command",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "cmd": {
+         "type": "string"
+        }
+       }
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "write_file",
+      "description": "Write a file",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "cmd": {
+         "type": "string"
+        }
+       }
+      }
+     }
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "all passing"
+ },
+ {
+  "id": "h3-t15",
+  "group": "toolloop",
+  "lang": "en",
+  "intent": "tool-lint",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 4096,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "fix the lint errors"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_0",
+       "name": "run",
+       "input": {
+        "cmd": "pwd"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_0",
+       "content": "/home/dev/repo"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_1",
+       "name": "run",
+       "input": {
+        "cmd": "git status --short"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_1",
+       "content": ""
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_2",
+       "name": "run",
+       "input": {
+        "cmd": "npm run lint"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_2",
+       "content": "src/a.ts\n  3:8  error  'fs' is defined but never used  @typescript-eslint/no-unused-vars\nsrc/b.ts\n  1:10  error  'path' is defined but never used  @typescript-eslint/no-unused-vars\n  2:10  error  'os' is defined but never used  @typescript-eslint/no-unused-vars\n\n3 problems (3 errors, 0 warnings)"
+      }
+     ]
+    }
+   ],
+   "system": "You are a coding agent working in the user's repository. Use the tools to inspect and edit files. Be concise.",
+   "tools": [
+    {
+     "name": "read_file",
+     "description": "Read a file",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "path": {
+        "type": "string"
+       },
+       "cmd": {
+        "type": "string"
+       }
+      }
+     }
+    },
+    {
+     "name": "run",
+     "description": "Run a shell command",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "path": {
+        "type": "string"
+       },
+       "cmd": {
+        "type": "string"
+       }
+      }
+     }
+    },
+    {
+     "name": "write_file",
+     "description": "Write a file",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "path": {
+        "type": "string"
+       },
+       "cmd": {
+        "type": "string"
+       }
+      }
+     }
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "unused imports"
+ },
+ {
+  "id": "h3-t16",
+  "group": "toolloop",
+  "lang": "en",
+  "intent": "tool-migration",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a coding agent working in the user's repository. Use the tools to inspect and edit files. Be concise."
+    },
+    {
+     "role": "user",
+     "content": "apply the new migration, it blew up earlier"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_0",
+       "type": "function",
+       "function": {
+        "name": "run",
+        "arguments": "{\"cmd\": \"psql $DB -f migrations/0042_orders_fk.sql\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_0",
+     "content": "ERROR:  insert or update on table \"orders\" violates foreign key constraint \"orders_customer_fk\"\nDETAIL:  Key (customer_id)=(8812) is not present in table \"customers\"."
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"migrations/0042_orders_fk.sql\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_1",
+     "content": "ALTER TABLE orders ADD CONSTRAINT orders_customer_fk FOREIGN KEY (customer_id) REFERENCES customers(id);"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_2",
+       "type": "function",
+       "function": {
+        "name": "run",
+        "arguments": "{\"cmd\": \"psql $DB -c \\\"select count(*) from orders o left join customers c on c.id=o.customer_id where c.id is null\\\"\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_2",
+     "content": "count\n-------\n   217"
+    }
+   ],
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "read_file",
+      "description": "Read a file",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "cmd": {
+         "type": "string"
+        }
+       }
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "run",
+      "description": "Run a shell command",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "cmd": {
+         "type": "string"
+        }
+       }
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "write_file",
+      "description": "Write a file",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "cmd": {
+         "type": "string"
+        }
+       }
+      }
+     }
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "orphan rows blocking FK, needs a decision"
+ },
+ {
+  "id": "h3-t17",
+  "group": "toolloop",
+  "lang": "en",
+  "intent": "tool-perf",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 4096,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "p99 on /search doubled after friday's deploy. figure out why"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_0",
+       "name": "run",
+       "input": {
+        "cmd": "pwd"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_0",
+       "content": "/home/dev/repo"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_1",
+       "name": "run",
+       "input": {
+        "cmd": "git status --short"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_1",
+       "content": ""
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_2",
+       "name": "run",
+       "input": {
+        "cmd": "git log --since=3.days --oneline -- internal/search"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_2",
+       "content": "a91c3e2 search: switch tokenizer to unicode-aware\n77b02d1 search: add per-tenant result cache\n5ce9f10 bump deps"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_3",
+       "name": "run",
+       "input": {
+        "cmd": "go test -bench=Search -cpuprofile=cpu.out ./internal/search && go tool pprof -top cpu.out | head -12"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_3",
+       "content": "      flat  flat%   sum%        cum   cum%\n    2.10s 31.2%  31.2%      2.10s 31.2%  runtime.mallocgc\n    1.44s 21.4%  52.6%      1.52s 22.6%  internal/search.(*Index).tokenize\n    0.61s  9.1%  61.7%      1.95s 29.0%  regexp.(*Regexp).FindAllString\n    0.40s  5.9%  67.6%      0.40s  5.9%  runtime.scanobject"
+      }
+     ]
+    }
+   ],
+   "system": "You are a coding agent working in the user's repository. Use the tools to inspect and edit files. Be concise.",
+   "tools": [
+    {
+     "name": "read_file",
+     "description": "Read a file",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "path": {
+        "type": "string"
+       },
+       "cmd": {
+        "type": "string"
+       }
+      }
+     }
+    },
+    {
+     "name": "run",
+     "description": "Run a shell command",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "path": {
+        "type": "string"
+       },
+       "cmd": {
+        "type": "string"
+       }
+      }
+     }
+    },
+    {
+     "name": "write_file",
+     "description": "Write a file",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "path": {
+        "type": "string"
+       },
+       "cmd": {
+        "type": "string"
+       }
+      }
+     }
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "profile reading, causal reasoning across commits"
+ },
+ {
+  "id": "h3-t18",
+  "group": "toolloop",
+  "lang": "en",
+  "intent": "tool-test-write",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a coding agent working in the user's repository. Use the tools to inspect and edit files. Be concise."
+    },
+    {
+     "role": "user",
+     "content": "write a unit test for slugify()"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_0",
+       "type": "function",
+       "function": {
+        "name": "run",
+        "arguments": "{\"cmd\": \"pwd\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_0",
+     "content": "/home/dev/repo"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "run",
+        "arguments": "{\"cmd\": \"git status --short\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_1",
+     "content": ""
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_2",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"util/slug.go\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_2",
+     "content": "func Slugify(s string) string {\n\ts = strings.ToLower(strings.TrimSpace(s))\n\ts = nonAlnum.ReplaceAllString(s, \"-\")\n\treturn strings.Trim(s, \"-\")\n}"
+    }
+   ],
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "read_file",
+      "description": "Read a file",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "cmd": {
+         "type": "string"
+        }
+       }
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "run",
+      "description": "Run a shell command",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "cmd": {
+         "type": "string"
+        }
+       }
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "write_file",
+      "description": "Write a file",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "cmd": {
+         "type": "string"
+        }
+       }
+      }
+     }
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "small pure-function test"
+ },
+ {
+  "id": "h3-t19",
+  "group": "toolloop",
+  "lang": "en",
+  "intent": "tool-docker",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 4096,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "docker build fails, why"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_0",
+       "name": "run",
+       "input": {
+        "cmd": "pwd"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_0",
+       "content": "/home/dev/repo"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_1",
+       "name": "run",
+       "input": {
+        "cmd": "git status --short"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_1",
+       "content": ""
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_2",
+       "name": "run",
+       "input": {
+        "cmd": "docker build ."
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_2",
+       "content": "Step 5/9 : RUN pip install -r requirements.txt\n ---> Running in 3f2a\nERROR: Failed building wheel for cryptography\n  error: command 'gcc' failed: No such file or directory\nThe command '/bin/sh -c pip install -r requirements.txt' returned a non-zero code: 1"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_3",
+       "name": "read_file",
+       "input": {
+        "path": "Dockerfile"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_3",
+       "content": "FROM python:3.12-alpine\nWORKDIR /app\nCOPY requirements.txt .\nRUN pip install -r requirements.txt\nCOPY . .\nCMD [\"python\",\"main.py\"]"
+      }
+     ]
+    }
+   ],
+   "system": "You are a coding agent working in the user's repository. Use the tools to inspect and edit files. Be concise.",
+   "tools": [
+    {
+     "name": "read_file",
+     "description": "Read a file",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "path": {
+        "type": "string"
+       },
+       "cmd": {
+        "type": "string"
+       }
+      }
+     }
+    },
+    {
+     "name": "run",
+     "description": "Run a shell command",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "path": {
+        "type": "string"
+       },
+       "cmd": {
+        "type": "string"
+       }
+      }
+     }
+    },
+    {
+     "name": "write_file",
+     "description": "Write a file",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "path": {
+        "type": "string"
+       },
+       "cmd": {
+        "type": "string"
+       }
+      }
+     }
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "missing build deps on alpine"
+ },
+ {
+  "id": "h3-t20",
+  "group": "toolloop",
+  "lang": "en",
+  "intent": "tool-ci",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a coding agent working in the user's repository. Use the tools to inspect and edit files. Be concise."
+    },
+    {
+     "role": "user",
+     "content": "CI is red, look at the workflow"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_0",
+       "type": "function",
+       "function": {
+        "name": "run",
+        "arguments": "{\"cmd\": \"pwd\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_0",
+     "content": "/home/dev/repo"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "run",
+        "arguments": "{\"cmd\": \"git status --short\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_1",
+     "content": ""
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_2",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \".github/workflows/ci.yml\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_2",
+     "content": "jobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - uses: actions/setup-node@v4\n        with: { node-version: 16 }\n      - run: npm ci\n      - run: npm test"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_3",
+       "type": "function",
+       "function": {
+        "name": "run",
+        "arguments": "{\"cmd\": \"gh run view --log-failed | tail -5\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_3",
+     "content": "npm ERR! engine Unsupported engine: wanted node >=18 (current: v16.20.2)"
+    }
+   ],
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "read_file",
+      "description": "Read a file",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "cmd": {
+         "type": "string"
+        }
+       }
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "run",
+      "description": "Run a shell command",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "cmd": {
+         "type": "string"
+        }
+       }
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "write_file",
+      "description": "Write a file",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "cmd": {
+         "type": "string"
+        }
+       }
+      }
+     }
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "wrong node version"
+ },
+ {
+  "id": "h3-t21",
+  "group": "toolloop",
+  "lang": "en",
+  "intent": "tool-review",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 4096,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "review this PR for auth issues before i merge"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_0",
+       "name": "run",
+       "input": {
+        "cmd": "pwd"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_0",
+       "content": "/home/dev/repo"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_1",
+       "name": "run",
+       "input": {
+        "cmd": "git status --short"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_1",
+       "content": ""
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_2",
+       "name": "run",
+       "input": {
+        "cmd": "gh pr diff 482"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_2",
+       "content": "+func (h *Handler) DeleteProject(w http.ResponseWriter, r *http.Request) {\n+\tid := chi.URLParam(r, \"id\")\n+\tuser := auth.FromContext(r.Context())\n+\tif user == nil { http.Error(w, \"unauthorized\", 401); return }\n+\tif err := h.store.DeleteProject(r.Context(), id); err != nil {\n+\t\thttp.Error(w, err.Error(), 500); return\n+\t}\n+\tw.WriteHeader(204)\n+}\n+\n+func (s *Store) DeleteProject(ctx context.Context, id string) error {\n+\t_, err := s.db.ExecContext(ctx, \"DELETE FROM projects WHERE id = '\"+id+\"'\")\n+\treturn err\n+}"
+      }
+     ]
+    }
+   ],
+   "system": "You are a coding agent working in the user's repository. Use the tools to inspect and edit files. Be concise.",
+   "tools": [
+    {
+     "name": "read_file",
+     "description": "Read a file",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "path": {
+        "type": "string"
+       },
+       "cmd": {
+        "type": "string"
+       }
+      }
+     }
+    },
+    {
+     "name": "run",
+     "description": "Run a shell command",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "path": {
+        "type": "string"
+       },
+       "cmd": {
+        "type": "string"
+       }
+      }
+     }
+    },
+    {
+     "name": "write_file",
+     "description": "Write a file",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "path": {
+        "type": "string"
+       },
+       "cmd": {
+        "type": "string"
+       }
+      }
+     }
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "authz + injection review of a diff"
+ },
+ {
+  "id": "h3-t22",
+  "group": "toolloop",
+  "lang": "en",
+  "intent": "tool-feature",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a coding agent working in the user's repository. Use the tools to inspect and edit files. Be concise."
+    },
+    {
+     "role": "user",
+     "content": "implement cursor pagination on GET /orders across handler, store and the openapi spec"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_0",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"internal/auth/auth.ts\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_0",
+     "content": "import { legacyFetch } from '../http'\nexport function authLoad(url: string) {\n  return legacyFetch(url, {})\n}\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"internal/cache/cache.ts\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_1",
+     "content": "import { legacyFetch } from '../http'\nexport function cacheLoad(url: string) {\n  return legacyFetch(url, {})\n}\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_2",
+       "type": "function",
+       "function": {
+        "name": "run",
+        "arguments": "{\"cmd\": \"grep -rn \\\"legacyFetch\\\" internal/config\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_2",
+     "content": "internal/config/config.ts:12:  return legacyFetch(url, opts)"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_3",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"internal/db/db.ts\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_3",
+     "content": "import { legacyFetch } from '../http'\nexport function dbLoad(url: string) {\n  return legacyFetch(url, {})\n}\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_4",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"internal/errors/errors.ts\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_4",
+     "content": "import { legacyFetch } from '../http'\nexport function errorsLoad(url: string) {\n  return legacyFetch(url, {})\n}\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_5",
+       "type": "function",
+       "function": {
+        "name": "run",
+        "arguments": "{\"cmd\": \"grep -rn \\\"legacyFetch\\\" internal/handlers\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_5",
+     "content": "internal/handlers/handlers.ts:15:  return legacyFetch(url, opts)"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_6",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"internal/logger/logger.ts\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_6",
+     "content": "import { legacyFetch } from '../http'\nexport function loggerLoad(url: string) {\n  return legacyFetch(url, {})\n}\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_7",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"internal/metrics/metrics.ts\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_7",
+     "content": "import { legacyFetch } from '../http'\nexport function metricsLoad(url: string) {\n  return legacyFetch(url, {})\n}\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_8",
+       "type": "function",
+       "function": {
+        "name": "run",
+        "arguments": "{\"cmd\": \"grep -rn \\\"legacyFetch\\\" internal/router\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_8",
+     "content": "internal/router/router.ts:18:  return legacyFetch(url, opts)"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_9",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"internal/utils/utils.ts\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_9",
+     "content": "import { legacyFetch } from '../http'\nexport function utilsLoad(url: string) {\n  return legacyFetch(url, {})\n}\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_10",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"internal/queue/queue.ts\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_10",
+     "content": "import { legacyFetch } from '../http'\nexport function queueLoad(url: string) {\n  return legacyFetch(url, {})\n}\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_11",
+       "type": "function",
+       "function": {
+        "name": "run",
+        "arguments": "{\"cmd\": \"grep -rn \\\"legacyFetch\\\" internal/store\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_11",
+     "content": "internal/store/store.ts:21:  return legacyFetch(url, opts)"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_12",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"internal/client/client.ts\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_12",
+     "content": "import { legacyFetch } from '../http'\nexport function clientLoad(url: string) {\n  return legacyFetch(url, {})\n}\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_13",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"internal/server/server.ts\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_13",
+     "content": "import { legacyFetch } from '../http'\nexport function serverLoad(url: string) {\n  return legacyFetch(url, {})\n}\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_14",
+       "type": "function",
+       "function": {
+        "name": "run",
+        "arguments": "{\"cmd\": \"grep -rn \\\"legacyFetch\\\" internal/models\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_14",
+     "content": "internal/models/models.ts:24:  return legacyFetch(url, opts)"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_15",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"internal/jobs/jobs.ts\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_15",
+     "content": "import { legacyFetch } from '../http'\nexport function jobsLoad(url: string) {\n  return legacyFetch(url, {})\n}\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_16",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"internal/mail/mail.ts\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_16",
+     "content": "import { legacyFetch } from '../http'\nexport function mailLoad(url: string) {\n  return legacyFetch(url, {})\n}\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_17",
+       "type": "function",
+       "function": {
+        "name": "run",
+        "arguments": "{\"cmd\": \"grep -rn \\\"legacyFetch\\\" internal/limits\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_17",
+     "content": "internal/limits/limits.ts:27:  return legacyFetch(url, opts)"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_18",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"internal/session/session.ts\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_18",
+     "content": "import { legacyFetch } from '../http'\nexport function sessionLoad(url: string) {\n  return legacyFetch(url, {})\n}\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_19",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"internal/hooks/hooks.ts\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_19",
+     "content": "import { legacyFetch } from '../http'\nexport function hooksLoad(url: string) {\n  return legacyFetch(url, {})\n}\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_20",
+       "type": "function",
+       "function": {
+        "name": "run",
+        "arguments": "{\"cmd\": \"grep -rn \\\"legacyFetch\\\" internal/auth\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_20",
+     "content": "internal/auth/auth.ts:30:  return legacyFetch(url, opts)"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_21",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"internal/cache/cache.ts\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_21",
+     "content": "import { legacyFetch } from '../http'\nexport function cacheLoad(url: string) {\n  return legacyFetch(url, {})\n}\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_22",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"internal/config/config.ts\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_22",
+     "content": "import { legacyFetch } from '../http'\nexport function configLoad(url: string) {\n  return legacyFetch(url, {})\n}\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_23",
+       "type": "function",
+       "function": {
+        "name": "run",
+        "arguments": "{\"cmd\": \"grep -rn \\\"legacyFetch\\\" internal/db\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_23",
+     "content": "internal/db/db.ts:33:  return legacyFetch(url, opts)"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_24",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"internal/errors/errors.ts\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_24",
+     "content": "import { legacyFetch } from '../http'\nexport function errorsLoad(url: string) {\n  return legacyFetch(url, {})\n}\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_25",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"internal/handlers/handlers.ts\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_25",
+     "content": "import { legacyFetch } from '../http'\nexport function handlersLoad(url: string) {\n  return legacyFetch(url, {})\n}\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_26",
+       "type": "function",
+       "function": {
+        "name": "run",
+        "arguments": "{\"cmd\": \"go test ./internal/orders\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_26",
+     "content": "ok  \tgithub.com/acme/api/internal/store\t0.412s\nok  \tgithub.com/acme/api/internal/http\t0.288s\nPASS"
+    }
+   ],
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "read_file",
+      "description": "Read a file",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "cmd": {
+         "type": "string"
+        }
+       }
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "run",
+      "description": "Run a shell command",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "cmd": {
+         "type": "string"
+        }
+       }
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "write_file",
+      "description": "Write a file",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "cmd": {
+         "type": "string"
+        }
+       }
+      }
+     }
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "multi-layer feature, routine steps now"
+ },
+ {
+  "id": "h3-t23",
+  "group": "toolloop",
+  "lang": "en",
+  "intent": "tool-cleanup",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 4096,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "nuke the tmp build dir"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_0",
+       "name": "run",
+       "input": {
+        "cmd": "pwd"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_0",
+       "content": "/home/dev/repo"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_1",
+       "name": "run",
+       "input": {
+        "cmd": "git status --short"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_1",
+       "content": ""
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_2",
+       "name": "run",
+       "input": {
+        "cmd": "rm -rf tmp/build"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_2",
+       "content": ""
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_3",
+       "name": "run",
+       "input": {
+        "cmd": "ls tmp"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_3",
+       "content": "cache\nlogs"
+      }
+     ]
+    }
+   ],
+   "system": "You are a coding agent working in the user's repository. Use the tools to inspect and edit files. Be concise.",
+   "tools": [
+    {
+     "name": "read_file",
+     "description": "Read a file",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "path": {
+        "type": "string"
+       },
+       "cmd": {
+        "type": "string"
+       }
+      }
+     }
+    },
+    {
+     "name": "run",
+     "description": "Run a shell command",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "path": {
+        "type": "string"
+       },
+       "cmd": {
+        "type": "string"
+       }
+      }
+     }
+    },
+    {
+     "name": "write_file",
+     "description": "Write a file",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "path": {
+        "type": "string"
+       },
+       "cmd": {
+        "type": "string"
+       }
+      }
+     }
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "trivial cleanup"
+ },
+ {
+  "id": "h3-t24",
+  "group": "toolloop",
+  "lang": "en",
+  "intent": "tool-curl",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a coding agent working in the user's repository. Use the tools to inspect and edit files. Be concise."
+    },
+    {
+     "role": "user",
+     "content": "is staging up?"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_0",
+       "type": "function",
+       "function": {
+        "name": "run",
+        "arguments": "{\"cmd\": \"pwd\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_0",
+     "content": "/home/dev/repo"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "run",
+        "arguments": "{\"cmd\": \"git status --short\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_1",
+     "content": ""
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_2",
+       "type": "function",
+       "function": {
+        "name": "run",
+        "arguments": "{\"cmd\": \"curl -s -o /dev/null -w '%{http_code}' https://staging.acme.dev/healthz\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_2",
+     "content": "200"
+    }
+   ],
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "read_file",
+      "description": "Read a file",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "cmd": {
+         "type": "string"
+        }
+       }
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "run",
+      "description": "Run a shell command",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "cmd": {
+         "type": "string"
+        }
+       }
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "write_file",
+      "description": "Write a file",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "cmd": {
+         "type": "string"
+        }
+       }
+      }
+     }
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "status 200"
+ },
+ {
+  "id": "h3-t25",
+  "group": "toolloop",
+  "lang": "en",
+  "intent": "tool-concurrency",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 4096,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "the counters in stats are losing increments under load, fix without slowing the hot path much"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_0",
+       "name": "run",
+       "input": {
+        "cmd": "pwd"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_0",
+       "content": "/home/dev/repo"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_1",
+       "name": "run",
+       "input": {
+        "cmd": "git status --short"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_1",
+       "content": ""
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_2",
+       "name": "read_file",
+       "input": {
+        "path": "stats/stats.go"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_2",
+       "content": "type Stats struct { hits map[string]int; mu sync.RWMutex }\nfunc (s *Stats) Inc(k string) {\n\ts.mu.RLock()\n\ts.hits[k]++\n\ts.mu.RUnlock()\n}"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_3",
+       "name": "run",
+       "input": {
+        "cmd": "go test -race -run TestInc -count=1 ./stats"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_3",
+       "content": "WARNING: DATA RACE\nWrite at ... by goroutine 14: stats.(*Stats).Inc stats.go:5\nFAIL"
+      }
+     ]
+    }
+   ],
+   "system": "You are a coding agent working in the user's repository. Use the tools to inspect and edit files. Be concise.",
+   "tools": [
+    {
+     "name": "read_file",
+     "description": "Read a file",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "path": {
+        "type": "string"
+       },
+       "cmd": {
+        "type": "string"
+       }
+      }
+     }
+    },
+    {
+     "name": "run",
+     "description": "Run a shell command",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "path": {
+        "type": "string"
+       },
+       "cmd": {
+        "type": "string"
+       }
+      }
+     }
+    },
+    {
+     "name": "write_file",
+     "description": "Write a file",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "path": {
+        "type": "string"
+       },
+       "cmd": {
+        "type": "string"
+       }
+      }
+     }
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "rwlock misuse, sharded/atomic options"
+ },
+ {
+  "id": "h3-t26",
+  "group": "toolloop",
+  "lang": "en",
+  "intent": "tool-algo",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a coding agent working in the user's repository. Use the tools to inspect and edit files. Be concise."
+    },
+    {
+     "role": "user",
+     "content": "this dedupe is O(n^2) and eats 40 min on 2M rows. make it fast"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_0",
+       "type": "function",
+       "function": {
+        "name": "run",
+        "arguments": "{\"cmd\": \"pwd\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_0",
+     "content": "/home/dev/repo"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "run",
+        "arguments": "{\"cmd\": \"git status --short\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_1",
+     "content": ""
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_2",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"etl/dedupe.py\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_2",
+     "content": "def dedupe(rows):\n    out = []\n    for r in rows:\n        if not any(near_dup(r, o) for o in out):\n            out.append(r)\n    return out\n\ndef near_dup(a, b):\n    return levenshtein(a['name'], b['name']) <= 2 and a['zip'] == b['zip']"
+    }
+   ],
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "read_file",
+      "description": "Read a file",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "cmd": {
+         "type": "string"
+        }
+       }
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "run",
+      "description": "Run a shell command",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "cmd": {
+         "type": "string"
+        }
+       }
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "write_file",
+      "description": "Write a file",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "cmd": {
+         "type": "string"
+        }
+       }
+      }
+     }
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "blocking by zip then bounded edit distance"
+ },
+ {
+  "id": "h3-t27",
+  "group": "toolloop",
+  "lang": "en",
+  "intent": "tool-tsc",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a coding agent working in the user's repository. Use the tools to inspect and edit files. Be concise."
+    },
+    {
+     "role": "user",
+     "content": "fix the type errors"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_0",
+       "type": "function",
+       "function": {
+        "name": "run",
+        "arguments": "{\"cmd\": \"pwd\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_0",
+     "content": "/home/dev/repo"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "run",
+        "arguments": "{\"cmd\": \"git status --short\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_1",
+     "content": ""
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_2",
+       "type": "function",
+       "function": {
+        "name": "run",
+        "arguments": "{\"cmd\": \"npx tsc --noEmit\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_2",
+     "content": "src/a.ts(1,1): error TS2304: Cannot find name 'React'.\nsrc/b.tsx(1,1): error TS2304: Cannot find name 'React'.\nsrc/c.tsx(1,1): error TS2304: Cannot find name 'React'.\nsrc/d.tsx(1,1): error TS2304: Cannot find name 'React'."
+    }
+   ],
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "read_file",
+      "description": "Read a file",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "cmd": {
+         "type": "string"
+        }
+       }
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "run",
+      "description": "Run a shell command",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "cmd": {
+         "type": "string"
+        }
+       }
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "write_file",
+      "description": "Write a file",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "cmd": {
+         "type": "string"
+        }
+       }
+      }
+     }
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "missing import repeated"
+ },
+ {
+  "id": "h3-t28",
+  "group": "toolloop",
+  "lang": "en",
+  "intent": "tool-session",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a coding agent working in the user's repository. Use the tools to inspect and edit files. Be concise."
+    },
+    {
+     "role": "user",
+     "content": "refactor the payment retry logic so charges are idempotent across process restarts, using the outbox table. think about double-charging when the worker crashes between the PSP call and our commit"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_0",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"payments/auth/auth.ts\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_0",
+     "content": "import { legacyFetch } from '../http'\nexport function authLoad(url: string) {\n  return legacyFetch(url, {})\n}\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"payments/cache/cache.ts\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_1",
+     "content": "import { legacyFetch } from '../http'\nexport function cacheLoad(url: string) {\n  return legacyFetch(url, {})\n}\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_2",
+       "type": "function",
+       "function": {
+        "name": "run",
+        "arguments": "{\"cmd\": \"grep -rn \\\"legacyFetch\\\" payments/config\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_2",
+     "content": "payments/config/config.ts:12:  return legacyFetch(url, opts)"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_3",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"payments/db/db.ts\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_3",
+     "content": "import { legacyFetch } from '../http'\nexport function dbLoad(url: string) {\n  return legacyFetch(url, {})\n}\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_4",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"payments/errors/errors.ts\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_4",
+     "content": "import { legacyFetch } from '../http'\nexport function errorsLoad(url: string) {\n  return legacyFetch(url, {})\n}\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_5",
+       "type": "function",
+       "function": {
+        "name": "run",
+        "arguments": "{\"cmd\": \"grep -rn \\\"legacyFetch\\\" payments/handlers\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_5",
+     "content": "payments/handlers/handlers.ts:15:  return legacyFetch(url, opts)"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_6",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"payments/logger/logger.ts\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_6",
+     "content": "import { legacyFetch } from '../http'\nexport function loggerLoad(url: string) {\n  return legacyFetch(url, {})\n}\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_7",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"payments/metrics/metrics.ts\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_7",
+     "content": "import { legacyFetch } from '../http'\nexport function metricsLoad(url: string) {\n  return legacyFetch(url, {})\n}\n"
+    },
+    {
+     "role": "assistant",
+     "content": "Done with the first module. Want the same treatment elsewhere?"
+    },
+    {
+     "role": "user",
+     "content": "ok now do the same for the refund worker and the payout worker"
+    }
+   ],
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "read_file",
+      "description": "Read a file",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "cmd": {
+         "type": "string"
+        }
+       }
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "run",
+      "description": "Run a shell command",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "cmd": {
+         "type": "string"
+        }
+       }
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "write_file",
+      "description": "Write a file",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "cmd": {
+         "type": "string"
+        }
+       }
+      }
+     }
+    }
+   ]
+  },
+  "session": {
+   "replay": true
+  },
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "session-required: earlier turns set a hard idempotency refactor, this ask is terse"
+ },
+ {
+  "id": "h3-t29",
+  "group": "toolloop",
+  "lang": "en",
+  "intent": "tool-session",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 4096,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "the flaky ledger reconciliation test fails ~1 in 20, nobody knows why. find the root cause"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_0",
+       "name": "run",
+       "input": {
+        "cmd": "pwd"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_0",
+       "content": "/home/dev/repo"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_1",
+       "name": "run",
+       "input": {
+        "cmd": "git status --short"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_1",
+       "content": ""
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_2",
+       "name": "run",
+       "input": {
+        "cmd": "go test -run TestReconcile -count=50 ./ledger"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_2",
+       "content": "--- FAIL: TestReconcile (0.01s)\n    expected balance 1000 got 1010\nFAIL (3 of 50)"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "text",
+       "text": "It fails when two transfers share a timestamp. Let me look at ordering."
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "try again"
+      }
+     ]
+    }
+   ],
+   "system": "You are a coding agent working in the user's repository. Use the tools to inspect and edit files. Be concise.",
+   "tools": [
+    {
+     "name": "read_file",
+     "description": "Read a file",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "path": {
+        "type": "string"
+       },
+       "cmd": {
+        "type": "string"
+       }
+      }
+     }
+    },
+    {
+     "name": "run",
+     "description": "Run a shell command",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "path": {
+        "type": "string"
+       },
+       "cmd": {
+        "type": "string"
+       }
+      }
+     }
+    },
+    {
+     "name": "write_file",
+     "description": "Write a file",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "path": {
+        "type": "string"
+       },
+       "cmd": {
+        "type": "string"
+       }
+      }
+     }
+    }
+   ]
+  },
+  "session": {
+   "replay": true
+  },
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "session-required: 'try again' on a flaky-test root-cause hunt"
+ },
+ {
+  "id": "h3-t30",
+  "group": "toolloop",
+  "lang": "en",
+  "intent": "tool-ops",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a coding agent working in the user's repository. Use the tools to inspect and edit files. Be concise."
+    },
+    {
+     "role": "user",
+     "content": "anything unhealthy in prod ns?"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_0",
+       "type": "function",
+       "function": {
+        "name": "run",
+        "arguments": "{\"cmd\": \"pwd\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_0",
+     "content": "/home/dev/repo"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "run",
+        "arguments": "{\"cmd\": \"git status --short\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_1",
+     "content": ""
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_2",
+       "type": "function",
+       "function": {
+        "name": "run",
+        "arguments": "{\"cmd\": \"kubectl -n prod get pods\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_2",
+     "content": "NAME                    READY   STATUS    RESTARTS   AGE\napi-7d9f-abcde          1/1     Running   0          3d\napi-7d9f-fghij          1/1     Running   0          3d\nworker-5c8b-klmno       1/1     Running   1          3d"
+    }
+   ],
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "read_file",
+      "description": "Read a file",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "cmd": {
+         "type": "string"
+        }
+       }
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "run",
+      "description": "Run a shell command",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "cmd": {
+         "type": "string"
+        }
+       }
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "write_file",
+      "description": "Write a file",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "cmd": {
+         "type": "string"
+        }
+       }
+      }
+     }
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "all running"
+ }
+]

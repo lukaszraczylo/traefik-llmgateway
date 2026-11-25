@@ -6,11 +6,25 @@
 export interface LimitsConfig {
   requestsPerMinute?: number
   requestsPerDay?: number
+  tokensPerMinute?: number
   tokensPerDay?: number
   tokensPerMonth?: number
   costPerDayUSD?: number
   costPerMonthUSD?: number
+  pacing?: PacingConfig
 }
+
+/** LimitKey is the numeric LimitsConfig fields — everything except the nested pacing block. */
+export type LimitKey = Exclude<keyof LimitsConfig, 'pacing'>
+
+/** Mirrors Go's PacingConfig: requests wait up to maxDelay (a Go duration) as minute usage rises from startPct to 100%. */
+export interface PacingConfig {
+  startPct: number
+  maxDelay: string
+}
+
+/** Maps a LimitsConfig field name to where its effective value came from: "user" or "memberLimits:<group>". */
+export type LimitSources = Partial<Record<keyof LimitsConfig, string>>
 
 /**
  * One upstream model's current-window attempt/failure counters within its
@@ -210,6 +224,118 @@ export interface AdminGroupView {
   memberCount: number
 }
 
+/** One tier of a smart router (admin_routers.go: adminRouterTierView). */
+export interface AdminRouterTierView {
+  name: string
+  models: string[]
+  minScore: number
+}
+
+/** One keyword rule of a smart router (admin_routers.go: adminRouterRuleView). */
+export interface AdminRouterRuleView {
+  tier: string
+  keywords: string[]
+}
+
+/** A named request count (admin_routers.go: adminRouterCountView). */
+export interface AdminRouterCountView {
+  name: string
+  count: number
+}
+
+/** One tier-to-tier escalation count (admin_routers.go: adminRouterEscalationView). */
+export interface AdminRouterEscalationView {
+  from: string
+  to: string
+  count: number
+}
+
+/** One live-tier by shadow-tier matrix cell (admin_routers.go: adminRouterShadowView). */
+export interface AdminRouterShadowView {
+  live: string
+  shadow: string
+  count: number
+}
+
+/** Finished requests by first attempted tier, routing reason and outcome (admin_routers.go: adminRouterOutcomeView). */
+export interface AdminRouterOutcomeView {
+  tier: string
+  reason: string
+  outcome: 'ok' | 'error' | 'escalated' | 'bad' | 'slow'
+  count: number
+}
+
+/** Router counters (admin_routers.go: adminRouterStatsView); scope "shared" sums all gateway instances this month, "instance" is this process since start. */
+export interface AdminRouterStatsView {
+  scope: 'shared' | 'instance'
+  requests: number
+  tiers: AdminRouterCountView[]
+  reasons: AdminRouterCountView[]
+  escalations: AdminRouterEscalationView[]
+  /** Non-zero cells of the live-by-shadow tier matrix; empty without shadowWeights. */
+  shadow: AdminRouterShadowView[]
+  outcomes: AdminRouterOutcomeView[]
+}
+
+/** One tier's calibration offset: points its threshold sits below the configured minScore. */
+export interface AdminRouterDeltaView {
+  tier: string
+  delta: number
+}
+
+/** Calibration state of one router (admin_routers.go: adminRouterCalibrationView). Shadow offsets are computed, not applied. */
+export interface AdminRouterCalibrationView {
+  mode: 'off' | 'shadow' | 'live'
+  delta: AdminRouterDeltaView[]
+  maxLower: number
+  maxRaise: number
+  freeze: boolean
+}
+
+/** Settings of adaptive selection; present only when selection is "adaptive". */
+export interface AdminRouterAdaptiveView {
+  explorePct: number
+  windowHours: number
+  latencyWeightPct: number
+}
+
+/** One configured smart router, read-only (admin_routers.go: adminRouterView). */
+export interface AdminRouterView {
+  name: string
+  defaultTier: string
+  /** Floor tier for requests with tools; absent when unset. */
+  toolsMinTier?: string
+  /** True when the router has shadowWeights or shadowClassifier, so the matrix is meaningful even when empty. */
+  shadowEnabled: boolean
+  /** Live classifier: "v1" or "v2". */
+  classifier: string
+  /** "v2" when the router scores each request with v2 beside a v1 live classifier; absent otherwise. */
+  shadowClassifier?: string
+  /** v2 risk margin in hundredths of a sigma. */
+  riskZ: number
+  /** Go duration after which a slow upstream attempt escalates; absent when unset. */
+  firstByteTimeout?: string
+  selection: string
+  adaptive?: AdminRouterAdaptiveView
+  calibration: AdminRouterCalibrationView
+  /** True when a saturated tier starts score-routed requests one tier lower. */
+  saturationDowngrade: boolean
+  downgradeBand: number
+  /** Requests started one tier lower because their tier was saturated. */
+  downgraded: number
+  /** True when a router whose every attempt was slow tries one tier below its first attempted tier. */
+  timeoutFallback: boolean
+  /** Requests that took the extra timeout-fallback attempt. */
+  fellBack: number
+  tiers: AdminRouterTierView[]
+  keywordRules: AdminRouterRuleView[]
+  maxAttempts: number
+  contextEscalation: boolean
+  /** Advertised context window in tokens; absent when no target declares one. */
+  contextTokens?: number
+  stats?: AdminRouterStatsView
+}
+
 export interface AdminAliasView {
   alias: string
   target: string
@@ -275,6 +401,7 @@ export interface AdminOverviewResponse {
   providers: AdminProviderView[]
   groups: AdminGroupView[]
   aliases: AdminAliasView[]
+  routers?: AdminRouterView[]
   redis: AdminRedisView
   cache: AdminCacheView
   retry: AdminRetryView
@@ -284,6 +411,10 @@ export interface AdminOverviewResponse {
 
 export interface AdminUsageEntryView {
   limits?: LimitsConfig
+  /** Users only: each set limits field's origin, "user" or "memberLimits:<group>" (admin.go: adminUsageEntryView.LimitSources). */
+  limitSources?: LimitSources
+  /** Groups only: the per-member default each member user inherits. */
+  memberLimits?: LimitsConfig
   kind: string
   id: string
   groupName?: string
@@ -328,6 +459,8 @@ export interface AdminUsageEntryView {
    * path already paid, so this field costs nothing extra to read).
    */
   rejectionsPerDay: number
+  /** Limit-exempt requests this month (limitExemptKinds); they count in no limit. */
+  exemptRequestsPerMonth?: number
   storeDown?: boolean
   /**
    * Unix seconds this scope last made a request, fleet-wide (admin.go:
@@ -707,6 +840,8 @@ export interface AdminCatalogModel {
   /** True for a pseudo-model row built from a `pathBaseUrls` key — not a routable model, never priced. */
   endpoint?: boolean
   aliases?: string[]
+  /** Smart routers that list this model as a target (admin_catalog.go: adminCatalogModel.Routers). */
+  routers?: string[]
 }
 
 /** One provider's full catalog listing (admin.go: adminCatalogProvider — phase 2 redesign), on-demand only (never part of the 5s overview poll). */
@@ -724,6 +859,7 @@ export interface AdminCatalogProvider {
 export interface AdminCatalogResponse {
   providers: AdminCatalogProvider[]
   aliases: AdminAliasView[]
+  routers?: AdminRouterView[]
 }
 
 /**
@@ -735,6 +871,7 @@ export interface AdminCatalogResponse {
  */
 export interface AdminConsumerUser {
   limits?: LimitsConfig
+  limitSources?: LimitSources
   name: string
   source: 'inline' | 'file'
   groups: string[]
@@ -757,6 +894,7 @@ export interface AdminModelAccessCount {
  */
 export interface AdminConsumerGroup {
   limits?: LimitsConfig
+  memberLimits?: LimitsConfig
   name: string
   providers?: string[]
   models?: string[]

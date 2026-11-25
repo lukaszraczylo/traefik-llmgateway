@@ -605,7 +605,7 @@ func openAIResponseFromGemini(body []byte, model string, created int64) (map[str
 		message["content"] = nil
 	}
 
-	u := usage{prompt: resp.UsageMetadata.safePrompt(), completion: resp.UsageMetadata.safeCompletion()}
+	u := withAnswerFlags(usage{prompt: resp.UsageMetadata.safePrompt(), completion: resp.UsageMetadata.safeCompletion()}, finishReason, len(textParts) > 0 || len(toolCalls) > 0)
 
 	out := map[string]any{
 		"id":      chatCompletionIDPrefix + geminiResponseIDOrFallback(resp.ResponseID, created),
@@ -653,8 +653,10 @@ func (m *geminiUsageMetadata) safeCompletion() int64 {
 // tool-call ordinal counter lesson (a) requires. A caller constructs one
 // per stream and calls translate once per upstream sseEvent, in order.
 type geminiStreamState struct {
-	id      string
-	model   string
+	id    string
+	model string
+	// finish is the mapped finish reason once a chunk carried one; hasOutput latches on the first text or tool call.
+	finish  string
 	content contentChunker
 	u       usage
 	created int64
@@ -672,6 +674,7 @@ type geminiStreamState struct {
 	// chunk arrives, so this must be state on the struct, not a translate
 	// local.
 	sawFunctionCall bool
+	hasOutput       bool
 }
 
 // newGeminiStreamState returns a geminiStreamState for one streaming chat
@@ -690,7 +693,7 @@ func newGeminiStreamState(model string, created int64) *geminiStreamState {
 // usage returns the prompt/completion token counts captured so far, from
 // whichever chunk's usageMetadata was translated most recently.
 func (st *geminiStreamState) usage() usage {
-	return st.u
+	return withAnswerFlags(st.u, st.finish, st.hasOutput)
 }
 
 // chunk builds one OpenAI-shaped "chat.completion.chunk" payload carrying
@@ -806,6 +809,7 @@ func (st *geminiStreamState) translate(ev sseEvent) ([][]byte, error) {
 		// only "[DONE]" and no finish_reason for the client to act on.
 		if resp.PromptFeedback.BlockReason != "" {
 			reason := "content_filter"
+			st.finish = reason
 			chunks = append(chunks, st.chunk(map[string]any{}, &reason))
 		}
 		return chunks, nil
@@ -834,14 +838,17 @@ func (st *geminiStreamState) translate(ev sseEvent) ([][]byte, error) {
 				},
 			}}}
 			st.nextToolOrdinal++
+			st.hasOutput = true
 			chunks = append(chunks, st.chunk(delta, nil))
 		case p.Text != "":
+			st.hasOutput = true
 			chunks = append(chunks, st.content.build(p.Text))
 		}
 	}
 
 	if c.FinishReason != "" {
 		reason := geminiFinishReason(c.FinishReason, st.sawFunctionCall)
+		st.finish = reason
 		chunks = append(chunks, st.chunk(map[string]any{}, &reason))
 	}
 

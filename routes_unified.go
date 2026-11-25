@@ -222,10 +222,11 @@ func (g *Gateway) handleEmbeddings(w http.ResponseWriter, r *http.Request, u *us
 func (g *Gateway) runUnified(w http.ResponseWriter, r *http.Request, u *user, grp *group, endpoint string, call adapterCall) {
 	sw := &statusTrackingWriter{ResponseWriter: w}
 
-	scopes, ok := g.admitRequestForRoute(sw, u, grp, writeOAIError, eventRouteForEndpoint(endpoint))
+	scopes, ok := g.admitRequestForRoute(r.Context(), sw, u, grp, writeOAIError, eventRouteForEndpoint(endpoint), r.ContentLength, endpointKind(endpoint))
 	if !ok {
 		return
 	}
+	defer g.limiter.releaseReservations(scopes)
 
 	body, req, ok := g.readAndDecodeUnifiedBody(sw, r, writeOAIError)
 	if !ok {
@@ -285,26 +286,38 @@ func (g *Gateway) runMeteredCall(sw *statusTrackingWriter, r *http.Request, scop
 	// failoverCandidates' own provider scan entirely, so a config that
 	// never opted into failover pays nothing extra for a pool it will
 	// never use.
-	var primary resolveCandidate
-	var extra []resolveCandidate
-	var err error
-	if g.failover.enabled {
-		primary, extra, err = g.registry.resolveWithCandidates(requestedModel, grp)
+	var plan *routerPlan
+	var candidates []resolveCandidate
+	if rt := g.registry.routers[requestedModel]; rt != nil {
+		var planErr error
+		plan, planErr = g.planSmartRouter(rt, req, endpoint, r.Header, grp, scopes)
+		if planErr != nil {
+			writeModelResolveErrorEnvelope(sw, planErr, envelope)
+			return
+		}
+		candidates = plan.candidates()
 	} else {
-		primary, err = g.registry.resolvePrimaryOnly(requestedModel, grp)
+		var primary resolveCandidate
+		var extra []resolveCandidate
+		var err error
+		if g.failover.enabled {
+			primary, extra, err = g.registry.resolveWithCandidates(requestedModel, grp)
+		} else {
+			primary, err = g.registry.resolvePrimaryOnly(requestedModel, grp)
+		}
+		if err != nil {
+			writeModelResolveErrorEnvelope(sw, err, envelope)
+			return
+		}
+		// Sequence matters (each step's own doc comment explains why):
+		// health/discovery ordering first, so candidates[0] below is the
+		// ACTUAL first-attempted candidate the cost guard compares everyone
+		// else against; cost filtering second; the maxAttempts cap last, so
+		// it never re-admits a candidate the cost guard already removed.
+		candidates = g.orderedFailoverCandidates(primary, extra)
+		candidates = g.filterCandidatesByCost(candidates, requestedModel)
+		candidates = capFailoverCandidates(candidates, g.failover.maxAttempts)
 	}
-	if err != nil {
-		writeModelResolveErrorEnvelope(sw, err, envelope)
-		return
-	}
-	// Sequence matters (each step's own doc comment explains why):
-	// health/discovery ordering first, so candidates[0] below is the
-	// ACTUAL first-attempted candidate the cost guard compares everyone
-	// else against; cost filtering second; the maxAttempts cap last, so
-	// it never re-admits a candidate the cost guard already removed.
-	candidates := g.orderedFailoverCandidates(primary, extra)
-	candidates = g.filterCandidatesByCost(candidates, requestedModel)
-	candidates = capFailoverCandidates(candidates, g.failover.maxAttempts)
 
 	// cacheable/streaming gate every cache step below on spec §2's scope,
 	// exactly as before this feature: a non-streaming request, with a
@@ -318,11 +331,8 @@ func (g *Gateway) runMeteredCall(sw *statusTrackingWriter, r *http.Request, scop
 		(endpoint != cacheEndpointEmbeddings || g.cache.embeddings)
 
 	// pristineReq is the client's own decoded request, snapshotted ONCE,
-	// BEFORE any candidate's adapter ever touches it, with "model"
-	// already rewritten to the upstream id every candidate in this
-	// failover chain shares by construction (failoverCandidates,
-	// failover.go, only ever adds providers serving the IDENTICAL bare
-	// id resolve's primary already resolved to). Every attempt below
+	// BEFORE any candidate's adapter ever touches it ("model" is rewritten
+	// per attempt below). Every attempt below
 	// builds its OWN fresh top-level copy from this snapshot rather than
 	// reusing or mutating one shared map (adversarial-review fix, F1):
 	// openai-type adapters mutate req in place — chatCompletion forces
@@ -336,9 +346,6 @@ func (g *Gateway) runMeteredCall(sw *statusTrackingWriter, r *http.Request, scop
 	pristineReq := make(map[string]any, len(req)+1)
 	for k, v := range req {
 		pristineReq[k] = v
-	}
-	if len(candidates) > 0 {
-		pristineReq["model"] = candidates[0].upstreamModel
 	}
 
 	// preFailoverHeaders snapshots sw.Header() ONCE, before the loop below
@@ -356,7 +363,8 @@ func (g *Gateway) runMeteredCall(sw *statusTrackingWriter, r *http.Request, scop
 
 	var lastErr error
 	var lastProviderName string
-	for i, cand := range candidates {
+	for i := 0; i < len(candidates); i++ {
+		cand := candidates[i]
 		if i > 0 {
 			// F4 fix (adversarial-review): a shared request context an
 			// EARLIER candidate already exhausted must never be
@@ -370,6 +378,9 @@ func (g *Gateway) runMeteredCall(sw *statusTrackingWriter, r *http.Request, scop
 			// chasing further doomed candidates and wrongly opening a
 			// perfectly healthy provider's request-health breaker.
 			if r.Context().Err() != nil {
+				if plan != nil {
+					g.recordRouterOutcome(plan, i-1, false, false)
+				}
 				g.recordUpstreamEvent(scopes, candidates[i-1].canonical, lastProviderName, eventRouteForEndpoint(endpoint), lastErr)
 				g.handleAdapterErrorEnvelope(sw, lastErr, lastProviderName, logPrefix, envelope, writeUpstream)
 				return
@@ -452,7 +463,17 @@ func (g *Gateway) runMeteredCall(sw *statusTrackingWriter, r *http.Request, scop
 		for k, v := range pristineReq {
 			attemptReq[k] = v
 		}
+		attemptReq["model"] = cand.upstreamModel
+		// Hashed before gatewayAliasKey is injected: cacheKey does not strip it.
+		var cacheKeyStr string
+		if cacheable {
+			cacheKeyStr = cacheKey(cand.providerName, cand.upstreamModel, requestedModel, endpoint, attemptReq)
+		}
 		attemptReq[gatewayAliasKey] = requestedModel
+		if plan != nil {
+			setRouterHeaders(sw.Header(), plan, i)
+			g.recordRouterAttempt(plan, i, endpoint, scopes)
+		}
 
 		// Cache lookup for THIS candidate, immediately before its own
 		// attempt (adversarial-review round 2 ruling — supersedes the
@@ -470,15 +491,10 @@ func (g *Gateway) runMeteredCall(sw *statusTrackingWriter, r *http.Request, scop
 		// on a later request without ever dialing the dead one — the
 		// pre-pass solved that problem by accident, with the side
 		// effect of mis-serving healthy traffic from an unrelated
-		// candidate's cache. cacheKeyStr is computed from pristineReq,
-		// BEFORE gatewayAliasKey was injected above would have mattered
-		// — gatewayAliasKey is a purely internal echo-back mechanism
-		// cacheKey does not itself strip (its own doc comment,
-		// cache.go), so hashing attemptReq instead would add noise no
-		// two requests would otherwise disagree on.
-		var cacheKeyStr string
+		// candidate's cache. cacheKeyStr is computed from attemptReq
+		// before gatewayAliasKey is injected (an internal echo-back key
+		// cacheKey does not strip).
 		if cacheable {
-			cacheKeyStr = cacheKey(cand.providerName, cand.upstreamModel, requestedModel, endpoint, pristineReq)
 			if cached, hit := g.cache.lookup(cacheKeyStr); hit {
 				sw.Header().Set("X-Llmgw-Cache", "hit")
 				if cached.ContentType != "" {
@@ -512,6 +528,9 @@ func (g *Gateway) runMeteredCall(sw *statusTrackingWriter, r *http.Request, scop
 				if g.limiter.statsAdmin {
 					saved := unifiedCostMicros(cand.canonical, cand.upstreamModel, cachedUsage(cached.Body), g.cfg.Pricing, g.cfg.ModelMeta, func(string) {})
 					g.limiter.recordCacheHit(cand.canonical, saved)
+				}
+				if plan != nil {
+					g.recordRouterOutcome(plan, i, true, false)
 				}
 				return
 			}
@@ -585,6 +604,9 @@ func (g *Gateway) runMeteredCall(sw *statusTrackingWriter, r *http.Request, scop
 			g.recordUnpricedRefusalEvent(scopes, cand.canonical, cand.providerName, eventRouteForEndpoint(endpoint)) // F3 hook 5 (item 5, this round)
 			envelope(sw, http.StatusPaymentRequired, "invalid_request_error",
 				fmt.Sprintf("model %q has no configured price, so the cost budget that applies to this request cannot be enforced; add a \"pricing\" entry for it, or set allowUnpricedWithCostBudget to serve it unbounded", cand.canonical))
+			if plan != nil {
+				g.recordRouterOutcome(plan, i, false, false)
+			}
 			return
 		}
 
@@ -604,7 +626,7 @@ func (g *Gateway) runMeteredCall(sw *statusTrackingWriter, r *http.Request, scop
 		// metrics are off.
 		var latSample latencySample
 		var hasLat bool
-		if metricsEnabled(g.cfg) || g.limiter.statsLatency {
+		if metricsEnabled(g.cfg) || g.limiter.statsLatency || (plan != nil && plan.bandit != nil) {
 			ctx = withLatencyRecorder(ctx, func(sample latencySample) {
 				latSample = sample
 				hasLat = true
@@ -613,8 +635,19 @@ func (g *Gateway) runMeteredCall(sw *statusTrackingWriter, r *http.Request, scop
 				}
 			})
 		}
+		var fbGuard *firstByteGuard
+		var fbCancel context.CancelFunc
+		if plan != nil && plan.firstByte > 0 {
+			ctx, fbCancel = context.WithCancel(ctx)
+			fbGuard = newFirstByteGuard(fbCancel, plan.firstByte)
+			ctx = withFirstByteGuard(ctx, fbGuard)
+		}
 		result, callErr := call(cand.adapter, ctx, respWriter, attemptReq)
 		endUpstream()
+		if fbGuard != nil {
+			callErr = g.finishFirstByteAttempt(fbGuard, fbCancel, ctx, r, sw, plan, i, endpoint, scopes, cand, callErr)
+		}
+		bad := plan != nil && plan.badResult(result, callErr, sw.wroteHeader)
 
 		// Request-path health, recorded ONCE per candidate per logical
 		// request (F3/F6 fix, adversarial-review) — see
@@ -751,6 +784,13 @@ func (g *Gateway) runMeteredCall(sw *statusTrackingWriter, r *http.Request, scop
 			g.logf("%s: usage for model %q logged as estimated (%d prompt tokens derived from request body size, not the provider's reported usage)", logPrefix, cand.canonical, result.prompt)
 		}
 
+		if plan != nil && callErr == nil && !plan.hasImage && !result.estimated {
+			g.tokenCalib.observe(providerName, cand.upstreamModel, plan.promptBytes, result.prompt)
+		}
+		if plan != nil && plan.bandit != nil {
+			g.observeBandit(plan, i, callErr, bad, latSample, hasLat)
+		}
+
 		// Usage provenance (feat: expose token-accounting provenance),
 		// recorded ONLY for a candidate whose own response actually
 		// completed (callErr == nil): a candidate that failed over never
@@ -797,6 +837,9 @@ func (g *Gateway) runMeteredCall(sw *statusTrackingWriter, r *http.Request, scop
 		}
 
 		if callErr == nil {
+			if plan != nil {
+				g.recordRouterOutcome(plan, i, true, bad)
+			}
 			return
 		}
 
@@ -808,6 +851,9 @@ func (g *Gateway) runMeteredCall(sw *statusTrackingWriter, r *http.Request, scop
 		// before this feature existed, regardless of how many candidates
 		// remain.
 		if sw.wroteHeader {
+			if plan != nil {
+				g.recordRouterOutcome(plan, i, false, bad)
+			}
 			g.recordUpstreamEvent(scopes, cand.canonical, providerName, eventRouteForEndpoint(endpoint), callErr)
 			g.handleAdapterErrorEnvelope(sw, callErr, providerName, logPrefix, envelope, writeUpstream)
 			return
@@ -816,7 +862,8 @@ func (g *Gateway) runMeteredCall(sw *statusTrackingWriter, r *http.Request, scop
 		lastErr = callErr
 		lastProviderName = providerName
 
-		hasNext := i < len(candidates)-1 && failoverEligible(callErr)
+		// Past the sw.wroteHeader return above: a router's context-overflow 400 escalates only before any byte is written.
+		hasNext := i < len(candidates)-1 && routerEscalatable(callErr, plan != nil)
 		if hasNext && isProviderNotFoundError(callErr) {
 			// Loud, non-suppressed log line (brief: "Failover after a 404
 			// must log loudly ... a 404 usually means a real
@@ -829,7 +876,17 @@ func (g *Gateway) runMeteredCall(sw *statusTrackingWriter, r *http.Request, scop
 			// log).
 			g.errorf("%s: provider %q returned 404 for model %q; failing over to %q — this usually means a real provider/model configuration mistake, not a transient outage", logPrefix, providerName, requestedModel, candidates[i+1].providerName)
 		}
+		if !hasNext && plan != nil && i == len(candidates)-1 && g.addTimeoutFallback(plan, r, i, endpoint, scopes, callErr) {
+			candidates = plan.candidates()
+			continue
+		}
 		if !hasNext {
+			if plan != nil {
+				g.recordRouterOutcome(plan, i, false, bad)
+			}
+			if plan != nil && i == len(candidates)-1 && routerEscalatable(callErr, true) {
+				g.recordRouterExhausted(plan, i, endpoint, scopes)
+			}
 			g.recordUpstreamEvent(scopes, cand.canonical, providerName, eventRouteForEndpoint(endpoint), callErr)
 			g.handleAdapterErrorEnvelope(sw, callErr, providerName, logPrefix, envelope, writeUpstream)
 			return
@@ -933,9 +990,18 @@ func withTotalScope(scopes []limitScope) []limitScope {
 // 2026-08-22 review) lets routes_messages.go answer a violation in
 // Anthropic's own error shape instead of OpenAI's, without a second copy
 // of this function's own logic.
-func (g *Gateway) admitRequestForRoute(sw *statusTrackingWriter, u *user, grp *group, envelope envelopeWriter, route string) (scopes []limitScope, ok bool) {
+func (g *Gateway) admitRequestForRoute(ctx context.Context, sw *statusTrackingWriter, u *user, grp *group, envelope envelopeWriter, route string, bodyBytes int64, kind string) (scopes []limitScope, ok bool) {
+	reserve := reserveTokensFor(bodyBytes)
 	scopes = withTotalScope(buildLimitScopes(u, grp))
-	if violation := g.limiter.checkAndCount(scopes); violation != nil {
+	exempt := g.kindExempt(kind)
+	violation, gone := g.admitCounted(ctx, sw, scopes, reserve, exempt)
+	if exempt {
+		scopes = exemptScopes(scopes)
+	}
+	if gone {
+		return scopes, false
+	}
+	if violation != nil {
 		g.recordLimitEvent(scopes, route, violation)
 		writeLimitViolationEnvelope(sw, violation, envelope)
 		return scopes, false
@@ -1138,6 +1204,10 @@ func unifiedCostMicros(canonical, bare string, u usage, overrides map[string]*Mo
 // only these sentinels/types, so reaching this branch would be a
 // programming error, not a client mistake.
 func writeModelResolveErrorEnvelope(w http.ResponseWriter, err error, envelope envelopeWriter) {
+	if rerr, ok := err.(*routerTargetError); ok {
+		envelope(w, rerr.status, "invalid_request_error", rerr.message)
+		return
+	}
 	if aerr, ok := err.(*aliasTargetError); ok {
 		envelope(w, http.StatusNotFound, "invalid_request_error", aerr.Error())
 		return
@@ -1310,6 +1380,12 @@ func (g *Gateway) handleAdapterErrorEnvelope(sw *statusTrackingWriter, err error
 		return
 	}
 
+	if _, ok := err.(*firstByteTimeoutError); ok {
+		g.errorf("%s: %v", logPrefix, err)
+		envelope(sw, http.StatusGatewayTimeout, "timeout_error", routerSlowMessage)
+		return
+	}
+
 	if errors.Is(err, context.Canceled) {
 		g.logf("%s: client canceled request to provider %q: %v", logPrefix, providerName, err)
 		return
@@ -1441,6 +1517,24 @@ func (w *cacheCaptureWriter) Write(b []byte) (int, error) {
 		}
 	}
 	return w.statusTrackingWriter.Write(b)
+}
+
+// endpointKind is the request kind a unified endpoint serves, or "" for a
+// chat-style endpoint with no kind of its own.
+func endpointKind(endpoint string) string {
+	if endpoint == cacheEndpointEmbeddings {
+		return kindEmbedding
+	}
+	return ""
+}
+
+// reserveTokensFor is the tokensPerMinute pre-charge for a request body of
+// bodyBytes. An unknown (negative) or empty size reserves nothing.
+func reserveTokensFor(bodyBytes int64) int64 {
+	if bodyBytes <= 0 {
+		return 0
+	}
+	return estimatePromptTokens(bodyBytes)
 }
 
 // maxEstimatedPromptTokens caps a body-size estimate, so a padded request

@@ -1,0 +1,168 @@
+[
+ {
+  "id": "h2-c01",
+  "group": "chitchat",
+  "lang": "en",
+  "intent": "chitchat",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "good morning"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "greeting"
+ },
+ {
+  "id": "h2-c02",
+  "group": "chitchat",
+  "lang": "en",
+  "intent": "chitchat",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "do you ever get tired of questions lol"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "banter"
+ },
+ {
+  "id": "h2-c03",
+  "group": "chitchat",
+  "lang": "en",
+  "intent": "chitchat",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "what should i cook tonight, have eggs rice and half a cabbage"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "casual"
+ },
+ {
+  "id": "h2-c04",
+  "group": "chitchat",
+  "lang": "en",
+  "intent": "chitchat",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 4096,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "thanks that worked!!"
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "gratitude"
+ },
+ {
+  "id": "h2-c05",
+  "group": "chitchat",
+  "lang": "en",
+  "intent": "chitchat",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "tell me a joke about kubernetes"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "joke"
+ },
+ {
+  "id": "h2-c06",
+  "group": "chitchat",
+  "lang": "en",
+  "intent": "chitchat",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "feeling kinda burned out on this job, not looking for advice just wanna vent for a sec"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "emotional support; low OK but mid nicer"
+ },
+ {
+  "id": "h2-c07",
+  "group": "chitchat",
+  "lang": "en",
+  "intent": "chitchat",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "who would win, 100 ducks vs 1 horse"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "silly"
+ },
+ {
+  "id": "h2-c08",
+  "group": "chitchat",
+  "lang": "en",
+  "intent": "chitchat",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "what's the capital of australia"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "fact"
+ }
+]

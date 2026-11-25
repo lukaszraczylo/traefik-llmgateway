@@ -1,0 +1,226 @@
+[
+ {
+  "id": "h3-m01",
+  "group": "math",
+  "lang": "en",
+  "intent": "math",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "whats 15% of 240"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "arithmetic"
+ },
+ {
+  "id": "h3-m02",
+  "group": "math",
+  "lang": "en",
+  "intent": "math",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "derivative of x^2 * sin(x)"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "product rule"
+ },
+ {
+  "id": "h3-m03",
+  "group": "math",
+  "lang": "en",
+  "intent": "algo",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 4096,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "write binary search in python, returns index or -1"
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "textbook"
+ },
+ {
+  "id": "h3-m04",
+  "group": "math",
+  "lang": "en",
+  "intent": "math",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "prove sqrt(2) is irrational"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "standard proof"
+ },
+ {
+  "id": "h3-m05",
+  "group": "math",
+  "lang": "en",
+  "intent": "algo",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "explain the O(n log n) longest increasing subsequence approach, why does the tails array stay sorted"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "patience sorting argument"
+ },
+ {
+  "id": "h3-m06",
+  "group": "math",
+  "lang": "en",
+  "intent": "math",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 4096,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "8 people throw hats in a pile and grab one at random. prob nobody gets their own hat? derive it, not just the number"
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "derangements inclusion-exclusion"
+ },
+ {
+  "id": "h3-m07",
+  "group": "math",
+  "lang": "en",
+  "intent": "math",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 4096,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "prove there are infinitely many primes congruent to 3 mod 4"
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "Euclid style argument; moderate"
+ },
+ {
+  "id": "h3-m08",
+  "group": "math",
+  "lang": "en",
+  "intent": "algo",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "median of two sorted arrays in O(log(min(m,n))). walk me through why the partition invariant works and the edge cases with empty halves"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "binary search on partition"
+ },
+ {
+  "id": "h3-m09",
+  "group": "math",
+  "lang": "en",
+  "intent": "algo",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 4096,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "dynamic array grows by 1.5x. prove amortized O(1) append with the potential method, and say what changes if growth is +1000 instead"
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "potential argument"
+ },
+ {
+  "id": "h3-m10",
+  "group": "math",
+  "lang": "en",
+  "intent": "math",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "show that scheduling jobs on a single machine with sequence dependent setup times to minimise makespan is NP-hard, give a full reduction (from hamiltonian path or TSP) and argue why it is not in APX with triangle inequality violated"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 2,
+  "maxTier": 2,
+  "notes": "hard complexity reduction"
+ }
+]

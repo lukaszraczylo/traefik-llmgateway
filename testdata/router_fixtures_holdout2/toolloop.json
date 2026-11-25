@@ -1,0 +1,5565 @@
+[
+ {
+  "id": "h2-tl01",
+  "group": "toolloop",
+  "lang": "en",
+  "intent": "toolloop",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a coding agent working in the user's repo. Use tools; keep edits minimal."
+    },
+    {
+     "role": "user",
+     "content": "bump the version string in version.go to 1.4.2"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"go.mod\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_1",
+     "content": "module example.com/svc\n\ngo 1.22\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_2",
+       "type": "function",
+       "function": {
+        "name": "grep",
+        "arguments": "{\"pattern\": \"Version =\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_2",
+     "content": "version.go:5:const Version = \"1.4.1\""
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_3",
+       "type": "function",
+       "function": {
+        "name": "edit_file",
+        "arguments": "{\"path\": \"version.go\", \"old\": \"1.4.1\", \"new\": \"1.4.2\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_3",
+     "content": "ok"
+    }
+   ],
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "read_file",
+      "description": "Read a file from the workspace",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "start": {
+         "type": "integer"
+        },
+        "end": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "path"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "grep",
+      "description": "Search the repo with ripgrep",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "pattern": {
+         "type": "string"
+        },
+        "glob": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "pattern"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "edit_file",
+      "description": "Replace exact text in a file",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "old": {
+         "type": "string"
+        },
+        "new": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "path"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "run",
+      "description": "Run a shell command and return stdout/stderr",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "cmd": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "cmd"
+       ]
+      }
+     }
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "trivial one-line edit finishing; final result is ok"
+ },
+ {
+  "id": "h2-tl02",
+  "group": "toolloop",
+  "lang": "en",
+  "intent": "toolloop",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 4096,
+   "system": "You are a coding agent working in the user's repo. Use tools; keep edits minimal.",
+   "messages": [
+    {
+     "role": "user",
+     "content": "rename the flag --out to --output in cmd/root.go and fix usages"
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_1",
+       "name": "read_file",
+       "input": {
+        "path": "go.mod"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_1",
+       "content": "module example.com/svc\n\ngo 1.22\n"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_2",
+       "name": "grep",
+       "input": {
+        "pattern": "\"out\""
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_2",
+       "content": "cmd/root.go:22:\tf.StringVar(&opts.Out, \"out\", \"\", \"output path\")\ncmd/root.go:60:\t// --out"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_3",
+       "name": "edit_file",
+       "input": {
+        "path": "cmd/root.go",
+        "old": "\"out\"",
+        "new": "\"output\""
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_3",
+       "content": "ok"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_4",
+       "name": "run",
+       "input": {
+        "cmd": "go build ./..."
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_4",
+       "content": ""
+      }
+     ]
+    }
+   ],
+   "tools": [
+    {
+     "name": "read_file",
+     "description": "Read a file from the workspace",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "path": {
+        "type": "string"
+       },
+       "start": {
+        "type": "integer"
+       },
+       "end": {
+        "type": "integer"
+       }
+      },
+      "required": [
+       "path"
+      ]
+     }
+    },
+    {
+     "name": "grep",
+     "description": "Search the repo with ripgrep",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "pattern": {
+        "type": "string"
+       },
+       "glob": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "pattern"
+      ]
+     }
+    },
+    {
+     "name": "edit_file",
+     "description": "Replace exact text in a file",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "path": {
+        "type": "string"
+       },
+       "old": {
+        "type": "string"
+       },
+       "new": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "path"
+      ]
+     }
+    },
+    {
+     "name": "run",
+     "description": "Run a shell command and return stdout/stderr",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "cmd": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "cmd"
+      ]
+     }
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "mechanical rename, build passes"
+ },
+ {
+  "id": "h2-tl03",
+  "group": "toolloop",
+  "lang": "en",
+  "intent": "toolloop",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a coding agent working in the user's repo. Use tools; keep edits minimal."
+    },
+    {
+     "role": "user",
+     "content": "tests fail in CI but pass locally, figure out why"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"go.mod\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_1",
+     "content": "module example.com/svc\n\ngo 1.22\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_2",
+       "type": "function",
+       "function": {
+        "name": "grep",
+        "arguments": "{\"pattern\": \"TODO\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_2",
+     "content": "internal/cache/lru.go:41: // TODO evict by size"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_3",
+       "type": "function",
+       "function": {
+        "name": "run",
+        "arguments": "{\"cmd\": \"git status --short\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_3",
+     "content": ""
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_4",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"Makefile\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_4",
+     "content": "test:\n\tgo test ./...\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_5",
+       "type": "function",
+       "function": {
+        "name": "run",
+        "arguments": "{\"cmd\": \"go test ./internal/store -run TestList -count=1\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_5",
+     "content": "ok  \texample.com/svc/internal/store\t0.4s"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_6",
+       "type": "function",
+       "function": {
+        "name": "run",
+        "arguments": "{\"cmd\": \"go test ./internal/store -run TestList -count=1 -race -shuffle=on\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_6",
+     "content": "--- FAIL: TestList (0.01s)\n    store_test.go:77: expected 3 items, got 5\nFAIL"
+    }
+   ],
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "read_file",
+      "description": "Read a file from the workspace",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "start": {
+         "type": "integer"
+        },
+        "end": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "path"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "grep",
+      "description": "Search the repo with ripgrep",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "pattern": {
+         "type": "string"
+        },
+        "glob": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "pattern"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "edit_file",
+      "description": "Replace exact text in a file",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "old": {
+         "type": "string"
+        },
+        "new": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "path"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "run",
+      "description": "Run a shell command and return stdout/stderr",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "cmd": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "cmd"
+       ]
+      }
+     }
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "order-dependent test, needs reasoning about shared state; last result is a shuffle failure"
+ },
+ {
+  "id": "h2-tl04",
+  "group": "toolloop",
+  "lang": "en",
+  "intent": "toolloop",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 4096,
+   "system": "You are a coding agent working in the user's repo. Use tools; keep edits minimal.",
+   "messages": [
+    {
+     "role": "user",
+     "content": "add a retry with backoff to the http client in internal/http/client.go"
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_1",
+       "name": "read_file",
+       "input": {
+        "path": "go.mod"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_1",
+       "content": "module example.com/svc\n\ngo 1.22\n"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_2",
+       "name": "grep",
+       "input": {
+        "pattern": "TODO"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_2",
+       "content": "internal/cache/lru.go:41: // TODO evict by size"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_3",
+       "name": "run",
+       "input": {
+        "cmd": "git status --short"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_3",
+       "content": ""
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_4",
+       "name": "read_file",
+       "input": {
+        "path": "Makefile"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_4",
+       "content": "test:\n\tgo test ./...\n"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_5",
+       "name": "run",
+       "input": {
+        "cmd": "ls internal"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_5",
+       "content": "cache\nhttp\nstore"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_6",
+       "name": "read_file",
+       "input": {
+        "path": "internal/http/client.go"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_6",
+       "content": "package http\n\nfunc (c *Client) Do(req *Request) (*Response, error) {\n\treturn c.inner.Do(req)\n}\n"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_7",
+       "name": "edit_file",
+       "input": {
+        "path": "internal/http/client.go",
+        "old": "return c.inner.Do(req)",
+        "new": "return c.doRetry(req)"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_7",
+       "content": "ok"
+      }
+     ]
+    }
+   ],
+   "tools": [
+    {
+     "name": "read_file",
+     "description": "Read a file from the workspace",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "path": {
+        "type": "string"
+       },
+       "start": {
+        "type": "integer"
+       },
+       "end": {
+        "type": "integer"
+       }
+      },
+      "required": [
+       "path"
+      ]
+     }
+    },
+    {
+     "name": "grep",
+     "description": "Search the repo with ripgrep",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "pattern": {
+        "type": "string"
+       },
+       "glob": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "pattern"
+      ]
+     }
+    },
+    {
+     "name": "edit_file",
+     "description": "Replace exact text in a file",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "path": {
+        "type": "string"
+       },
+       "old": {
+        "type": "string"
+       },
+       "new": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "path"
+      ]
+     }
+    },
+    {
+     "name": "run",
+     "description": "Run a shell command and return stdout/stderr",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "cmd": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "cmd"
+      ]
+     }
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 1,
+  "notes": "small feature, needs a body helper written next; mid"
+ },
+ {
+  "id": "h2-tl05",
+  "group": "toolloop",
+  "lang": "en",
+  "intent": "toolloop",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a coding agent working in the user's repo. Use tools; keep edits minimal."
+    },
+    {
+     "role": "user",
+     "content": "there's a goroutine leak somewhere in the worker pool, pprof says 40k goroutines after an hour. find it"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"go.mod\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_1",
+     "content": "module example.com/svc\n\ngo 1.22\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_2",
+       "type": "function",
+       "function": {
+        "name": "grep",
+        "arguments": "{\"pattern\": \"TODO\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_2",
+     "content": "internal/cache/lru.go:41: // TODO evict by size"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_3",
+       "type": "function",
+       "function": {
+        "name": "run",
+        "arguments": "{\"cmd\": \"git status --short\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_3",
+     "content": ""
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_4",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"Makefile\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_4",
+     "content": "test:\n\tgo test ./...\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_5",
+       "type": "function",
+       "function": {
+        "name": "run",
+        "arguments": "{\"cmd\": \"ls internal\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_5",
+     "content": "cache\nhttp\nstore"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_6",
+       "type": "function",
+       "function": {
+        "name": "grep",
+        "arguments": "{\"pattern\": \"func New\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_6",
+     "content": "internal/store/store.go:18:func NewStore(db *sql.DB) *Store {"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_7",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"go.mod\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_7",
+     "content": "module example.com/svc\n\ngo 1.22\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_8",
+       "type": "function",
+       "function": {
+        "name": "grep",
+        "arguments": "{\"pattern\": \"TODO\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_8",
+     "content": "internal/cache/lru.go:41: // TODO evict by size"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_9",
+       "type": "function",
+       "function": {
+        "name": "run",
+        "arguments": "{\"cmd\": \"curl -s localhost:6060/debug/pprof/goroutine?debug=1 | head -30\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_9",
+     "content": "40213 @ 0x43 0x44 0x7f\n#\t0x7f\tsvc/internal/pool.(*Pool).worker+0x9c\t/app/internal/pool/pool.go:88\n#\t0x7f\tsvc/internal/pool.(*Pool).Submit.func1+0x3a\t/app/internal/pool/pool.go:61"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_10",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"internal/pool/pool.go\", \"start\": 50, \"end\": 100}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_10",
+     "content": "func (p *Pool) Submit(j Job) {\n\tgo func() {\n\t\tp.jobs <- j\n\t}()\n}\nfunc (p *Pool) worker() {\n\tfor j := range p.jobs {\n\t\tj.Run()\n\t}\n}\nfunc (p *Pool) Close() { }"
+    }
+   ],
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "read_file",
+      "description": "Read a file from the workspace",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "start": {
+         "type": "integer"
+        },
+        "end": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "path"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "grep",
+      "description": "Search the repo with ripgrep",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "pattern": {
+         "type": "string"
+        },
+        "glob": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "pattern"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "edit_file",
+      "description": "Replace exact text in a file",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "old": {
+         "type": "string"
+        },
+        "new": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "path"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "run",
+      "description": "Run a shell command and return stdout/stderr",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "cmd": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "cmd"
+       ]
+      }
+     }
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "leak analysis: unbounded goroutine per Submit blocked on channel, Close never closes; mid can find, top safer"
+ },
+ {
+  "id": "h2-tl06",
+  "group": "toolloop",
+  "lang": "en",
+  "intent": "toolloop",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 4096,
+   "system": "You are a coding agent working in the user's repo. Use tools; keep edits minimal.",
+   "messages": [
+    {
+     "role": "user",
+     "content": "run the linter and fix whatever it says"
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_1",
+       "name": "read_file",
+       "input": {
+        "path": "go.mod"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_1",
+       "content": "module example.com/svc\n\ngo 1.22\n"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_2",
+       "name": "grep",
+       "input": {
+        "pattern": "TODO"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_2",
+       "content": "internal/cache/lru.go:41: // TODO evict by size"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_3",
+       "name": "run",
+       "input": {
+        "cmd": "golangci-lint run ./..."
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_3",
+       "content": "internal/http/client.go:31:2: S1021: should merge variable declaration with assignment (gosimple)"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_4",
+       "name": "edit_file",
+       "input": {
+        "path": "internal/http/client.go",
+        "old": "var err error\n\terr = c.send()",
+        "new": "err := c.send()"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_4",
+       "content": "ok"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_5",
+       "name": "run",
+       "input": {
+        "cmd": "golangci-lint run ./..."
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_5",
+       "content": ""
+      }
+     ]
+    }
+   ],
+   "tools": [
+    {
+     "name": "read_file",
+     "description": "Read a file from the workspace",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "path": {
+        "type": "string"
+       },
+       "start": {
+        "type": "integer"
+       },
+       "end": {
+        "type": "integer"
+       }
+      },
+      "required": [
+       "path"
+      ]
+     }
+    },
+    {
+     "name": "grep",
+     "description": "Search the repo with ripgrep",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "pattern": {
+        "type": "string"
+       },
+       "glob": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "pattern"
+      ]
+     }
+    },
+    {
+     "name": "edit_file",
+     "description": "Replace exact text in a file",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "path": {
+        "type": "string"
+       },
+       "old": {
+        "type": "string"
+       },
+       "new": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "path"
+      ]
+     }
+    },
+    {
+     "name": "run",
+     "description": "Run a shell command and return stdout/stderr",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "cmd": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "cmd"
+      ]
+     }
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "lint clean, nothing left; wrap-up"
+ },
+ {
+  "id": "h2-tl07",
+  "group": "toolloop",
+  "lang": "en",
+  "intent": "toolloop",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a coding agent working in the user's repo. Use tools; keep edits minimal."
+    },
+    {
+     "role": "user",
+     "content": "migrate the config loader from viper to plain env parsing, keep behaviour"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"go.mod\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_1",
+     "content": "module example.com/svc\n\ngo 1.22\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_2",
+       "type": "function",
+       "function": {
+        "name": "grep",
+        "arguments": "{\"pattern\": \"TODO\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_2",
+     "content": "internal/cache/lru.go:41: // TODO evict by size"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_3",
+       "type": "function",
+       "function": {
+        "name": "run",
+        "arguments": "{\"cmd\": \"git status --short\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_3",
+     "content": ""
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_4",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"Makefile\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_4",
+     "content": "test:\n\tgo test ./...\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_5",
+       "type": "function",
+       "function": {
+        "name": "run",
+        "arguments": "{\"cmd\": \"ls internal\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_5",
+     "content": "cache\nhttp\nstore"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_6",
+       "type": "function",
+       "function": {
+        "name": "grep",
+        "arguments": "{\"pattern\": \"func New\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_6",
+     "content": "internal/store/store.go:18:func NewStore(db *sql.DB) *Store {"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_7",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"go.mod\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_7",
+     "content": "module example.com/svc\n\ngo 1.22\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_8",
+       "type": "function",
+       "function": {
+        "name": "grep",
+        "arguments": "{\"pattern\": \"TODO\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_8",
+     "content": "internal/cache/lru.go:41: // TODO evict by size"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_9",
+       "type": "function",
+       "function": {
+        "name": "run",
+        "arguments": "{\"cmd\": \"git status --short\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_9",
+     "content": ""
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_10",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"Makefile\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_10",
+     "content": "test:\n\tgo test ./...\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_11",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"internal/config/config.go\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_11",
+     "content": "func Load() (*Config, error) {\n\tviper.AutomaticEnv()\n\tviper.SetDefault(\"PORT\", 8080)\n\tviper.SetDefault(\"DB_URL\", \"\")\n\treturn &Config{Port: viper.GetInt(\"PORT\"), DB: viper.GetString(\"DB_URL\")}, nil\n}"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_12",
+       "type": "function",
+       "function": {
+        "name": "grep",
+        "arguments": "{\"pattern\": \"viper\\\\.\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_12",
+     "content": "internal/config/config.go:5\ninternal/config/config.go:6\ninternal/config/config.go:7\ncmd/main.go:19:\tviper.BindPFlag(\"PORT\", flag)"
+    }
+   ],
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "read_file",
+      "description": "Read a file from the workspace",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "start": {
+         "type": "integer"
+        },
+        "end": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "path"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "grep",
+      "description": "Search the repo with ripgrep",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "pattern": {
+         "type": "string"
+        },
+        "glob": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "pattern"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "edit_file",
+      "description": "Replace exact text in a file",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "old": {
+         "type": "string"
+        },
+        "new": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "path"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "run",
+      "description": "Run a shell command and return stdout/stderr",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "cmd": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "cmd"
+       ]
+      }
+     }
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "multi-file migration with a flag-binding behaviour trap in cmd/main.go"
+ },
+ {
+  "id": "h2-tl08",
+  "group": "toolloop",
+  "lang": "en",
+  "intent": "toolloop",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 4096,
+   "system": "You are a coding agent working in the user's repo. Use tools; keep edits minimal.",
+   "messages": [
+    {
+     "role": "user",
+     "content": "can you check if the README mentions the old port 3000 anywhere"
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_1",
+       "name": "read_file",
+       "input": {
+        "path": "go.mod"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_1",
+       "content": "module example.com/svc\n\ngo 1.22\n"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_2",
+       "name": "grep",
+       "input": {
+        "pattern": "3000",
+        "glob": "*.md"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_2",
+       "content": "README.md:14:Listens on :8080 by default."
+      }
+     ]
+    }
+   ],
+   "tools": [
+    {
+     "name": "read_file",
+     "description": "Read a file from the workspace",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "path": {
+        "type": "string"
+       },
+       "start": {
+        "type": "integer"
+       },
+       "end": {
+        "type": "integer"
+       }
+      },
+      "required": [
+       "path"
+      ]
+     }
+    },
+    {
+     "name": "grep",
+     "description": "Search the repo with ripgrep",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "pattern": {
+        "type": "string"
+       },
+       "glob": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "pattern"
+      ]
+     }
+    },
+    {
+     "name": "edit_file",
+     "description": "Replace exact text in a file",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "path": {
+        "type": "string"
+       },
+       "old": {
+        "type": "string"
+       },
+       "new": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "path"
+      ]
+     }
+    },
+    {
+     "name": "run",
+     "description": "Run a shell command and return stdout/stderr",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "cmd": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "cmd"
+      ]
+     }
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "grep shows no hits; just report"
+ },
+ {
+  "id": "h2-tl09",
+  "group": "toolloop",
+  "lang": "en",
+  "intent": "toolloop",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a coding agent working in the user's repo. Use tools; keep edits minimal."
+    },
+    {
+     "role": "user",
+     "content": "migration 0042 hangs on prod-sized table, here's what I got"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"go.mod\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_1",
+     "content": "module example.com/svc\n\ngo 1.22\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_2",
+       "type": "function",
+       "function": {
+        "name": "grep",
+        "arguments": "{\"pattern\": \"TODO\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_2",
+     "content": "internal/cache/lru.go:41: // TODO evict by size"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_3",
+       "type": "function",
+       "function": {
+        "name": "run",
+        "arguments": "{\"cmd\": \"git status --short\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_3",
+     "content": ""
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_4",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"Makefile\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_4",
+     "content": "test:\n\tgo test ./...\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_5",
+       "type": "function",
+       "function": {
+        "name": "run",
+        "arguments": "{\"cmd\": \"ls internal\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_5",
+     "content": "cache\nhttp\nstore"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_6",
+       "type": "function",
+       "function": {
+        "name": "grep",
+        "arguments": "{\"pattern\": \"func New\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_6",
+     "content": "internal/store/store.go:18:func NewStore(db *sql.DB) *Store {"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_7",
+       "type": "function",
+       "function": {
+        "name": "run",
+        "arguments": "{\"cmd\": \"psql -c \\\"select pid,state,wait_event_type,query from pg_stat_activity where state<>'idle'\\\"\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_7",
+     "content": "  pid | state  | wait_event_type | query\n 8812 | active | Lock            | ALTER TABLE events ADD COLUMN src text NOT NULL DEFAULT 'web'\n 7120 | idle in transaction | Client | select * from events where id=...\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_8",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"migrations/0042_add_src.sql\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_8",
+     "content": "ALTER TABLE events ADD COLUMN src text NOT NULL DEFAULT 'web';"
+    }
+   ],
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "read_file",
+      "description": "Read a file from the workspace",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "start": {
+         "type": "integer"
+        },
+        "end": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "path"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "grep",
+      "description": "Search the repo with ripgrep",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "pattern": {
+         "type": "string"
+        },
+        "glob": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "pattern"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "edit_file",
+      "description": "Replace exact text in a file",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "old": {
+         "type": "string"
+        },
+        "new": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "path"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "run",
+      "description": "Run a shell command and return stdout/stderr",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "cmd": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "cmd"
+       ]
+      }
+     }
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "lock queue behind idle-in-transaction; reasoning about lock semantics; plain tools"
+ },
+ {
+  "id": "h2-tl10",
+  "group": "toolloop",
+  "lang": "en",
+  "intent": "toolloop",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 4096,
+   "system": "You are a coding agent working in the user's repo. Use tools; keep edits minimal.",
+   "messages": [
+    {
+     "role": "user",
+     "content": "update the changelog with the fix for #231"
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_1",
+       "name": "read_file",
+       "input": {
+        "path": "go.mod"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_1",
+       "content": "module example.com/svc\n\ngo 1.22\n"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_2",
+       "name": "read_file",
+       "input": {
+        "path": "CHANGELOG.md",
+        "start": 1,
+        "end": 12
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_2",
+       "content": "# Changelog\n\n## 1.4.1\n- fix: nil deref in session store (#228)\n"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_3",
+       "name": "edit_file",
+       "input": {
+        "path": "CHANGELOG.md",
+        "old": "## 1.4.1",
+        "new": "## Unreleased\n- fix: trim trailing slash in redirect (#231)\n\n## 1.4.1"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_3",
+       "content": "ok"
+      }
+     ]
+    }
+   ],
+   "tools": [
+    {
+     "name": "read_file",
+     "description": "Read a file from the workspace",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "path": {
+        "type": "string"
+       },
+       "start": {
+        "type": "integer"
+       },
+       "end": {
+        "type": "integer"
+       }
+      },
+      "required": [
+       "path"
+      ]
+     }
+    },
+    {
+     "name": "grep",
+     "description": "Search the repo with ripgrep",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "pattern": {
+        "type": "string"
+       },
+       "glob": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "pattern"
+      ]
+     }
+    },
+    {
+     "name": "edit_file",
+     "description": "Replace exact text in a file",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "path": {
+        "type": "string"
+       },
+       "old": {
+        "type": "string"
+       },
+       "new": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "path"
+      ]
+     }
+    },
+    {
+     "name": "run",
+     "description": "Run a shell command and return stdout/stderr",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "cmd": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "cmd"
+      ]
+     }
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "changelog edit complete"
+ },
+ {
+  "id": "h2-tl11",
+  "group": "toolloop",
+  "lang": "en",
+  "intent": "toolloop",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a coding agent working in the user's repo. Use tools; keep edits minimal."
+    },
+    {
+     "role": "user",
+     "content": "Why does TestConcurrentWrites flake ~1 in 20? it was added last week"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"go.mod\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_1",
+     "content": "module example.com/svc\n\ngo 1.22\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_2",
+       "type": "function",
+       "function": {
+        "name": "grep",
+        "arguments": "{\"pattern\": \"TODO\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_2",
+     "content": "internal/cache/lru.go:41: // TODO evict by size"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_3",
+       "type": "function",
+       "function": {
+        "name": "run",
+        "arguments": "{\"cmd\": \"git status --short\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_3",
+     "content": ""
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_4",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"Makefile\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_4",
+     "content": "test:\n\tgo test ./...\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_5",
+       "type": "function",
+       "function": {
+        "name": "run",
+        "arguments": "{\"cmd\": \"go test ./internal/store -run TestConcurrentWrites -count=200 -race\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_5",
+     "content": "WARNING: DATA RACE\nWrite at 0x00c0001b4020 by goroutine 14:\n  svc/internal/store.(*Store).Put()\n      store.go:71 +0x8a\nPrevious read at 0x00c0001b4020 by goroutine 13:\n  svc/internal/store.(*Store).Len()\n      store.go:96 +0x44\n--- FAIL: TestConcurrentWrites"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_6",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"internal/store/store.go\", \"start\": 60, \"end\": 100}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_6",
+     "content": "func (s *Store) Put(k string, v []byte) {\n\ts.mu.Lock()\n\ts.m[k] = v\n\ts.n++\n\ts.mu.Unlock()\n}\n...\nfunc (s *Store) Len() int { return s.n }"
+    }
+   ],
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "read_file",
+      "description": "Read a file from the workspace",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "start": {
+         "type": "integer"
+        },
+        "end": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "path"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "grep",
+      "description": "Search the repo with ripgrep",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "pattern": {
+         "type": "string"
+        },
+        "glob": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "pattern"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "edit_file",
+      "description": "Replace exact text in a file",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "old": {
+         "type": "string"
+        },
+        "new": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "path"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "run",
+      "description": "Run a shell command and return stdout/stderr",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "cmd": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "cmd"
+       ]
+      }
+     }
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "race: Len reads s.n without lock; findable but needs care, mid ok"
+ },
+ {
+  "id": "h2-tl12",
+  "group": "toolloop",
+  "lang": "en",
+  "intent": "toolloop",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 4096,
+   "system": "You are a coding agent working in the user's repo. Use tools; keep edits minimal.",
+   "messages": [
+    {
+     "role": "user",
+     "content": "delete the unused import in main.go"
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_1",
+       "name": "read_file",
+       "input": {
+        "path": "go.mod"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_1",
+       "content": "module example.com/svc\n\ngo 1.22\n"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_2",
+       "name": "run",
+       "input": {
+        "cmd": "go vet ./..."
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_2",
+       "content": "./main.go:6:2: \"os\" imported and not used"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_3",
+       "name": "edit_file",
+       "input": {
+        "path": "main.go",
+        "old": "\t\"os\"\n",
+        "new": ""
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_3",
+       "content": "ok"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_4",
+       "name": "run",
+       "input": {
+        "cmd": "go vet ./..."
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_4",
+       "content": ""
+      }
+     ]
+    }
+   ],
+   "tools": [
+    {
+     "name": "read_file",
+     "description": "Read a file from the workspace",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "path": {
+        "type": "string"
+       },
+       "start": {
+        "type": "integer"
+       },
+       "end": {
+        "type": "integer"
+       }
+      },
+      "required": [
+       "path"
+      ]
+     }
+    },
+    {
+     "name": "grep",
+     "description": "Search the repo with ripgrep",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "pattern": {
+        "type": "string"
+       },
+       "glob": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "pattern"
+      ]
+     }
+    },
+    {
+     "name": "edit_file",
+     "description": "Replace exact text in a file",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "path": {
+        "type": "string"
+       },
+       "old": {
+        "type": "string"
+       },
+       "new": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "path"
+      ]
+     }
+    },
+    {
+     "name": "run",
+     "description": "Run a shell command and return stdout/stderr",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "cmd": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "cmd"
+      ]
+     }
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "trivial"
+ },
+ {
+  "id": "h2-tl13",
+  "group": "toolloop",
+  "lang": "en",
+  "intent": "toolloop",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a coding agent working in the user's repo. Use tools; keep edits minimal."
+    },
+    {
+     "role": "user",
+     "content": "refactor session handling to support multiple concurrent tabs without logging the user out; look at how refresh rotation interacts"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"go.mod\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_1",
+     "content": "module example.com/svc\n\ngo 1.22\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_2",
+       "type": "function",
+       "function": {
+        "name": "grep",
+        "arguments": "{\"pattern\": \"TODO\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_2",
+     "content": "internal/cache/lru.go:41: // TODO evict by size"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_3",
+       "type": "function",
+       "function": {
+        "name": "run",
+        "arguments": "{\"cmd\": \"git status --short\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_3",
+     "content": ""
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_4",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"Makefile\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_4",
+     "content": "test:\n\tgo test ./...\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_5",
+       "type": "function",
+       "function": {
+        "name": "run",
+        "arguments": "{\"cmd\": \"ls internal\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_5",
+     "content": "cache\nhttp\nstore"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_6",
+       "type": "function",
+       "function": {
+        "name": "grep",
+        "arguments": "{\"pattern\": \"func New\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_6",
+     "content": "internal/store/store.go:18:func NewStore(db *sql.DB) *Store {"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_7",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"go.mod\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_7",
+     "content": "module example.com/svc\n\ngo 1.22\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_8",
+       "type": "function",
+       "function": {
+        "name": "grep",
+        "arguments": "{\"pattern\": \"TODO\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_8",
+     "content": "internal/cache/lru.go:41: // TODO evict by size"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_9",
+       "type": "function",
+       "function": {
+        "name": "run",
+        "arguments": "{\"cmd\": \"git status --short\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_9",
+     "content": ""
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_10",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"Makefile\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_10",
+     "content": "test:\n\tgo test ./...\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_11",
+       "type": "function",
+       "function": {
+        "name": "run",
+        "arguments": "{\"cmd\": \"ls internal\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_11",
+     "content": "cache\nhttp\nstore"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_12",
+       "type": "function",
+       "function": {
+        "name": "grep",
+        "arguments": "{\"pattern\": \"func New\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_12",
+     "content": "internal/store/store.go:18:func NewStore(db *sql.DB) *Store {"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_13",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"go.mod\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_13",
+     "content": "module example.com/svc\n\ngo 1.22\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_14",
+       "type": "function",
+       "function": {
+        "name": "grep",
+        "arguments": "{\"pattern\": \"RefreshToken\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_14",
+     "content": "auth/session.go:44: s.RefreshToken = resp.RefreshToken\nauth/refresh.go:19: func (a *Auth) Refresh(ctx, s *Session) error {\nauth/refresh.go:33: // provider invalidates old refresh token on use"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_15",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"auth/refresh.go\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_15",
+     "content": "func (a *Auth) Refresh(ctx context.Context, s *Session) error {\n\tresp, err := a.exchange(ctx, s.RefreshToken)\n\tif err != nil { return err }\n\ts.RefreshToken = resp.RefreshToken\n\treturn a.store.Save(s)\n}"
+    }
+   ],
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "read_file",
+      "description": "Read a file from the workspace",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "start": {
+         "type": "integer"
+        },
+        "end": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "path"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "grep",
+      "description": "Search the repo with ripgrep",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "pattern": {
+         "type": "string"
+        },
+        "glob": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "pattern"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "edit_file",
+      "description": "Replace exact text in a file",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "old": {
+         "type": "string"
+        },
+        "new": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "path"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "run",
+      "description": "Run a shell command and return stdout/stderr",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "cmd": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "cmd"
+       ]
+      }
+     }
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "design-level: rotation race across tabs needs single-flight/locking; no keywords"
+ },
+ {
+  "id": "h2-tl14",
+  "group": "toolloop",
+  "lang": "en",
+  "intent": "toolloop",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 4096,
+   "system": "You are a coding agent working in the user's repo. Use tools; keep edits minimal.",
+   "messages": [
+    {
+     "role": "user",
+     "content": "format the new files"
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_1",
+       "name": "read_file",
+       "input": {
+        "path": "go.mod"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_1",
+       "content": "module example.com/svc\n\ngo 1.22\n"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_2",
+       "name": "run",
+       "input": {
+        "cmd": "gofmt -l ."
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_2",
+       "content": "internal/cache/lru.go"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_3",
+       "name": "run",
+       "input": {
+        "cmd": "gofmt -w internal/cache/lru.go"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_3",
+       "content": ""
+      }
+     ]
+    }
+   ],
+   "tools": [
+    {
+     "name": "read_file",
+     "description": "Read a file from the workspace",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "path": {
+        "type": "string"
+       },
+       "start": {
+        "type": "integer"
+       },
+       "end": {
+        "type": "integer"
+       }
+      },
+      "required": [
+       "path"
+      ]
+     }
+    },
+    {
+     "name": "grep",
+     "description": "Search the repo with ripgrep",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "pattern": {
+        "type": "string"
+       },
+       "glob": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "pattern"
+      ]
+     }
+    },
+    {
+     "name": "edit_file",
+     "description": "Replace exact text in a file",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "path": {
+        "type": "string"
+       },
+       "old": {
+        "type": "string"
+       },
+       "new": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "path"
+      ]
+     }
+    },
+    {
+     "name": "run",
+     "description": "Run a shell command and return stdout/stderr",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "cmd": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "cmd"
+      ]
+     }
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "formatter run"
+ },
+ {
+  "id": "h2-tl15",
+  "group": "toolloop",
+  "lang": "en",
+  "intent": "toolloop",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a coding agent working in the user's repo. Use tools; keep edits minimal."
+    },
+    {
+     "role": "user",
+     "content": "the build is failing, fix it"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"go.mod\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_1",
+     "content": "module example.com/svc\n\ngo 1.22\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_2",
+       "type": "function",
+       "function": {
+        "name": "grep",
+        "arguments": "{\"pattern\": \"TODO\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_2",
+     "content": "internal/cache/lru.go:41: // TODO evict by size"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_3",
+       "type": "function",
+       "function": {
+        "name": "run",
+        "arguments": "{\"cmd\": \"git status --short\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_3",
+     "content": ""
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_4",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"Makefile\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_4",
+     "content": "test:\n\tgo test ./...\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_5",
+       "type": "function",
+       "function": {
+        "name": "run",
+        "arguments": "{\"cmd\": \"go build ./...\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_5",
+     "content": "# svc/internal/api\ninternal/api/handler.go:88:19: cannot use req.ID (variable of type string) as int in argument to s.Get"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_6",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"internal/api/handler.go\", \"start\": 80, \"end\": 92}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_6",
+     "content": "\tid := req.ID\n\titem, err := s.Get(id)"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_7",
+       "type": "function",
+       "function": {
+        "name": "grep",
+        "arguments": "{\"pattern\": \"func (s \\\\*Store) Get\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_7",
+     "content": "internal/store/store.go:40:func (s *Store) Get(id int) (*Item, error) {"
+    }
+   ],
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "read_file",
+      "description": "Read a file from the workspace",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "start": {
+         "type": "integer"
+        },
+        "end": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "path"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "grep",
+      "description": "Search the repo with ripgrep",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "pattern": {
+         "type": "string"
+        },
+        "glob": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "pattern"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "edit_file",
+      "description": "Replace exact text in a file",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "old": {
+         "type": "string"
+        },
+        "new": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "path"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "run",
+      "description": "Run a shell command and return stdout/stderr",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "cmd": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "cmd"
+       ]
+      }
+     }
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "type mismatch, simple fix w/ strconv; low can do"
+ },
+ {
+  "id": "h2-tl16",
+  "group": "toolloop",
+  "lang": "en",
+  "intent": "toolloop",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 4096,
+   "system": "You are a coding agent working in the user's repo. Use tools; keep edits minimal.",
+   "messages": [
+    {
+     "role": "user",
+     "content": "memory grows on the ingest service until OOM after ~6h under steady load. heap profile attached via tool"
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_1",
+       "name": "read_file",
+       "input": {
+        "path": "go.mod"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_1",
+       "content": "module example.com/svc\n\ngo 1.22\n"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_2",
+       "name": "grep",
+       "input": {
+        "pattern": "TODO"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_2",
+       "content": "internal/cache/lru.go:41: // TODO evict by size"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_3",
+       "name": "run",
+       "input": {
+        "cmd": "git status --short"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_3",
+       "content": ""
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_4",
+       "name": "read_file",
+       "input": {
+        "path": "Makefile"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_4",
+       "content": "test:\n\tgo test ./...\n"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_5",
+       "name": "run",
+       "input": {
+        "cmd": "ls internal"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_5",
+       "content": "cache\nhttp\nstore"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_6",
+       "name": "grep",
+       "input": {
+        "pattern": "func New"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_6",
+       "content": "internal/store/store.go:18:func NewStore(db *sql.DB) *Store {"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_7",
+       "name": "read_file",
+       "input": {
+        "path": "go.mod"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_7",
+       "content": "module example.com/svc\n\ngo 1.22\n"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_8",
+       "name": "grep",
+       "input": {
+        "pattern": "TODO"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_8",
+       "content": "internal/cache/lru.go:41: // TODO evict by size"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_9",
+       "name": "run",
+       "input": {
+        "cmd": "git status --short"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_9",
+       "content": ""
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_10",
+       "name": "read_file",
+       "input": {
+        "path": "Makefile"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_10",
+       "content": "test:\n\tgo test ./...\n"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_11",
+       "name": "run",
+       "input": {
+        "cmd": "ls internal"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_11",
+       "content": "cache\nhttp\nstore"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_12",
+       "name": "grep",
+       "input": {
+        "pattern": "func New"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_12",
+       "content": "internal/store/store.go:18:func NewStore(db *sql.DB) *Store {"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_13",
+       "name": "read_file",
+       "input": {
+        "path": "go.mod"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_13",
+       "content": "module example.com/svc\n\ngo 1.22\n"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_14",
+       "name": "grep",
+       "input": {
+        "pattern": "TODO"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_14",
+       "content": "internal/cache/lru.go:41: // TODO evict by size"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_15",
+       "name": "run",
+       "input": {
+        "cmd": "git status --short"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_15",
+       "content": ""
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_16",
+       "name": "read_file",
+       "input": {
+        "path": "Makefile"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_16",
+       "content": "test:\n\tgo test ./...\n"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_17",
+       "name": "run",
+       "input": {
+        "cmd": "ls internal"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_17",
+       "content": "cache\nhttp\nstore"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_18",
+       "name": "grep",
+       "input": {
+        "pattern": "func New"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_18",
+       "content": "internal/store/store.go:18:func NewStore(db *sql.DB) *Store {"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_19",
+       "name": "run",
+       "input": {
+        "cmd": "go tool pprof -top -inuse_space heap.pb.gz | head -12"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_19",
+       "content": "flat%  sum%  cum%\n61.2% 61.2% 61.2% svc/internal/ingest.(*Batcher).add\n18.0% 79.2% 79.2% bytes.growSlice"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_20",
+       "name": "read_file",
+       "input": {
+        "path": "internal/ingest/batcher.go",
+        "start": 30,
+        "end": 80
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_20",
+       "content": "func (b *Batcher) add(ev Event) {\n\tb.mu.Lock()\n\tb.pending[ev.Key] = append(b.pending[ev.Key], ev)\n\tb.mu.Unlock()\n}\nfunc (b *Batcher) flushLoop() {\n\tfor range time.Tick(time.Second) {\n\t\tb.flush()\n\t}\n}\nfunc (b *Batcher) flush() {\n\tb.mu.Lock(); defer b.mu.Unlock()\n\tfor k, evs := range b.pending {\n\t\tif err := b.sink.Write(evs); err != nil { continue }\n\t\tdelete(b.pending, k)\n\t}\n}"
+      }
+     ]
+    }
+   ],
+   "tools": [
+    {
+     "name": "read_file",
+     "description": "Read a file from the workspace",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "path": {
+        "type": "string"
+       },
+       "start": {
+        "type": "integer"
+       },
+       "end": {
+        "type": "integer"
+       }
+      },
+      "required": [
+       "path"
+      ]
+     }
+    },
+    {
+     "name": "grep",
+     "description": "Search the repo with ripgrep",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "pattern": {
+        "type": "string"
+       },
+       "glob": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "pattern"
+      ]
+     }
+    },
+    {
+     "name": "edit_file",
+     "description": "Replace exact text in a file",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "path": {
+        "type": "string"
+       },
+       "old": {
+        "type": "string"
+       },
+       "new": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "path"
+      ]
+     }
+    },
+    {
+     "name": "run",
+     "description": "Run a shell command and return stdout/stderr",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "cmd": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "cmd"
+      ]
+     }
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "retry-forever on sink failure retains events; reasoning on error path"
+ },
+ {
+  "id": "h2-tl17",
+  "group": "toolloop",
+  "lang": "en",
+  "intent": "toolloop",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a coding agent working in the user's repo. Use tools; keep edits minimal."
+    },
+    {
+     "role": "user",
+     "content": "commit this with a decent message"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"go.mod\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_1",
+     "content": "module example.com/svc\n\ngo 1.22\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_2",
+       "type": "function",
+       "function": {
+        "name": "grep",
+        "arguments": "{\"pattern\": \"TODO\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_2",
+     "content": "internal/cache/lru.go:41: // TODO evict by size"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_3",
+       "type": "function",
+       "function": {
+        "name": "run",
+        "arguments": "{\"cmd\": \"git status --short\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_3",
+     "content": ""
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_4",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"Makefile\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_4",
+     "content": "test:\n\tgo test ./...\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_5",
+       "type": "function",
+       "function": {
+        "name": "run",
+        "arguments": "{\"cmd\": \"git diff --stat\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_5",
+     "content": "internal/http/client.go | 22 +++++\n1 file changed"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_6",
+       "type": "function",
+       "function": {
+        "name": "run",
+        "arguments": "{\"cmd\": \"git add -A && git commit -m 'feat(http): retry idempotent requests with backoff'\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_6",
+     "content": "[main 3f2a1c9] feat(http): retry idempotent requests with backoff"
+    }
+   ],
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "read_file",
+      "description": "Read a file from the workspace",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "start": {
+         "type": "integer"
+        },
+        "end": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "path"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "grep",
+      "description": "Search the repo with ripgrep",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "pattern": {
+         "type": "string"
+        },
+        "glob": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "pattern"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "edit_file",
+      "description": "Replace exact text in a file",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "old": {
+         "type": "string"
+        },
+        "new": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "path"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "run",
+      "description": "Run a shell command and return stdout/stderr",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "cmd": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "cmd"
+       ]
+      }
+     }
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "commit done"
+ },
+ {
+  "id": "h2-tl18",
+  "group": "toolloop",
+  "lang": "en",
+  "intent": "toolloop",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 4096,
+   "system": "You are a coding agent working in the user's repo. Use tools; keep edits minimal.",
+   "messages": [
+    {
+     "role": "user",
+     "content": "port this python script in tools/sync.py to go, same CLI flags, keep the rate limiting semantics"
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_1",
+       "name": "read_file",
+       "input": {
+        "path": "go.mod"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_1",
+       "content": "module example.com/svc\n\ngo 1.22\n"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_2",
+       "name": "grep",
+       "input": {
+        "pattern": "TODO"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_2",
+       "content": "internal/cache/lru.go:41: // TODO evict by size"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_3",
+       "name": "run",
+       "input": {
+        "cmd": "git status --short"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_3",
+       "content": ""
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_4",
+       "name": "read_file",
+       "input": {
+        "path": "Makefile"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_4",
+       "content": "test:\n\tgo test ./...\n"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_5",
+       "name": "run",
+       "input": {
+        "cmd": "ls internal"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_5",
+       "content": "cache\nhttp\nstore"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_6",
+       "name": "grep",
+       "input": {
+        "pattern": "func New"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_6",
+       "content": "internal/store/store.go:18:func NewStore(db *sql.DB) *Store {"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_7",
+       "name": "read_file",
+       "input": {
+        "path": "go.mod"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_7",
+       "content": "module example.com/svc\n\ngo 1.22\n"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_8",
+       "name": "read_file",
+       "input": {
+        "path": "tools/sync.py"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_8",
+       "content": "import argparse, time, requests\nTOKENS=5\nlast=time.monotonic()\ndef take():\n    global TOKENS,last\n    now=time.monotonic(); TOKENS=min(5,TOKENS+(now-last)*2); last=now\n    if TOKENS<1: time.sleep((1-TOKENS)/2); TOKENS=0\n    else: TOKENS-=1\n..."
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_9",
+       "name": "run",
+       "input": {
+        "cmd": "python tools/sync.py --help"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_9",
+       "content": "usage: sync.py [-h] [--dry-run] [--since SINCE] [--burst N] src dst"
+      }
+     ]
+    }
+   ],
+   "tools": [
+    {
+     "name": "read_file",
+     "description": "Read a file from the workspace",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "path": {
+        "type": "string"
+       },
+       "start": {
+        "type": "integer"
+       },
+       "end": {
+        "type": "integer"
+       }
+      },
+      "required": [
+       "path"
+      ]
+     }
+    },
+    {
+     "name": "grep",
+     "description": "Search the repo with ripgrep",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "pattern": {
+        "type": "string"
+       },
+       "glob": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "pattern"
+      ]
+     }
+    },
+    {
+     "name": "edit_file",
+     "description": "Replace exact text in a file",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "path": {
+        "type": "string"
+       },
+       "old": {
+        "type": "string"
+       },
+       "new": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "path"
+      ]
+     }
+    },
+    {
+     "name": "run",
+     "description": "Run a shell command and return stdout/stderr",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "cmd": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "cmd"
+      ]
+     }
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "port with token-bucket semantics; mid-level work"
+ },
+ {
+  "id": "h2-tl19",
+  "group": "toolloop",
+  "lang": "en",
+  "intent": "toolloop",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a coding agent working in the user's repo. Use tools; keep edits minimal."
+    },
+    {
+     "role": "user",
+     "content": "did the tests pass?"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": "{\"path\": \"go.mod\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_1",
+     "content": "module example.com/svc\n\ngo 1.22\n"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_2",
+       "type": "function",
+       "function": {
+        "name": "run",
+        "arguments": "{\"cmd\": \"go test ./... 2>&1 | tail -5\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_2",
+     "content": "ok  \tsvc/internal/api\t0.31s\nok  \tsvc/internal/store\t0.12s\nok  \tsvc/internal/cache\t0.08s"
+    }
+   ],
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "read_file",
+      "description": "Read a file from the workspace",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "start": {
+         "type": "integer"
+        },
+        "end": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "path"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "grep",
+      "description": "Search the repo with ripgrep",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "pattern": {
+         "type": "string"
+        },
+        "glob": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "pattern"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "edit_file",
+      "description": "Replace exact text in a file",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "old": {
+         "type": "string"
+        },
+        "new": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "path"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "run",
+      "description": "Run a shell command and return stdout/stderr",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "cmd": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "cmd"
+       ]
+      }
+     }
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "reads output, says yes"
+ },
+ {
+  "id": "h2-tl20",
+  "group": "toolloop",
+  "lang": "en",
+  "intent": "toolloop",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 4096,
+   "system": "You are a coding agent working in the user's repo. Use tools; keep edits minimal.",
+   "messages": [
+    {
+     "role": "user",
+     "content": "our oauth callback intermittently 500s with 'state mismatch' only behind the load balancer. look into it"
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_1",
+       "name": "read_file",
+       "input": {
+        "path": "go.mod"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_1",
+       "content": "module example.com/svc\n\ngo 1.22\n"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_2",
+       "name": "grep",
+       "input": {
+        "pattern": "TODO"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_2",
+       "content": "internal/cache/lru.go:41: // TODO evict by size"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_3",
+       "name": "run",
+       "input": {
+        "cmd": "git status --short"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_3",
+       "content": ""
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_4",
+       "name": "read_file",
+       "input": {
+        "path": "Makefile"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_4",
+       "content": "test:\n\tgo test ./...\n"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_5",
+       "name": "run",
+       "input": {
+        "cmd": "ls internal"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_5",
+       "content": "cache\nhttp\nstore"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_6",
+       "name": "grep",
+       "input": {
+        "pattern": "func New"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_6",
+       "content": "internal/store/store.go:18:func NewStore(db *sql.DB) *Store {"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_7",
+       "name": "read_file",
+       "input": {
+        "path": "go.mod"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_7",
+       "content": "module example.com/svc\n\ngo 1.22\n"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_8",
+       "name": "grep",
+       "input": {
+        "pattern": "TODO"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_8",
+       "content": "internal/cache/lru.go:41: // TODO evict by size"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_9",
+       "name": "run",
+       "input": {
+        "cmd": "git status --short"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_9",
+       "content": ""
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_10",
+       "name": "read_file",
+       "input": {
+        "path": "Makefile"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_10",
+       "content": "test:\n\tgo test ./...\n"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_11",
+       "name": "run",
+       "input": {
+        "cmd": "ls internal"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_11",
+       "content": "cache\nhttp\nstore"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_12",
+       "name": "grep",
+       "input": {
+        "pattern": "func New"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_12",
+       "content": "internal/store/store.go:18:func NewStore(db *sql.DB) *Store {"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_13",
+       "name": "read_file",
+       "input": {
+        "path": "go.mod"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_13",
+       "content": "module example.com/svc\n\ngo 1.22\n"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_14",
+       "name": "grep",
+       "input": {
+        "pattern": "TODO"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_14",
+       "content": "internal/cache/lru.go:41: // TODO evict by size"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_15",
+       "name": "run",
+       "input": {
+        "cmd": "git status --short"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_15",
+       "content": ""
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_16",
+       "name": "read_file",
+       "input": {
+        "path": "Makefile"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_16",
+       "content": "test:\n\tgo test ./...\n"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_17",
+       "name": "run",
+       "input": {
+        "cmd": "ls internal"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_17",
+       "content": "cache\nhttp\nstore"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_18",
+       "name": "grep",
+       "input": {
+        "pattern": "func New"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_18",
+       "content": "internal/store/store.go:18:func NewStore(db *sql.DB) *Store {"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_19",
+       "name": "read_file",
+       "input": {
+        "path": "go.mod"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_19",
+       "content": "module example.com/svc\n\ngo 1.22\n"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_20",
+       "name": "grep",
+       "input": {
+        "pattern": "TODO"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_20",
+       "content": "internal/cache/lru.go:41: // TODO evict by size"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_21",
+       "name": "run",
+       "input": {
+        "cmd": "git status --short"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_21",
+       "content": ""
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_22",
+       "name": "read_file",
+       "input": {
+        "path": "Makefile"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_22",
+       "content": "test:\n\tgo test ./...\n"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_23",
+       "name": "run",
+       "input": {
+        "cmd": "ls internal"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_23",
+       "content": "cache\nhttp\nstore"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_24",
+       "name": "grep",
+       "input": {
+        "pattern": "func New"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_24",
+       "content": "internal/store/store.go:18:func NewStore(db *sql.DB) *Store {"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_25",
+       "name": "read_file",
+       "input": {
+        "path": "go.mod"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_25",
+       "content": "module example.com/svc\n\ngo 1.22\n"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_26",
+       "name": "grep",
+       "input": {
+        "pattern": "TODO"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_26",
+       "content": "internal/cache/lru.go:41: // TODO evict by size"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_27",
+       "name": "run",
+       "input": {
+        "cmd": "git status --short"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_27",
+       "content": ""
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_28",
+       "name": "grep",
+       "input": {
+        "pattern": "state mismatch"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_28",
+       "content": "auth/callback.go:52:\t\treturn errors.New(\"state mismatch\")"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_29",
+       "name": "read_file",
+       "input": {
+        "path": "auth/callback.go",
+        "start": 30,
+        "end": 60
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_29",
+       "content": "sess, _ := store.Get(r, \"oidc\")\nwant, _ := sess.Values[\"state\"].(string)\nif r.URL.Query().Get(\"state\") != want {\n\treturn errors.New(\"state mismatch\")\n}"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_30",
+       "name": "read_file",
+       "input": {
+        "path": "deploy/helm/values.yaml"
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "toolu_30",
+       "content": "replicaCount: 3\nsession:\n  store: cookie\n  secretEnv: SESSION_KEY\nenv:\n  - name: SESSION_KEY\n    value: \"\"\n"
+      }
+     ]
+    }
+   ],
+   "tools": [
+    {
+     "name": "read_file",
+     "description": "Read a file from the workspace",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "path": {
+        "type": "string"
+       },
+       "start": {
+        "type": "integer"
+       },
+       "end": {
+        "type": "integer"
+       }
+      },
+      "required": [
+       "path"
+      ]
+     }
+    },
+    {
+     "name": "grep",
+     "description": "Search the repo with ripgrep",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "pattern": {
+        "type": "string"
+       },
+       "glob": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "pattern"
+      ]
+     }
+    },
+    {
+     "name": "edit_file",
+     "description": "Replace exact text in a file",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "path": {
+        "type": "string"
+       },
+       "old": {
+        "type": "string"
+       },
+       "new": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "path"
+      ]
+     }
+    },
+    {
+     "name": "run",
+     "description": "Run a shell command and return stdout/stderr",
+     "input_schema": {
+      "type": "object",
+      "properties": {
+       "cmd": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "cmd"
+      ]
+     }
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "per-replica generated key when SESSION_KEY empty; cross-file inference"
+ }
+]

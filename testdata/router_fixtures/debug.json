@@ -1,0 +1,508 @@
+[
+ {
+  "id": "dbg-01",
+  "group": "debug",
+  "lang": "en",
+  "intent": "debug",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "My service crashes on startup. Here is the traceback:\n\n```\nTraceback (most recent call last):\n  File \"app/main.py\", line 42, in handle\n    result = process(payload)\n  File \"app/core.py\", line 17, in process\n    return payload[\"items\"][0][\"id\"]\nKeyError: 'items'\n```\nwhy is this happening?"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "fenced python traceback"
+ },
+ {
+  "id": "dbg-02",
+  "group": "debug",
+  "lang": "en",
+  "intent": "debug",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 1024,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "Why does this panic?\n\npanic: runtime error: invalid memory address or nil pointer dereference\n[signal SIGSEGV: segmentation violation code=0x1 addr=0x0 pc=0x4a1b2c]\n\ngoroutine 1 [running]:\nmain.(*Server).handle(0x0, 0xc000123456)\n\t/app/server.go:88 +0x2c\nmain.main()\n\t/app/main.go:21 +0x65\nexit status 2"
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "unfenced go panic"
+ },
+ {
+  "id": "dbg-03",
+  "group": "debug",
+  "lang": "en",
+  "intent": "debug",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "I get this exception when I call count with an empty value, what is wrong?\n\nException in thread \"main\" java.lang.NullPointerException: Cannot invoke \"String.length()\" because \"s\" is null\n\tat com.acme.Util.count(Util.java:14)\n\tat com.acme.App.run(App.java:31)\n\tat com.acme.App.main(App.java:9)"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "java stack trace"
+ },
+ {
+  "id": "dbg-04",
+  "group": "debug",
+  "lang": "en",
+  "intent": "debug",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 1024,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "npm install is failing, can you help me fix it?\n\nnpm ERR! code ERESOLVE\nnpm ERR! ERESOLVE could not resolve\nnpm ERR! While resolving: app@1.0.0\nnpm ERR! Found: react@18.2.0\nnpm ERR! Could not resolve dependency: peer react@\"^17.0.0\" from react-legacy@3.1.0"
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "dependency resolution log"
+ },
+ {
+  "id": "dbg-05",
+  "group": "debug",
+  "lang": "en",
+  "intent": "debug",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "The borrow checker is rejecting this, how do I fix it?\n\n```\nerror[E0382]: borrow of moved value: `v`\n --> src/main.rs:6:20\n  |\n4 |     let v = vec![1, 2, 3];\n5 |     let w = v;\n6 |     println!(\"{:?}\", v);\n  |                      ^ value borrowed here after move\n```"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "rust compiler error"
+ },
+ {
+  "id": "dbg-06",
+  "group": "debug",
+  "lang": "en",
+  "intent": "debug",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 1024,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "My pod keeps restarting, here are the events:\n\nEvents:\n  Type     Reason     Age                From     Message\n  Warning  BackOff    2m (x41 over 10m)  kubelet  Back-off restarting failed container\n  Normal   Pulled     2m                 kubelet  Container image already present\nLast State: Terminated  Reason: OOMKilled  Exit Code: 137\n\nwhat should I change?"
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "oom kill log"
+ },
+ {
+  "id": "dbg-07",
+  "group": "debug",
+  "lang": "en",
+  "intent": "debug",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "node crashes with this error, not working at all:\n\nSyntaxError: Unexpected token '}'\n    at wrapSafe (node:internal/modules/cjs/loader:1281:20)\n    at Module._compile (node:internal/modules/cjs/loader:1321:27)\n    at node:internal/main/run_main_module:28:49"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "node syntax error log"
+ },
+ {
+  "id": "dbg-08",
+  "group": "debug",
+  "lang": "en",
+  "intent": "debug",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 1024,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "Our API cannot connect to the database since the maintenance window. Logs:\n\n2025-11-20T10:14:03Z error: dial tcp 10.0.3.7:5432: connect: connection refused\n2025-11-20T10:14:04Z error: retry 1/5 failed\n2025-11-20T10:14:06Z error: retry 2/5 failed\n\nWhat could cause this?"
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "connection refused log"
+ },
+ {
+  "id": "dbg-09",
+  "group": "debug",
+  "lang": "en",
+  "intent": "debug",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "This test is flaky and fails about one run in ten:\n\n--- FAIL: TestWorker (0.31s)\n    worker_test.go:58: expected 3 results, got 2\nFAIL\nexit status 1\n\nI think there is a race condition in the worker pool. How do I find it?"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "flaky test failure"
+ },
+ {
+  "id": "dbg-10",
+  "group": "debug",
+  "lang": "en",
+  "intent": "debug",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 1024,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "Why is my build broken?\n\n```\nerror: cannot find module providing package github.com/acme/lib\nmake: *** [build] Error 1\n```"
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "build failure"
+ },
+ {
+  "id": "dbg-11",
+  "group": "debug",
+  "lang": "en",
+  "intent": "debug",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "The function below returns the wrong total, it is a bug I cannot find:\n\n```python\ndef parse_price(raw):\n    cleaned = raw.replace('$', '').replace(',', '')\n    if not cleaned:\n        return None\n    return round(float(cleaned) * 100)\n\ndef total(items):\n    return sum(parse_price(i['price']) for i in items)\n```\nInput: [{'price': '$1,200.50'}, {'price': ''}] gives a TypeError"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "bug in a snippet with symptom"
+ },
+ {
+  "id": "dbg-12",
+  "group": "debug",
+  "lang": "en",
+  "intent": "debug",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 1024,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "segfault in production once a day. core dump backtrace:\n\n#0  0x00007f3a in memcpy ()\n#1  0x0000555 in parse_frame (buf=0x0, len=4096) at net.c:211\n#2  0x0000555 in read_loop () at net.c:342\n\nthe exception happens only under load. Where do I start?"
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "native backtrace under load"
+ },
+ {
+  "id": "dbg-13",
+  "group": "debug",
+  "lang": "en",
+  "intent": "debug",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "It's not working: the deploy script exits with error: permission denied on /var/run/docker.sock"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "short error report"
+ },
+ {
+  "id": "dbg-14",
+  "group": "debug",
+  "lang": "en",
+  "intent": "debug",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 1024,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "Here is the output of the failing CI job, please explain why it fails and give me a fix:\n\n```\n=== RUN   TestMigrate\n    migrate_test.go:44: error: column \"deleted_at\" does not exist\n--- FAIL: TestMigrate (0.02s)\nFAIL\nexit status 1\n```"
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "ci log"
+ },
+ {
+  "id": "dbg-15",
+  "group": "debug",
+  "lang": "en",
+  "intent": "debug",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Heisenbug: my goroutines deadlock only when the buffer size is 1. Trace:\n\n```\nfatal error: all goroutines are asleep - deadlock!\n\ngoroutine 1 [chan send]:\nmain.produce()\n\t/app/main.go:30 +0x5c\n```\nCan you reason about the channel ownership and tell me what is wrong?"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 2,
+  "maxTier": 2,
+  "notes": "concurrency bug needing careful reasoning"
+ },
+ {
+  "id": "dbg-16",
+  "group": "debug",
+  "lang": "en",
+  "intent": "debug",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 1024,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "Python raises KeyError: 'items' in this handler, why?\n\nTraceback (most recent call last):\n  File \"app/main.py\", line 42, in handle\n    result = process(payload)\n  File \"app/core.py\", line 17, in process\n    return payload[\"items\"][0][\"id\"]\nKeyError: 'items'"
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "traceback with direct question"
+ },
+ {
+  "id": "dbg-17",
+  "group": "debug",
+  "lang": "en",
+  "intent": "debug",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "react app crashes: Uncaught Error: Rendered more hooks than during the previous render.\n    at renderWithHooks (react-dom.development.js:16305:13)\nwhy does this crash happen after I add the early return?"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "hooks error"
+ },
+ {
+  "id": "dbg-18",
+  "group": "debug",
+  "lang": "en",
+  "intent": "debug",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 1024,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "TLS handshake fails against our proxy since the certificate rotation:\n\nerror: x509: certificate signed by unknown authority\ncurl: (60) SSL certificate problem\n\nhow do I debug this?"
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "tls failure"
+ },
+ {
+  "id": "dbg-19",
+  "group": "debug",
+  "lang": "en",
+  "intent": "debug",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "this broke after the upgrade, stack: Exception in thread \"main\" java.lang.NullPointerException: Cannot invoke \"String.length()\" because \"s\" is null | \tat com.acme.Util.count(Util.java:14) | \tat com.acme.App.run(App.java:31) | \tat com.acme.App.main(App.java:9) fix?"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "stack trace flattened to one line"
+ },
+ {
+  "id": "dbg-20",
+  "group": "debug",
+  "lang": "en",
+  "intent": "debug",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 1024,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "The migration crashed halfway and left the table in a broken state:\n\n```\nERROR: duplicate key value violates unique constraint \"users_email_key\"\nDETAIL: Key (email)=(a@b.c) already exists.\n```\nhow do I recover safely?"
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "db constraint error"
+ },
+ {
+  "id": "dbg-21",
+  "group": "debug",
+  "lang": "en",
+  "intent": "debug",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Memory grows without bound in our Node service. heap snapshot diff shows Closure retained by EventEmitter listeners. Why would listeners accumulate and how do I prove it is a leak?"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "leak investigation without paste"
+ },
+ {
+  "id": "dbg-22",
+  "group": "debug",
+  "lang": "en",
+  "intent": "debug",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 1024,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "It fails to compile:\n\n```\nmain.go:12:2: undefined: strconv\n```"
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "trivial missing import"
+ }
+]

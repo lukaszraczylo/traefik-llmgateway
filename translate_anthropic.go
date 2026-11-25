@@ -651,7 +651,8 @@ func openAIResponseFromAnthropic(body []byte, model string, created int64) (map[
 		message["tool_calls"] = toolCalls
 	}
 
-	u := usage{prompt: resp.Usage.totalInputTokens(), completion: resp.Usage.OutputTokens}
+	finish := anthropicFinishReason(resp.StopReason)
+	u := withAnswerFlags(usage{prompt: resp.Usage.totalInputTokens(), completion: resp.Usage.OutputTokens, cached: resp.Usage.CacheReadInputTokens}, finish, anthropicHasOutput(resp.Content))
 
 	out := map[string]any{
 		"id":      chatCompletionIDPrefix + resp.ID,
@@ -661,7 +662,7 @@ func openAIResponseFromAnthropic(body []byte, model string, created int64) (map[
 		"choices": []any{map[string]any{
 			"index":         0,
 			"message":       message,
-			"finish_reason": anthropicFinishReason(resp.StopReason),
+			"finish_reason": finish,
 		}},
 		"usage": map[string]any{
 			"prompt_tokens":     u.prompt,
@@ -703,13 +704,16 @@ type anthropicStreamState struct {
 	// index also counts any preceding non-tool_use blocks (a tool_use
 	// block right after a text block is content-block index 1, but it is
 	// still the first — index 0 — tool call).
-	toolOrdinals    map[int]int
-	id              string
-	model           string
+	toolOrdinals map[int]int
+	id           string
+	model        string
+	// finish is the mapped stop reason once message_delta arrived; hasOutput latches on the first text or tool call.
+	finish          string
 	content         contentChunker
 	u               usage
 	created         int64
 	nextToolOrdinal int
+	hasOutput       bool
 }
 
 // newAnthropicStreamState returns an anthropicStreamState for one
@@ -725,7 +729,7 @@ func newAnthropicStreamState(model string, created int64) *anthropicStreamState 
 // usage returns the prompt/completion token counts captured so far, from
 // the message_start and message_delta events already translated.
 func (st *anthropicStreamState) usage() usage {
-	return st.u
+	return withAnswerFlags(st.u, st.finish, st.hasOutput)
 }
 
 // chunk builds one OpenAI-shaped "chat.completion.chunk" payload carrying
@@ -964,6 +968,7 @@ func (st *anthropicStreamState) translate(ev sseEvent) ([][]byte, error) {
 		st.id = p.Message.ID
 		st.content.set(chatCompletionIDPrefix+st.id, st.model, st.created)
 		st.u.prompt = p.Message.Usage.totalInputTokens()
+		st.u.cached = p.Message.Usage.CacheReadInputTokens
 		return [][]byte{st.chunk(map[string]any{"role": "assistant"}, nil)}, nil
 
 	case "content_block_start":
@@ -974,6 +979,7 @@ func (st *anthropicStreamState) translate(ev sseEvent) ([][]byte, error) {
 		if p.ContentBlock.Type != "tool_use" {
 			return nil, nil
 		}
+		st.hasOutput = true
 		ordinal := st.nextToolOrdinal
 		st.toolOrdinals[p.Index] = ordinal
 		st.nextToolOrdinal++
@@ -995,6 +1001,9 @@ func (st *anthropicStreamState) translate(ev sseEvent) ([][]byte, error) {
 		}
 		switch p.Delta.Type {
 		case "text_delta":
+			if p.Delta.Text != "" {
+				st.hasOutput = true
+			}
 			return [][]byte{st.content.build(p.Delta.Text)}, nil
 		case "input_json_delta":
 			ordinal, ok := st.toolOrdinals[p.Index]
@@ -1023,6 +1032,7 @@ func (st *anthropicStreamState) translate(ev sseEvent) ([][]byte, error) {
 		}
 		st.u.completion = p.Usage.OutputTokens
 		reason := anthropicFinishReason(p.Delta.StopReason)
+		st.finish = reason
 		return [][]byte{st.chunk(map[string]any{}, &reason)}, nil
 
 	case "error":

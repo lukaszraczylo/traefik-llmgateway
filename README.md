@@ -380,11 +380,14 @@ config accepts them as YAML, which decodes to the same JSON shape.
 | `admin` | `*AdminConfig` | `nil` (disabled) | Read-only admin dashboard — see [Admin](#admin). `nil` or `enabled: false` means the `/admin*` routes are not registered at all. |
 | `metrics` | `*MetricsConfig` | `nil` (disabled) | Prometheus text-exposition endpoint — see [Metrics](#metrics). `nil` or `enabled: false` means the metrics route is not registered at all. |
 | `modelAliases` | `map[string]string` | `{}` | Operator-defined alias id → target model id — see [Model aliases](#model-aliases). Omitted or empty means no aliases, byte-identical to a gateway built before this field existed. |
+| `smartRouters` | `map[string]SmartRouterConfig` | `{}` | Virtual models that route each request to a real model by estimated complexity — see [Smart routers](#smart-routers). Omitted or empty means no routers, so behaviour matches a gateway built before this field existed. |
 | `requireModelPrefix` | `bool` | `false` | When `true`, a model resolves only as `provider/model` or as a `modelAliases` id. A bare id returns 404 `unknown model` and `GET /v1/models` lists no bare ids. `false` keeps the sorted-first bare-id collision winner. |
 | `stripClientAnthropicBeta` | `bool` | `false` | When `true`, `POST /v1/messages` does not forward the client's `anthropic-beta` header to the provider, as native passthrough already does. `false` forwards it, so a client can enable beta features on the operator's own Anthropic account. |
 | `modelMeta` | `map[string]*ModelMetaConfig` | `{}` | Per-model context-window and cost overrides, keyed by exact `provider/model` or a bare model id — see [Model metadata](#model-metadata). Omitted or empty means no overrides; every model's metadata still resolves through discovery and the built-in table. |
 | `maxConcurrency` | `int` | `0` | When above `0`, every response carries `RateLimit-Policy: "concurrency";q=<n>;qu="concurrent-requests"` (IETF draft `draft-ietf-httpapi-ratelimit-headers`, an Internet-Draft, not a final standard), so clients that read it can keep at most `n` requests in flight. Set it to what your upstreams serve at once. The gateway only advertises the value; it does not queue or reject on it. It always wins over a learned value. `0` sends no header. Negative values are rejected at startup. |
 | `concurrencyAutodetect` | `bool` | `false` | When `true`, the gateway learns per provider how many requests the upstream serves at once. A 429, 503, 504 or upstream timeout sets the learned value to half the in-flight requests (minimum 1) and never raises it. Every 4 consecutive successes add 1. At 64 the value counts as unknown again. Responses served via that provider advertise the smaller of `maxConcurrency` and the learned value in `RateLimit-Policy`; with neither known, no header is sent. Learned values live in memory and reset on restart. |
+| `rateLimitHeaders` | `bool` | `false` | When `true`, responses carry the per-minute rate-limit headers for users with a minute limit. See [Rate-limit headers and pacing](#rate-limit-headers-and-pacing). |
+| `limitExemptKinds` | `[]string` | `[]` | Request kinds that skip every limit but still count in usage. See [Exempt kinds](#exempt-kinds). A blank entry fails construction. |
 | `passthroughUnknown` | `bool` | `false` | `false`: a request matching none of the plugin's routes gets a 404 JSON envelope. `true`: it falls through to the router's own backing service. **Does not cover the three media routes** — see the upgrade note below. |
 | `maxRequestBytes` | `int` | `0` (4 MiB) | Raises the unified chat/embeddings request-body cap. `0` or negative keeps 4 MiB; a positive value is clamped to 64 MiB. Pair with `maxInFlightBodyRequests` and the pod memory limit: an adversarial body decodes to ~12x live heap. |
 | `maxInFlightBodyRequests` | `int` | `0` (self-tuned) | Caps how many unified/media requests may concurrently be inside their own request-body read+decode step — see [Body-admission limit](#body-admission-limit). `0` self-tunes from the host's own `GOMAXPROCS`; a positive value pins an exact cap instead, clamped to a maximum of 10,000. |
@@ -462,7 +465,8 @@ alone allows the path and `b` alone allows the model.
 
 | Field | Type | Default | Semantics |
 |---|---|---|---|
-| `limits` | `*LimitsConfig` | `nil` (unlimited) | |
+| `limits` | `*LimitsConfig` | `nil` (unlimited) | One aggregate budget shared by every member of the group — see [Group, member and user limits](#group-member-and-user-limits). |
+| `memberLimits` | `*LimitsConfig` | `nil` (unlimited) | Per-member limits: each member user gets their own counter with these values — see [Group, member and user limits](#group-member-and-user-limits). |
 | `providers` | `[]string` | `[]` (all) | Glob-matched (`path.Match`) against a provider's configured name. |
 | `models` | `[]string` | `[]` (all) | Glob-matched, exactly as given — no automatic `provider/` prefix stripping. Both the bare and provider-prefixed forms of a model id are checked, so a pattern like `gpt-*` matches a client request for either `gpt-5-mini` or `openai/gpt-5-mini`. |
 | `cache` | `*bool` | `nil` (inherit) | Overrides the top-level `cache.enabled` setting for this group's requests — see [Caching](#caching). `nil` inherits the global setting; `false` opts the group out even when caching is globally on; `true` opts the group in, but only when the top-level `cache` block is actually configured (a construction error otherwise — there is nothing to inherit `ttl`/`maxBodyBytes` from). |
@@ -473,17 +477,19 @@ alone allows the path and `b` alone allows the model.
 
 ### `LimitsConfig`
 
-All six fields default to `0` (unlimited). A negative count, or a cost
+All seven count and cost fields default to `0` (unlimited). `pacing` defaults to unset (off). A negative count, or a cost
 that is negative, `NaN`, or `±Inf`, is a construction error.
 
 | Field | Type | Window |
 |---|---|---|
 | `requestsPerMinute` | `int64` | Fixed 1-minute window, UTC. |
 | `requestsPerDay` | `int64` | Fixed calendar-day window, UTC midnight to midnight. |
+| `tokensPerMinute` | `int64` | Fixed 1-minute window, UTC. Counts uncached input plus output tokens. |
 | `tokensPerDay` | `int64` | Fixed calendar-day window, UTC. |
 | `tokensPerMonth` | `int64` | Fixed calendar-month window, UTC. |
 | `costPerDayUSD` | `float64` | Fixed calendar-day window, UTC. |
 | `costPerMonthUSD` | `float64` | Fixed calendar-month window, UTC. |
+| `pacing` | `*PacingConfig` | Soft slowdown before the per-minute limits. See [Rate-limit headers and pacing](#rate-limit-headers-and-pacing). |
 
 Every window enforces correctly on the in-process fallback too, not only Redis —
 see [Limits and accounting](#limits-and-accounting)'s "Fallback" bullet for the
@@ -495,6 +501,189 @@ group's limits, not instead of them — a request is refused the moment it
 breaches whichever of the two is tighter. A user with no `limits` of their
 own is governed purely by their group's — see
 [UserConfig](#userconfig).
+
+**Token limits block the next request.** Tokens are known only after the
+upstream answers, so `tokensPerMinute`, `tokensPerDay` and `tokensPerMonth`
+all work the same way. The gateway admits a request while the window's
+`tokin + tokout` total is below the limit, then adds that request's tokens
+after the response. The request that crosses the limit still succeeds. The
+next request in the same window gets `429` with `Retry-After` set to the
+seconds until the window ends. The minute window is a fixed UTC minute, not
+a sliding one. The gateway writes the per-minute token counters only for
+scopes that set `tokensPerMinute`, so a config without it stores no extra
+keys.
+
+**What the minute window counts.** `tokensPerMinute` counts uncached input
+tokens plus output tokens. Anthropic `cache_read_input_tokens` and OpenAI
+`prompt_tokens_details.cached_tokens` do not count, so a client that
+re-sends a long, cached prompt is not locked out by cache hits. Anthropic
+`cache_creation_input_tokens` count. `tokensPerDay` and `tokensPerMonth`
+keep counting the full prompt, cached tokens included. Gemini cached tokens
+are not separated and count in full.
+
+**Pre-charge.** Usage is known only after the call, so a burst of large
+requests could all pass the check before any usage lands. When a scope sets
+`tokensPerMinute`, admission adds an estimate of the request's prompt tokens
+(body bytes divided by four, taken from `Content-Length` on routes that
+admit before reading the body, capped at 1,048,576) to the minute window in
+the same store round trip. The check compares against the value before that
+addition. When the call finishes, the estimate is replaced by the reported
+uncached usage. A refused, cancelled or failed request gives its estimate
+back. A request with no known length (chunked) reserves nothing. Scopes
+without `tokensPerMinute` make no extra store calls. While a request is in
+flight, `remaining` in the token headers already includes its estimate.
+
+#### Group, member and user limits
+
+Three places set limits. All use the same `LimitsConfig` fields, and `0`
+means unlimited.
+
+| Setting | Counter | Meaning |
+|---|---|---|
+| group `limits` | one per group (`kind: group`) | Aggregate: all members share one budget. |
+| group `memberLimits` | one per member user (`kind: user`) | Each member has their own budget with these values. |
+| user `limits` | one per user (`kind: user`) | The user's own budget. |
+
+`memberLimits` does not add a counter family. At load time the gateway
+merges it into each member's effective `limits`, so counting, the admin
+usage API, `429` bodies, events and `Retry-After` behave as for a user
+limit. Merge rules, per field:
+
+1. A non-zero value in the user's own `limits` wins.
+2. Otherwise the strictest (smallest) non-zero `memberLimits` value across
+   all the user's groups applies. A group that leaves the field at `0`
+   does not count.
+3. A user with no value from either source is unlimited for that field.
+
+The group's aggregate `limits` still apply on top of the per-user result.
+A users-file reload rebuilds each file user's effective limits against the
+configured groups.
+
+Example: no single user in `friends` may exceed 2 requests per minute or
+20000 tokens per minute, and the whole group stays under 1000 requests per
+day. `carol` gets a higher request limit of her own.
+
+```yaml
+groups:
+  friends:
+    limits:
+      requestsPerDay: 1000
+    memberLimits:
+      requestsPerMinute: 2
+      tokensPerMinute: 20000
+users:
+  inline:
+    - {name: carol, group: friends, apiKey: "env:LLMGW_KEY_CAROL", limits: {requestsPerMinute: 10}}
+```
+
+`GET /admin/api/usage` shows each user's effective `limits` plus
+`limitSources`, which maps each set field to `user` or
+`memberLimits:<group>`. Each group row also carries its `memberLimits`.
+
+#### Rate-limit headers and pacing
+
+When the global `rateLimitHeaders` option is `true` (default `false`, so an
+upgrade changes no response), the gateway reports a user's effective
+per-minute limits (the user's own `limits` merged with `memberLimits`) on
+every metered response, success and `429` alike. It sets only the windows
+that are configured:
+`requestsPerMinute` and `tokensPerMinute`. It reads the values from the
+counters the admission check already fetched, so it adds no store call.
+Headers are set before the body or SSE stream starts. A user with no
+minute limit gets no rate-limit headers.
+
+| Dialect | Headers |
+|---|---|
+| OpenAI | `x-ratelimit-limit-requests`, `x-ratelimit-remaining-requests`, `x-ratelimit-reset-requests` (for example `12s`), and the same three with `-tokens` |
+| Anthropic | `anthropic-ratelimit-requests-limit`, `-remaining`, `-reset` (RFC 3339), and `anthropic-ratelimit-tokens-limit`, `-remaining`, `-reset` |
+| IETF draft | `RateLimit: "requests";r=<remaining>;t=<seconds>` and `RateLimit-Policy: "requests";q=<limit>;w=60`, with a `tokens` member when set |
+
+The token headers describe `tokensPerMinute`, which counts uncached input
+plus output tokens (see above). The Anthropic `tokens` headers carry that
+combined count, as Anthropic's own `anthropic-ratelimit-tokens-*` do. On a
+`429`, `remaining` is `0` for the refused window, and the counts leave out
+the refused request. A `429` from a day or month limit, or from another
+scope's limit that the headers do not describe, reports `0` for every
+reported window and moves the reset to when the refused window ends, which
+matches `Retry-After`. On a native passthrough route the gateway's headers
+replace any rate-limit headers the upstream sends; with none to send, the
+upstream's pass through unchanged. The gateway
+merges its `RateLimit-Policy` members with the `concurrency` member from
+`maxConcurrency` / `concurrencyAutodetect`; neither replaces the other.
+
+**Pacing** slows a user down before the hard limit. Set `pacing` inside
+`memberLimits` or a user's `limits` (a user's own `pacing` wins). Pacing
+requires `requestsPerMinute` above 0 in the same block, and a group's
+aggregate `limits` rejects it, because nothing reads it there. With several
+member groups, the earliest `startPct` and the longest `maxDelay` across them
+apply:
+
+```yaml
+memberLimits:
+  requestsPerMinute: 60
+  tokensPerMinute: 20000
+  pacing: {startPct: 80, maxDelay: "10s"}
+```
+
+When the higher of the minute request fraction and the minute token
+fraction passes `startPct`, the gateway waits before forwarding. The
+delay grows linearly from 0 at `startPct` to `maxDelay` at 100%, and
+never exceeds `maxDelay`. `startPct` is 1 to 99 and `maxDelay` is a Go
+duration above 0 and at most `20s`, so a paced request stays inside a CDN
+time-to-first-byte budget. Anything else fails construction. A paced response carries
+`X-Llmgw-Paced-Ms`, and the gateway records one `paced` event per user
+per minute in the admin event feed. Pacing is off unless set; with it
+unset, behaviour is unchanged. The `429` at 100% is unchanged.
+
+On the unified and passthrough routes the wait runs right after admission,
+before the gateway reads the body, so it holds no body-admission slot and no
+provider concurrency slot. `/v1/messages` must decode the body first, to
+reject streaming without charging the limit, so its wait comes after the
+read. That is why pacing needs `requestsPerMinute`: it bounds how many
+requests can wait. Each user also has at most four requests waiting at once;
+a further paced request proceeds without delay. A client that disconnects during the wait ends the request with no
+response written; the request still counted against its minute window.
+
+Most clients honour `Retry-After` on a `429` and ignore the remaining-quota
+headers. Pacing is therefore the reliable way to slow a client down before
+it hits the limit; the headers help clients that do read them.
+
+#### Exempt kinds
+
+`limitExemptKinds` (global, default empty) lists request kinds that no limit
+applies to, for example `["embedding", "reranking"]`. An exempt request skips
+the request, token and cost limits on the user, `memberLimits`, group
+aggregate and total scopes, is never paced, is never refused with `429` or
+`402` (the unpriced-model cost-budget refusal), makes no `tokensPerMinute`
+pre-charge, and carries no rate-limit headers. Empty keeps every request
+limited.
+
+The gateway classifies the kind before admission:
+
+1. `POST /v1/embeddings` is `embedding`.
+2. A native passthrough path takes the kind the provider's `kinds` map gives
+   that path (the exact key, else the longest key that is a path prefix).
+3. Otherwise a passthrough path ending in `/rerank` or `/reranking` is
+   `reranking`, and one ending in `/embeddings` is `embedding`.
+4. Otherwise, when the provider's `kinds` map names an exempt kind for some
+   model id, the gateway reads the model from the body, in a bounded peek that
+   restores the body, and uses `kinds[model]`.
+
+With `limitExemptKinds` empty, steps 2 to 4 do not run and the body is not
+peeked. The `/v1/chat/completions` and `/v1/messages` routes do not look up a
+model kind.
+
+Exempt requests increment no limit counter on the user, `memberLimits`,
+group or total scopes: not the request, token or cost windows, and not the
+minute token pre-charge. Embedding traffic therefore never uses up the
+`requestsPerMinute`, `requestsPerDay` or token budgets that refuse the user's
+other requests. They still count in the per-model usage, so `GET
+/admin/api/usage/models` shows the traffic, and in a per-user monthly
+exempt counter, shown as `exemptRequestsPerMonth` on the user's row in
+`GET /admin/api/usage` and as "Exempt requests/month" on the user page. The
+user and group totals in the admin usage view leave exempt traffic out.
+The gateway decides the kind before admission, so no admission count is ever
+taken back.
 
 ### `UsersConfig`
 
@@ -513,7 +702,7 @@ own is governed purely by their group's — see
 | `apiKey` | `string` | — | Secret form (see [Secret forms](#secret-forms)); must resolve non-empty and unique across every inline **and** file-sourced user. |
 | `providers` | `[]string` | `[]` | This user's own personal grant — access beyond whatever their group(s) already allow, glob-matched exactly like a group's own `providers`. Set alone (with `models` left empty), it grants **every** model on those providers — the same empty-`models`-means-all-models contract a group's own `models` carries. The personal grant exists at all only when `providers` is non-empty — leaving it empty/omitted never means "allow everything" on its own, regardless of `models`. |
 | `models` | `[]string` | `[]` | The personal grant's own model glob, narrowing `providers` above — same semantics as a group's own `models`. Requires `providers` to be non-empty too: a `models`-only personal grant (no `providers`) would reach every configured provider, not just the ones already covered — a construction error naming the user. |
-| `limits` | `*LimitsConfig` | `nil` (governed by group's limits alone) | When set, enforced alongside — not instead of — every member group's own limits (one independent scope per member group); the request is refused by whichever scope is breached first. The personal grant above carries no limits of its own. |
+| `limits` | `*LimitsConfig` | `nil` (governed by group's limits alone) | Overrides the groups' `memberLimits` per non-zero field (see [Group, member and user limits](#group-member-and-user-limits)). When set, enforced alongside — not instead of — every member group's own limits (one independent scope per member group); the request is refused by whichever scope is breached first. The personal grant above carries no limits of its own. |
 | `admin` | `bool` | `false` | Grants access to the read-only admin dashboard — see [Admin](#admin). Works the same for an inline or a file-sourced user. An admin user is otherwise ordinary: their own keys, group(s), and limits still apply, including to the admin routes themselves. |
 
 A user belonging to exactly one group (`group` alone, `groups` empty)
@@ -615,6 +804,7 @@ changes what a request is billed.
 | `inputCostPerMTokMicroUsd` | `int64` | `0` (not overridden) | Input cost per 1,000,000 tokens, in micro-USD (1 USD = 1,000,000). `0` falls through to the next layer unless `free` is set. Must not be negative. |
 | `outputCostPerMTokMicroUsd` | `int64` | `0` (not overridden) | Output cost per 1,000,000 tokens, in micro-USD. Same fallthrough rule as `inputCostPerMTokMicroUsd`. |
 | `free` | `bool` | `false` | `true` sets both cost fields to an explicit, known zero — distinct from leaving them at `0`, which means "not overridden here, keep looking." Rejected at construction when combined with a non-zero cost field (contradictory). |
+| `vision` | `bool` | unset (treated as capable) | Declares whether the model accepts image input. A [smart router](#smart-routers) skips a model with `vision: false` when the request carries an image. An unset value or a missing entry counts as capable. |
 
 ### `TargetConfig` (an `mcpServers` entry)
 
@@ -824,6 +1014,300 @@ http:
 - **Admin overview**: `GET /admin/api/overview` includes an `aliases`
   array (`{alias, target}`, sorted by alias) — see [Admin](#admin). No
   secrets involved.
+
+## Smart routers
+
+A smart router is a virtual model. The client requests the router name, such as `auto`. The gateway scores the request, picks a tier of real models, and escalates to a higher tier when the upstream fails. A router costs nothing when `smartRouters` is empty.
+
+### Smart router example
+
+Three tiers, several models in the upper tiers, and every optional key at a useful value. Remove the keys you do not need. Each tier model must name a model the gateway can serve.
+
+```yaml
+http:
+  middlewares:
+    llmgateway:
+      plugin:
+        llmgateway:
+          # ... providers, groups, users unchanged ...
+          smartRouters:
+            auto:
+              tiers:
+                - name: small
+                  minScore: 0
+                  models: ["openai/gpt-5-mini"]
+                - name: medium
+                  minScore: 300
+                  models: ["anthropic/claude-sonnet-4-5", "openai/gpt-5"]
+                - name: large
+                  minScore: 600
+                  models: ["anthropic/claude-opus-4-5", "openai/gpt-5-pro"]
+              keywordRules:
+                - tier: large
+                  keywords: ["security review", "architecture"]
+              defaultTier: small
+              toolsMinTier: medium
+              classifier: v2
+              riskZ: 128
+              intentTiers: {debug: large}
+              session: {enabled: true}
+              calibration: {mode: shadow}
+              selection: adaptive
+              saturationDowngrade: true
+              maxAttempts: 4
+              firstByteTimeout: 40s
+              timeoutFallback: true
+              contextEscalation: true
+```
+
+Clients send `"model": "auto"`. The router name must not collide with a provider prefix, an explicit model id, or a model alias.
+
+### Configuration keys
+
+All keys sit under `smartRouters.<name>`. The gateway refuses the config when a value is out of range.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `tiers` | required | List of tiers, cheapest first. The position is the rank. |
+| `tiers[].name` | required | Tier name. Must be unique in the router. |
+| `tiers[].models` | required | Models of the tier. A model appears in one tier only. A router cannot name another router. |
+| `tiers[].minScore` | required | Lowest score the tier serves, 0 to 1000. The first tier needs 0. Each later value must be higher. |
+| `keywordRules` | none | Raise a request to `tier` when its text holds one of the `keywords`. At most 64 keywords in total. |
+| `defaultTier` | first tier | Tier for a request with no user text. |
+| `toolsMinTier` | none | Floor for a request that carries tools or tool history. |
+| `weights` | see [Tiers, scoring and floors](#tiers-scoring-and-floors) | Override the v1 weights, each 0 to 1000. |
+| `classifier` | `v1` | `v1` or `v2`. |
+| `riskZ` | `128` | v2 uncertainty margin, 0 to 400. `0` turns the margin off. |
+| `intentTiers` | none | Pin a v2 intent to a tier by name. |
+| `shadowWeights` | none | Second v1 scoring for comparison. Never changes routing. |
+| `shadowClassifier` | none | `v2` scores each request with v2 for comparison. Cannot be set with `shadowWeights`. |
+| `session.enabled` | `false` | Keep a tier pin per conversation. |
+| `session.header` | `X-Session-Id` | Request header that carries a client session id. |
+| `session.ttlSeconds` | `21600` | Idle lifetime of a session record, 60 to 604800. |
+| `session.idleResetSeconds` | `1800` | Silence after which the pin resets, 1 to 604800. Must not exceed `ttlSeconds`. |
+| `session.decayAsks` | `3` | Calm new asks that lower the pin one tier, 1 to 50. |
+| `session.regenWindowSeconds` | `120` | Window in which a repeated ask counts as a regenerate, 5 to 3600. |
+| `session.toolFailStreak` | `3` | Failing tool results in a row that raise a tool loop one tier, 2 to 20. |
+| `calibration.mode` | `off` | `off`, `shadow`, or `live`. |
+| `calibration.targetBadPct` | `3` | Bad-answer share a tier must stay under, 1 to 50. |
+| `calibration.minSamples` | `200` | Requests a boundary needs before it moves, 50 or more. |
+| `calibration.step` | `25` | Points added to an offset per refresh, 1 to 100. |
+| `calibration.maxLower` | `150`, reduced to fit tier gaps | Largest drop of a threshold, 0 to 300. |
+| `calibration.maxRaise` | `0` | Largest rise of a threshold, 0 to 100. |
+| `calibration.freeze` | `false` | Set every offset to zero. |
+| `selection` | `ordered` | `ordered`, `hash`, or `adaptive`. |
+| `adaptive.explorePct` | `5` | Chance in percent that a random candidate goes first, 0 to 50. |
+| `adaptive.windowHours` | `6` | Hours of reward counters that count, 1 to 12. |
+| `adaptive.latencyWeightPct` | `30` | Share of the reward a slow first byte can remove, 0 to 100. |
+| `maxAttempts` | `4` | Upstream attempts per request. |
+| `firstByteTimeout` | off | Go duration of at least `1s`. Escalate when an attempt starts too slowly. |
+| `timeoutFallback` | `false` | After every attempt misses `firstByteTimeout`, add one attempt on a lower tier. Needs `firstByteTimeout` and two tiers. |
+| `contextEscalation` | `true` | Skip models whose known context window is too small. |
+| `saturationDowngrade` | `false` | Start one tier lower when the classified tier is full. Needs two tiers. |
+| `downgradeBand` | `100` | Points above a threshold in which a downgrade can happen, 0 to 300. |
+
+### Tiers, scoring and floors
+
+Scores run from 0 to 1000. A request goes to the highest tier whose `minScore` its score reaches. The default classifier is `v1`.
+
+- **v1 signals**: the gateway scores the newest user text, looking back up to 32 messages. It adds points for length, code markers, reasoning markers, technical vocabulary, multi-step phrasing, and several questions. It subtracts points for short, simple questions. A request with `tools`, or tool calls in its history, also adds the `tools` weight.
+- **v1 weights**: `weights` overrides the defaults `length` 100, `code` 300, `reasoning` 250, `technical` 250, `multiStep` 30, `multiQuestion` 20, `simple` 50 (a penalty), and `tools` 100. The score stays between 0 and 1000.
+- **Floors**: a floor raises the tier and never lowers it. `reasoning_effort` of `medium` or `high`, or `thinking.type: enabled`, starts at the top tier. Two or more reasoning markers also start at the top tier. `toolsMinTier` floors every request with tools or tool history. A keyword rule raises the request to its tier.
+- **Empty text**: a request with no user text uses `defaultTier`.
+- **Reasons**: each routed request carries one reason: `score`, `keyword`, `floor`, `default`, `skipped`, `session`, `loop`, `bump`, or `saturated`. `skipped` means the first attempted tier sits above the classified tier because lower tiers had no usable target.
+
+### Classifier v2
+
+Set `classifier: v2` to score the newest real ask. The v1 output does not change when you leave the default. Floors and keyword rules still raise the tier last, and v2 never lowers a rank.
+
+- **Ask search**: v2 looks back up to 400 messages. A tool loop keeps the tier of the ask that started it, because a user turn that carries tool results is never the ask.
+- **Prose and paste**: v2 splits the ask into prose and pasted material. Fenced code, dense or short-line paragraphs, and logs count as paste. Markers and keyword rules read only the prose, so a marker inside a paste cannot move the tier.
+- **Request shape**: v2 also reads the size, the history length, the requested output, JSON mode, and non-Latin or unrecognised language.
+- **Intents**: the prose gets one intent: chit-chat, rewrite, edit, debug, design, or math. Each intent has a base score on the router's own ladder. The same intent lands on the same relative tier for any `minScore` layout. The v1 score is a lower bound.
+- **Hard subjects**: a request whose subject needs a stronger model, whatever its wording, lifts the score to the `debug` or `design` base.
+- **Tool-output failure**: when one of the newest three tool results shows an error, v2 raises the score to at least the `edit` base. An Anthropic `is_error` result or a log signature at the head or tail of the text counts as a failure.
+- **Ladder positions**: a position runs from 0 (score 0) to 1000 (the first boundary above tier 0) to 2000 (the top boundary). The defaults are chit-chat 0, rewrite 400, edit 1000, debug 1500, design 1800, math 2000. Text the English markers cannot classify uses 1000.
+- **`intentTiers`**: map an intent to a tier name to pin it to that tier's `minScore`. The keys are `chitchat`, `rewrite`, `edit`, `debug`, `design`, `math`, and `foreign`. A key that is not an intent, or a name that is not a tier, fails validation.
+- **Uncertainty margin**: v2 computes a spread `sigma` and routes on `score + riskZ * sigma / 100`, scaled to the router's tier spacing. Doubt routes up. `sigma` grows for non-Latin text, long text with no recognised intent, a truncated history, a very short follow-up, and conflicting intents. The default `riskZ` of 128 means 1.28 sigma. Set `riskZ: 0` to turn the margin off.
+
+### Shadow comparison
+
+A shadow scoring runs beside the live one and never changes routing. Use one of two keys. They exclude each other, and the gateway refuses a router that sets both.
+
+- **`shadowWeights`**: scores each request a second time with other v1 weights, for example `{code: 0}`.
+- **`shadowClassifier: v2`**: scores each request with v2 on a v1 router.
+
+For each request the gateway counts the live tier against the shadow tier. It stores no prompt text and no per-request record. The counters use monthly buckets, shared through Redis when configured and kept per instance otherwise. The admin Models page shows the counts as an agreement matrix: rows hold the live tier, columns hold the shadow tier, and the diagonal holds the requests where both agree. Mass below the diagonal means the shadow routes lower. Mass above it means the shadow routes higher.
+
+### Sessions
+
+Set `session.enabled: true` to keep a tier pin per conversation. The default is off.
+
+- **Needs v2**: sessions change live routing only with `classifier: v2`. With only `shadowClassifier: v2`, the session changes the shadow rank and never live routing. A router with neither ignores the setting, and the gateway logs a warning.
+- **Key**: the conversation key is a SHA-256 of the router, the caller, a client id, and the first 256 bytes of the system prompt. The caller is the user scope, else a digest of the presented API key. The client id is `metadata.user_id`, else `prompt_cache_key`, else the `session.header` header. With none of them, the key uses the system prompt and the first user message.
+- **Privacy**: the gateway stores the 32-character digest and a few small numbers. It stores no prompt text.
+- **Storage**: with Redis, the value lives at `llmgw:rsess:{router}:{hash}` and expires after `ttlSeconds`. Each turn does one `GET` and renews the expiry with an asynchronous `SET`. A bounded in-process cache of 4096 sessions sits in front. Without Redis it is the only store, and each instance keeps its own sessions. A Redis error counts as a session miss and never fails a request. A shadow-only router still does the `GET` on each request.
+- **Ratchet**: the pin only rises within a conversation. A bad answer pins the next turn one tier above the tier that gave it. An escalation pins the tier that served it. These outcome pins apply to routers with live sessions only.
+- **Regenerate**: a repeat of the same ask inside `regenWindowSeconds` goes up one tier, with reason `bump`.
+- **Decay**: after `decayAsks` new asks that classify below the pin, the pin drops one tier.
+- **Idle reset**: after `idleResetSeconds` of silence, the session resets.
+- **Tool loops**: a turn that carries tool results keeps the tier of the ask that started the loop, with reason `loop`. `toolFailStreak` failing tool results in a row raise the loop one tier, with reason `bump`.
+- **Short follow-ups**: a very short follow-up such as "ok do it" starts from the score of the previous ask.
+- **Several instances**: when instances share Redis, the newest record wins, so a decay on one instance applies on the others.
+
+### Outcomes
+
+Each request counts once by first attempted tier, routing reason, and outcome.
+
+| Outcome | Meaning |
+|---|---|
+| `ok` | The first attempted tier served a 2xx. |
+| `escalated` | A higher tier served a 2xx. |
+| `error` | The final response was not a 2xx. |
+| `bad` | The answer was cut at the output cap, came back empty, or broke after the first byte. |
+| `slow` | An attempt missed `firstByteTimeout`, whatever the final result. |
+
+A request that took the timeout-fallback attempt counts under the routing reason `fallback`, with outcome `slow`.
+
+`bad` overrides `slow`, and `slow` overrides the other three. A length cut counts as bad only when the completion has at least 512 tokens or the client sent no `max_tokens`. A short answer cut by a small client limit is the client's choice. `bad` changes routing only through live session pins and live calibration.
+
+### Calibration
+
+Calibration lowers tier thresholds when a tier gives too many bad answers, so more requests route up. It is off by default.
+
+- **Modes**: `off`, `shadow`, or `live`. `shadow` computes and exports the offsets and never changes routing. `live` routes on `minScore - offset`. `freeze: true` sets every offset to zero.
+- **Refresh**: a background job runs every 60 seconds. It reads the last 24 hourly counters of each tier.
+- **Raise rule**: take the 95% Wilson lower bound of a tier's bad share. When it exceeds `targetBadPct` over at least `minSamples` requests, the threshold of the next tier up drops by `step` points.
+- **Relax rule**: when the upper bound stays under 1% over at least 500 requests, the offset relaxes by 10.
+- **Limits**: an offset stays between `-maxRaise` and `maxLower`. `maxRaise` is 0 by default, so thresholds only drop. `maxLower` plus `maxRaise` must stay below the smallest gap between two `minScore` values. Without an explicit `maxLower`, the gateway lowers the default of 150 to fit tight gaps.
+- **Counted requests**: only requests routed by `score` count, and only when the first attempted tier served them or gave a bad answer. Upstream errors, `429` responses, escalations, and keyword, floor, session, and loop routes are left out. They measure capacity or a forced tier, not the classifier.
+- **Storage**: counters live at `llmgw:router:{router}:cal/{tier}/n` and `cal/{tier}/bad`, with `:hour:{yyyymmddhh}` appended and a 48 hour expiry. They use the shared store of the other router counters, and each instance keeps its own without Redis. The refresh goroutine starts with the first routed request. It stops on `Close` or after 10 minutes without a routed request.
+
+### Model selection
+
+`selection` sets the order of the models inside one tier.
+
+- **`ordered`** (default): try the models in the listed order.
+- **`hash`**: start at a model chosen from the request text. This spreads load and keeps the choice stable per prompt.
+- **`adaptive`**: order the models with a Thompson-sampling bandit. The bandit only permutes the candidates of one tier. It never adds a candidate, removes one, or moves one to another tier.
+
+Adaptive details:
+
+- **Reward**: a bad answer or an upstream error earns 0. A slow attempt that missed `firstByteTimeout` counts as a failure. Any other attempt earns `1 - latencyWeightPct/100 * clamp(ttfb / tierAverage - 1, 0, 1)`. A client cancel or an upstream `400` is not counted.
+- **Order**: each candidate draws a score from a normal approximation of Beta(2+a, 1+n-a). Here a is the reward sum and n the attempt count over the last `windowHours` hourly buckets. The optimistic prior means a new candidate gets tried.
+- **Load**: with `concurrencyAutodetect` on, the score drops by `0.5 * utilisation^2` of the candidate's provider. A provider at its known limit goes last.
+- **Explore**: with probability `explorePct` percent, a random unsaturated candidate goes first.
+- **Storage**: counters live at `llmgw:router:{router}:bd/{tier}/{candidateHash}/a` and `/n`, with `:hour:{yyyymmddhh}` appended, a 12 hour expiry, and rewards in thousandths. The window refreshes every 60 seconds with the calibration job. A router keeps at most 256 candidates. Each instance keeps its own counters without Redis.
+- **Warning**: the `adaptive` settings have no effect with another selection, and the gateway logs a warning.
+
+### Saturation downgrade
+
+Set `saturationDowngrade: true` to start a request one tier below its classified tier when the classified tier has no free capacity. The tier counts as saturated when every usable candidate has a known concurrency limit and has reached it. The limit comes from `maxConcurrency` or `concurrencyAutodetect`. Without them, nothing is saturated. A request moves down only when all of these hold:
+
+- **Reason**: the tier came from the score alone. A keyword, a floor, the default tier, a session pin, a tool loop, or a bump never moves down.
+- **Floors**: the lower tier is not below any floor or keyword tier of the request.
+- **Band**: the score is less than the tier threshold plus `downgradeBand`. A score deep inside the tier stays.
+- **Fit**: the lower tier has a candidate that fits the context window, vision, and cost checks.
+
+The request moves down at most one tier. The higher tiers stay in the plan, so a failure still escalates up. The response carries `X-Llmgw-Router-Downgraded` with the classified tier name while the lower tier serves it. The request counts with reason `saturated`, and the admin view lists the count as `downgraded`.
+
+### Escalation and first-byte timeout
+
+- **Escalation**: on a retryable failure, the gateway tries the next model in the same tier, then the first model of the next tier. It never moves down, except `saturationDowngrade` at the start and the one extra `timeoutFallback` attempt. It stops after `maxAttempts` upstream attempts. When a higher tier has a usable model, the plan keeps one attempt for it, so same-tier failover cannot use every attempt. Escalation works with `failover` off. Once the gateway sends the first response byte, it cannot escalate.
+- **Client errors**: an upstream `400` does not escalate, because the request is invalid. The exception is a context overflow. Before the first response byte, a `400` body can name an overflow: `context_length_exceeded`, "maximum context length", "prompt is too long", "context window", "is longer than the model's", or "too many tokens". The router then moves to the next candidate and counts an escalation. Direct model requests never do this.
+- **Limits**: a routed request passes admission, pacing, and the rate-limit headers once, before the router plans its attempts. Escalation and timeout-fallback attempts count no extra request. The token pre-charge settles once, and only attempts that report usage add tokens. See [Group, member and user limits](#group-member-and-user-limits).
+- **`firstByteTimeout`**: set a Go duration of at least `1s`, such as `40s`, to escalate when an upstream starts too slowly. It is off by default.
+  - **Scope**: the deadline applies to each upstream attempt of the router, and only to requests sent to the router name. A direct model request has no deadline.
+  - **First byte**: for a non-stream request, the first byte is the first byte of the response body. For a stream, it is the first SSE `data:` event. Response headers and SSE comment lines such as keep-alive pings do not count.
+  - **On a miss**: the gateway cancels that attempt, never the client request, and tries the next candidate under the normal escalation rules. A slow attempt counts as a failed attempt for health tracking. After the first byte arrives, the deadline is over.
+  - **Provider limit**: the value must not exceed the `requestTimeout` of a provider that a tier model names. The gateway refuses the config otherwise.
+  - **CDN limits**: a CDN or proxy in front of the gateway can cut a request first. Cloudflare closes at about 100 seconds with HTTP `524`. Each attempt can take up to `firstByteTimeout`, so keep `firstByteTimeout` times `maxAttempts` below that limit.
+  - **No candidate starts**: when the last candidate also misses the deadline, the gateway answers `504`, unless `timeoutFallback` adds one more attempt. The error type is `timeout_error` and the message is "the router's models did not start responding in time". The body uses the OpenAI error shape on `/v1/chat/completions` and the Anthropic shape on `/v1/messages`.
+
+### Timeout fallback
+
+Set `timeoutFallback: true` to answer a request that every candidate was too slow for, instead of the `504`. It is off by default. The key follows `saturationDowngrade` and `contextEscalation`: a camelCase switch named for what it does. The gateway refuses the config without `firstByteTimeout` or with fewer than two tiers.
+
+The plan still only goes upward. This is the one exception to "never moves down", next to `saturationDowngrade`. The extra attempt happens only when all of these hold:
+
+- **Slow**: every candidate in the plan has been tried and at least one of them missed `firstByteTimeout`.
+- **Retryable**: the last failure still allows a retry. A `400` client error, or any other non-timeout failure as the last result, ends the request as before.
+- **Nothing sent**: no byte has reached the client, and the client is still connected.
+- **Room below**: some tier below the first attempted tier has a usable candidate.
+
+The gateway picks the highest tier below the first attempted tier, and goes lower only when that tier has no usable candidate. Inside the tier it takes the first usable candidate in the normal order. Access, vision, cost-budget and context-fit checks apply as usual, so a model that is too small for the prompt or denied to the caller is never used. With `contextEscalation: false` the context check is off, as everywhere else.
+
+- **Floors and pins**: the extra attempt can go below a keyword, reasoning or tools floor and below a session pin. The alternative is an error. Nothing else about the floors changes.
+- **Deadline**: the extra attempt keeps `firstByteTimeout`. If it also fails, the request ends with the existing error: `504` for a slow attempt, the upstream error otherwise. There is never a second extra attempt.
+- **`maxAttempts`**: the extra attempt can exceed `maxAttempts` by exactly one. The plan holds at most `maxAttempts + 1` attempts, and only on a router with `timeoutFallback`.
+- **Reporting**: the response carries `X-Llmgw-Router-Downgraded` with the first attempted tier, and `X-Llmgw-Router-Tier` with the serving tier. The request counts with reason `fallback` and outcome `slow`. The admin router row shows `timeoutFallback` and the count as `fellBack`. The events feed records a rate-gated `router_timeout_fallback` event, with its own 30-second gate. The attempt is not counted as an escalation.
+- **Sessions**: a fallback never raises the session pin, even when the lower tier gives a bad answer. The next turn plans normally.
+- **Learning**: calibration does not count the request. The bandit records the slow attempts as failures, as without the flag.
+- **Cloudflare and CDNs**: the extra attempt adds one more `firstByteTimeout` to the worst case. Keep `firstByteTimeout` times `(maxAttempts + 1)` below the CDN limit, about 100 seconds for Cloudflare, or the CDN answers `524` first.
+
+### Context windows
+
+- **Escalation**: with `contextEscalation` on (the default), the gateway skips a model when the estimated prompt plus the requested output exceeds 90% of its known context window. The requested output is `max_completion_tokens`, then `max_tokens` on chat, and `max_tokens` on `/v1/messages`. It counts as 0 when absent.
+- **Estimate**: the prompt estimate counts one token per four bytes of these inputs: message text, the system prompt, the `tools` schema, OpenAI `tool_calls` arguments, and Anthropic `tool_use` input. Each image adds 1000 tokens. Very large structured payloads count as a lower bound.
+- **Learned ratio**: after 50 served requests with provider-reported usage, the gateway learns bytes per token for each upstream model. The ratio stays between 1.5 and 6.0 and lives in memory on each instance.
+- **No fit**: when the check would skip every target, the gateway uses the model with the largest known window instead of returning `404`.
+- **Vision**: a request with an image skips models that set `vision: false` in `modelMeta`.
+- **Advertised window**: `GET /v1/models` lists a router when the group may use its name and at least one target. With `contextEscalation` on, the entry advertises the largest known window of all targets in `context_window`, `context_length`, and `max_model_len`. With `contextEscalation: false`, it advertises the smallest known window. Targets with an unknown window do not count. When no target has a known window, the fields are omitted.
+- **Override**: a `modelMeta` entry keyed by the router name replaces the value. It needs `contextTokens` above zero. The gateway logs a one-time warning when the override exceeds the largest known target window.
+
+### Access and response headers
+
+- **Access**: a group needs access to the router name and to each target model it can reach. The gateway skips targets the group may not use. When the group may use none, the request returns `403`.
+- **Validation**: at construction, a router needs at least one tier. A keyword rule, `defaultTier`, `toolsMinTier`, and `intentTiers` must name real tiers.
+
+| Header | Value |
+|---|---|
+| `X-Llmgw-Routed-Model` | Canonical `provider/model` id that served the request. |
+| `X-Llmgw-Router-Tier` | Name of the serving tier. |
+| `X-Llmgw-Router-Reason` | Routing reason. Sent only by routers with live sessions (`classifier: v2` and `session.enabled`). |
+| `X-Llmgw-Router-Downgraded` | Classified tier name, when saturation moved the request down and the lower tier serves it. |
+
+The response body keeps the real model that served the request.
+
+### Observability
+
+- **Metrics**: `llmgateway_router_requests_total{router,tier,reason}` counts each request once. `llmgateway_router_escalations_total{router,from_tier,to_tier}` counts each move to a higher tier. Same-tier failover does not count. `llmgateway_router_calibration_delta{router,tier,mode}` is a gauge of the calibration offsets. Labels come only from configured names.
+- **Events**: the admin events feed records a `router_escalation` event on a cross-tier escalation or when a router exhausts its attempts. A rate gate allows one event per 30 seconds on each instance. The next event reports how many it suppressed. The event names the slow model after a first-byte miss.
+- **Admin API**: `GET /admin/api/overview` and `GET /admin/api/catalog` list routers. Each router row shows its tiers, keyword rules, `selection`, `classifier`, `shadowClassifier`, `riskZ`, `toolsMinTier`, `firstByteTimeout`, `maxAttempts`, `saturationDowngrade`, `downgradeBand`, `downgraded`, `timeoutFallback`, and `fellBack`. It also shows `calibration` (mode and offset per tier) and the `adaptive` settings.
+- **Admin stats**: each row has `stats` with request counts per tier and reason, escalations, the shadow matrix, and the outcome counts. `stats.scope` is `shared` when the counters come from Redis, summed over all instances this month. It is `instance` when they come from this process since start.
+- **Admin UI**: the Models page shows a Smart routers card with the tiers, the shadow agreement matrix, the outcome table, and `firstByteTimeout` when set. The Config page has a Smart router helper that builds a snippet.
+
+### Evaluation harness
+
+The classifier ships with fixture sets and gates in Go tests. Run them with `go test -run 'Router|ScoreV2' ./...`.
+
+- **Fixtures**: each file under `testdata/router_fixtures*/` holds a JSON array of requests with an expected tier range. A fixture has `id`, `group`, `lang`, `intent`, `wire` (`openai` or `anthropic`), `request`, `minTier`, `maxTier`, `notes`, and an optional `session`.
+- **Sets**: `router_fixtures` is the main set. `router_fixtures_dev` holds the dev set. `router_fixtures_holdout2` and `router_fixtures_holdout3` are former blind holdouts, now training sets.
+- **Gates**: `TestRouterFixturesGate`, `TestRouterDevGate`, `TestRouterHoldout2Gate`, and `TestRouterHoldout3Gate` run v2 on two layouts, `deployed` (tiers at 0, 150, 350) and `wide` (0, 300, 600). Each gate allows at most 2% under-routes and 25% over-routes overall. The `toolloop` and `nonenglish` groups allow no under-route. v1 results print without a gate.
+- **Pins**: `TestRouterFixturesV1Unchanged` pins v1 output against `testdata/router_v1_golden.json`. `TestScoreV2NeverBelowV1Fixtures` checks that v2 never scores below the v1 signals.
+- **Interpreter speed**: `make yaegi-bench` times v2 decisions under Yaegi, as Traefik loads the plugin. It fails below 2000 decisions per second. To time another set, run `cd tools/yaegi-bench && GOWORK=off go run . -fixtures testdata/router_fixtures_dev ../..`.
+- **Add a blind holdout**: write the fixtures in a new `testdata/router_fixtures_holdoutN/` directory before you read any classifier output for them. Add a glob constant and a gate test next to `TestRouterHoldout3Gate`. Run it once. A pass is the honest result. After you tune the classifier on a failure, treat the set as a training set and write a fresh holdout for the next change.
+
+### Rollout order
+
+This order changes one thing at a time and keeps a way back at each step.
+
+1. Define the tiers with the default classifier. Check the admin tier counts.
+2. Add `shadowClassifier: v2`. Read the agreement matrix and the outcome table for a few days.
+3. Switch to `classifier: v2`. Set `riskZ` and `intentTiers` only if the counts call for it.
+4. Add `session.enabled: true`. Use Redis so several instances share sessions.
+5. Add `calibration: {mode: shadow}`. Read the offsets, then move to `live` if they look right.
+6. Add `selection: adaptive` when a tier has several models.
+7. Add `saturationDowngrade: true` when you set concurrency limits.
+8. Add `firstByteTimeout` last. Check it against `requestTimeout` and the CDN limit.
+
+### Limitations
+
+- The marker lists are English only.
+- The classifier uses heuristics. It has no LLM classifier.
+- Routers serve `POST /v1/chat/completions` and `POST /v1/messages` only.
+- Embeddings requests to a router return `400`. Request an embedding model directly.
+- Image and audio endpoints return `404` for a router name. Native passthrough routes do not support routers.
 
 ## Model metadata
 
@@ -2643,6 +3127,10 @@ plugin's config.
     model)` too. These are distinct metric names, not the unlabelled pair
     re-emitted under a wider label set, so a query against the unlabelled
     families is unaffected either way.
+  - `llmgateway_router_requests_total{router,tier,reason}` /
+    `llmgateway_router_escalations_total{router,from_tier,to_tier}` —
+    per-process counters for [smart routers](#smart-routers). They
+    appear after the first routed request.
   - `llmgateway_provider_healthy{provider}` — `1`/`0` gauge from the
     discovery circuit breaker (`healthState` in the admin API); see
     [Provider health](#provider-health-discovery-circuit-breaker).

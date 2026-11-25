@@ -19,7 +19,7 @@
 // authorizedProviders is computed first and gates model resolution).
 import { emitConfigSnippet, emitYamlFlowMap, emitYamlKey, emitYamlScalar } from '@/lib/yaml-emit'
 import type { YamlValue } from '@/lib/yaml-emit'
-import type { LimitsConfig } from '@/types/api'
+import type { LimitKey, LimitsConfig } from '@/types/api'
 
 /** NAME_PATTERN is the operator-facing name rule every provider/group id must satisfy — letters, digits, dot, underscore, hyphen, matching every real name in middleware.yaml (anthropic, gx10-embed, macstudio-rerank, friends, ...) and mirroring the plugin's own path.Match glob-safe charset. */
 export const NAME_PATTERN = /^[a-zA-Z0-9._-]+$/
@@ -109,9 +109,10 @@ export function validatePersonalGrant(providers: string[], models: string[]): st
 }
 
 /** LIMITS_FIELD_ORDER is LimitsConfig's own field order (types/api.ts) — the single source of truth every limits snippet (YAML block or JSON fragment) below renders in, so the two never drift relative to each other. */
-const LIMITS_FIELD_ORDER: (keyof LimitsConfig)[] = [
+const LIMITS_FIELD_ORDER: (LimitKey)[] = [
   'requestsPerMinute',
   'requestsPerDay',
+  'tokensPerMinute',
   'tokensPerDay',
   'tokensPerMonth',
   'costPerDayUSD',
@@ -133,6 +134,13 @@ export function groupLimitsSnippet(groupName: string, limits: LimitsConfig): str
   const body: { [key: string]: YamlValue | undefined } = {}
   for (const [key, value] of limitsEntries(limits)) body[key] = value
   return emitConfigSnippet(['groups', groupName], { limits: body })
+}
+
+/** groupMemberLimitsSnippet builds a group's per-member YAML block at spec.plugin.llmgateway.groups.<name>.memberLimits — each member user gets their own counter with these values. */
+export function groupMemberLimitsSnippet(groupName: string, limits: LimitsConfig): string {
+  const body: { [key: string]: YamlValue | undefined } = {}
+  for (const [key, value] of limitsEntries(limits)) body[key] = value
+  return emitConfigSnippet(['groups', groupName], { memberLimits: body })
 }
 
 function jsonString(s: string): string {
@@ -304,4 +312,82 @@ export function userJsonLine(user: UserSnippetInput): string {
   if (user.limits && limitsEntries(user.limits).length > 0) parts.push(`"limits": ${jsonLimitsObject(user.limits)}`)
   if (user.admin) parts.push(`"admin": ${emitYamlScalar(true)}`)
   return `{${parts.join(', ')}}`
+}
+
+/** ROUTER_MAX_MIN_SCORE mirrors smart_router.go's maxSmartMinScore: tier scores are per-mille. */
+export const ROUTER_MAX_MIN_SCORE = 1000
+
+export interface RouterTierInput {
+  name: string
+  minScore: number
+  models: string[]
+}
+
+export interface RouterKeywordRuleInput {
+  tier: string
+  keywords: string[]
+}
+
+export interface RouterInput {
+  tiers: RouterTierInput[]
+  keywordRules: RouterKeywordRuleInput[]
+  selection: 'ordered' | 'hash'
+  /** 0 means the gateway default. */
+  maxAttempts: number
+  contextEscalation: boolean
+}
+
+/**
+ * validateRouter mirrors smart_router.go's validateSmartRouters rules: at
+ * least one tier, unique tier names, first minScore 0, strictly rising
+ * scores, models required and disjoint across tiers, keyword rules naming a
+ * real tier. Returns every problem, empty when the router is valid.
+ */
+export function validateRouter(router: RouterInput): string[] {
+  const errors: string[] = []
+  if (router.tiers.length === 0) errors.push('Add at least one tier.')
+  const names = new Set<string>()
+  const modelTier = new Map<string, string>()
+  let prev = -1
+  router.tiers.forEach((tier, i) => {
+    if (names.has(tier.name)) errors.push(`Tier name "${tier.name}" is used twice.`)
+    names.add(tier.name)
+    if (!Number.isInteger(tier.minScore) || tier.minScore < 0 || tier.minScore > ROUTER_MAX_MIN_SCORE) {
+      errors.push(`Tier "${tier.name}" minScore must be a whole number from 0 to ${ROUTER_MAX_MIN_SCORE}.`)
+    } else if (i === 0 && tier.minScore !== 0) {
+      errors.push(`First tier "${tier.name}" must have minScore 0.`)
+    } else if (i > 0 && tier.minScore <= prev) {
+      errors.push(`Tier "${tier.name}" minScore must be greater than the previous tier's.`)
+    }
+    prev = tier.minScore
+    if (tier.models.length === 0) errors.push(`Tier "${tier.name}" needs at least one model.`)
+    for (const model of tier.models) {
+      const other = modelTier.get(model)
+      if (other !== undefined) errors.push(`Model "${model}" is in tier "${other}" and tier "${tier.name}"; tiers must be disjoint.`)
+      else modelTier.set(model, tier.name)
+    }
+  })
+  for (const rule of router.keywordRules) {
+    if (!names.has(rule.tier)) errors.push(`Keyword rule tier "${rule.tier}" is not a tier of this router.`)
+    if (rule.keywords.length === 0) errors.push(`Keyword rule for tier "${rule.tier}" needs at least one keyword.`)
+  }
+  if (!Number.isInteger(router.maxAttempts) || router.maxAttempts < 0) errors.push('Max attempts must be a non-negative whole number.')
+  return errors
+}
+
+/**
+ * routerSnippet builds one `smartRouters.<name>` YAML entry
+ * (SmartRouterConfig, smart_router.go). Defaults stay out: selection
+ * "ordered", maxAttempts 0 and contextEscalation true are omitted, so the
+ * snippet only states what differs from the gateway.
+ */
+export function routerSnippet(name: string, router: RouterInput): string {
+  const body: { [key: string]: YamlValue | undefined } = {
+    tiers: router.tiers.map((t) => ({ name: t.name, minScore: t.minScore, models: t.models })),
+  }
+  if (router.keywordRules.length > 0) body.keywordRules = router.keywordRules.map((r) => ({ tier: r.tier, keywords: r.keywords }))
+  if (router.selection !== 'ordered') body.selection = router.selection
+  if (router.maxAttempts > 0) body.maxAttempts = router.maxAttempts
+  if (!router.contextEscalation) body.contextEscalation = false
+  return emitConfigSnippet(['smartRouters', name], body)
 }

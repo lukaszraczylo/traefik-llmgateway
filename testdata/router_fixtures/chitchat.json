@@ -1,0 +1,278 @@
+[
+ {
+  "id": "chit-01",
+  "group": "chitchat",
+  "lang": "en",
+  "intent": "chitchat",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Hello!"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "greeting; cheapest tier is enough"
+ },
+ {
+  "id": "chit-02",
+  "group": "chitchat",
+  "lang": "en",
+  "intent": "chitchat",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 1024,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "thanks, that helped"
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "thanks; cheapest tier is enough"
+ },
+ {
+  "id": "chit-03",
+  "group": "chitchat",
+  "lang": "en",
+  "intent": "chitchat",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "What is the capital of France?"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "trivia lookup; cheapest tier is enough"
+ },
+ {
+  "id": "chit-04",
+  "group": "chitchat",
+  "lang": "en",
+  "intent": "chitchat",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 1024,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "Tell me a joke about cats."
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "joke; cheapest tier is enough"
+ },
+ {
+  "id": "chit-05",
+  "group": "chitchat",
+  "lang": "en",
+  "intent": "chitchat",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "how are you today?"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "smalltalk; cheapest tier is enough"
+ },
+ {
+  "id": "chit-06",
+  "group": "chitchat",
+  "lang": "en",
+  "intent": "chitchat",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 1024,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "Who is Ada Lovelace?"
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "short factual; cheapest tier is enough"
+ },
+ {
+  "id": "chit-07",
+  "group": "chitchat",
+  "lang": "en",
+  "intent": "chitchat",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "What time zone is Tokyo in?"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "short factual; cheapest tier is enough"
+ },
+ {
+  "id": "chit-08",
+  "group": "chitchat",
+  "lang": "en",
+  "intent": "chitchat",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 1024,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "define serendipity"
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "dictionary; cheapest tier is enough"
+ },
+ {
+  "id": "chit-09",
+  "group": "chitchat",
+  "lang": "en",
+  "intent": "chitchat",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Thank you so much, have a great day"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "closing; cheapest tier is enough"
+ },
+ {
+  "id": "chit-10",
+  "group": "chitchat",
+  "lang": "en",
+  "intent": "chitchat",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 1024,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "what is 12 times 11?"
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "trivial arithmetic; cheapest tier is enough"
+ },
+ {
+  "id": "chit-11",
+  "group": "chitchat",
+  "lang": "en",
+  "intent": "chitchat",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "hi, can you help me pick a name for my dog? he is a golden retriever puppy"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "casual naming request with no technical content"
+ },
+ {
+  "id": "chit-12",
+  "group": "chitchat",
+  "lang": "en",
+  "intent": "chitchat",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 1024,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "What is the difference between affect and effect?"
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "short grammar question"
+ }
+]

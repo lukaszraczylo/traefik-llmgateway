@@ -1,0 +1,386 @@
+[
+ {
+  "id": "ho-ne01",
+  "group": "nonenglish",
+  "lang": "pl",
+  "intent": "nonenglish",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Cześć! Co polecasz na szybki obiad, mam tylko ryż, jajka i trochę warzyw?"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "Polish casual cooking ask"
+ },
+ {
+  "id": "ho-ne02",
+  "group": "nonenglish",
+  "lang": "pl",
+  "intent": "nonenglish",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Dlaczego mój program w Go się zawiesza? Dwie gorutyny, jedna trzyma mutex A i czeka na B, druga odwrotnie, ale tylko czasem. Jak to zaprojektować, żeby nie było deadlocka i nie stracić współbieżności przy 64 kontach bankowych i przelewach między nimi?"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "Polish lock-ordering design for concurrent transfers"
+ },
+ {
+  "id": "ho-ne03",
+  "group": "nonenglish",
+  "lang": "de",
+  "intent": "nonenglish",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Kannst du bitte diesen Satz korrigieren: 'Ich habe gestern zu dem Arzt gegangen und er hat mir ein Medikament verschreibt.'"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "German grammar fix"
+ },
+ {
+  "id": "ho-ne04",
+  "group": "nonenglish",
+  "lang": "de",
+  "intent": "nonenglish",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 4096,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "Zeige, dass jede Gruppe der Ordnung 15 zyklisch ist, und erkläre, wo genau der Satz von Sylow gebraucht wird."
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "German group theory proof via Sylow"
+ },
+ {
+  "id": "ho-ne05",
+  "group": "nonenglish",
+  "lang": "es",
+  "intent": "nonenglish",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "oye, ¿cómo se dice 'no pasa nada' en inglés según el contexto? me da miedo sonar raro"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "Spanish phrase translation chat"
+ },
+ {
+  "id": "ho-ne06",
+  "group": "nonenglish",
+  "lang": "es",
+  "intent": "nonenglish",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Tengo un servicio de rate limiting distribuido con Redis y ventana deslizante; bajo carga con 6 réplicas se cuelan hasta 2x las peticiones permitidas en los bordes de la ventana. ¿Cómo lo rediseño para que sea casi exacto sin que Redis sea el cuello de botella?"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "Spanish distributed rate limiter design"
+ },
+ {
+  "id": "ho-ne07",
+  "group": "nonenglish",
+  "lang": "fr",
+  "intent": "nonenglish",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 4096,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "Peux-tu résumer en deux phrases : 'Le conseil municipal a adopté hier un budget en hausse de 3 %, principalement pour la rénovation des écoles et des pistes cyclables.'"
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "French short summary"
+ },
+ {
+  "id": "ho-ne08",
+  "group": "nonenglish",
+  "lang": "fr",
+  "intent": "nonenglish",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Ma migration Postgres ajoute un index unique sur une table de 200 millions de lignes avec des écritures continues. Comment la faire sans verrou bloquant, gérer les doublons existants, et revenir en arrière si ça échoue?"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "French online-migration planning"
+ },
+ {
+  "id": "ho-ne09",
+  "group": "nonenglish",
+  "lang": "zh",
+  "intent": "nonenglish",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "你好，帮我想一个周末去杭州玩的简单行程吧"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 1,
+  "notes": "Chinese travel itinerary chat"
+ },
+ {
+  "id": "ho-ne10",
+  "group": "nonenglish",
+  "lang": "zh",
+  "intent": "nonenglish",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "我们的分布式事务用的是TCC，最近在网络分区后出现了悬挂和空回滚，同时Try超时重试导致重复预留库存。请给出幂等、防悬挂的完整设计，并证明在最坏情况下库存不会超卖。"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 2,
+  "maxTier": 2,
+  "notes": "Chinese TCC idempotency/anti-hanging design with correctness argument"
+ },
+ {
+  "id": "ho-ne11",
+  "group": "nonenglish",
+  "lang": "ja",
+  "intent": "nonenglish",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 4096,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "取引先へのお詫びメールを丁寧な敬語に直してください：「昨日は打ち合わせに遅れてすみませんでした。資料は今日中に送ります」"
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "Japanese keigo rewrite"
+ },
+ {
+  "id": "ho-ne12",
+  "group": "nonenglish",
+  "lang": "ja",
+  "intent": "nonenglish",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Kubernetesで、HPAがCPU使用率は低いのにスケールアウトし続けて、ノードが足りずPodがPendingになります。カスタムメトリクスとPDB、topologySpreadConstraintsの相互作用を踏まえて原因の切り分け手順を教えてください。"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "Japanese k8s autoscaling diagnosis"
+ },
+ {
+  "id": "ho-ne13",
+  "group": "nonenglish",
+  "lang": "ru",
+  "intent": "nonenglish",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Привет! Подскажи, как по-русски вежливо отказаться от приглашения на свадьбу коллеги?"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "Russian polite refusal"
+ },
+ {
+  "id": "ho-ne14",
+  "group": "nonenglish",
+  "lang": "ru",
+  "intent": "nonenglish",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Докажи, что для любого простого p > 3 число p^2 - 1 делится на 24, и обобщи на произведение двух различных простых."
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "Russian number theory proof"
+ },
+ {
+  "id": "ho-ne15",
+  "group": "nonenglish",
+  "lang": "ar",
+  "intent": "nonenglish",
+  "wire": "anthropic",
+  "request": {
+   "model": "smart/auto",
+   "max_tokens": 4096,
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "مرحبا، كيف حالك؟ اقترح علي اسما لمقهى صغير"
+      }
+     ]
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "Arabic small talk/naming"
+ },
+ {
+  "id": "ho-ne16",
+  "group": "nonenglish",
+  "lang": "ar",
+  "intent": "nonenglish",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "عندي نظام طوابير رسائل يعيد تسليم الرسائل أحيانا ويسبب خصما مزدوجا من الرصيد. صمم لي حلا يضمن المعالجة مرة واحدة فعليا مع قاعدة بيانات عادية وبدون معاملات موزعة، واشرح حالات الفشل."
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 2,
+  "maxTier": 2,
+  "notes": "Arabic exactly-once effect design under failures"
+ },
+ {
+  "id": "ho-ne17",
+  "group": "nonenglish",
+  "lang": "hi",
+  "intent": "nonenglish",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "नमस्ते! मुझे एक छोटा सा जन्मदिन संदेश लिखना है दोस्त के लिए, थोड़ा मज़ेदार।"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 0,
+  "maxTier": 0,
+  "notes": "Hindi birthday message"
+ },
+ {
+  "id": "ho-ne18",
+  "group": "nonenglish",
+  "lang": "hi",
+  "intent": "nonenglish",
+  "wire": "openai",
+  "request": {
+   "model": "smart/auto",
+   "messages": [
+    {
+     "role": "user",
+     "content": "मेरे Python async सर्विस में asyncio.gather के साथ कुछ tasks cancel होने पर connection pool लीक हो रहा है और shutdown पर hang होता है। कारण समझाओ और सही cancellation-safe पैटर्न दो।"
+    }
+   ]
+  },
+  "session": null,
+  "minTier": 1,
+  "maxTier": 2,
+  "notes": "Hindi asyncio cancellation-leak debugging"
+ }
+]

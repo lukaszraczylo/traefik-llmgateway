@@ -5,6 +5,7 @@ import ErrorState from '@/components/ErrorState.vue'
 import KpiTile from '@/components/KpiTile.vue'
 import LoadStateView from '@/components/LoadStateView.vue'
 import SkeletonKpiTile from '@/components/SkeletonKpiTile.vue'
+import SmartRoutersCard from '@/components/SmartRoutersCard.vue'
 import TopList from '@/components/TopList.vue'
 import type { TopListItem } from '@/components/TopList.vue'
 import TryLongerRangeButton from '@/components/TryLongerRangeButton.vue'
@@ -504,5 +505,6 @@ onUnmounted(() => {
         </LoadStateView>
       </CardContent>
     </Card>
+    <SmartRoutersCard v-if="(dashboard.overview?.routers?.length ?? 0) > 0" :routers="dashboard.overview?.routers ?? []" />
   </div>
 </template>

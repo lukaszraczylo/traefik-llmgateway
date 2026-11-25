@@ -6,7 +6,7 @@ import type { ModelCatalogRow } from '@/lib/model-table-columns'
 import { useCatalogStore } from '@/stores/catalog'
 import { useFiltersStore } from '@/stores/filters'
 import { hourOrDayWindow } from '@/stores/reliability'
-import type { AdminPerfResponse, AdminPerfRow, AdminUsageModelsResponse, HistoryWindow } from '@/types/api'
+import type { AdminPerfResponse, AdminPerfRow, AdminRouterView, AdminUsageModelsResponse, HistoryWindow } from '@/types/api'
 
 /**
  * useModelsStore fetches the Models page's own catalog table (redesign-
@@ -29,6 +29,8 @@ import type { AdminPerfResponse, AdminPerfRow, AdminUsageModelsResponse, History
 export const useModelsStore = defineStore('models', {
   state: () => ({
     rows: [] as ModelCatalogRow[],
+    /** The catalog's configured smart routers, shown read-only by SmartRoutersCard.vue. */
+    routers: [] as AdminRouterView[],
     /** GET /admin/api/performance?kind=provider's own rows (fleet p50/p95, attempts/failures, timeouts, failovers per provider) — ProviderHealthPanel.vue's own doc comment. Keyed by provider name at read time, not here, so this store stays a plain array like `rows` above. */
     providerPerf: [] as AdminPerfRow[],
     /** The hour/day window + span hourOrDayWindow actually resolved for both performance requests — ProviderHealthPanel.vue's badge titles read this rather than filters.window/span directly whenever a month-range clamp was applied. */
@@ -66,6 +68,7 @@ export const useModelsStore = defineStore('models', {
         if (requestId !== this.reqId) return
 
         this.rows = buildModelCatalogRows(catalog.data, rankingRes, perfRes)
+        this.routers = catalog.data.routers ?? []
         this.providerPerf = providerPerfRes.rows ?? []
         this.perfWindow = perfWindow
         this.latencyEnabled = perfRes.latencyEnabled

@@ -256,3 +256,28 @@ describe('modelCatalogColumns: p50/p95/error rate columns', () => {
     expect(accessor(testRow({ attempts: 10, failures: 0 }), 0)).toBe(0)
   })
 })
+
+describe('buildModelCatalogRows: router targets', () => {
+  it('carries a model routers list and defaults to empty', () => {
+    const catalog = {
+      providers: [
+        {
+          name: 'openai',
+          type: 'openai',
+          lastRefresh: '',
+          openUntil: '',
+          healthState: 'closed',
+          discoveryEnabled: false,
+          models: [
+            { id: 'openai/a', model: 'a', priceSource: 'unpriced', routers: ['auto'] },
+            { id: 'openai/b', model: 'b', priceSource: 'unpriced' },
+          ],
+        },
+      ],
+      aliases: [],
+      routers: [],
+    } as unknown as AdminCatalogResponse
+    const rows = buildModelCatalogRows(catalog, { models: [] } as unknown as AdminUsageModelsResponse, { rows: [] } as unknown as AdminPerfResponse)
+    expect(rows.map((r) => r.routers)).toEqual([['auto'], []])
+  })
+})

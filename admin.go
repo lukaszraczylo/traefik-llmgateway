@@ -661,6 +661,7 @@ type adminOverviewResponse struct {
 	Providers []adminProviderView `json:"providers"`
 	Groups    []adminGroupView    `json:"groups"`
 	Aliases   []adminAliasView    `json:"aliases"`
+	Routers   []adminRouterView   `json:"routers"`
 	Redis     adminRedisView      `json:"redis"`
 	Cache     adminCacheView      `json:"cache"`
 	Retry     adminRetryView      `json:"retry"`
@@ -885,6 +886,7 @@ func (g *Gateway) buildAdminOverview() adminOverviewResponse {
 		Retry:           retryView,
 		Groups:          groups,
 		Aliases:         aliases,
+		Routers:         g.buildAdminRouterViews(),
 		Features:        g.buildAdminFeatures(),
 		Pricing:         buildAdminPricingSummary(snaps, g.cfg.Pricing, g.cfg.ModelMeta),
 		Version:         pluginVersion,
@@ -940,10 +942,14 @@ func (g *Gateway) serveAdminOverview(w http.ResponseWriter) {
 // dashboard can tell "explicitly restricted to these N" apart from
 // "unrestricted" without the payload growing with catalog size.
 type adminUsageEntryView struct {
-	Limits    *LimitsConfig `json:"limits,omitempty"`
-	Kind      string        `json:"kind"`
-	ID        string        `json:"id"`
-	GroupName string        `json:"groupName,omitempty"`
+	Limits *LimitsConfig `json:"limits,omitempty"`
+	// LimitSources maps each set limits field of a user to "user" or
+	// "memberLimits:<group>"; MemberLimits is a group's per-member default.
+	LimitSources map[string]string `json:"limitSources,omitempty"`
+	MemberLimits *LimitsConfig     `json:"memberLimits,omitempty"`
+	Kind         string            `json:"kind"`
+	ID           string            `json:"id"`
+	GroupName    string            `json:"groupName,omitempty"`
 	// Groups is the user's full member group list (multi-group support)
 	// — set only for a user entry, same "user-only" convention GroupName
 	// above already follows. GroupName keeps the first group for
@@ -965,6 +971,9 @@ type adminUsageEntryView struct {
 	// attributed to this scope today (F4, v0.3 dashboard task) — read via
 	// windowKey's metric "rej", window "day" (limits.go's metricRej).
 	RejectionsPerDay int64 `json:"rejectionsPerDay"`
+	// ExemptRequestsPerMonth counts this user's limit-exempt requests this
+	// month (limitExemptKinds). They are in no limit counter.
+	ExemptRequestsPerMonth int64 `json:"exemptRequestsPerMonth"`
 	// LastSeen is this scope's most recent admitted-request instant, unix
 	// seconds (admin dashboard redesign, WP-B; DECISIONS Q6) — 0
 	// (omitted) means never observed, or unknown (a storeDown read).
@@ -990,20 +999,21 @@ type adminUsageResponse struct {
 // matching limit into the JSON view.
 func usageEntryView(su scopeUsage, limits *LimitsConfig) adminUsageEntryView {
 	return adminUsageEntryView{
-		Kind:                 su.kind,
-		ID:                   su.id,
-		Limits:               limits,
-		RequestsPerMinute:    su.requestsPerMinute,
-		RequestsPerDay:       su.requestsPerDay,
-		TokensInPerDay:       su.tokensInPerDay,
-		TokensOutPerDay:      su.tokensOutPerDay,
-		TokensInPerMonth:     su.tokensInPerMonth,
-		TokensOutPerMonth:    su.tokensOutPerMonth,
-		CostPerDayMicroUSD:   su.costPerDayMicros,
-		CostPerMonthMicroUSD: su.costPerMonthMicros,
-		RejectionsPerDay:     su.rejectionsPerDay,
-		LastSeen:             su.lastSeen,
-		StoreDown:            su.storeDown,
+		Kind:                   su.kind,
+		ID:                     su.id,
+		Limits:                 limits,
+		RequestsPerMinute:      su.requestsPerMinute,
+		RequestsPerDay:         su.requestsPerDay,
+		TokensInPerDay:         su.tokensInPerDay,
+		TokensOutPerDay:        su.tokensOutPerDay,
+		TokensInPerMonth:       su.tokensInPerMonth,
+		TokensOutPerMonth:      su.tokensOutPerMonth,
+		CostPerDayMicroUSD:     su.costPerDayMicros,
+		CostPerMonthMicroUSD:   su.costPerMonthMicros,
+		RejectionsPerDay:       su.rejectionsPerDay,
+		ExemptRequestsPerMonth: su.exemptPerMonth,
+		LastSeen:               su.lastSeen,
+		StoreDown:              su.storeDown,
 	}
 }
 
@@ -1053,7 +1063,7 @@ func usageEntryView(su scopeUsage, limits *LimitsConfig) adminUsageEntryView {
 // chunk, keeping this endpoint's per-round-trip key count at the same
 // order of magnitude this constant has always targeted, rather than
 // letting it grow every time a future per-scope counter is added here.
-const adminUsageChunkScopes = 160
+const adminUsageChunkScopes = 145
 
 // chunkedCurrentUsage calls limiter.currentUsage in batches of at most
 // adminUsageChunkScopes scopes at a time, concatenating the results in
@@ -1095,12 +1105,14 @@ func (g *Gateway) buildAdminUsage() adminUsageResponse {
 	users := make([]adminUsageEntryView, len(userUsage))
 	for i, su := range userUsage {
 		users[i] = usageEntryView(su, userSummaries[i].limits)
+		users[i].LimitSources = userSummaries[i].limitSources
 		users[i].GroupName = userSummaries[i].groupName
 		users[i].Groups = userSummaries[i].groups
 	}
 	groups := make([]adminUsageEntryView, len(groupUsage))
 	for i, su := range groupUsage {
 		groups[i] = usageEntryView(su, groupSummaries[i].limits)
+		groups[i].MemberLimits = groupSummaries[i].memberLimits
 		groups[i].Providers = groupSummaries[i].providers
 		groups[i].Models = groupSummaries[i].models
 		groups[i].MCPServers = groupSummaries[i].mcpServers

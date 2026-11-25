@@ -1,4 +1,4 @@
-import type { HistoryWindow, LimitsConfig } from '@/types/api'
+import type { HistoryWindow, LimitSources, LimitsConfig } from '@/types/api'
 
 /** ZERO_TIME is Go's zero time.Time value in its default JSON (RFC 3339) encoding — the unset-timestamp sentinel every admin API "never happened yet" field marshals as, and every formatter/test below treats as absent. */
 export const ZERO_TIME = '0001-01-01T00:00:00Z'
@@ -368,15 +368,22 @@ export function refreshDetailLabel(discoveryEnabled: boolean, lastRefresh: strin
 }
 
 /** formatLimits renders a LimitsConfig as a short comma-joined summary, or "none" when unset. */
-export function formatLimits(limits: LimitsConfig | undefined): string {
+export function formatLimits(limits: LimitsConfig | undefined, sources?: LimitSources): string {
   if (!limits) return 'none'
   const parts: string[] = []
-  if (limits.requestsPerMinute) parts.push(`req/min ${limits.requestsPerMinute}`)
-  if (limits.requestsPerDay) parts.push(`req/day ${limits.requestsPerDay}`)
-  if (limits.tokensPerDay) parts.push(`tok/day ${limits.tokensPerDay}`)
-  if (limits.tokensPerMonth) parts.push(`tok/month ${limits.tokensPerMonth}`)
-  if (limits.costPerDayUSD) parts.push(`cost/day $${limits.costPerDayUSD}`)
-  if (limits.costPerMonthUSD) parts.push(`cost/month $${limits.costPerMonthUSD}`)
+  const add = (key: keyof LimitsConfig, text: string) => {
+    if (!limits[key]) return
+    const source = sources?.[key]
+    parts.push(source ? `${text} (${source})` : text)
+  }
+  add('requestsPerMinute', `req/min ${limits.requestsPerMinute}`)
+  add('requestsPerDay', `req/day ${limits.requestsPerDay}`)
+  add('tokensPerMinute', `tok/min ${limits.tokensPerMinute}`)
+  add('tokensPerDay', `tok/day ${limits.tokensPerDay}`)
+  add('tokensPerMonth', `tok/month ${limits.tokensPerMonth}`)
+  add('costPerDayUSD', `cost/day $${limits.costPerDayUSD}`)
+  add('costPerMonthUSD', `cost/month $${limits.costPerMonthUSD}`)
+  if (limits.pacing) add('pacing', `pace from ${limits.pacing.startPct}% up to ${limits.pacing.maxDelay}`)
   return parts.length ? parts.join(', ') : 'none'
 }
 

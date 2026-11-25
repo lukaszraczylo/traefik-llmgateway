@@ -5,6 +5,7 @@ import {
   generateApiKey,
   groupGrantSnippet,
   groupLimitsSnippet,
+  groupMemberLimitsSnippet,
   isValidName,
   isValidNonNegative,
   isValidNonNegativeInt,
@@ -335,5 +336,26 @@ describe('generateApiKey / API_KEY_PLACEHOLDER', () => {
 
   it('two calls produce different keys (real CSPRNG, not mocked)', () => {
     expect(generateApiKey()).not.toBe(generateApiKey())
+  })
+})
+
+describe('groupMemberLimitsSnippet: golden YAML, spec.plugin.llmgateway.groups.<name>.memberLimits', () => {
+  it('renders memberLimits with tokensPerMinute in field order', () => {
+    expect(groupMemberLimitsSnippet('friends', { tokensPerMinute: 1000, requestsPerMinute: 2 })).toBe(
+      [
+        'spec:',
+        '  plugin:',
+        '    llmgateway:',
+        '      groups:',
+        '        friends:',
+        '          memberLimits:',
+        '            requestsPerMinute: 2',
+        '            tokensPerMinute: 1000',
+      ].join('\n'),
+    )
+  })
+
+  it('emits tokensPerMinute in a user limits fragment', () => {
+    expect(userLimitsJsonFragment({ tokensPerMinute: 50 })).toBe('"limits": {"tokensPerMinute": 50}')
   })
 })

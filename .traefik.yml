@@ -20,6 +20,7 @@ testData:
       apiKey: test-key
       models:
         - gpt-test
+        - gpt-test-large
   groups:
     default:
       providers: []
@@ -35,3 +36,14 @@ testData:
   # copy-pasted example here would risk skipping past.
   metrics:
     enabled: true
+  # Two-tier smart router with the v2 classifier, see README.md#smart-routers.
+  smartRouters:
+    auto:
+      classifier: v2
+      tiers:
+        - name: small
+          minScore: 0
+          models: [openai/gpt-test]
+        - name: large
+          minScore: 400
+          models: [openai/gpt-test-large]

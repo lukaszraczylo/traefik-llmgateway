@@ -64,6 +64,9 @@ const (
 	// (below) — never a second round trip. Read back as
 	// scopeUsage.rejectionsPerDay / adminUsageEntryView.RejectionsPerDay.
 	metricRej = "rej"
+	// metricExempt counts a user's limit-exempt requests, month-bucketed. No
+	// limit reads it.
+	metricExempt = "xreq"
 )
 
 // New counter-family metric names (admin-redesign WP-A): landed together,
@@ -219,6 +222,7 @@ func (lc *LimitsConfig) validate() error {
 	}{
 		{"requestsPerMinute", lc.RequestsPerMinute},
 		{"requestsPerDay", lc.RequestsPerDay},
+		{"tokensPerMinute", lc.TokensPerMinute},
 		{"tokensPerDay", lc.TokensPerDay},
 		{"tokensPerMonth", lc.TokensPerMonth},
 	}
@@ -226,6 +230,13 @@ func (lc *LimitsConfig) validate() error {
 		if c.v < 0 {
 			return fmt.Errorf("llmgateway: limits: %s must not be negative, got %d", c.name, c.v)
 		}
+	}
+
+	if err := lc.Pacing.validate(); err != nil {
+		return err
+	}
+	if lc.Pacing != nil && lc.RequestsPerMinute <= 0 {
+		return fmt.Errorf("llmgateway: limits: pacing requires requestsPerMinute above 0 in the same block")
 	}
 
 	costs := []struct {
@@ -555,11 +566,30 @@ type usage struct {
 	// tell an estimated cost from a provider-reported one, per the spec's
 	// "logged as estimated" requirement.
 	estimated bool
+	// finishLength and emptyOutput describe the answer, not its cost: the
+	// upstream cut it at the output cap, or returned neither text nor a tool
+	// call. Smart router outcome counters read them; billing ignores them.
+	finishLength, emptyOutput bool
+	// cached is the part of prompt the provider served from its prompt
+	// cache (Anthropic cache reads, OpenAI cached_tokens). The minute token
+	// window excludes it; the day and month windows keep the full prompt.
+	cached int64
 }
 
 // total returns the request's combined prompt and completion tokens.
 func (u usage) total() int64 {
 	return u.prompt + u.completion
+}
+
+// minutePrompt returns the prompt tokens the tokensPerMinute window counts.
+func (u usage) minutePrompt() int64 {
+	if u.cached <= 0 {
+		return u.prompt
+	}
+	if u.cached >= u.prompt {
+		return 0
+	}
+	return u.prompt - u.cached
 }
 
 // limitScope is one entity (a user, their group, or the synthetic total
@@ -569,8 +599,54 @@ func (u usage) total() int64 {
 // its group's limits in one call.
 type limitScope struct {
 	limits *LimitsConfig
-	kind   string // "user", "group", or "total"
-	id     string
+	// resv is the tokensPerMinute pre-charge made at admission. It is nil
+	// when none was made. Copies of the scope share it.
+	resv *tpmReservation
+	kind string // "user", "group", or "total"
+	id   string
+	// noCount marks a limit-exempt request's scope: accountWith writes no
+	// counter for it.
+	noCount bool
+}
+
+// tpmReservation is a prompt-token estimate added to a scope's minute window
+// at admission. Exactly one of accountWith, settleRejection or
+// releaseReservations takes it back out, via claim.
+type tpmReservation struct {
+	bucket  string
+	amount  int64
+	mu      sync.Mutex
+	settled bool
+}
+
+// claim reports true to the first caller only.
+func (r *tpmReservation) claim() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.settled {
+		return false
+	}
+	r.settled = true
+	return true
+}
+
+func (r *tpmReservation) refund(sc limitScope, et enforceTTLSet) counterIncr {
+	return counterIncr{key: windowKeyForBucket(sc.kind, sc.id, metricTokIn, windowMin, r.bucket), delta: -r.amount, ttl: minWindowTTL, enforceTTL: et.min}
+}
+
+// releaseReservations gives back every reservation in scopes that nothing has
+// settled yet (a request that never reached accounting).
+func (l *limiter) releaseReservations(scopes []limitScope) {
+	var entries []counterIncr
+	et := enforceTTLsFor()
+	for _, sc := range scopes {
+		if sc.resv != nil && sc.resv.claim() {
+			entries = append(entries, sc.resv.refund(sc, et))
+		}
+	}
+	if len(entries) > 0 {
+		l.storeIncrMulti(entries)
+	}
 }
 
 // totalScopeKind and totalScopeID name the synthetic "all LLM traffic"
@@ -590,6 +666,8 @@ const (
 // limitViolation describes the first limit a request breached.
 type limitViolation struct {
 	message string
+	// limit names the breached limit ("requests-per-minute", ...).
+	limit string
 	// kind is one of the eventKindRateLimit/eventKindBudget/
 	// eventKindStoreDown vocabulary (events.go, F3 v0.3 dashboard task) —
 	// set once, at construction (storeDownViolation, requestLimitViolation,
@@ -757,8 +835,10 @@ type limiter struct {
 	// lastSeenEntries safely regardless of whether admin stats end up
 	// enabled.
 	lastSeen *lastSeenGate
-	fallback *memoryStore     // in-process counter store, always available
-	nowFn    func() time.Time // injected for tests; defaults to time.Now
+	// pacedSlots bounds each user's concurrent paced requests.
+	pacedSlots *pacedSlotGate
+	fallback   *memoryStore     // in-process counter store, always available
+	nowFn      func() time.Time // injected for tests; defaults to time.Now
 	// logf is a bound method value (g.errorf), injectable for tests; defaults
 	// to a no-op. Its own call site (logStoreError) passes exactly one
 	// variadic argument — never extend that to two or more without first
@@ -1058,6 +1138,7 @@ func newLimiter(store counterStore, failOpen bool) *limiter {
 		failOpen:    failOpen,
 		spawnTokens: make(chan struct{}, providerAttemptSpawnCap),
 		lastSeen:    &lastSeenGate{},
+		pacedSlots:  &pacedSlotGate{},
 	}
 	l.spawn = func(f func()) {
 		select {
@@ -1481,6 +1562,7 @@ func buildBudgetProbes(scopes []limitScope, now time.Time) (probes []budgetProbe
 				reads = append(reads, windowKey(sc.kind, sc.id, metricCost, window, now))
 			}
 		}
+		add("tokens-per-minute", windowMin, lim.TokensPerMinute, true)
 		add("tokens-per-day", windowDay, lim.TokensPerDay, true)
 		add("tokens-per-month", windowMonth, lim.TokensPerMonth, true)
 		add("cost-per-day", windowDay, usdToMicros(lim.CostPerDayUSD), false)
@@ -1548,10 +1630,13 @@ func buildBudgetProbes(scopes []limitScope, now time.Time) (probes []budgetProbe
 // call completes, one request may still push a scope over its budget — an
 // accepted trade-off, unchanged from before this round.
 func (l *limiter) checkAndCount(scopes []limitScope) *limitViolation {
-	now := l.now()
-	wb := bucketsFor(now)
-	et := enforceTTLsFor()
+	v, _ := l.checkAndCountInfo(scopes, 0)
+	return v
+}
 
+// requestCountEntries returns the req:min, req:day and req:hour increments
+// for every scope, in the order checkAndCountKeysPerScope describes.
+func requestCountEntries(scopes []limitScope, wb windowBuckets, et enforceTTLSet) []counterIncr {
 	entries := make([]counterIncr, 0, len(scopes)*checkAndCountKeysPerScope)
 	for _, sc := range scopes {
 		entries = append(entries,
@@ -1560,6 +1645,39 @@ func (l *limiter) checkAndCount(scopes []limitScope) *limitViolation {
 			counterIncr{key: windowKeyForBucket(sc.kind, sc.id, metricReq, windowHour, wb.hour), delta: 1, ttl: hourWindowTTL, enforceTTL: et.hour},
 		)
 	}
+	return entries
+}
+
+// countExempt counts a limit-exempt request in the user's exempt counter and
+// in no limit window. It evaluates no limit, so it never refuses, and it
+// reserves nothing.
+func (l *limiter) countExempt(scopes []limitScope) {
+	for _, sc := range scopes {
+		if sc.kind != "user" {
+			continue
+		}
+		wb := bucketsFor(l.now())
+		l.storeIncrMulti([]counterIncr{{key: windowKeyForBucket(sc.kind, sc.id, metricExempt, windowMonth, wb.month), delta: 1, ttl: monthWindowTTL, enforceTTL: enforceTTLsFor().month}})
+		return
+	}
+}
+
+// checkAndCountInfo is checkAndCount plus the user scope's minute-window
+// view, built from the same round trip's counters (no extra store call).
+//
+// A positive reserve adds that many prompt tokens to every scope's
+// tokensPerMinute window in the same round trip, and the limit compares
+// against the value before the addition, so concurrent requests cannot all
+// pass on the same stale reading. The reservation is stored in scopes[i].resv
+// (the caller's slice is updated in place); accountWith, a rejection or
+// releaseReservations takes it back out. A scope without tokensPerMinute
+// makes no reservation and costs no extra store work.
+func (l *limiter) checkAndCountInfo(scopes []limitScope, reserve int64) (*limitViolation, *rateInfo) {
+	now := l.now()
+	wb := bucketsFor(now)
+	et := enforceTTLsFor()
+
+	entries := requestCountEntries(scopes, wb, et)
 	// Last-seen (Q6, DECISIONS) no longer rides this batch (P9 fix, admin
 	// dashboard redesign verify round): it used to be appended here,
 	// unconditionally, which meant a REJECTED request still moved that
@@ -1569,12 +1687,81 @@ func (l *limiter) checkAndCount(scopes []limitScope) *limitViolation {
 	// branch instead — see its own doc comment.
 	probes, reads := buildBudgetProbes(scopes, now)
 
-	incrVals, readVals, ok := l.storeIncrAndGetMulti(entries, reads)
-	if !ok || len(incrVals) != len(entries) || len(readVals) != len(reads) {
-		l.rejections.increment(rejectionScopeStoreDown, rejectionScopeStoreDown)
-		return storeDownViolation()
+	var resvIdx []int
+	if reserve > 0 {
+		for i := range scopes {
+			if scopes[i].limits == nil || scopes[i].limits.TokensPerMinute <= 0 {
+				continue
+			}
+			if resvIdx == nil {
+				resvIdx = make([]int, len(scopes))
+				for j := range resvIdx {
+					resvIdx[j] = -1
+				}
+			}
+			sc := scopes[i]
+			scopes[i].resv = &tpmReservation{bucket: wb.min, amount: reserve}
+			resvIdx[i] = len(entries)
+			entries = append(entries, counterIncr{key: windowKeyForBucket(sc.kind, sc.id, metricTokIn, windowMin, wb.min), delta: reserve, ttl: minWindowTTL, enforceTTL: et.min})
+		}
 	}
 
+	incrVals, readVals, ok := l.storeIncrAndGetMulti(entries, reads)
+	if !ok || len(incrVals) != len(entries) || len(readVals) != len(reads) {
+		for i := range scopes {
+			scopes[i].resv = nil
+		}
+		l.rejections.increment(rejectionScopeStoreDown, rejectionScopeStoreDown)
+		return storeDownViolation(), nil
+	}
+
+	// probeUsed returns a budget probe's usage including this request's own
+	// reservation.
+	probeUsed := func(p budgetProbe) int64 {
+		used := readVals[p.keyStart]
+		if p.tokens {
+			used += readVals[p.keyStart+1]
+		}
+		if p.window == windowMin && resvIdx != nil && resvIdx[p.scopeIdx] >= 0 {
+			used = incrVals[resvIdx[p.scopeIdx]] + readVals[p.keyStart+1]
+		}
+		return used
+	}
+
+	userIdx := -1
+	for i, sc := range scopes {
+		if sc.limits != nil && sc.kind == "user" {
+			userIdx = i
+			break
+		}
+	}
+	infoFor := func(v *limitViolation, violatedIdx int) *rateInfo {
+		if userIdx < 0 {
+			return nil
+		}
+		minCount := incrVals[userIdx*checkAndCountKeysPerScope]
+		if v != nil && violatedIdx != userIdx {
+			// settleRejection rolled this request's count back off the user scope.
+			minCount--
+		}
+		var tokUsed int64
+		for _, p := range probes {
+			if p.scopeIdx == userIdx && p.window == windowMin {
+				tokUsed = probeUsed(p)
+			}
+		}
+		if v != nil && scopes[userIdx].resv != nil {
+			tokUsed -= scopes[userIdx].resv.amount
+			if tokUsed < 0 {
+				tokUsed = 0
+			}
+		}
+		info := buildRateInfo(scopes[userIdx], minCount, tokUsed, now)
+		if v != nil {
+			info.refuse(v, now)
+		}
+		return info
+	}
 	for i, sc := range scopes {
 		if sc.limits == nil {
 			continue
@@ -1586,34 +1773,36 @@ func (l *limiter) checkAndCount(scopes []limitScope) *limitViolation {
 		if v := requestLimitViolation(sc, "requests-per-minute", sc.limits.RequestsPerMinute, minCount, windowMin, now); v != nil {
 			l.rejections.increment(sc.kind, sc.id)
 			l.settleRejection(entries, i, scopes, wb, et)
-			return v
+			return v, infoFor(v, i)
 		}
 		if v := requestLimitViolation(sc, "requests-per-day", sc.limits.RequestsPerDay, dayCount, windowDay, now); v != nil {
 			l.rejections.increment(sc.kind, sc.id)
 			l.settleRejection(entries, i, scopes, wb, et)
-			return v
+			return v, infoFor(v, i)
 		}
 		for _, p := range probes {
 			if p.scopeIdx != i {
 				continue
 			}
-			used := readVals[p.keyStart]
-			if p.tokens {
-				used += readVals[p.keyStart+1]
+			used := probeUsed(p)
+			if p.window == windowMin && resvIdx != nil && resvIdx[i] >= 0 {
+				used -= scopes[i].resv.amount
 			}
 			if used < p.limit {
 				continue
 			}
 			l.rejections.increment(sc.kind, sc.id)
 			l.settleRejection(entries, i, scopes, wb, et)
-			return &limitViolation{
+			v := &limitViolation{
+				limit:      p.name,
 				message:    fmt.Sprintf("%s %q exceeded %s budget", sc.kind, sc.id, p.name),
 				retryAfter: retryAfterSeconds(now, p.window),
 				kind:       eventKindBudget,
 			}
+			return v, infoFor(v, i)
 		}
 	}
-	return nil
+	return nil, infoFor(nil, -1)
 }
 
 // recordLastSeen writes the absolute last-seen SET entries lastSeenEntries
@@ -1684,6 +1873,13 @@ func (l *limiter) settleRejection(entries []counterIncr, violatedIdx int, scopes
 			totalPresent = true
 		}
 	}
+	// A refused request gives back its tokensPerMinute reservations on every
+	// scope, the violated one included.
+	for _, sc := range scopes {
+		if sc.resv != nil && sc.resv.claim() {
+			comp = append(comp, sc.resv.refund(sc, et))
+		}
+	}
 	violated := scopes[violatedIdx]
 	comp = append(comp, rejectionCounterIncr(violated.kind, violated.id, windowDay, wb.day, et.day))
 	if totalPresent {
@@ -1723,6 +1919,7 @@ func requestLimitViolation(sc limitScope, name string, limit, count int64, windo
 		return nil
 	}
 	return &limitViolation{
+		limit:      name,
 		message:    fmt.Sprintf("%s %q exceeded %s limit (%d)", sc.kind, sc.id, name, limit),
 		retryAfter: retryAfterSeconds(now, window),
 		kind:       eventKindRateLimit,
@@ -1868,6 +2065,9 @@ func (l *limiter) accountWith(scopes []limitScope, u usage, costMicros int64, x 
 			hasModelScope = true
 			modelCanonical = sc.id
 		}
+		if sc.noCount {
+			continue
+		}
 		// A kindModel scope is the one scope kind checkAndCount never
 		// sees: it is resolved post-response, because only then is the
 		// SERVING model known (failover can move a request to another
@@ -1883,6 +2083,24 @@ func (l *limiter) accountWith(scopes []limitScope, u usage, costMicros int64, x 
 				counterIncr{key: windowKeyForBucket(sc.kind, sc.id, metricReq, windowDay, wb.day), delta: 1, ttl: dayWindowTTL, enforceTTL: et.day},
 				counterIncr{key: windowKeyForBucket(sc.kind, sc.id, metricReq, windowMonth, wb.month), delta: 1, ttl: monthWindowTTL, enforceTTL: et.month},
 			)
+		}
+		// The per-minute token window is read only by a tokensPerMinute
+		// limit, so it is written only for scopes that set one.
+		if sc.limits != nil && sc.limits.TokensPerMinute > 0 {
+			mp := u.minutePrompt()
+			if sc.resv != nil && sc.resv.claim() {
+				if sc.resv.bucket == wb.min {
+					mp -= sc.resv.amount
+				} else {
+					entries = append(entries, sc.resv.refund(sc, et))
+				}
+			}
+			if mp != 0 {
+				entries = append(entries, counterIncr{key: windowKeyForBucket(sc.kind, sc.id, metricTokIn, windowMin, wb.min), delta: mp, ttl: minWindowTTL, enforceTTL: et.min})
+			}
+			if u.completion != 0 {
+				entries = append(entries, counterIncr{key: windowKeyForBucket(sc.kind, sc.id, metricTokOut, windowMin, wb.min), delta: u.completion, ttl: minWindowTTL, enforceTTL: et.min})
+			}
 		}
 		if u.prompt != 0 {
 			entries = append(entries,
@@ -2732,7 +2950,7 @@ func (l *limiter) providerUsage(scopes []limitScope) []providerCounters {
 // rejectionsPerDay counter (metricRej) usageWindowKeys now appends. Grows
 // once more, 9 to 10, for the last-seen counter (Q6, DECISIONS) — see
 // usageWindowKeys' own doc comment for the appended field's position.
-const usageKeysPerScope = 10
+const usageKeysPerScope = 11
 
 // scopeUsage is one scope's (a user's, a group's, or the synthetic total
 // scope's — totalScopeKind) current-window counter values — the admin
@@ -2765,6 +2983,8 @@ type scopeUsage struct {
 	// off for the whole life of the deployment so far, matching GET
 	// /admin/api/usage's own "lastSeen 0 means never/unknown" contract.
 	lastSeen int64
+	// exemptPerMonth is the scope's limit-exempt request count this month.
+	exemptPerMonth int64
 	// storeDown reports whether reading any of the usageKeysPerScope
 	// counters above failed closed (a configured store errored and
 	// failOpen is false) — mirrors limitViolation.storeDown. Every value
@@ -2796,6 +3016,7 @@ func usageWindowKeys(sc limitScope, now time.Time) []string {
 		windowKey(sc.kind, sc.id, metricCost, windowMonth, now),
 		windowKey(sc.kind, sc.id, metricRej, windowDay, now),
 		lastSeenKey(sc.kind, sc.id),
+		windowKey(sc.kind, sc.id, metricExempt, windowMonth, now),
 	}
 }
 
@@ -2870,7 +3091,7 @@ func (l *limiter) currentUsage(scopes []limitScope) []scopeUsage {
 			tokensInPerDay: v[2], tokensInPerMonth: v[3],
 			tokensOutPerDay: v[4], tokensOutPerMonth: v[5],
 			costPerDayMicros: v[6], costPerMonthMicros: v[7],
-			rejectionsPerDay: v[8], lastSeen: v[9],
+			rejectionsPerDay: v[8], lastSeen: v[9], exemptPerMonth: v[10],
 		}
 	}
 	return out
