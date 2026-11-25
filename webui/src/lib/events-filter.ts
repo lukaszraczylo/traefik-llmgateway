@@ -10,6 +10,8 @@ export const EVENT_KIND_LABEL: Record<AdminEventKind, string> = {
   unpriced: 'Unpriced model',
   capacity: 'Capacity',
   paced: 'Paced',
+  router_escalation: 'Router escalation',
+  router_timeout_fallback: 'Router timeout fallback',
 }
 
 /**
@@ -67,29 +69,67 @@ export function eventKindVariant(kind: string): 'destructive' | 'secondary' | 'o
   }
 }
 
-/** EventFilter is filterEvents' own query shape — kind is an exact AdminEventKind match ('' means "every kind"); user is matched, case-insensitively, against EITHER the event's user OR its group (a group-scoped event has no user, and vice versa — see AdminEventView's own doc comment). */
+/** EventFilter is filterEvents' own query shape — kind is an exact AdminEventKind match ('' means "every kind"); user is matched, case-insensitively, against EITHER the event's user OR its group; provider is an exact match and route a substring match, both case-insensitive and ignored when absent or empty. */
 export interface EventFilter {
   kind: string
   user: string
+  provider?: string
+  route?: string
 }
 
 /**
  * filterEvents narrows the (already newest-first) event list to the
- * current kind/user selection. `filter.user` is matched pre-normalized —
- * callers pair this with useSearchQuery()'s own `normalized` the same way
- * every other search filter in this panel does (ProviderHealthPanel.vue's
- * modelMatches, lib/usage-search.ts) — this function itself does no
- * trimming or casing of its own beyond a defensive `.trim().toLowerCase()`
- * so it is still correct if a caller passes the raw query directly.
+ * current selection. `filter.user` is matched pre-normalized by the
+ * caller; a defensive trim and lower-casing keeps it correct on raw input.
  */
 export function filterEvents(events: AdminEventView[], filter: EventFilter): AdminEventView[] {
   const kind = filter.kind
   const user = filter.user.trim().toLowerCase()
+  const provider = (filter.provider ?? '').trim().toLowerCase()
+  const route = (filter.route ?? '').trim().toLowerCase()
   return events.filter((e) => {
     if (kind && e.kind !== kind) return false
+    if (provider && (e.provider ?? '').toLowerCase() !== provider) return false
+    if (route && !e.route.toLowerCase().includes(route)) return false
     if (!user) return true
     const userMatch = e.user?.toLowerCase().includes(user) ?? false
     const groupMatch = e.group?.toLowerCase().includes(user) ?? false
     return userMatch || groupMatch
   })
+}
+
+/** The hash params the Events page reads; each maps to one FilterBar field of the same id. */
+export const EVENT_FILTER_FIELDS = ['kind', 'user', 'provider', 'route'] as const
+export type EventFilterField = (typeof EVENT_FILTER_FIELDS)[number]
+
+type ParamBag = Record<string, string | undefined>
+
+export function eventFilterFromParams(params: ParamBag): Required<EventFilter> {
+  const get = (k: EventFilterField): string => (params[k] ?? '').trim()
+  return { kind: get('kind'), user: get('user'), provider: get('provider'), route: get('route') }
+}
+
+export interface EventFilterItem {
+  id: string
+  field: string
+  value: string | number | boolean | string[]
+}
+
+/** One chip per non-empty filter; the chip id is its field so a re-applied filter replaces the old one. */
+export function itemsFromFilter(filter: Partial<EventFilter>): EventFilterItem[] {
+  return EVENT_FILTER_FIELDS.flatMap((field) => {
+    const value = (filter[field] ?? '').trim()
+    return value ? [{ id: field, field, value }] : []
+  })
+}
+
+/** Back to hash params: one value per field (the last chip wins), unknown fields and empty values dropped. */
+export function paramsFromItems(items: EventFilterItem[]): Partial<Record<EventFilterField, string>> {
+  const out: Partial<Record<EventFilterField, string>> = {}
+  for (const item of items) {
+    if (!(EVENT_FILTER_FIELDS as readonly string[]).includes(item.field)) continue
+    const value = String(item.value).trim()
+    if (value) out[item.field as EventFilterField] = value
+  }
+  return out
 }

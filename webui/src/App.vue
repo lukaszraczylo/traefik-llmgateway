@@ -41,8 +41,6 @@ function lazyPage(loader: () => Promise<Component>): Component {
   return defineAsyncComponent({ loader, errorComponent: PageLoadError, timeout: 30_000 })
 }
 
-// Legacy pages stand in until their redesigned replacements land:
-// events still lives inside Reliability.
 const PAGES: Record<PageId, Component> = {
   overview: lazyPage(() => import('@/pages/OverviewPage.vue')),
   usage: lazyPage(() => import('@/pages/UsagePage.vue')),
@@ -51,7 +49,7 @@ const PAGES: Record<PageId, Component> = {
   models: lazyPage(() => import('@/pages/ModelsPage.vue')),
   routers: lazyPage(() => import('@/pages/RoutersPage.vue')),
   targets: lazyPage(() => import('@/pages/TargetsPage.vue')),
-  events: lazyPage(() => import('@/pages/LegacyReliabilityPage.vue')),
+  events: lazyPage(() => import('@/pages/EventsPage.vue')),
   config: lazyPage(() => import('@/pages/ConfigPage.vue')),
 }
 

@@ -668,6 +668,8 @@ export type AdminEventKind =
   | 'unpriced'
   | 'capacity'
   | 'paced'
+  | 'router_escalation'
+  | 'router_timeout_fallback'
 
 /**
  * One row in GET /admin/api/events (admin.go/events.go: gatewayEvent — the
