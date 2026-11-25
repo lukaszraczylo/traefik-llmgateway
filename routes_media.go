@@ -107,7 +107,7 @@ func (g *Gateway) resolveMediaModel(sw *statusTrackingWriter, grp *group, reques
 func (g *Gateway) handleImagesGenerations(w http.ResponseWriter, r *http.Request, u *user, grp *group) {
 	sw := &statusTrackingWriter{ResponseWriter: w}
 
-	scopes, ok := g.admitRequestForRoute(sw, u, grp, writeOAIError, routeImages)
+	scopes, ok := g.admitRequestForRoute(r.Context(), sw, u, grp, writeOAIError, routeImages, 0, "")
 	if !ok {
 		return
 	}
@@ -161,7 +161,7 @@ func (g *Gateway) handleImagesGenerations(w http.ResponseWriter, r *http.Request
 func (g *Gateway) handleAudioSpeech(w http.ResponseWriter, r *http.Request, u *user, grp *group) {
 	sw := &statusTrackingWriter{ResponseWriter: w}
 
-	scopes, ok := g.admitRequestForRoute(sw, u, grp, writeOAIError, routeAudioSpeech)
+	scopes, ok := g.admitRequestForRoute(r.Context(), sw, u, grp, writeOAIError, routeAudioSpeech, 0, "")
 	if !ok {
 		return
 	}
@@ -238,7 +238,7 @@ func (g *Gateway) handleAudioSpeech(w http.ResponseWriter, r *http.Request, u *u
 func (g *Gateway) handleAudioTranscriptions(w http.ResponseWriter, r *http.Request, u *user, grp *group) {
 	sw := &statusTrackingWriter{ResponseWriter: w}
 
-	scopes, ok := g.admitRequestForRoute(sw, u, grp, writeOAIError, routeAudioTranscriptions)
+	scopes, ok := g.admitRequestForRoute(r.Context(), sw, u, grp, writeOAIError, routeAudioTranscriptions, 0, "")
 	if !ok {
 		return
 	}

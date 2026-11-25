@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { formatBucketLabel, formatCompactCount, formatContextWindow, formatCostAxis, formatCostDisplay, formatElapsedAgo, formatLatencyMs, formatModelCostHover, formatPercentAxis, formatUntil, refreshDetailLabel, refreshLabel, ZERO_TIME } from './format'
+import { formatBucketLabel, formatCompactCount, formatContextWindow, formatCostAxis, formatCostDisplay, formatElapsedAgo, formatLimits, formatLatencyMs, formatModelCostHover, formatPercentAxis, formatUntil, refreshDetailLabel, refreshLabel, ZERO_TIME } from './format'
 
 describe('refreshLabel', () => {
   it('reads "discovery off" when discovery is disabled, regardless of lastRefresh', () => {
@@ -298,5 +298,31 @@ describe('formatPercentAxis', () => {
     { rate: 0.05, want: '5%' },
   ])('$rate -> $want', ({ rate, want }) => {
     expect(formatPercentAxis(rate)).toBe(want)
+  })
+})
+
+describe('formatLimits', () => {
+  it('returns none when unset or empty', () => {
+    expect(formatLimits(undefined)).toBe('none')
+    expect(formatLimits({})).toBe('none')
+  })
+
+  it('renders tokens per minute', () => {
+    expect(formatLimits({ tokensPerMinute: 500 })).toBe('tok/min 500')
+  })
+
+  it('renders pacing with its source', () => {
+    expect(formatLimits({ pacing: { startPct: 80, maxDelay: '10s' } }, { pacing: 'memberLimits:friends' })).toBe(
+      'pace from 80% up to 10s (memberLimits:friends)',
+    )
+  })
+
+  it('appends each field source when given', () => {
+    expect(
+      formatLimits(
+        { requestsPerMinute: 9, tokensPerMinute: 100 },
+        { requestsPerMinute: 'user', tokensPerMinute: 'memberLimits:friends' },
+      ),
+    ).toBe('req/min 9 (user), tok/min 100 (memberLimits:friends)')
   })
 })

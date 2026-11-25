@@ -16,7 +16,11 @@ import (
 
 // user is an authenticated API-key holder resolved by authStore.identify.
 type user struct {
-	limits          *LimitsConfig
+	// limits is the EFFECTIVE limit set: the user's own limits merged with
+	// member groups' memberLimits (effectiveUserLimits, member_limits.go).
+	limits *LimitsConfig
+	// limitSources maps each non-zero limits field to its origin.
+	limitSources    map[string]string
 	name, groupName string
 	// groupNames is this user's full, de-duplicated, order-preserving
 	// member group list (effectiveGroupNames, below) — groupName above
@@ -35,6 +39,9 @@ type user struct {
 // providers, models, mcpServers, or agents means all are allowed.
 type group struct {
 	limits *LimitsConfig
+	// memberLimits is GroupConfig.MemberLimits: per-member defaults folded
+	// into each member user's effective limits at entry build time.
+	memberLimits *LimitsConfig
 	// cache is GroupConfig.Cache carried through unchanged: nil inherits
 	// the global cache.enabled setting, non-nil overrides it for this
 	// group's requests. Resolved by groupCacheEnabled (cache.go).
@@ -753,6 +760,12 @@ func newAuthStore(cfg *Config) (*authStore, error) {
 		if err := gc.Limits.validate(); err != nil {
 			return nil, fmt.Errorf("llmgateway: group %q: %w", name, err)
 		}
+		if gc.Limits != nil && gc.Limits.Pacing != nil {
+			return nil, fmt.Errorf("llmgateway: group %q: pacing is not supported on a group's aggregate limits; set it in memberLimits or on a user", name)
+		}
+		if err := gc.MemberLimits.validate(); err != nil {
+			return nil, fmt.Errorf("llmgateway: group %q memberLimits: %w", name, err)
+		}
 		// A group cannot opt into caching (Cache: true) when the global
 		// cache block itself is not configured (cfg.Cache.Enabled false)
 		// — there is no ttl/maxBodyBytes to inherit, and nothing for
@@ -776,6 +789,7 @@ func newAuthStore(cfg *Config) (*authStore, error) {
 		}
 		a.groups[name] = &group{
 			limits:           gc.Limits,
+			memberLimits:     gc.MemberLimits,
 			cache:            gc.Cache,
 			cacheTTL:         cacheTTL,
 			name:             name,
@@ -1034,15 +1048,17 @@ func (a *authStore) buildEntry(uc *UserConfig) (*authEntry, error) {
 	if key == "" {
 		return nil, fmt.Errorf("llmgateway: user %q has an empty API key", uc.Name)
 	}
+	effLimits, limitSources := effectiveUserLimits(uc.Limits, members)
 	digest := sha256.Sum256([]byte(key))
 	return &authEntry{
 		digest: digest,
 		user: &user{
-			limits:     uc.Limits,
-			groupNames: groupNames,
-			name:       uc.Name,
-			groupName:  groupNames[0],
-			admin:      uc.Admin,
+			limits:       effLimits,
+			limitSources: limitSources,
+			groupNames:   groupNames,
+			name:         uc.Name,
+			groupName:    groupNames[0],
+			admin:        uc.Admin,
 		},
 		group: effective,
 	}, nil
@@ -1271,6 +1287,7 @@ func presentedKeyFromHeader(h http.Header) (string, bool) {
 // byDigest itself.
 type userSummary struct {
 	limits            *LimitsConfig
+	limitSources      map[string]string
 	name              string
 	groupName         string
 	source            string
@@ -1300,6 +1317,7 @@ type userSummary struct {
 // on.
 type groupSummary struct {
 	limits           *LimitsConfig
+	memberLimits     *LimitsConfig
 	name             string
 	providers        []string
 	models           []string
@@ -1330,6 +1348,7 @@ func (a *authStore) snapshot() ([]userSummary, []groupSummary) {
 		}
 		users = append(users, userSummary{
 			limits:            entry.user.limits,
+			limitSources:      entry.user.limitSources,
 			name:              entry.user.name,
 			groupName:         entry.user.groupName,
 			groups:            cloneStringSlice(entry.user.groupNames),
@@ -1355,6 +1374,7 @@ func (a *authStore) snapshot() ([]userSummary, []groupSummary) {
 	for name, grp := range a.groups {
 		groups = append(groups, groupSummary{
 			limits:           grp.limits,
+			memberLimits:     grp.memberLimits,
 			name:             name,
 			providers:        cloneStringSlice(grp.providers),
 			models:           cloneStringSlice(grp.models),

@@ -412,7 +412,8 @@ function groupsCsv(): string {
                 </DetailField>
               </dl>
               <dl class="mb-3 grid grid-cols-2 gap-x-6 gap-y-1.5 text-sm sm:grid-cols-4">
-                <DetailField label="Limits">{{ formatLimits(row.original.limits) }}</DetailField>
+                <DetailField label="Limits">{{ formatLimits(row.original.limits, row.original.limitSources) }}</DetailField>
+                <DetailField v-if="row.original.memberLimits" label="Member limits">{{ formatLimits(row.original.memberLimits) }}</DetailField>
                 <DetailField label="req/min" numeric>
                   <template v-if="row.original.storeDown">?</template>
                   <CompactNumber v-else :value="row.original.requestsPerMinute" />

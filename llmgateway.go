@@ -28,7 +28,12 @@ import (
 // original doc comment) — see providerState's own doc comment (registry.go)
 // for the general pointer-first/scalar-last convention this follows.
 type Config struct {
-	Redis *RedisConfig `json:"redis,omitempty"`
+	// LimitExemptKinds lists request kinds (for example "embedding",
+	// "reranking") that no rate limit, budget, pacing or token pre-charge
+	// applies to. Exempt requests are still counted in usage. Empty (the
+	// default) exempts nothing.
+	LimitExemptKinds []string     `json:"limitExemptKinds,omitempty"`
+	Redis            *RedisConfig `json:"redis,omitempty"`
 	// Admin gates the read-only admin dashboard (spec §4, v0.2): nil or
 	// Admin.Enabled false means the /admin* routes are not registered at
 	// all — ServeHTTP falls through to its existing 404/passthroughUnknown
@@ -191,6 +196,10 @@ type Config struct {
 	// from overload answers (429/503/504/timeout) and advertises
 	// min(MaxConcurrency, learned). Defaults to false.
 	ConcurrencyAutodetect bool `json:"concurrencyAutodetect,omitempty"`
+	// RateLimitHeaders, when true, writes the minute-window rate-limit
+	// headers (x-ratelimit-*, anthropic-ratelimit-*, RateLimit,
+	// RateLimit-Policy) for users with a per-minute limit. Defaults to false.
+	RateLimitHeaders bool `json:"rateLimitHeaders,omitempty"`
 	// MaxConcurrency, when > 0, is advertised on every response as a
 	// RateLimit-Policy concurrent-requests quota
 	// (draft-ietf-httpapi-ratelimit-headers). The gateway does not queue or
@@ -246,8 +255,8 @@ type ProviderConfig struct {
 	PathBaseURLs map[string]string `json:"pathBaseUrls,omitempty"`
 	// Kinds labels a model id or a PathBaseURLs key with a free-form kind
 	// (for example "reranking", "decision") for the admin catalog, which
-	// groups a provider's rows by kind. Display only: routing, auth and
-	// billing never read it. Each PathBaseURLs key also appears in the
+	// groups a provider's rows by kind. Routing, auth and billing never
+	// read it; only Config.LimitExemptKinds does. Each PathBaseURLs key also appears in the
 	// catalog as an endpoint row.
 	Kinds map[string]string `json:"kinds,omitempty"`
 	// MetadataPath is an optional second discovery endpoint (feature
@@ -268,9 +277,14 @@ type ProviderConfig struct {
 // GroupConfig describes a group's access and limits. Empty/omitted
 // Providers, Models, MCPServers, Agents mean all are allowed.
 type GroupConfig struct {
-	Limits    *LimitsConfig `json:"limits,omitempty"`
-	Providers []string      `json:"providers,omitempty"`
-	Models    []string      `json:"models,omitempty"`
+	// Limits is one aggregate budget shared by every member of the group.
+	Limits *LimitsConfig `json:"limits,omitempty"`
+	// MemberLimits gives each member user their own counter with these
+	// values. A user's own non-zero limits field wins per field; a user in
+	// several groups gets the strictest non-zero value per field.
+	MemberLimits *LimitsConfig `json:"memberLimits,omitempty"`
+	Providers    []string      `json:"providers,omitempty"`
+	Models       []string      `json:"models,omitempty"`
 	// Cache overrides the global cache.enabled setting for this group's
 	// requests (spec §2): nil inherits the global setting, false opts the
 	// group out even when caching is globally enabled, and true opts the
@@ -321,12 +335,27 @@ type GroupConfig struct {
 
 // LimitsConfig holds request/token/cost limits. Zero means unlimited.
 type LimitsConfig struct {
-	RequestsPerMinute int64   `json:"requestsPerMinute,omitempty"`
-	RequestsPerDay    int64   `json:"requestsPerDay,omitempty"`
-	TokensPerDay      int64   `json:"tokensPerDay,omitempty"`
-	TokensPerMonth    int64   `json:"tokensPerMonth,omitempty"`
-	CostPerDayUSD     float64 `json:"costPerDayUSD,omitempty"`
-	CostPerMonthUSD   float64 `json:"costPerMonthUSD,omitempty"`
+	// Pacing delays requests as the per-minute usage approaches the limit.
+	// Nil (the default) disables it.
+	Pacing            *PacingConfig `json:"pacing,omitempty"`
+	RequestsPerMinute int64         `json:"requestsPerMinute,omitempty"`
+	RequestsPerDay    int64         `json:"requestsPerDay,omitempty"`
+	TokensPerMinute   int64         `json:"tokensPerMinute,omitempty"`
+	TokensPerDay      int64         `json:"tokensPerDay,omitempty"`
+	TokensPerMonth    int64         `json:"tokensPerMonth,omitempty"`
+	CostPerDayUSD     float64       `json:"costPerDayUSD,omitempty"`
+	CostPerMonthUSD   float64       `json:"costPerMonthUSD,omitempty"`
+}
+
+// PacingConfig slows requests before the hard limit. Once the higher of the
+// minute request and token usage fractions passes StartPct, each request waits
+// a delay that grows linearly from 0 to MaxDelay at 100%.
+type PacingConfig struct {
+	// MaxDelay is a Go duration string, greater than 0 and at most 60s.
+	MaxDelay string `json:"maxDelay"`
+	// StartPct is the usage percentage (1-99) where pacing begins.
+	StartPct int64 `json:"startPct"`
+	maxDelay time.Duration
 }
 
 // UsersConfig combines inline users with an optional file-backed source.
@@ -974,6 +1003,9 @@ func newGateway(ctx context.Context, next http.Handler, config *Config, name str
 	}
 	if config.MaxConcurrency < 0 {
 		return nil, errors.New("llmgateway: maxConcurrency must not be negative")
+	}
+	if err := validateLimitExemptKinds(config.LimitExemptKinds); err != nil {
+		return nil, err
 	}
 	// Finding F4, 2026-09 review: validate every Config.Pricing override
 	// at construction — non-nil, finite, >= 0 — rather than letting a

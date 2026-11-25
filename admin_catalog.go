@@ -208,13 +208,16 @@ func (g *Gateway) serveAdminCatalog(w http.ResponseWriter) {
 // userSummary's own new fields (auth.go's doc comment has the full
 // source/personal-grant contract).
 type adminConsumerUser struct {
-	Limits    *LimitsConfig `json:"limits,omitempty"`
-	Name      string        `json:"name"`
-	Source    string        `json:"source"` // inline|file
-	Groups    []string      `json:"groups"`
-	Providers []string      `json:"providers,omitempty"`
-	Models    []string      `json:"models,omitempty"`
-	Admin     bool          `json:"admin,omitempty"`
+	Limits *LimitsConfig `json:"limits,omitempty"`
+	// LimitSources names the origin of each set limits field ("user" or
+	// "memberLimits:<group>").
+	LimitSources map[string]string `json:"limitSources,omitempty"`
+	Name         string            `json:"name"`
+	Source       string            `json:"source"` // inline|file
+	Groups       []string          `json:"groups"`
+	Providers    []string          `json:"providers,omitempty"`
+	Models       []string          `json:"models,omitempty"`
+	Admin        bool              `json:"admin,omitempty"`
 }
 
 // adminModelAccessCount is one group's per-provider model-access tally in
@@ -240,6 +243,7 @@ type adminModelAccessCount struct {
 // configured glob list the way Providers/Models below do.
 type adminConsumerGroup struct {
 	Limits           *LimitsConfig                    `json:"limits,omitempty"`
+	MemberLimits     *LimitsConfig                    `json:"memberLimits,omitempty"`
 	ModelAccess      map[string]adminModelAccessCount `json:"modelAccess"`
 	Name             string                           `json:"name"`
 	Providers        []string                         `json:"providers,omitempty"`
@@ -285,13 +289,14 @@ func (g *Gateway) buildAdminConsumers() adminConsumersResponse {
 	users := make([]adminConsumerUser, len(userSummaries))
 	for i, us := range userSummaries {
 		users[i] = adminConsumerUser{
-			Limits:    us.limits,
-			Name:      us.name,
-			Source:    us.source,
-			Groups:    us.groups,
-			Providers: us.personalProviders,
-			Models:    us.personalModels,
-			Admin:     us.admin,
+			Limits:       us.limits,
+			LimitSources: us.limitSources,
+			Name:         us.name,
+			Source:       us.source,
+			Groups:       us.groups,
+			Providers:    us.personalProviders,
+			Models:       us.personalModels,
+			Admin:        us.admin,
 		}
 	}
 
@@ -315,6 +320,7 @@ func (g *Gateway) buildAdminConsumers() adminConsumersResponse {
 		sort.Strings(allowedProviders)
 		groups[i] = adminConsumerGroup{
 			Limits:           gs.limits,
+			MemberLimits:     gs.memberLimits,
 			Name:             gs.name,
 			Providers:        gs.providers,
 			Models:           gs.models,

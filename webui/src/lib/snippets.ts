@@ -19,7 +19,7 @@
 // authorizedProviders is computed first and gates model resolution).
 import { emitConfigSnippet, emitYamlFlowMap, emitYamlKey, emitYamlScalar } from '@/lib/yaml-emit'
 import type { YamlValue } from '@/lib/yaml-emit'
-import type { LimitsConfig } from '@/types/api'
+import type { LimitKey, LimitsConfig } from '@/types/api'
 
 /** NAME_PATTERN is the operator-facing name rule every provider/group id must satisfy — letters, digits, dot, underscore, hyphen, matching every real name in middleware.yaml (anthropic, gx10-embed, macstudio-rerank, friends, ...) and mirroring the plugin's own path.Match glob-safe charset. */
 export const NAME_PATTERN = /^[a-zA-Z0-9._-]+$/
@@ -109,9 +109,10 @@ export function validatePersonalGrant(providers: string[], models: string[]): st
 }
 
 /** LIMITS_FIELD_ORDER is LimitsConfig's own field order (types/api.ts) — the single source of truth every limits snippet (YAML block or JSON fragment) below renders in, so the two never drift relative to each other. */
-const LIMITS_FIELD_ORDER: (keyof LimitsConfig)[] = [
+const LIMITS_FIELD_ORDER: (LimitKey)[] = [
   'requestsPerMinute',
   'requestsPerDay',
+  'tokensPerMinute',
   'tokensPerDay',
   'tokensPerMonth',
   'costPerDayUSD',
@@ -133,6 +134,13 @@ export function groupLimitsSnippet(groupName: string, limits: LimitsConfig): str
   const body: { [key: string]: YamlValue | undefined } = {}
   for (const [key, value] of limitsEntries(limits)) body[key] = value
   return emitConfigSnippet(['groups', groupName], { limits: body })
+}
+
+/** groupMemberLimitsSnippet builds a group's per-member YAML block at spec.plugin.llmgateway.groups.<name>.memberLimits — each member user gets their own counter with these values. */
+export function groupMemberLimitsSnippet(groupName: string, limits: LimitsConfig): string {
+  const body: { [key: string]: YamlValue | undefined } = {}
+  for (const [key, value] of limitsEntries(limits)) body[key] = value
+  return emitConfigSnippet(['groups', groupName], { memberLimits: body })
 }
 
 function jsonString(s: string): string {

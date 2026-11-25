@@ -6,11 +6,25 @@
 export interface LimitsConfig {
   requestsPerMinute?: number
   requestsPerDay?: number
+  tokensPerMinute?: number
   tokensPerDay?: number
   tokensPerMonth?: number
   costPerDayUSD?: number
   costPerMonthUSD?: number
+  pacing?: PacingConfig
 }
+
+/** LimitKey is the numeric LimitsConfig fields — everything except the nested pacing block. */
+export type LimitKey = Exclude<keyof LimitsConfig, 'pacing'>
+
+/** Mirrors Go's PacingConfig: requests wait up to maxDelay (a Go duration) as minute usage rises from startPct to 100%. */
+export interface PacingConfig {
+  startPct: number
+  maxDelay: string
+}
+
+/** Maps a LimitsConfig field name to where its effective value came from: "user" or "memberLimits:<group>". */
+export type LimitSources = Partial<Record<keyof LimitsConfig, string>>
 
 /**
  * One upstream model's current-window attempt/failure counters within its
@@ -397,6 +411,10 @@ export interface AdminOverviewResponse {
 
 export interface AdminUsageEntryView {
   limits?: LimitsConfig
+  /** Users only: each set limits field's origin, "user" or "memberLimits:<group>" (admin.go: adminUsageEntryView.LimitSources). */
+  limitSources?: LimitSources
+  /** Groups only: the per-member default each member user inherits. */
+  memberLimits?: LimitsConfig
   kind: string
   id: string
   groupName?: string
@@ -441,6 +459,8 @@ export interface AdminUsageEntryView {
    * path already paid, so this field costs nothing extra to read).
    */
   rejectionsPerDay: number
+  /** Limit-exempt requests this month (limitExemptKinds); they count in no limit. */
+  exemptRequestsPerMonth?: number
   storeDown?: boolean
   /**
    * Unix seconds this scope last made a request, fleet-wide (admin.go:
@@ -851,6 +871,7 @@ export interface AdminCatalogResponse {
  */
 export interface AdminConsumerUser {
   limits?: LimitsConfig
+  limitSources?: LimitSources
   name: string
   source: 'inline' | 'file'
   groups: string[]
@@ -873,6 +894,7 @@ export interface AdminModelAccessCount {
  */
 export interface AdminConsumerGroup {
   limits?: LimitsConfig
+  memberLimits?: LimitsConfig
   name: string
   providers?: string[]
   models?: string[]

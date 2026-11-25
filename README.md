@@ -386,6 +386,8 @@ config accepts them as YAML, which decodes to the same JSON shape.
 | `modelMeta` | `map[string]*ModelMetaConfig` | `{}` | Per-model context-window and cost overrides, keyed by exact `provider/model` or a bare model id — see [Model metadata](#model-metadata). Omitted or empty means no overrides; every model's metadata still resolves through discovery and the built-in table. |
 | `maxConcurrency` | `int` | `0` | When above `0`, every response carries `RateLimit-Policy: "concurrency";q=<n>;qu="concurrent-requests"` (IETF draft `draft-ietf-httpapi-ratelimit-headers`, an Internet-Draft, not a final standard), so clients that read it can keep at most `n` requests in flight. Set it to what your upstreams serve at once. The gateway only advertises the value; it does not queue or reject on it. It always wins over a learned value. `0` sends no header. Negative values are rejected at startup. |
 | `concurrencyAutodetect` | `bool` | `false` | When `true`, the gateway learns per provider how many requests the upstream serves at once. A 429, 503, 504 or upstream timeout sets the learned value to half the in-flight requests (minimum 1) and never raises it. Every 4 consecutive successes add 1. At 64 the value counts as unknown again. Responses served via that provider advertise the smaller of `maxConcurrency` and the learned value in `RateLimit-Policy`; with neither known, no header is sent. Learned values live in memory and reset on restart. |
+| `rateLimitHeaders` | `bool` | `false` | When `true`, responses carry the per-minute rate-limit headers for users with a minute limit. See [Rate-limit headers and pacing](#rate-limit-headers-and-pacing). |
+| `limitExemptKinds` | `[]string` | `[]` | Request kinds that skip every limit but still count in usage. See [Exempt kinds](#exempt-kinds). A blank entry fails construction. |
 | `passthroughUnknown` | `bool` | `false` | `false`: a request matching none of the plugin's routes gets a 404 JSON envelope. `true`: it falls through to the router's own backing service. **Does not cover the three media routes** — see the upgrade note below. |
 | `maxRequestBytes` | `int` | `0` (4 MiB) | Raises the unified chat/embeddings request-body cap. `0` or negative keeps 4 MiB; a positive value is clamped to 64 MiB. Pair with `maxInFlightBodyRequests` and the pod memory limit: an adversarial body decodes to ~12x live heap. |
 | `maxInFlightBodyRequests` | `int` | `0` (self-tuned) | Caps how many unified/media requests may concurrently be inside their own request-body read+decode step — see [Body-admission limit](#body-admission-limit). `0` self-tunes from the host's own `GOMAXPROCS`; a positive value pins an exact cap instead, clamped to a maximum of 10,000. |
@@ -463,7 +465,8 @@ alone allows the path and `b` alone allows the model.
 
 | Field | Type | Default | Semantics |
 |---|---|---|---|
-| `limits` | `*LimitsConfig` | `nil` (unlimited) | |
+| `limits` | `*LimitsConfig` | `nil` (unlimited) | One aggregate budget shared by every member of the group — see [Group, member and user limits](#group-member-and-user-limits). |
+| `memberLimits` | `*LimitsConfig` | `nil` (unlimited) | Per-member limits: each member user gets their own counter with these values — see [Group, member and user limits](#group-member-and-user-limits). |
 | `providers` | `[]string` | `[]` (all) | Glob-matched (`path.Match`) against a provider's configured name. |
 | `models` | `[]string` | `[]` (all) | Glob-matched, exactly as given — no automatic `provider/` prefix stripping. Both the bare and provider-prefixed forms of a model id are checked, so a pattern like `gpt-*` matches a client request for either `gpt-5-mini` or `openai/gpt-5-mini`. |
 | `cache` | `*bool` | `nil` (inherit) | Overrides the top-level `cache.enabled` setting for this group's requests — see [Caching](#caching). `nil` inherits the global setting; `false` opts the group out even when caching is globally on; `true` opts the group in, but only when the top-level `cache` block is actually configured (a construction error otherwise — there is nothing to inherit `ttl`/`maxBodyBytes` from). |
@@ -474,17 +477,19 @@ alone allows the path and `b` alone allows the model.
 
 ### `LimitsConfig`
 
-All six fields default to `0` (unlimited). A negative count, or a cost
+All seven count and cost fields default to `0` (unlimited). `pacing` defaults to unset (off). A negative count, or a cost
 that is negative, `NaN`, or `±Inf`, is a construction error.
 
 | Field | Type | Window |
 |---|---|---|
 | `requestsPerMinute` | `int64` | Fixed 1-minute window, UTC. |
 | `requestsPerDay` | `int64` | Fixed calendar-day window, UTC midnight to midnight. |
+| `tokensPerMinute` | `int64` | Fixed 1-minute window, UTC. Counts uncached input plus output tokens. |
 | `tokensPerDay` | `int64` | Fixed calendar-day window, UTC. |
 | `tokensPerMonth` | `int64` | Fixed calendar-month window, UTC. |
 | `costPerDayUSD` | `float64` | Fixed calendar-day window, UTC. |
 | `costPerMonthUSD` | `float64` | Fixed calendar-month window, UTC. |
+| `pacing` | `*PacingConfig` | Soft slowdown before the per-minute limits. See [Rate-limit headers and pacing](#rate-limit-headers-and-pacing). |
 
 Every window enforces correctly on the in-process fallback too, not only Redis —
 see [Limits and accounting](#limits-and-accounting)'s "Fallback" bullet for the
@@ -496,6 +501,189 @@ group's limits, not instead of them — a request is refused the moment it
 breaches whichever of the two is tighter. A user with no `limits` of their
 own is governed purely by their group's — see
 [UserConfig](#userconfig).
+
+**Token limits block the next request.** Tokens are known only after the
+upstream answers, so `tokensPerMinute`, `tokensPerDay` and `tokensPerMonth`
+all work the same way. The gateway admits a request while the window's
+`tokin + tokout` total is below the limit, then adds that request's tokens
+after the response. The request that crosses the limit still succeeds. The
+next request in the same window gets `429` with `Retry-After` set to the
+seconds until the window ends. The minute window is a fixed UTC minute, not
+a sliding one. The gateway writes the per-minute token counters only for
+scopes that set `tokensPerMinute`, so a config without it stores no extra
+keys.
+
+**What the minute window counts.** `tokensPerMinute` counts uncached input
+tokens plus output tokens. Anthropic `cache_read_input_tokens` and OpenAI
+`prompt_tokens_details.cached_tokens` do not count, so a client that
+re-sends a long, cached prompt is not locked out by cache hits. Anthropic
+`cache_creation_input_tokens` count. `tokensPerDay` and `tokensPerMonth`
+keep counting the full prompt, cached tokens included. Gemini cached tokens
+are not separated and count in full.
+
+**Pre-charge.** Usage is known only after the call, so a burst of large
+requests could all pass the check before any usage lands. When a scope sets
+`tokensPerMinute`, admission adds an estimate of the request's prompt tokens
+(body bytes divided by four, taken from `Content-Length` on routes that
+admit before reading the body, capped at 1,048,576) to the minute window in
+the same store round trip. The check compares against the value before that
+addition. When the call finishes, the estimate is replaced by the reported
+uncached usage. A refused, cancelled or failed request gives its estimate
+back. A request with no known length (chunked) reserves nothing. Scopes
+without `tokensPerMinute` make no extra store calls. While a request is in
+flight, `remaining` in the token headers already includes its estimate.
+
+#### Group, member and user limits
+
+Three places set limits. All use the same `LimitsConfig` fields, and `0`
+means unlimited.
+
+| Setting | Counter | Meaning |
+|---|---|---|
+| group `limits` | one per group (`kind: group`) | Aggregate: all members share one budget. |
+| group `memberLimits` | one per member user (`kind: user`) | Each member has their own budget with these values. |
+| user `limits` | one per user (`kind: user`) | The user's own budget. |
+
+`memberLimits` does not add a counter family. At load time the gateway
+merges it into each member's effective `limits`, so counting, the admin
+usage API, `429` bodies, events and `Retry-After` behave as for a user
+limit. Merge rules, per field:
+
+1. A non-zero value in the user's own `limits` wins.
+2. Otherwise the strictest (smallest) non-zero `memberLimits` value across
+   all the user's groups applies. A group that leaves the field at `0`
+   does not count.
+3. A user with no value from either source is unlimited for that field.
+
+The group's aggregate `limits` still apply on top of the per-user result.
+A users-file reload rebuilds each file user's effective limits against the
+configured groups.
+
+Example: no single user in `friends` may exceed 2 requests per minute or
+20000 tokens per minute, and the whole group stays under 1000 requests per
+day. `carol` gets a higher request limit of her own.
+
+```yaml
+groups:
+  friends:
+    limits:
+      requestsPerDay: 1000
+    memberLimits:
+      requestsPerMinute: 2
+      tokensPerMinute: 20000
+users:
+  inline:
+    - {name: carol, group: friends, apiKey: "env:LLMGW_KEY_CAROL", limits: {requestsPerMinute: 10}}
+```
+
+`GET /admin/api/usage` shows each user's effective `limits` plus
+`limitSources`, which maps each set field to `user` or
+`memberLimits:<group>`. Each group row also carries its `memberLimits`.
+
+#### Rate-limit headers and pacing
+
+When the global `rateLimitHeaders` option is `true` (default `false`, so an
+upgrade changes no response), the gateway reports a user's effective
+per-minute limits (the user's own `limits` merged with `memberLimits`) on
+every metered response, success and `429` alike. It sets only the windows
+that are configured:
+`requestsPerMinute` and `tokensPerMinute`. It reads the values from the
+counters the admission check already fetched, so it adds no store call.
+Headers are set before the body or SSE stream starts. A user with no
+minute limit gets no rate-limit headers.
+
+| Dialect | Headers |
+|---|---|
+| OpenAI | `x-ratelimit-limit-requests`, `x-ratelimit-remaining-requests`, `x-ratelimit-reset-requests` (for example `12s`), and the same three with `-tokens` |
+| Anthropic | `anthropic-ratelimit-requests-limit`, `-remaining`, `-reset` (RFC 3339), and `anthropic-ratelimit-tokens-limit`, `-remaining`, `-reset` |
+| IETF draft | `RateLimit: "requests";r=<remaining>;t=<seconds>` and `RateLimit-Policy: "requests";q=<limit>;w=60`, with a `tokens` member when set |
+
+The token headers describe `tokensPerMinute`, which counts uncached input
+plus output tokens (see above). The Anthropic `tokens` headers carry that
+combined count, as Anthropic's own `anthropic-ratelimit-tokens-*` do. On a
+`429`, `remaining` is `0` for the refused window, and the counts leave out
+the refused request. A `429` from a day or month limit, or from another
+scope's limit that the headers do not describe, reports `0` for every
+reported window and moves the reset to when the refused window ends, which
+matches `Retry-After`. On a native passthrough route the gateway's headers
+replace any rate-limit headers the upstream sends; with none to send, the
+upstream's pass through unchanged. The gateway
+merges its `RateLimit-Policy` members with the `concurrency` member from
+`maxConcurrency` / `concurrencyAutodetect`; neither replaces the other.
+
+**Pacing** slows a user down before the hard limit. Set `pacing` inside
+`memberLimits` or a user's `limits` (a user's own `pacing` wins). Pacing
+requires `requestsPerMinute` above 0 in the same block, and a group's
+aggregate `limits` rejects it, because nothing reads it there. With several
+member groups, the earliest `startPct` and the longest `maxDelay` across them
+apply:
+
+```yaml
+memberLimits:
+  requestsPerMinute: 60
+  tokensPerMinute: 20000
+  pacing: {startPct: 80, maxDelay: "10s"}
+```
+
+When the higher of the minute request fraction and the minute token
+fraction passes `startPct`, the gateway waits before forwarding. The
+delay grows linearly from 0 at `startPct` to `maxDelay` at 100%, and
+never exceeds `maxDelay`. `startPct` is 1 to 99 and `maxDelay` is a Go
+duration above 0 and at most `20s`, so a paced request stays inside a CDN
+time-to-first-byte budget. Anything else fails construction. A paced response carries
+`X-Llmgw-Paced-Ms`, and the gateway records one `paced` event per user
+per minute in the admin event feed. Pacing is off unless set; with it
+unset, behaviour is unchanged. The `429` at 100% is unchanged.
+
+On the unified and passthrough routes the wait runs right after admission,
+before the gateway reads the body, so it holds no body-admission slot and no
+provider concurrency slot. `/v1/messages` must decode the body first, to
+reject streaming without charging the limit, so its wait comes after the
+read. That is why pacing needs `requestsPerMinute`: it bounds how many
+requests can wait. Each user also has at most four requests waiting at once;
+a further paced request proceeds without delay. A client that disconnects during the wait ends the request with no
+response written; the request still counted against its minute window.
+
+Most clients honour `Retry-After` on a `429` and ignore the remaining-quota
+headers. Pacing is therefore the reliable way to slow a client down before
+it hits the limit; the headers help clients that do read them.
+
+#### Exempt kinds
+
+`limitExemptKinds` (global, default empty) lists request kinds that no limit
+applies to, for example `["embedding", "reranking"]`. An exempt request skips
+the request, token and cost limits on the user, `memberLimits`, group
+aggregate and total scopes, is never paced, is never refused with `429` or
+`402` (the unpriced-model cost-budget refusal), makes no `tokensPerMinute`
+pre-charge, and carries no rate-limit headers. Empty keeps every request
+limited.
+
+The gateway classifies the kind before admission:
+
+1. `POST /v1/embeddings` is `embedding`.
+2. A native passthrough path takes the kind the provider's `kinds` map gives
+   that path (the exact key, else the longest key that is a path prefix).
+3. Otherwise a passthrough path ending in `/rerank` or `/reranking` is
+   `reranking`, and one ending in `/embeddings` is `embedding`.
+4. Otherwise, when the provider's `kinds` map names an exempt kind for some
+   model id, the gateway reads the model from the body, in a bounded peek that
+   restores the body, and uses `kinds[model]`.
+
+With `limitExemptKinds` empty, steps 2 to 4 do not run and the body is not
+peeked. The `/v1/chat/completions` and `/v1/messages` routes do not look up a
+model kind.
+
+Exempt requests increment no limit counter on the user, `memberLimits`,
+group or total scopes: not the request, token or cost windows, and not the
+minute token pre-charge. Embedding traffic therefore never uses up the
+`requestsPerMinute`, `requestsPerDay` or token budgets that refuse the user's
+other requests. They still count in the per-model usage, so `GET
+/admin/api/usage/models` shows the traffic, and in a per-user monthly
+exempt counter, shown as `exemptRequestsPerMonth` on the user's row in
+`GET /admin/api/usage` and as "Exempt requests/month" on the user page. The
+user and group totals in the admin usage view leave exempt traffic out.
+The gateway decides the kind before admission, so no admission count is ever
+taken back.
 
 ### `UsersConfig`
 
@@ -514,7 +702,7 @@ own is governed purely by their group's — see
 | `apiKey` | `string` | — | Secret form (see [Secret forms](#secret-forms)); must resolve non-empty and unique across every inline **and** file-sourced user. |
 | `providers` | `[]string` | `[]` | This user's own personal grant — access beyond whatever their group(s) already allow, glob-matched exactly like a group's own `providers`. Set alone (with `models` left empty), it grants **every** model on those providers — the same empty-`models`-means-all-models contract a group's own `models` carries. The personal grant exists at all only when `providers` is non-empty — leaving it empty/omitted never means "allow everything" on its own, regardless of `models`. |
 | `models` | `[]string` | `[]` | The personal grant's own model glob, narrowing `providers` above — same semantics as a group's own `models`. Requires `providers` to be non-empty too: a `models`-only personal grant (no `providers`) would reach every configured provider, not just the ones already covered — a construction error naming the user. |
-| `limits` | `*LimitsConfig` | `nil` (governed by group's limits alone) | When set, enforced alongside — not instead of — every member group's own limits (one independent scope per member group); the request is refused by whichever scope is breached first. The personal grant above carries no limits of its own. |
+| `limits` | `*LimitsConfig` | `nil` (governed by group's limits alone) | Overrides the groups' `memberLimits` per non-zero field (see [Group, member and user limits](#group-member-and-user-limits)). When set, enforced alongside — not instead of — every member group's own limits (one independent scope per member group); the request is refused by whichever scope is breached first. The personal grant above carries no limits of its own. |
 | `admin` | `bool` | `false` | Grants access to the read-only admin dashboard — see [Admin](#admin). Works the same for an inline or a file-sourced user. An admin user is otherwise ordinary: their own keys, group(s), and limits still apply, including to the admin routes themselves. |
 
 A user belonging to exactly one group (`group` alone, `groups` empty)
@@ -1027,6 +1215,7 @@ The request moves down at most one tier. The higher tiers stay in the plan, so a
 
 - **Escalation**: on a retryable failure, the gateway tries the next model in the same tier, then the first model of the next tier. It never moves down, except `saturationDowngrade` at the start and the one extra `timeoutFallback` attempt. It stops after `maxAttempts` upstream attempts. When a higher tier has a usable model, the plan keeps one attempt for it, so same-tier failover cannot use every attempt. Escalation works with `failover` off. Once the gateway sends the first response byte, it cannot escalate.
 - **Client errors**: an upstream `400` does not escalate, because the request is invalid. The exception is a context overflow. Before the first response byte, a `400` body can name an overflow: `context_length_exceeded`, "maximum context length", "prompt is too long", "context window", "is longer than the model's", or "too many tokens". The router then moves to the next candidate and counts an escalation. Direct model requests never do this.
+- **Limits**: a routed request passes admission, pacing, and the rate-limit headers once, before the router plans its attempts. Escalation and timeout-fallback attempts count no extra request. The token pre-charge settles once, and only attempts that report usage add tokens. See [Group, member and user limits](#group-member-and-user-limits).
 - **`firstByteTimeout`**: set a Go duration of at least `1s`, such as `40s`, to escalate when an upstream starts too slowly. It is off by default.
   - **Scope**: the deadline applies to each upstream attempt of the router, and only to requests sent to the router name. A direct model request has no deadline.
   - **First byte**: for a non-stream request, the first byte is the first byte of the response body. For a stream, it is the first SSE `data:` event. Response headers and SSE comment lines such as keep-alive pings do not count.
