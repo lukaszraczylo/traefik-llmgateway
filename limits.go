@@ -2950,7 +2950,7 @@ func (l *limiter) providerUsage(scopes []limitScope) []providerCounters {
 // rejectionsPerDay counter (metricRej) usageWindowKeys now appends. Grows
 // once more, 9 to 10, for the last-seen counter (Q6, DECISIONS) — see
 // usageWindowKeys' own doc comment for the appended field's position.
-const usageKeysPerScope = 11
+const usageKeysPerScope = 13
 
 // scopeUsage is one scope's (a user's, a group's, or the synthetic total
 // scope's — totalScopeKind) current-window counter values — the admin
@@ -2985,6 +2985,8 @@ type scopeUsage struct {
 	lastSeen int64
 	// exemptPerMonth is the scope's limit-exempt request count this month.
 	exemptPerMonth int64
+	// tokensPerMinute is the minute-window uncached input plus output; 0 for scopes with no tokensPerMinute limit (nothing is written).
+	tokensPerMinute int64
 	// storeDown reports whether reading any of the usageKeysPerScope
 	// counters above failed closed (a configured store errored and
 	// failOpen is false) — mirrors limitViolation.storeDown. Every value
@@ -3017,6 +3019,8 @@ func usageWindowKeys(sc limitScope, now time.Time) []string {
 		windowKey(sc.kind, sc.id, metricRej, windowDay, now),
 		lastSeenKey(sc.kind, sc.id),
 		windowKey(sc.kind, sc.id, metricExempt, windowMonth, now),
+		windowKey(sc.kind, sc.id, metricTokIn, windowMin, now),
+		windowKey(sc.kind, sc.id, metricTokOut, windowMin, now),
 	}
 }
 
@@ -3092,6 +3096,7 @@ func (l *limiter) currentUsage(scopes []limitScope) []scopeUsage {
 			tokensOutPerDay: v[4], tokensOutPerMonth: v[5],
 			costPerDayMicros: v[6], costPerMonthMicros: v[7],
 			rejectionsPerDay: v[8], lastSeen: v[9], exemptPerMonth: v[10],
+			tokensPerMinute: v[11] + v[12],
 		}
 	}
 	return out

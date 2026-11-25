@@ -443,6 +443,8 @@ export interface AdminUsageEntryView {
   mcpServers?: string[]
   agents?: string[]
   requestsPerMinute: number
+  /** Live minute-window tokens (uncached input + output); 0 when the scope has no tokensPerMinute limit. */
+  tokensPerMinute?: number
   requestsPerDay: number
   tokensInPerDay: number
   tokensOutPerDay: number

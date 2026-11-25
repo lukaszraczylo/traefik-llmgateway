@@ -960,6 +960,7 @@ type adminUsageEntryView struct {
 	MCPServers           []string `json:"mcpServers,omitempty"`
 	Agents               []string `json:"agents,omitempty"`
 	RequestsPerMinute    int64    `json:"requestsPerMinute"`
+	TokensPerMinute      int64    `json:"tokensPerMinute"`
 	RequestsPerDay       int64    `json:"requestsPerDay"`
 	TokensInPerDay       int64    `json:"tokensInPerDay"`
 	TokensOutPerDay      int64    `json:"tokensOutPerDay"`
@@ -1003,6 +1004,7 @@ func usageEntryView(su scopeUsage, limits *LimitsConfig) adminUsageEntryView {
 		ID:                     su.id,
 		Limits:                 limits,
 		RequestsPerMinute:      su.requestsPerMinute,
+		TokensPerMinute:        su.tokensPerMinute,
 		RequestsPerDay:         su.requestsPerDay,
 		TokensInPerDay:         su.tokensInPerDay,
 		TokensOutPerDay:        su.tokensOutPerDay,
@@ -1063,7 +1065,8 @@ func usageEntryView(su scopeUsage, limits *LimitsConfig) adminUsageEntryView {
 // chunk, keeping this endpoint's per-round-trip key count at the same
 // order of magnitude this constant has always targeted, rather than
 // letting it grow every time a future per-scope counter is added here.
-const adminUsageChunkScopes = 145
+// 123 scopes * 13 keys/scope = 1,599 keys, within usageModelsChunkKeys.
+const adminUsageChunkScopes = 123
 
 // chunkedCurrentUsage calls limiter.currentUsage in batches of at most
 // adminUsageChunkScopes scopes at a time, concatenating the results in
