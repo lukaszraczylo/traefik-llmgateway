@@ -187,6 +187,46 @@ func writeRateLimitHeaders(h http.Header, info *rateInfo, now time.Time) {
 	appendPolicyMember(h, strings.Join(policy, ", "))
 }
 
+// isRateLimitHeader reports whether canonical header key k is a rate-limit
+// header in any dialect the gateway writes.
+func isRateLimitHeader(k string) bool {
+	lk := strings.ToLower(k)
+	return strings.HasPrefix(lk, "x-ratelimit-") || strings.HasPrefix(lk, "anthropic-ratelimit-") || lk == "ratelimit" || lk == "ratelimit-policy"
+}
+
+// snapshotRateLimitHeaders returns a copy of the rate-limit headers in h, or
+// nil when h carries none.
+func snapshotRateLimitHeaders(h http.Header) http.Header {
+	var snap http.Header
+	for k, vs := range h {
+		if !isRateLimitHeader(k) {
+			continue
+		}
+		if snap == nil {
+			snap = http.Header{}
+		}
+		snap[k] = append([]string(nil), vs...)
+	}
+	return snap
+}
+
+// restoreRateLimitHeaders replaces every rate-limit header in h with snap, so
+// an upstream's own quota headers never override the gateway's. A nil snap
+// leaves h untouched.
+func restoreRateLimitHeaders(h, snap http.Header) {
+	if snap == nil {
+		return
+	}
+	for k := range h {
+		if isRateLimitHeader(k) {
+			delete(h, k)
+		}
+	}
+	for k, vs := range snap {
+		h[k] = vs
+	}
+}
+
 // pace waits for the pacing delay unless ctx ends first. It reports false
 // when the client went away during the wait.
 func pace(ctx context.Context, d time.Duration) bool {

@@ -1777,8 +1777,10 @@ func (g *Gateway) proxyUpstream(w http.ResponseWriter, r *http.Request, upstream
 	resp.Body = wb
 	defer resp.Body.Close() //nolint:errcheck // read-side close; nothing actionable on failure
 
+	gwRateHeaders := snapshotRateLimitHeaders(w.Header())
 	copyHeadersExcept(w.Header(), resp.Header, hopByHopHeaders, dangerousResponseHeaders)
 	stripHeaderPrefixes(w.Header(), dangerousResponseHeaderPrefixes)
+	restoreRateLimitHeaders(w.Header(), gwRateHeaders)
 	w.WriteHeader(resp.StatusCode)
 	fw := newFlushWriter(w)
 
