@@ -7,6 +7,7 @@ import { formatCompactCount } from '@/lib/format'
 import { formatLastSeen } from '@/lib/last-seen'
 import { loadState } from '@/lib/load-state'
 import { isHot, primaryLimit } from '@/lib/meters'
+import { countOrUnknown, formatCount, STORE_DOWN_HINT } from '@/lib/usage-store'
 import { pageWindow } from '@/lib/paging'
 import { sortThenSlice } from '@/lib/table-sort'
 import type { SortSpec } from '@/lib/table-sort'
@@ -33,10 +34,12 @@ interface Row {
   id: string
   name: string
   group: string
+  groups: string[]
   members: number
   lastSeen: string
-  requests: number
-  tokens: number
+  requests: number | null
+  tokens: number | null
+  storeDown: boolean
   share: number | null
   limit: number | null
   limitUnit: string
@@ -66,18 +69,20 @@ function toRow(e: AdminUsageEntryView): Row {
     id: e.id,
     name: e.id,
     group: (e.groups ?? (e.groupName ? [e.groupName] : [])).join(', ') || '—',
+    groups: e.groups ?? (e.groupName ? [e.groupName] : []),
     members: memberCounts.value.get(e.id) ?? 0,
     lastSeen: formatLastSeen(e.lastSeen, now.value),
-    requests: e.requestsPerDay,
-    tokens: e.tokensInPerDay + e.tokensOutPerDay,
-    share: totalRequests.value > 0 ? Math.min(1, e.requestsPerDay / totalRequests.value) : null,
+    requests: countOrUnknown(e.requestsPerDay, e.storeDown),
+    tokens: countOrUnknown(e.tokensInPerDay + e.tokensOutPerDay, e.storeDown),
+    storeDown: e.storeDown === true,
+    share: e.storeDown || totalRequests.value <= 0 ? null : Math.min(1, e.requestsPerDay / totalRequests.value),
     limit,
     limitUnit: unit,
     hot: isHot(e, e.limits),
   }
 }
 
-const byRequests = (a: Row, b: Row): number => b.requests - a.requests || a.name.localeCompare(b.name)
+const byRequests = (a: Row, b: Row): number => (b.requests ?? -1) - (a.requests ?? -1) || a.name.localeCompare(b.name)
 const userRows = computed<Row[]>(() => (usage.value?.users ?? []).map(toRow).sort(byRequests))
 const groupRows = computed<Row[]>(() => (usage.value?.groups ?? []).map(toRow).sort(byRequests))
 const query = computed<string>({
@@ -88,9 +93,13 @@ const query = computed<string>({
   },
 })
 const needle = computed(() => query.value.trim().toLowerCase())
+const groupFilter = computed(() => nav.params.group ?? '')
 const allRows = computed(() => (tab.value === 'users' ? userRows.value : groupRows.value))
+const inGroup = computed(() =>
+  groupFilter.value === '' || tab.value !== 'users' ? allRows.value : allRows.value.filter((r) => r.groups.includes(groupFilter.value)),
+)
 const rows = computed(() =>
-  needle.value === '' ? allRows.value : allRows.value.filter((r) => r.name.toLowerCase().includes(needle.value) || (tab.value === 'users' && r.group.toLowerCase().includes(needle.value))),
+  needle.value === '' ? inGroup.value : inGroup.value.filter((r) => r.name.toLowerCase().includes(needle.value) || (tab.value === 'users' && r.group.toLowerCase().includes(needle.value))),
 )
 
 const userColumns = wbColumns<Row>([
@@ -113,7 +122,7 @@ const groupColumns = wbColumns<Row>([
 const columns = computed(() => (tab.value === 'users' ? userColumns : groupColumns))
 
 const page = ref(1)
-watch([tab, needle], () => {
+watch([tab, needle, groupFilter], () => {
   page.value = 1
   sort.value = null
 })
@@ -154,6 +163,11 @@ watch(
 )
 const openSel = computed(() => (usage.value ? resolveSel(selection.value, (k, id) => exists(k, id)) : null))
 
+function clearGroup(): void {
+  const { group: _group, ...rest } = nav.params
+  nav.goTo('users', rest)
+}
+
 function open(row: Row): void {
   nav.openPanel(tab.value === 'users' ? 'user' : 'group', row.id)
 }
@@ -172,7 +186,10 @@ onUnmounted(stopClock)
         </CardAction>
       </CardHeader>
       <CardContent class="flex flex-col gap-2">
-        <SearchInput v-model="query" size="sm" class="max-w-sm" :placeholder="tab === 'users' ? 'Filter by name or group' : 'Filter by name'" :aria-label="`Filter ${tab}`" />
+        <div class="flex flex-wrap items-center gap-2">
+          <SearchInput v-model="query" size="sm" class="max-w-sm" :placeholder="tab === 'users' ? 'Filter by name or group' : 'Filter by name'" :aria-label="`Filter ${tab}`" />
+          <Button v-if="tab === 'users' && groupFilter" variant="outline" size="sm" :aria-label="`Clear group filter ${groupFilter}`" @click="clearGroup">Group: {{ groupFilter }} ×</Button>
+        </div>
         <StateView :state="state" :empty-title="emptyTitle" :error-message="dashboard.error" :updated-at="dashboard.lastUpdated ?? undefined" @retry="dashboard.refresh()">
           <WbTable
             class="wb-clip"
@@ -186,8 +203,8 @@ onUnmounted(stopClock)
             @row-activate="open"
           >
             <template #cell-members="{ value }">{{ formatCompactCount(value as number) }}</template>
-            <template #cell-requests="{ value }">{{ formatCompactCount(value as number) }}</template>
-            <template #cell-tokens="{ value }">{{ formatCompactCount(value as number) }}</template>
+            <template #cell-requests="{ value, row }"><span :title="(row as Row).storeDown ? STORE_DOWN_HINT : undefined">{{ formatCount(value as number | null) }}</span></template>
+            <template #cell-tokens="{ value, row }"><span :title="(row as Row).storeDown ? STORE_DOWN_HINT : undefined">{{ formatCount(value as number | null) }}</span></template>
             <template #cell-limit="{ row }">
               <LimitBadge :limit="(row as Row).limit" :unit="(row as Row).limitUnit" :hot="(row as Row).hot" />
             </template>

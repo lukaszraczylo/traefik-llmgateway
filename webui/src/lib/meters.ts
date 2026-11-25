@@ -16,9 +16,11 @@ export interface Meter {
   value: number
   max: number
   markers: MeterMarker[]
+  /** The usage store is down: the reading is unknown, not zero. */
+  unavailable?: boolean
 }
 
-type LiveEntry = Pick<AdminUsageEntryView, 'requestsPerMinute' | 'requestsPerDay' | 'tokensPerMinute'>
+type LiveEntry = Pick<AdminUsageEntryView, 'requestsPerMinute' | 'requestsPerDay' | 'tokensPerMinute'> & { storeDown?: boolean }
 
 const has = (n: number | undefined): n is number => typeof n === 'number' && Number.isFinite(n) && n > 0
 
@@ -39,6 +41,11 @@ function minuteMarkers(limit: number, limits: LimitsConfig, live: boolean): Mete
 /** meterModel builds one meter per set limit; pacing applies to minute meters only, and needs a live reading. */
 export function meterModel(entry: LiveEntry, limits: LimitsConfig | undefined): Meter[] {
   if (!limits) return []
+  const out = liveMeters(entry, limits)
+  return entry.storeDown ? out.map((m) => ({ ...m, unavailable: true })) : out
+}
+
+function liveMeters(entry: LiveEntry, limits: LimitsConfig): Meter[] {
   const out: Meter[] = []
   if (has(limits.requestsPerMinute)) {
     out.push({ label: 'Requests/min', value: entry.requestsPerMinute, max: limits.requestsPerMinute, markers: minuteMarkers(limits.requestsPerMinute, limits, true) })
@@ -55,7 +62,7 @@ export function meterModel(entry: LiveEntry, limits: LimitsConfig | undefined): 
 
 /** isHot reports a minute meter at or past the pacing start (80% when pacing is unset). */
 export function isHot(entry: LiveEntry, limits: LimitsConfig | undefined): boolean {
-  if (!limits) return false
+  if (!limits || entry.storeDown) return false
   const threshold = has(limits.pacing?.startPct) ? (limits.pacing as { startPct: number }).startPct / PERCENT : DEFAULT_HOT_FRACTION
   return meterModel(entry, limits)
     .filter((m) => m.label.endsWith('/min'))

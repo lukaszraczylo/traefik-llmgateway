@@ -7,6 +7,22 @@ const PACING = { startPct: 80, maxDelay: '10s' }
 const LIMITS: LimitsConfig = { requestsPerMinute: 30, requestsPerDay: 3000, tokensPerMinute: 1_200_000, pacing: PACING }
 const ENTRY = { requestsPerMinute: 27, requestsPerDay: 1500, tokensPerMinute: 900_000 }
 
+describe('meterModel with the usage store down', () => {
+  it('marks every meter unavailable rather than reporting a zero reading', () => {
+    const meters = meterModel({ ...ENTRY, storeDown: true }, LIMITS)
+    expect(meters.length).toBe(3)
+    expect(meters.every((m) => m.unavailable === true)).toBe(true)
+  })
+
+  it('is never hot when the readings are unknown', () => {
+    expect(isHot({ ...ENTRY, storeDown: true }, LIMITS)).toBe(false)
+  })
+
+  it('leaves live meters without the unavailable flag', () => {
+    expect(meterModel(ENTRY, LIMITS).some((m) => m.unavailable)).toBe(false)
+  })
+})
+
 describe('meterModel', () => {
   it('requests meter has pacing marker at startPct and limit marker', () => {
     const m = meterModel(ENTRY, LIMITS).find((x) => x.label === 'Requests/min')

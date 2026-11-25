@@ -116,6 +116,11 @@ function redisDown(path: string, body: Obj, ctx: ScenarioContext): ScenarioResul
   if (HISTORY_PATHS.includes(path)) return fail(503, 'server_error', 'usage history store unavailable')
   if (path === '/admin/api/overview') {
     body.redis = { configured: true, lastErrAt: iso(ctx.now - 4000), lastErr: 'dial tcp: connect: connection refused' }
+  } else if (path === '/admin/api/usage') {
+    for (const o of [...(body.users ?? []), ...(body.groups ?? [])]) {
+      zeroCounters(o)
+      o.storeDown = true
+    }
   } else if (path === '/admin/api/events') {
     body.source = 'replica'
     body.degraded = true

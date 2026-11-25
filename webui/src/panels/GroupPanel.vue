@@ -2,8 +2,9 @@
 import { DescriptionItem, DescriptionList } from '@perfect-design/ui'
 import { computed } from 'vue'
 
-import { formatCompactCount, formatCostDisplay } from '@/lib/format'
+import { formatCostDisplay } from '@/lib/format'
 import { effectiveLimitRows, meterModel } from '@/lib/meters'
+import { countOrUnknown, formatCount, STORE_DOWN_HINT } from '@/lib/usage-store'
 import { useDashboardStore } from '@/stores/dashboard'
 import { useNavStore } from '@/stores/nav'
 import DetailPanel from '@/widgets/DetailPanel.vue'
@@ -33,13 +34,14 @@ const memberRows = computed(() => effectiveLimitRows(entry.value?.memberLimits, 
 const usageRows = computed(() => {
   const e = entry.value
   if (!e) return []
+  const cost = (micros: number): string => (e.storeDown ? '—' : formatCostDisplay(micros))
   return [
-    { term: 'Requests/min', value: formatCompactCount(e.requestsPerMinute) },
-    { term: 'Requests/day', value: formatCompactCount(e.requestsPerDay) },
-    { term: 'Tokens/day', value: formatCompactCount(e.tokensInPerDay + e.tokensOutPerDay) },
-    { term: 'Rejected/day', value: formatCompactCount(e.rejectionsPerDay) },
-    { term: 'Cost/day', value: formatCostDisplay(e.costPerDayMicroUsd) },
-    { term: 'Cost/month', value: formatCostDisplay(e.costPerMonthMicroUsd) },
+    { term: 'Requests/min', value: formatCount(countOrUnknown(e.requestsPerMinute, e.storeDown)) },
+    { term: 'Requests/day', value: formatCount(countOrUnknown(e.requestsPerDay, e.storeDown)) },
+    { term: 'Tokens/day', value: formatCount(countOrUnknown(e.tokensInPerDay + e.tokensOutPerDay, e.storeDown)) },
+    { term: 'Rejected/day', value: formatCount(countOrUnknown(e.rejectionsPerDay, e.storeDown)) },
+    { term: 'Cost/day', value: cost(e.costPerDayMicroUsd) },
+    { term: 'Cost/month', value: cost(e.costPerMonthMicroUsd) },
   ]
 })
 </script>
@@ -71,20 +73,21 @@ const usageRows = computed(() => {
             <li v-for="u in shownMembers" :key="u.id">
               <button type="button" class="hover:bg-accent flex h-8 w-full items-center justify-between gap-3 rounded-md px-2 text-left text-sm" @click="nav.openPanel('user', u.id)">
                 <span class="min-w-0 truncate">{{ u.id }}</span>
-                <span class="shrink-0 text-right font-mono text-xs tabular-nums">{{ formatCompactCount(u.requestsPerDay) }} req/day</span>
+                <span class="shrink-0 text-right font-mono text-xs tabular-nums">{{ formatCount(countOrUnknown(u.requestsPerDay, u.storeDown)) }} req/day</span>
               </button>
             </li>
           </ul>
           <p v-else class="text-muted-foreground m-0 text-sm">No members.</p>
           <p v-if="members.length > MEMBER_ROWS" class="text-muted-foreground m-0 px-2 text-xs">
             Top {{ MEMBER_ROWS }} by requests.
-            <button type="button" class="text-primary underline-offset-2 hover:underline" @click="nav.goTo('users', { q: id }, { replace: false })">
+            <button type="button" class="text-primary underline-offset-2 hover:underline" @click="nav.goTo('users', { group: id }, { replace: false })">
               Show all {{ members.length.toLocaleString('en-US') }} on the Users tab
             </button>
           </p>
         </PanelSection>
 
         <PanelSection title="Usage">
+          <p v-if="entry.storeDown" class="text-muted-foreground m-0 text-xs">{{ STORE_DOWN_HINT }}</p>
           <DescriptionList variant="inline" size="sm" density="compact">
             <DescriptionItem v-for="r in usageRows" :key="r.term" :term="r.term"><span class="font-mono tabular-nums">{{ r.value }}</span></DescriptionItem>
           </DescriptionList>
