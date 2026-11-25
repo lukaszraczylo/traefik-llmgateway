@@ -912,6 +912,9 @@ func newModelRegistry(adapters map[string]providerAdapter, cfg *Config, log func
 	if err = validateRouterFirstByte(routers, cfg); err != nil {
 		return nil, err
 	}
+	if err = validateRouterDecisions(routers, cfg); err != nil {
+		return nil, err
+	}
 	m.routers = routers
 	m.requirePrefix = cfg.RequireModelPrefix
 

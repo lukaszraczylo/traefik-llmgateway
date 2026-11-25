@@ -56,9 +56,17 @@ func (a *openaiAdapter) passthroughBase(model, path string) string {
 			return b
 		}
 	}
+	if best, ok := longestPathPrefix(path, a.pathBases); ok {
+		return a.pathBases[best]
+	}
+	return a.baseURL
+}
+
+// longestPathPrefix returns the longest key of bases that covers path on whole segments.
+func longestPathPrefix(path string, bases map[string]string) (string, bool) {
 	best := ""
 	found := false
-	for prefix := range a.pathBases {
+	for prefix := range bases {
 		if !pathHasPrefix(path, prefix) {
 			continue
 		}
@@ -67,10 +75,7 @@ func (a *openaiAdapter) passthroughBase(model, path string) string {
 			found = true
 		}
 	}
-	if found {
-		return a.pathBases[best]
-	}
-	return a.baseURL
+	return best, found
 }
 
 // pathHasPrefix matches on whole path segments: "/v1/decide" covers

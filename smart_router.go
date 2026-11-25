@@ -60,6 +60,8 @@ type SmartRouterConfig struct {
 	// Session keeps an upward-ratcheting tier pin per conversation. It needs classifier v2 to
 	// route live; with only shadowClassifier v2 it changes the shadow rank and never live routing.
 	Session *SmartRouterSessionConfig `json:"session,omitempty"`
+	// Decision asks a decision model to settle near-boundary requests; needs classifier v2, off when absent.
+	Decision *SmartRouterDecisionConfig `json:"decision,omitempty"`
 	// Adaptive tunes selection "adaptive"; it has no effect with another selection.
 	Adaptive *SmartRouterAdaptiveConfig `json:"adaptive,omitempty"`
 	// Calibration lowers tier thresholds from outcome counters; it is off by default.
@@ -118,6 +120,7 @@ type smartRouter struct {
 	calibState        *smartCalibState
 	bandit            *smartBandit
 	calib             smartCalibCfg
+	decision          *smartDecisionCfg
 	name              string
 	selection         string
 	classifier        string
@@ -373,6 +376,10 @@ func compileSmartRouter(name string, cfg *SmartRouterConfig, routers map[string]
 	if err = validateSmartTimeoutFallback(name, cfg, len(tiers), firstByte); err != nil {
 		return nil, err
 	}
+	decision, err := compileSmartDecision(name, cfg.Decision, cfg.Classifier)
+	if err != nil {
+		return nil, err
+	}
 	var bandit *smartBandit
 	if selection == smartSelectionAdaptive {
 		bandit = newSmartBandit(adaptive)
@@ -385,6 +392,7 @@ func compileSmartRouter(name string, cfg *SmartRouterConfig, routers map[string]
 		timeoutFallback:   cfg.TimeoutFallback,
 		adaptiveSet:       cfg.Adaptive != nil,
 		calib:             calib,
+		decision:          decision,
 		calibState:        calibState,
 		classifier:        classifier,
 		shadowV2:          shadowV2,

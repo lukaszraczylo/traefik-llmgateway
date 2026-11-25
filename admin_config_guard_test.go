@@ -16,7 +16,7 @@ var nonSecretConfigKeys = map[string]bool{
 	"openDuration": true, "passthroughPaths": true, "path": true, "pathBaseUrls": true,
 	"probeInterval": true, "providers": true, "requestTimeout": true,
 	"ttl": true, "type": true,
-	"defaultTier": true, "toolsMinTier": true, "classifier": true, "shadowClassifier": true, "intentTiers": true, "keywords": true, "selection": true, "tier": true, "header": true, "mode": true, "firstByteTimeout": true,
+	"defaultTier": true, "toolsMinTier": true, "classifier": true, "shadowClassifier": true, "intentTiers": true, "keywords": true, "selection": true, "tier": true, "header": true, "mode": true, "firstByteTimeout": true, "provider": true, "timeout": true,
 }
 
 func collectStringKeys(t reflect.Type, seen map[reflect.Type]bool, out map[string]bool) {
