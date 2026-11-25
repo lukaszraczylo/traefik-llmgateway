@@ -1,0 +1,72 @@
+{
+ "kind": "targetcaller",
+ "window": "day",
+ "metrics": [
+  "req"
+ ],
+ "rows": [
+  {
+   "values": {
+    "req": 12759
+   },
+   "id": "mcp/readitall/internal"
+  },
+  {
+   "values": {
+    "req": 7970
+   },
+   "id": "mcp/captcha-solver/internal"
+  },
+  {
+   "values": {
+    "req": 7341
+   },
+   "id": "mcp/web-search/internal"
+  },
+  {
+   "values": {
+    "req": 7266
+   },
+   "id": "mcp/fetch/internal"
+  },
+  {
+   "values": {
+    "req": 7240
+   },
+   "id": "mcp/wikipedia/internal"
+  },
+  {
+   "values": {
+    "req": 7218
+   },
+   "id": "mcp/lightpanda/internal"
+  },
+  {
+   "values": {
+    "req": 7172
+   },
+   "id": "mcp/brave-search/internal"
+  },
+  {
+   "values": {
+    "req": 7088
+   },
+   "id": "mcp/google-maps/internal"
+  },
+  {
+   "values": {
+    "req": 7073
+   },
+   "id": "mcp/weather/internal"
+  },
+  {
+   "values": {
+    "req": 4147
+   },
+   "id": "mcp/time/internal"
+  }
+ ],
+ "span": 7,
+ "offset": 0,
+ "truncated": true
+}

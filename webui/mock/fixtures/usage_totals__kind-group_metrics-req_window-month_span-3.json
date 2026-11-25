@@ -1,0 +1,10 @@
+{
+ "kind": "group",
+ "window": "month",
+ "metrics": [
+  "req"
+ ],
+ "rows": [],
+ "span": 3,
+ "offset": 0
+}

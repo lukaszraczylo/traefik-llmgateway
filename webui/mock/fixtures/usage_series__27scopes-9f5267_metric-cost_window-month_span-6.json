@@ -1,0 +1,314 @@
+{
+ "metric": "cost",
+ "window": "month",
+ "buckets": [
+  "202606",
+  "202607",
+  "202608",
+  "202609",
+  "202610",
+  "202611"
+ ],
+ "series": [
+  {
+   "scope": "model:openai/gpt-5.5",
+   "points": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    9130865
+   ]
+  },
+  {
+   "scope": "model:minimax/MiniMax-M3",
+   "points": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    6407815
+   ]
+  },
+  {
+   "scope": "model:minimax/MiniMax-M2.5-highspeed",
+   "points": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    5678
+   ]
+  },
+  {
+   "scope": "model:minimax/MiniMax-M2.5",
+   "points": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    4010
+   ]
+  },
+  {
+   "scope": "model:uni/text-embedding-multilingual-e5-base",
+   "points": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+   ]
+  },
+  {
+   "scope": "model:uni/deepseek-v4-flash-0731",
+   "points": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+   ]
+  },
+  {
+   "scope": "model:uni/deepseek-v4.1-flash-1017",
+   "points": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+   ]
+  },
+  {
+   "scope": "model:uni/glm-5.3-flash",
+   "points": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+   ]
+  },
+  {
+   "scope": "model:gx10/DeepSeek-V4.1-Flash-EXL3",
+   "points": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+   ]
+  },
+  {
+   "scope": "model:uni/qwen3.8-flash-next",
+   "points": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+   ]
+  },
+  {
+   "scope": "model:minimax/MiniMax-M3.1-Flash",
+   "points": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+   ]
+  },
+  {
+   "scope": "model:alibaba/deepseek-v4.1-flash-1017",
+   "points": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+   ]
+  },
+  {
+   "scope": "model:gx10/Qwen3.8-27B",
+   "points": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+   ]
+  },
+  {
+   "scope": "model:uni/qwen3.8-27b",
+   "points": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+   ]
+  },
+  {
+   "scope": "model:uni/model-fast",
+   "points": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+   ]
+  },
+  {
+   "scope": "model:minimax/MiniMax-M2.7",
+   "points": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+   ]
+  },
+  {
+   "scope": "model:minimax/MiniMax-M2.7-highspeed",
+   "points": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+   ]
+  },
+  {
+   "scope": "model:gx10/Inkling-2-Mini",
+   "points": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+   ]
+  },
+  {
+   "scope": "model:anthropic/claude-haiku-5-5",
+   "points": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+   ]
+  },
+  {
+   "scope": "model:uni/ornith-1.5-397b",
+   "points": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+   ]
+  },
+  {
+   "scope": "model:gx10/current",
+   "points": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+   ]
+  },
+  {
+   "scope": "model:uni/ornith-397b",
+   "points": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+   ]
+  },
+  {
+   "scope": "model:uni/qwen3.8-27b-uncensored",
+   "points": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+   ]
+  },
+  {
+   "scope": "model:uni/model-light",
+   "points": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+   ]
+  },
+  {
+   "scope": "model:uni/ornith-1.5-35b",
+   "points": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+   ]
+  },
+  {
+   "scope": "model:uni/qwen3.6-27b",
+   "points": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+   ]
+  },
+  {
+   "scope": "model:uni/model-heavy",
+   "points": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+   ]
+  }
+ ],
+ "unknown": [],
+ "span": 6,
+ "offset": 0
+}

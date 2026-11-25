@@ -1,0 +1,232 @@
+{
+ "kind": "provider",
+ "window": "day",
+ "rows": [],
+ "buckets": [
+  "20261027",
+  "20261028",
+  "20261029",
+  "20261030",
+  "20261031",
+  "20261101",
+  "20261102",
+  "20261103",
+  "20261104",
+  "20261105",
+  "20261106",
+  "20261107",
+  "20261108",
+  "20261109",
+  "20261110",
+  "20261111",
+  "20261112",
+  "20261113",
+  "20261114",
+  "20261115",
+  "20261116",
+  "20261117",
+  "20261118",
+  "20261119",
+  "20261120",
+  "20261121",
+  "20261122",
+  "20261123",
+  "20261124",
+  "20261125"
+ ],
+ "points": [
+  {
+   "id": "20261027",
+   "count": 0,
+   "attempts": 0,
+   "failures": 0
+  },
+  {
+   "id": "20261028",
+   "count": 0,
+   "attempts": 0,
+   "failures": 0
+  },
+  {
+   "id": "20261029",
+   "count": 0,
+   "attempts": 0,
+   "failures": 0
+  },
+  {
+   "id": "20261030",
+   "count": 0,
+   "attempts": 0,
+   "failures": 0
+  },
+  {
+   "id": "20261031",
+   "count": 0,
+   "attempts": 0,
+   "failures": 0
+  },
+  {
+   "id": "20261101",
+   "count": 0,
+   "attempts": 0,
+   "failures": 0
+  },
+  {
+   "id": "20261102",
+   "count": 0,
+   "attempts": 0,
+   "failures": 0
+  },
+  {
+   "id": "20261103",
+   "count": 0,
+   "attempts": 0,
+   "failures": 0
+  },
+  {
+   "id": "20261104",
+   "count": 0,
+   "attempts": 0,
+   "failures": 0
+  },
+  {
+   "id": "20261105",
+   "count": 0,
+   "attempts": 0,
+   "failures": 0
+  },
+  {
+   "id": "20261106",
+   "count": 0,
+   "attempts": 0,
+   "failures": 0
+  },
+  {
+   "id": "20261107",
+   "count": 0,
+   "attempts": 0,
+   "failures": 0
+  },
+  {
+   "id": "20261108",
+   "count": 0,
+   "attempts": 0,
+   "failures": 0
+  },
+  {
+   "id": "20261109",
+   "count": 0,
+   "attempts": 0,
+   "failures": 0
+  },
+  {
+   "id": "20261110",
+   "count": 0,
+   "attempts": 0,
+   "failures": 0
+  },
+  {
+   "id": "20261111",
+   "count": 0,
+   "attempts": 0,
+   "failures": 0
+  },
+  {
+   "id": "20261112",
+   "count": 0,
+   "attempts": 0,
+   "failures": 0
+  },
+  {
+   "id": "20261113",
+   "count": 0,
+   "attempts": 0,
+   "failures": 0
+  },
+  {
+   "id": "20261114",
+   "count": 0,
+   "attempts": 0,
+   "failures": 0
+  },
+  {
+   "p50Ms": 3652.542372881356,
+   "p95Ms": 9971.264367816091,
+   "p99Ms": 14958.333333333325,
+   "ttfbP50Ms": 2134.6153846153848,
+   "ttfbP95Ms": 4817.307692307692,
+   "id": "20261115",
+   "count": 310,
+   "attempts": 408,
+   "failures": 178
+  },
+  {
+   "id": "20261116",
+   "count": 0,
+   "attempts": 0,
+   "failures": 0
+  },
+  {
+   "id": "20261117",
+   "count": 0,
+   "attempts": 0,
+   "failures": 0
+  },
+  {
+   "p50Ms": 6604.166666666667,
+   "p95Ms": 32924.999999999985,
+   "p99Ms": 58185.00000000003,
+   "ttfbP50Ms": 3140,
+   "ttfbP95Ms": 9088.383838383837,
+   "id": "20261118",
+   "count": 421,
+   "attempts": 529,
+   "failures": 188
+  },
+  {
+   "id": "20261119",
+   "count": 0,
+   "attempts": 0,
+   "failures": 0
+  },
+  {
+   "id": "20261120",
+   "count": 0,
+   "attempts": 0,
+   "failures": 0
+  },
+  {
+   "id": "20261121",
+   "count": 0,
+   "attempts": 0,
+   "failures": 0
+  },
+  {
+   "id": "20261122",
+   "count": 0,
+   "attempts": 0,
+   "failures": 0
+  },
+  {
+   "id": "20261123",
+   "count": 0,
+   "attempts": 0,
+   "failures": 0
+  },
+  {
+   "id": "20261124",
+   "count": 0,
+   "attempts": 0,
+   "failures": 0
+  },
+  {
+   "id": "20261125",
+   "count": 0,
+   "attempts": 0,
+   "failures": 0
+  }
+ ],
+ "span": 30,
+ "offset": 0,
+ "latencyEnabled": true
+}

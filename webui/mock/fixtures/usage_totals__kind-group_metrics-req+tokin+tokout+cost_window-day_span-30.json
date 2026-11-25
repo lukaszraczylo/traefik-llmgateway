@@ -1,0 +1,32 @@
+{
+ "kind": "group",
+ "window": "day",
+ "metrics": [
+  "req",
+  "tokin",
+  "tokout",
+  "cost"
+ ],
+ "rows": [
+  {
+   "values": {
+    "cost": 15518522,
+    "req": 785354,
+    "tokin": 1817962220,
+    "tokout": 21861263
+   },
+   "id": "home"
+  },
+  {
+   "values": {
+    "cost": 50538,
+    "req": 27792,
+    "tokin": 3963750594,
+    "tokout": 16023565
+   },
+   "id": "friends"
+  }
+ ],
+ "span": 30,
+ "offset": 0
+}

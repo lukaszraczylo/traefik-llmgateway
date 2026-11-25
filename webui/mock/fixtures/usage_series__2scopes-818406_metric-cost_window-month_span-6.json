@@ -1,0 +1,39 @@
+{
+ "metric": "cost",
+ "window": "month",
+ "buckets": [
+  "202606",
+  "202607",
+  "202608",
+  "202609",
+  "202610",
+  "202611"
+ ],
+ "series": [
+  {
+   "scope": "group:home",
+   "points": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    15518522
+   ]
+  },
+  {
+   "scope": "group:friends",
+   "points": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    50538
+   ]
+  }
+ ],
+ "unknown": [],
+ "span": 6,
+ "offset": 0
+}

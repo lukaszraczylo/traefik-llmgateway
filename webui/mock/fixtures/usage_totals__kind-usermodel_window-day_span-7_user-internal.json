@@ -1,0 +1,113 @@
+{
+ "kind": "usermodel",
+ "window": "day",
+ "metrics": [
+  "req",
+  "tokin",
+  "tokout",
+  "cost"
+ ],
+ "rows": [
+  {
+   "values": {
+    "cost": 0,
+    "req": 332125,
+    "tokin": 65435123,
+    "tokout": 0
+   },
+   "id": "uni/text-embedding-multilingual-e5-base"
+  },
+  {
+   "values": {
+    "cost": 0,
+    "req": 14523,
+    "tokin": 558726319,
+    "tokout": 10384017
+   },
+   "id": "uni/deepseek-v4-flash-0731"
+  },
+  {
+   "values": {
+    "cost": 0,
+    "req": 1240,
+    "tokin": 12452257,
+    "tokout": 608062
+   },
+   "id": "minimax/MiniMax-M3.1-Flash"
+  },
+  {
+   "values": {
+    "cost": 4941768,
+    "req": 217,
+    "tokin": 14869779,
+    "tokout": 400684
+   },
+   "id": "minimax/MiniMax-M3"
+  },
+  {
+   "values": {
+    "cost": 0,
+    "req": 119,
+    "tokin": 225619,
+    "tokout": 193299
+   },
+   "id": "uni/deepseek-v4.1-flash-1017"
+  },
+  {
+   "values": {
+    "cost": 0,
+    "req": 15,
+    "tokin": 327547,
+    "tokout": 100689
+   },
+   "id": "uni/glm-5.3-flash"
+  },
+  {
+   "values": {
+    "cost": 0,
+    "req": 3,
+    "tokin": 176,
+    "tokout": 55
+   },
+   "id": "gx10/Qwen3.8-27B"
+  },
+  {
+   "values": {
+    "cost": 0,
+    "req": 2,
+    "tokin": 24,
+    "tokout": 6
+   },
+   "id": "gx10/current"
+  },
+  {
+   "values": {
+    "cost": 0,
+    "req": 2,
+    "tokin": 117,
+    "tokout": 47
+   },
+   "id": "uni/qwen3.8-27b"
+  },
+  {
+   "values": {
+    "cost": 0,
+    "req": 1,
+    "tokin": 12,
+    "tokout": 3
+   },
+   "id": "gx10/DeepSeek-V4.1-Flash-EXL3"
+  },
+  {
+   "values": {
+    "cost": 0,
+    "req": 1,
+    "tokin": 230,
+    "tokout": 68
+   },
+   "id": "minimax/MiniMax-M2.7-highspeed"
+  }
+ ],
+ "span": 7,
+ "offset": 0
+}

@@ -1,0 +1,68 @@
+{
+ "kind": "user",
+ "window": "day",
+ "metrics": [
+  "req",
+  "tokin",
+  "tokout",
+  "cost"
+ ],
+ "rows": [
+  {
+   "values": {
+    "cost": 14129214,
+    "req": 768837,
+    "tokin": 862584569,
+    "tokout": 17270936
+   },
+   "id": "internal"
+  },
+  {
+   "values": {
+    "cost": 18015,
+    "req": 8154,
+    "tokin": 16429603,
+    "tokout": 892873
+   },
+   "id": "service-01"
+  },
+  {
+   "values": {
+    "cost": 0,
+    "req": 6502,
+    "tokin": 932678599,
+    "tokout": 2867617
+   },
+   "id": "user-13"
+  },
+  {
+   "values": {
+    "cost": 1371293,
+    "req": 1650,
+    "tokin": 1452531,
+    "tokout": 779359
+   },
+   "id": "user-20"
+  },
+  {
+   "values": {
+    "cost": 0,
+    "req": 124,
+    "tokin": 4602252,
+    "tokout": 43542
+   },
+   "id": "user-16"
+  },
+  {
+   "values": {
+    "cost": 0,
+    "req": 88,
+    "tokin": 214666,
+    "tokout": 6936
+   },
+   "id": "admin"
+  }
+ ],
+ "span": 30,
+ "offset": 0
+}

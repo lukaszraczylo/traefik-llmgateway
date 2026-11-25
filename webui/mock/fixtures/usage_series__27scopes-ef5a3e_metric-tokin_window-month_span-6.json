@@ -1,0 +1,314 @@
+{
+ "metric": "tokin",
+ "window": "month",
+ "buckets": [
+  "202606",
+  "202607",
+  "202608",
+  "202609",
+  "202610",
+  "202611"
+ ],
+ "series": [
+  {
+   "scope": "model:uni/deepseek-v4.1-flash-1017",
+   "points": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    2825232700
+   ]
+  },
+  {
+   "scope": "model:uni/deepseek-v4-flash-0731",
+   "points": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    1288614360
+   ]
+  },
+  {
+   "scope": "model:uni/glm-5.3-flash",
+   "points": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    692792587
+   ]
+  },
+  {
+   "scope": "model:gx10/DeepSeek-V4.1-Flash-EXL3",
+   "points": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    374075798
+   ]
+  },
+  {
+   "scope": "model:alibaba/deepseek-v4.1-flash-1017",
+   "points": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    200558194
+   ]
+  },
+  {
+   "scope": "model:uni/qwen3.8-flash-next",
+   "points": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    157645322
+   ]
+  },
+  {
+   "scope": "model:uni/text-embedding-multilingual-e5-base",
+   "points": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    119632840
+   ]
+  },
+  {
+   "scope": "model:gx10/Qwen3.8-27B",
+   "points": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    30544309
+   ]
+  },
+  {
+   "scope": "model:minimax/MiniMax-M3",
+   "points": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    16486171
+   ]
+  },
+  {
+   "scope": "model:minimax/MiniMax-M3.1-Flash",
+   "points": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    12504315
+   ]
+  },
+  {
+   "scope": "model:openai/gpt-5.5",
+   "points": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    310255
+   ]
+  },
+  {
+   "scope": "model:gx10/Inkling-2-Mini",
+   "points": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    75501
+   ]
+  },
+  {
+   "scope": "model:anthropic/claude-haiku-5-5",
+   "points": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    55059
+   ]
+  },
+  {
+   "scope": "model:uni/qwen3.8-27b",
+   "points": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    7444
+   ]
+  },
+  {
+   "scope": "model:minimax/MiniMax-M2.5-highspeed",
+   "points": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    5858
+   ]
+  },
+  {
+   "scope": "model:minimax/MiniMax-M2.7-highspeed",
+   "points": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    5693
+   ]
+  },
+  {
+   "scope": "model:minimax/MiniMax-M2.7",
+   "points": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    5654
+   ]
+  },
+  {
+   "scope": "model:minimax/MiniMax-M2.5",
+   "points": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    5463
+   ]
+  },
+  {
+   "scope": "model:uni/model-fast",
+   "points": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    2369
+   ]
+  },
+  {
+   "scope": "model:uni/ornith-1.5-397b",
+   "points": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    319
+   ]
+  },
+  {
+   "scope": "model:uni/qwen3.8-27b-uncensored",
+   "points": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    293
+   ]
+  },
+  {
+   "scope": "model:uni/model-light",
+   "points": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    233
+   ]
+  },
+  {
+   "scope": "model:uni/qwen3.6-27b",
+   "points": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    201
+   ]
+  },
+  {
+   "scope": "model:uni/ornith-397b",
+   "points": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    93
+   ]
+  },
+  {
+   "scope": "model:uni/ornith-1.5-35b",
+   "points": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    75
+   ]
+  },
+  {
+   "scope": "model:gx10/current",
+   "points": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    69
+   ]
+  },
+  {
+   "scope": "model:uni/model-heavy",
+   "points": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    45
+   ]
+  }
+ ],
+ "unknown": [],
+ "span": 6,
+ "offset": 0
+}

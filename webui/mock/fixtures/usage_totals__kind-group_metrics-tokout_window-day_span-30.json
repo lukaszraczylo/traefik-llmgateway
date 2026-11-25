@@ -1,0 +1,23 @@
+{
+ "kind": "group",
+ "window": "day",
+ "metrics": [
+  "tokout"
+ ],
+ "rows": [
+  {
+   "values": {
+    "tokout": 21861263
+   },
+   "id": "home"
+  },
+  {
+   "values": {
+    "tokout": 16023565
+   },
+   "id": "friends"
+  }
+ ],
+ "span": 30,
+ "offset": 0
+}

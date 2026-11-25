@@ -1,0 +1,230 @@
+{
+ "metric": "req",
+ "window": "month",
+ "buckets": [
+  "202609",
+  "202610",
+  "202611"
+ ],
+ "series": [
+  {
+   "scope": "model:uni/text-embedding-multilingual-e5-base",
+   "points": [
+    0,
+    0,
+    618883
+   ]
+  },
+  {
+   "scope": "model:uni/deepseek-v4-flash-0731",
+   "points": [
+    0,
+    0,
+    23158
+   ]
+  },
+  {
+   "scope": "model:uni/deepseek-v4.1-flash-1017",
+   "points": [
+    0,
+    0,
+    19716
+   ]
+  },
+  {
+   "scope": "model:uni/glm-5.3-flash",
+   "points": [
+    0,
+    0,
+    4665
+   ]
+  },
+  {
+   "scope": "model:gx10/DeepSeek-V4.1-Flash-EXL3",
+   "points": [
+    0,
+    0,
+    2610
+   ]
+  },
+  {
+   "scope": "model:minimax/MiniMax-M3",
+   "points": [
+    0,
+    0,
+    1924
+   ]
+  },
+  {
+   "scope": "model:uni/qwen3.8-flash-next",
+   "points": [
+    0,
+    0,
+    1440
+   ]
+  },
+  {
+   "scope": "model:minimax/MiniMax-M3.1-Flash",
+   "points": [
+    0,
+    0,
+    1273
+   ]
+  },
+  {
+   "scope": "model:alibaba/deepseek-v4.1-flash-1017",
+   "points": [
+    0,
+    0,
+    571
+   ]
+  },
+  {
+   "scope": "model:gx10/Qwen3.8-27B",
+   "points": [
+    0,
+    0,
+    258
+   ]
+  },
+  {
+   "scope": "model:openai/gpt-5.5",
+   "points": [
+    0,
+    0,
+    170
+   ]
+  },
+  {
+   "scope": "model:uni/qwen3.8-27b",
+   "points": [
+    0,
+    0,
+    103
+   ]
+  },
+  {
+   "scope": "model:uni/model-fast",
+   "points": [
+    0,
+    0,
+    28
+   ]
+  },
+  {
+   "scope": "model:minimax/MiniMax-M2.5-highspeed",
+   "points": [
+    0,
+    0,
+    24
+   ]
+  },
+  {
+   "scope": "model:minimax/MiniMax-M2.7",
+   "points": [
+    0,
+    0,
+    23
+   ]
+  },
+  {
+   "scope": "model:minimax/MiniMax-M2.7-highspeed",
+   "points": [
+    0,
+    0,
+    23
+   ]
+  },
+  {
+   "scope": "model:minimax/MiniMax-M2.5",
+   "points": [
+    0,
+    0,
+    22
+   ]
+  },
+  {
+   "scope": "model:gx10/Inkling-2-Mini",
+   "points": [
+    0,
+    0,
+    16
+   ]
+  },
+  {
+   "scope": "model:anthropic/claude-haiku-5-5",
+   "points": [
+    0,
+    0,
+    9
+   ]
+  },
+  {
+   "scope": "model:uni/ornith-1.5-397b",
+   "points": [
+    0,
+    0,
+    7
+   ]
+  },
+  {
+   "scope": "model:gx10/current",
+   "points": [
+    0,
+    0,
+    5
+   ]
+  },
+  {
+   "scope": "model:uni/ornith-397b",
+   "points": [
+    0,
+    0,
+    4
+   ]
+  },
+  {
+   "scope": "model:uni/qwen3.8-27b-uncensored",
+   "points": [
+    0,
+    0,
+    4
+   ]
+  },
+  {
+   "scope": "model:uni/model-light",
+   "points": [
+    0,
+    0,
+    3
+   ]
+  },
+  {
+   "scope": "model:uni/ornith-1.5-35b",
+   "points": [
+    0,
+    0,
+    3
+   ]
+  },
+  {
+   "scope": "model:uni/qwen3.6-27b",
+   "points": [
+    0,
+    0,
+    3
+   ]
+  },
+  {
+   "scope": "model:uni/model-heavy",
+   "points": [
+    0,
+    0,
+    1
+   ]
+  }
+ ],
+ "unknown": [],
+ "span": 3,
+ "offset": 0
+}

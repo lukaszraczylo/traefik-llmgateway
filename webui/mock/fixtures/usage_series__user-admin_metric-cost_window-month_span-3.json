@@ -1,0 +1,22 @@
+{
+ "metric": "cost",
+ "window": "month",
+ "buckets": [
+  "202609",
+  "202610",
+  "202611"
+ ],
+ "series": [
+  {
+   "scope": "user:admin",
+   "points": [
+    0,
+    0,
+    0
+   ]
+  }
+ ],
+ "unknown": [],
+ "span": 3,
+ "offset": 0
+}

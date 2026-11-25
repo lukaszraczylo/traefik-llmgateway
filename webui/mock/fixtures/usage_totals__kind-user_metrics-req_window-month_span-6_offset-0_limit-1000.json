@@ -1,0 +1,10 @@
+{
+ "kind": "user",
+ "window": "month",
+ "metrics": [
+  "req"
+ ],
+ "rows": [],
+ "span": 6,
+ "offset": 0
+}
