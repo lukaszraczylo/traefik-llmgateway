@@ -324,6 +324,40 @@ func TestRouterDecisionTimeout(t *testing.T) {
 	}
 }
 
+func TestRouterDecisionClientCancelSkipsBreaker(t *testing.T) {
+	started := make(chan struct{}, 8)
+	release := make(chan struct{})
+	var slow atomic.Bool
+	slow.Store(true)
+	f := newDecisionFixture(t, 3, "2s", func(w http.ResponseWriter, r *http.Request) {
+		if slow.Load() {
+			started <- struct{}{}
+			select {
+			case <-r.Context().Done():
+			case <-release:
+			}
+			return
+		}
+		okHandler(w, r)
+	})
+	t.Cleanup(func() { close(release) })
+	for i := 0; i < 3; i++ {
+		ctx, cancel := context.WithCancel(context.Background())
+		go func() {
+			<-started
+			cancel()
+		}()
+		if a := f.g.askDecisionModel(ctx, f.rt, "c"+strconv.Itoa(i)); a.outcome != decisionError {
+			t.Fatalf("cancel %d outcome %q", i, a.outcome)
+		}
+	}
+	slow.Store(false)
+	before := f.hitCount()
+	if a := f.g.askDecisionModel(context.Background(), f.rt, "after"); a.outcome != "" || f.hitCount() != before+1 {
+		t.Fatalf("breaker opened by client cancels: outcome %q", a.outcome)
+	}
+}
+
 func TestRouterDecisionBreaker(t *testing.T) {
 	var fail atomic.Bool
 	fail.Store(true)

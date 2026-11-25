@@ -347,6 +347,9 @@ func (g *Gateway) askDecisionModel(ctx context.Context, rt *smartRouter, state s
 	}
 	rank, prob, outcome := g.callDecisionModel(ctx, rt, state)
 	if outcome != "" {
+		if ctx.Err() != nil {
+			return decisionAnswer{outcome: decisionError}
+		}
 		cfg.dec.record(false)
 		return decisionAnswer{outcome: outcome}
 	}

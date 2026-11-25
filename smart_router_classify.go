@@ -563,7 +563,8 @@ func classifySmartV2With(rt *smartRouter, req map[string]any, endpoint string, f
 		rank, reason, next = smartSessionRoute(&rt.session, top, f, sc.sess, verdict, sc.now, askHash)
 		out.hardRank = smartMaxInt(out.hardRank, next.pin)
 	}
-	if assist != nil && reason == smartReasonScore && f.found && smartNearBoundary(rt, verdict.score) {
+	if assist != nil && reason == smartReasonScore && f.found && smartNearBoundary(rt, verdict.score) &&
+		(!rt.decision.live || smartMaxInt(floorRank, kwRank) < smartMinInt(rank+1, top)) {
 		ans := assist(f)
 		newRank, outcome := applyDecision(rt, rank, ans)
 		out.heuristicRank, out.decisionOutcome = rank, outcome

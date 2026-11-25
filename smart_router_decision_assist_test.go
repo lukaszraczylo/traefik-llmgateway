@@ -137,12 +137,25 @@ func TestClassifyDecisionSessionPinnedSkips(t *testing.T) {
 	assert.Equal(t, -1, cls.decisionTier)
 }
 
-func TestClassifyDecisionFloorStillRaises(t *testing.T) {
+func TestClassifyDecisionLiveSkipsSettledRequest(t *testing.T) {
 	rt := assistRouter(t, 1000, true, false)
 	req := userReq(assistAsk)
 	req["reasoning_effort"] = "high"
 	stub := &stubAssist{ans: decisionAnswer{rank: 0, prob: 990}}
 	cls := classifySmartWith(rt, req, cacheEndpointChat, nil, nil, stub.fn)
+	assert.Equal(t, 0, stub.calls)
+	assert.Equal(t, 2, cls.rank)
+	assert.Equal(t, smartReasonFloor, cls.reason)
+	assert.Equal(t, "", cls.decisionOutcome)
+}
+
+func TestClassifyDecisionShadowCallsEvenWhenSettled(t *testing.T) {
+	rt := assistRouter(t, 1000, false, false)
+	req := userReq(assistAsk)
+	req["reasoning_effort"] = "high"
+	stub := &stubAssist{ans: decisionAnswer{rank: 0, prob: 990}}
+	cls := classifySmartWith(rt, req, cacheEndpointChat, nil, nil, stub.fn)
+	assert.Equal(t, 1, stub.calls)
 	assert.Equal(t, 2, cls.rank)
 	assert.Equal(t, smartReasonFloor, cls.reason)
 }
