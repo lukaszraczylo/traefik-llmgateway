@@ -130,8 +130,10 @@ export const useSpendStore = defineStore('spend', {
      * longer discards a row specifically BECAUSE it is unpriced.
      */
     pricingHealthRanking: [] as AdminUsageModelsResponse['models'],
-    /** False when the server refused `detail=1` for this range (400 range too large) and the rankings fell back to value-only rows, so per-model tokens, cost and free flags are absent. */
+    /** False when the server refused `detail=1` for this range (400 range too large) and the model ranking fell back to value-only rows, so per-model tokens, cost and free flags are absent. */
     detailAvailable: true,
+    /** Same as detailAvailable, for the pricing-health ranking. */
+    pricingDetailAvailable: true,
 
     // --- burn-down (BurnDownChart) ---
     burndownBuckets: [] as string[],
@@ -348,7 +350,7 @@ export const useSpendStore = defineStore('spend', {
         const { res, detail } = await fetchModelsRanking('req', filters.window, filters.span)
         if (requestId !== this.pricingHealthReqId) return
         this.pricingHealthRanking = res.models
-        this.detailAvailable = detail
+        this.pricingDetailAvailable = detail
         this.pricingHealthError = ''
         this.pricingHealthLoaded = true
       } catch (err) {

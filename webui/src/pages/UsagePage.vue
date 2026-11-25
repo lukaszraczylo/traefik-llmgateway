@@ -6,7 +6,7 @@ import { useEntityLinks } from '@/composables/useEntityLinks'
 import { useNow } from '@/composables/useNow'
 import { budgetLineVisible, cumulative, runOutDate } from '@/lib/burndown'
 import { cacheSavingsStatus } from '@/lib/cache-savings'
-import { toCsv } from '@/lib/csv'
+import { thinLabels } from '@/lib/chart-labels'
 import { costAvoidedMicros, freeRows, pickReferenceModel } from '@/lib/cost-avoided'
 import { downloadText } from '@/lib/download'
 import type { DownloadOutcome } from '@/lib/download'
@@ -22,7 +22,7 @@ import { deltaOf, sumPoints } from '@/lib/overview-metrics'
 import type { ChartLine } from '@/lib/overview-metrics'
 import { parseScope, scopeBudgetLimits, scopeId, scopeMtdMicros } from '@/lib/scope'
 import { seriesToStacked } from '@/lib/series'
-import { usageCsv } from '@/lib/usage-csv'
+import { breakdownCsv } from '@/lib/usage-csv'
 import { wbColumns } from '@/lib/wb-columns'
 import { useCatalogStore } from '@/stores/catalog'
 import { useDashboardStore } from '@/stores/dashboard'
@@ -32,6 +32,7 @@ import { isSpendMetric, SPEND_METRIC_LABEL, SPEND_METRICS, useSpendStore } from 
 import { USERS_RANGE_TOO_LARGE, useUsageUsersStore } from '@/stores/usage-users'
 import type { HistoryMetric } from '@/types/api'
 import ModelName from '@/widgets/ModelName.vue'
+import ShareCell from '@/widgets/ShareCell.vue'
 import StateView from '@/widgets/StateView.vue'
 import type { ViewState } from '@/widgets/StateView.vue'
 import WbTable from '@/widgets/WbTable.vue'
@@ -163,6 +164,8 @@ interface BreakdownRow {
   name: string
   value: number
   share: number | null
+  /** Set for a zero-valued model row with detail: what to show instead of a zero cost. */
+  zeroText: string | null
 }
 
 const columns = computed(() =>
@@ -173,17 +176,22 @@ const columns = computed(() =>
   ]),
 )
 
-const sourceRows = computed<{ id: string; value: number }[]>(() => {
-  if (by.value === 'model') return spend.modelRanking.map((m) => ({ id: m.id, value: m.value }))
+const sourceRows = computed<{ id: string; value: number; free?: boolean }[]>(() => {
+  if (by.value === 'model') return spend.modelRanking.map((m) => ({ id: m.id, value: m.value, free: m.free }))
   if (by.value === 'group') return spend.drilldownRows.map((r) => ({ id: r.id, value: r.values[metric.value] ?? 0 }))
   return users.rows
 })
+
+function zeroText(r: { value: number; free?: boolean }): string | null {
+  if (by.value !== 'model' || !spend.detailAvailable || r.value !== 0) return null
+  return r.free && metric.value === 'cost' ? 'free' : '—'
+}
 
 const tableRows = computed<BreakdownRow[]>(() => {
   const rows = sourceRows.value.filter((r) => r.value > 0 || by.value === 'model').sort((a, b) => b.value - a.value)
   const sum = rows.reduce((acc, r) => acc + r.value, 0)
   const total = filters.scope === 'all' && totalInRange.value > 0 ? totalInRange.value : sum
-  return rows.map((r) => ({ id: r.id, name: r.id, value: r.value, share: total > 0 ? Math.min(1, r.value / total) : null }))
+  return rows.map((r) => ({ id: r.id, name: r.id, value: r.value, share: total > 0 ? Math.min(1, r.value / total) : null, zeroText: zeroText(r) }))
 })
 
 const tablePage = ref(1)
@@ -221,7 +229,7 @@ const limits = computed(() => scopeBudgetLimits(filters.scope, dashboard.overvie
 const projected = computed(() => projectMonthEnd(mtdMicros.value, monthProgress(now.value)))
 const room = computed(() => headroom(projected.value, limits.value?.costPerMonthUSD))
 
-const burnLabels = computed(() => spend.burndownBuckets.map((b) => formatBucketLabel(b, 'day')))
+const burnLabels = computed(() => thinLabels(spend.burndownBuckets.map((b) => formatBucketLabel(b, 'day'))))
 const burnSpent = computed(() => cumulative(spend.burndownPoints))
 const burnTotal = computed(() => burnSpent.value.at(-1) ?? 0)
 const burnLines = computed<ChartLine[]>(() => {
@@ -275,7 +283,7 @@ const healthColumns = computed(() =>
     { key: 'id', header: 'Model', kind: 'text', sortable: false },
     { key: 'priceSource', header: 'Source', kind: 'status', sortable: false },
     { key: 'inputPerMTokUsd', header: 'Price in / out per MTok', kind: 'text', sortable: false },
-    ...(spend.detailAvailable
+    ...(spend.pricingDetailAvailable
       ? [
           { key: 'requests', header: 'Requests', kind: 'number' as const, sortable: false },
           { key: 'costMicroUsd', header: 'Cost', kind: 'number' as const, sortable: false },
@@ -311,14 +319,8 @@ const feedback = ref<DownloadOutcome | null>(null)
 const FEEDBACK_LABEL: Record<DownloadOutcome, string> = { downloaded: 'Downloaded', copied: 'Copied', selected: 'Selected', failed: 'Export failed' }
 let feedbackTimer: ReturnType<typeof setTimeout> | undefined
 
-function groupMemberCount(id: string): string {
-  return String((dashboard.usage?.users ?? []).filter((u) => (u.groups ?? (u.groupName === undefined ? [] : [u.groupName])).includes(id)).length)
-}
-
 function buildCsv(): string {
-  if (by.value === 'group') return usageCsv(dashboard.usage?.groups ?? [], 'groups', (e) => groupMemberCount(e.id), now.value)
-  if (by.value === 'user') return usageCsv(dashboard.usage?.users ?? [], 'users', (e) => (e.groups ?? (e.groupName === undefined ? [] : [e.groupName])).join(', '), now.value)
-  return toCsv(['model', metric.value, 'share'], tableRows.value.map((r) => [r.id, r.value, r.share ?? '']))
+  return breakdownCsv(by.value, metric.value, tableRows.value)
 }
 
 async function exportCsv(): Promise<void> {
@@ -428,7 +430,11 @@ const money = (micros: number | null): string | null => (micros === null ? null 
                 <ModelName v-if="by === 'model'" :id="value as string" />
                 <template v-else>{{ value }}</template>
               </template>
-              <template #cell-value="{ value }">{{ fmtValue(value) }}</template>
+              <template #cell-value="{ value, row }">{{ (row as BreakdownRow).zeroText ?? fmtValue(value) }}</template>
+              <template #cell-share="{ value, row }">
+                <ShareCell v-if="!(row as BreakdownRow).zeroText" :value="value as number" />
+                <span v-else aria-hidden="true" />
+              </template>
             </WbTable>
             <div v-if="tableRows.length > TABLE_PAGE_SIZE" class="flex items-center justify-between gap-2">
               <span class="text-muted-foreground text-xs">{{ tableRows.length.toLocaleString('en-US') }} rows</span>
@@ -506,7 +512,7 @@ const money = (micros: number | null): string | null => (micros === null ? null 
       </CardHeader>
       <CardContent class="flex flex-col gap-2">
         <StateView :state="healthState" empty-title="No served models in this range" :error-message="healthError" @retry="retryHealth">
-          <p v-if="!spend.detailAvailable" class="text-muted-foreground m-0 text-xs">{{ DETAIL_NOTICE }}</p>
+          <p v-if="!spend.pricingDetailAvailable" class="text-muted-foreground m-0 text-xs">{{ DETAIL_NOTICE }}</p>
           <WbTable
             :columns="healthColumns"
             :rows="healthPaged"
@@ -520,7 +526,7 @@ const money = (micros: number | null): string | null => (micros === null ? null 
             </template>
             <template #cell-inputPerMTokUsd="{ row }"><span class="font-mono text-xs">{{ priceText(row as PricingHealthRow) }}</span></template>
             <template #cell-requests="{ value }">{{ formatCompactCount(value as number) }}</template>
-            <template #cell-costMicroUsd="{ value }">{{ formatCostDisplay(value as number) }}</template>
+            <template #cell-costMicroUsd="{ value, row }">{{ (row as PricingHealthRow).priceSource === 'unpriced' ? '—' : formatCostDisplay(value as number) }}</template>
           </WbTable>
           <div v-if="healthRows.length > HEALTH_PAGE_SIZE" class="flex items-center justify-between gap-2">
             <span class="text-muted-foreground text-xs">{{ healthRows.length.toLocaleString('en-US') }} models</span>

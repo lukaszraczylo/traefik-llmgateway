@@ -752,6 +752,33 @@ describe('useSpendStore detail fallback', () => {
     expect(spend.rankingError).toBe('')
   })
 
+  it('falls back on a 400 for a range not on the known-rejected list (day/14)', async () => {
+    const urls: string[] = []
+    mockedAdminFetch.mockImplementation((async (path: string) => {
+      urls.push(path)
+      if (path.includes('detail=1')) throw tooLarge()
+      return { ...rankingWith(['a/one']), detail: false, models: [{ id: 'a/one', value: 5 }] }
+    }) as typeof adminFetch)
+    useFiltersStore().setFilters({ range: '14d' })
+    const spend = useSpendStore()
+    await spend.fetchModelRanking()
+    expect(urls).toHaveLength(2)
+    expect(spend.detailAvailable).toBe(false)
+    expect(spend.rankingError).toBe('')
+  })
+
+  it('keeps the two ranking flags independent', async () => {
+    mockedAdminFetch.mockImplementation((async (path: string) => {
+      if (path.includes('metric=req') && path.includes('detail=1')) throw tooLarge()
+      return { ...rankingWith(['a/one']), models: [{ id: 'a/one', value: 5 }] }
+    }) as typeof adminFetch)
+    const spend = useSpendStore()
+    await spend.fetchModelRanking()
+    await spend.fetchPricingHealthRanking()
+    expect(spend.pricingDetailAvailable).toBe(false)
+    expect(spend.detailAvailable).toBe(true)
+  })
+
   it('does the same for the pricing-health ranking', async () => {
     mockedAdminFetch.mockImplementation((async (path: string) => {
       if (path.includes('detail=1')) throw tooLarge()
@@ -761,7 +788,7 @@ describe('useSpendStore detail fallback', () => {
     await spend.fetchPricingHealthRanking()
     expect(spend.pricingHealthRanking).toHaveLength(1)
     expect(spend.pricingHealthError).toBe('')
-    expect(spend.detailAvailable).toBe(false)
+    expect(spend.pricingDetailAvailable).toBe(false)
   })
 
   it('keeps surfacing non-400 failures', async () => {
