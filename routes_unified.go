@@ -222,7 +222,7 @@ func (g *Gateway) handleEmbeddings(w http.ResponseWriter, r *http.Request, u *us
 func (g *Gateway) runUnified(w http.ResponseWriter, r *http.Request, u *user, grp *group, endpoint string, call adapterCall) {
 	sw := &statusTrackingWriter{ResponseWriter: w}
 
-	scopes, ok := g.admitRequestForRoute(r.Context(), sw, u, grp, writeOAIError, eventRouteForEndpoint(endpoint), r.ContentLength)
+	scopes, ok := g.admitRequestForRoute(r.Context(), sw, u, grp, writeOAIError, eventRouteForEndpoint(endpoint), r.ContentLength, endpointKind(endpoint))
 	if !ok {
 		return
 	}
@@ -934,10 +934,14 @@ func withTotalScope(scopes []limitScope) []limitScope {
 // 2026-08-22 review) lets routes_messages.go answer a violation in
 // Anthropic's own error shape instead of OpenAI's, without a second copy
 // of this function's own logic.
-func (g *Gateway) admitRequestForRoute(ctx context.Context, sw *statusTrackingWriter, u *user, grp *group, envelope envelopeWriter, route string, bodyBytes int64) (scopes []limitScope, ok bool) {
+func (g *Gateway) admitRequestForRoute(ctx context.Context, sw *statusTrackingWriter, u *user, grp *group, envelope envelopeWriter, route string, bodyBytes int64, kind string) (scopes []limitScope, ok bool) {
 	reserve := reserveTokensFor(bodyBytes)
 	scopes = withTotalScope(buildLimitScopes(u, grp))
-	violation, gone := g.admitCounted(ctx, sw, scopes, reserve)
+	exempt := g.kindExempt(kind)
+	violation, gone := g.admitCounted(ctx, sw, scopes, reserve, exempt)
+	if exempt {
+		scopes = exemptScopes(scopes)
+	}
 	if gone {
 		return scopes, false
 	}
@@ -1447,6 +1451,15 @@ func (w *cacheCaptureWriter) Write(b []byte) (int, error) {
 		}
 	}
 	return w.statusTrackingWriter.Write(b)
+}
+
+// endpointKind is the request kind a unified endpoint serves, or "" for a
+// chat-style endpoint with no kind of its own.
+func endpointKind(endpoint string) string {
+	if endpoint == cacheEndpointEmbeddings {
+		return kindEmbedding
+	}
+	return ""
 }
 
 // reserveTokensFor is the tokensPerMinute pre-charge for a request body of

@@ -1247,7 +1247,11 @@ func (g *Gateway) handlePassthrough(w http.ResponseWriter, r *http.Request, u *u
 	}
 
 	scopes := withTotalScope(buildLimitScopes(u, grp))
-	violation, gone := g.admitCounted(r.Context(), w, scopes, reserveTokensFor(r.ContentLength))
+	exempt := g.kindExempt(g.passthroughKind(r, providerName, rest))
+	violation, gone := g.admitCounted(r.Context(), w, scopes, reserveTokensFor(r.ContentLength), exempt)
+	if exempt {
+		scopes = exemptScopes(scopes)
+	}
 	if gone {
 		return
 	}

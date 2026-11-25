@@ -28,7 +28,12 @@ import (
 // original doc comment) — see providerState's own doc comment (registry.go)
 // for the general pointer-first/scalar-last convention this follows.
 type Config struct {
-	Redis *RedisConfig `json:"redis,omitempty"`
+	// LimitExemptKinds lists request kinds (for example "embedding",
+	// "reranking") that no rate limit, budget, pacing or token pre-charge
+	// applies to. Exempt requests are still counted in usage. Empty (the
+	// default) exempts nothing.
+	LimitExemptKinds []string     `json:"limitExemptKinds,omitempty"`
+	Redis            *RedisConfig `json:"redis,omitempty"`
 	// Admin gates the read-only admin dashboard (spec §4, v0.2): nil or
 	// Admin.Enabled false means the /admin* routes are not registered at
 	// all — ServeHTTP falls through to its existing 404/passthroughUnknown
@@ -246,8 +251,8 @@ type ProviderConfig struct {
 	PathBaseURLs map[string]string `json:"pathBaseUrls,omitempty"`
 	// Kinds labels a model id or a PathBaseURLs key with a free-form kind
 	// (for example "reranking", "decision") for the admin catalog, which
-	// groups a provider's rows by kind. Display only: routing, auth and
-	// billing never read it. Each PathBaseURLs key also appears in the
+	// groups a provider's rows by kind. Routing, auth and billing never
+	// read it; only Config.LimitExemptKinds does. Each PathBaseURLs key also appears in the
 	// catalog as an endpoint row.
 	Kinds map[string]string `json:"kinds,omitempty"`
 	// MetadataPath is an optional second discovery endpoint (feature
@@ -984,6 +989,9 @@ func newGateway(ctx context.Context, next http.Handler, config *Config, name str
 	}
 	if config.MaxConcurrency < 0 {
 		return nil, errors.New("llmgateway: maxConcurrency must not be negative")
+	}
+	if err := validateLimitExemptKinds(config.LimitExemptKinds); err != nil {
+		return nil, err
 	}
 	// Finding F4, 2026-09 review: validate every Config.Pricing override
 	// at construction — non-nil, finite, >= 0 — rather than letting a

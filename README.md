@@ -385,6 +385,8 @@ config accepts them as YAML, which decodes to the same JSON shape.
 | `modelMeta` | `map[string]*ModelMetaConfig` | `{}` | Per-model context-window and cost overrides, keyed by exact `provider/model` or a bare model id — see [Model metadata](#model-metadata). Omitted or empty means no overrides; every model's metadata still resolves through discovery and the built-in table. |
 | `maxConcurrency` | `int` | `0` | When above `0`, every response carries `RateLimit-Policy: "concurrency";q=<n>;qu="concurrent-requests"` (IETF draft `draft-ietf-httpapi-ratelimit-headers`, an Internet-Draft, not a final standard), so clients that read it can keep at most `n` requests in flight. Set it to what your upstreams serve at once. The gateway only advertises the value; it does not queue or reject on it. It always wins over a learned value. `0` sends no header. Negative values are rejected at startup. |
 | `concurrencyAutodetect` | `bool` | `false` | When `true`, the gateway learns per provider how many requests the upstream serves at once. A 429, 503, 504 or upstream timeout sets the learned value to half the in-flight requests (minimum 1) and never raises it. Every 4 consecutive successes add 1. At 64 the value counts as unknown again. Responses served via that provider advertise the smaller of `maxConcurrency` and the learned value in `RateLimit-Policy`; with neither known, no header is sent. Learned values live in memory and reset on restart. |
+| `rateLimitHeaders` | `bool` | `false` | When `true`, responses carry the per-minute rate-limit headers for users with a minute limit. See [Rate-limit headers and pacing](#rate-limit-headers-and-pacing). |
+| `limitExemptKinds` | `[]string` | `[]` | Request kinds that skip every limit but still count in usage. See [Exempt kinds](#exempt-kinds). A blank entry fails construction. |
 | `passthroughUnknown` | `bool` | `false` | `false`: a request matching none of the plugin's routes gets a 404 JSON envelope. `true`: it falls through to the router's own backing service. **Does not cover the three media routes** — see the upgrade note below. |
 | `maxRequestBytes` | `int` | `0` (4 MiB) | Raises the unified chat/embeddings request-body cap. `0` or negative keeps 4 MiB; a positive value is clamped to 64 MiB. Pair with `maxInFlightBodyRequests` and the pod memory limit: an adversarial body decodes to ~12x live heap. |
 | `maxInFlightBodyRequests` | `int` | `0` (self-tuned) | Caps how many unified/media requests may concurrently be inside their own request-body read+decode step — see [Body-admission limit](#body-admission-limit). `0` self-tunes from the host's own `GOMAXPROCS`; a positive value pins an exact cap instead, clamped to a maximum of 10,000. |
@@ -481,7 +483,7 @@ that is negative, `NaN`, or `±Inf`, is a construction error.
 |---|---|---|
 | `requestsPerMinute` | `int64` | Fixed 1-minute window, UTC. |
 | `requestsPerDay` | `int64` | Fixed calendar-day window, UTC midnight to midnight. |
-| `tokensPerMinute` | `int64` | Fixed 1-minute window, UTC (`tokin + tokout`). |
+| `tokensPerMinute` | `int64` | Fixed 1-minute window, UTC. Counts uncached input plus output tokens. |
 | `tokensPerDay` | `int64` | Fixed calendar-day window, UTC. |
 | `tokensPerMonth` | `int64` | Fixed calendar-month window, UTC. |
 | `costPerDayUSD` | `float64` | Fixed calendar-day window, UTC. |
@@ -509,6 +511,26 @@ seconds until the window ends. The minute window is a fixed UTC minute, not
 a sliding one. The gateway writes the per-minute token counters only for
 scopes that set `tokensPerMinute`, so a config without it stores no extra
 keys.
+
+**What the minute window counts.** `tokensPerMinute` counts uncached input
+tokens plus output tokens. Anthropic `cache_read_input_tokens` and OpenAI
+`prompt_tokens_details.cached_tokens` do not count, so a client that
+re-sends a long, cached prompt is not locked out by cache hits. Anthropic
+`cache_creation_input_tokens` count. `tokensPerDay` and `tokensPerMonth`
+keep counting the full prompt, cached tokens included. Gemini cached tokens
+are not separated and count in full.
+
+**Pre-charge.** Usage is known only after the call, so a burst of large
+requests could all pass the check before any usage lands. When a scope sets
+`tokensPerMinute`, admission adds an estimate of the request's prompt tokens
+(body bytes divided by four, taken from `Content-Length` on routes that
+admit before reading the body, capped at 1,048,576) to the minute window in
+the same store round trip. The check compares against the value before that
+addition. When the call finishes, the estimate is replaced by the reported
+uncached usage. A refused, cancelled or failed request gives its estimate
+back. A request with no known length (chunked) reserves nothing. Scopes
+without `tokensPerMinute` make no extra store calls. While a request is in
+flight, `remaining` in the token headers already includes its estimate.
 
 #### Group, member and user limits
 
@@ -559,9 +581,11 @@ users:
 
 #### Rate-limit headers and pacing
 
-The gateway reports a user's effective per-minute limits (the user's own
-`limits` merged with `memberLimits`) on every metered response, success
-and `429` alike. It sets only the windows that are configured:
+When the global `rateLimitHeaders` option is `true` (default `false`, so an
+upgrade changes no response), the gateway reports a user's effective
+per-minute limits (the user's own `limits` merged with `memberLimits`) on
+every metered response, success and `429` alike. It sets only the windows
+that are configured:
 `requestsPerMinute` and `tokensPerMinute`. It reads the values from the
 counters the admission check already fetched, so it adds no store call.
 Headers are set before the body or SSE stream starts. A user with no
@@ -570,18 +594,28 @@ minute limit gets no rate-limit headers.
 | Dialect | Headers |
 |---|---|
 | OpenAI | `x-ratelimit-limit-requests`, `x-ratelimit-remaining-requests`, `x-ratelimit-reset-requests` (for example `12s`), and the same three with `-tokens` |
-| Anthropic | `anthropic-ratelimit-requests-limit`, `-remaining`, `-reset` (RFC 3339), and `anthropic-ratelimit-input-tokens-limit`, `-remaining`, `-reset` |
+| Anthropic | `anthropic-ratelimit-requests-limit`, `-remaining`, `-reset` (RFC 3339), and `anthropic-ratelimit-tokens-limit`, `-remaining`, `-reset` |
 | IETF draft | `RateLimit: "requests";r=<remaining>;t=<seconds>` and `RateLimit-Policy: "requests";q=<limit>;w=60`, with a `tokens` member when set |
 
-The token headers describe `tokensPerMinute`, which counts prompt plus
-completion tokens. `remaining` for tokens is the budget left before the
-check; the response in flight adds its own tokens afterwards. The gateway
+The token headers describe `tokensPerMinute`, which counts uncached input
+plus output tokens (see above). The Anthropic `tokens` headers carry that
+combined count, as Anthropic's own `anthropic-ratelimit-tokens-*` do. On a
+`429`, `remaining` is `0` for the refused window, and the counts leave out
+the refused request. A `429` from a day or month limit, or from another
+scope's limit that the headers do not describe, reports `0` for every
+reported window and moves the reset to when the refused window ends, which
+matches `Retry-After`. On a native passthrough route the gateway's headers
+replace any rate-limit headers the upstream sends; with none to send, the
+upstream's pass through unchanged. The gateway
 merges its `RateLimit-Policy` members with the `concurrency` member from
 `maxConcurrency` / `concurrencyAutodetect`; neither replaces the other.
 
 **Pacing** slows a user down before the hard limit. Set `pacing` inside
-`limits` or `memberLimits` (a user's own `pacing` wins, otherwise the
-earliest `startPct` across the user's groups applies):
+`memberLimits` or a user's `limits` (a user's own `pacing` wins). Pacing
+requires `requestsPerMinute` above 0 in the same block, and a group's
+aggregate `limits` rejects it, because nothing reads it there. With several
+member groups, the earliest `startPct` and the longest `maxDelay` across them
+apply:
 
 ```yaml
 memberLimits:
@@ -594,20 +628,55 @@ When the higher of the minute request fraction and the minute token
 fraction passes `startPct`, the gateway waits before forwarding. The
 delay grows linearly from 0 at `startPct` to `maxDelay` at 100%, and
 never exceeds `maxDelay`. `startPct` is 1 to 99 and `maxDelay` is a Go
-duration above 0 and at most `60s`, so a paced request stays under CDN
-100 s limits. Anything else fails construction. A paced response carries
+duration above 0 and at most `20s`, so a paced request stays inside a CDN
+time-to-first-byte budget. Anything else fails construction. A paced response carries
 `X-Llmgw-Paced-Ms`, and the gateway records one `paced` event per user
 per minute in the admin event feed. Pacing is off unless set; with it
 unset, behaviour is unchanged. The `429` at 100% is unchanged.
 
-The wait runs right after admission, before the gateway reads the body.
-It therefore holds no body-admission slot and no provider concurrency
-slot. A client that disconnects during the wait ends the request with no
+On the unified and passthrough routes the wait runs right after admission,
+before the gateway reads the body, so it holds no body-admission slot and no
+provider concurrency slot. `/v1/messages` must decode the body first, to
+reject streaming without charging the limit, so its wait comes after the
+read. That is why pacing needs `requestsPerMinute`: it bounds how many
+requests can wait. Each user also has at most four requests waiting at once;
+a further paced request proceeds without delay. A client that disconnects during the wait ends the request with no
 response written; the request still counted against its minute window.
 
 Most clients honour `Retry-After` on a `429` and ignore the remaining-quota
 headers. Pacing is therefore the reliable way to slow a client down before
 it hits the limit; the headers help clients that do read them.
+
+#### Exempt kinds
+
+`limitExemptKinds` (global, default empty) lists request kinds that no limit
+applies to, for example `["embedding", "reranking"]`. An exempt request skips
+the request, token and cost limits on the user, `memberLimits`, group
+aggregate and total scopes, is never paced, is never refused with `429` or
+`402` (the unpriced-model cost-budget refusal), makes no `tokensPerMinute`
+pre-charge, and carries no rate-limit headers. Empty keeps every request
+limited.
+
+The gateway classifies the kind before admission:
+
+1. `POST /v1/embeddings` is `embedding`.
+2. A native passthrough path takes the kind the provider's `kinds` map gives
+   that path (the exact key, else the longest key that is a path prefix).
+3. Otherwise a passthrough path ending in `/rerank` or `/reranking` is
+   `reranking`, and one ending in `/embeddings` is `embedding`.
+4. Otherwise, when the provider's `kinds` map names an exempt kind for some
+   model id, the gateway reads the model from the body, in a bounded peek that
+   restores the body, and uses `kinds[model]`.
+
+With `limitExemptKinds` empty, steps 2 to 4 do not run and the body is not
+peeked. The `/v1/chat/completions` and `/v1/messages` routes do not look up a
+model kind.
+
+Exempt requests are still counted: request, token and cost counters and the
+admin usage keep counting them. They are not counted in the minute token
+window. The request counters are shared with the limits, so exempt traffic
+counts toward the same `requestsPerMinute` and `requestsPerDay` totals that
+refuse the user's other requests; size those limits with that in mind.
 
 ### `UsersConfig`
 

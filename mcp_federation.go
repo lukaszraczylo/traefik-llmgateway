@@ -463,7 +463,7 @@ func (g *Gateway) handleMCPFederated(w http.ResponseWriter, r *http.Request, u *
 	}
 
 	scopes := withTotalScope(buildLimitScopes(u, grp))
-	violation, gone := g.admitCounted(r.Context(), w, scopes, 0)
+	violation, gone := g.admitCounted(r.Context(), w, scopes, 0, false)
 	if gone {
 		return
 	}

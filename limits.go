@@ -1624,6 +1624,28 @@ func (l *limiter) checkAndCount(scopes []limitScope) *limitViolation {
 	return v
 }
 
+// requestCountEntries returns the req:min, req:day and req:hour increments
+// for every scope, in the order checkAndCountKeysPerScope describes.
+func requestCountEntries(scopes []limitScope, wb windowBuckets, et enforceTTLSet) []counterIncr {
+	entries := make([]counterIncr, 0, len(scopes)*checkAndCountKeysPerScope)
+	for _, sc := range scopes {
+		entries = append(entries,
+			counterIncr{key: windowKeyForBucket(sc.kind, sc.id, metricReq, windowMin, wb.min), delta: 1, ttl: minWindowTTL, enforceTTL: et.min},
+			counterIncr{key: windowKeyForBucket(sc.kind, sc.id, metricReq, windowDay, wb.day), delta: 1, ttl: dayWindowTTL, enforceTTL: et.day},
+			counterIncr{key: windowKeyForBucket(sc.kind, sc.id, metricReq, windowHour, wb.hour), delta: 1, ttl: hourWindowTTL, enforceTTL: et.hour},
+		)
+	}
+	return entries
+}
+
+// countExempt counts a limit-exempt request in every scope's request
+// counters in one store round trip. It evaluates no limit, so it never
+// refuses, and it reserves nothing.
+func (l *limiter) countExempt(scopes []limitScope) {
+	now := l.now()
+	l.storeIncrMulti(requestCountEntries(scopes, bucketsFor(now), enforceTTLsFor()))
+}
+
 // checkAndCountInfo is checkAndCount plus the user scope's minute-window
 // view, built from the same round trip's counters (no extra store call).
 //
@@ -1639,14 +1661,7 @@ func (l *limiter) checkAndCountInfo(scopes []limitScope, reserve int64) (*limitV
 	wb := bucketsFor(now)
 	et := enforceTTLsFor()
 
-	entries := make([]counterIncr, 0, len(scopes)*checkAndCountKeysPerScope)
-	for _, sc := range scopes {
-		entries = append(entries,
-			counterIncr{key: windowKeyForBucket(sc.kind, sc.id, metricReq, windowMin, wb.min), delta: 1, ttl: minWindowTTL, enforceTTL: et.min},
-			counterIncr{key: windowKeyForBucket(sc.kind, sc.id, metricReq, windowDay, wb.day), delta: 1, ttl: dayWindowTTL, enforceTTL: et.day},
-			counterIncr{key: windowKeyForBucket(sc.kind, sc.id, metricReq, windowHour, wb.hour), delta: 1, ttl: hourWindowTTL, enforceTTL: et.hour},
-		)
-	}
+	entries := requestCountEntries(scopes, wb, et)
 	// Last-seen (Q6, DECISIONS) no longer rides this batch (P9 fix, admin
 	// dashboard redesign verify round): it used to be appended here,
 	// unconditionally, which meant a REJECTED request still moved that

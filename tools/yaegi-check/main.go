@@ -697,7 +697,7 @@ func run() error {
 		return fmt.Errorf("marshal metrics escaping probe user name: %w", err)
 	}
 
-	attemptAccountingOverride := `{"maxConcurrency":4,"concurrencyAutodetect":true,"failover":{"enabled":true},"breaker":{"failureThreshold":2,"openDuration":"3s","maxOpenDuration":"6s"},` +
+	attemptAccountingOverride := `{"rateLimitHeaders":true,"limitExemptKinds":["embedding","reranking"],"maxConcurrency":4,"concurrencyAutodetect":true,"failover":{"enabled":true},"breaker":{"failureThreshold":2,"openDuration":"3s","maxOpenDuration":"6s"},` +
 		`"providers":{"openai":{"type":"openai","baseUrl":"` + upstream.URL + `","apiKey":"sk-up","models":["` + testDataWantModel + `","` + builtinLookupModelID + `"]},` +
 		`"brk":{"type":"openai","baseUrl":"` + brkUpstream.URL + `","apiKey":"sk-up","discovery":true,"discoveryInterval":"1ms"},` +
 		// "warmretry" backs exerciseWarmFillRetry (production incident fix,
@@ -865,6 +865,7 @@ func run() error {
 		// (allow-all), but with its own requestsPerMinute:1 limit so a
 		// second call under this key alone 429s deterministically.
 		`{"name":"events-probe","group":"default","apiKey":"` + eventsProbeUserAPIKey + `","limits":{"requestsPerMinute":1}},` +
+		`{"name":"exempt-probe","group":"default","apiKey":"` + limitExemptProbeAPIKey + `","limits":{"requestsPerMinute":1,"tokensPerMinute":50}},` +
 		`{"name":"member-a","group":"` + memberLimitsGroupName + `","apiKey":"` + memberLimitsUserAAPIKey + `"},` +
 		`{"name":"member-b","group":"` + memberLimitsGroupName + `","apiKey":"` + memberLimitsUserBAPIKey + `"}]}}`
 	if err = json.Unmarshal([]byte(attemptAccountingOverride), cfgVal.Interface()); err != nil {
@@ -1047,6 +1048,9 @@ func run() error {
 		return err
 	}
 	if err := exerciseMemberLimits(handler); err != nil {
+		return err
+	}
+	if err := exerciseLimitExempt(handler); err != nil {
 		return err
 	}
 	// exerciseUpstreamAndTimeoutEvents (F3 hook 2, coordinator request
@@ -1243,6 +1247,53 @@ func exerciseMemberLimits(handler http.Handler) error {
 		}
 	}
 	fmt.Println("yaegi-check: group memberLimits enforced per member user, with rate-limit headers and pacing, under the interpreter")
+	return nil
+}
+
+// limitExemptProbeAPIKey authenticates exerciseLimitExempt's own inline user,
+// limited to requestsPerMinute:1; no other probe may reuse it.
+const limitExemptProbeAPIKey = "sk-limit-exempt-probe" // #nosec G101 -- test fixture literal, not a real credential
+
+// exerciseLimitExempt proves limitExemptKinds under the real interpreter:
+// embedding (the /v1/embeddings route) and reranking (a native passthrough
+// /rerank path) requests are never refused or given rate-limit headers,
+// while the same user's chat request is refused.
+func exerciseLimitExempt(handler http.Handler) error {
+	post := func(path, body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+limitExemptProbeAPIKey)
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		return rec
+	}
+	chat := `{"model":"` + testDataWantModel + `","messages":[{"role":"user","content":"hi"}]}`
+	if rec := post("/v1/chat/completions", chat); rec.Code != http.StatusOK {
+		return fmt.Errorf("limitExempt harness, chat 1st: status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	exempt := []struct{ label, path, body string }{
+		{"embeddings", "/v1/embeddings", `{"model":"` + testDataWantModel + `","input":"hi"}`},
+		{"rerank passthrough", "/openai/v1/rerank", `{"query":"q","documents":["a"]}`},
+	}
+	for _, e := range exempt {
+		for i := 0; i < 3; i++ {
+			rec := post(e.path, e.body)
+			if rec.Code != http.StatusOK {
+				return fmt.Errorf("limitExempt harness, %s #%d: status = %d, want 200, body=%s", e.label, i+1, rec.Code, rec.Body.String())
+			}
+			for k := range rec.Header() {
+				lk := strings.ToLower(k)
+				// RateLimit-Policy stays: it carries the global maxConcurrency member.
+				if strings.HasPrefix(lk, "x-ratelimit-") || strings.HasPrefix(lk, "anthropic-ratelimit-") || lk == "ratelimit" || lk == "x-llmgw-paced-ms" {
+					return fmt.Errorf("limitExempt harness, %s #%d: unexpected header %s on an exempt response", e.label, i+1, k)
+				}
+			}
+		}
+	}
+	if rec := post("/v1/chat/completions", chat); rec.Code != http.StatusTooManyRequests {
+		return fmt.Errorf("limitExempt harness, chat 2nd: status = %d, want 429, body=%s", rec.Code, rec.Body.String())
+	}
+	fmt.Println("yaegi-check: limitExemptKinds exempts embedding and reranking requests from limits, under the interpreter")
 	return nil
 }
 
