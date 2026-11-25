@@ -1,0 +1,12 @@
+{
+ "metric": "cost",
+ "window": "hour",
+ "models": [
+  {
+   "id": "minimax/MiniMax-M3",
+   "value": 22117
+  }
+ ],
+ "span": 24,
+ "offset": 0
+}

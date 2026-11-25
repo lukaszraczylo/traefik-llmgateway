@@ -1,0 +1,50 @@
+{
+ "kind": "user",
+ "window": "hour",
+ "metrics": [
+  "req",
+  "tokin",
+  "tokout",
+  "cost"
+ ],
+ "rows": [
+  {
+   "values": {
+    "cost": 0,
+    "req": 2693,
+    "tokin": 521673509,
+    "tokout": 1320493
+   },
+   "id": "user-02"
+  },
+  {
+   "values": {
+    "cost": 0,
+    "req": 2109,
+    "tokin": 311700755,
+    "tokout": 1080171
+   },
+   "id": "user-03"
+  },
+  {
+   "values": {
+    "cost": 0,
+    "req": 174,
+    "tokin": 10907,
+    "tokout": 9177
+   },
+   "id": "user-07"
+  },
+  {
+   "values": {
+    "cost": 0,
+    "req": 1,
+    "tokin": 1651,
+    "tokout": 25
+   },
+   "id": "user-08"
+  }
+ ],
+ "span": 24,
+ "offset": 0
+}

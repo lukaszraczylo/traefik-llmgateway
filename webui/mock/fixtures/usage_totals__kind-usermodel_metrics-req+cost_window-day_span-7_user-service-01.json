@@ -1,0 +1,26 @@
+{
+ "kind": "usermodel",
+ "window": "day",
+ "metrics": [
+  "req",
+  "cost"
+ ],
+ "rows": [
+  {
+   "values": {
+    "cost": 0,
+    "req": 1223
+   },
+   "id": "uni/deepseek-v4-flash-0731"
+  },
+  {
+   "values": {
+    "cost": 18015,
+    "req": 8
+   },
+   "id": "minimax/MiniMax-M3"
+  }
+ ],
+ "span": 7,
+ "offset": 0
+}

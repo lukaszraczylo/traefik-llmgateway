@@ -1,0 +1,23 @@
+{
+ "kind": "user",
+ "window": "hour",
+ "metrics": [
+  "cost"
+ ],
+ "rows": [
+  {
+   "values": {
+    "cost": 19972
+   },
+   "id": "user-20"
+  },
+  {
+   "values": {
+    "cost": 2145
+   },
+   "id": "service-01"
+  }
+ ],
+ "span": 24,
+ "offset": 0
+}

@@ -1,0 +1,742 @@
+{
+ "usersFile": "/llmgw/users/users.json",
+ "users": [
+  {
+   "limits": {
+    "pacing": {
+     "maxDelay": "10s",
+     "startPct": 80,
+     "XmaxDelay": 10000000000
+    },
+    "requestsPerMinute": 30,
+    "requestsPerDay": 3000,
+    "tokensPerMinute": 1200000
+   },
+   "limitSources": {
+    "pacing": "memberLimits:friends",
+    "requestsPerDay": "memberLimits:friends",
+    "requestsPerMinute": "memberLimits:friends",
+    "tokensPerMinute": "memberLimits:friends"
+   },
+   "name": "user-01",
+   "source": "file",
+   "groups": [
+    "friends"
+   ]
+  },
+  {
+   "name": "admin",
+   "source": "file",
+   "groups": [
+    "home"
+   ],
+   "admin": true
+  },
+  {
+   "limits": {
+    "pacing": {
+     "maxDelay": "10s",
+     "startPct": 80,
+     "XmaxDelay": 10000000000
+    },
+    "requestsPerMinute": 30,
+    "requestsPerDay": 3000,
+    "tokensPerMinute": 1200000
+   },
+   "limitSources": {
+    "pacing": "memberLimits:friends",
+    "requestsPerDay": "memberLimits:friends",
+    "requestsPerMinute": "memberLimits:friends",
+    "tokensPerMinute": "memberLimits:friends"
+   },
+   "name": "user-02",
+   "source": "file",
+   "groups": [
+    "friends"
+   ]
+  },
+  {
+   "limits": {
+    "pacing": {
+     "maxDelay": "10s",
+     "startPct": 80,
+     "XmaxDelay": 10000000000
+    },
+    "requestsPerMinute": 30,
+    "requestsPerDay": 3000,
+    "tokensPerMinute": 1200000
+   },
+   "limitSources": {
+    "pacing": "memberLimits:friends",
+    "requestsPerDay": "memberLimits:friends",
+    "requestsPerMinute": "memberLimits:friends",
+    "tokensPerMinute": "memberLimits:friends"
+   },
+   "name": "user-03",
+   "source": "file",
+   "groups": [
+    "friends"
+   ],
+   "providers": [
+    "gx10"
+   ]
+  },
+  {
+   "limits": {
+    "pacing": {
+     "maxDelay": "10s",
+     "startPct": 80,
+     "XmaxDelay": 10000000000
+    },
+    "requestsPerMinute": 30,
+    "requestsPerDay": 3000,
+    "tokensPerMinute": 1200000
+   },
+   "limitSources": {
+    "pacing": "memberLimits:friends",
+    "requestsPerDay": "memberLimits:friends",
+    "requestsPerMinute": "memberLimits:friends",
+    "tokensPerMinute": "memberLimits:friends"
+   },
+   "name": "user-04",
+   "source": "file",
+   "groups": [
+    "friends"
+   ]
+  },
+  {
+   "limits": {
+    "pacing": {
+     "maxDelay": "10s",
+     "startPct": 80,
+     "XmaxDelay": 10000000000
+    },
+    "requestsPerMinute": 30,
+    "requestsPerDay": 3000,
+    "tokensPerMinute": 1200000
+   },
+   "limitSources": {
+    "pacing": "memberLimits:friends",
+    "requestsPerDay": "memberLimits:friends",
+    "requestsPerMinute": "memberLimits:friends",
+    "tokensPerMinute": "memberLimits:friends"
+   },
+   "name": "user-05",
+   "source": "file",
+   "groups": [
+    "friends"
+   ]
+  },
+  {
+   "limits": {
+    "pacing": {
+     "maxDelay": "10s",
+     "startPct": 80,
+     "XmaxDelay": 10000000000
+    },
+    "requestsPerMinute": 30,
+    "requestsPerDay": 3000,
+    "tokensPerMinute": 1200000
+   },
+   "limitSources": {
+    "pacing": "memberLimits:friends",
+    "requestsPerDay": "memberLimits:friends",
+    "requestsPerMinute": "memberLimits:friends",
+    "tokensPerMinute": "memberLimits:friends"
+   },
+   "name": "user-06",
+   "source": "file",
+   "groups": [
+    "friends"
+   ]
+  },
+  {
+   "limits": {
+    "pacing": {
+     "maxDelay": "10s",
+     "startPct": 80,
+     "XmaxDelay": 10000000000
+    },
+    "requestsPerMinute": 30,
+    "requestsPerDay": 3000,
+    "tokensPerMinute": 1200000
+   },
+   "limitSources": {
+    "pacing": "memberLimits:friends",
+    "requestsPerDay": "memberLimits:friends",
+    "requestsPerMinute": "memberLimits:friends",
+    "tokensPerMinute": "memberLimits:friends"
+   },
+   "name": "user-07",
+   "source": "file",
+   "groups": [
+    "friends"
+   ]
+  },
+  {
+   "limits": {
+    "pacing": {
+     "maxDelay": "10s",
+     "startPct": 80,
+     "XmaxDelay": 10000000000
+    },
+    "requestsPerMinute": 30,
+    "requestsPerDay": 3000,
+    "tokensPerMinute": 1200000
+   },
+   "limitSources": {
+    "pacing": "memberLimits:friends",
+    "requestsPerDay": "memberLimits:friends",
+    "requestsPerMinute": "memberLimits:friends",
+    "tokensPerMinute": "memberLimits:friends"
+   },
+   "name": "user-08",
+   "source": "file",
+   "groups": [
+    "friends"
+   ]
+  },
+  {
+   "limits": {
+    "pacing": {
+     "maxDelay": "10s",
+     "startPct": 80,
+     "XmaxDelay": 10000000000
+    },
+    "requestsPerMinute": 30,
+    "requestsPerDay": 3000,
+    "tokensPerMinute": 1200000
+   },
+   "limitSources": {
+    "pacing": "memberLimits:friends",
+    "requestsPerDay": "memberLimits:friends",
+    "requestsPerMinute": "memberLimits:friends",
+    "tokensPerMinute": "memberLimits:friends"
+   },
+   "name": "user-09",
+   "source": "file",
+   "groups": [
+    "friends"
+   ]
+  },
+  {
+   "limits": {
+    "pacing": {
+     "maxDelay": "10s",
+     "startPct": 80,
+     "XmaxDelay": 10000000000
+    },
+    "requestsPerMinute": 150,
+    "tokensPerMinute": 2000000
+   },
+   "limitSources": {
+    "pacing": "user",
+    "requestsPerMinute": "user",
+    "tokensPerMinute": "user"
+   },
+   "name": "internal",
+   "source": "file",
+   "groups": [
+    "home"
+   ]
+  },
+  {
+   "limits": {
+    "pacing": {
+     "maxDelay": "10s",
+     "startPct": 80,
+     "XmaxDelay": 10000000000
+    },
+    "requestsPerMinute": 30,
+    "requestsPerDay": 3000,
+    "tokensPerMinute": 1200000
+   },
+   "limitSources": {
+    "pacing": "memberLimits:friends",
+    "requestsPerDay": "memberLimits:friends",
+    "requestsPerMinute": "memberLimits:friends",
+    "tokensPerMinute": "memberLimits:friends"
+   },
+   "name": "user-10",
+   "source": "file",
+   "groups": [
+    "friends"
+   ]
+  },
+  {
+   "limits": {
+    "pacing": {
+     "maxDelay": "10s",
+     "startPct": 80,
+     "XmaxDelay": 10000000000
+    },
+    "requestsPerMinute": 30,
+    "requestsPerDay": 3000,
+    "tokensPerMinute": 1200000
+   },
+   "limitSources": {
+    "pacing": "memberLimits:friends",
+    "requestsPerDay": "memberLimits:friends",
+    "requestsPerMinute": "memberLimits:friends",
+    "tokensPerMinute": "memberLimits:friends"
+   },
+   "name": "user-11",
+   "source": "file",
+   "groups": [
+    "friends"
+   ]
+  },
+  {
+   "name": "user-12",
+   "source": "file",
+   "groups": [
+    "projects"
+   ]
+  },
+  {
+   "name": "user-13",
+   "source": "file",
+   "groups": [
+    "home"
+   ]
+  },
+  {
+   "limits": {
+    "pacing": {
+     "maxDelay": "10s",
+     "startPct": 80,
+     "XmaxDelay": 10000000000
+    },
+    "requestsPerMinute": 30,
+    "requestsPerDay": 3000,
+    "tokensPerMinute": 1200000
+   },
+   "limitSources": {
+    "pacing": "memberLimits:friends",
+    "requestsPerDay": "memberLimits:friends",
+    "requestsPerMinute": "memberLimits:friends",
+    "tokensPerMinute": "memberLimits:friends"
+   },
+   "name": "user-14",
+   "source": "file",
+   "groups": [
+    "friends"
+   ]
+  },
+  {
+   "limits": {
+    "pacing": {
+     "maxDelay": "10s",
+     "startPct": 80,
+     "XmaxDelay": 10000000000
+    },
+    "requestsPerMinute": 30,
+    "requestsPerDay": 3000,
+    "tokensPerMinute": 1200000
+   },
+   "limitSources": {
+    "pacing": "memberLimits:friends",
+    "requestsPerDay": "memberLimits:friends",
+    "requestsPerMinute": "memberLimits:friends",
+    "tokensPerMinute": "memberLimits:friends"
+   },
+   "name": "user-15",
+   "source": "file",
+   "groups": [
+    "friends"
+   ]
+  },
+  {
+   "name": "user-16",
+   "source": "file",
+   "groups": [
+    "home"
+   ]
+  },
+  {
+   "limits": {
+    "pacing": {
+     "maxDelay": "10s",
+     "startPct": 80,
+     "XmaxDelay": 10000000000
+    },
+    "requestsPerMinute": 30,
+    "requestsPerDay": 3000,
+    "tokensPerMinute": 1200000
+   },
+   "limitSources": {
+    "pacing": "memberLimits:friends",
+    "requestsPerDay": "memberLimits:friends",
+    "requestsPerMinute": "memberLimits:friends",
+    "tokensPerMinute": "memberLimits:friends"
+   },
+   "name": "user-17",
+   "source": "file",
+   "groups": [
+    "friends"
+   ]
+  },
+  {
+   "name": "service-01",
+   "source": "file",
+   "groups": [
+    "home"
+   ]
+  },
+  {
+   "limits": {
+    "pacing": {
+     "maxDelay": "10s",
+     "startPct": 80,
+     "XmaxDelay": 10000000000
+    },
+    "requestsPerMinute": 30,
+    "requestsPerDay": 3000,
+    "tokensPerMinute": 1200000
+   },
+   "limitSources": {
+    "pacing": "memberLimits:friends",
+    "requestsPerDay": "memberLimits:friends",
+    "requestsPerMinute": "memberLimits:friends",
+    "tokensPerMinute": "memberLimits:friends"
+   },
+   "name": "user-18",
+   "source": "file",
+   "groups": [
+    "friends"
+   ]
+  },
+  {
+   "limits": {
+    "pacing": {
+     "maxDelay": "10s",
+     "startPct": 80,
+     "XmaxDelay": 10000000000
+    },
+    "requestsPerMinute": 30,
+    "requestsPerDay": 3000,
+    "tokensPerMinute": 1200000
+   },
+   "limitSources": {
+    "pacing": "memberLimits:friends",
+    "requestsPerDay": "memberLimits:friends",
+    "requestsPerMinute": "memberLimits:friends",
+    "tokensPerMinute": "memberLimits:friends"
+   },
+   "name": "user-19",
+   "source": "file",
+   "groups": [
+    "friends"
+   ]
+  },
+  {
+   "name": "user-20",
+   "source": "file",
+   "groups": [
+    "home"
+   ]
+  }
+ ],
+ "groups": [
+  {
+   "memberLimits": {
+    "pacing": {
+     "maxDelay": "10s",
+     "startPct": 80,
+     "XmaxDelay": 10000000000
+    },
+    "requestsPerMinute": 30,
+    "requestsPerDay": 3000,
+    "tokensPerMinute": 1200000
+   },
+   "modelAccess": {
+    "alibaba": {
+     "allowed": 0,
+     "total": 49
+    },
+    "amd": {
+     "allowed": 0,
+     "total": 10
+    },
+    "anthropic": {
+     "allowed": 0,
+     "total": 15
+    },
+    "cerebras": {
+     "allowed": 0,
+     "total": 2
+    },
+    "codex": {
+     "allowed": 0,
+     "total": 12
+    },
+    "copilot": {
+     "allowed": 0,
+     "total": 55
+    },
+    "deepseek": {
+     "allowed": 0,
+     "total": 2
+    },
+    "gx10": {
+     "allowed": 0,
+     "total": 6
+    },
+    "macstudio": {
+     "allowed": 0,
+     "total": 0
+    },
+    "minimax": {
+     "allowed": 0,
+     "total": 9
+    },
+    "nvidia-nim": {
+     "allowed": 0,
+     "total": 30
+    },
+    "nvidia-retrieval": {
+     "allowed": 0,
+     "total": 0
+    },
+    "openai": {
+     "allowed": 0,
+     "total": 105
+    },
+    "openai-audio": {
+     "allowed": 0,
+     "total": 9
+    },
+    "parakeet-mlx": {
+     "allowed": 0,
+     "total": 0
+    },
+    "piper-tts": {
+     "allowed": 0,
+     "total": 0
+    },
+    "uni": {
+     "allowed": 0,
+     "total": 14
+    },
+    "xai": {
+     "allowed": 0,
+     "total": 12
+    },
+    "xiaomi": {
+     "allowed": 0,
+     "total": 2
+    }
+   },
+   "name": "friends",
+   "providers": [
+    "minimax",
+    "uni"
+   ],
+   "models": [
+    "minimax/MiniMax-M3.1-Flash",
+    "uni/*",
+    "smartrouter/uni"
+   ],
+   "allowedProviders": [
+    "minimax",
+    "uni"
+   ],
+   "memberCount": 16
+  },
+  {
+   "modelAccess": {
+    "alibaba": {
+     "allowed": 49,
+     "total": 49
+    },
+    "amd": {
+     "allowed": 10,
+     "total": 10
+    },
+    "anthropic": {
+     "allowed": 15,
+     "total": 15
+    },
+    "cerebras": {
+     "allowed": 2,
+     "total": 2
+    },
+    "codex": {
+     "allowed": 12,
+     "total": 12
+    },
+    "copilot": {
+     "allowed": 55,
+     "total": 55
+    },
+    "deepseek": {
+     "allowed": 2,
+     "total": 2
+    },
+    "gx10": {
+     "allowed": 6,
+     "total": 6
+    },
+    "macstudio": {
+     "allowed": 0,
+     "total": 0
+    },
+    "minimax": {
+     "allowed": 9,
+     "total": 9
+    },
+    "nvidia-nim": {
+     "allowed": 30,
+     "total": 30
+    },
+    "nvidia-retrieval": {
+     "allowed": 0,
+     "total": 0
+    },
+    "openai": {
+     "allowed": 105,
+     "total": 105
+    },
+    "openai-audio": {
+     "allowed": 9,
+     "total": 9
+    },
+    "parakeet-mlx": {
+     "allowed": 0,
+     "total": 0
+    },
+    "piper-tts": {
+     "allowed": 0,
+     "total": 0
+    },
+    "uni": {
+     "allowed": 14,
+     "total": 14
+    },
+    "xai": {
+     "allowed": 12,
+     "total": 12
+    },
+    "xiaomi": {
+     "allowed": 2,
+     "total": 2
+    }
+   },
+   "name": "home",
+   "allowedProviders": [
+    "alibaba",
+    "amd",
+    "anthropic",
+    "cerebras",
+    "codex",
+    "copilot",
+    "deepseek",
+    "gx10",
+    "macstudio",
+    "minimax",
+    "nvidia-nim",
+    "nvidia-retrieval",
+    "openai",
+    "openai-audio",
+    "parakeet-mlx",
+    "piper-tts",
+    "uni",
+    "xai",
+    "xiaomi"
+   ],
+   "memberCount": 6
+  },
+  {
+   "modelAccess": {
+    "alibaba": {
+     "allowed": 0,
+     "total": 49
+    },
+    "amd": {
+     "allowed": 0,
+     "total": 10
+    },
+    "anthropic": {
+     "allowed": 0,
+     "total": 15
+    },
+    "cerebras": {
+     "allowed": 0,
+     "total": 2
+    },
+    "codex": {
+     "allowed": 0,
+     "total": 12
+    },
+    "copilot": {
+     "allowed": 0,
+     "total": 55
+    },
+    "deepseek": {
+     "allowed": 0,
+     "total": 2
+    },
+    "gx10": {
+     "allowed": 6,
+     "total": 6
+    },
+    "macstudio": {
+     "allowed": 0,
+     "total": 0
+    },
+    "minimax": {
+     "allowed": 9,
+     "total": 9
+    },
+    "nvidia-nim": {
+     "allowed": 0,
+     "total": 30
+    },
+    "nvidia-retrieval": {
+     "allowed": 0,
+     "total": 0
+    },
+    "openai": {
+     "allowed": 0,
+     "total": 105
+    },
+    "openai-audio": {
+     "allowed": 0,
+     "total": 9
+    },
+    "parakeet-mlx": {
+     "allowed": 0,
+     "total": 0
+    },
+    "piper-tts": {
+     "allowed": 0,
+     "total": 0
+    },
+    "uni": {
+     "allowed": 14,
+     "total": 14
+    },
+    "xai": {
+     "allowed": 0,
+     "total": 12
+    },
+    "xiaomi": {
+     "allowed": 0,
+     "total": 2
+    }
+   },
+   "name": "projects",
+   "providers": [
+    "minimax",
+    "uni",
+    "gx10"
+   ],
+   "allowedProviders": [
+    "gx10",
+    "minimax",
+    "uni"
+   ],
+   "memberCount": 1
+  }
+ ]
+}

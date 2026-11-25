@@ -1,0 +1,143 @@
+{
+ "metric": "req",
+ "window": "hour",
+ "models": [
+  {
+   "requests": 68810,
+   "tokensIn": 14022990,
+   "tokensOut": 0,
+   "costMicroUsd": 0,
+   "r402": 0,
+   "id": "uni/text-embedding-multilingual-e5-base",
+   "priceSource": "unpriced",
+   "value": 68810
+  },
+  {
+   "requests": 4661,
+   "tokensIn": 579917441,
+   "tokensOut": 2924159,
+   "costMicroUsd": 0,
+   "r402": 0,
+   "id": "uni/deepseek-v4-flash-0731",
+   "priceSource": "free",
+   "value": 4661,
+   "free": true
+  },
+  {
+   "requests": 1501,
+   "tokensIn": 218431739,
+   "tokensOut": 569962,
+   "costMicroUsd": 0,
+   "r402": 0,
+   "id": "uni/glm-5.3-flash",
+   "priceSource": "unpriced",
+   "value": 1501
+  },
+  {
+   "requests": 836,
+   "tokensIn": 10550024,
+   "tokensOut": 484975,
+   "costMicroUsd": 0,
+   "r402": 0,
+   "id": "minimax/MiniMax-M3.1-Flash",
+   "priceSource": "unpriced",
+   "value": 836
+  },
+  {
+   "requests": 706,
+   "tokensIn": 94149449,
+   "tokensOut": 474967,
+   "costMicroUsd": 0,
+   "r402": 0,
+   "id": "uni/qwen3.8-flash-next",
+   "priceSource": "unpriced",
+   "value": 706
+  },
+  {
+   "requests": 140,
+   "tokensIn": 44446,
+   "tokensOut": 7295,
+   "costMicroUsd": 22117,
+   "r402": 0,
+   "id": "minimax/MiniMax-M3",
+   "priceSource": "litellm",
+   "value": 140
+  },
+  {
+   "requests": 137,
+   "tokensIn": 3200649,
+   "tokensOut": 47277,
+   "costMicroUsd": 0,
+   "r402": 0,
+   "id": "uni/deepseek-v4.1-flash-1017",
+   "priceSource": "unpriced",
+   "value": 137
+  },
+  {
+   "requests": 103,
+   "tokensIn": 7444,
+   "tokensOut": 1374,
+   "costMicroUsd": 0,
+   "r402": 0,
+   "id": "uni/qwen3.8-27b",
+   "priceSource": "unpriced",
+   "value": 103
+  },
+  {
+   "requests": 82,
+   "tokensIn": 9074269,
+   "tokensOut": 71733,
+   "costMicroUsd": 0,
+   "r402": 0,
+   "id": "gx10/DeepSeek-V4.1-Flash-EXL3",
+   "priceSource": "free",
+   "value": 82,
+   "free": true
+  },
+  {
+   "requests": 34,
+   "tokensIn": 2353,
+   "tokensOut": 1037,
+   "costMicroUsd": 0,
+   "r402": 0,
+   "id": "gx10/Qwen3.8-27B",
+   "priceSource": "free",
+   "value": 34,
+   "free": true
+  },
+  {
+   "requests": 16,
+   "tokensIn": 75501,
+   "tokensOut": 1544,
+   "costMicroUsd": 0,
+   "r402": 0,
+   "id": "gx10/Inkling-2-Mini",
+   "priceSource": "free",
+   "value": 16,
+   "free": true
+  },
+  {
+   "requests": 4,
+   "tokensIn": 244,
+   "tokensOut": 940,
+   "costMicroUsd": 0,
+   "r402": 0,
+   "id": "uni/ornith-1.5-397b",
+   "priceSource": "unpriced",
+   "value": 4
+  },
+  {
+   "requests": 1,
+   "tokensIn": 54,
+   "tokensOut": 40,
+   "costMicroUsd": 0,
+   "r402": 0,
+   "id": "uni/model-light",
+   "priceSource": "unpriced",
+   "value": 1
+  }
+ ],
+ "span": 24,
+ "offset": 0,
+ "detail": true
+}

@@ -1,0 +1,785 @@
+{
+ "users": [
+  {
+   "limits": {
+    "pacing": {
+     "maxDelay": "10s",
+     "startPct": 80,
+     "XmaxDelay": 10000000000
+    },
+    "requestsPerMinute": 30,
+    "requestsPerDay": 3000,
+    "tokensPerMinute": 1200000
+   },
+   "limitSources": {
+    "pacing": "memberLimits:friends",
+    "requestsPerDay": "memberLimits:friends",
+    "requestsPerMinute": "memberLimits:friends",
+    "tokensPerMinute": "memberLimits:friends"
+   },
+   "kind": "user",
+   "id": "user-01",
+   "groupName": "friends",
+   "groups": [
+    "friends"
+   ],
+   "requestsPerMinute": 0,
+   "requestsPerDay": 0,
+   "tokensInPerDay": 0,
+   "tokensOutPerDay": 0,
+   "tokensInPerMonth": 0,
+   "tokensOutPerMonth": 0,
+   "costPerDayMicroUsd": 0,
+   "costPerMonthMicroUsd": 0,
+   "rejectionsPerDay": 0,
+   "exemptRequestsPerMonth": 0
+  },
+  {
+   "kind": "user",
+   "id": "admin",
+   "groupName": "home",
+   "groups": [
+    "home"
+   ],
+   "requestsPerMinute": 0,
+   "requestsPerDay": 7,
+   "tokensInPerDay": 415,
+   "tokensOutPerDay": 828,
+   "tokensInPerMonth": 214666,
+   "tokensOutPerMonth": 6936,
+   "costPerDayMicroUsd": 0,
+   "costPerMonthMicroUsd": 0,
+   "rejectionsPerDay": 0,
+   "exemptRequestsPerMonth": 1,
+   "lastSeen": 1795567561
+  },
+  {
+   "limits": {
+    "pacing": {
+     "maxDelay": "10s",
+     "startPct": 80,
+     "XmaxDelay": 10000000000
+    },
+    "requestsPerMinute": 30,
+    "requestsPerDay": 3000,
+    "tokensPerMinute": 1200000
+   },
+   "limitSources": {
+    "pacing": "memberLimits:friends",
+    "requestsPerDay": "memberLimits:friends",
+    "requestsPerMinute": "memberLimits:friends",
+    "tokensPerMinute": "memberLimits:friends"
+   },
+   "kind": "user",
+   "id": "user-02",
+   "groupName": "friends",
+   "groups": [
+    "friends"
+   ],
+   "requestsPerMinute": 2,
+   "requestsPerDay": 416,
+   "tokensInPerDay": 98794700,
+   "tokensOutPerDay": 225592,
+   "tokensInPerMonth": 519763881,
+   "tokensOutPerMonth": 1316687,
+   "costPerDayMicroUsd": 0,
+   "costPerMonthMicroUsd": 0,
+   "rejectionsPerDay": 0,
+   "exemptRequestsPerMonth": 0,
+   "lastSeen": 1795568436
+  },
+  {
+   "limits": {
+    "pacing": {
+     "maxDelay": "10s",
+     "startPct": 80,
+     "XmaxDelay": 10000000000
+    },
+    "requestsPerMinute": 30,
+    "requestsPerDay": 3000,
+    "tokensPerMinute": 1200000
+   },
+   "limitSources": {
+    "pacing": "memberLimits:friends",
+    "requestsPerDay": "memberLimits:friends",
+    "requestsPerMinute": "memberLimits:friends",
+    "tokensPerMinute": "memberLimits:friends"
+   },
+   "kind": "user",
+   "id": "user-03",
+   "groupName": "friends",
+   "groups": [
+    "friends"
+   ],
+   "requestsPerMinute": 0,
+   "requestsPerDay": 0,
+   "tokensInPerDay": 0,
+   "tokensOutPerDay": 0,
+   "tokensInPerMonth": 3399385809,
+   "tokensOutPerMonth": 14188239,
+   "costPerDayMicroUsd": 0,
+   "costPerMonthMicroUsd": 144,
+   "rejectionsPerDay": 0,
+   "exemptRequestsPerMonth": 0,
+   "lastSeen": 1795549310
+  },
+  {
+   "limits": {
+    "pacing": {
+     "maxDelay": "10s",
+     "startPct": 80,
+     "XmaxDelay": 10000000000
+    },
+    "requestsPerMinute": 30,
+    "requestsPerDay": 3000,
+    "tokensPerMinute": 1200000
+   },
+   "limitSources": {
+    "pacing": "memberLimits:friends",
+    "requestsPerDay": "memberLimits:friends",
+    "requestsPerMinute": "memberLimits:friends",
+    "tokensPerMinute": "memberLimits:friends"
+   },
+   "kind": "user",
+   "id": "user-04",
+   "groupName": "friends",
+   "groups": [
+    "friends"
+   ],
+   "requestsPerMinute": 0,
+   "requestsPerDay": 0,
+   "tokensInPerDay": 0,
+   "tokensOutPerDay": 0,
+   "tokensInPerMonth": 0,
+   "tokensOutPerMonth": 0,
+   "costPerDayMicroUsd": 0,
+   "costPerMonthMicroUsd": 0,
+   "rejectionsPerDay": 0,
+   "exemptRequestsPerMonth": 0
+  },
+  {
+   "limits": {
+    "pacing": {
+     "maxDelay": "10s",
+     "startPct": 80,
+     "XmaxDelay": 10000000000
+    },
+    "requestsPerMinute": 30,
+    "requestsPerDay": 3000,
+    "tokensPerMinute": 1200000
+   },
+   "limitSources": {
+    "pacing": "memberLimits:friends",
+    "requestsPerDay": "memberLimits:friends",
+    "requestsPerMinute": "memberLimits:friends",
+    "tokensPerMinute": "memberLimits:friends"
+   },
+   "kind": "user",
+   "id": "user-05",
+   "groupName": "friends",
+   "groups": [
+    "friends"
+   ],
+   "requestsPerMinute": 0,
+   "requestsPerDay": 0,
+   "tokensInPerDay": 0,
+   "tokensOutPerDay": 0,
+   "tokensInPerMonth": 72646,
+   "tokensOutPerMonth": 9639,
+   "costPerDayMicroUsd": 0,
+   "costPerMonthMicroUsd": 33361,
+   "rejectionsPerDay": 0,
+   "exemptRequestsPerMonth": 0,
+   "lastSeen": 1794776534
+  },
+  {
+   "limits": {
+    "pacing": {
+     "maxDelay": "10s",
+     "startPct": 80,
+     "XmaxDelay": 10000000000
+    },
+    "requestsPerMinute": 30,
+    "requestsPerDay": 3000,
+    "tokensPerMinute": 1200000
+   },
+   "limitSources": {
+    "pacing": "memberLimits:friends",
+    "requestsPerDay": "memberLimits:friends",
+    "requestsPerMinute": "memberLimits:friends",
+    "tokensPerMinute": "memberLimits:friends"
+   },
+   "kind": "user",
+   "id": "user-06",
+   "groupName": "friends",
+   "groups": [
+    "friends"
+   ],
+   "requestsPerMinute": 0,
+   "requestsPerDay": 0,
+   "tokensInPerDay": 0,
+   "tokensOutPerDay": 0,
+   "tokensInPerMonth": 16933528,
+   "tokensOutPerMonth": 266424,
+   "costPerDayMicroUsd": 0,
+   "costPerMonthMicroUsd": 17033,
+   "rejectionsPerDay": 0,
+   "exemptRequestsPerMonth": 0,
+   "lastSeen": 1795306239
+  },
+  {
+   "limits": {
+    "pacing": {
+     "maxDelay": "10s",
+     "startPct": 80,
+     "XmaxDelay": 10000000000
+    },
+    "requestsPerMinute": 30,
+    "requestsPerDay": 3000,
+    "tokensPerMinute": 1200000
+   },
+   "limitSources": {
+    "pacing": "memberLimits:friends",
+    "requestsPerDay": "memberLimits:friends",
+    "requestsPerMinute": "memberLimits:friends",
+    "tokensPerMinute": "memberLimits:friends"
+   },
+   "kind": "user",
+   "id": "user-07",
+   "groupName": "friends",
+   "groups": [
+    "friends"
+   ],
+   "requestsPerMinute": 0,
+   "requestsPerDay": 82,
+   "tokensInPerDay": 5221,
+   "tokensOutPerDay": 832,
+   "tokensInPerMonth": 10907,
+   "tokensOutPerMonth": 9177,
+   "costPerDayMicroUsd": 0,
+   "costPerMonthMicroUsd": 0,
+   "rejectionsPerDay": 11,
+   "exemptRequestsPerMonth": 3,
+   "lastSeen": 1795567550
+  },
+  {
+   "limits": {
+    "pacing": {
+     "maxDelay": "10s",
+     "startPct": 80,
+     "XmaxDelay": 10000000000
+    },
+    "requestsPerMinute": 30,
+    "requestsPerDay": 3000,
+    "tokensPerMinute": 1200000
+   },
+   "limitSources": {
+    "pacing": "memberLimits:friends",
+    "requestsPerDay": "memberLimits:friends",
+    "requestsPerMinute": "memberLimits:friends",
+    "tokensPerMinute": "memberLimits:friends"
+   },
+   "kind": "user",
+   "id": "user-08",
+   "groupName": "friends",
+   "groups": [
+    "friends"
+   ],
+   "requestsPerMinute": 0,
+   "requestsPerDay": 0,
+   "tokensInPerDay": 0,
+   "tokensOutPerDay": 0,
+   "tokensInPerMonth": 15101892,
+   "tokensOutPerMonth": 79428,
+   "costPerDayMicroUsd": 0,
+   "costPerMonthMicroUsd": 0,
+   "rejectionsPerDay": 0,
+   "exemptRequestsPerMonth": 0,
+   "lastSeen": 1795496380
+  },
+  {
+   "limits": {
+    "pacing": {
+     "maxDelay": "10s",
+     "startPct": 80,
+     "XmaxDelay": 10000000000
+    },
+    "requestsPerMinute": 30,
+    "requestsPerDay": 3000,
+    "tokensPerMinute": 1200000
+   },
+   "limitSources": {
+    "pacing": "memberLimits:friends",
+    "requestsPerDay": "memberLimits:friends",
+    "requestsPerMinute": "memberLimits:friends",
+    "tokensPerMinute": "memberLimits:friends"
+   },
+   "kind": "user",
+   "id": "user-09",
+   "groupName": "friends",
+   "groups": [
+    "friends"
+   ],
+   "requestsPerMinute": 0,
+   "requestsPerDay": 0,
+   "tokensInPerDay": 0,
+   "tokensOutPerDay": 0,
+   "tokensInPerMonth": 0,
+   "tokensOutPerMonth": 0,
+   "costPerDayMicroUsd": 0,
+   "costPerMonthMicroUsd": 0,
+   "rejectionsPerDay": 0,
+   "exemptRequestsPerMonth": 0
+  },
+  {
+   "limits": {
+    "pacing": {
+     "maxDelay": "10s",
+     "startPct": 80,
+     "XmaxDelay": 10000000000
+    },
+    "requestsPerMinute": 150,
+    "tokensPerMinute": 2000000
+   },
+   "limitSources": {
+    "pacing": "user",
+    "requestsPerMinute": "user",
+    "tokensPerMinute": "user"
+   },
+   "kind": "user",
+   "id": "internal",
+   "groupName": "home",
+   "groups": [
+    "home"
+   ],
+   "requestsPerMinute": 0,
+   "requestsPerDay": 1522,
+   "tokensInPerDay": 42425,
+   "tokensOutPerDay": 7990,
+   "tokensInPerMonth": 862584569,
+   "tokensOutPerMonth": 17270936,
+   "costPerDayMicroUsd": 0,
+   "costPerMonthMicroUsd": 14129214,
+   "rejectionsPerDay": 0,
+   "exemptRequestsPerMonth": 382,
+   "lastSeen": 1795568458
+  },
+  {
+   "limits": {
+    "pacing": {
+     "maxDelay": "10s",
+     "startPct": 80,
+     "XmaxDelay": 10000000000
+    },
+    "requestsPerMinute": 30,
+    "requestsPerDay": 3000,
+    "tokensPerMinute": 1200000
+   },
+   "limitSources": {
+    "pacing": "memberLimits:friends",
+    "requestsPerDay": "memberLimits:friends",
+    "requestsPerMinute": "memberLimits:friends",
+    "tokensPerMinute": "memberLimits:friends"
+   },
+   "kind": "user",
+   "id": "user-10",
+   "groupName": "friends",
+   "groups": [
+    "friends"
+   ],
+   "requestsPerMinute": 0,
+   "requestsPerDay": 0,
+   "tokensInPerDay": 0,
+   "tokensOutPerDay": 0,
+   "tokensInPerMonth": 0,
+   "tokensOutPerMonth": 0,
+   "costPerDayMicroUsd": 0,
+   "costPerMonthMicroUsd": 0,
+   "rejectionsPerDay": 0,
+   "exemptRequestsPerMonth": 0
+  },
+  {
+   "limits": {
+    "pacing": {
+     "maxDelay": "10s",
+     "startPct": 80,
+     "XmaxDelay": 10000000000
+    },
+    "requestsPerMinute": 30,
+    "requestsPerDay": 3000,
+    "tokensPerMinute": 1200000
+   },
+   "limitSources": {
+    "pacing": "memberLimits:friends",
+    "requestsPerDay": "memberLimits:friends",
+    "requestsPerMinute": "memberLimits:friends",
+    "tokensPerMinute": "memberLimits:friends"
+   },
+   "kind": "user",
+   "id": "user-11",
+   "groupName": "friends",
+   "groups": [
+    "friends"
+   ],
+   "requestsPerMinute": 0,
+   "requestsPerDay": 0,
+   "tokensInPerDay": 0,
+   "tokensOutPerDay": 0,
+   "tokensInPerMonth": 0,
+   "tokensOutPerMonth": 0,
+   "costPerDayMicroUsd": 0,
+   "costPerMonthMicroUsd": 0,
+   "rejectionsPerDay": 0,
+   "exemptRequestsPerMonth": 0
+  },
+  {
+   "kind": "user",
+   "id": "user-12",
+   "groupName": "projects",
+   "groups": [
+    "projects"
+   ],
+   "requestsPerMinute": 0,
+   "requestsPerDay": 0,
+   "tokensInPerDay": 0,
+   "tokensOutPerDay": 0,
+   "tokensInPerMonth": 0,
+   "tokensOutPerMonth": 0,
+   "costPerDayMicroUsd": 0,
+   "costPerMonthMicroUsd": 0,
+   "rejectionsPerDay": 0,
+   "exemptRequestsPerMonth": 0
+  },
+  {
+   "kind": "user",
+   "id": "user-13",
+   "groupName": "home",
+   "groups": [
+    "home"
+   ],
+   "requestsPerMinute": 0,
+   "requestsPerDay": 63,
+   "tokensInPerDay": 53522,
+   "tokensOutPerDay": 722,
+   "tokensInPerMonth": 932678599,
+   "tokensOutPerMonth": 2867617,
+   "costPerDayMicroUsd": 0,
+   "costPerMonthMicroUsd": 0,
+   "rejectionsPerDay": 0,
+   "exemptRequestsPerMonth": 0,
+   "lastSeen": 1795568216
+  },
+  {
+   "limits": {
+    "pacing": {
+     "maxDelay": "10s",
+     "startPct": 80,
+     "XmaxDelay": 10000000000
+    },
+    "requestsPerMinute": 30,
+    "requestsPerDay": 3000,
+    "tokensPerMinute": 1200000
+   },
+   "limitSources": {
+    "pacing": "memberLimits:friends",
+    "requestsPerDay": "memberLimits:friends",
+    "requestsPerMinute": "memberLimits:friends",
+    "tokensPerMinute": "memberLimits:friends"
+   },
+   "kind": "user",
+   "id": "user-14",
+   "groupName": "friends",
+   "groups": [
+    "friends"
+   ],
+   "requestsPerMinute": 0,
+   "requestsPerDay": 0,
+   "tokensInPerDay": 0,
+   "tokensOutPerDay": 0,
+   "tokensInPerMonth": 0,
+   "tokensOutPerMonth": 0,
+   "costPerDayMicroUsd": 0,
+   "costPerMonthMicroUsd": 0,
+   "rejectionsPerDay": 0,
+   "exemptRequestsPerMonth": 0
+  },
+  {
+   "limits": {
+    "pacing": {
+     "maxDelay": "10s",
+     "startPct": 80,
+     "XmaxDelay": 10000000000
+    },
+    "requestsPerMinute": 30,
+    "requestsPerDay": 3000,
+    "tokensPerMinute": 1200000
+   },
+   "limitSources": {
+    "pacing": "memberLimits:friends",
+    "requestsPerDay": "memberLimits:friends",
+    "requestsPerMinute": "memberLimits:friends",
+    "tokensPerMinute": "memberLimits:friends"
+   },
+   "kind": "user",
+   "id": "user-15",
+   "groupName": "friends",
+   "groups": [
+    "friends"
+   ],
+   "requestsPerMinute": 0,
+   "requestsPerDay": 0,
+   "tokensInPerDay": 0,
+   "tokensOutPerDay": 0,
+   "tokensInPerMonth": 0,
+   "tokensOutPerMonth": 0,
+   "costPerDayMicroUsd": 0,
+   "costPerMonthMicroUsd": 0,
+   "rejectionsPerDay": 0,
+   "exemptRequestsPerMonth": 0
+  },
+  {
+   "kind": "user",
+   "id": "user-16",
+   "groupName": "home",
+   "groups": [
+    "home"
+   ],
+   "requestsPerMinute": 2,
+   "requestsPerDay": 104,
+   "tokensInPerDay": 2918020,
+   "tokensOutPerDay": 36027,
+   "tokensInPerMonth": 2918020,
+   "tokensOutPerMonth": 36027,
+   "costPerDayMicroUsd": 0,
+   "costPerMonthMicroUsd": 0,
+   "rejectionsPerDay": 0,
+   "exemptRequestsPerMonth": 0,
+   "lastSeen": 1795568418
+  },
+  {
+   "limits": {
+    "pacing": {
+     "maxDelay": "10s",
+     "startPct": 80,
+     "XmaxDelay": 10000000000
+    },
+    "requestsPerMinute": 30,
+    "requestsPerDay": 3000,
+    "tokensPerMinute": 1200000
+   },
+   "limitSources": {
+    "pacing": "memberLimits:friends",
+    "requestsPerDay": "memberLimits:friends",
+    "requestsPerMinute": "memberLimits:friends",
+    "tokensPerMinute": "memberLimits:friends"
+   },
+   "kind": "user",
+   "id": "user-17",
+   "groupName": "friends",
+   "groups": [
+    "friends"
+   ],
+   "requestsPerMinute": 0,
+   "requestsPerDay": 0,
+   "tokensInPerDay": 0,
+   "tokensOutPerDay": 0,
+   "tokensInPerMonth": 0,
+   "tokensOutPerMonth": 0,
+   "costPerDayMicroUsd": 0,
+   "costPerMonthMicroUsd": 0,
+   "rejectionsPerDay": 0,
+   "exemptRequestsPerMonth": 0
+  },
+  {
+   "kind": "user",
+   "id": "service-01",
+   "groupName": "home",
+   "groups": [
+    "home"
+   ],
+   "requestsPerMinute": 0,
+   "requestsPerDay": 2,
+   "tokensInPerDay": 0,
+   "tokensOutPerDay": 0,
+   "tokensInPerMonth": 16429603,
+   "tokensOutPerMonth": 892873,
+   "costPerDayMicroUsd": 0,
+   "costPerMonthMicroUsd": 18015,
+   "rejectionsPerDay": 0,
+   "exemptRequestsPerMonth": 0,
+   "lastSeen": 1795566799
+  },
+  {
+   "limits": {
+    "pacing": {
+     "maxDelay": "10s",
+     "startPct": 80,
+     "XmaxDelay": 10000000000
+    },
+    "requestsPerMinute": 30,
+    "requestsPerDay": 3000,
+    "tokensPerMinute": 1200000
+   },
+   "limitSources": {
+    "pacing": "memberLimits:friends",
+    "requestsPerDay": "memberLimits:friends",
+    "requestsPerMinute": "memberLimits:friends",
+    "tokensPerMinute": "memberLimits:friends"
+   },
+   "kind": "user",
+   "id": "user-18",
+   "groupName": "friends",
+   "groups": [
+    "friends"
+   ],
+   "requestsPerMinute": 0,
+   "requestsPerDay": 0,
+   "tokensInPerDay": 0,
+   "tokensOutPerDay": 0,
+   "tokensInPerMonth": 10251128,
+   "tokensOutPerMonth": 149746,
+   "costPerDayMicroUsd": 0,
+   "costPerMonthMicroUsd": 0,
+   "rejectionsPerDay": 0,
+   "exemptRequestsPerMonth": 0,
+   "lastSeen": 1795102898
+  },
+  {
+   "limits": {
+    "pacing": {
+     "maxDelay": "10s",
+     "startPct": 80,
+     "XmaxDelay": 10000000000
+    },
+    "requestsPerMinute": 30,
+    "requestsPerDay": 3000,
+    "tokensPerMinute": 1200000
+   },
+   "limitSources": {
+    "pacing": "memberLimits:friends",
+    "requestsPerDay": "memberLimits:friends",
+    "requestsPerMinute": "memberLimits:friends",
+    "tokensPerMinute": "memberLimits:friends"
+   },
+   "kind": "user",
+   "id": "user-19",
+   "groupName": "friends",
+   "groups": [
+    "friends"
+   ],
+   "requestsPerMinute": 0,
+   "requestsPerDay": 0,
+   "tokensInPerDay": 0,
+   "tokensOutPerDay": 0,
+   "tokensInPerMonth": 0,
+   "tokensOutPerMonth": 0,
+   "costPerDayMicroUsd": 0,
+   "costPerMonthMicroUsd": 0,
+   "rejectionsPerDay": 0,
+   "exemptRequestsPerMonth": 0
+  },
+  {
+   "kind": "user",
+   "id": "user-20",
+   "groupName": "home",
+   "groups": [
+    "home"
+   ],
+   "requestsPerMinute": 0,
+   "requestsPerDay": 6,
+   "tokensInPerDay": 1218,
+   "tokensOutPerDay": 48,
+   "tokensInPerMonth": 1452531,
+   "tokensOutPerMonth": 779359,
+   "costPerDayMicroUsd": 425,
+   "costPerMonthMicroUsd": 1371293,
+   "rejectionsPerDay": 0,
+   "exemptRequestsPerMonth": 0,
+   "lastSeen": 1795568370
+  }
+ ],
+ "groups": [
+  {
+   "memberLimits": {
+    "pacing": {
+     "maxDelay": "10s",
+     "startPct": 80,
+     "XmaxDelay": 10000000000
+    },
+    "requestsPerMinute": 30,
+    "requestsPerDay": 3000,
+    "tokensPerMinute": 1200000
+   },
+   "kind": "group",
+   "id": "friends",
+   "providers": [
+    "minimax",
+    "uni"
+   ],
+   "models": [
+    "minimax/MiniMax-M3.1-Flash",
+    "uni/*",
+    "smartrouter/uni"
+   ],
+   "requestsPerMinute": 2,
+   "requestsPerDay": 487,
+   "tokensInPerDay": 98799921,
+   "tokensOutPerDay": 226424,
+   "tokensInPerMonth": 3961519791,
+   "tokensOutPerMonth": 16019340,
+   "costPerDayMicroUsd": 0,
+   "costPerMonthMicroUsd": 50538,
+   "rejectionsPerDay": 0,
+   "exemptRequestsPerMonth": 0,
+   "lastSeen": 1795568436
+  },
+  {
+   "kind": "group",
+   "id": "home",
+   "requestsPerMinute": 2,
+   "requestsPerDay": 1704,
+   "tokensInPerDay": 3015600,
+   "tokensOutPerDay": 45615,
+   "tokensInPerMonth": 1816277988,
+   "tokensOutPerMonth": 21853748,
+   "costPerDayMicroUsd": 425,
+   "costPerMonthMicroUsd": 15518522,
+   "rejectionsPerDay": 0,
+   "exemptRequestsPerMonth": 0,
+   "lastSeen": 1795568458
+  },
+  {
+   "kind": "group",
+   "id": "projects",
+   "providers": [
+    "minimax",
+    "uni",
+    "gx10"
+   ],
+   "requestsPerMinute": 0,
+   "requestsPerDay": 0,
+   "tokensInPerDay": 0,
+   "tokensOutPerDay": 0,
+   "tokensInPerMonth": 0,
+   "tokensOutPerMonth": 0,
+   "costPerDayMicroUsd": 0,
+   "costPerMonthMicroUsd": 0,
+   "rejectionsPerDay": 0,
+   "exemptRequestsPerMonth": 0
+  }
+ ],
+ "total": {
+  "kind": "total",
+  "id": "all",
+  "requestsPerMinute": 4,
+  "requestsPerDay": 2191,
+  "tokensInPerDay": 101815521,
+  "tokensOutPerDay": 272039,
+  "tokensInPerMonth": 5777797779,
+  "tokensOutPerMonth": 37873088,
+  "costPerDayMicroUsd": 425,
+  "costPerMonthMicroUsd": 15569060,
+  "rejectionsPerDay": 11,
+  "exemptRequestsPerMonth": 0
+ }
+}

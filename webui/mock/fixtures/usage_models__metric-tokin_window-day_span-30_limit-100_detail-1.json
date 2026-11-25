@@ -1,0 +1,7 @@
+{
+ "error": {
+  "code": "400",
+  "message": "range too large; narrow span or filter",
+  "type": "invalid_request_error"
+ }
+}

@@ -1,0 +1,143 @@
+{
+ "metric": "tokout",
+ "window": "hour",
+ "models": [
+  {
+   "requests": 4661,
+   "tokensIn": 579917441,
+   "tokensOut": 2924159,
+   "costMicroUsd": 0,
+   "r402": 0,
+   "id": "uni/deepseek-v4-flash-0731",
+   "priceSource": "free",
+   "value": 2924159,
+   "free": true
+  },
+  {
+   "requests": 1501,
+   "tokensIn": 218431739,
+   "tokensOut": 569962,
+   "costMicroUsd": 0,
+   "r402": 0,
+   "id": "uni/glm-5.3-flash",
+   "priceSource": "unpriced",
+   "value": 569962
+  },
+  {
+   "requests": 836,
+   "tokensIn": 10550024,
+   "tokensOut": 484975,
+   "costMicroUsd": 0,
+   "r402": 0,
+   "id": "minimax/MiniMax-M3.1-Flash",
+   "priceSource": "unpriced",
+   "value": 484975
+  },
+  {
+   "requests": 706,
+   "tokensIn": 94149449,
+   "tokensOut": 474967,
+   "costMicroUsd": 0,
+   "r402": 0,
+   "id": "uni/qwen3.8-flash-next",
+   "priceSource": "unpriced",
+   "value": 474967
+  },
+  {
+   "requests": 82,
+   "tokensIn": 9074269,
+   "tokensOut": 71733,
+   "costMicroUsd": 0,
+   "r402": 0,
+   "id": "gx10/DeepSeek-V4.1-Flash-EXL3",
+   "priceSource": "free",
+   "value": 71733,
+   "free": true
+  },
+  {
+   "requests": 139,
+   "tokensIn": 3357814,
+   "tokensOut": 48011,
+   "costMicroUsd": 0,
+   "r402": 0,
+   "id": "uni/deepseek-v4.1-flash-1017",
+   "priceSource": "unpriced",
+   "value": 48011
+  },
+  {
+   "requests": 140,
+   "tokensIn": 44446,
+   "tokensOut": 7295,
+   "costMicroUsd": 22117,
+   "r402": 0,
+   "id": "minimax/MiniMax-M3",
+   "priceSource": "litellm",
+   "value": 7295
+  },
+  {
+   "requests": 16,
+   "tokensIn": 75501,
+   "tokensOut": 1544,
+   "costMicroUsd": 0,
+   "r402": 0,
+   "id": "gx10/Inkling-2-Mini",
+   "priceSource": "free",
+   "value": 1544,
+   "free": true
+  },
+  {
+   "requests": 103,
+   "tokensIn": 7444,
+   "tokensOut": 1374,
+   "costMicroUsd": 0,
+   "r402": 0,
+   "id": "uni/qwen3.8-27b",
+   "priceSource": "unpriced",
+   "value": 1374
+  },
+  {
+   "requests": 34,
+   "tokensIn": 2353,
+   "tokensOut": 1037,
+   "costMicroUsd": 0,
+   "r402": 0,
+   "id": "gx10/Qwen3.8-27B",
+   "priceSource": "free",
+   "value": 1037,
+   "free": true
+  },
+  {
+   "requests": 4,
+   "tokensIn": 244,
+   "tokensOut": 940,
+   "costMicroUsd": 0,
+   "r402": 0,
+   "id": "uni/ornith-1.5-397b",
+   "priceSource": "unpriced",
+   "value": 940
+  },
+  {
+   "requests": 1,
+   "tokensIn": 54,
+   "tokensOut": 40,
+   "costMicroUsd": 0,
+   "r402": 0,
+   "id": "uni/model-light",
+   "priceSource": "unpriced",
+   "value": 40
+  },
+  {
+   "requests": 68813,
+   "tokensIn": 14023121,
+   "tokensOut": 0,
+   "costMicroUsd": 0,
+   "r402": 0,
+   "id": "uni/text-embedding-multilingual-e5-base",
+   "priceSource": "unpriced",
+   "value": 0
+  }
+ ],
+ "span": 24,
+ "offset": 0,
+ "detail": true
+}

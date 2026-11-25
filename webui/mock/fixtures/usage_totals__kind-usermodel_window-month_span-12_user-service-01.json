@@ -1,0 +1,32 @@
+{
+ "kind": "usermodel",
+ "window": "month",
+ "metrics": [
+  "req",
+  "tokin",
+  "tokout",
+  "cost"
+ ],
+ "rows": [
+  {
+   "values": {
+    "cost": 0,
+    "req": 2343,
+    "tokin": 9803759,
+    "tokout": 412124
+   },
+   "id": "uni/deepseek-v4-flash-0731"
+  },
+  {
+   "values": {
+    "cost": 18015,
+    "req": 8,
+    "tokin": 52177,
+    "tokout": 1967
+   },
+   "id": "minimax/MiniMax-M3"
+  }
+ ],
+ "span": 12,
+ "offset": 0
+}

@@ -1,0 +1,82 @@
+{
+ "kind": "user",
+ "window": "hour",
+ "metrics": [
+  "tokin",
+  "tokout"
+ ],
+ "rows": [
+  {
+   "values": {
+    "tokin": 521673509,
+    "tokout": 1320493
+   },
+   "id": "user-02"
+  },
+  {
+   "values": {
+    "tokin": 311700755,
+    "tokout": 1080171
+   },
+   "id": "user-03"
+  },
+  {
+   "values": {
+    "tokin": 92345401,
+    "tokout": 2089318
+   },
+   "id": "internal"
+  },
+  {
+   "values": {
+    "tokin": 4325588,
+    "tokout": 42620
+   },
+   "id": "user-16"
+  },
+  {
+   "values": {
+    "tokin": 1449191,
+    "tokout": 78214
+   },
+   "id": "service-01"
+  },
+  {
+   "values": {
+    "tokin": 432947,
+    "tokout": 11473
+   },
+   "id": "user-13"
+  },
+  {
+   "values": {
+    "tokin": 214666,
+    "tokout": 6936
+   },
+   "id": "admin"
+  },
+  {
+   "values": {
+    "tokin": 37657,
+    "tokout": 7205
+   },
+   "id": "user-20"
+  },
+  {
+   "values": {
+    "tokin": 10907,
+    "tokout": 9177
+   },
+   "id": "user-07"
+  },
+  {
+   "values": {
+    "tokin": 1651,
+    "tokout": 25
+   },
+   "id": "user-08"
+  }
+ ],
+ "span": 24,
+ "offset": 0
+}

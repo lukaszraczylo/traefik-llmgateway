@@ -1,0 +1,23 @@
+{
+ "kind": "group",
+ "window": "day",
+ "metrics": [
+  "cost"
+ ],
+ "rows": [
+  {
+   "values": {
+    "cost": 15518522
+   },
+   "id": "home"
+  },
+  {
+   "values": {
+    "cost": 50538
+   },
+   "id": "friends"
+  }
+ ],
+ "span": 14,
+ "offset": 0
+}

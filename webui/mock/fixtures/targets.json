@@ -1,0 +1,636 @@
+{
+ "mcpServers": [
+  {
+   "health": {
+    "state": "unknown",
+    "consecutiveFailures": 0
+   },
+   "name": "brave-search",
+   "url": "http://mcp-brave-search.svc-x.internal:8080/mcp",
+   "access": null,
+   "counters": {
+    "requestsPerMinute": 0,
+    "requestsPerDay": 82,
+    "requestsPerMonth": 10127
+   }
+  },
+  {
+   "health": {
+    "state": "unknown",
+    "consecutiveFailures": 0
+   },
+   "name": "captcha-solver",
+   "url": "http://mcp-captcha-solver.svc-x.internal:8085/mcp",
+   "access": null,
+   "counters": {
+    "requestsPerMinute": 0,
+    "requestsPerDay": 105,
+    "requestsPerMonth": 10960
+   }
+  },
+  {
+   "health": {
+    "state": "unknown",
+    "consecutiveFailures": 0
+   },
+   "name": "fetch",
+   "url": "http://mcp-fetch.svc-x.internal:8088/mcp",
+   "access": null,
+   "counters": {
+    "requestsPerMinute": 0,
+    "requestsPerDay": 82,
+    "requestsPerMonth": 10207
+   }
+  },
+  {
+   "health": {
+    "state": "unknown",
+    "consecutiveFailures": 0
+   },
+   "name": "google-maps",
+   "url": "http://mcp-google-maps.svc-x.internal:8084/mcp",
+   "access": null,
+   "counters": {
+    "requestsPerMinute": 0,
+    "requestsPerDay": 84,
+    "requestsPerMonth": 10007
+   }
+  },
+  {
+   "health": {
+    "state": "unknown",
+    "consecutiveFailures": 0
+   },
+   "name": "lightpanda",
+   "url": "http://mcp-lightpanda.svc-x.internal:8081/mcp",
+   "access": null,
+   "counters": {
+    "requestsPerMinute": 0,
+    "requestsPerDay": 106,
+    "requestsPerMonth": 10593
+   }
+  },
+  {
+   "health": {
+    "state": "unknown",
+    "consecutiveFailures": 0
+   },
+   "name": "playwright",
+   "url": "http://203.0.113.2:3000/sse",
+   "access": null,
+   "counters": {
+    "requestsPerMinute": 0,
+    "requestsPerDay": 10,
+    "requestsPerMonth": 2939
+   }
+  },
+  {
+   "health": {
+    "state": "unknown",
+    "consecutiveFailures": 0
+   },
+   "name": "readitall",
+   "url": "http://mcp-readitall.svc-x.internal:8080/mcp",
+   "access": null,
+   "counters": {
+    "requestsPerMinute": 0,
+    "requestsPerDay": 63,
+    "requestsPerMonth": 21530
+   }
+  },
+  {
+   "health": {
+    "state": "unknown",
+    "consecutiveFailures": 0
+   },
+   "name": "time",
+   "url": "http://mcp-time.svc-x.internal:8083/mcp",
+   "access": null,
+   "counters": {
+    "requestsPerMinute": 0,
+    "requestsPerDay": 67,
+    "requestsPerMonth": 5053
+   }
+  },
+  {
+   "health": {
+    "state": "unknown",
+    "consecutiveFailures": 0
+   },
+   "name": "weather",
+   "url": "http://mcp-weather.svc-x.internal:8087/mcp",
+   "access": null,
+   "counters": {
+    "requestsPerMinute": 0,
+    "requestsPerDay": 82,
+    "requestsPerMonth": 10019
+   }
+  },
+  {
+   "health": {
+    "state": "unknown",
+    "consecutiveFailures": 0
+   },
+   "name": "web-search",
+   "url": "http://mcp-web-search.svc-x.internal:8092/mcp",
+   "access": null,
+   "counters": {
+    "requestsPerMinute": 0,
+    "requestsPerDay": 92,
+    "requestsPerMonth": 11433
+   }
+  },
+  {
+   "health": {
+    "state": "unknown",
+    "consecutiveFailures": 0
+   },
+   "name": "wikipedia",
+   "url": "http://mcp-wikipedia.svc-x.internal:8089/mcp",
+   "access": null,
+   "counters": {
+    "requestsPerMinute": 0,
+    "requestsPerDay": 82,
+    "requestsPerMonth": 10204
+   }
+  }
+ ],
+ "agents": [
+  {
+   "health": {
+    "state": "unknown",
+    "consecutiveFailures": 0
+   },
+   "name": "agentkit",
+   "url": "http://agentkit.svc-x.internal:8080",
+   "access": null,
+   "counters": {
+    "requestsPerMinute": 0,
+    "requestsPerDay": 0,
+    "requestsPerMonth": 0
+   }
+  },
+  {
+   "health": {
+    "state": "unknown",
+    "consecutiveFailures": 0
+   },
+   "name": "brainstorm",
+   "url": "http://agentkit.svc-x.internal:8080/brainstorm",
+   "access": null,
+   "counters": {
+    "requestsPerMinute": 0,
+    "requestsPerDay": 0,
+    "requestsPerMonth": 0
+   }
+  },
+  {
+   "health": {
+    "state": "unknown",
+    "consecutiveFailures": 0
+   },
+   "name": "budgeting-helper",
+   "url": "http://agentkit.svc-x.internal:8080/budgeting-helper",
+   "access": null,
+   "counters": {
+    "requestsPerMinute": 0,
+    "requestsPerDay": 0,
+    "requestsPerMonth": 0
+   }
+  },
+  {
+   "health": {
+    "state": "unknown",
+    "consecutiveFailures": 0
+   },
+   "name": "business-writer",
+   "url": "http://agentkit.svc-x.internal:8080/business-writer",
+   "access": null,
+   "counters": {
+    "requestsPerMinute": 0,
+    "requestsPerDay": 0,
+    "requestsPerMonth": 0
+   }
+  },
+  {
+   "health": {
+    "state": "unknown",
+    "consecutiveFailures": 0
+   },
+   "name": "car-advisor",
+   "url": "http://agentkit.svc-x.internal:8080/car-advisor",
+   "access": null,
+   "counters": {
+    "requestsPerMinute": 0,
+    "requestsPerDay": 0,
+    "requestsPerMonth": 0
+   }
+  },
+  {
+   "health": {
+    "state": "unknown",
+    "consecutiveFailures": 0
+   },
+   "name": "contract-review",
+   "url": "http://agentkit.svc-x.internal:8080/contract-review",
+   "access": null,
+   "counters": {
+    "requestsPerMinute": 0,
+    "requestsPerDay": 0,
+    "requestsPerMonth": 0
+   }
+  },
+  {
+   "health": {
+    "state": "unknown",
+    "consecutiveFailures": 0
+   },
+   "name": "creative",
+   "url": "http://agentkit.svc-x.internal:8080/creative",
+   "access": null,
+   "counters": {
+    "requestsPerMinute": 0,
+    "requestsPerDay": 0,
+    "requestsPerMonth": 0
+   }
+  },
+  {
+   "health": {
+    "state": "unknown",
+    "consecutiveFailures": 0
+   },
+   "name": "financial-research",
+   "url": "http://agentkit.svc-x.internal:8080/financial-research",
+   "access": null,
+   "counters": {
+    "requestsPerMinute": 0,
+    "requestsPerDay": 0,
+    "requestsPerMonth": 0
+   }
+  },
+  {
+   "health": {
+    "state": "unknown",
+    "consecutiveFailures": 0
+   },
+   "name": "fitness-coach",
+   "url": "http://agentkit.svc-x.internal:8080/fitness-coach",
+   "access": null,
+   "counters": {
+    "requestsPerMinute": 0,
+    "requestsPerDay": 0,
+    "requestsPerMonth": 0
+   }
+  },
+  {
+   "health": {
+    "state": "unknown",
+    "consecutiveFailures": 0
+   },
+   "name": "gift-finder",
+   "url": "http://agentkit.svc-x.internal:8080/gift-finder",
+   "access": null,
+   "counters": {
+    "requestsPerMinute": 0,
+    "requestsPerDay": 0,
+    "requestsPerMonth": 0
+   }
+  },
+  {
+   "health": {
+    "state": "unknown",
+    "consecutiveFailures": 0
+   },
+   "name": "health-researcher",
+   "url": "http://agentkit.svc-x.internal:8080/health-researcher",
+   "access": null,
+   "counters": {
+    "requestsPerMinute": 0,
+    "requestsPerDay": 0,
+    "requestsPerMonth": 0
+   }
+  },
+  {
+   "health": {
+    "state": "unknown",
+    "consecutiveFailures": 0
+   },
+   "name": "home-services-finder",
+   "url": "http://agentkit.svc-x.internal:8080/home-services-finder",
+   "access": null,
+   "counters": {
+    "requestsPerMinute": 0,
+    "requestsPerDay": 0,
+    "requestsPerMonth": 0
+   }
+  },
+  {
+   "health": {
+    "state": "unknown",
+    "consecutiveFailures": 0
+   },
+   "name": "job-search-assistant",
+   "url": "http://agentkit.svc-x.internal:8080/job-search-assistant",
+   "access": null,
+   "counters": {
+    "requestsPerMinute": 0,
+    "requestsPerDay": 0,
+    "requestsPerMonth": 0
+   }
+  },
+  {
+   "health": {
+    "state": "unknown",
+    "consecutiveFailures": 0
+   },
+   "name": "lead-research",
+   "url": "http://agentkit.svc-x.internal:8080/lead-research",
+   "access": null,
+   "counters": {
+    "requestsPerMinute": 0,
+    "requestsPerDay": 0,
+    "requestsPerMonth": 0
+   }
+  },
+  {
+   "health": {
+    "state": "unknown",
+    "consecutiveFailures": 0
+   },
+   "name": "local-events-finder",
+   "url": "http://agentkit.svc-x.internal:8080/local-events-finder",
+   "access": null,
+   "counters": {
+    "requestsPerMinute": 0,
+    "requestsPerDay": 0,
+    "requestsPerMonth": 0
+   }
+  },
+  {
+   "health": {
+    "state": "unknown",
+    "consecutiveFailures": 0
+   },
+   "name": "local-guide",
+   "url": "http://agentkit.svc-x.internal:8080/local-guide",
+   "access": null,
+   "counters": {
+    "requestsPerMinute": 0,
+    "requestsPerDay": 0,
+    "requestsPerMonth": 0
+   }
+  },
+  {
+   "health": {
+    "state": "unknown",
+    "consecutiveFailures": 0
+   },
+   "name": "market-research",
+   "url": "http://agentkit.svc-x.internal:8080/market-research",
+   "access": null,
+   "counters": {
+    "requestsPerMinute": 0,
+    "requestsPerDay": 0,
+    "requestsPerMonth": 0
+   }
+  },
+  {
+   "health": {
+    "state": "unknown",
+    "consecutiveFailures": 0
+   },
+   "name": "meal-prep-planner",
+   "url": "http://agentkit.svc-x.internal:8080/meal-prep-planner",
+   "access": null,
+   "counters": {
+    "requestsPerMinute": 0,
+    "requestsPerDay": 0,
+    "requestsPerMonth": 0
+   }
+  },
+  {
+   "health": {
+    "state": "unknown",
+    "consecutiveFailures": 0
+   },
+   "name": "meeting-prep",
+   "url": "http://agentkit.svc-x.internal:8080/meeting-prep",
+   "access": null,
+   "counters": {
+    "requestsPerMinute": 0,
+    "requestsPerDay": 0,
+    "requestsPerMonth": 0
+   }
+  },
+  {
+   "health": {
+    "state": "unknown",
+    "consecutiveFailures": 0
+   },
+   "name": "news-briefer",
+   "url": "http://agentkit.svc-x.internal:8080/news-briefer",
+   "access": null,
+   "counters": {
+    "requestsPerMinute": 0,
+    "requestsPerDay": 0,
+    "requestsPerMonth": 0
+   }
+  },
+  {
+   "health": {
+    "state": "unknown",
+    "consecutiveFailures": 0
+   },
+   "name": "productivity-planner",
+   "url": "http://agentkit.svc-x.internal:8080/productivity-planner",
+   "access": null,
+   "counters": {
+    "requestsPerMinute": 0,
+    "requestsPerDay": 0,
+    "requestsPerMonth": 10
+   }
+  },
+  {
+   "health": {
+    "state": "unknown",
+    "consecutiveFailures": 0
+   },
+   "name": "property-scout",
+   "url": "http://agentkit.svc-x.internal:8080/property-scout",
+   "access": null,
+   "counters": {
+    "requestsPerMinute": 0,
+    "requestsPerDay": 0,
+    "requestsPerMonth": 0
+   }
+  },
+  {
+   "health": {
+    "state": "unknown",
+    "consecutiveFailures": 0
+   },
+   "name": "recipe-finder",
+   "url": "http://agentkit.svc-x.internal:8080/recipe-finder",
+   "access": null,
+   "counters": {
+    "requestsPerMinute": 0,
+    "requestsPerDay": 0,
+    "requestsPerMonth": 0
+   }
+  },
+  {
+   "health": {
+    "state": "unknown",
+    "consecutiveFailures": 0
+   },
+   "name": "research",
+   "url": "http://agentkit.svc-x.internal:8080/research",
+   "access": null,
+   "counters": {
+    "requestsPerMinute": 0,
+    "requestsPerDay": 0,
+    "requestsPerMonth": 0
+   }
+  },
+  {
+   "health": {
+    "state": "unknown",
+    "consecutiveFailures": 0
+   },
+   "name": "researcher",
+   "url": "http://agentkit.svc-x.internal:8080/researcher",
+   "access": null,
+   "counters": {
+    "requestsPerMinute": 0,
+    "requestsPerDay": 0,
+    "requestsPerMonth": 0
+   }
+  },
+  {
+   "health": {
+    "state": "unknown",
+    "consecutiveFailures": 0
+   },
+   "name": "restaurant-scout",
+   "url": "http://agentkit.svc-x.internal:8080/restaurant-scout",
+   "access": null,
+   "counters": {
+    "requestsPerMinute": 0,
+    "requestsPerDay": 0,
+    "requestsPerMonth": 0
+   }
+  },
+  {
+   "health": {
+    "state": "unknown",
+    "consecutiveFailures": 0
+   },
+   "name": "science-tutor",
+   "url": "http://agentkit.svc-x.internal:8080/science-tutor",
+   "access": null,
+   "counters": {
+    "requestsPerMinute": 0,
+    "requestsPerDay": 0,
+    "requestsPerMonth": 0
+   }
+  },
+  {
+   "health": {
+    "state": "unknown",
+    "consecutiveFailures": 0
+   },
+   "name": "shopping-researcher",
+   "url": "http://agentkit.svc-x.internal:8080/shopping-researcher",
+   "access": null,
+   "counters": {
+    "requestsPerMinute": 0,
+    "requestsPerDay": 0,
+    "requestsPerMonth": 0
+   }
+  },
+  {
+   "health": {
+    "state": "unknown",
+    "consecutiveFailures": 0
+   },
+   "name": "study-helper",
+   "url": "http://agentkit.svc-x.internal:8080/study-helper",
+   "access": null,
+   "counters": {
+    "requestsPerMinute": 0,
+    "requestsPerDay": 0,
+    "requestsPerMonth": 0
+   }
+  },
+  {
+   "health": {
+    "state": "unknown",
+    "consecutiveFailures": 0
+   },
+   "name": "tech-support",
+   "url": "http://agentkit.svc-x.internal:8080/tech-support",
+   "access": null,
+   "counters": {
+    "requestsPerMinute": 0,
+    "requestsPerDay": 0,
+    "requestsPerMonth": 0
+   }
+  },
+  {
+   "health": {
+    "state": "unknown",
+    "consecutiveFailures": 0
+   },
+   "name": "translation",
+   "url": "http://agentkit.svc-x.internal:8080/translation",
+   "access": null,
+   "counters": {
+    "requestsPerMinute": 0,
+    "requestsPerDay": 0,
+    "requestsPerMonth": 0
+   }
+  },
+  {
+   "health": {
+    "state": "unknown",
+    "consecutiveFailures": 0
+   },
+   "name": "travel-planner",
+   "url": "http://agentkit.svc-x.internal:8080/travel-planner",
+   "access": null,
+   "counters": {
+    "requestsPerMinute": 0,
+    "requestsPerDay": 0,
+    "requestsPerMonth": 0
+   }
+  },
+  {
+   "health": {
+    "state": "unknown",
+    "consecutiveFailures": 0
+   },
+   "name": "weather-planner",
+   "url": "http://agentkit.svc-x.internal:8080/weather-planner",
+   "access": null,
+   "counters": {
+    "requestsPerMinute": 0,
+    "requestsPerDay": 0,
+    "requestsPerMonth": 0
+   }
+  },
+  {
+   "health": {
+    "state": "unknown",
+    "consecutiveFailures": 0
+   },
+   "name": "writer",
+   "url": "http://agentkit.svc-x.internal:8080/writer",
+   "access": null,
+   "counters": {
+    "requestsPerMinute": 0,
+    "requestsPerDay": 0,
+    "requestsPerMonth": 764
+   }
+  }
+ ]
+}

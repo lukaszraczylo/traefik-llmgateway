@@ -1,0 +1,10 @@
+{
+ "kind": "targetcaller",
+ "window": "day",
+ "metrics": [
+  "req"
+ ],
+ "rows": [],
+ "span": 7,
+ "offset": 0
+}
