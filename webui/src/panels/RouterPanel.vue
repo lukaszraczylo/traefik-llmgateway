@@ -3,6 +3,7 @@ import { Badge, Button, DescriptionItem, DescriptionList, Heatmap, StatBar } fro
 import { computed, ref, watch } from 'vue'
 
 import RouterForm from '@/components/forms/RouterForm.vue'
+import { decisionView } from '@/lib/decision-view'
 import { formatCompactCount, formatExactInt } from '@/lib/format'
 import { formatSel } from '@/lib/panel-selection'
 import { routerPanelModel } from '@/lib/router-panel'
@@ -22,6 +23,7 @@ const nav = useNavStore()
 
 const view = computed(() => models.routers.find((r) => r.name === props.id))
 const model = computed(() => (view.value ? routerPanelModel(view.value) : null))
+const decision = computed(() => (view.value ? decisionView(view.value) : null))
 const known = computed(() => new Set(models.rows.map((r) => r.id)))
 const requests = computed(() => view.value?.stats?.requests ?? 0)
 const scope = computed(() => (view.value?.stats?.scope === 'shared' ? 'all replicas, this month (UTC)' : 'this gateway instance, since start'))
@@ -144,6 +146,31 @@ watch(() => props.id, () => (snippetOpen.value = false))
               :cell-title="(v: number | null, r: string, c: string) => `live ${r}, shadow ${c}: ${formatExactInt(v ?? 0)}`"
             />
           </div>
+        </PanelSection>
+
+        <PanelSection v-if="decision" title="Decision model">
+          <p class="text-muted-foreground m-0 font-mono text-xs" data-testid="decision-summary">{{ decision.summary }}</p>
+          <p v-if="decision.grid" class="text-muted-foreground m-0 text-xs">Rows: heuristic tier. Columns: model tier.</p>
+          <div v-if="decision.grid" data-wb-ignore-numeric>
+            <Heatmap
+              :values="decision.grid.values"
+              :row-labels="decision.grid.rows"
+              :col-labels="decision.grid.cols"
+              tone="info"
+              :levels="5"
+              fit
+              :min="0"
+              show-legend
+              label="Heuristic tier by model tier request counts"
+              :cell-title="(v: number | null, r: string, c: string) => `heuristic ${r}, model ${c}: ${formatExactInt(v ?? 0)}`"
+            />
+          </div>
+          <p v-else class="text-muted-foreground m-0 text-sm">No decisions recorded yet.</p>
+          <DescriptionList variant="inline" size="sm" density="compact">
+            <DescriptionItem v-for="o in decision.outcomes" :key="o.name" :term="o.name">
+              <span class="font-mono tabular-nums">{{ formatExactInt(o.count) }}</span>
+            </DescriptionItem>
+          </DescriptionList>
         </PanelSection>
 
         <PanelSection title="Settings">

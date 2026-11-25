@@ -138,6 +138,8 @@ function configWarnings(path: string, body: Obj) {
 
 const ROUTER_MIN_REQUESTS = 120
 const SHADOW_CLASSIFIER = 'v3'
+const DECISION_PROVIDER = 'gx10'
+const DECISION_OUTCOMES = ['agree', 'override', 'lowconf', 'timeout', 'error', 'breaker', 'cache']
 
 /** Scales counts by `factor`; with `total`, the rounding remainder lands on the largest row so the rows still sum to it. */
 function scaleCounts(rows: Obj[], factor: number, total?: number) {
@@ -149,6 +151,7 @@ function scaleCounts(rows: Obj[], factor: number, total?: number) {
 
 function routerEscalations(path: string, body: Obj) {
   if (path !== '/admin/api/overview' && path !== '/admin/api/catalog') return
+  let decided = false
   eachRouter(body, (r) => {
     const tiers: string[] = (r.tiers ?? []).map((t: Obj) => t.name)
     if (tiers.length < 2) return
@@ -161,6 +164,12 @@ function routerEscalations(path: string, body: Obj) {
     stats.requests = target
     for (const list of [stats.tiers, stats.reasons]) scaleCounts(list ?? [], factor, target)
     scaleCounts(stats.outcomes ?? [], factor)
+    if (!decided) {
+      decided = true
+      r.decision = { provider: DECISION_PROVIDER, path: '/v1/decide', mode: 'live', timeout: '500ms', minProb: 700, band: 100 }
+      stats.decision = tiers.flatMap((heuristic, i) => tiers.map((model, j) => ({ heuristic, model, count: i === j ? 30 - i * 6 : Math.abs(i - j) === 1 ? 12 : 0 }))).filter((c) => c.count > 0)
+      stats.decisionOutcomes = DECISION_OUTCOMES.map((name, i) => ({ name, count: 60 - i * 9 }))
+    }
     r.shadowEnabled = true
     r.shadowClassifier = SHADOW_CLASSIFIER
     r.fellBack = 7
