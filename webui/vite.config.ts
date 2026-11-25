@@ -8,6 +8,11 @@ import vue from '@vitejs/plugin-vue'
 // vitest.config.ts or a triple-slash type reference.
 import { defineConfig } from 'vitest/config'
 
+import { mockAdminApi } from './mock/server.ts'
+
+// MOCK=1 serves /admin/api/* from webui/mock (dev server only; apply: 'serve' keeps it out of vite build).
+const useMock = process.env.MOCK === '1'
+
 // https://vite.dev/config/
 export default defineConfig({
   // admin.go serves this build's index.html at GET /admin and every hashed
@@ -15,7 +20,7 @@ export default defineConfig({
   // emitted index.html's own <script>/<link> references resolve correctly
   // regardless of what path the browser first loaded the page from.
   base: '/admin/',
-  plugins: [vue(), tailwindcss()],
+  plugins: [vue(), tailwindcss(), ...(useMock ? [mockAdminApi()] : [])],
   resolve: {
     alias: {
       '@': fileURLToPath(new URL('./src', import.meta.url)),
@@ -43,12 +48,14 @@ export default defineConfig({
     // (ADMIN_API_PROXY_TARGET) rather than hardcoded, since which gateway
     // instance a developer is pointed at varies by machine; the fallback
     // matches this repo's own `run-local`/integration default port.
-    proxy: {
-      '/admin/api': {
-        target: process.env.ADMIN_API_PROXY_TARGET ?? 'http://localhost:8080',
-        changeOrigin: true,
-      },
-    },
+    proxy: useMock
+      ? undefined
+      : {
+          '/admin/api': {
+            target: process.env.ADMIN_API_PROXY_TARGET ?? 'http://localhost:8080',
+            changeOrigin: true,
+          },
+        },
   },
   test: {
     // Deliberately narrow: lib/'s pure modules (search-expand.ts,
