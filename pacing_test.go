@@ -414,3 +414,16 @@ func TestPacing_ConcurrentPacedRequestsCappedPerUser(t *testing.T) {
 	assert.LessOrEqual(t, paced.Load(), int64(maxConcurrentPaced), "requests above the cap proceed undelayed")
 	assert.Greater(t, paced.Load(), int64(0))
 }
+
+func TestPacing_EventMessageRoundsDelay(t *testing.T) {
+	_, gw := pacingGateway(t, nil, &LimitsConfig{RequestsPerMinute: 10})
+	scopes := []limitScope{{kind: "user", id: "a"}}
+	gw.recordPacedEvent(scopes, 8333333333*time.Nanosecond)
+	var msgs []string
+	for _, ev := range gw.events.ring.snapshot(eventRingCap) {
+		if ev.Kind == eventKindPaced {
+			msgs = append(msgs, ev.Message)
+		}
+	}
+	assert.Equal(t, []string{"request paced 8.3s"}, msgs)
+}
