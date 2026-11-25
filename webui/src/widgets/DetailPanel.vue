@@ -18,7 +18,7 @@ function onOpen(open: boolean): void {
         <SheetTitle class="truncate">{{ title }}</SheetTitle>
         <SheetDescription class="sr-only">{{ kind }} details for {{ title }}</SheetDescription>
       </SheetHeader>
-      <div class="min-w-0 flex-1 overflow-y-auto">
+      <div class="min-w-0 flex-1 overflow-y-auto" data-panel-scroll>
         <slot />
       </div>
     </SheetContent>

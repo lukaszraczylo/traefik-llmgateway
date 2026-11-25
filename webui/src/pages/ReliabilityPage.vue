@@ -9,6 +9,7 @@ import { loadState } from '@/lib/load-state'
 import { pageWindow } from '@/lib/paging'
 import { sortThenSlice } from '@/lib/table-sort'
 import type { SortSpec } from '@/lib/table-sort'
+import { statusRank } from '@/lib/breaker-severity'
 import { breakerRows, ratePercentSeries } from '@/lib/provider-rate'
 import type { BreakerRow } from '@/lib/provider-rate'
 import { scopeId } from '@/lib/scope'
@@ -31,6 +32,7 @@ const MAX_AXIS_LABELS = 6
 interface BreakerView extends BreakerRow {
   until: string
   status: string
+  statusRank: number
 }
 
 const dashboard = useDashboardStore()
@@ -137,6 +139,7 @@ const breakers = computed<BreakerView[]>(() => {
     ...r,
     until: r.state === 'open' ? formatUntil(r.openUntil) || 'due' : '',
     status: r.degraded ? 'degraded' : r.state,
+    statusRank: statusRank(r.degraded ? 'degraded' : r.state),
   }))
 })
 const phone = ref(false)
@@ -148,7 +151,8 @@ const breakerPageSize = computed(() => (phone.value ? BREAKER_PAGE_SIZE_PHONE : 
 const breakerPage = ref(1)
 const breakerWindow = computed(() => pageWindow(breakers.value.length, breakerPageSize.value, breakerPage.value - 1))
 const breakerSort = ref<SortSpec | null>(null)
-const breakerPaged = computed(() => sortThenSlice(breakers.value, breakerSort.value, breakerPageSize.value, breakerWindow.value.index))
+const breakerSortSpec = computed<SortSpec | null>(() => (breakerSort.value?.key === 'status' ? { ...breakerSort.value, key: 'statusRank' } : breakerSort.value))
+const breakerPaged = computed(() => sortThenSlice(breakers.value, breakerSortSpec.value, breakerPageSize.value, breakerWindow.value.index))
 function onBreakerSort(next: SortSpec | null): void {
   breakerSort.value = next
   breakerPage.value = 1

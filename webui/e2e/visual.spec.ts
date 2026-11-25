@@ -5,7 +5,7 @@ import { expect, test } from '@playwright/test'
 import type { Page } from '@playwright/test'
 
 import { PAGE_IDS } from '../src/lib/pages'
-import { collectConsoleErrors, runChecks } from './checks'
+import { collectConsoleErrors, expandPanelViewport, runChecks } from './checks'
 
 const SCENARIOS = ['live', 'empty', 'limits-hot', 'breaker-open', 'redis-down', 'auth-401', 'huge'] as const
 const VIEWPORTS = {
@@ -43,7 +43,8 @@ async function sampleIds(page: Page, scenario: string): Promise<Record<string, s
     'provider-degraded': `provider:${encodeURIComponent('amd')}`,
     'provider-open': `provider:${encodeURIComponent('alibaba')}`,
     router: `router:${encodeURIComponent(catalog.routers[0].name)}`,
-    target: `target:${encodeURIComponent((targets.mcpServers[0] ?? targets.agents[0]).name)}`,
+    'router-uni': `router:${encodeURIComponent(catalog.routers[1].name)}`,
+    target: `target:${encodeURIComponent(targets.mcpServers[0] ? `mcp/${targets.mcpServers[0].name}` : `agent/${targets.agents[0].name}`)}`,
   }
 }
 
@@ -57,6 +58,7 @@ const PANEL_PAGES: Array<{ page: (typeof PAGE_IDS)[number]; kind: string; scenar
   { page: 'models', kind: 'provider-open', scenario: 'breaker-open' },
   { page: 'routers', kind: 'router' },
   { page: 'routers', kind: 'router', scenario: 'router-escalations' },
+  { page: 'routers', kind: 'router-uni' },
   { page: 'targets', kind: 'target' },
 ]
 
@@ -83,6 +85,12 @@ async function exercise(page: Page, label: string, hash: string, scenario: strin
   mkdirSync(OUT, { recursive: true })
   const name = `${label}-${scenario}-${viewport}-${theme}`
   await page.screenshot({ path: join(OUT, `${name}.png`), fullPage: true })
+  // Panels are measured and captured whole: a Sheet scrolls inside the viewport, which fullPage cannot see.
+  const hiddenAfterExpand = await expandPanelViewport(page)
+  if (hiddenAfterExpand !== null) {
+    await page.locator('[data-panel-scroll]').screenshot({ path: join(OUT, `${name}-full.png`) })
+    expect.soft(hiddenAfterExpand, `${name}: panel still scrolls after expanding the viewport`).toBe(0)
+  }
   const results = await runChecks(page, errors())
   mkdirSync(join(OUT, 'results'), { recursive: true })
   writeFileSync(join(OUT, 'results', `${name}.json`), JSON.stringify({ label, scenario, viewport, theme, results, diag }))
@@ -185,3 +193,44 @@ for (const theme of THEMES) {
     await expect(page.getByTestId('clamped-range')).toBeVisible()
   })
 }
+
+// Events with a filter set in the hash: the chips show and the feed narrows. Also the Reliability handoff param.
+const EVENT_FILTER_HASHES = { 'events-filter': '#events?kind=upstream&route=chat', 'events-provider': '#events?provider=alibaba' } as const
+for (const [label, hash] of Object.entries(EVENT_FILTER_HASHES)) {
+  for (const [vp, size] of Object.entries(VIEWPORTS)) {
+    for (const theme of THEMES) {
+      test(`${label} live ${vp} ${theme}`, async ({ page }) => {
+        await page.setViewportSize(size)
+        await exercise(page, label, hash, 'live', vp as keyof typeof VIEWPORTS, theme)
+        await expect(page.getByRole('group', { name: /filter/i }).first()).toBeVisible()
+        await expect(page.getByText(label === 'events-filter' ? /Kind.*Upstream error/i : /Provider.*alibaba/i).first()).toBeVisible()
+      })
+    }
+  }
+}
+
+test('events pause and resume the live tail', async ({ page }) => {
+  await page.setViewportSize(VIEWPORTS.desktop)
+  let polls = 0
+  page.on('request', (r) => r.url().includes('/admin/api/events') && polls++)
+  await visit(page, '#events', 'live', 'light')
+  const status = page.getByTestId('events-live-status')
+  await expect(status).toContainText('Live')
+  await page.getByRole('button', { name: 'Pause' }).click()
+  await expect(status).toContainText('Paused')
+  const paused = polls
+  await page.waitForTimeout(6500)
+  expect(polls, 'no events request while paused').toBe(paused)
+  await page.getByRole('button', { name: 'Resume' }).click()
+  await expect(status).toContainText('Live')
+  await expect.poll(() => polls).toBeGreaterThan(paused)
+})
+
+test('events rows are capped and show more', async ({ page }) => {
+  await page.setViewportSize(VIEWPORTS.desktop)
+  await visit(page, '#events', 'huge', 'light')
+  const rows = page.getByRole('list', { name: 'Events' }).locator('li')
+  expect(await rows.count()).toBeLessThanOrEqual(50)
+  await page.getByRole('button', { name: /Show \d+ more/ }).click()
+  expect(await rows.count()).toBeGreaterThan(50)
+})

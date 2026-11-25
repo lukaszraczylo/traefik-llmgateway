@@ -131,6 +131,17 @@ function configWarnings(path: string, body: Obj) {
   }
 }
 
+const ROUTER_MIN_REQUESTS = 120
+const SHADOW_CLASSIFIER = 'v3'
+
+/** Scales counts by `factor`; with `total`, the rounding remainder lands on the largest row so the rows still sum to it. */
+function scaleCounts(rows: Obj[], factor: number, total?: number) {
+  for (const row of rows) row.count = Math.round(row.count * factor)
+  if (total === undefined || rows.length === 0) return
+  const largest = rows.reduce((a, b) => (b.count > a.count ? b : a))
+  largest.count += total - rows.reduce((sum, row) => sum + row.count, 0)
+}
+
 function routerEscalations(path: string, body: Obj) {
   if (path !== '/admin/api/overview' && path !== '/admin/api/catalog') return
   eachRouter(body, (r) => {
@@ -140,9 +151,13 @@ function routerEscalations(path: string, body: Obj) {
     stats.escalations = tiers.slice(0, -1).map((from, i) => ({ from, to: tiers[i + 1], count: 14 - i * 5 }))
     if (tiers.length > 2) stats.escalations.push({ from: tiers[0], to: tiers[tiers.length - 1], count: 3 })
     stats.shadow = tiers.flatMap((live, i) => tiers.map((shadow, j) => ({ live, shadow, count: i === j ? 40 - i * 9 : 4 + ((i + j) % 3) * 3 })))
-    stats.requests = Math.max(stats.requests ?? 0, 120)
+    const target = Math.max(stats.requests ?? 0, ROUTER_MIN_REQUESTS)
+    const factor = target / Math.max(stats.requests ?? 0, 1)
+    stats.requests = target
+    for (const list of [stats.tiers, stats.reasons]) scaleCounts(list ?? [], factor, target)
+    scaleCounts(stats.outcomes ?? [], factor)
     r.shadowEnabled = true
-    r.shadowClassifier ??= 'v2'
+    r.shadowClassifier = SHADOW_CLASSIFIER
     r.fellBack = 7
   })
 }
@@ -312,6 +327,10 @@ function huge(path: string, body: Obj) {
     body.rows = expandRows(body.rows, body.kind === 'provider' ? (id) => copies(HUGE_FACTOR, (n) => hugeProvider(id, n)) : hugeModelIds)
   } else if (path === '/admin/api/usage/totals' && body.kind === 'usermodel') {
     body.rows = expandRows(body.rows, hugeModelIds)
+  } else if (path === '/admin/api/targets') {
+    for (const key of ['mcpServers', 'agents']) {
+      body[key] = (body[key] as Obj[]).flatMap((t) => copies(HUGE_USER_FACTOR, (n) => (n === 0 ? t : { ...t, name: `${t.name}-${n + 1}` })))
+    }
   }
 }
 

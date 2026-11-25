@@ -223,6 +223,27 @@ export async function noLiteralNaNUndefined(page: Page): Promise<CheckResult> {
   return { name: 'no-literal-NaN-undefined', ok: !m, detail: ctx }
 }
 
+const PANEL_SCROLL = '[data-panel-scroll]'
+const MAX_EXPANDED_VIEWPORT_PX = 8000
+
+/**
+ * Grows the viewport by the panel's hidden scroll height so the whole panel is on screen.
+ * A fullPage screenshot misses the Sheet's inner scroll, and axe and the geometry checks skip
+ * content clipped by a scroller, so every panel check runs after this. Returns the remaining
+ * hidden height (0 when the whole panel fits), or null when no panel is open.
+ */
+export async function expandPanelViewport(page: Page): Promise<number | null> {
+  const box = page.locator(PANEL_SCROLL)
+  if ((await box.count()) === 0) return null
+  const { hidden } = await box.evaluate((el) => ({ hidden: el.scrollHeight - el.clientHeight }))
+  const size = page.viewportSize()
+  if (hidden > 0 && size) {
+    await page.setViewportSize({ width: size.width, height: Math.min(size.height + hidden, MAX_EXPANDED_VIEWPORT_PX) })
+    await page.waitForTimeout(300)
+  }
+  return box.evaluate((el) => Math.max(0, el.scrollHeight - el.clientHeight))
+}
+
 async function guarded(name: CheckName, run: () => Promise<CheckResult>): Promise<CheckResult> {
   try {
     return await run()

@@ -10,7 +10,6 @@ import { sortThenSlice } from '@/lib/table-sort'
 import type { SortSpec } from '@/lib/table-sort'
 import { wbColumns } from '@/lib/wb-columns'
 import RouterPanel from '@/panels/RouterPanel.vue'
-import { useFiltersStore } from '@/stores/filters'
 import { useModelsStore } from '@/stores/models'
 import { useNavStore } from '@/stores/nav'
 import StateView from '@/widgets/StateView.vue'
@@ -30,15 +29,10 @@ interface Row {
   escalations: number | null
 }
 
-const filters = useFiltersStore()
 const models = useModelsStore()
 const nav = useNavStore()
 
 onMounted(() => void models.fetch())
-watch(
-  () => filters.range,
-  () => void models.fetch(),
-)
 
 const rows = computed<Row[]>(() =>
   models.routers.map((r) => ({
