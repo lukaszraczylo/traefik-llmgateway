@@ -446,3 +446,36 @@ func TestRouterDecisionOutcomeNames(t *testing.T) {
 		t.Fatalf("got %d outcomes", len(seen))
 	}
 }
+
+func TestRouterDecisionIgnoresRequestRecorders(t *testing.T) {
+	f := newDecisionFixture(t, 3, "", okHandler)
+	var attempts, latencies int64
+	ctx := withAttemptRecorder(context.Background(), func(*http.Response, error) { atomic.AddInt64(&attempts, 1) })
+	ctx = withLatencyRecorder(ctx, func(latencySample) { atomic.AddInt64(&latencies, 1) })
+	if a := f.g.askDecisionModel(ctx, f.rt, "s"); a.outcome != "" {
+		t.Fatalf("outcome %q", a.outcome)
+	}
+	if n := atomic.LoadInt64(&attempts); n != 0 {
+		t.Fatalf("attempt recorder called %d times", n)
+	}
+	if n := atomic.LoadInt64(&latencies); n != 0 {
+		t.Fatalf("latency recorder called %d times", n)
+	}
+}
+
+func TestRouterDecisionNonOpenAIProviderIsError(t *testing.T) {
+	f := newDecisionFixture(t, 3, "", okHandler)
+	f.g.adapters["gx10"] = &fakeAdapter{}
+	if a := f.g.askDecisionModel(context.Background(), f.rt, "s"); a.outcome != decisionError {
+		t.Fatalf("outcome %q", a.outcome)
+	}
+}
+
+func TestRouterDecisionParentCancelIsError(t *testing.T) {
+	f := newDecisionFixture(t, 3, "", okHandler)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if a := f.g.askDecisionModel(ctx, f.rt, "s"); a.outcome != decisionError {
+		t.Fatalf("outcome %q", a.outcome)
+	}
+}

@@ -366,7 +366,7 @@ func (g *Gateway) callDecisionModel(ctx context.Context, rt *smartRouter, state 
 	if body == nil {
 		return 0, 0, decisionError
 	}
-	callCtx, cancel := context.WithTimeout(ctx, cfg.timeout)
+	callCtx, cancel := context.WithTimeout(withoutUpstreamAccounting(ctx), cfg.timeout)
 	defer cancel()
 	probe := &http.Request{Header: http.Header{}}
 	oa.injectAuth(probe)
@@ -398,4 +398,11 @@ func decisionFailure(parent, call context.Context) string {
 		return decisionTimeout
 	}
 	return decisionError
+}
+
+// withoutUpstreamAccounting hides the request's recorders so the decision call is not billed to the user's request.
+func withoutUpstreamAccounting(ctx context.Context) context.Context {
+	ctx = context.WithValue(ctx, attemptRecorderCtxKey{}, nil)
+	ctx = context.WithValue(ctx, latencyRecorderCtxKey{}, nil)
+	return context.WithValue(ctx, firstByteCtxKey{}, nil)
 }
