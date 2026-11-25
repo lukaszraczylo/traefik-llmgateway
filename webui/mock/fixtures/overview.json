@@ -1175,7 +1175,8 @@
     "DeepSeek-V4.1-Flash-EXL3": {
      "contextTokens": 524288,
      "inputPerMTokUsd": 0,
-     "outputPerMTokUsd": 0
+     "outputPerMTokUsd": 0,
+     "vision": true
     },
     "Inkling-2-Mini": {
      "contextTokens": 32768,
@@ -1185,7 +1186,8 @@
     "Qwen3.8-27B": {
      "contextTokens": 262144,
      "inputPerMTokUsd": 0,
-     "outputPerMTokUsd": 0
+     "outputPerMTokUsd": 0,
+     "vision": false
     },
     "current": {
      "inputPerMTokUsd": 0,

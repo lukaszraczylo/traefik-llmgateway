@@ -3,7 +3,8 @@ import { Button, DescriptionItem, DescriptionList, StatusBadge } from '@perfect-
 import { computed, ref } from 'vue'
 
 import { copyText } from '@/lib/clipboard'
-import { formatAgo, formatCompactCount, formatLatencyMs, formatUntil } from '@/lib/format'
+import { formatCompactCount, formatLatencyMs, formatUntil } from '@/lib/format'
+import { formatLastSeen } from '@/lib/last-seen'
 import { breakerRows, providerRateStatus, providerSuccessRate } from '@/lib/provider-rate'
 import { useCopyFeedback } from '@/composables/useCopyFeedback'
 import { useDashboardStore } from '@/stores/dashboard'
@@ -29,7 +30,10 @@ const breaker = computed(() => breakerRows(dashboard.overview).find((b) => b.pro
 const status = computed(() => (breaker.value?.degraded ? 'degraded' : (breaker.value?.state ?? 'closed')))
 const until = computed(() => formatUntil(breaker.value?.openUntil))
 
-const lastDiscovery = computed(() => formatAgo(provider.value?.lastRefresh).trim().slice(1, -1) || '—')
+const lastDiscovery = computed(() => {
+  const ms = Date.parse(provider.value?.lastRefresh ?? '')
+  return formatLastSeen(Number.isNaN(ms) || ms <= 0 ? undefined : Math.floor(ms / 1000))
+})
 const perf = computed(() => models.providerPerf.find((r) => r.id === props.id))
 const successRate = computed(() => providerSuccessRate(provider.value?.attemptsDay ?? 0, provider.value?.failuresDay ?? 0))
 
@@ -87,7 +91,9 @@ function showAll(): void {
         </PanelSection>
 
         <PanelSection title="Models">
-          <p v-if="providerModels.length === 0" class="text-muted-foreground m-0 text-sm">No models listed for this provider.</p>
+          <p v-if="providerModels.length === 0" class="text-muted-foreground m-0 text-sm break-words">
+            No models discovered<template v-if="provider.lastErr">. Last error: {{ provider.lastErr }}</template><template v-else> for this provider.</template>
+          </p>
           <template v-else>
             <ul class="m-0 flex list-none flex-col p-0" aria-label="Provider models">
               <li v-for="m in shownModels" :key="m.id">

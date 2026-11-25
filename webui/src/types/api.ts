@@ -52,6 +52,8 @@ export interface AdminModelMetaView {
   contextTokens?: number
   inputPerMTokUsd?: number
   outputPerMTokUsd?: number
+  /** Explicit modelMeta.vision; absent when unset (unknown). */
+  vision?: boolean
 }
 
 /**

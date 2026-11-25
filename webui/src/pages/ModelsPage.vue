@@ -5,8 +5,8 @@ import { computed, onMounted, reactive, watch } from 'vue'
 
 import { formatCompactCount, formatContextWindow, formatModelCostHover } from '@/lib/format'
 import { loadState } from '@/lib/load-state'
-import { NO_KIND, groupByProvider, priceStatus, selectModels } from '@/lib/models-view'
-import type { ModelSelection, PriceStatus } from '@/lib/models-view'
+import { NO_KIND, groupByProvider, priceStatus, selectModels, sortThenSlice } from '@/lib/models-view'
+import type { ModelSelection, PriceStatus, SortSpec } from '@/lib/models-view'
 import { pageWindow } from '@/lib/paging'
 import { resolveSel } from '@/lib/panel-selection'
 import { breakerRows, providerRateStatus, providerSuccessRate } from '@/lib/provider-rate'
@@ -19,6 +19,7 @@ import { useDashboardStore } from '@/stores/dashboard'
 import { useFiltersStore } from '@/stores/filters'
 import { useModelsStore } from '@/stores/models'
 import { useNavStore } from '@/stores/nav'
+import ModelName from '@/widgets/ModelName.vue'
 import StateView from '@/widgets/StateView.vue'
 import type { ViewState } from '@/widgets/StateView.vue'
 import WbTable from '@/widgets/WbTable.vue'
@@ -42,7 +43,7 @@ interface Row {
   context: number | null
   price: PriceStatus
   priceTitle: string
-  requests: number
+  requests: number | null
   health: number | null
   healthTone: 'success' | 'warning' | 'danger' | null
   routers: string[]
@@ -103,6 +104,16 @@ function applyFilters(items: FilterItem[]): void {
   setParams(patch)
 }
 
+const providerNames = computed(() =>
+  [...new Set([...overviewProviders.value.map((p) => p.name), ...models.rows.map((r) => r.providerName)])].sort(),
+)
+watch(
+  [() => providerNames.value.join(','), () => filters.range],
+  () => void models.fetchProviderRequests(providerNames.value),
+  { immediate: true },
+)
+const providerRequests = (provider: string): number | null => models.providerRequests?.[provider] ?? null
+
 // --- Rows and groups ---------------------------------------------------------------
 
 const selected = computed(() => selectModels(models.rows, selection.value))
@@ -116,8 +127,21 @@ const groups = computed(() => {
     const seen = new Set(grouped.map((g) => g.provider))
     for (const p of overviewProviders.value) if (!seen.has(p.name)) grouped.push({ provider: p.name, rows: [], requests: 0 })
   }
-  return grouped.sort((a, b) => b.requests - a.requests || a.provider.localeCompare(b.provider))
+  const total = (p: string): number => providerRequests(p) ?? -1
+  return grouped.sort((a, b) => total(b.provider) - total(a.provider) || a.provider.localeCompare(b.provider))
 })
+
+// --- Sort (hash params sort, dir) ------------------------------------------------
+
+const SORT_KEYS: readonly string[] = ['name', 'kind', 'context', 'price', 'requests']
+const sort = computed<SortSpec | null>(() => {
+  const key = nav.params.sort
+  return key && SORT_KEYS.includes(key) ? { key, direction: nav.params.dir === 'desc' ? 'desc' : 'asc' } : null
+})
+function onSort(next: SortSpec | null): void {
+  pages.clear()
+  setParams({ sort: next?.key ?? '', dir: next?.direction === 'desc' ? 'desc' : '' })
+}
 
 function breakerStatus(provider: string): keyof typeof BREAKER_TONE {
   const b: BreakerRow | undefined = breakers.value.get(provider)
@@ -138,7 +162,7 @@ function toRow(r: (typeof models.rows)[number]): Row {
     context: r.contextTokens ?? null,
     price: priceStatus(r),
     priceTitle: known ? formatModelCostHover(r.inputPerMTokUsd as number, r.outputPerMTokUsd as number) : r.priceSource,
-    requests: r.requests,
+    requests: r.ranked === false ? null : r.requests,
     health: success === null ? null : Math.round(success * 1000) / 10,
     healthTone: status === 'no-traffic' ? null : HEALTH_TONE[status],
     routers,
@@ -175,8 +199,7 @@ function pageOf(provider: string, total: number): number {
   return pageWindow(total, PAGE_SIZE, (pages.get(provider) ?? 1) - 1).index + 1
 }
 function rowsOf(g: (typeof groups.value)[number]): Row[] {
-  const w = pageWindow(g.rows.length, PAGE_SIZE, pageOf(g.provider, g.rows.length) - 1)
-  return g.rows.slice(w.from, w.to).map(toRow)
+  return sortThenSlice(g.rows.map(toRow), sort.value, PAGE_SIZE, pageOf(g.provider, g.rows.length) - 1)
 }
 
 // --- State, selection ----------------------------------------------------------------
@@ -236,13 +259,13 @@ const openSel = computed(() => (models.lastUpdated !== null && dashboard.overvie
                 >
                   <span aria-hidden="true" class="inline-block transition-transform" :class="isOpen(g.provider, i, g.rows.length) ? 'rotate-90' : ''">›</span>
                 </button>
-                <button type="button" class="hover:underline min-w-0 truncate font-mono font-medium" :aria-label="`Open provider ${g.provider}`" @click="nav.openPanel('provider', g.provider)">
+                <button type="button" class="hover:underline min-w-0 truncate font-medium" :aria-label="`Open provider ${g.provider}`" @click="nav.openPanel('provider', g.provider)">
                   {{ g.provider }}
                 </button>
                 <StatusDot :tone="BREAKER_TONE[breakerStatus(g.provider)]" size="md" class="shrink-0" />
                 <span v-if="breakerStatus(g.provider) !== 'closed'" class="text-muted-foreground shrink-0 text-xs">{{ breakerStatus(g.provider) }}</span>
                 <span class="text-muted-foreground ml-auto shrink-0 font-mono text-xs tabular-nums">{{ g.rows.length.toLocaleString('en-US') }} models</span>
-                <span class="text-muted-foreground hidden shrink-0 font-mono text-xs tabular-nums sm:inline">{{ formatCompactCount(g.requests) }} req</span>
+                <span class="text-muted-foreground hidden shrink-0 font-mono text-xs tabular-nums sm:inline">{{ providerRequests(g.provider) === null ? '—' : formatCompactCount(providerRequests(g.provider) as number) }} req</span>
               </div>
               <div v-if="isOpen(g.provider, i, g.rows.length)" class="flex flex-col gap-2 p-1">
                 <WbTable
@@ -250,11 +273,13 @@ const openSel = computed(() => (models.lastUpdated !== null && dashboard.overvie
                   :rows="rowsOf(g)"
                   row-key="id"
                   :active-key="activeModel"
+                  :sort="sort"
+                  @update:sort="onSort"
                   :label="`${g.provider} models`"
                   @row-activate="(row: Row) => nav.openPanel('model', row.id)"
                 >
                   <template #cell-name="{ row }">
-                    <span class="wb-model" :title="(row as Row).id"><span class="wb-model-name">{{ (row as Row).name }}</span></span>
+                    <ModelName :id="(row as Row).id" bare />
                   </template>
                   <template #cell-kind="{ value }">
                     <span :class="value ? '' : 'text-muted-foreground'">{{ value || '—' }}</span>
@@ -263,7 +288,7 @@ const openSel = computed(() => (models.lastUpdated !== null && dashboard.overvie
                   <template #cell-price="{ row }">
                     <Badge :tone="(row as Row).price === 'unpriced' ? 'warning' : 'neutral'" variant="outline" size="sm" :title="(row as Row).priceTitle">{{ (row as Row).price === 'none' ? '—' : (row as Row).price }}</Badge>
                   </template>
-                  <template #cell-requests="{ value }">{{ formatCompactCount(value as number) }}</template>
+                  <template #cell-requests="{ value }">{{ value === null ? '—' : formatCompactCount(value as number) }}</template>
                   <template #cell-health="{ row }">
                     <span v-if="(row as Row).health === null" class="text-muted-foreground">—</span>
                     <span v-else class="inline-flex items-center justify-end gap-1.5">

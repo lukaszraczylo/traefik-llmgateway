@@ -5,8 +5,12 @@ import { buildModelCatalogRows } from '@/lib/model-table-columns'
 import type { ModelCatalogRow } from '@/lib/model-table-columns'
 import { useCatalogStore } from '@/stores/catalog'
 import { useFiltersStore } from '@/stores/filters'
+import { seriesUrl } from '@/lib/range'
 import { hourOrDayWindow } from '@/stores/reliability'
-import type { AdminPerfResponse, AdminPerfRow, AdminRouterView, AdminUsageModelsResponse, HistoryWindow } from '@/types/api'
+import type { AdminPerfResponse, AdminPerfRow, AdminRouterView, AdminSeriesResponse, AdminUsageModelsResponse, HistoryWindow } from '@/types/api'
+
+/** The series endpoint accepts at most this many scopes per call. */
+const PROVIDER_SERIES_MAX = 100
 
 /**
  * useModelsStore fetches the Models page's own catalog table (redesign-
@@ -37,6 +41,8 @@ export const useModelsStore = defineStore('models', {
     perfWindow: { window: 'day' as Extract<HistoryWindow, 'hour' | 'day'>, span: 0 },
     /** GET /admin/api/performance's own latencyEnabled (AdminPerfResponse) — shared by BOTH the model and provider performance requests below (the same admin.stats.latency toggle gates both), surfaced so ModelCatalogTable.vue/ProviderHealthPanel.vue can hint at it rather than silently showing every row's p50/p95 as "—". */
     latencyEnabled: false,
+    /** Requests per provider over the range, from the provider series (not capped like the model ranking); null until loaded or when unavailable. */
+    providerRequests: null as Record<string, number> | null,
     loading: false,
     lastUpdated: null as Date | null,
     error: '',
@@ -44,6 +50,21 @@ export const useModelsStore = defineStore('models', {
     reqId: 0,
   }),
   actions: {
+    /** Sums the per-provider request series for the global range. Failure leaves totals null so the page shows a dash, never a false 0. */
+    async fetchProviderRequests(names: string[]): Promise<void> {
+      if (names.length === 0) return
+      const filters = useFiltersStore()
+      try {
+        const res = await adminFetch<AdminSeriesResponse>(
+          seriesUrl({ scope: names.slice(0, PROVIDER_SERIES_MAX).map((n) => `provider:${n}`), metric: 'req', window: filters.window, span: filters.span }),
+        )
+        const totals: Record<string, number> = {}
+        for (const s of res.series) totals[s.scope.replace(/^provider:/, '')] = s.points.reduce((a, v) => a + v, 0)
+        this.providerRequests = totals
+      } catch (err) {
+        if (!isAuthRejection(err)) this.providerRequests = null
+      }
+    },
     async fetch(): Promise<void> {
       const requestId = ++this.reqId
       this.loading = true

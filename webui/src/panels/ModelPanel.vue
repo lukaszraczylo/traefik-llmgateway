@@ -11,6 +11,7 @@ import { formatSel } from '@/lib/panel-selection'
 import { providerRateStatus, providerSuccessRate } from '@/lib/provider-rate'
 import { seriesUrl } from '@/lib/range'
 import { routersByModel } from '@/lib/router-index'
+import { useDashboardStore } from '@/stores/dashboard'
 import { useFiltersStore } from '@/stores/filters'
 import { useModelsStore } from '@/stores/models'
 import { useNavStore } from '@/stores/nav'
@@ -35,6 +36,7 @@ type Snippet = 'meta' | 'price' | null
 const props = defineProps<{ id: string }>()
 const emit = defineEmits<{ close: [] }>()
 
+const dashboard = useDashboardStore()
 const filters = useFiltersStore()
 const models = useModelsStore()
 const nav = useNavStore()
@@ -45,6 +47,10 @@ const routers = computed(() => {
   if (!r) return []
   const index = routersByModel(models.routers)
   return [...new Set([...(r.routers ?? []), ...(index.get(r.id) ?? [])])].sort()
+})
+const vision = computed(() => {
+  const v = dashboard.overview?.providers.find((p) => p.name === row.value?.providerName)?.modelMeta?.[row.value?.model ?? '']?.vision
+  return v === undefined ? 'unknown' : v ? 'yes' : 'no'
 })
 const status = computed(() => (row.value ? priceStatus(row.value) : 'none'))
 const priced = computed(() => row.value?.inputPerMTokUsd !== undefined && row.value?.outputPerMTokUsd !== undefined)
@@ -111,6 +117,7 @@ function openRouter(name: string): void {
             <DescriptionItem term="Context window">
               <span class="font-mono tabular-nums">{{ row.contextTokens !== undefined ? formatContextWindow(row.contextTokens) : '—' }}</span>
             </DescriptionItem>
+            <DescriptionItem term="Vision">{{ vision }}</DescriptionItem>
             <DescriptionItem term="Aliases">
               <span v-if="row.aliases.length === 0" class="text-muted-foreground">none</span>
               <span v-else class="flex flex-wrap justify-end gap-1">
@@ -140,7 +147,7 @@ function openRouter(name: string): void {
 
         <PanelSection title="Usage in range">
           <DescriptionList variant="inline" size="sm" density="compact">
-            <DescriptionItem term="Requests"><span class="font-mono tabular-nums">{{ formatCompactCount(row.requests) }}</span></DescriptionItem>
+            <DescriptionItem term="Requests"><span class="font-mono tabular-nums">{{ row.ranked === false ? '—' : formatCompactCount(row.requests) }}</span></DescriptionItem>
             <DescriptionItem term="Tokens in / out">
               <span class="font-mono tabular-nums">{{ formatCompactCount(row.tokensIn) }} / {{ formatCompactCount(row.tokensOut) }}</span>
             </DescriptionItem>
@@ -160,7 +167,15 @@ function openRouter(name: string): void {
           <p v-if="routers.length === 0" class="text-muted-foreground m-0 text-sm">No smart router targets this model.</p>
           <ul v-else class="m-0 flex list-none flex-col p-0" aria-label="Routers using this model">
             <li v-for="r in routers" :key="r" class="flex h-8 items-center">
-              <button type="button" class="hover:bg-accent w-full truncate rounded px-2 text-left font-mono text-sm" @click="openRouter(r)">{{ r }}</button>
+              <button
+                type="button"
+                class="hover:bg-accent focus-visible:ring-ring flex w-full items-center justify-between gap-2 rounded px-2 text-left font-mono text-sm underline decoration-dotted underline-offset-4 focus-visible:ring-2 focus-visible:outline-none"
+                :aria-label="`Open router ${r}`"
+                @click="openRouter(r)"
+              >
+                <span class="min-w-0 truncate">{{ r }}</span>
+                <span aria-hidden="true" class="text-muted-foreground shrink-0 no-underline">→</span>
+              </button>
             </li>
           </ul>
         </PanelSection>

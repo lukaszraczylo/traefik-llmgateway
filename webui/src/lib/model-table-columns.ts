@@ -45,6 +45,8 @@ export interface ModelCatalogRow {
   aliases: string[]
   /** Smart routers that target this model. */
   routers?: string[]
+  /** False when the range ranking (capped by the server) has no entry: requests is then 0 by absence, not a measured zero. */
+  ranked?: boolean
   requests: number
   tokensIn: number
   tokensOut: number
@@ -86,6 +88,7 @@ export function buildModelCatalogRows(
         displayFree: m.displayFree,
         aliases: m.aliases ?? [],
         routers: m.routers ?? [],
+        ranked: usage !== undefined,
         requests: usage?.requests ?? 0,
         tokensIn: usage?.tokensIn ?? 0,
         tokensOut: usage?.tokensOut ?? 0,
