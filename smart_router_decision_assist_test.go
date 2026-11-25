@@ -3,6 +3,7 @@ package traefikllmgateway
 import (
 	"context"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -158,6 +159,14 @@ func TestClassifyDecisionShadowCallsEvenWhenSettled(t *testing.T) {
 	assert.Equal(t, 1, stub.calls)
 	assert.Equal(t, 2, cls.rank)
 	assert.Equal(t, smartReasonFloor, cls.reason)
+}
+
+func TestExtractSmartV2KeepsRawHeads(t *testing.T) {
+	long := strings.Repeat("a", 6000) + strings.Repeat("b", 6000)
+	req := map[string]any{"messages": []any{msg("system", strings.Repeat("s", 900)+strings.Repeat("t", 900)), msg("user", long)}}
+	f := extractSmartV2(req, cacheEndpointChat)
+	assert.Equal(t, strings.Repeat("a", 6000)+strings.Repeat("b", 2192), f.ask)
+	assert.Equal(t, strings.Repeat("s", 900)+strings.Repeat("t", 124), f.sysHead)
 }
 
 func TestExtractSmartV2KeepsRawAsk(t *testing.T) {

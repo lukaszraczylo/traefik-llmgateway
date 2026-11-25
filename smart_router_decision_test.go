@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 func decisionInt(v int) *int { return &v }
@@ -269,6 +270,13 @@ func TestRouterDecisionState(t *testing.T) {
 	}
 	if got := decisionState("", ask); got != ask[:8192] {
 		t.Fatalf("empty system len %d", len(got))
+	}
+	if got := decisionState(sys, ask); !strings.HasPrefix(got, sys[:1024]+"\n\n"+ask[:8]) {
+		t.Fatal("head of system and ask not kept")
+	}
+	multi := strings.Repeat("é", 600)
+	if got := decisionState(multi, multi); !utf8.ValidString(got) {
+		t.Fatal("cut inside a rune")
 	}
 }
 

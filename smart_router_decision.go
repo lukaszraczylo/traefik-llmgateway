@@ -266,16 +266,11 @@ type decisionResponse struct {
 
 // decisionState is the text the decision model sees and the cache key source.
 func decisionState(system, ask string) string {
-	if len(ask) > decisionAskCap {
-		ask = ask[:decisionAskCap]
-	}
+	ask = smartRuneHead(ask, decisionAskCap)
 	if system == "" {
 		return ask
 	}
-	if len(system) > decisionSystemCap {
-		system = system[:decisionSystemCap]
-	}
-	return system + "\n\n" + ask
+	return smartRuneHead(system, decisionSystemCap) + "\n\n" + ask
 }
 
 func decisionRequestBody(rt *smartRouter, state string) []byte {

@@ -594,7 +594,7 @@ func (g *Gateway) classifyWithSession(ctx context.Context, rt *smartRouter, req 
 	var assist smartAssist
 	if rt.decision != nil {
 		assist = func(f *smartFeatures) decisionAnswer {
-			return g.askDecisionModel(ctx, rt, decisionState(f.system, f.ask))
+			return g.askDecisionModel(ctx, rt, decisionState(f.sysHead, f.ask))
 		}
 	}
 	if !rt.session.active() || g.routerSessions == nil {
