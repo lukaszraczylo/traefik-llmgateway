@@ -1159,13 +1159,13 @@ decision:
   band: 100
 ```
 
-- **Requirements**: the router needs `classifier: v2`. The `provider` must exist and must have a `pathBaseUrls` prefix that matches `path` on whole path segments. The gateway refuses the config otherwise. With `mode: off` the gateway skips these checks and sends no calls.
-- **When it asks**: the gateway calls the model only when all of these hold. The score step decided the tier, so a session-pinned request never asks. The request has user text. The score lies within `band` of the `minScore` of any tier above the first.
-- **Request**: the gateway sends the first 1024 bytes of the system text, then the newest user ask capped at 8192 bytes. It also sends the tier names, cheapest first. The model returns one probability for each tier. The tier with the highest probability is the model tier.
-- **One-step limit**: the model can move the tier by one step toward its own tier, never further. It can move the tier only when its probability reaches `minProb`. A lower probability counts as `lowconf` and changes nothing. A moved tier gets the routing reason `model`.
+- **Requirements**: the router needs `classifier: v2`. The `provider` must exist and must have a `pathBaseUrls` prefix that matches `path` on whole path segments. The gateway refuses the config otherwise. The provider must also have `type: openai`. Any other type passes validation, but every call fails with the outcome `error`. With `mode: off` the gateway skips these checks and sends no calls.
+- **When it asks**: the gateway calls the model only when all of these hold. The score step decided the tier, so a session-pinned request never asks. The request has user text. The score lies within `band` of the threshold of any tier above the first. The threshold is the tier `minScore` after the live calibration offset. In `live` mode the gateway also skips the call when a floor or keyword rule already sets the tier at or above one step over the heuristic tier, because no answer can change the result. `shadow` mode still calls, so the statistics stay complete.
+- **Request**: the gateway sends the first 1024 bytes of the system text, a blank line, and the first 8192 bytes of the newest user ask. A cut that falls inside a multi-byte character moves back to the character start. The v2 score does not use these cut texts. It also sends the tier names, cheapest first. The model returns one probability for each tier. The tier with the highest probability is the model tier.
+- **One-step limit**: the model can move the tier by one step toward its own tier, never further. It can move the tier only when its probability reaches `minProb`. A lower probability counts as `lowconf` and changes nothing. A moved tier gets the routing reason `model`, unless a floor or keyword rule then raises it.
 - **Shadow and live**: `shadow` makes the same call and records the same outcome, but never changes the tier or the reason. Run `shadow` first, compare the grid, then set `live`.
 - **Floors still win**: keyword rules and floors, such as `toolsMinTier`, run after the model. They only raise a tier. The model can lower a tier, but it cannot go below a floor.
-- **Fallback**: on a timeout, an error, an open breaker, or a low probability, the heuristic tier stands. The request never waits longer than `timeout`. A non-2xx status, bad JSON, or an unknown tier index counts as an error.
+- **Fallback**: on a timeout, an error, an open breaker, or a low probability, the heuristic tier stands. The request never waits longer than `timeout`. A client that cancels during the call records `error` and does not count toward the breaker. A non-2xx status, bad JSON, or an unknown tier index counts as an error.
 - **Breaker**: three failures in a row (timeouts or errors) open the breaker for 30 seconds. The gateway makes no calls while it is open. One success resets the count.
 - **Cache**: each router keeps up to 1024 answers in memory for 10 minutes. The key is a hash of the text sent to the model. The cache holds the tier and the probability, not the text. A hit has the outcome `cache` and applies like a fresh answer.
 - **Outcomes**: a request that is not near a boundary records nothing. Each other request records one outcome.
@@ -1174,14 +1174,15 @@ decision:
 |---|---|
 | `agree` | The model tier equals the heuristic tier. |
 | `override` | The model tier differs and its probability reached `minProb`. In `live` mode the tier moves. |
-| `lowconf` | The model tier differs, but its probability is below `minProb`. |
+| `lowconf` | The probability of the answer is below `minProb`. The gateway checks this first, so an answer that agrees can still be `lowconf`. |
 | `timeout` | The call exceeded `timeout`. |
 | `error` | The call failed, returned a non-2xx status, or returned an answer the gateway cannot read. |
 | `breaker` | The breaker was open, so the gateway made no call. |
 | `cache` | A cached answer served the request. |
 
 - **Metrics**: `llmgateway_router_decision_total{router,outcome}` counts the outcomes. `llmgateway_router_decision_tiers_total{router,heuristic,model}` counts the heuristic tier against the model tier. It counts only answers from the model or the cache.
-- **Admin panel**: the router panel shows the decision settings, a grid with the heuristic tier in the rows and the model tier in the columns, and one row for each outcome. Mass off the diagonal shows where the model disagrees.
+- **Saturation**: the saturation downgrade applies only when the reason is `score`. A tier that the model raised or lowered has the reason `model`, so the downgrade skips it.
+- **Admin panel**: the router panel shows the decision settings and the outcome counts. It also shows a grid with the heuristic tier in the rows and the model tier in the columns. Mass off the diagonal shows where the model disagrees.
 - **No retention**: the gateway does not store or log prompt text for this feature. No log line, event, or counter holds it. The decision call writes no log line.
 
 ### Sessions
@@ -2430,7 +2431,7 @@ or in CI.
   `openUntil` is the zero time when `healthState` is not `"open"`. Each
   alias entry carries its own `modelMeta` too. `usage`
   returns every user's and every group's
-  current-window counter values — `requestsPerMinute`, `requestsPerDay`,
+  current-window counter values — `requestsPerMinute`, `tokensPerMinute`, `requestsPerDay`,
   `rejectionsPerDay` (every `checkAndCount` rejection attributed to this
   scope today — fleet-wide via the shared store, folded into the same
   round trip the rejection itself already pays, so it costs no extra
@@ -2971,31 +2972,19 @@ detail mode.
 
 ### Dashboard
 
-The dashboard was redesigned around a left sidebar of seven pages
-(`webui/src/lib/pages.ts`) replacing the earlier flat-tab shell
-(`ChartsView.vue`/`UsageChart.vue`/`UsageView.vue`/`ProvidersView.vue`,
-and `composables/useTabHash.ts`, all deleted): a request only needs to
-answer one question ("what does this page show"), instead of a tab whose
-own content changed shape depending on a second `tab=` sub-parameter.
+The dashboard has a left sidebar of nine pages (`webui/src/lib/pages.ts`). A request answers one question per page. The sidebar groups them (`webui/src/lib/nav-groups.ts`):
 
-- **Sidebar pages** (`SidebarNav.vue`, horizontal-scrolling on narrow
-  screens): **Home** (spend today/MTD vs. budget, projected month-end,
-  req/min, fleet error rate, open breakers, top 5 users/models, latest
-  events, config warnings + unpriced-model count), **Spend** (stacked
-  time-series with optional dashed period-over-period comparison,
-  burn-down vs. budget with a projected run-out date, group→user→model
-  attribution drill-down, a pricing-health table surfacing unpriced
-  served models first, and a cost-avoided card for free-tier usage
-  against a reference paid model), **Consumers** (the user/group
-  directory — reusing the usage table/bars this section already
-  documented — an access matrix of group × provider/MCP/agent, and a
-  per-user detail view with its own timeline and recent errors),
-  **Models** (the model catalog joined with usage and p50/p95/error-rate
-  performance, and the provider health panel moved from the old
-  Providers tab), **Reliability** (per-provider error-rate/failover/
-  timeout/402 time series, plus the events feed), **Config** (the
-  redacted config tree and the change helper, below), and **MCP &
-  Agents** (unchanged target list, now with a per-caller breakdown card).
+- **Overview**, **Usage & spend** and **Reliability** hold the fleet-wide views.
+- **Users & groups**, **Models & providers**, **Smart routers** and **MCP & agents** hold the directories. Each row opens a detail panel.
+- **Events** and **Config** complete the list.
+
+Page details:
+
+- **Usage & spend**: a Cost avoided card prices the free-tier tokens (input and output) against two reference models. The first is MiniMax M3.1 Flash. The card uses the gateway catalog price when the catalog has one, else a built-in list price of 0.15 USD input and 0.60 USD output per million tokens. The second is the latest priced `anthropic/claude-sonnet-*` model in the catalog. It shows `n/a` when the catalog has none (`webui/src/lib/cost-avoided.ts`).
+- **Users & groups**: the user and group detail panels show a Tokens/min meter next to Requests/min. The meter reads `tokensPerMinute` from `GET /admin/api/usage`, the live fixed-window count per scope.
+- **Models & providers**: the model panel shows Vision as `yes`, `no` or `unknown`, from `modelMeta.vision`.
+- **Smart routers**: the router panel shows the decision model settings, the heuristic-by-model tier grid and the outcome counts. See [Decision model assist](#decision-model-assist).
+
 - **Global filter bar** (`GlobalFilterBar.vue`, under the header, applies
   to every page except MCP & Agents): a `range` preset — `24h`, `48h`,
   `7d` (default), `14d`, `30d`, `3mo`, `6mo`, or `12mo`, each a fixed
@@ -3011,27 +3000,10 @@ own content changed shape depending on a second `tab=` sub-parameter.
   `2×30=60` already exceeds it), and `12mo` (span 12 of 13) cannot be
   compared (the toggle disables itself with a "retention limit" reason);
   the other five ranges can.
-- **Hash schema**: `#<page>?range=7d&cmp=prev&scope=group:friends&<page
-  params>` — global filters and page-specific params share one
-  `location.hash`, so a link or a reload restores exactly what was
-  showing; a default value is always OMITTED from the hash rather than
-  written out explicitly. Per-page params: Spend `by=provider|model|group`,
-  `metric=cost|req|tokin|tokout`, `ref=<canonical>` (cost-avoided
-  reference model), `drill=group:x|user:x` (attribution breadcrumb);
-  Consumers `q`, `view=directory|matrix`, `user=<name>`; Models `q`,
-  `model=<canonical>`; Reliability `provider`, `kind`, `user`; Config
-  `helper=limits|grant|pricing|model|user`; MCP & Agents `q`,
-  `target=mcp/x`. **Legacy mapping** (`LEGACY_PAGE_MAP`,
-  `lib/hash-state.ts`): a bookmark or shared link built against the old
-  shell still lands somewhere sensible — `#providers`→`models`,
-  `#usage`→`consumers`, `#charts`→`spend`, `#events`→`reliability`;
-  `#targets` keeps its own name (the one page that did not move). A
-  legacy hash's own query params never carry over — none of the old
-  names (`#charts`'s `tab=models&metric=cost`, for instance) map cleanly
-  onto the new page's own param names, so a legacy link lands on a clean
-  instance of its mapped page rather than misapplying a stale param.
-- **Config page's change helper** (`ChangeHelper.vue`) is five forms —
-  limits, an access grant, pricing, model metadata, and a new user — each
+- **Hash schema**: `#<page>?range=7d&cmp=prev&scope=group:friends&<page params>`. Global filters and page params share one `location.hash`, so a link or a reload restores what was showing. A default value is omitted from the hash. Page params include `by` and `metric` on Usage & spend, `q`, `provider`, `kind` and `price` on Models & providers, `tab`, `q` and `group` on Users & groups, and `sel` for the open detail panel. **Legacy mapping** (`LEGACY_PAGE_MAP`, `lib/hash-state.ts`): `#home` opens `overview`, `#spend` and `#charts` open `usage`, `#consumers` opens `users`, and `#providers` opens `models`. A legacy hash drops its old query params.
+- **Config page's change helper** (`ChangeHelperPanel.vue`) is six forms —
+  limits, an access grant, pricing, model metadata, a new user, and a smart
+  router — each
   producing a paste-ready YAML or `users.json` snippet
   (`lib/snippets.ts`/`lib/yaml-emit.ts`) in the exact shape the
   production config repo actually uses (nested at
