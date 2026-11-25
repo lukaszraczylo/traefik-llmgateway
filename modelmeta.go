@@ -34,6 +34,8 @@ const freeTierSuffix = ":free"
 // field, since a free model's cost fields are legitimately zero AND
 // known (ModelMetaConfig.Free).
 type resolvedModelMeta struct {
+	// Vision is the operator's explicit modelMeta.vision; nil means unset.
+	Vision                    *bool
 	ContextTokens             int
 	InputCostPerMTokMicroUSD  int64
 	OutputCostPerMTokMicroUSD int64
@@ -71,6 +73,7 @@ type resolvedModelMeta struct {
 // entry.
 func resolveModelMeta(provider, model string, cfg map[string]*ModelMetaConfig, discoveredContext int, discoveredKnown bool) resolvedModelMeta {
 	var out resolvedModelMeta
+	out.Vision = configuredVision(provider, model, cfg)
 	override := lookupModelMetaConfig(provider, model, cfg)
 	builtin, builtinOK := builtinModelMetaTable[model]
 
@@ -190,13 +193,23 @@ func lookupModelMetaConfig(provider, model string, cfg map[string]*ModelMetaConf
 // deployments keep today's behaviour. The exact "provider/model" key wins
 // over the bare key only when it sets Vision itself.
 func modelVisionCapable(provider, model string, cfg map[string]*ModelMetaConfig) bool {
-	if v, ok := cfg[provider+"/"+model]; ok && v != nil && v.Vision != nil {
-		return *v.Vision
-	}
-	if v, ok := cfg[model]; ok && v != nil && v.Vision != nil {
-		return *v.Vision
+	if v := configuredVision(provider, model, cfg); v != nil {
+		return *v
 	}
 	return true
+}
+
+// configuredVision returns the explicitly configured Vision value, or nil
+// when no applicable modelMeta entry sets it. Exact "provider/model" wins
+// over the bare key only when it sets Vision itself.
+func configuredVision(provider, model string, cfg map[string]*ModelMetaConfig) *bool {
+	if v, ok := cfg[provider+"/"+model]; ok && v != nil && v.Vision != nil {
+		return v.Vision
+	}
+	if v, ok := cfg[model]; ok && v != nil && v.Vision != nil {
+		return v.Vision
+	}
+	return nil
 }
 
 // resolveAliasModelMeta applies modelMeta's alias-inheritance rule

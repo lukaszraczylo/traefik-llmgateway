@@ -509,3 +509,36 @@ func TestModelMetaConfig_VisionJSONRoundTrip(t *testing.T) {
 		t.Errorf("unset vision must be omitted from JSON, got %s", out)
 	}
 }
+
+func TestAdminModelMetaView_Vision(t *testing.T) {
+	t.Parallel()
+	yes, no := true, false
+	cfg := map[string]*ModelMetaConfig{
+		"p/seen":  {Vision: &yes},
+		"p/blind": {Vision: &no},
+		"p/other": {ContextTokens: 1000},
+	}
+	cases := []struct {
+		want     *bool
+		model    string
+		wantJSON bool
+	}{
+		{&yes, "seen", true},
+		{&no, "blind", true},
+		{nil, "other", false},
+		{nil, "absent", false},
+	}
+	for _, c := range cases {
+		view := buildAdminModelMetaView(resolveModelMeta("p", c.model, cfg, 0, false))
+		if (view.Vision == nil) != (c.want == nil) || (c.want != nil && *view.Vision != *c.want) {
+			t.Fatalf("%s: Vision = %v, want %v", c.model, view.Vision, c.want)
+		}
+		raw, err := json.Marshal(view)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := strings.Contains(string(raw), `"vision"`); got != c.wantJSON {
+			t.Fatalf("%s: json %s, vision present = %v, want %v", c.model, raw, got, c.wantJSON)
+		}
+	}
+}

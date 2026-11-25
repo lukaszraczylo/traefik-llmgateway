@@ -566,6 +566,7 @@ type adminModelMetaView struct {
 	ContextTokens    *int     `json:"contextTokens,omitempty"`
 	InputPerMTokUSD  *float64 `json:"inputPerMTokUsd,omitempty"`
 	OutputPerMTokUSD *float64 `json:"outputPerMTokUsd,omitempty"`
+	Vision           *bool    `json:"vision,omitempty"`
 }
 
 // buildAdminModelMetaView converts resolveModelMeta's result into the
@@ -574,6 +575,7 @@ type adminModelMetaView struct {
 // do this).
 func buildAdminModelMetaView(meta resolvedModelMeta) adminModelMetaView {
 	var v adminModelMetaView
+	v.Vision = meta.Vision
 	if meta.ContextKnown {
 		ctx := meta.ContextTokens
 		v.ContextTokens = &ctx
