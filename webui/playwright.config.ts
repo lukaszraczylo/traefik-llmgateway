@@ -1,6 +1,7 @@
 import { defineConfig } from '@playwright/test'
 
-const PORT = 5199
+// PW_PORT sets the dev-server port; PW_REUSE=1 attaches to a running server (default: fail fast, so two runs cannot share one).
+const PORT = Number(process.env.PW_PORT ?? 5199)
 
 export default defineConfig({
   testDir: './e2e',
@@ -14,7 +15,7 @@ export default defineConfig({
   webServer: {
     command: `npm run dev:mock -- --port ${PORT} --strictPort`,
     url: `http://localhost:${PORT}/admin/`,
-    reuseExistingServer: !process.env.CI,
+    reuseExistingServer: process.env.PW_REUSE === '1',
     timeout: 60_000,
   },
 })

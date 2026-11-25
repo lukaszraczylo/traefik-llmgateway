@@ -183,13 +183,38 @@ test('config change helper opens from the header and Back closes it', async ({ p
   await expect(page.locator('[data-panel-kind="helper"]')).toHaveCount(0)
 })
 
-test('config sections fold, filter and the copied text is redacted', async ({ page }) => {
+test('config page starts compact on desktop', async ({ page }) => {
+  await page.setViewportSize(VIEWPORTS.desktop)
+  await visit(page, '#config', 'live', 'light')
+  const height = await page.evaluate(() => document.documentElement.scrollHeight)
+  expect(height).toBeLessThan(2500)
+})
+
+test('config clears an unknown helper sel with replace', async ({ page }) => {
+  await page.setViewportSize(VIEWPORTS.desktop)
+  await visit(page, '#config', 'live', 'light')
+  const before = await page.evaluate(() => history.length)
+  await page.goto(page.url().replace(/#.*/, '#config?sel=helper:bogus'))
+  await expect(page).not.toHaveURL(/sel=/)
+  await expect(page.locator('[data-panel-kind="helper"]')).toHaveCount(0)
+  expect(await page.evaluate(() => history.length)).toBeLessThanOrEqual(before + 1)
+})
+
+// Smoke check only: the page never renders secret-shaped strings. The real redaction guard is the Go side
+// (admin_config_guard_test.go, nonSecretConfigKeys); a fixture that redacts would test the mock, not the product.
+test('config sections fold and filter, and the page shows no secret-shaped strings', async ({ page }) => {
   await page.setViewportSize(VIEWPORTS.desktop)
   await visit(page, '#config', 'live', 'light')
   const providers = page.getByRole('region', { name: 'providers', exact: true })
+  const toggle = providers.getByRole('button', { name: /providers/ }).first()
+  await expect(toggle).toHaveAttribute('aria-expanded', 'false')
+  await expect(providers.getByText('baseUrl')).toHaveCount(0)
+  await toggle.click()
   await expect(providers.getByText('baseUrl').first()).toBeVisible()
-  await providers.getByRole('button', { name: /providers/ }).first().click()
-  await expect(providers.getByRole('button', { name: /providers/ }).first()).toHaveAttribute('aria-expanded', 'false')
+  await page.getByRole('button', { name: 'Collapse all' }).click()
+  await expect(toggle).toHaveAttribute('aria-expanded', 'false')
+  await page.getByRole('button', { name: 'Expand all' }).click()
+  await expect(toggle).toHaveAttribute('aria-expanded', 'true')
   await page.getByLabel('Filter config sections').fill('redis')
   await expect(page.getByRole('region', { name: 'redis', exact: true })).toBeVisible()
   await expect(page.getByRole('region', { name: 'providers', exact: true })).toHaveCount(0)

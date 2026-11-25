@@ -100,3 +100,10 @@ npm run build     # what `make admin-ui` runs, plus webui/generate.mjs
 - `generate.mjs` — reads `dist/` after `vite build` and writes
   `../admin_assets_gen.go`; see its own header comment for why every
   asset is base64-encoded rather than embedded as a raw string literal.
+
+## Visual harness
+
+`npm run test:visual` starts the mock dev server on `PW_PORT` (default 5199)
+and fails fast if that port is taken, so two runs cannot share one server or
+the `.screenshots/` output. Set `PW_REUSE=1` to attach to a server you
+already started.

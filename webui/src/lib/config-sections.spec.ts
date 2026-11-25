@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { filterSections, splitConfigSections } from '@/lib/config-sections'
+import { filterSections, initialFold, splitConfigSections } from '@/lib/config-sections'
 
 const YAML = ['admin:', '  enabled: true', 'agents:', '  a:', '    url: x', '  b:', '    url: y', '"odd/key":', '  v: 1', 'redis:', '  addr: r'].join('\n')
 
@@ -40,5 +40,23 @@ describe('filterSections', () => {
   })
   it('returns none when nothing matches', () => {
     expect(filterSections(s, 'zzz')).toEqual([])
+  })
+})
+
+describe('initialFold', () => {
+  const big = (key: string, n: number) => [`${key}:`, ...Array.from({ length: n - 1 }, (_, i) => `  k${i}: v`)].join('\n')
+  const secs = splitConfigSections([big('small', 8), big('medium', 9), big('large', 40)].join('\n'))
+
+  it('collapses sections over 8 lines and keeps small ones open', () => {
+    expect([...initialFold(secs, {})].sort()).toEqual(['large', 'medium'])
+  })
+  it('keeps the hash target open', () => {
+    expect([...initialFold(secs, { target: 'large' })]).toEqual(['medium'])
+  })
+  it('keeps filter matches open', () => {
+    expect([...initialFold(secs, { filter: 'med' })]).toEqual(['large'])
+  })
+  it('ignores a blank filter and an unknown target', () => {
+    expect([...initialFold(secs, { filter: ' ', target: 'nope' })].sort()).toEqual(['large', 'medium'])
   })
 })

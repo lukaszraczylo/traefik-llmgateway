@@ -1,11 +1,11 @@
 <script setup lang="ts">
 import { faChevronDown, faChevronRight } from '@fortawesome/free-solid-svg-icons'
 import { Button, Callout, Card, CardAction, CardContent, CardHeader, CardTitle, SearchInput, YamlViewer } from '@perfect-design/ui'
-import { computed, onMounted, ref } from 'vue'
+import { computed, nextTick, onMounted, ref, watch } from 'vue'
 
 import { copyText } from '@/lib/clipboard'
-import { filterSections, splitConfigSections } from '@/lib/config-sections'
-import { formatHelperSel, parseHelperSel } from '@/lib/helper-forms'
+import { filterSections, initialFold, splitConfigSections } from '@/lib/config-sections'
+import { formatHelperSel, isStaleHelperSel, parseHelperSel } from '@/lib/helper-forms'
 import type { HelperId } from '@/lib/helper-forms'
 import { loadState } from '@/lib/load-state'
 import { emitYamlDocument, toYamlValue } from '@/lib/yaml-emit'
@@ -36,6 +36,13 @@ const sections = computed(() => splitConfigSections(yamlText.value))
 const query = ref('')
 const shown = computed(() => filterSections(sections.value, query.value))
 const collapsed = ref<Set<string>>(new Set())
+const target = computed(() => nav.params.section)
+
+// Default fold: big sections closed, small ones, filter matches and the hash target open.
+function resetFold(): void {
+  collapsed.value = initialFold(sections.value, { filter: query.value, target: target.value })
+}
+watch([sections, query], resetFold, { immediate: true })
 
 function toggle(key: string): void {
   const next = new Set(collapsed.value)
@@ -43,12 +50,18 @@ function toggle(key: string): void {
   collapsed.value = next
 }
 
-function jump(key: string): void {
-  query.value = ''
+function setAll(open: boolean): void {
+  collapsed.value = open ? new Set() : new Set(sections.value.map((s) => s.key))
+}
+
+async function jump(key: string): Promise<void> {
   const next = new Set(collapsed.value)
   next.delete(key)
+  query.value = ''
+  await nextTick()
   collapsed.value = next
-  requestAnimationFrame(() => document.getElementById(`cfg-${key}`)?.scrollIntoView({ block: 'start' }))
+  await nextTick()
+  document.getElementById(`cfg-${key}`)?.scrollIntoView({ block: 'start' })
 }
 
 const state = computed<ViewState>(() => {
@@ -68,6 +81,16 @@ async function copyConfig(): Promise<void> {
 
 // --- Change helper sheet: lives in the hash as sel=helper:<form> ---
 const helperForm = computed(() => parseHelperSel(nav.params.sel))
+// This page has no entity panels, so any other `sel` is stale: drop it in place, like resolveSel does elsewhere.
+watch(
+  () => nav.params.sel,
+  (sel) => {
+    if (!isStaleHelperSel(sel)) return
+    const { sel: _sel, ...rest } = nav.params
+    nav.goTo('config', rest)
+  },
+  { immediate: true },
+)
 const groupNames = computed(() => (consumers.data?.groups ?? []).map((g) => g.name))
 const userNames = computed(() => (consumers.data?.users ?? []).map((u) => u.name))
 
@@ -101,6 +124,10 @@ function selectForm(id: HelperId): void {
         <StateView :state="state" empty-title="No config returned" :error-message="config.error" @retry="config.fetchConfig()">
           <div class="flex flex-col gap-2">
             <SearchInput v-model="query" size="sm" class="max-w-sm" placeholder="Filter sections" aria-label="Filter config sections" />
+            <div class="flex flex-wrap items-center gap-1">
+              <Button variant="outline" size="xs" @click="setAll(true)">Expand all</Button>
+              <Button variant="outline" size="xs" @click="setAll(false)">Collapse all</Button>
+            </div>
             <nav class="flex flex-wrap gap-1" aria-label="Config sections">
               <Button v-for="s in sections" :key="s.key" variant="ghost" size="xs" class="font-mono" @click="jump(s.key)">{{ s.key }}</Button>
             </nav>
@@ -114,9 +141,9 @@ function selectForm(id: HelperId): void {
               >
                 <FontAwesomeIcon :icon="collapsed.has(s.key) ? faChevronRight : faChevronDown" class="text-muted-foreground size-3" aria-hidden="true" />
                 <span class="font-mono text-sm font-medium">{{ s.key }}</span>
-                <span class="text-muted-foreground ml-auto font-mono text-xs tabular-nums">{{ s.lineCount.toLocaleString('en-US') }} lines</span>
+                <span class="text-muted-foreground ml-auto font-mono text-xs tabular-nums">{{ s.lineCount.toLocaleString('en-US') }} {{ s.lineCount === 1 ? 'line' : 'lines' }}</span>
               </button>
-              <YamlViewer v-if="!collapsed.has(s.key)" :source="s.text" :start-line="s.startLine" variant="plain" size="sm" line-numbers foldable :copy="false" :label="`${s.key} config`" />
+              <YamlViewer v-if="!collapsed.has(s.key)" :source="s.text" :start-line="s.startLine" variant="plain" size="sm" line-numbers :foldable="false" :copy="false" :label="`${s.key} config`" />
             </section>
           </div>
         </StateView>

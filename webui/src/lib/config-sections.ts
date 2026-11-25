@@ -38,3 +38,14 @@ export function filterSections(sections: ConfigSection[], query: string): Config
   const q = query.trim().toLowerCase()
   return q === '' ? sections : sections.filter((s) => s.key.toLowerCase().includes(q))
 }
+
+const SMALL_SECTION_LINES = 8
+
+/** Keys of the sections that start collapsed: all but small ones, filter matches and the jump target. */
+export function initialFold(sections: ConfigSection[], opts: { filter?: string; target?: string }): Set<string> {
+  const matched = new Set(filterSections(sections, opts.filter ?? '').map((s) => s.key))
+  const filtering = (opts.filter ?? '').trim() !== ''
+  return new Set(
+    sections.filter((s) => s.lineCount > SMALL_SECTION_LINES && s.key !== opts.target && !(filtering && matched.has(s.key))).map((s) => s.key),
+  )
+}

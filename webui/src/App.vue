@@ -10,11 +10,13 @@ import { useHashState } from '@/composables/useHashState'
 import AppLayout from '@/layout/AppLayout.vue'
 import type { PageId } from '@/lib/pages'
 import { useAuthStore } from '@/stores/auth'
+import { useConfigStore } from '@/stores/config'
 import { useDashboardStore } from '@/stores/dashboard'
 import { useNavStore } from '@/stores/nav'
 import { resetSessionData } from '@/stores/session'
 
 const auth = useAuthStore()
+const config = useConfigStore()
 const dashboard = useDashboardStore()
 const nav = useNavStore()
 
@@ -74,7 +76,7 @@ onMounted(() => {
   </div>
   <AppLayout v-else>
     <!-- GET /admin/api/overview's config warnings — renders nothing itself once `warnings` is empty, so this is always safe to mount. -->
-    <ConfigWarningsBanner v-if="nav.page !== 'config'" :warnings="dashboard.overview?.warnings ?? []" :warnings-dropped="dashboard.overview?.warningsDropped" />
+    <ConfigWarningsBanner v-if="nav.page !== 'config' || (config.error !== '' && !config.data)" :warnings="dashboard.overview?.warnings ?? []" :warnings-dropped="dashboard.overview?.warningsDropped" />
     <component :is="currentPage" />
   </AppLayout>
   <ToastViewport />

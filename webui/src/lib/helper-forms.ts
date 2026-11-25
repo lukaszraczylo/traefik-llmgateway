@@ -25,3 +25,8 @@ export function parseHelperSel(v: string | undefined): HelperId | null {
   const id = v.slice(PREFIX.length + 1)
   return (HELPER_IDS as readonly string[]).includes(id) ? (id as HelperId) : null
 }
+
+/** True when `sel` is set but opens no helper form; the Config page has no other sheet, so it clears such a value. */
+export function isStaleHelperSel(v: string | undefined): boolean {
+  return v !== undefined && parseHelperSel(v) === null
+}
