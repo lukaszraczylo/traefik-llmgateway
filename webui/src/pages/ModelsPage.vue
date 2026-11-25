@@ -115,6 +115,12 @@ watch(
   { immediate: true },
 )
 const providerRequests = (provider: string): number | null => models.providerRequests?.[provider] ?? null
+const providerAttemptsTitle = computed(() => {
+  const r = models.providerRequestsRange
+  const unit = r.window === 'hour' ? 'hours' : 'days'
+  const clamped = r.window !== filters.window || r.span !== filters.span
+  return `Provider attempts over the last ${r.span} ${unit}${clamped ? ' (this view does not keep longer ranges)' : ''}`
+})
 
 // --- Rows and groups ---------------------------------------------------------------
 
@@ -267,7 +273,7 @@ const openSel = computed(() => (models.lastUpdated !== null && dashboard.overvie
                 <StatusDot :tone="BREAKER_TONE[breakerStatus(g.provider)]" size="md" class="shrink-0" />
                 <span v-if="breakerStatus(g.provider) !== 'closed'" class="text-muted-foreground shrink-0 text-xs">{{ breakerStatus(g.provider) }}</span>
                 <span class="text-muted-foreground ml-auto shrink-0 font-mono text-xs tabular-nums">{{ g.rows.length.toLocaleString('en-US') }} models</span>
-                <span class="text-muted-foreground hidden shrink-0 font-mono text-xs tabular-nums sm:inline">{{ providerRequests(g.provider) === null ? '—' : formatCompactCount(providerRequests(g.provider) as number) }} req</span>
+                <span :title="providerAttemptsTitle" class="text-muted-foreground hidden shrink-0 font-mono text-xs tabular-nums sm:inline">{{ providerRequests(g.provider) === null ? '—' : formatCompactCount(providerRequests(g.provider) as number) }} attempts</span>
               </div>
               <div v-if="isOpen(g.provider, i, g.rows.length)" class="flex flex-col gap-2 p-1">
                 <WbTable

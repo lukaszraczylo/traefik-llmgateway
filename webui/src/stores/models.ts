@@ -43,6 +43,8 @@ export const useModelsStore = defineStore('models', {
     latencyEnabled: false,
     /** Requests per provider over the range, from the provider series (not capped like the model ranking); null until loaded or when unavailable. */
     providerRequests: null as Record<string, number> | null,
+    /** The hour/day window + span the provider series was actually requested with (provider series have no month bucket). */
+    providerRequestsRange: { window: 'day' as Extract<HistoryWindow, 'hour' | 'day'>, span: 0 },
     loading: false,
     lastUpdated: null as Date | null,
     error: '',
@@ -52,20 +54,22 @@ export const useModelsStore = defineStore('models', {
     providerReqId: 0,
   }),
   actions: {
-    /** Sums the per-provider request series for the global range. Failure leaves totals null so the page shows a dash, never a false 0. */
+    /** Sums the per-provider attempt series (the only count kind=provider series offers) over the global range clamped to hour/day. Failure leaves totals null so the page shows a dash, never a false 0. */
     async fetchProviderRequests(names: string[]): Promise<void> {
       if (names.length === 0) return
       const filters = useFiltersStore()
       const requestId = ++this.providerReqId
+      const range = hourOrDayWindow(filters.window, filters.span)
       this.providerRequests = null
       try {
         const res = await adminFetch<AdminSeriesResponse>(
-          seriesUrl({ scope: names.slice(0, PROVIDER_SERIES_MAX).map((n) => `provider:${n}`), metric: 'req', window: filters.window, span: filters.span }),
+          seriesUrl({ scope: names.slice(0, PROVIDER_SERIES_MAX).map((n) => `provider:${n}`), metric: 'attempt', window: range.window, span: range.span }),
         )
         const totals: Record<string, number> = {}
         for (const s of res.series) totals[s.scope.replace(/^provider:/, '')] = s.points.reduce((a, v) => a + v, 0)
         if (requestId !== this.providerReqId) return
         this.providerRequests = totals
+        this.providerRequestsRange = range
       } catch (err) {
         if (requestId === this.providerReqId && !isAuthRejection(err)) this.providerRequests = null
       }
