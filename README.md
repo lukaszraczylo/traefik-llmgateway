@@ -672,11 +672,17 @@ With `limitExemptKinds` empty, steps 2 to 4 do not run and the body is not
 peeked. The `/v1/chat/completions` and `/v1/messages` routes do not look up a
 model kind.
 
-Exempt requests are still counted: request, token and cost counters and the
-admin usage keep counting them. They are not counted in the minute token
-window. The request counters are shared with the limits, so exempt traffic
-counts toward the same `requestsPerMinute` and `requestsPerDay` totals that
-refuse the user's other requests; size those limits with that in mind.
+Exempt requests increment no limit counter on the user, `memberLimits`,
+group or total scopes: not the request, token or cost windows, and not the
+minute token pre-charge. Embedding traffic therefore never uses up the
+`requestsPerMinute`, `requestsPerDay` or token budgets that refuse the user's
+other requests. They still count in the per-model usage, so `GET
+/admin/api/usage/models` shows the traffic, and in a per-user monthly
+exempt counter, shown as `exemptRequestsPerMonth` on the user's row in
+`GET /admin/api/usage` and as "Exempt requests/month" on the user page. The
+user and group totals in the admin usage view leave exempt traffic out.
+The gateway decides the kind before admission, so no admission count is ever
+taken back.
 
 ### `UsersConfig`
 

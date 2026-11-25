@@ -969,6 +969,9 @@ type adminUsageEntryView struct {
 	// attributed to this scope today (F4, v0.3 dashboard task) — read via
 	// windowKey's metric "rej", window "day" (limits.go's metricRej).
 	RejectionsPerDay int64 `json:"rejectionsPerDay"`
+	// ExemptRequestsPerMonth counts this user's limit-exempt requests this
+	// month (limitExemptKinds). They are in no limit counter.
+	ExemptRequestsPerMonth int64 `json:"exemptRequestsPerMonth"`
 	// LastSeen is this scope's most recent admitted-request instant, unix
 	// seconds (admin dashboard redesign, WP-B; DECISIONS Q6) — 0
 	// (omitted) means never observed, or unknown (a storeDown read).
@@ -994,20 +997,21 @@ type adminUsageResponse struct {
 // matching limit into the JSON view.
 func usageEntryView(su scopeUsage, limits *LimitsConfig) adminUsageEntryView {
 	return adminUsageEntryView{
-		Kind:                 su.kind,
-		ID:                   su.id,
-		Limits:               limits,
-		RequestsPerMinute:    su.requestsPerMinute,
-		RequestsPerDay:       su.requestsPerDay,
-		TokensInPerDay:       su.tokensInPerDay,
-		TokensOutPerDay:      su.tokensOutPerDay,
-		TokensInPerMonth:     su.tokensInPerMonth,
-		TokensOutPerMonth:    su.tokensOutPerMonth,
-		CostPerDayMicroUSD:   su.costPerDayMicros,
-		CostPerMonthMicroUSD: su.costPerMonthMicros,
-		RejectionsPerDay:     su.rejectionsPerDay,
-		LastSeen:             su.lastSeen,
-		StoreDown:            su.storeDown,
+		Kind:                   su.kind,
+		ID:                     su.id,
+		Limits:                 limits,
+		RequestsPerMinute:      su.requestsPerMinute,
+		RequestsPerDay:         su.requestsPerDay,
+		TokensInPerDay:         su.tokensInPerDay,
+		TokensOutPerDay:        su.tokensOutPerDay,
+		TokensInPerMonth:       su.tokensInPerMonth,
+		TokensOutPerMonth:      su.tokensOutPerMonth,
+		CostPerDayMicroUSD:     su.costPerDayMicros,
+		CostPerMonthMicroUSD:   su.costPerMonthMicros,
+		RejectionsPerDay:       su.rejectionsPerDay,
+		ExemptRequestsPerMonth: su.exemptPerMonth,
+		LastSeen:               su.lastSeen,
+		StoreDown:              su.storeDown,
 	}
 }
 
@@ -1057,7 +1061,7 @@ func usageEntryView(su scopeUsage, limits *LimitsConfig) adminUsageEntryView {
 // chunk, keeping this endpoint's per-round-trip key count at the same
 // order of magnitude this constant has always targeted, rather than
 // letting it grow every time a future per-scope counter is added here.
-const adminUsageChunkScopes = 160
+const adminUsageChunkScopes = 145
 
 // chunkedCurrentUsage calls limiter.currentUsage in batches of at most
 // adminUsageChunkScopes scopes at a time, concatenating the results in

@@ -346,6 +346,8 @@ export interface AdminUsageEntryView {
    * path already paid, so this field costs nothing extra to read).
    */
   rejectionsPerDay: number
+  /** Limit-exempt requests this month (limitExemptKinds); they count in no limit. */
+  exemptRequestsPerMonth?: number
   storeDown?: boolean
   /**
    * Unix seconds this scope last made a request, fleet-wide (admin.go:

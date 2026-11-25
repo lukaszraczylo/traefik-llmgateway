@@ -49,13 +49,15 @@ func TestLimitExempt_EmbeddingsNeverLimitedWhileChatIs(t *testing.T) {
 	}
 	assert.Less(t, time.Since(start), time.Second)
 
-	n, _ := gw.limiter.getCounter("user", "a", metricReq, windowDay, gw.limiter.now())
-	assert.EqualValues(t, 6, n, "exempt requests are still counted")
-	tok, _ := gw.limiter.getCounter("user", "a", metricTokIn, windowDay, gw.limiter.now())
-	assert.EqualValues(t, 6*30, tok, "exempt usage is still accounted")
+	x, _ := gw.limiter.getCounter("user", "a", metricExempt, windowMonth, gw.limiter.now())
+	assert.EqualValues(t, 6, x, "exempt requests are still counted, in the exempt counter")
+	tok, _ := gw.limiter.getCounter(kindModel, "openai/gpt-test", metricTokIn, windowDay, gw.limiter.now())
+	assert.EqualValues(t, 6*30, tok, "exempt usage is still in per-model usage")
 
+	assert.Equal(t, http.StatusOK, memberLimitsChat(t, h, "sk-a").Code)
+	assert.Equal(t, http.StatusOK, memberLimitsChat(t, h, "sk-a").Code)
 	rec := memberLimitsChat(t, h, "sk-a")
-	assert.Equal(t, http.StatusTooManyRequests, rec.Code, "chat is still limited")
+	assert.Equal(t, http.StatusTooManyRequests, rec.Code, "chat is still limited, by its own requests only")
 	assert.NotEmpty(t, rec.Header().Get("x-ratelimit-limit-requests"))
 }
 
@@ -89,8 +91,8 @@ func TestLimitExempt_RerankPassthroughPath(t *testing.T) {
 				rec := exemptPost(h, path, `{"query":"q","documents":["a"]}`)
 				require.Equal(t, http.StatusOK, rec.Code, "rerank %d: %s", i+1, rec.Body.String())
 			}
-			n, _ := gw.limiter.getCounter("user", "a", metricReq, windowDay, gw.limiter.now())
-			assert.EqualValues(t, 4, n, "still counted")
+			n, _ := gw.limiter.getCounter("user", "a", metricExempt, windowMonth, gw.limiter.now())
+			assert.EqualValues(t, 4, n, "still counted, in the exempt counter")
 		})
 	}
 }

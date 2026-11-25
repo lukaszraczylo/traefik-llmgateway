@@ -64,6 +64,9 @@ const (
 	// (below) — never a second round trip. Read back as
 	// scopeUsage.rejectionsPerDay / adminUsageEntryView.RejectionsPerDay.
 	metricRej = "rej"
+	// metricExempt counts a user's limit-exempt requests, month-bucketed. No
+	// limit reads it.
+	metricExempt = "xreq"
 )
 
 // New counter-family metric names (admin-redesign WP-A): landed together,
@@ -597,6 +600,9 @@ type limitScope struct {
 	resv *tpmReservation
 	kind string // "user", "group", or "total"
 	id   string
+	// noCount marks a limit-exempt request's scope: accountWith writes no
+	// counter for it.
+	noCount bool
 }
 
 // tpmReservation is a prompt-token estimate added to a scope's minute window
@@ -1638,12 +1644,18 @@ func requestCountEntries(scopes []limitScope, wb windowBuckets, et enforceTTLSet
 	return entries
 }
 
-// countExempt counts a limit-exempt request in every scope's request
-// counters in one store round trip. It evaluates no limit, so it never
-// refuses, and it reserves nothing.
+// countExempt counts a limit-exempt request in the user's exempt counter and
+// in no limit window. It evaluates no limit, so it never refuses, and it
+// reserves nothing.
 func (l *limiter) countExempt(scopes []limitScope) {
-	now := l.now()
-	l.storeIncrMulti(requestCountEntries(scopes, bucketsFor(now), enforceTTLsFor()))
+	for _, sc := range scopes {
+		if sc.kind != "user" {
+			continue
+		}
+		wb := bucketsFor(l.now())
+		l.storeIncrMulti([]counterIncr{{key: windowKeyForBucket(sc.kind, sc.id, metricExempt, windowMonth, wb.month), delta: 1, ttl: monthWindowTTL, enforceTTL: enforceTTLsFor().month}})
+		return
+	}
 }
 
 // checkAndCountInfo is checkAndCount plus the user scope's minute-window
@@ -2048,6 +2060,9 @@ func (l *limiter) accountWith(scopes []limitScope, u usage, costMicros int64, x 
 		if sc.kind == kindModel {
 			hasModelScope = true
 			modelCanonical = sc.id
+		}
+		if sc.noCount {
+			continue
 		}
 		// A kindModel scope is the one scope kind checkAndCount never
 		// sees: it is resolved post-response, because only then is the
@@ -2931,7 +2946,7 @@ func (l *limiter) providerUsage(scopes []limitScope) []providerCounters {
 // rejectionsPerDay counter (metricRej) usageWindowKeys now appends. Grows
 // once more, 9 to 10, for the last-seen counter (Q6, DECISIONS) — see
 // usageWindowKeys' own doc comment for the appended field's position.
-const usageKeysPerScope = 10
+const usageKeysPerScope = 11
 
 // scopeUsage is one scope's (a user's, a group's, or the synthetic total
 // scope's — totalScopeKind) current-window counter values — the admin
@@ -2964,6 +2979,8 @@ type scopeUsage struct {
 	// off for the whole life of the deployment so far, matching GET
 	// /admin/api/usage's own "lastSeen 0 means never/unknown" contract.
 	lastSeen int64
+	// exemptPerMonth is the scope's limit-exempt request count this month.
+	exemptPerMonth int64
 	// storeDown reports whether reading any of the usageKeysPerScope
 	// counters above failed closed (a configured store errored and
 	// failOpen is false) — mirrors limitViolation.storeDown. Every value
@@ -2995,6 +3012,7 @@ func usageWindowKeys(sc limitScope, now time.Time) []string {
 		windowKey(sc.kind, sc.id, metricCost, windowMonth, now),
 		windowKey(sc.kind, sc.id, metricRej, windowDay, now),
 		lastSeenKey(sc.kind, sc.id),
+		windowKey(sc.kind, sc.id, metricExempt, windowMonth, now),
 	}
 }
 
@@ -3069,7 +3087,7 @@ func (l *limiter) currentUsage(scopes []limitScope) []scopeUsage {
 			tokensInPerDay: v[2], tokensInPerMonth: v[3],
 			tokensOutPerDay: v[4], tokensOutPerMonth: v[5],
 			costPerDayMicros: v[6], costPerMonthMicros: v[7],
-			rejectionsPerDay: v[8], lastSeen: v[9],
+			rejectionsPerDay: v[8], lastSeen: v[9], exemptPerMonth: v[10],
 		}
 	}
 	return out

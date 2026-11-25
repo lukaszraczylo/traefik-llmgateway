@@ -187,6 +187,9 @@ const runOutDate = computed(() => {
       </CardContent>
       <CardContent v-else class="grid grid-cols-2 gap-4 text-sm sm:grid-cols-4">
         <StatItem label="Requests/day"><CompactNumber :value="entry.requestsPerDay" /></StatItem>
+        <StatItem v-if="entry.exemptRequestsPerMonth" label="Exempt requests/month">
+          <CompactNumber :value="entry.exemptRequestsPerMonth" />
+        </StatItem>
         <StatItem label="Cost/day">{{ formatCostDisplay(entry.costPerDayMicroUsd) }}</StatItem>
         <StatItem label="Cost/month">{{ formatCostDisplay(entry.costPerMonthMicroUsd) }}</StatItem>
         <div>

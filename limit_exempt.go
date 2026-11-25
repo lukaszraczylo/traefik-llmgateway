@@ -43,6 +43,7 @@ func exemptScopes(scopes []limitScope) []limitScope {
 	out := make([]limitScope, len(scopes))
 	for i, sc := range scopes {
 		sc.limits = nil
+		sc.noCount = true
 		out[i] = sc
 	}
 	return out
