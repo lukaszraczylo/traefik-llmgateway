@@ -4,25 +4,17 @@ import { isCmpMode, isRangeKey } from '@/lib/range'
 import type { CmpMode, RangeKey } from '@/lib/range'
 
 /**
- * LEGACY_PAGE_MAP redirects the pre-redesign flat-tab hash names to their
- * redesign home (redesign-plan.md section 3.1's legacy mapping): a
- * bookmark or shared link built against the old #providers/#usage/
- * #charts/#events/#targets shell still lands somewhere sensible instead
- * of falling back to the default page. `targets` keeps its own name —
- * the MCP & Agents page is the one page that did not move.
- *
- * The OLD hash's query params never carry over (see parseHashState below)
- * — they were shaped for the old tab (e.g. #charts's `tab=models&metric=
- * cost`), and none of that maps cleanly onto the new page's own param
- * names, so a legacy hash lands on a clean instance of its mapped page
- * rather than misapplying a stale param.
+ * Pre-redesign hash names that no longer exist as page ids, pointed at their
+ * new home. A name that is also a current PageId (usage, events, targets)
+ * is never looked up here: the new id wins. Old query params are dropped,
+ * since they were shaped for the old page.
  */
 const LEGACY_PAGE_MAP: Record<string, PageId> = {
+  home: 'overview',
+  spend: 'usage',
+  consumers: 'users',
   providers: 'models',
-  usage: 'consumers',
-  charts: 'spend',
-  events: 'reliability',
-  targets: 'targets',
+  charts: 'usage',
 }
 
 export interface HashState {
@@ -36,9 +28,8 @@ export interface HashState {
  *
  * 1. The page segment is a current PageId (lib/pages.ts) — parse the
  *    query normally.
- * 2. The page segment is a legacy tab name (LEGACY_PAGE_MAP) — map to the
- *    new page, with an EMPTY query (old params dropped, see the map's own
- *    doc comment).
+ * 2. The page segment is a legacy name (LEGACY_PAGE_MAP) — map to the
+ *    new page, with an EMPTY query.
  * 3. Anything else (absent, empty, or unrecognized) — DEFAULT_PAGE, query
  *    parsed as-is (so a malformed page segment does not also swallow an
  *    otherwise-valid query string).

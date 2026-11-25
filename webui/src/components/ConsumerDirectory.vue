@@ -116,7 +116,7 @@ function sourceOf(entry: AdminUsageEntryView): string | undefined {
 // the old nav.usageQuery special case.
 const usageQuery = computed<string>({
   get: () => nav.params.q ?? '',
-  set: (value) => nav.goTo('consumers', { ...nav.params, q: value }),
+  set: (value) => nav.goTo('users', { ...nav.params, q: value }),
 })
 const { query: userQuery, normalized: normalizedQuery, hasQuery } = useSearchQuery(usageQuery)
 

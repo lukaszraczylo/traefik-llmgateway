@@ -20,10 +20,10 @@ import { useNavStore } from '@/stores/nav'
  *   design (stores/nav.ts's own doc comment).
  * - A single computed re-derives the hash from filters' current state
  *   plus nav.page/nav.params, and writes it back via history.
- *   replaceState whenever it changes — never pushState (one browser-
- *   history entry per admin session, not per click) and never a bare
- *   `location.hash =` assignment (which would also jump scroll position
- *   to any element whose id happens to match).
+ *   replaceState whenever it changes, except when nav.pushPending is set
+ *   (nav.openPanel): then pushState, so Back closes the panel. Never a
+ *   bare `location.hash =` assignment (which would also jump scroll
+ *   position to any element whose id happens to match).
  * - It listens for the browser's own `hashchange` event (back/forward
  *   navigation, or a hand-edited URL) and re-parses from scratch,
  *   reapplying the same restore path as the initial read.
@@ -86,9 +86,12 @@ export function useHashState(): void {
   watch(
     currentHash,
     (hash) => {
+      const push = nav.pushPending
+      nav.pushPending = false
       if (!hasWindow) return
       if (window.location.hash === hash) return
-      window.history.replaceState(null, '', hash)
+      if (push) window.history.pushState(null, '', hash)
+      else window.history.replaceState(null, '', hash)
     },
     { immediate: true },
   )

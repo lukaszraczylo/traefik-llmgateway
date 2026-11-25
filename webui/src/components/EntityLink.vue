@@ -47,8 +47,8 @@ const props = defineProps<{
 const nav = useNavStore()
 const { isAlias } = useAliasNames()
 
-const TARGET: Record<'user' | 'model', { page: 'consumers' | 'models'; paramKey: 'user' | 'model'; noun: string }> = {
-  user: { page: 'consumers', paramKey: 'user', noun: 'Consumers' },
+const TARGET: Record<'user' | 'model', { page: 'users' | 'models'; paramKey: 'user' | 'model'; noun: string }> = {
+  user: { page: 'users', paramKey: 'user', noun: 'Consumers' },
   model: { page: 'models', paramKey: 'model', noun: 'Models' },
 }
 

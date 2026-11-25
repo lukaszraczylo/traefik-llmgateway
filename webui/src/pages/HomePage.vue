@@ -162,10 +162,10 @@ function setTopUsersMode(next: unknown): void {
   const mode = next as TopUsersMode
   if (mode === DEFAULT_TOP_USERS_MODE) {
     const { top: _top, ...rest } = nav.params
-    nav.goTo('home', rest)
+    nav.goTo('overview', rest)
     return
   }
-  nav.goTo('home', { ...nav.params, top: mode })
+  nav.goTo('overview', { ...nav.params, top: mode })
 }
 
 /**
@@ -408,13 +408,13 @@ onUnmounted(() => {
         <ErrorState :message="dashboard.error" :on-retry="dashboard.refresh" />
       </div>
       <template v-else>
-        <KpiTile label="Spend (MTD)" :value="formatCostDisplay(spendMtdMicros)" :delta="spendDelta" :tier="spendTier" :to="{ page: 'spend' }" />
+        <KpiTile label="Spend (MTD)" :value="formatCostDisplay(spendMtdMicros)" :delta="spendDelta" :tier="spendTier" :to="{ page: 'usage' }" />
         <KpiTile
           label="Projected month-end"
           :value="projectedValue"
           :delta="projectedDelta"
           :tier="projectedTier"
-          :to="{ page: 'spend' }"
+          :to="{ page: 'usage' }"
         />
         <KpiTile label="Requests/min" :value="formatCompactCount(requestsPerMinute)" />
         <KpiTile
@@ -440,7 +440,7 @@ onUnmounted(() => {
           label="Unpriced models"
           :value="String(unpricedCount)"
           :tier="unpricedCount > 0 ? 'warn' : 'ok'"
-          :to="{ page: 'spend' }"
+          :to="{ page: 'usage' }"
         />
       </template>
     </section>

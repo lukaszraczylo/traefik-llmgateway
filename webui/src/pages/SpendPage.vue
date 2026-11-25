@@ -61,7 +61,7 @@ function updateParams(next: Partial<{ by: SpendBy; metric: HistoryMetric; ref: s
   if (merged.metric !== 'cost') params.metric = merged.metric
   if (merged.ref !== '') params.ref = merged.ref
   if (merged.drill !== '') params.drill = merged.drill
-  nav.goTo('spend', params)
+  nav.goTo('usage', params)
 }
 
 function onByChange(value: string | number): void {

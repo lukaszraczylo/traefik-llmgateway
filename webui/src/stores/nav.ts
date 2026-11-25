@@ -2,6 +2,8 @@ import { defineStore } from 'pinia'
 
 import { DEFAULT_PAGE } from '@/lib/pages'
 import type { PageId } from '@/lib/pages'
+import { formatSel, parseSel } from '@/lib/panel-selection'
+import type { PanelKind, PanelSelection } from '@/lib/panel-selection'
 
 /**
  * useNavStore is the redesign's single navigation store (redesign-plan.md
@@ -23,7 +25,15 @@ export const useNavStore = defineStore('nav', {
   state: () => ({
     page: DEFAULT_PAGE as PageId,
     params: {} as Record<string, string>,
+    /** Set by openPanel / goTo(replace:false); composables/useHashState.ts consumes it to choose pushState over replaceState. */
+    pushPending: false,
+    /** True while the current history entry was created by openPanel, so closePanel can go Back instead of stacking another entry. */
+    panelPushed: false,
   }),
+  getters: {
+    /** The open detail panel parsed from the `sel` param, or null. */
+    selection: (state): PanelSelection | null => parseSel(state.params.sel),
+  },
   actions: {
     /**
      * goTo navigates to `page` with `params` as that page's complete
@@ -34,9 +44,31 @@ export const useNavStore = defineStore('nav', {
      * single click is always one atomic state change (and, downstream,
      * one hash rewrite — composables/useHashState.ts's own watcher).
      */
-    goTo(page: PageId, params: Record<string, string> = {}): void {
+    goTo(page: PageId, params: Record<string, string> = {}, opts: { replace?: boolean } = {}): void {
       this.page = page
       this.params = params
+      this.pushPending = opts.replace === false
+      this.panelPushed = false
+    },
+    /** Opens a detail panel and pushes a history entry, so Back closes it. */
+    openPanel(kind: PanelKind, id: string): void {
+      const sel = formatSel(kind, id)
+      if (this.params.sel === sel) return
+      this.params = { ...this.params, sel }
+      this.pushPending = true
+      this.panelPushed = true
+    },
+    /** Goes Back when the panel owns the last history entry; otherwise drops `sel` in place. */
+    closePanel(): void {
+      if (this.panelPushed && typeof window !== 'undefined') {
+        this.panelPushed = false
+        window.history.back()
+        return
+      }
+      const { sel: _sel, ...rest } = this.params
+      this.params = rest
+      this.pushPending = false
+      this.panelPushed = false
     },
   },
 })

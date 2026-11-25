@@ -5,25 +5,25 @@ import { buildHash, parseGlobalParams, parseHashState, parsePageParams } from '.
 
 describe('parseHashState', () => {
   it('splits a page and query string', () => {
-    const { page, query } = parseHashState('#spend?range=30d&by=model')
-    expect(page).toBe('spend')
+    const { page, query } = parseHashState('#usage?range=30d&by=model')
+    expect(page).toBe('usage')
     expect(query.get('range')).toBe('30d')
     expect(query.get('by')).toBe('model')
   })
 
   it('parses a bare page with no query to an empty query', () => {
-    const { page, query } = parseHashState('#consumers')
-    expect(page).toBe('consumers')
+    const { page, query } = parseHashState('#users')
+    expect(page).toBe('users')
     expect(Array.from(query.keys())).toEqual([])
   })
 
-  it('falls back to DEFAULT_PAGE ("home") for an empty hash', () => {
-    expect(parseHashState('').page).toBe('home')
+  it('falls back to DEFAULT_PAGE ("overview") for an empty hash', () => {
+    expect(parseHashState('').page).toBe('overview')
   })
 
   it('falls back to DEFAULT_PAGE for an unrecognized, non-legacy page, and still parses its query', () => {
     const { page, query } = parseHashState('#bogus?range=30d')
-    expect(page).toBe('home')
+    expect(page).toBe('overview')
     expect(query.get('range')).toBe('30d')
   })
 
@@ -40,17 +40,27 @@ describe('parseHashState', () => {
   describe('legacy tab-name mapping', () => {
     it.each([
       ['providers', 'models'],
-      ['usage', 'consumers'],
-      ['charts', 'spend'],
-      ['events', 'reliability'],
+      ['charts', 'usage'],
+      ['events', 'events'],
       ['targets', 'targets'],
     ] as const)('#%s maps to #%s', (legacy, mapped) => {
       expect(parseHashState(`#${legacy}`).page).toBe(mapped)
     })
 
+    it('legacy ids map to new ids (home→overview, spend→usage, consumers→users)', () => {
+      expect(parseHashState('#home').page).toBe('overview')
+      expect(parseHashState('#spend').page).toBe('usage')
+      expect(parseHashState('#consumers').page).toBe('users')
+    })
+
+    it('a new id wins over a legacy alias of the same name (usage, events)', () => {
+      expect(parseHashState('#usage').page).toBe('usage')
+      expect(parseHashState('#events').page).toBe('events')
+    })
+
     it('drops the old hash\'s query params entirely, regardless of shape', () => {
       const { page, query } = parseHashState('#charts?tab=models&metric=cost&scope=user%3Aalice')
-      expect(page).toBe('spend')
+      expect(page).toBe('usage')
       expect(Array.from(query.keys())).toEqual([])
     })
   })
@@ -58,20 +68,20 @@ describe('parseHashState', () => {
 
 describe('buildHash', () => {
   it('omits the query suffix entirely when params is empty', () => {
-    expect(buildHash('home', {})).toBe('#home')
+    expect(buildHash('overview', {})).toBe('#overview')
   })
 
   it('appends a query string for non-empty params', () => {
-    expect(buildHash('spend', { range: '30d' })).toBe('#spend?range=30d')
+    expect(buildHash('usage', { range: '30d' })).toBe('#usage?range=30d')
   })
 
   it('joins multiple params with &, in insertion order', () => {
-    const hash = buildHash('spend', { range: '30d', cmp: 'prev', scope: 'user:alice' })
-    expect(hash).toBe('#spend?range=30d&cmp=prev&scope=user%3Aalice')
+    const hash = buildHash('usage', { range: '30d', cmp: 'prev', scope: 'user:alice' })
+    expect(hash).toBe('#usage?range=30d&cmp=prev&scope=user%3Aalice')
   })
 
   it('drops a param whose value is an explicit empty string', () => {
-    expect(buildHash('consumers', { q: '' })).toBe('#consumers')
+    expect(buildHash('users', { q: '' })).toBe('#users')
   })
 })
 
@@ -109,6 +119,22 @@ describe('parseGlobalParams', () => {
 
   it('returns an empty object for an empty query', () => {
     expect(parseGlobalParams(new URLSearchParams())).toEqual({})
+  })
+})
+
+describe('sel param', () => {
+  it('sel survives round trip', () => {
+    const hash = buildHash('models', { range: '7d', sel: 'model:uni%2Fglm-5.3-flash' })
+    const { page, query } = parseHashState(hash)
+    expect(page).toBe('models')
+    expect(parsePageParams(query).sel).toBe('model:uni%2Fglm-5.3-flash')
+    expect(parseGlobalParams(query)).toEqual({ range: '7d' })
+  })
+
+  it('scope param still parsed alongside sel', () => {
+    const { query } = parseHashState('#users?scope=group%3Aeng&sel=user%3Aalice')
+    expect(parseGlobalParams(query).scope).toBe('group:eng')
+    expect(parsePageParams(query)).toEqual({ sel: 'user:alice' })
   })
 })
 

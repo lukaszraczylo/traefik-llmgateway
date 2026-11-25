@@ -28,7 +28,7 @@ const matrixKind = computed<MatrixKind>(() => parseMatrixKind(nav.params.matrix)
 function setView(next: unknown): void {
   if (next !== 'directory' && next !== 'matrix') return
   const { user: _user, ...rest } = nav.params
-  nav.goTo('consumers', { ...rest, view: next })
+  nav.goTo('users', { ...rest, view: next })
 }
 
 /**
@@ -38,15 +38,15 @@ function setView(next: unknown): void {
 function setMatrixKind(next: MatrixKind): void {
   const { user: _user, matrix: _matrix, ...rest } = nav.params
   if (next === 'models') {
-    nav.goTo('consumers', { ...rest, view: 'matrix' })
+    nav.goTo('users', { ...rest, view: 'matrix' })
     return
   }
-  nav.goTo('consumers', { ...rest, view: 'matrix', matrix: next })
+  nav.goTo('users', { ...rest, view: 'matrix', matrix: next })
 }
 
 function closeUserDetail(): void {
   const { user: _user, ...rest } = nav.params
-  nav.goTo('consumers', rest)
+  nav.goTo('users', rest)
 }
 </script>
 

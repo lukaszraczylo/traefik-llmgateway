@@ -10,10 +10,9 @@ import { onBeforeUnmount, onMounted, ref } from 'vue'
  * only ones this admin panel targets — see vite.config.ts's
  * modulePreload note for the same reasoning), so no conversion is needed.
  *
- * Re-reads on a `prefers-color-scheme` change so an open Charts view
- * repaints if the OS theme flips while it's on screen — main.css's own
- * dark-mode block is a plain media query, not a class toggle, so this is
- * the only way a chart already on screen learns about it.
+ * Re-reads when the `class` of <html> changes (perfect-design's theme
+ * store toggles `.dark` there, including on an OS flip in "system" mode),
+ * so an open chart repaints on a theme switch.
  */
 export function useThemeColors() {
   const foreground = ref('')
@@ -27,14 +26,14 @@ export function useThemeColors() {
     border.value = style.getPropertyValue('--border').trim()
   }
 
-  let media: MediaQueryList | undefined
+  let observer: MutationObserver | undefined
   onMounted(() => {
     sync()
-    media = window.matchMedia('(prefers-color-scheme: dark)')
-    media.addEventListener('change', sync)
+    observer = new MutationObserver(sync)
+    observer.observe(document.documentElement, { attributes: true, attributeFilter: ['class'] })
   })
   onBeforeUnmount(() => {
-    media?.removeEventListener('change', sync)
+    observer?.disconnect()
   })
 
   return { foreground, mutedForeground, border }
