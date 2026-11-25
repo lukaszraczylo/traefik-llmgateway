@@ -651,7 +651,7 @@ func openAIResponseFromAnthropic(body []byte, model string, created int64) (map[
 		message["tool_calls"] = toolCalls
 	}
 
-	u := usage{prompt: resp.Usage.totalInputTokens(), completion: resp.Usage.OutputTokens}
+	u := usage{prompt: resp.Usage.totalInputTokens(), completion: resp.Usage.OutputTokens, cached: resp.Usage.CacheReadInputTokens}
 
 	out := map[string]any{
 		"id":      chatCompletionIDPrefix + resp.ID,
@@ -964,6 +964,7 @@ func (st *anthropicStreamState) translate(ev sseEvent) ([][]byte, error) {
 		st.id = p.Message.ID
 		st.content.set(chatCompletionIDPrefix+st.id, st.model, st.created)
 		st.u.prompt = p.Message.Usage.totalInputTokens()
+		st.u.cached = p.Message.Usage.CacheReadInputTokens
 		return [][]byte{st.chunk(map[string]any{"role": "assistant"}, nil)}, nil
 
 	case "content_block_start":

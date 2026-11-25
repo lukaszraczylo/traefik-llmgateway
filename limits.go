@@ -560,11 +560,26 @@ type usage struct {
 	// tell an estimated cost from a provider-reported one, per the spec's
 	// "logged as estimated" requirement.
 	estimated bool
+	// cached is the part of prompt the provider served from its prompt
+	// cache (Anthropic cache reads, OpenAI cached_tokens). The minute token
+	// window excludes it; the day and month windows keep the full prompt.
+	cached int64
 }
 
 // total returns the request's combined prompt and completion tokens.
 func (u usage) total() int64 {
 	return u.prompt + u.completion
+}
+
+// minutePrompt returns the prompt tokens the tokensPerMinute window counts.
+func (u usage) minutePrompt() int64 {
+	if u.cached <= 0 {
+		return u.prompt
+	}
+	if u.cached >= u.prompt {
+		return 0
+	}
+	return u.prompt - u.cached
 }
 
 // limitScope is one entity (a user, their group, or the synthetic total
@@ -1915,8 +1930,8 @@ func (l *limiter) accountWith(scopes []limitScope, u usage, costMicros int64, x 
 		// The per-minute token window is read only by a tokensPerMinute
 		// limit, so it is written only for scopes that set one.
 		if sc.limits != nil && sc.limits.TokensPerMinute > 0 {
-			if u.prompt != 0 {
-				entries = append(entries, counterIncr{key: windowKeyForBucket(sc.kind, sc.id, metricTokIn, windowMin, wb.min), delta: u.prompt, ttl: minWindowTTL, enforceTTL: et.min})
+			if mp := u.minutePrompt(); mp != 0 {
+				entries = append(entries, counterIncr{key: windowKeyForBucket(sc.kind, sc.id, metricTokIn, windowMin, wb.min), delta: mp, ttl: minWindowTTL, enforceTTL: et.min})
 			}
 			if u.completion != 0 {
 				entries = append(entries, counterIncr{key: windowKeyForBucket(sc.kind, sc.id, metricTokOut, windowMin, wb.min), delta: u.completion, ttl: minWindowTTL, enforceTTL: et.min})

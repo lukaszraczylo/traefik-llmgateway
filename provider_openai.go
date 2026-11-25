@@ -109,8 +109,14 @@ func (a *openaiAdapter) requestHeaders(hasBody bool) http.Header {
 // choices-empty chunk when the client (or this adapter, see chatCompletion)
 // requested it via stream_options.include_usage.
 type chatStreamUsage struct {
-	PromptTokens     int64 `json:"prompt_tokens"`
-	CompletionTokens int64 `json:"completion_tokens"`
+	PromptTokens     int64              `json:"prompt_tokens"`
+	CompletionTokens int64              `json:"completion_tokens"`
+	PromptDetails    promptTokenDetails `json:"prompt_tokens_details"`
+}
+
+// promptTokenDetails is OpenAI's prompt_tokens_details object.
+type promptTokenDetails struct {
+	CachedTokens int64 `json:"cached_tokens"`
 }
 
 // chatStreamChunk is the subset of one SSE chunk's JSON payload
@@ -233,7 +239,7 @@ func (a *openaiAdapter) forwardJSON(w http.ResponseWriter, resp *http.Response) 
 	w.WriteHeader(resp.StatusCode)
 	_, _ = w.Write(body)
 
-	return usage{prompt: payload.Usage.PromptTokens, completion: payload.Usage.CompletionTokens}, nil
+	return usage{prompt: payload.Usage.PromptTokens, completion: payload.Usage.CompletionTokens, cached: payload.Usage.PromptDetails.CachedTokens}, nil
 }
 
 // sseDoneMarker is the exact data payload readSSE hands forwardStream for
@@ -266,6 +272,7 @@ func (a *openaiAdapter) forwardStream(w http.ResponseWriter, body io.Reader, cli
 		if hasUsage {
 			u.prompt = chunk.Usage.PromptTokens
 			u.completion = chunk.Usage.CompletionTokens
+			u.cached = chunk.Usage.PromptDetails.CachedTokens
 		}
 
 		isUsageOnlyChunk := hasUsage && len(chunk.Choices) == 0

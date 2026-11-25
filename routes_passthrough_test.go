@@ -84,7 +84,7 @@ func TestExtractPassthroughUsage(t *testing.T) {
 			typeName:     providerTypeAnthropic,
 			providerName: "anthropic",
 			body:         `{"model":"claude-native","usage":{"input_tokens":4,"cache_creation_input_tokens":180000,"cache_read_input_tokens":20000,"output_tokens":9}}`,
-			wantUsage:    usage{prompt: 200004, completion: 9},
+			wantUsage:    usage{prompt: 200004, completion: 9, cached: 20000},
 			wantModel:    "claude-native",
 		},
 		{
@@ -1279,7 +1279,7 @@ func TestExtractPassthroughSSEUsage(t *testing.T) {
 			providerName: "anthropic",
 			raw: "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-native\",\"usage\":{\"input_tokens\":20,\"cache_creation_input_tokens\":5,\"cache_read_input_tokens\":3,\"output_tokens\":0}}}\n\n" +
 				"event: message_delta\ndata: {\"delta\":{},\"usage\":{\"output_tokens\":11}}\n\n",
-			wantUsage: usage{prompt: 28, completion: 11},
+			wantUsage: usage{prompt: 28, completion: 11, cached: 3},
 			wantModel: "claude-native",
 		},
 		{

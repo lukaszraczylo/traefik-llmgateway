@@ -582,6 +582,8 @@ type passthroughUsagePayload struct {
 		// this route either.
 		CacheCreationInputTokens int64 `json:"cache_creation_input_tokens"`
 		CacheReadInputTokens     int64 `json:"cache_read_input_tokens"`
+		// PromptDetails carries the OpenAI-shaped cached_tokens count.
+		PromptDetails promptTokenDetails `json:"prompt_tokens_details"`
 	} `json:"usage"`
 	UsageMetadata struct {
 		PromptTokenCount     int64 `json:"promptTokenCount"`
@@ -613,9 +615,9 @@ func extractPassthroughUsage(typeName, providerName string, body []byte) (usage,
 
 	switch typeName {
 	case providerTypeOpenAI:
-		return usage{prompt: payload.Usage.PromptTokens, completion: payload.Usage.CompletionTokens}, model, err
+		return usage{prompt: payload.Usage.PromptTokens, completion: payload.Usage.CompletionTokens, cached: payload.Usage.PromptDetails.CachedTokens}, model, err
 	case providerTypeAnthropic:
-		return usage{prompt: payload.Usage.InputTokens + payload.Usage.CacheCreationInputTokens + payload.Usage.CacheReadInputTokens, completion: payload.Usage.OutputTokens}, model, err
+		return usage{prompt: payload.Usage.InputTokens + payload.Usage.CacheCreationInputTokens + payload.Usage.CacheReadInputTokens, completion: payload.Usage.OutputTokens, cached: payload.Usage.CacheReadInputTokens}, model, err
 	case providerTypeGemini:
 		return usage{prompt: payload.UsageMetadata.PromptTokenCount, completion: payload.UsageMetadata.CandidatesTokenCount}, model, err
 	default:
@@ -664,6 +666,7 @@ func extractPassthroughSSEUsage(typeName, providerName string, head, tail []byte
 	u := headUsage
 	if tailUsage.prompt > 0 {
 		u.prompt = tailUsage.prompt
+		u.cached = tailUsage.cached
 	}
 	if tailUsage.completion > 0 {
 		u.completion = tailUsage.completion
@@ -709,7 +712,7 @@ func parseSSEUsageChunk(typeName string, raw []byte) (usage, string) {
 				return nil
 			}
 			if chunk.Usage.PromptTokens > 0 || chunk.Usage.CompletionTokens > 0 {
-				u = usage{prompt: chunk.Usage.PromptTokens, completion: chunk.Usage.CompletionTokens}
+				u = usage{prompt: chunk.Usage.PromptTokens, completion: chunk.Usage.CompletionTokens, cached: chunk.Usage.PromptDetails.CachedTokens}
 			}
 			if chunk.Model != "" {
 				model = chunk.Model
@@ -735,6 +738,7 @@ func parseSSEUsageChunk(typeName string, raw []byte) (usage, string) {
 					return nil
 				}
 				u.prompt = payload.Message.Usage.InputTokens + payload.Message.Usage.CacheCreationInputTokens + payload.Message.Usage.CacheReadInputTokens
+				u.cached = payload.Message.Usage.CacheReadInputTokens
 				if payload.Message.Usage.OutputTokens > 0 {
 					u.completion = payload.Message.Usage.OutputTokens
 				}
