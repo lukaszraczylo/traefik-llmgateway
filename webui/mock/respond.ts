@@ -1,5 +1,5 @@
 import { matchFixture, nearestFixture, normaliseQuery, type Fixture } from './match.ts'
-import { applyScenarios, errorEnvelope, scenarioDelayMs } from './scenarios.ts'
+import { applyScenarios, errorEnvelope, hotUserIds, scenarioDelayMs } from './scenarios.ts'
 import { fitSeriesScopes, synthesise } from './synth.ts'
 import { CAPTURE_AT, shiftTimestamps } from './time-shift.ts'
 
@@ -97,17 +97,30 @@ export function jitterMeters(path: string, body: unknown, rng: () => number): un
       p.failuresMinute = Math.min(wobble(p.failuresMinute, rng), p.attemptsMinute)
     }
   } else {
-    for (const u of b.users ?? []) u.requestsPerMinute = wobble(u.requestsPerMinute, rng, u.limits?.requestsPerMinute || undefined)
-    for (const g of b.groups ?? []) g.requestsPerMinute = wobble(g.requestsPerMinute, rng)
-    if (b.total) b.total.requestsPerMinute = wobble(b.total.requestsPerMinute, rng)
+    for (const u of b.users ?? []) {
+      u.requestsPerMinute = wobble(u.requestsPerMinute, rng, u.limits?.requestsPerMinute || undefined)
+      if (u.tokensPerMinute > 0) u.tokensPerMinute = wobble(u.tokensPerMinute, rng, u.limits?.tokensPerMinute || undefined)
+    }
+    for (const o of [...(b.groups ?? []), b.total ?? {}]) {
+      o.requestsPerMinute = wobble(o.requestsPerMinute, rng)
+      if (o.tokensPerMinute > 0) o.tokensPerMinute = wobble(o.tokensPerMinute, rng)
+    }
   }
   return b
+}
+
+const EVENTS = '/admin/api/events'
+
+function usageBody(i: RespondInput): Obj {
+  const f = i.manifest.find((m) => m.path === '/admin/api/usage')
+  return f ? (i.readFixture(f.file) as Obj) : { users: [] }
 }
 
 /** One mock admin API response: fixture or synthesis, then scenarios, then meter jitter. */
 export function respond(i: RespondInput): MockResponse {
   const base = resolveBase(i)
-  const out = applyScenarios(i.scenarios, i.path, base.body, base.status, { now: i.now, rng: i.rng })
+  const hotUsers = i.scenarios.includes('limits-hot') && i.path === EVENTS ? hotUserIds(usageBody(i)) : undefined
+  const out = applyScenarios(i.scenarios, i.path, base.body, base.status, { now: i.now, rng: i.rng, hotUsers })
   const body = out.status === 200 ? jitterMeters(i.path, out.body, i.rng) : out.body
   return { status: out.status, body, delayMs: scenarioDelayMs(i.scenarios) }
 }

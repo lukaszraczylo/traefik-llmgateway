@@ -23,8 +23,10 @@ export const SLOW_DELAY_MS = 1500
 const API = '/admin/api/'
 const HISTORY_PATHS = ['/admin/api/usage/series', '/admin/api/usage/totals', '/admin/api/usage/models']
 const LATENCY_KEYS = ['p50Ms', 'p95Ms', 'p99Ms', 'ttfbP50Ms', 'ttfbP95Ms']
-const HOT_USER_IDS = ['user-01', 'user-02', 'user-03']
+const HOT_USERS = 3
 const HOT_GROUP = 'friends'
+const LIVE_TPM_MIN_FRACTION = 0.01
+const LIVE_TPM_SPREAD_FRACTION = 0.03
 const HOT_MINUTE_FRACTION = 0.93
 const HOT_DAY_FRACTION = 0.9
 const BREAKER_OPEN_MS = 90_000
@@ -33,6 +35,8 @@ const HUGE_FACTOR = 3
 export interface ScenarioContext {
   now: number
   rng: () => number
+  /** Users limits-hot targets on the events path; usage derives them itself, see hotUserIds. */
+  hotUsers?: string[]
 }
 
 export interface ScenarioResult {
@@ -201,19 +205,37 @@ function empty(path: string, body: Obj) {
   }
 }
 
+/** The first HOT_USERS members of the friends group that have a per-minute request limit. */
+export function hotUserIds(usage: Obj): string[] {
+  return (usage.users as Obj[])
+    .filter((u) => (u.groups ?? [u.groupName]).includes(HOT_GROUP) && (u.limits?.requestsPerMinute ?? 0) > 0)
+    .map((u) => u.id as string)
+    .sort()
+    .slice(0, HOT_USERS)
+}
+
+function addToGroupAndTotal(body: Obj, groupName: string | undefined, field: string, delta: number) {
+  for (const g of body.groups ?? []) if (g.id === groupName) g[field] = (g[field] ?? 0) + delta
+  if (body.total) body.total[field] = (body.total[field] ?? 0) + delta
+}
+
 function limitsHot(path: string, body: Obj, ctx: ScenarioContext) {
   if (path === '/admin/api/usage') {
-    const hot = (body.users as Obj[]).filter((u) => HOT_USER_IDS.includes(u.id) && (u.limits?.requestsPerMinute ?? 0) > 0)
-    for (const u of hot) {
-      u.requestsPerMinute = Math.floor(u.limits.requestsPerMinute * HOT_MINUTE_FRACTION)
+    const ids = hotUserIds(body)
+    for (const u of (body.users as Obj[]).filter((x) => ids.includes(x.id))) {
+      const rpm = Math.floor(u.limits.requestsPerMinute * HOT_MINUTE_FRACTION)
+      addToGroupAndTotal(body, HOT_GROUP, 'requestsPerMinute', rpm - u.requestsPerMinute)
+      u.requestsPerMinute = rpm
+      if (u.limits.tokensPerMinute > 0) {
+        const tpm = Math.floor(u.limits.tokensPerMinute * HOT_MINUTE_FRACTION)
+        addToGroupAndTotal(body, HOT_GROUP, 'tokensPerMinute', tpm - (u.tokensPerMinute ?? 0))
+        u.tokensPerMinute = tpm
+      }
       if (u.limits.requestsPerDay > 0) u.requestsPerDay = Math.floor(u.limits.requestsPerDay * HOT_DAY_FRACTION)
       u.rejectionsPerDay = Math.max(u.rejectionsPerDay ?? 0, 9)
     }
-    const added = hot.reduce((s: number, u: Obj) => s + u.requestsPerMinute, 0)
-    for (const g of body.groups ?? []) if (g.id === HOT_GROUP) g.requestsPerMinute += added
-    if (body.total) body.total.requestsPerMinute += added
   } else if (path === '/admin/api/events') {
-    const fresh = HOT_USER_IDS.flatMap((user, i) => [
+    const fresh = (ctx.hotUsers ?? []).flatMap((user, i) => [
       limitEvent(user, 'rate_limit', ctx.now - (i * 2 + 1) * 4000, 'requests per minute limit reached; request rejected', 429),
       limitEvent(user, 'paced', ctx.now - (i * 2 + 2) * 4000, `request delayed ${(1.5 + i * 0.7).toFixed(1)}s by pacing`),
     ])
@@ -227,6 +249,17 @@ function limitEvent(user: string, kind: string, at: number, message: string, sta
 
 const copies = <T>(factor: number, make: (n: number) => T): T[] => Array.from({ length: factor }, (_, n) => make(n))
 const suffix = (id: string, n: number) => (n === 0 ? id : `${id}-v${n + 1}`)
+const hugeProvider = (name: string, n: number) => (n === 0 ? name : `${name}-${n + 1}`)
+
+/** Every "provider/model" id the huge overview and catalog list for one captured id. */
+function hugeModelIds(id: string): string[] {
+  const slash = id.indexOf('/')
+  const provider = slash < 0 ? '' : id.slice(0, slash)
+  const model = id.slice(slash + 1)
+  return copies(HUGE_FACTOR, (n) => copies(HUGE_FACTOR, (r) => `${provider ? `${hugeProvider(provider, n)}/` : ''}${suffix(model, r)}`)).flat()
+}
+
+const expandRows = (rows: Obj[], ids: (id: string) => string[]): Obj[] => rows.flatMap((r) => ids(r.id).map((id) => ({ ...r, id })))
 
 function huge(path: string, body: Obj) {
   if (path === '/admin/api/overview') {
@@ -234,26 +267,24 @@ function huge(path: string, body: Obj) {
       copies(HUGE_FACTOR, (n) => {
         const models = (p.models as string[]).flatMap((m) => copies(HUGE_FACTOR, (r) => suffix(m, r)))
         const grow = (src: Obj) => Object.fromEntries(Object.entries(src ?? {}).flatMap(([m, v]) => copies(HUGE_FACTOR, (r) => [suffix(m, r), v])))
-        return { ...p, name: n === 0 ? p.name : `${p.name}-${n + 1}`, models, modelCount: models.length, modelMeta: grow(p.modelMeta), modelRates: grow(p.modelRates) }
+        return { ...p, name: hugeProvider(p.name, n), models, modelCount: models.length, modelMeta: grow(p.modelMeta), modelRates: grow(p.modelRates) }
       }),
     )
   } else if (path === '/admin/api/catalog') {
     body.providers = (body.providers as Obj[]).flatMap((p) =>
       copies(HUGE_FACTOR, (n) => {
-        const name = n === 0 ? p.name : `${p.name}-${n + 1}`
+        const name = hugeProvider(p.name, n)
         const models = (p.models as Obj[]).flatMap((m) => copies(HUGE_FACTOR, (r) => ({ ...m, model: suffix(m.model, r), id: `${name}/${suffix(m.model, r)}` })))
         return { ...p, name, models }
       }),
     )
   } else if (path === '/admin/api/usage/models' && Array.isArray(body.models)) {
-    body.models = tripleRows(body.models)
-  } else if (path === '/admin/api/performance' && Array.isArray(body.rows) && body.kind === 'model') {
-    body.rows = tripleRows(body.rows)
+    body.models = expandRows(body.models, hugeModelIds)
+  } else if (path === '/admin/api/performance' && Array.isArray(body.rows)) {
+    body.rows = expandRows(body.rows, body.kind === 'provider' ? (id) => copies(HUGE_FACTOR, (n) => hugeProvider(id, n)) : hugeModelIds)
+  } else if (path === '/admin/api/usage/totals' && body.kind === 'usermodel') {
+    body.rows = expandRows(body.rows, hugeModelIds)
   }
-}
-
-function tripleRows(rows: Obj[]): Obj[] {
-  return rows.flatMap((r) => copies(HUGE_FACTOR, (n) => ({ ...r, id: suffix(r.id, n) })))
 }
 
 function live(path: string, body: Obj, ctx: ScenarioContext) {
@@ -264,6 +295,12 @@ function live(path: string, body: Obj, ctx: ScenarioContext) {
   } else if (path === '/admin/api/usage') {
     for (const u of body.users ?? []) if (u.requestsPerDay > 0) u.requestsPerMinute = Math.max(u.requestsPerMinute, 3)
     body.total.requestsPerMinute = Math.max(body.total.requestsPerMinute, 24)
+    for (const u of body.users ?? []) {
+      const limit = u.limits?.tokensPerMinute ?? 0
+      if (limit <= 0 || !(u.requestsPerDay > 0)) continue
+      u.tokensPerMinute = Math.round(limit * (LIVE_TPM_MIN_FRACTION + ctx.rng() * LIVE_TPM_SPREAD_FRACTION))
+      addToGroupAndTotal(body, u.groupName, 'tokensPerMinute', u.tokensPerMinute)
+    }
   } else if (path === '/admin/api/overview') {
     for (const p of body.providers ?? []) if (p.attemptsDay > 0) p.attemptsMinute = Math.max(p.attemptsMinute, 4)
   }

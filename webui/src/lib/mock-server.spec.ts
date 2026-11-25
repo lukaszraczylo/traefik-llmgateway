@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest'
 import manifestJson from '../../mock/manifest.json'
 import { matchFixture, type Fixture } from '../../mock/match'
 import { respond } from '../../mock/respond'
-import { applyScenarios, SCENARIOS, scenarioDelayMs, parseScenarios } from '../../mock/scenarios'
+import { applyScenarios, hotUserIds, SCENARIOS, scenarioDelayMs, parseScenarios } from '../../mock/scenarios'
 import { bucketsFor, CAPTURE_AT, shiftTimestamps } from '../../mock/time-shift'
 
 const manifest = manifestJson as Fixture[]
@@ -156,7 +156,7 @@ describe('respond', () => {
 
   it('jitters live minute meters between calls', () => {
     let n = 0
-    const rng = () => (n++ % 2 ? 0.9 : 0.1)
+    const rng = () => (n++ * 0.37) % 1
     const call = () => respond({ manifest, readFixture, path: '/admin/api/usage', query: q(''), scenarios: ['live'], now: NOW, rng }).body as Any
     expect(call().total.requestsPerMinute).not.toBe(call().total.requestsPerMinute)
   })
@@ -270,18 +270,56 @@ describe('scenarios', () => {
   })
 
   it('limits-hot sets requestsPerMinute near limit for 3 friends users and adds rate_limit/paced events', () => {
-    const u = apply(['limits-hot'], '/admin/api/usage', readFixture('usage.json')).body as Any
+    const usage = readFixture('usage.json') as Any
+    const u = apply(['limits-hot'], '/admin/api/usage', usage).body as Any
     const hot = u.users.filter((x: Any) => x.limits?.requestsPerMinute > 0 && x.requestsPerMinute >= x.limits.requestsPerMinute * 0.8)
     expect(hot).toHaveLength(3)
+    expect(hot.map((h: Any) => h.id).sort()).toEqual(hotUserIds(usage))
     for (const h of hot) {
       expect(h.groupName).toBe('friends')
       expect(h.requestsPerMinute).toBeLessThanOrEqual(h.limits.requestsPerMinute)
     }
-    const e = apply(['limits-hot'], '/admin/api/events', readFixture('events__limit-200.json')).body as Any
+    const e = applyScenarios(['limits-hot'], '/admin/api/events', readFixture('events__limit-200.json'), 200, { ...NOWS, hotUsers: hotUserIds(usage) }).body as Any
     const kinds = new Set(e.events.map((x: Any) => x.kind))
     expect(kinds.has('rate_limit')).toBe(true)
     expect(kinds.has('paced')).toBe(true)
     expect(e.events.filter((x: Any) => hot.some((h: Any) => h.id === x.user)).length).toBeGreaterThan(0)
+  })
+
+  it('derives the hot users from the friends group members', () => {
+    const usage = { users: [
+      { id: 'b', groupName: 'home', groups: ['home'], limits: { requestsPerMinute: 5 } },
+      { id: 'z', groupName: 'friends', groups: ['friends'], limits: { requestsPerMinute: 5 } },
+      { id: 'c', groupName: 'friends', groups: ['friends'], limits: { requestsPerMinute: 5 } },
+      { id: 'n', groupName: 'friends', groups: ['friends'], limits: {} },
+      { id: 'a', groupName: 'friends', groups: ['friends'], limits: { requestsPerMinute: 5 } },
+      { id: 'd', groupName: 'friends', groups: ['friends'], limits: { requestsPerMinute: 5 } },
+    ] }
+    expect(hotUserIds(usage)).toEqual(['a', 'c', 'd'])
+  })
+
+  it('limits-hot sets live tokensPerMinute near the limit and sums it into group and total', () => {
+    const usage = readFixture('usage.json') as Any
+    const u = apply(['limits-hot'], '/admin/api/usage', usage).body as Any
+    const hot = u.users.filter((x: Any) => hotUserIds(usage).includes(x.id))
+    for (const h of hot) {
+      expect(h.tokensPerMinute).toBe(Math.floor(h.limits.tokensPerMinute * 0.93))
+      expect(h.tokensPerMinute).toBeLessThanOrEqual(h.limits.tokensPerMinute)
+    }
+    const sum = hot.reduce((n: number, h: Any) => n + h.tokensPerMinute, 0)
+    expect(u.groups.find((g: Any) => g.id === 'friends').tokensPerMinute).toBe(sum)
+    expect(u.total.tokensPerMinute).toBe(sum)
+  })
+
+  it('live gives users with a tokensPerMinute limit a small value and others none', () => {
+    const u = apply(['live'], '/admin/api/usage', readFixture('usage.json')).body as Any
+    const active = u.users.filter((x: Any) => x.limits?.tokensPerMinute > 0 && x.requestsPerDay > 0)
+    expect(active.length).toBeGreaterThan(0)
+    for (const x of active) {
+      expect(x.tokensPerMinute).toBeGreaterThan(0)
+      expect(x.tokensPerMinute).toBeLessThan(x.limits.tokensPerMinute * 0.05)
+    }
+    for (const x of u.users.filter((y: Any) => !(y.limits?.tokensPerMinute > 0))) expect(x.tokensPerMinute).toBeUndefined()
   })
 
   it('huge triples providers and models with unique ids', () => {
@@ -304,5 +342,65 @@ describe('scenarios', () => {
     const body = { a: 1 }
     expect(apply([], '/admin/api/overview', body)).toEqual({ status: 200, body })
     expect(apply(['live'], '/admin/api/config', body).body).toEqual(body)
+  })
+})
+
+describe('huge scenario consistency', () => {
+  const hugeGet = (path: string, query: string) => get(path, query, ['huge']).body as Any
+
+  it('lists the same provider ids in overview and performance kind=provider', () => {
+    const overview = hugeGet('/admin/api/overview', '')
+    const perf = hugeGet('/admin/api/performance', 'kind=provider&window=day&span=14')
+    const names = overview.providers.map((p: Any) => p.name).sort()
+    expect(perf.rows.map((r: Any) => r.id).sort()).toEqual(names)
+    expect(names).toHaveLength(57)
+  })
+
+  it('lists model ids that overview and catalog also list', () => {
+    const overview = hugeGet('/admin/api/overview', '')
+    const fromOverview = overview.providers.flatMap((p: Any) => p.models.map((m: string) => `${p.name}/${m}`))
+    const catalog = hugeGet('/admin/api/catalog', '')
+    const known = new Set<string>(catalog.providers.flatMap((p: Any) => p.models.map((m: Any) => m.id)))
+    for (const id of fromOverview) expect(known.has(id), id).toBe(true)
+    const perf = hugeGet('/admin/api/performance', 'kind=model&window=day&span=14')
+    const models = hugeGet('/admin/api/usage/models', 'metric=req&window=day&span=7&limit=100&detail=1')
+    const totals = hugeGet('/admin/api/usage/totals', 'kind=usermodel&window=day&span=14&user=admin')
+    for (const rows of [perf.rows, models.models, totals.rows]) {
+      expect(rows.length).toBeGreaterThan(0)
+      expect(new Set(rows.map((r: Any) => r.id)).size).toBe(rows.length)
+      for (const r of rows) expect(known.has(r.id), r.id).toBe(true)
+    }
+  })
+
+  it('serves series for the tripled provider and model scopes', () => {
+    const b = hugeGet('/admin/api/usage/series', 'scope=provider:alibaba-2&scope=model:alibaba-3/deepseek-v4-flash-0731-v2&metric=req&window=day&span=7')
+    expect(b.series.map((s: Any) => s.scope)).toEqual(['provider:alibaba-2', 'model:alibaba-3/deepseek-v4-flash-0731-v2'])
+    for (const s of b.series) expect(s.points).toHaveLength(7)
+  })
+})
+
+describe('month boundaries', () => {
+  const NEW_YEAR_EVE = Date.parse('2026-12-31T23:59:00Z')
+  const NEW_YEAR = Date.parse('2027-01-01T00:30:00Z')
+
+  it('bucketsFor rolls day, hour and month labels over the year end', () => {
+    expect(bucketsFor('day', 2, 0, NEW_YEAR_EVE)).toEqual(['20261230', '20261231'])
+    expect(bucketsFor('day', 2, 0, NEW_YEAR)).toEqual(['20261231', '20270101'])
+    expect(bucketsFor('hour', 2, 0, NEW_YEAR_EVE)).toEqual(['2026123122', '2026123123'])
+    expect(bucketsFor('hour', 2, 0, NEW_YEAR)).toEqual(['2026123123', '2027010100'])
+    expect(bucketsFor('month', 2, 0, NEW_YEAR_EVE)).toEqual(['202611', '202612'])
+    expect(bucketsFor('month', 2, 0, NEW_YEAR)).toEqual(['202612', '202701'])
+    expect(bucketsFor('month', 2, 1, NEW_YEAR)).toEqual(['202611', '202612'])
+  })
+
+  it('shiftTimestamps lands the newest bucket on now across the year end', () => {
+    const body = { buckets: ['20261124', '20261125'], points: [{ id: '20261125' }], hours: { buckets: ['2026112500', '2026112501'] }, months: { buckets: ['202610', '202611'] } }
+    for (const now of [NEW_YEAR_EVE, NEW_YEAR]) {
+      const out = shiftTimestamps(body, CAPTURE_AT, now) as Any
+      expect(out.buckets).toEqual(bucketsFor('day', 2, 0, now))
+      expect(out.points[0].id).toBe(out.buckets[1])
+      expect(out.hours.buckets).toEqual(bucketsFor('hour', 2, 0, now))
+      expect(out.months.buckets).toEqual(bucketsFor('month', 2, 0, now))
+    }
   })
 })
