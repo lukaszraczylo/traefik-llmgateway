@@ -305,6 +305,42 @@ func TestAdminConsumers_ModelAccessCounts(t *testing.T) {
 	}
 }
 
+// TestAdminConsumers_ModelAccessPrefixedGlobs pins that model globs written
+// as "provider/model" count, as every request path also tries the prefixed id.
+func TestAdminConsumers_ModelAccessPrefixedGlobs(t *testing.T) {
+	t.Parallel()
+	cfg := newAdminTestConfig()
+	cfg.Groups["prefixed"] = &GroupConfig{Providers: []string{"alpha"}, Models: []string{"alpha/*"}}
+	cfg.Groups["exact"] = &GroupConfig{Providers: []string{"alpha"}, Models: []string{"alpha/a-model-1"}}
+	cfg.Groups["bare"] = &GroupConfig{Providers: []string{"alpha"}, Models: []string{"a-model-*"}}
+	h, _ := newAdminGatewayHandle(t, cfg)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, adminRequest(http.MethodGet, adminConsumersPath, "sk-admin1"))
+	var got adminConsumersResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	want := map[string]adminModelAccessCount{
+		"prefixed": {Allowed: 2, Total: 2},
+		"exact":    {Allowed: 1, Total: 2},
+		"bare":     {Allowed: 2, Total: 2},
+	}
+	for _, grp := range got.Groups {
+		w, ok := want[grp.Name]
+		if !ok {
+			continue
+		}
+		if grp.ModelAccess["alpha"] != w {
+			t.Errorf("%s ModelAccess[alpha] = %+v, want %+v", grp.Name, grp.ModelAccess["alpha"], w)
+		}
+		delete(want, grp.Name)
+	}
+	if len(want) != 0 {
+		t.Errorf("groups missing from response: %v", want)
+	}
+}
+
 // TestAdminConsumers_UsersFilePathOnly pins the "usersFile path shown,
 // contents never" risk note (plan §6): only the configured path appears,
 // never any per-user data beyond what userSummary/groupSummary already
