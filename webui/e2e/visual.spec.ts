@@ -56,6 +56,7 @@ const PANEL_PAGES: Array<{ page: (typeof PAGE_IDS)[number]; kind: string; scenar
   { page: 'models', kind: 'provider-degraded' },
   { page: 'models', kind: 'provider-open', scenario: 'breaker-open' },
   { page: 'routers', kind: 'router' },
+  { page: 'routers', kind: 'router', scenario: 'router-escalations' },
   { page: 'targets', kind: 'target' },
 ]
 
