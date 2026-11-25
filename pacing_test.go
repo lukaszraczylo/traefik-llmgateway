@@ -427,3 +427,19 @@ func TestPacing_EventMessageRoundsDelay(t *testing.T) {
 	}
 	assert.Equal(t, []string{"request paced 8.3s"}, msgs)
 }
+
+func TestPacedDelayText(t *testing.T) {
+	cases := []struct {
+		want string
+		d    time.Duration
+	}{
+		{"8.3s", 8333333333 * time.Nanosecond},
+		{"100ms", 120 * time.Millisecond},
+		{"37ms", 37 * time.Millisecond},
+		{"1ms", 400 * time.Microsecond},
+		{"100ms", 99600 * time.Microsecond},
+	}
+	for _, c := range cases {
+		assert.Equal(t, c.want, pacedDelayText(c.d), c.d.String())
+	}
+}

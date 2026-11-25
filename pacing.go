@@ -348,10 +348,22 @@ func (g *Gateway) admitCounted(ctx context.Context, w http.ResponseWriter, scope
 // pacedEventRound keeps the event message readable (8.3s, not 8.333333333s).
 const pacedEventRound = 100 * time.Millisecond
 
+// pacedDelayText renders a delay for the event message: tenths of a second
+// from 100ms up, whole milliseconds below, never "0s" for a positive delay.
+func pacedDelayText(d time.Duration) string {
+	if d >= pacedEventRound {
+		return d.Round(pacedEventRound).String()
+	}
+	if d > 0 && d < time.Millisecond {
+		return time.Millisecond.String()
+	}
+	return d.Round(time.Millisecond).String()
+}
+
 // recordPacedEvent records at most one pacing event per user per throttle
 // window.
 func (g *Gateway) recordPacedEvent(scopes []limitScope, d time.Duration) {
-	ev := gatewayEvent{Route: "pacing", Kind: eventKindPaced, Message: "request paced " + d.Round(pacedEventRound).String()}
+	ev := gatewayEvent{Route: "pacing", Kind: eventKindPaced, Message: "request paced " + pacedDelayText(d)}
 	applyScopeAttribution(&ev, scopes)
 	if ev.User == "" || !g.limiter.lastSeen.due(pacedEventScope, ev.User, g.limiter.now()) {
 		return
