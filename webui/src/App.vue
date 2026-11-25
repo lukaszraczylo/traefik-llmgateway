@@ -74,7 +74,7 @@ onMounted(() => {
   </div>
   <AppLayout v-else>
     <!-- GET /admin/api/overview's config warnings — renders nothing itself once `warnings` is empty, so this is always safe to mount. -->
-    <ConfigWarningsBanner :warnings="dashboard.overview?.warnings ?? []" :warnings-dropped="dashboard.overview?.warningsDropped" />
+    <ConfigWarningsBanner v-if="nav.page !== 'config'" :warnings="dashboard.overview?.warnings ?? []" :warnings-dropped="dashboard.overview?.warningsDropped" />
     <component :is="currentPage" />
   </AppLayout>
   <ToastViewport />

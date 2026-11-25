@@ -59,11 +59,20 @@ export const useNavStore = defineStore('nav', {
     },
     /** Opens a detail panel and pushes a history entry, so Back closes it. */
     openPanel(kind: PanelKind, id: string): void {
-      const sel = formatSel(kind, id)
+      this.openSheet(formatSel(kind, id))
+    },
+    /** Opens a sheet whose `sel` is not an entity panel (e.g. `helper:router`), pushing a history entry like openPanel. */
+    openSheet(sel: string): void {
       if (this.params.sel === sel) return
       this.params = { ...this.params, sel }
       this.pushPending = true
       this.panelPushed = true
+    },
+    /** Switches the open sheet's `sel` in place: no new history entry, and Back still closes it. */
+    swapSheet(sel: string): void {
+      if (this.params.sel === sel) return
+      this.params = { ...this.params, sel }
+      this.pushPending = false
     },
     /** Goes Back when the panel owns the last history entry; otherwise drops `sel` in place. */
     closePanel(): void {

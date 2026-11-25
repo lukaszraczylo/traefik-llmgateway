@@ -92,6 +92,27 @@ describe('useNavStore panels', () => {
   })
 })
 
+describe('useNavStore raw sheet selection', () => {
+  it('openSheet sets an opaque sel, pushes history and lets close go Back', () => {
+    const nav = useNavStore()
+    nav.goTo('config', { q: 'x' })
+    nav.openSheet('helper:router')
+    expect(nav.params).toEqual({ q: 'x', sel: 'helper:router' })
+    expect(nav.pushPending).toBe(true)
+    expect(nav.panelPushed).toBe(true)
+  })
+
+  it('swapSheet changes sel in place and keeps the pushed marker', () => {
+    const nav = useNavStore()
+    nav.openSheet('helper:router')
+    nav.pushPending = false
+    nav.swapSheet('helper:limits')
+    expect(nav.params.sel).toBe('helper:limits')
+    expect(nav.pushPending).toBe(false)
+    expect(nav.panelPushed).toBe(true)
+  })
+})
+
 describe('useNavStore no-op navigation', () => {
   it('goTo to the identical page and params with replace:false does not leave a push pending', () => {
     const nav = useNavStore()

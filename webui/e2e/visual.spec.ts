@@ -145,6 +145,58 @@ for (const [vp, size] of Object.entries(VIEWPORTS)) {
   }
 }
 
+// The Change helper sheet, deep-linked onto a form: captured whole like the entity panels.
+for (const form of ['router', 'limits'] as const) {
+  for (const [vp, size] of Object.entries(VIEWPORTS)) {
+    for (const theme of THEMES) {
+      test(`config helper ${form} live ${vp} ${theme}`, async ({ page }) => {
+        await page.setViewportSize(size)
+        await exercise(page, `config-helper-${form}`, `#config?sel=helper:${form}`, 'live', vp as keyof typeof VIEWPORTS, theme)
+        await expect(page.locator('[data-panel-kind="helper"]')).toHaveAttribute('data-panel-id', form)
+        await expect(page.getByRole('button', { name: 'Smart router', pressed: form === 'router' })).toBeVisible()
+      })
+    }
+  }
+}
+
+// Config warnings show as callouts above the viewer; the global banner steps aside on this page.
+for (const [vp, size] of Object.entries(VIEWPORTS)) {
+  for (const theme of THEMES) {
+    test(`config warnings config-warnings ${vp} ${theme}`, async ({ page }) => {
+      await page.setViewportSize(size)
+      await exercise(page, 'config-warnings', '#config', 'config-warnings', vp as keyof typeof VIEWPORTS, theme)
+      await expect(page.getByTestId('config-warnings').getByText('Config warning')).toHaveCount(5)
+      await expect(page.getByRole('button', { name: /configuration warning details/ })).toHaveCount(0)
+    })
+  }
+}
+
+// Opening and closing the helper from the header moves the hash, and Back closes it.
+test('config change helper opens from the header and Back closes it', async ({ page }) => {
+  await page.setViewportSize(VIEWPORTS.desktop)
+  await visit(page, '#config', 'live', 'light')
+  await page.getByRole('button', { name: 'Change helper' }).click()
+  await expect(page).toHaveURL(/#config\?.*sel=helper(%3A|:)limits/)
+  await page.getByRole('button', { name: 'Smart router' }).click()
+  await expect(page).toHaveURL(/sel=helper(%3A|:)router/)
+  await page.goBack()
+  await expect(page.locator('[data-panel-kind="helper"]')).toHaveCount(0)
+})
+
+test('config sections fold, filter and the copied text is redacted', async ({ page }) => {
+  await page.setViewportSize(VIEWPORTS.desktop)
+  await visit(page, '#config', 'live', 'light')
+  const providers = page.getByRole('region', { name: 'providers', exact: true })
+  await expect(providers.getByText('baseUrl').first()).toBeVisible()
+  await providers.getByRole('button', { name: /providers/ }).first().click()
+  await expect(providers.getByRole('button', { name: /providers/ }).first()).toHaveAttribute('aria-expanded', 'false')
+  await page.getByLabel('Filter config sections').fill('redis')
+  await expect(page.getByRole('region', { name: 'redis', exact: true })).toBeVisible()
+  await expect(page.getByRole('region', { name: 'providers', exact: true })).toHaveCount(0)
+  const body = await page.locator('main').innerText()
+  expect(body).not.toMatch(/sk-[A-Za-z0-9]{8,}/)
+})
+
 // Compare mode: tiles show a delta and the chart adds a dashed previous-period series.
 for (const theme of THEMES) {
   test(`overview-cmp live desktop ${theme}`, async ({ page }) => {

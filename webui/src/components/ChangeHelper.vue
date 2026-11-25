@@ -8,20 +8,9 @@ import PricingForm from '@/components/forms/PricingForm.vue'
 import RouterForm from '@/components/forms/RouterForm.vue'
 import UserForm from '@/components/forms/UserForm.vue'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { HELPER_IDS, HELPER_LABEL } from '@/lib/helper-forms'
+import type { HelperId } from '@/lib/helper-forms'
 import { useNavStore } from '@/stores/nav'
-
-/** HELPER_IDS mirrors the Config page's own `helper` hash param (redesign-plan.md section 3.1: `helper=limits|grant|pricing|model|router|user`) — the single source of truth for which tab is selected and which form renders. */
-const HELPER_IDS = ['limits', 'grant', 'pricing', 'model', 'router', 'user'] as const
-type HelperId = (typeof HELPER_IDS)[number]
-
-const HELPER_LABEL: Record<HelperId, string> = {
-  limits: 'Limits',
-  grant: 'Access grant',
-  pricing: 'Pricing',
-  model: 'Model metadata',
-  router: 'Smart router',
-  user: 'New user',
-}
 
 /**
  * ChangeHelper (redesign-plan.md section 3.4) is the Config page's
