@@ -98,3 +98,23 @@ for (const theme of THEMES) {
     await expect(page.locator('text=Previous period >> visible=true').first()).toBeVisible()
   })
 }
+
+// Usage ranges whose model detail the API refuses (400 range too large): the page falls back to the plain ranking.
+for (const scenario of ['live', 'empty'] as const) {
+  for (const [vp, size] of Object.entries(VIEWPORTS)) {
+    for (const theme of THEMES) {
+      test(`usage-48h ${scenario} ${vp} ${theme}`, async ({ page }) => {
+        await page.setViewportSize(size)
+        await exercise(page, 'usage-48h', '#usage?range=48h', scenario, vp as keyof typeof VIEWPORTS, theme)
+      })
+    }
+  }
+}
+
+for (const theme of THEMES) {
+  test(`usage-cmp live desktop ${theme}`, async ({ page }) => {
+    await page.setViewportSize(VIEWPORTS.desktop)
+    await exercise(page, 'usage-cmp', '#usage?cmp=prev', 'live', 'desktop', theme)
+    await expect(page.locator('text=Previous period >> visible=true').first()).toBeVisible()
+  })
+}

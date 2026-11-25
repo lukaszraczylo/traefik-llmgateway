@@ -3,7 +3,7 @@ import { defineStore } from 'pinia'
 import { AdminApiError, adminFetch, isAuthRejection, messageOf } from '@/lib/api'
 import { currentMonthDaySpan } from '@/lib/burndown'
 import { createVisibilityPoller, type VisibilityPoller } from '@/lib/polling'
-import { dayOrMonthWindow, seriesUrl, totalsUrl } from '@/lib/range'
+import { dayOrMonthWindow, modelDetailSupported, seriesUrl, totalsUrl } from '@/lib/range'
 import type { TotalsUrlParams } from '@/lib/range'
 import { drilldownLevel, scopeBudgetLimits } from '@/lib/scope'
 import { other, stackTopN, sumByProvider, type Series } from '@/lib/series'
@@ -130,6 +130,8 @@ export const useSpendStore = defineStore('spend', {
      * longer discards a row specifically BECAUSE it is unpriced.
      */
     pricingHealthRanking: [] as AdminUsageModelsResponse['models'],
+    /** False when the server refused `detail=1` for this range (400 range too large) and the rankings fell back to value-only rows, so per-model tokens, cost and free flags are absent. */
+    detailAvailable: true,
 
     // --- burn-down (BurnDownChart) ---
     burndownBuckets: [] as string[],
@@ -312,11 +314,10 @@ export const useSpendStore = defineStore('spend', {
       const filters = useFiltersStore()
       const requestId = ++this.rankingReqId
       try {
-        const res = await adminFetch<AdminUsageModelsResponse>(
-          `/admin/api/usage/models?metric=${this.metric}&window=${filters.window}&span=${filters.span}&limit=${MODEL_RANKING_LIMIT}&detail=1`,
-        )
+        const { res, detail } = await fetchModelsRanking(this.metric, filters.window, filters.span)
         if (requestId !== this.rankingReqId) return false
         this.modelRanking = res.models
+        this.detailAvailable = detail
         this.rankingError = ''
         return true
       } catch (err) {
@@ -344,11 +345,10 @@ export const useSpendStore = defineStore('spend', {
       const requestId = ++this.pricingHealthReqId
       this.pricingHealthLoading = true
       try {
-        const res = await adminFetch<AdminUsageModelsResponse>(
-          `/admin/api/usage/models?metric=req&window=${filters.window}&span=${filters.span}&limit=${MODEL_RANKING_LIMIT}&detail=1`,
-        )
+        const { res, detail } = await fetchModelsRanking('req', filters.window, filters.span)
         if (requestId !== this.pricingHealthReqId) return
         this.pricingHealthRanking = res.models
+        this.detailAvailable = detail
         this.pricingHealthError = ''
         this.pricingHealthLoaded = true
       } catch (err) {
@@ -627,6 +627,18 @@ export const useSpendStore = defineStore('spend', {
     },
   },
 })
+
+/** fetchModelsRanking asks for `detail=1` except on ranges the server is known to refuse (48h, 30d); a 400 elsewhere retries once without detail. Reports which form it got. */
+async function fetchModelsRanking(metric: string, window: HistoryWindow, span: number): Promise<{ res: AdminUsageModelsResponse; detail: boolean }> {
+  const base = `/admin/api/usage/models?metric=${metric}&window=${window}&span=${span}&limit=${MODEL_RANKING_LIMIT}`
+  if (!modelDetailSupported(window, span)) return { res: await adminFetch<AdminUsageModelsResponse>(base), detail: false }
+  try {
+    return { res: await adminFetch<AdminUsageModelsResponse>(`${base}&detail=1`), detail: true }
+  } catch (err) {
+    if (!(err instanceof AdminApiError) || err.status !== 400) throw err
+    return { res: await adminFetch<AdminUsageModelsResponse>(base), detail: false }
+  }
+}
 
 /** burndownScopeParam maps the global scope filter to the /usage/series scope this store's burn-down line requests — null for a provider scope, which has no cost series and no budget concept (see useSpendStore's own doc comment). */
 function burndownScopeParam(filtersScope: string): string | null {

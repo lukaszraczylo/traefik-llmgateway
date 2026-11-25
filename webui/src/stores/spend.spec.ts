@@ -732,3 +732,68 @@ describe('useSpendStore.refresh: breakdown depends on the ranking', () => {
     expect(spend.breakdown.map((s) => s.scope)).toContain('group:a')
   })
 })
+
+describe('useSpendStore detail fallback', () => {
+  const tooLarge = () => new AdminApiError('range too large; narrow span or filter', 400)
+
+  it('retries the ranking without detail on a 400 and flags detailAvailable false', async () => {
+    const urls: string[] = []
+    mockedAdminFetch.mockImplementation((async (path: string) => {
+      urls.push(path)
+      if (path.includes('detail=1')) throw tooLarge()
+      return { ...rankingWith(['a/one']), detail: false, models: [{ id: 'a/one', value: 5 }] }
+    }) as typeof adminFetch)
+    const spend = useSpendStore()
+    await spend.fetchModelRanking()
+    expect(urls).toHaveLength(2)
+    expect(urls[1]).not.toContain('detail=1')
+    expect(spend.modelRanking.map((m) => m.id)).toEqual(['a/one'])
+    expect(spend.detailAvailable).toBe(false)
+    expect(spend.rankingError).toBe('')
+  })
+
+  it('does the same for the pricing-health ranking', async () => {
+    mockedAdminFetch.mockImplementation((async (path: string) => {
+      if (path.includes('detail=1')) throw tooLarge()
+      return { ...rankingWith(['a/one']), detail: false, models: [{ id: 'a/one', value: 5 }] }
+    }) as typeof adminFetch)
+    const spend = useSpendStore()
+    await spend.fetchPricingHealthRanking()
+    expect(spend.pricingHealthRanking).toHaveLength(1)
+    expect(spend.pricingHealthError).toBe('')
+    expect(spend.detailAvailable).toBe(false)
+  })
+
+  it('keeps surfacing non-400 failures', async () => {
+    mockedAdminFetch.mockRejectedValue(new AdminApiError('boom', 503))
+    const spend = useSpendStore()
+    await spend.fetchModelRanking()
+    expect(spend.rankingError).toBe('boom')
+    expect(mockedAdminFetch).toHaveBeenCalledTimes(1)
+  })
+
+  it('stays detailAvailable when the server accepts detail', async () => {
+    mockRoutes({ models: () => rankingWith(['a/one']) })
+    const spend = useSpendStore()
+    await spend.fetchModelRanking()
+    expect(spend.detailAvailable).toBe(true)
+  })
+
+  it('skips the doomed detail request on 48h and 30d', async () => {
+    const urls: string[] = []
+    mockedAdminFetch.mockImplementation((async (path: string) => {
+      urls.push(path)
+      return { ...rankingWith(['a/one']), detail: false, models: [{ id: 'a/one', value: 5 }] }
+    }) as typeof adminFetch)
+    const filters = useFiltersStore()
+    const spend = useSpendStore()
+    for (const range of ['48h', '30d'] as const) {
+      urls.length = 0
+      filters.setFilters({ range })
+      await spend.fetchModelRanking()
+      expect(urls).toHaveLength(1)
+      expect(urls[0]).not.toContain('detail=1')
+      expect(spend.detailAvailable).toBe(false)
+    }
+  })
+})

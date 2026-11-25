@@ -45,7 +45,7 @@ function lazyPage(loader: () => Promise<Component>): Component {
 // still lives inside the Models page and events inside Reliability.
 const PAGES: Record<PageId, Component> = {
   overview: lazyPage(() => import('@/pages/OverviewPage.vue')),
-  usage: lazyPage(() => import('@/pages/SpendPage.vue')),
+  usage: lazyPage(() => import('@/pages/UsagePage.vue')),
   reliability: lazyPage(() => import('@/pages/ReliabilityPage.vue')),
   users: lazyPage(() => import('@/pages/ConsumersPage.vue')),
   models: lazyPage(() => import('@/pages/ModelsPage.vue')),

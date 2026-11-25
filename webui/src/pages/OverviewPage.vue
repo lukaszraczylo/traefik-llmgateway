@@ -17,6 +17,7 @@ import { useFiltersStore } from '@/stores/filters'
 import { useNavStore } from '@/stores/nav'
 import { useOverviewStore } from '@/stores/overview'
 import HealthStrip from '@/widgets/HealthStrip.vue'
+import ModelName from '@/widgets/ModelName.vue'
 import NeedsAttention from '@/widgets/NeedsAttention.vue'
 import RecentEvents from '@/widgets/RecentEvents.vue'
 import StateView from '@/widgets/StateView.vue'
@@ -286,6 +287,7 @@ onUnmounted(() => {
                 label="Top models by requests"
                 @row-activate="(row: RankRow) => openEntity('model', row.id)"
               >
+                <template #cell-name="{ value }"><ModelName :id="value as string" /></template>
                 <template #cell-value="{ value }">{{ formatCompactCount(value as number) }}</template>
               </WbTable>
             </StateView>

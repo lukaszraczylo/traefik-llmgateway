@@ -13,7 +13,7 @@ export interface Delta {
 export interface ChartLine {
   name: string
   data: number[]
-  tone?: 'muted' | 'primary'
+  tone?: 'muted' | 'primary' | 'danger'
   stack?: false
 }
 

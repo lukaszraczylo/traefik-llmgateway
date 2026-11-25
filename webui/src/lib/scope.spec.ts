@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { drilldownLevel, makeScope, parseScope, scopeBudgetLimits, scopeId } from './scope'
+import { drilldownLevel, makeScope, parseScope, scopeBudgetLimits, scopeId, scopeMtdMicros } from './scope'
 import type { AdminGroupView, AdminUsageEntryView } from '@/types/api'
 
 function group(overrides: Partial<AdminGroupView> = {}): AdminGroupView {
@@ -110,5 +110,25 @@ describe('scopeBudgetLimits', () => {
 
   it('returns undefined for a provider scope (no single group/user limit applies)', () => {
     expect(scopeBudgetLimits('provider:openai', groups, users)).toBeUndefined()
+  })
+})
+
+describe('scopeMtdMicros', () => {
+  const entry = (id: string, micros: number) => ({ id, costPerMonthMicroUsd: micros }) as never
+  const usage = { total: entry('total', 900), groups: [entry('g1', 300)], users: [entry('u1', 100)] } as never
+
+  it('reads the fleet total for the all scope', () => {
+    expect(scopeMtdMicros('all', usage)).toBe(900)
+  })
+
+  it('reads a group or user entry by id', () => {
+    expect(scopeMtdMicros('group:g1', usage)).toBe(300)
+    expect(scopeMtdMicros('user:u1', usage)).toBe(100)
+  })
+
+  it('is 0 for an unknown entity, a provider scope, or no usage yet', () => {
+    expect(scopeMtdMicros('user:nobody', usage)).toBe(0)
+    expect(scopeMtdMicros('provider:x', usage)).toBe(0)
+    expect(scopeMtdMicros('all', null)).toBe(0)
   })
 })

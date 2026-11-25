@@ -123,3 +123,21 @@ export function activeScopes(series: Series[]): Set<string> {
 export function ratioSeries(numerator: number[], denominator: number[]): (number | null)[] {
   return denominator.map((d, i) => (d > 0 ? (numerator[i] ?? 0) / d : null))
 }
+
+export interface StackedSeries {
+  series: Series[]
+  /** Per-bucket sum of every series beyond `top`; null when none fall beyond it. */
+  other: number[] | null
+}
+
+/** seriesToStacked keeps the `top` series by total for stacking and folds the rest into one bucket-aligned `other`. */
+export function seriesToStacked(series: Series[], top: number): StackedSeries {
+  const ranked = [...series].sort((a, b) => sumSeries(b.points) - sumSeries(a.points))
+  const kept = ranked.slice(0, Math.max(0, top))
+  const rest = ranked.slice(kept.length)
+  if (rest.length === 0) return { series: kept, other: null }
+  const width = Math.max(...series.map((s) => s.points.length))
+  const sum = new Array<number>(width).fill(0)
+  for (const s of rest) for (let i = 0; i < width; i++) sum[i] = (sum[i] ?? 0) + (s.points[i] ?? 0)
+  return { series: kept, other: sum }
+}

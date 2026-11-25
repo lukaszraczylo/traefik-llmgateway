@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { activeScopes, activeSeries, other, ratioSeries, stackTopN, sumByProvider } from './series'
+import { activeScopes, activeSeries, other, ratioSeries, seriesToStacked, stackTopN, sumByProvider } from './series'
 
 describe('stackTopN', () => {
   it('returns the n series with the largest total, descending', () => {
@@ -153,5 +153,33 @@ describe('activeSeries / activeScopes', () => {
 
   it('activeScopes names only providers with traffic', () => {
     expect([...activeScopes(series)].sort()).toEqual(['provider:a', 'provider:b'])
+  })
+})
+
+describe('seriesToStacked', () => {
+  const s = (scope: string, ...points: number[]) => ({ scope, points })
+
+  it('groups beyond top into other', () => {
+    const out = seriesToStacked([s('a', 1, 1), s('b', 10, 10), s('c', 5, 5), s('d', 2, 0)], 2)
+    expect(out.series.map((x) => x.scope)).toEqual(['b', 'c'])
+    expect(out.other).toEqual([3, 1])
+  })
+
+  it('returns null other when nothing falls beyond top', () => {
+    const out = seriesToStacked([s('a', 1), s('b', 2)], 5)
+    expect(out.series.map((x) => x.scope)).toEqual(['b', 'a'])
+    expect(out.other).toBeNull()
+  })
+
+  it('puts everything into other when top is 0', () => {
+    expect(seriesToStacked([s('a', 1, 2)], 0)).toEqual({ series: [], other: [1, 2] })
+  })
+
+  it('handles an empty input', () => {
+    expect(seriesToStacked([], 5)).toEqual({ series: [], other: null })
+  })
+
+  it('pads short series so other stays bucket-aligned', () => {
+    expect(seriesToStacked([s('a', 9, 9), s('b', 1)], 1).other).toEqual([1, 0])
   })
 })
