@@ -20,6 +20,7 @@ const view = computed(() => {
     :data-prefix="icon.prefix"
     :data-icon="icon.iconName"
     :role="title ? 'img' : undefined"
+    :aria-label="title"
     :aria-hidden="title ? undefined : 'true'"
     focusable="false"
     :viewBox="view.box"

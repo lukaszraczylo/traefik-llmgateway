@@ -5,7 +5,7 @@ import type { ModelCatalogRow } from '@/lib/model-table-columns'
  * (lib/model-table-columns.ts's ModelCatalogRow, built from GET
  * /admin/api/catalog + usage/models + performance) to whichever match a
  * free-text query (redesign-plan.md section 3.1's Models page `q` param) —
- * against the canonical id (ModelChip's own copyable text) OR any of the
+ * against the canonical id (the copyable model name) OR any of the
  * model's own aliases, case-insensitively. An empty/whitespace-only query
  * is "no filter", returning `rows` unchanged (the pre-redesign
  * filterModelsByPrefix this function replaces made the identical choice).

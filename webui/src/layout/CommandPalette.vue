@@ -12,9 +12,9 @@ import {
 } from '@perfect-design/ui'
 import { computed, ref } from 'vue'
 
+import { useEntityLinks } from '@/composables/useEntityLinks'
 import { NAV_GROUPS } from '@/lib/nav-groups'
 import { paletteEntities } from '@/lib/palette-items'
-import { PANEL_PAGE } from '@/lib/panel-selection'
 import type { PanelKind } from '@/lib/panel-selection'
 import { RANGE_KEYS } from '@/lib/range'
 import { useDashboardStore } from '@/stores/dashboard'
@@ -39,11 +39,9 @@ function run(action: () => void): void {
   search.value = ''
 }
 
+const { openEntity: openEntityLink } = useEntityLinks()
 function openEntity(kind: PanelKind, id: string): void {
-  run(() => {
-    nav.goTo(PANEL_PAGE[kind])
-    nav.openPanel(kind, id)
-  })
+  run(() => openEntityLink(kind, id))
 }
 </script>
 

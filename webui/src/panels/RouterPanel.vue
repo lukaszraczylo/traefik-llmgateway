@@ -3,7 +3,7 @@ import { Badge, Button, DescriptionItem, DescriptionList, Heatmap, StatBar } fro
 import { computed, ref, watch } from 'vue'
 
 import RouterForm from '@/components/forms/RouterForm.vue'
-import { formatCompactCount } from '@/lib/format'
+import { formatCompactCount, formatExactInt } from '@/lib/format'
 import { formatSel } from '@/lib/panel-selection'
 import { routerPanelModel } from '@/lib/router-panel'
 import { useModelsStore } from '@/stores/models'
@@ -35,7 +35,6 @@ const agreement = computed(() => {
   return total > 0 ? Math.round((same * 100) / total) : null
 })
 
-const num = (n: number): string => n.toLocaleString('en-US')
 const tierValue = (count: number, pct: number): string => `${formatCompactCount(count)} · ${pct}%`
 
 function openModel(id: string): void {
@@ -57,7 +56,7 @@ watch(() => props.id, () => (snippetOpen.value = false))
               <div class="flex h-6 items-center gap-2 text-sm">
                 <span class="font-mono font-medium">{{ t.name }}</span>
                 <Badge v-if="t.isDefault" tone="neutral" variant="outline" size="sm">default</Badge>
-                <span class="text-muted-foreground ml-auto font-mono text-xs tabular-nums">min score {{ num(t.minScore) }}</span>
+                <span class="text-muted-foreground ml-auto font-mono text-xs tabular-nums">min score {{ formatExactInt(t.minScore) }}</span>
               </div>
               <ul class="m-0 flex list-none flex-col p-0">
                 <li v-for="m in t.models" :key="m" class="flex min-h-8 items-center">
@@ -77,7 +76,7 @@ watch(() => props.id, () => (snippetOpen.value = false))
           </ul>
         </PanelSection>
 
-        <PanelSection :title="`Tier split · ${num(requests)} requests`">
+        <PanelSection :title="`Tier split · ${formatExactInt(requests)} requests`">
           <p v-if="requests === 0" class="text-muted-foreground m-0 text-sm">No routed requests yet.</p>
           <div v-else class="flex flex-col gap-3">
             <StatBar
@@ -98,7 +97,7 @@ watch(() => props.id, () => (snippetOpen.value = false))
           <p v-if="model.reasons.length === 0" class="text-muted-foreground m-0 text-sm">No reasons recorded.</p>
           <DescriptionList v-else variant="inline" size="sm" density="compact">
             <DescriptionItem v-for="r in model.reasons" :key="r.name" :term="r.name">
-              <span class="font-mono tabular-nums">{{ num(r.count) }}<span class="text-muted-foreground"> · {{ reasonTotal > 0 ? Math.round((r.count * 100) / reasonTotal) : 0 }}%</span></span>
+              <span class="font-mono tabular-nums">{{ formatExactInt(r.count) }}<span class="text-muted-foreground"> · {{ reasonTotal > 0 ? Math.round((r.count * 100) / reasonTotal) : 0 }}%</span></span>
             </DescriptionItem>
           </DescriptionList>
         </PanelSection>
@@ -122,7 +121,7 @@ watch(() => props.id, () => (snippetOpen.value = false))
         <PanelSection v-if="escalations.length > 0" title="Escalations">
           <DescriptionList variant="inline" size="sm" density="compact">
             <DescriptionItem v-for="e in escalations" :key="`${e.from}>${e.to}`" :term="`${e.from} → ${e.to}`">
-              <span class="font-mono tabular-nums">{{ num(e.count) }}</span>
+              <span class="font-mono tabular-nums">{{ formatExactInt(e.count) }}</span>
             </DescriptionItem>
           </DescriptionList>
         </PanelSection>
@@ -142,7 +141,7 @@ watch(() => props.id, () => (snippetOpen.value = false))
               :min="0"
               show-legend
               label="Live tier by shadow tier request counts"
-              :cell-title="(v: number | null, r: string, c: string) => `live ${r}, shadow ${c}: ${num(v ?? 0)}`"
+              :cell-title="(v: number | null, r: string, c: string) => `live ${r}, shadow ${c}: ${formatExactInt(v ?? 0)}`"
             />
           </div>
         </PanelSection>

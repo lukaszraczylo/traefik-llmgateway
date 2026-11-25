@@ -12,7 +12,7 @@ import { useToastsStore } from '@/stores/toasts'
  * paste into a file" surface every ChangeHelper form and ConfigTree.vue
  * share — a `<pre>` plus a copy button (lib/clipboard.ts's copyText, same
  * Clipboard-API-with-selection-fallback convention CsvExportButton.vue's
- * download path and ModelChip.vue's own click-to-copy already use).
+ * download path already uses).
  */
 const props = defineProps<{
   /** The exact text to display and copy — YAML (lib/snippets.ts) or a single-line JSON fragment, verbatim, never re-formatted by this component. */
@@ -29,8 +29,7 @@ async function onCopy(): Promise<void> {
   const result = await copyText(props.text, preRef.value ?? undefined)
   setCopyFeedback(result)
   // Only a FAILURE also gets a toast (states-plan.md item 3) — see
-  // ModelChip.vue's own identical doc comment: 'copied'/'selected'
-  // already have clear inline feedback (the button's own icon/label
+  // 'copied'/'selected' already have clear inline feedback (the button's own icon/label
   // swap right below), so a success toast would double-notify.
   if (result === 'failed') toasts.push({ kind: 'error', message: 'Could not copy the snippet.' })
 }

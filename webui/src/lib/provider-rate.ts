@@ -66,7 +66,7 @@ export function providerRateStatus(rate: number | null): ProviderRateStatus {
 
 /**
  * isModelDegraded reports whether a model's OWN day-window rate should
- * show a badge beside its ModelChip at all — the spec's "only when that
+ * show a badge beside its model name at all — the spec's "only when that
  * model is degraded (<99% w/ attempts>0)" rule: a healthy or no-traffic
  * model gets no badge, so the accordion is not cluttered with a badge
  * beside every single model.

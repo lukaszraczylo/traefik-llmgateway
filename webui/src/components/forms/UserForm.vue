@@ -36,8 +36,8 @@ const toasts = useToastsStore()
  * the copy-to-clipboard actions elsewhere in this panel, nothing else on
  * screen visibly draws the eye to the API-key input changing (it is one
  * field among many, above the fold but easy to miss), so this one gets a
- * success toast, not just the failure-only treatment ModelChip/
- * SnippetBlock/CsvExportButton use. generateApiKey (lib/snippets.ts) reads
+ * success toast, not just the failure-only treatment SnippetBlock/
+ * CsvExportButton use. generateApiKey (lib/snippets.ts) reads
  * crypto.getRandomValues, which can theoretically throw in a context with
  * no Web Crypto — caught defensively rather than left to bubble into an
  * unhandled click-handler rejection.
