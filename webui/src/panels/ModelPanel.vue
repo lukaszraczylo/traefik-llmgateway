@@ -66,6 +66,7 @@ let reqId = 0
 async function loadSeries(): Promise<void> {
   const id = ++reqId
   seriesLoading.value = true
+  points.value = []
   try {
     const res = await adminFetch<AdminSeriesResponse>(seriesUrl({ scope: [`model:${props.id}`], metric: 'req', window: filters.window, span: filters.span }))
     if (id !== reqId) return

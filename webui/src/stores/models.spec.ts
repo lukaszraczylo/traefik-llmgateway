@@ -193,4 +193,23 @@ describe('useModelsStore.fetch', () => {
     expect(models.rows[0]?.id).toBe('openai/gpt-5')
     expect(models.loading).toBe(false)
   })
+
+  it('fetchProviderRequests keeps the later request when replies land out of order', async () => {
+    const resolvers: Array<(v: never) => void> = []
+    mockedAdminFetch.mockImplementation((() => new Promise<never>((resolve) => resolvers.push(resolve))) as typeof adminFetch)
+    const series = (n: number) => ({ series: [{ scope: 'provider:openai', points: [n] }] })
+
+    const models = useModelsStore()
+    const first = models.fetchProviderRequests(['openai'])
+    expect(models.providerRequests).toBeNull()
+    const second = models.fetchProviderRequests(['openai'])
+
+    resolvers[1](series(7) as never)
+    await second
+    expect(models.providerRequests).toEqual({ openai: 7 })
+
+    resolvers[0](series(999) as never)
+    await first
+    expect(models.providerRequests).toEqual({ openai: 7 })
+  })
 })

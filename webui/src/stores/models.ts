@@ -48,21 +48,26 @@ export const useModelsStore = defineStore('models', {
     error: '',
     /** reqId guards against an out-of-order response overwriting a newer one (latest-request-wins, stores/catalog.ts's own convention) — a range change mid-flight no longer gets silently dropped by an `if (this.loading) return` guard. */
     reqId: 0,
+    /** Latest-request-wins guard for fetchProviderRequests. */
+    providerReqId: 0,
   }),
   actions: {
     /** Sums the per-provider request series for the global range. Failure leaves totals null so the page shows a dash, never a false 0. */
     async fetchProviderRequests(names: string[]): Promise<void> {
       if (names.length === 0) return
       const filters = useFiltersStore()
+      const requestId = ++this.providerReqId
+      this.providerRequests = null
       try {
         const res = await adminFetch<AdminSeriesResponse>(
           seriesUrl({ scope: names.slice(0, PROVIDER_SERIES_MAX).map((n) => `provider:${n}`), metric: 'req', window: filters.window, span: filters.span }),
         )
         const totals: Record<string, number> = {}
         for (const s of res.series) totals[s.scope.replace(/^provider:/, '')] = s.points.reduce((a, v) => a + v, 0)
+        if (requestId !== this.providerReqId) return
         this.providerRequests = totals
       } catch (err) {
-        if (!isAuthRejection(err)) this.providerRequests = null
+        if (requestId === this.providerReqId && !isAuthRejection(err)) this.providerRequests = null
       }
     },
     async fetch(): Promise<void> {
