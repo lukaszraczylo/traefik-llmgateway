@@ -8,6 +8,8 @@ import { formatLastSeen } from '@/lib/last-seen'
 import { loadState } from '@/lib/load-state'
 import { isHot, primaryLimit } from '@/lib/meters'
 import { pageWindow } from '@/lib/paging'
+import { sortThenSlice } from '@/lib/table-sort'
+import type { SortSpec } from '@/lib/table-sort'
 import { resolveSel } from '@/lib/panel-selection'
 import { wbColumns } from '@/lib/wb-columns'
 import GroupPanel from '@/panels/GroupPanel.vue'
@@ -111,9 +113,17 @@ const groupColumns = wbColumns<Row>([
 const columns = computed(() => (tab.value === 'users' ? userColumns : groupColumns))
 
 const page = ref(1)
-watch([tab, needle], () => (page.value = 1))
+watch([tab, needle], () => {
+  page.value = 1
+  sort.value = null
+})
 const window_ = computed(() => pageWindow(rows.value.length, PAGE_SIZE, page.value - 1))
-const paged = computed(() => rows.value.slice(window_.value.from, window_.value.to))
+const sort = ref<SortSpec | null>(null)
+const paged = computed(() => sortThenSlice(rows.value, sort.value, PAGE_SIZE, window_.value.index))
+function onSort(next: SortSpec | null): void {
+  sort.value = next
+  page.value = 1
+}
 
 const state = computed<ViewState>(() => {
   const s = loadState({ loading: dashboard.lastUpdated === null, hasData: usage.value !== null, error: dashboard.error })
@@ -168,9 +178,11 @@ onUnmounted(stopClock)
             class="wb-clip"
             :columns="columns"
             :rows="paged"
+            :sort="sort"
             row-key="id"
             :active-key="activeKey"
             :label="tab === 'users' ? 'Users' : 'Groups'"
+            @update:sort="onSort"
             @row-activate="open"
           >
             <template #cell-members="{ value }">{{ formatCompactCount(value as number) }}</template>

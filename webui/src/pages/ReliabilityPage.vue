@@ -7,6 +7,8 @@ import { thinLabels } from '@/lib/chart-labels'
 import { formatBucketLabel, formatCompactCount, formatUntil } from '@/lib/format'
 import { loadState } from '@/lib/load-state'
 import { pageWindow } from '@/lib/paging'
+import { sortThenSlice } from '@/lib/table-sort'
+import type { SortSpec } from '@/lib/table-sort'
 import { breakerRows, ratePercentSeries } from '@/lib/provider-rate'
 import type { BreakerRow } from '@/lib/provider-rate'
 import { scopeId } from '@/lib/scope'
@@ -121,8 +123,8 @@ const ttfbState = computed<ViewState>(() => {
 // --- Breaker table ----------------------------------------------------------
 
 const breakerColumns = wbColumns<BreakerView>([
-  { key: 'provider', header: 'Provider', kind: 'text', sortable: false },
-  { key: 'status', header: 'State', kind: 'status', sortable: false },
+  { key: 'provider', header: 'Provider', kind: 'text' },
+  { key: 'status', header: 'State', kind: 'status', sortable: true },
   { key: 'until', header: 'Opens until', kind: 'time', sortable: false },
   { key: 'lastErr', header: 'Last error', kind: 'text', sortable: false },
 ])
@@ -145,7 +147,12 @@ const onPhone = (e: MediaQueryListEvent): void => {
 const breakerPageSize = computed(() => (phone.value ? BREAKER_PAGE_SIZE_PHONE : BREAKER_PAGE_SIZE))
 const breakerPage = ref(1)
 const breakerWindow = computed(() => pageWindow(breakers.value.length, breakerPageSize.value, breakerPage.value - 1))
-const breakerPaged = computed(() => breakers.value.slice(breakerWindow.value.from, breakerWindow.value.to))
+const breakerSort = ref<SortSpec | null>(null)
+const breakerPaged = computed(() => sortThenSlice(breakers.value, breakerSort.value, breakerPageSize.value, breakerWindow.value.index))
+function onBreakerSort(next: SortSpec | null): void {
+  breakerSort.value = next
+  breakerPage.value = 1
+}
 const breakerState = computed<ViewState>(() => (overview.value === null ? 'loading' : breakers.value.length === 0 ? 'empty' : 'ready'))
 const openCount = computed(() => breakers.value.filter((r) => r.state !== 'closed').length)
 const degradedCount = computed(() => breakers.value.filter((r) => r.degraded).length)
@@ -276,8 +283,10 @@ const windowUsed = computed(() => hourOrDayWindow(filters.window, filters.span))
               class="wb-clip"
               :columns="breakerColumns"
               :rows="breakerPaged"
+              :sort="breakerSort"
               row-key="provider"
               label="Provider circuit breakers"
+              @update:sort="onBreakerSort"
               @row-activate="(row: BreakerView) => nav.openPanel('provider', row.provider)"
             >
               <template #cell-status="{ value }">
