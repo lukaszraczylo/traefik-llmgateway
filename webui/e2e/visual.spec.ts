@@ -39,6 +39,9 @@ async function sampleIds(page: Page, scenario: string): Promise<Record<string, s
     user: `user:${encodeURIComponent(scenario === 'limits-hot' ? hottestUser(usage.users) : usage.users[0].id)}`,
     group: `group:${encodeURIComponent(memberGroup.id)}`,
     model: `model:${encodeURIComponent(catalog.providers[0].models[0].id)}`,
+    'routed-model': `model:${encodeURIComponent(catalog.routers[0].tiers[0].models[0])}`,
+    'provider-degraded': `provider:${encodeURIComponent('amd')}`,
+    'provider-open': `provider:${encodeURIComponent('alibaba')}`,
     router: `router:${encodeURIComponent(catalog.routers[0].name)}`,
     target: `target:${encodeURIComponent((targets.mcpServers[0] ?? targets.agents[0]).name)}`,
   }
@@ -49,6 +52,9 @@ const PANEL_PAGES: Array<{ page: (typeof PAGE_IDS)[number]; kind: string; scenar
   { page: 'users', kind: 'user', scenario: 'limits-hot' },
   { page: 'users', kind: 'group', scenario: 'limits-hot' },
   { page: 'models', kind: 'model' },
+  { page: 'models', kind: 'routed-model' },
+  { page: 'models', kind: 'provider-degraded' },
+  { page: 'models', kind: 'provider-open', scenario: 'breaker-open' },
   { page: 'routers', kind: 'router' },
   { page: 'targets', kind: 'target' },
 ]

@@ -19,7 +19,9 @@ import { isValidNonNegative, pricingSnippet } from '@/lib/snippets'
  * together — a one-sided price makes no billing sense — unlike
  * ModelMetaForm.vue's independent contextTokens/free fields.
  */
-const modelId = ref('')
+/** Pre-fills the model id (a detail panel opens the form for its own model). */
+const props = defineProps<{ presetModelId?: string }>()
+const modelId = ref(props.presetModelId ?? '')
 const inputRaw = ref('')
 const outputRaw = ref('')
 

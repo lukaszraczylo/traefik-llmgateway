@@ -15,7 +15,9 @@ import { isValidNonNegativeInt, modelMetaSnippet } from '@/lib/snippets'
  * discovered/override price (pricing.go: modelMetaFree short-circuits
  * before override/builtin/LiteLLM resolution).
  */
-const modelId = ref('')
+/** Pre-fills the model id (a detail panel opens the form for its own model). */
+const props = defineProps<{ presetModelId?: string }>()
+const modelId = ref(props.presetModelId ?? '')
 const contextRaw = ref('')
 const free = ref(false)
 
