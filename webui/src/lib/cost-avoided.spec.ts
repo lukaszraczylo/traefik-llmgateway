@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { costAvoidedMicros, freeRows, pickReferenceModel } from './cost-avoided'
+import { costAvoidedMicros, costComparisons, COST_REFERENCES, freeRows, latestSonnet } from './cost-avoided'
 import type { AdminCatalogModel, AdminUsageModelEntry } from '@/types/api'
 
 describe('freeRows', () => {
@@ -49,80 +49,74 @@ describe('costAvoidedMicros', () => {
   })
 })
 
-describe('pickReferenceModel', () => {
-  const catalog = new Map<string, AdminCatalogModel>([
-    ['a/paid-high', { id: 'a/paid-high', model: 'paid-high', priceSource: 'builtin' }],
-    ['a/paid-low', { id: 'a/paid-low', model: 'paid-low', priceSource: 'override' }],
-    ['a/free', { id: 'a/free', model: 'free', priceSource: 'free' }],
-    ['a/unpriced', { id: 'a/unpriced', model: 'unpriced', priceSource: 'unpriced' }],
-  ])
+const model = (id: string, priceSource: AdminCatalogModel['priceSource'], inP?: number, outP?: number): [string, AdminCatalogModel] => [
+  id,
+  { id, model: id.split('/')[1] ?? id, priceSource, inputPerMTokUsd: inP, outputPerMTokUsd: outP },
+]
+const SONNETS = [
+  model('anthropic/claude-sonnet-4-5-20250929', 'litellm', 3, 15),
+  model('anthropic/claude-sonnet-4-6', 'litellm', 3, 15),
+  model('anthropic/claude-sonnet-5', 'litellm', 2, 10),
+  model('anthropic/claude-sonnet-5-5', 'litellm', 2, 10),
+]
+const MINIMAX_ID = 'minimax/MiniMax-M3.1-Flash'
 
-  it('picks the most-requested model among genuinely priced catalog entries', () => {
-    const models: AdminUsageModelEntry[] = [
-      { id: 'a/paid-low', value: 1, requests: 5 },
-      { id: 'a/paid-high', value: 1, requests: 50 },
-    ]
-    expect(pickReferenceModel(models, catalog)).toBe('a/paid-high')
+describe('latestSonnet', () => {
+  it('picks 5-5 over 5, 4-6 and the dated 4-5', () => {
+    expect(latestSonnet(new Map(SONNETS))?.id).toBe('anthropic/claude-sonnet-5-5')
   })
 
-  it('skips free and unpriced catalog entries even if most-requested', () => {
-    const models: AdminUsageModelEntry[] = [
-      { id: 'a/free', value: 1, requests: 1000 },
-      { id: 'a/paid-low', value: 1, requests: 1 },
-    ]
-    expect(pickReferenceModel(models, catalog)).toBe('a/paid-low')
+  it('treats a date suffix as a tie-breaker, never a version', () => {
+    const catalog = new Map([model('anthropic/claude-sonnet-4-5-20250929', 'litellm', 3, 15), model('anthropic/claude-sonnet-4-6', 'litellm', 3, 15)])
+    expect(latestSonnet(catalog)?.id).toBe('anthropic/claude-sonnet-4-6')
+    const sameVersion = new Map([model('anthropic/claude-sonnet-4-5-20250101', 'litellm', 3, 15), model('anthropic/claude-sonnet-4-5-20250929', 'litellm', 3, 15)])
+    expect(latestSonnet(sameVersion)?.id).toBe('anthropic/claude-sonnet-4-5-20250929')
   })
 
-  it('skips a served id missing from the catalog entirely', () => {
-    const models: AdminUsageModelEntry[] = [{ id: 'a/removed', value: 1, requests: 999 }]
-    expect(pickReferenceModel(models, catalog)).toBeNull()
+  it('skips unpriced and free Sonnets', () => {
+    const catalog = new Map([...SONNETS, model('anthropic/claude-sonnet-6', 'unpriced'), model('anthropic/claude-sonnet-7', 'free', 0, 0)])
+    expect(latestSonnet(catalog)?.id).toBe('anthropic/claude-sonnet-5-5')
   })
 
-  it('skips a detail-less entry with no requests field', () => {
-    const models: AdminUsageModelEntry[] = [{ id: 'a/paid-high', value: 1 }]
-    expect(pickReferenceModel(models, catalog)).toBeNull()
-  })
-
-  it('returns null when nothing qualifies', () => {
-    const models: AdminUsageModelEntry[] = [{ id: 'a/free', value: 1, requests: 10 }]
-    expect(pickReferenceModel(models, catalog)).toBeNull()
-  })
-
-  it('returns null for an empty ranking', () => {
-    expect(pickReferenceModel([], catalog)).toBeNull()
+  it('returns null when no Sonnet is priced', () => {
+    expect(latestSonnet(new Map([model('anthropic/claude-sonnet-5', 'unpriced')]))).toBeNull()
+    expect(latestSonnet(new Map())).toBeNull()
   })
 })
 
-/**
- * N1 (verify-redesign-final.md): CostAvoidedCard.vue's own `avoidedMicros`
- * computed is exactly `pickReferenceModel` feeding `costAvoidedMicros`
- * with the picked model's `cat.inputPerMTokUsd`/`outputPerMTokUsd` — this
- * end-to-end shape is what broke when the catalog reported `priceSource:
- * 'override'` alongside undefined prices (admin_catalog.go's now-fixed
- * bug). This exercises the same two-step flow directly against a fixed-
- * shape catalog (billing price present for every priced source,
- * including 'override' — the contract GET /admin/api/catalog now
- * guarantees) so a regression back to undefined-but-priced catalog
- * entries fails here, not just in a Go-only test.
- */
-describe('pickReferenceModel + costAvoidedMicros end-to-end (N1 regression)', () => {
-  it('computes a non-null avoided-cost figure when the picked reference model is override-priced', () => {
-    const catalog = new Map<string, AdminCatalogModel>([
-      ['a/override-priced', { id: 'a/override-priced', model: 'override-priced', priceSource: 'override', inputPerMTokUsd: 5, outputPerMTokUsd: 10 }],
-    ])
-    const models: AdminUsageModelEntry[] = [
-      { id: 'a/override-priced', value: 1, requests: 42, free: false },
-      { id: 'a/free-model', value: 0, free: true, tokensIn: 1_000_000, tokensOut: 500_000 },
-    ]
+describe('costComparisons', () => {
+  const rows = [{ tokensIn: 1_000_000, tokensOut: 500_000 }]
 
-    const picked = pickReferenceModel(models, catalog)
-    expect(picked).toBe('a/override-priced')
+  it('returns MiniMax then the latest Sonnet', () => {
+    const out = costComparisons(rows, new Map(SONNETS))
+    expect(out.map((r) => r.id)).toEqual([COST_REFERENCES.minimax.id, 'anthropic/claude-sonnet-5-5'])
+  })
 
-    const cat = catalog.get(picked as string)
-    expect(cat?.inputPerMTokUsd).toBe(5)
-    expect(cat?.outputPerMTokUsd).toBe(10)
+  it('uses the reference rate when the catalog has MiniMax unpriced', () => {
+    const [mm] = costComparisons(rows, new Map([model(MINIMAX_ID, 'unpriced')]))
+    expect(mm).toMatchObject({ inPerMTok: 0.15, outPerMTok: 0.6, priceLabel: 'MiniMax list price, Nov 2026' })
+    expect(mm.avoidedMicros).toBe(Math.round(1_000_000 * 0.15 + 500_000 * 0.6))
+  })
 
-    const avoided = costAvoidedMicros(freeRows(models), cat?.inputPerMTokUsd as number, cat?.outputPerMTokUsd as number)
-    expect(avoided).toBe(1_000_000 * 5 + 500_000 * 10)
+  it('uses the catalog rate when the catalog has MiniMax priced', () => {
+    const [mm] = costComparisons(rows, new Map([model(MINIMAX_ID, 'litellm', 0.3, 1.2)]))
+    expect(mm).toMatchObject({ inPerMTok: 0.3, outPerMTok: 1.2, priceLabel: 'gateway price' })
+    expect(mm.avoidedMicros).toBe(1_000_000 * 0.3 + 500_000 * 1.2)
+  })
+
+  it('prices Sonnet from the catalog', () => {
+    const [, son] = costComparisons(rows, new Map(SONNETS))
+    expect(son).toMatchObject({ inPerMTok: 2, outPerMTok: 10, priceLabel: 'gateway price', avoidedMicros: 1_000_000 * 2 + 500_000 * 10 })
+  })
+
+  it('gives null avoided cost when no Sonnet is priced', () => {
+    const [, son] = costComparisons(rows, new Map())
+    expect(son.avoidedMicros).toBeNull()
+    expect(son.inPerMTok).toBeNull()
+  })
+
+  it('gives 0, never NaN, for zero free traffic', () => {
+    const out = costComparisons([], new Map(SONNETS))
+    expect(out.map((r) => r.avoidedMicros)).toEqual([0, 0])
   })
 })

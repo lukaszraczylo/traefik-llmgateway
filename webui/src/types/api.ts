@@ -828,7 +828,7 @@ export interface AdminPerfResponse {
  * final.md): an earlier version filled the two price fields from that
  * same display resolution instead, so a `pricing:` override with no
  * separate modelMeta/discovery price reported `priceSource: 'override'`
- * alongside undefined prices — CostAvoidedCard's pickReferenceModel
+ * alongside undefined prices — CostAvoidedCard's costComparisons
  * (lib/cost-avoided.ts) and PricingHealthTable both read these fields
  * assuming they agree with `priceSource`, and broke for exactly that
  * model.

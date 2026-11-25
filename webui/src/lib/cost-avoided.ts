@@ -1,6 +1,6 @@
 // Pure math behind CostAvoidedCard.vue (redesign-plan.md section 3.4): how
 // much a fleet's FREE-tier traffic would have cost against a real, priced
-// reference model, plus which model to default that reference to. Kept out
+// reference models. Kept out
 // of the component the same way lib/forecast.ts/lib/burndown.ts keep their
 // own math out of theirs.
 import type { AdminCatalogModel, AdminUsageModelEntry } from '@/types/api'
@@ -53,32 +53,118 @@ export function costAvoidedMicros(rows: FreeUsageRow[], refInputPerMTokUsd: numb
   return Math.round(total)
 }
 
-/** REFERENCE_INELIGIBLE_SOURCES are the catalog priceSource values pickReferenceModel refuses to default to — a "what would this have cost at a real price" comparison is meaningless against another $0 model. */
-const REFERENCE_INELIGIBLE_SOURCES = new Set(['free', 'unpriced'])
+/** UNPRICED_SOURCES are the catalog priceSource values that carry no usable rate. */
+const UNPRICED_SOURCES = new Set(['free', 'unpriced'])
+
+/** GATEWAY_PRICE_LABEL labels a rate read from the live catalog rather than the reference table. */
+const GATEWAY_PRICE_LABEL = 'gateway price'
+
+const SONNET_PREFIX = 'anthropic/claude-sonnet-'
+const DATE_SEGMENT = /^\d{8}$/
 
 /**
- * pickReferenceModel defaults the "compare free traffic against" model to
- * the MOST-REQUESTED genuinely-priced model actually served in the current
- * range (redesign-plan.md section 3.4: "reference model picker from priced
- * catalog models, default most-requested paid model in range"). Ranked by
- * `requests` specifically — NOT by whichever metric the Spend page's own
- * breakdown happens to be sorted by — since a cost-ranked or token-ranked
- * list would bias the default toward an expensive or verbose model rather
- * than the one readers actually reach for most. A model missing from
- * `catalog` (not currently in the live registry — a stale ranking entry
- * for a since-removed model) or lacking a `requests` count (a detail-less
- * entry) is skipped. Returns null when nothing in the range qualifies —
- * every served model was itself free/unpriced, or usage/models was empty
- * — the caller then falls back to an explicit picker with no preselection
- * rather than a fabricated default.
+ * COST_REFERENCES holds list prices for models the gateway records as
+ * unpriced, used only by the Cost avoided card. `in`/`out` are USD per
+ * 1M tokens. A real catalog price for the same id wins over this table.
  */
-export function pickReferenceModel(models: AdminUsageModelEntry[], catalog: Map<string, AdminCatalogModel>): string | null {
-  let best: AdminUsageModelEntry | null = null
-  for (const m of models) {
-    if (m.requests === undefined) continue
-    const cat = catalog.get(m.id)
-    if (!cat || REFERENCE_INELIGIBLE_SOURCES.has(cat.priceSource)) continue
-    if (best === null || m.requests > (best.requests ?? 0)) best = m
+export const COST_REFERENCES = {
+  minimax: { id: 'minimax/MiniMax-M3.1-Flash', label: 'MiniMax M3.1 Flash', in: 0.15, out: 0.6, source: 'MiniMax list price', asOf: '2026-11' },
+} as const
+
+export interface CostComparison {
+  id: string
+  label: string
+  inPerMTok: number | null
+  outPerMTok: number | null
+  priceLabel: string
+  avoidedMicros: number | null
+}
+
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+
+function asOfLabel(asOf: string): string {
+  const [year, month] = asOf.split('-')
+  return `${MONTHS[Number(month) - 1] ?? month} ${year}`
+}
+
+function isPriced(m: AdminCatalogModel): boolean {
+  return !UNPRICED_SOURCES.has(m.priceSource) && m.inputPerMTokUsd !== undefined && m.outputPerMTokUsd !== undefined
+}
+
+/** parseSonnet splits "claude-sonnet-4-5-20250929" into version [4, 5] and date 20250929 (0 when undated). */
+function parseSonnet(id: string): { version: number[]; date: number } | null {
+  const parts = id.slice(SONNET_PREFIX.length).split('-')
+  const version: number[] = []
+  let date = 0
+  for (const p of parts) {
+    if (DATE_SEGMENT.test(p)) date = Number(p)
+    else if (/^\d+$/.test(p)) version.push(Number(p))
+    else return null
   }
-  return best?.id ?? null
+  return version.length === 0 ? null : { version, date }
+}
+
+function compareSonnet(a: { version: number[]; date: number }, b: { version: number[]; date: number }): number {
+  const n = Math.max(a.version.length, b.version.length)
+  for (let i = 0; i < n; i++) {
+    const d = (a.version[i] ?? 0) - (b.version[i] ?? 0)
+    if (d !== 0) return d
+  }
+  return a.date - b.date
+}
+
+/**
+ * latestSonnet returns the highest-version priced `anthropic/claude-sonnet-*`
+ * in the catalog, or null. A date suffix only breaks ties between equal versions.
+ */
+export function latestSonnet(catalog: Map<string, AdminCatalogModel>): AdminCatalogModel | null {
+  let best: AdminCatalogModel | null = null
+  let bestKey: { version: number[]; date: number } | null = null
+  for (const m of catalog.values()) {
+    if (!m.id.startsWith(SONNET_PREFIX) || !isPriced(m)) continue
+    const key = parseSonnet(m.id)
+    if (key === null) continue
+    if (bestKey === null || compareSonnet(key, bestKey) > 0) {
+      best = m
+      bestKey = key
+    }
+  }
+  return best
+}
+
+/**
+ * costComparisons prices the free-tier rows against MiniMax M3.1 Flash, then
+ * the latest Sonnet. Entry `avoidedMicros` is null only when no rate exists.
+ */
+export function costComparisons(rows: FreeUsageRow[], catalog: Map<string, AdminCatalogModel>): CostComparison[] {
+  const ref = COST_REFERENCES.minimax
+  const mm = catalog.get(ref.id)
+  const mmCatalog = mm && isPriced(mm) ? mm : null
+  const minimax = mmCatalog
+    ? { inP: mmCatalog.inputPerMTokUsd as number, outP: mmCatalog.outputPerMTokUsd as number, priceLabel: GATEWAY_PRICE_LABEL }
+    : { inP: ref.in as number, outP: ref.out as number, priceLabel: `${ref.source}, ${asOfLabel(ref.asOf)}` }
+  const out: CostComparison[] = [
+    {
+      id: ref.id,
+      label: ref.label,
+      inPerMTok: minimax.inP,
+      outPerMTok: minimax.outP,
+      priceLabel: minimax.priceLabel,
+      avoidedMicros: costAvoidedMicros(rows, minimax.inP, minimax.outP),
+    },
+  ]
+  const sonnet = latestSonnet(catalog)
+  out.push(
+    sonnet
+      ? {
+          id: sonnet.id,
+          label: sonnet.model,
+          inPerMTok: sonnet.inputPerMTokUsd as number,
+          outPerMTok: sonnet.outputPerMTokUsd as number,
+          priceLabel: GATEWAY_PRICE_LABEL,
+          avoidedMicros: costAvoidedMicros(rows, sonnet.inputPerMTokUsd as number, sonnet.outputPerMTokUsd as number),
+        }
+      : { id: `${SONNET_PREFIX}*`, label: 'Latest Claude Sonnet', inPerMTok: null, outPerMTok: null, priceLabel: 'no priced Sonnet in catalog', avoidedMicros: null },
+  )
+  return out
 }

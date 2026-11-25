@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Badge, Button, Card, CardAction, CardContent, CardHeader, CardTitle, KpiTile, LineChart, NativeSelect, Pagination, SegmentedControl, StatGroup } from '@perfect-design/ui'
+import { Badge, Button, Card, CardAction, CardContent, CardHeader, CardTitle, KpiTile, LineChart, Pagination, SegmentedControl, StatGroup } from '@perfect-design/ui'
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 
 import { useEntityLinks } from '@/composables/useEntityLinks'
@@ -7,7 +7,7 @@ import { useNow } from '@/composables/useNow'
 import { budgetLineVisible, cumulative, runOutDate } from '@/lib/burndown'
 import { cacheSavingsStatus } from '@/lib/cache-savings'
 import { thinLabels } from '@/lib/chart-labels'
-import { costAvoidedMicros, freeRows, pickReferenceModel } from '@/lib/cost-avoided'
+import { costComparisons, freeRows } from '@/lib/cost-avoided'
 import { downloadText } from '@/lib/download'
 import type { DownloadOutcome } from '@/lib/download'
 import { headroom, monthProgress, NOT_ENOUGH_DATA, projectMonthEnd } from '@/lib/forecast'
@@ -57,18 +57,16 @@ const users = useUsageUsersStore()
 const { openEntity } = useEntityLinks()
 const { now, start: startClock, stop: stopClock } = useNow()
 
-// --- Page params (hash): by, metric, ref ------------------------------------
+// --- Page params (hash): by, metric ------------------------------------
 
 const by = computed<Breakdown>(() => (BREAKDOWNS as readonly string[]).includes(nav.params.by ?? '') ? (nav.params.by as Breakdown) : 'model')
 const metric = computed<HistoryMetric>(() => (nav.params.metric && isSpendMetric(nav.params.metric) ? nav.params.metric : 'cost'))
-const refParam = computed(() => nav.params.ref ?? '')
 
-function updateParams(next: Partial<{ by: Breakdown; metric: HistoryMetric; ref: string }>): void {
-  const merged = { by: next.by ?? by.value, metric: next.metric ?? metric.value, ref: next.ref ?? refParam.value }
+function updateParams(next: Partial<{ by: Breakdown; metric: HistoryMetric }>): void {
+  const merged = { by: next.by ?? by.value, metric: next.metric ?? metric.value }
   const params: Record<string, string> = {}
   if (merged.by !== 'model') params.by = merged.by
   if (merged.metric !== 'cost') params.metric = merged.metric
-  if (merged.ref !== '') params.ref = merged.ref
   nav.goTo('usage', params)
 }
 
@@ -249,28 +247,14 @@ const burnState = computed<ViewState>(() => {
 
 const cacheSavings = computed(() => cacheSavingsStatus(filters.window))
 const cacheEnabled = computed(() => dashboard.overview?.features.cacheStats ?? false)
-const referenceOptions = computed(() =>
-  spend.modelRanking
-    .filter((m) => {
-      const c = catalog.modelsById.get(m.id)
-      return c && c.priceSource !== 'free' && c.priceSource !== 'unpriced'
-    })
-    .sort((a, b) => (b.requests ?? 0) - (a.requests ?? 0))
-    .slice(0, 100)
-    .map((m) => ({ value: m.id, label: m.id })),
-)
-const effectiveRef = computed(() => refParam.value || pickReferenceModel(spend.modelRanking, catalog.modelsById) || '')
-const avoidedMicros = computed(() => {
-  const cat = effectiveRef.value ? catalog.modelsById.get(effectiveRef.value) : undefined
-  if (!cat || cat.inputPerMTokUsd === undefined || cat.outputPerMTokUsd === undefined) return null
-  return costAvoidedMicros(freeRows(spend.modelRanking), cat.inputPerMTokUsd, cat.outputPerMTokUsd)
-})
+const freeUsage = computed(() => freeRows(spend.modelRanking))
+const freeTokens = computed(() => ({
+  in: freeUsage.value.reduce((acc, r) => acc + r.tokensIn, 0),
+  out: freeUsage.value.reduce((acc, r) => acc + r.tokensOut, 0),
+}))
+const comparisons = computed(() => costComparisons(freeUsage.value, catalog.modelsById))
+const rateText = (inP: number | null, outP: number | null): string => (inP === null || outP === null ? 'n/a' : `$${inP} / $${outP} per 1M`)
 const cacheSavedMicros = computed(() => spend.modelRanking.reduce((acc, m) => acc + (m.cacheSavedMicroUsd ?? 0), 0))
-const avoidedHint = computed(() => {
-  if (!spend.detailAvailable) return 'needs per-model detail'
-  if (referenceOptions.value.length === 0) return 'no priced model served in range'
-  return avoidedMicros.value === null ? 'pick a reference model' : `at ${effectiveRef.value} rates`
-})
 const avoidedState = computed<ViewState>(() => {
   if (spend.rankingError && spend.modelRanking.length === 0) return 'error'
   return spend.modelRanking.length === 0 && spend.loading ? 'loading' : 'ready'
@@ -471,16 +455,26 @@ const money = (micros: number | null): string | null => (micros === null ? null 
           </CardHeader>
           <CardContent class="flex flex-col gap-3">
             <StateView :state="avoidedState" :error-message="spend.rankingError" @retry="spend.refresh()">
-              <StatGroup :columns="cacheEnabled ? 2 : 1" gap="sm" aria-label="Savings">
+              <div v-if="spend.detailAvailable" class="flex flex-col gap-1" data-wb-ignore-numeric>
+                <p class="text-muted-foreground m-0 text-xs">
+                  Free-tier traffic: <span class="font-mono tabular-nums">{{ formatCompactCount(freeTokens.in) }}</span> in ·
+                  <span class="font-mono tabular-nums">{{ formatCompactCount(freeTokens.out) }}</span> out. Cost at:
+                </p>
+                <ul class="m-0 flex list-none flex-col p-0" aria-label="Cost avoided by reference model">
+                  <li
+                    v-for="c in comparisons"
+                    :key="c.id"
+                    class="border-border grid grid-cols-[minmax(0,1fr)_auto] items-baseline gap-x-3 border-t py-2 first:border-t-0"
+                  >
+                    <span class="min-w-0 truncate text-sm"><ModelName :id="c.id" /></span>
+                    <span class="text-right font-mono text-sm font-medium tabular-nums">{{ money(c.avoidedMicros) ?? 'n/a' }}</span>
+                    <span class="text-muted-foreground text-xs" :title="c.priceLabel">{{ c.priceLabel }}</span>
+                    <span class="text-muted-foreground text-right font-mono text-xs tabular-nums">{{ rateText(c.inPerMTok, c.outPerMTok) }}</span>
+                  </li>
+                </ul>
+              </div>
+              <StatGroup v-if="cacheEnabled" :columns="1" gap="sm" aria-label="Savings">
                 <KpiTile
-                  label="Free-tier traffic"
-                  size="compact"
-                  :value="spend.detailAvailable ? money(avoidedMicros) : null"
-                  good-when="none"
-                  :hint="avoidedHint"
-                />
-                <KpiTile
-                  v-if="cacheEnabled"
                   label="Cache savings"
                   size="compact"
                   :value="spend.detailAvailable && cacheSavings.available ? formatCostDisplay(cacheSavedMicros) : 'n/a'"
@@ -488,14 +482,6 @@ const money = (micros: number | null): string | null => (micros === null ? null 
                   :hint="cacheSavings.note ?? rangeLabel"
                 />
               </StatGroup>
-              <NativeSelect
-                v-if="spend.detailAvailable && referenceOptions.length > 0"
-                :model-value="effectiveRef"
-                :options="referenceOptions"
-                size="sm"
-                aria-label="Reference model"
-                @update:model-value="(v: string) => updateParams({ ref: v })"
-              />
               <p v-if="!spend.detailAvailable" class="text-muted-foreground m-0 text-xs">{{ DETAIL_NOTICE }}</p>
             </StateView>
           </CardContent>
