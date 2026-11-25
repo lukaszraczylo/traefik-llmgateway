@@ -1,11 +1,68 @@
 @import "tailwindcss";
-/* Layered below utilities so Tailwind classes such as `hidden` still win over the FontAwesome icon display rule. */
-@import "@fortawesome/fontawesome-svg-core/styles.css" layer(base);
 @import "tw-animate-css";
 @import "shadcn-vue/tailwind.css";
 @import "@perfect-design/ui/theme.css";
 @import "@perfect-design/ui/packs.css";
-@source "../../node_modules/@perfect-design/ui/dist";
+/* Tailwind scans only the perfect-design components this app bundles; scanning all of dist adds ~15 KB gzip of unused utilities. Add a component's directory here when a new one is imported. */
+@source "../../node_modules/@perfect-design/ui/dist/lib/*.js";
+@source "../../node_modules/@perfect-design/ui/dist/components/feedback/*.js";
+@source "../../node_modules/@perfect-design/ui/dist/components/navigation/*.js";
+@source "../../node_modules/@perfect-design/ui/dist/components/overlays/*.js";
+@source "../../node_modules/@perfect-design/ui/dist/components/data-display/Card";
+@source "../../node_modules/@perfect-design/ui/dist/components/data-display/CodeViewer";
+@source "../../node_modules/@perfect-design/ui/dist/components/data-display/DataTable";
+@source "../../node_modules/@perfect-design/ui/dist/components/data-display/DescriptionList";
+@source "../../node_modules/@perfect-design/ui/dist/components/data-display/Heatmap";
+@source "../../node_modules/@perfect-design/ui/dist/components/data-display/KpiTile";
+@source "../../node_modules/@perfect-design/ui/dist/components/data-display/LineChart";
+@source "../../node_modules/@perfect-design/ui/dist/components/data-display/Sparkline";
+@source "../../node_modules/@perfect-design/ui/dist/components/data-display/StatBar";
+@source "../../node_modules/@perfect-design/ui/dist/components/data-display/StatGroup";
+@source "../../node_modules/@perfect-design/ui/dist/components/data-display/Table";
+@source "../../node_modules/@perfect-design/ui/dist/components/data-display/YamlViewer";
+@source "../../node_modules/@perfect-design/ui/dist/components/data-display/_chart";
+@source "../../node_modules/@perfect-design/ui/dist/components/data-display/_shared";
+@source "../../node_modules/@perfect-design/ui/dist/components/feedback/Callout";
+@source "../../node_modules/@perfect-design/ui/dist/components/feedback/EmptyState";
+@source "../../node_modules/@perfect-design/ui/dist/components/feedback/ErrorState";
+@source "../../node_modules/@perfect-design/ui/dist/components/feedback/LoadingState";
+@source "../../node_modules/@perfect-design/ui/dist/components/feedback/OfflineIndicator";
+@source "../../node_modules/@perfect-design/ui/dist/components/feedback/StaleNotice";
+@source "../../node_modules/@perfect-design/ui/dist/components/feedback/ToastItem";
+@source "../../node_modules/@perfect-design/ui/dist/components/feedback/Toaster";
+@source "../../node_modules/@perfect-design/ui/dist/components/forms/Checkbox";
+@source "../../node_modules/@perfect-design/ui/dist/components/forms/CheckboxCard";
+@source "../../node_modules/@perfect-design/ui/dist/components/forms/Combobox";
+@source "../../node_modules/@perfect-design/ui/dist/components/forms/DateInput";
+@source "../../node_modules/@perfect-design/ui/dist/components/forms/Field";
+@source "../../node_modules/@perfect-design/ui/dist/components/forms/FilterBar";
+@source "../../node_modules/@perfect-design/ui/dist/components/forms/Input";
+@source "../../node_modules/@perfect-design/ui/dist/components/forms/InputGroup";
+@source "../../node_modules/@perfect-design/ui/dist/components/forms/Label";
+@source "../../node_modules/@perfect-design/ui/dist/components/forms/NativeSelect";
+@source "../../node_modules/@perfect-design/ui/dist/components/forms/NumberInput";
+@source "../../node_modules/@perfect-design/ui/dist/components/forms/SearchInput";
+@source "../../node_modules/@perfect-design/ui/dist/components/forms/SegmentedControl";
+@source "../../node_modules/@perfect-design/ui/dist/components/forms/TimeInput";
+@source "../../node_modules/@perfect-design/ui/dist/components/layout/AppShell";
+@source "../../node_modules/@perfect-design/ui/dist/components/layout/ConfigProvider";
+@source "../../node_modules/@perfect-design/ui/dist/components/layout/Container";
+@source "../../node_modules/@perfect-design/ui/dist/components/navigation/NavLink";
+@source "../../node_modules/@perfect-design/ui/dist/components/navigation/Pagination";
+@source "../../node_modules/@perfect-design/ui/dist/components/navigation/SidebarNav";
+@source "../../node_modules/@perfect-design/ui/dist/components/navigation/ThemeToggle";
+@source "../../node_modules/@perfect-design/ui/dist/components/overlays/Command";
+@source "../../node_modules/@perfect-design/ui/dist/components/overlays/Dialog";
+@source "../../node_modules/@perfect-design/ui/dist/components/overlays/Popover";
+@source "../../node_modules/@perfect-design/ui/dist/components/overlays/Sheet";
+@source "../../node_modules/@perfect-design/ui/dist/components/primitives/Badge";
+@source "../../node_modules/@perfect-design/ui/dist/components/primitives/Button";
+@source "../../node_modules/@perfect-design/ui/dist/components/primitives/Icon";
+@source "../../node_modules/@perfect-design/ui/dist/components/primitives/Kbd";
+@source "../../node_modules/@perfect-design/ui/dist/components/primitives/Spinner";
+@source "../../node_modules/@perfect-design/ui/dist/components/primitives/StatusBadge";
+@source "../../node_modules/@perfect-design/ui/dist/components/primitives/StatusDot";
+@source "../../node_modules/@perfect-design/ui/dist/components/typography/RelativeTime/**/*.js";
 
 /*
  * The base palette (background, primary, border, radius, ...) now comes from
@@ -220,3 +277,15 @@
 .wb-model-provider::after { content: '/'; }
 .wb-model-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 @media (min-width: 640px) { .wb-table td.wb-text:has(.wb-model) { width: 100%; max-width: 0; overflow: hidden; } }
+
+/* FaIcon.vue's box; layered below utilities so classes such as `hidden` still win. */
+@layer base {
+  .svg-inline--fa {
+    box-sizing: content-box;
+    display: inline-block;
+    height: 1em;
+    overflow: visible;
+    vertical-align: -0.125em;
+    width: 1.25em;
+  }
+}

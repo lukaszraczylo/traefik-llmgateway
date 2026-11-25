@@ -1,16 +1,12 @@
-import { config } from '@fortawesome/fontawesome-svg-core'
-import { FontAwesomeIcon } from '@fortawesome/vue-fontawesome'
 import { useThemeStore } from '@perfect-design/ui'
 import { createPinia } from 'pinia'
 import { createApp } from 'vue'
 
 import App from '@/App.vue'
+import FaIcon from '@/components/FaIcon.vue'
 import '@/assets/main.css'
 import { messageOf } from '@/lib/api'
 import { useToastsStore } from '@/stores/toasts'
-
-// The admin CSP is style-src 'self': FontAwesome's runtime <style> injection is blocked, so its CSS ships in the bundle instead.
-config.autoAddCss = false
 
 const app = createApp(App)
 const pinia = createPinia()
@@ -23,5 +19,5 @@ app.config.errorHandler = (err) => {
 const theme = useThemeStore(pinia)
 theme.init()
 theme.setStyle('workbench')
-app.component('FontAwesomeIcon', FontAwesomeIcon)
+app.component('FontAwesomeIcon', FaIcon)
 app.mount('#app')
