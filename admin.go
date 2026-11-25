@@ -1037,37 +1037,17 @@ func usageEntryView(su scopeUsage, limits *LimitsConfig) adminUsageEntryView {
 // having nil limits — the dashboard shows usage for every user and group,
 // limited or not.
 // adminUsageChunkScopes bounds how many scopes buildAdminUsage sends to
-// limiter.currentUsage in a single storeGetMulti round trip (security
-// audit finding 4, 2026-08-22). currentUsage's own doc comment (limits.go)
-// already explains why every scope was folded into ONE round trip rather
-// than one per scope — but "one round trip" for the WHOLE catalog means
-// that round trip's own pipeline size, and how long it holds the shared,
-// mutex-guarded Redis connection (respClient, resp.go), now scales with
-// how many users and groups are configured. With 1,000 users that is
-// ~9,000 GETs (usageKeysPerScope=9, F4 v0.3 dashboard task's rej:day
-// counter) in one pipelined call, during which
-// every concurrent checkAndCount from live LLM traffic queues behind the
-// same connection mutex — and the admin dashboard polls this endpoint
-// every 5s. chunkedCurrentUsage (below) keeps each individual round trip's
-// key count bounded, letting live traffic interleave between chunks,
-// while a chunk still batches every scope inside it exactly as before,
-// keeping most of currentUsage's own round-trip-collapsing win. 200
-// scopes (1,600 keys per chunk) comfortably covers the live cluster's 5
-// friends + 4 home users in a single chunk, so today's real deployment
-// sees no behavior change at all — chunking only engages once a
-// deployment's user+group count actually grows past it. One accepted,
-// disclosed side effect: currentUsage's own doc comment notes a transient
-// store error marks every scope in ONE call storeDown together; chunking
-// narrows that blast radius to one chunk's worth of scopes instead of the
-// whole response, which is a strict improvement, not a new risk.
+// limiter.currentUsage in one storeGetMulti round trip. A single round trip
+// for the whole catalog holds the shared, mutex-guarded Redis connection
+// (respClient, resp.go) for a time that scales with the user and group
+// count, and every concurrent checkAndCount queues behind it while the
+// dashboard polls every 5s. chunkedCurrentUsage keeps each round trip's key
+// count bounded so live traffic interleaves between chunks.
 //
-// Lowered from 200 to 160 (admin dashboard redesign, WP-B) when
-// usageKeysPerScope grew from 9 to 10 for the new lastSeen counter
-// (limits.go, WP-A step 1): 160 scopes * 10 keys/scope = 1,600 keys per
-// chunk, keeping this endpoint's per-round-trip key count at the same
-// order of magnitude this constant has always targeted, rather than
-// letting it grow every time a future per-scope counter is added here.
-// 123 scopes * 13 keys/scope = 1,599 keys, within usageModelsChunkKeys.
+// 123 scopes * usageKeysPerScope (13) = 1,599 keys, within
+// usageModelsChunkKeys (1,600). A deployment under 123 users and groups
+// sends one chunk. A transient store error marks every scope in one chunk
+// storeDown together, so chunking narrows that blast radius to one chunk.
 const adminUsageChunkScopes = 123
 
 // chunkedCurrentUsage calls limiter.currentUsage in batches of at most

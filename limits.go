@@ -2940,16 +2940,8 @@ func (l *limiter) providerUsage(scopes []limitScope) []providerCounters {
 }
 
 // usageKeysPerScope is the number of windowKey strings usageWindowKeys
-// builds per scope, and the stride currentUsage's flat storeGetMulti
-// result is sliced back into per-scope chunks by. Named here, closing a
-// v0.2 final review wave follow-up (2026-08-20) that flagged the previous
-// literal "6" as a magic-number stride: this task grows the per-scope key
-// count from 6 to 8 for the tokens-in/tokens-out split, which is exactly
-// the moment a silent off-by-N here would have gone unnoticed. F4 (v0.3
-// dashboard task) grows it again, 8 to 9, for the fleet-wide
-// rejectionsPerDay counter (metricRej) usageWindowKeys now appends. Grows
-// once more, 9 to 10, for the last-seen counter (Q6, DECISIONS) — see
-// usageWindowKeys' own doc comment for the appended field's position.
+// builds per scope, and the stride currentUsage's flat storeGetMulti result
+// is sliced back into per-scope chunks by. Keep in step with usageWindowKeys.
 const usageKeysPerScope = 13
 
 // scopeUsage is one scope's (a user's, a group's, or the synthetic total
