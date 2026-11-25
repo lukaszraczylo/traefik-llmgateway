@@ -11,6 +11,8 @@ const (
 	metricRouterEsc  = "resc"
 	metricRouterShd  = "rshd"
 	metricRouterOut  = "rout"
+	metricRouterDec  = "rdec"
+	metricRouterDmx  = "rdmx"
 	routerKeySep     = "/"
 	routerReasonsMax = 11
 )
@@ -27,6 +29,14 @@ func routerEscKeyFor(k routerEscalationKey, bucket string) string {
 
 func routerShadowKeyFor(k routerShadowKey, bucket string) string {
 	return windowKeyForBucket(kindRouter, k.router, metricRouterShd+routerKeySep+k.live+routerKeySep+k.shadow, windowMonth, bucket)
+}
+
+func routerDecisionKeyFor(k routerDecisionKey, bucket string) string {
+	return windowKeyForBucket(kindRouter, k.router, metricRouterDec+routerKeySep+k.outcome, windowMonth, bucket)
+}
+
+func routerDecisionTierKeyFor(k routerDecisionTierKey, bucket string) string {
+	return windowKeyForBucket(kindRouter, k.router, metricRouterDmx+routerKeySep+k.heuristic+routerKeySep+k.model, windowMonth, bucket)
 }
 
 func routerOutcomeKeyFor(k routerOutcomeKey, bucket string) string {
@@ -53,6 +63,8 @@ type routerCounters struct {
 	escs     map[routerEscalationKey]int64
 	shadow   map[routerShadowKey]int64
 	outcomes map[routerOutcomeKey]int64
+	decs     map[routerDecisionKey]int64
+	decMx    map[routerDecisionTierKey]int64
 	scope    string
 }
 
@@ -66,7 +78,8 @@ func (g *Gateway) routerStatsSnapshot(now time.Time) routerCounters {
 	}
 	reqs, escs := g.routerStats.snapshot()
 	shadow, outcomes := g.routerStats.extraSnapshot()
-	return routerCounters{reqs: reqs, escs: escs, shadow: shadow, outcomes: outcomes, scope: statsScopeInstance}
+	decs, decMx := g.routerStats.decisionSnapshot()
+	return routerCounters{reqs: reqs, escs: escs, shadow: shadow, outcomes: outcomes, decs: decs, decMx: decMx, scope: statsScopeInstance}
 }
 
 // readRouterShared reads every config-derived key in one chunked round trip; ok is false on any store failure.
@@ -76,7 +89,9 @@ func (g *Gateway) readRouterShared(now time.Time) (routerCounters, bool) {
 	var escKeys []routerEscalationKey
 	var shdKeys []routerShadowKey
 	var outKeys []routerOutcomeKey
-	var reqNames, escNames, outNames, shdNames []string
+	var decKeys []routerDecisionKey
+	var dmxKeys []routerDecisionTierKey
+	var reqNames, escNames, outNames, shdNames, decNames, dmxNames []string
 	for _, rt := range g.registry.routers {
 		for _, t := range rt.tiers {
 			for _, reason := range routerReasonNames {
@@ -99,22 +114,38 @@ func (g *Gateway) readRouterShared(now time.Time) (routerCounters, bool) {
 					outNames = append(outNames, routerOutcomeKeyFor(k, bucket))
 				}
 			}
-			if !rt.shadowEnabled() {
-				continue
+			if rt.shadowEnabled() {
+				for _, to := range rt.tiers {
+					k := routerShadowKey{router: rt.name, live: t.name, shadow: to.name}
+					shdKeys = append(shdKeys, k)
+					shdNames = append(shdNames, routerShadowKeyFor(k, bucket))
+				}
 			}
-			for _, to := range rt.tiers {
-				k := routerShadowKey{router: rt.name, live: t.name, shadow: to.name}
-				shdKeys = append(shdKeys, k)
-				shdNames = append(shdNames, routerShadowKeyFor(k, bucket))
+			if rt.decision != nil {
+				for _, to := range rt.tiers {
+					k := routerDecisionTierKey{router: rt.name, heuristic: t.name, model: to.name}
+					dmxKeys = append(dmxKeys, k)
+					dmxNames = append(dmxNames, routerDecisionTierKeyFor(k, bucket))
+				}
+			}
+		}
+		if rt.decision != nil {
+			for _, outcome := range routerDecisionOutcomes {
+				k := routerDecisionKey{router: rt.name, outcome: outcome}
+				decKeys = append(decKeys, k)
+				decNames = append(decNames, routerDecisionKeyFor(k, bucket))
 			}
 		}
 	}
 	names := append(append(append(reqNames, escNames...), outNames...), shdNames...)
+	names = append(append(names, decNames...), dmxNames...)
 	c := routerCounters{
 		reqs:     make(map[routerRequestKey]int64),
 		escs:     make(map[routerEscalationKey]int64),
 		shadow:   make(map[routerShadowKey]int64),
 		outcomes: make(map[routerOutcomeKey]int64),
+		decs:     make(map[routerDecisionKey]int64),
+		decMx:    make(map[routerDecisionTierKey]int64),
 	}
 	if len(names) == 0 {
 		return c, true
@@ -145,6 +176,18 @@ func (g *Gateway) readRouterShared(now time.Time) (routerCounters, bool) {
 	for _, k := range shdKeys {
 		if vals[pos] > 0 {
 			c.shadow[k] = vals[pos]
+		}
+		pos++
+	}
+	for _, k := range decKeys {
+		if vals[pos] > 0 {
+			c.decs[k] = vals[pos]
+		}
+		pos++
+	}
+	for _, k := range dmxKeys {
+		if vals[pos] > 0 {
+			c.decMx[k] = vals[pos]
 		}
 		pos++
 	}
