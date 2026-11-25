@@ -35,4 +35,12 @@ describe('eventLink', () => {
   it('links router_escalation to its provider panel', () => {
     expect(eventLink(event({ kind: 'router_escalation', provider: 'gx10' }))).toEqual({ page: 'models', sel: 'provider:gx10' })
   })
+
+  it('links an unpriced event with its provider to the model panel', () => {
+    expect(eventLink(event({ kind: 'unpriced', provider: 'amd', model: 'qwen' }))).toEqual({ page: 'models', sel: 'model:amd%2Fqwen' })
+  })
+
+  it('links an unpriced event without a provider to the models search', () => {
+    expect(eventLink(event({ kind: 'unpriced', model: 'deepseek-v4' }))).toEqual({ page: 'models', params: { q: 'deepseek-v4' } })
+  })
 })

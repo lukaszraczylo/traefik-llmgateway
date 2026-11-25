@@ -3,6 +3,7 @@ import { Button, Card, CardAction, CardContent, CardHeader, CardTitle, FilterBar
 import type { FilterField, FilterItem } from '@perfect-design/ui'
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 
+import { collapseEvents } from '@/lib/event-feed'
 import { EVENT_KIND_LABEL, EVENT_KINDS, eventFilterFromParams, filterEvents, itemsFromFilter, paramsFromItems } from '@/lib/events-filter'
 import { loadState } from '@/lib/load-state'
 import { EVENTS_POLL_MS, useEventsStore } from '@/stores/events'
@@ -21,16 +22,10 @@ const nav = useNavStore()
 const filter = computed(() => eventFilterFromParams(nav.params))
 const items = computed<FilterItem[]>(() => itemsFromFilter(filter.value))
 
-const providerOptions = computed(() => {
-  const names = new Set(events.events.flatMap((e) => (e.provider ? [e.provider] : [])))
-  if (filter.value.provider) names.add(filter.value.provider)
-  return [...names].sort().map((value) => ({ value, label: value }))
-})
 const fields = computed<FilterField[]>(() => [
   { id: 'kind', label: 'Kind', type: 'select', operators: ['eq'], options: EVENT_KINDS.map((k) => ({ value: k, label: EVENT_KIND_LABEL[k] })) },
   { id: 'user', label: 'User or group', type: 'text', operators: ['contains'], placeholder: 'name' },
-  // The select needs at least one option; until events name a provider it is a plain text field.
-  { id: 'provider', label: 'Provider', type: providerOptions.value.length > 0 ? 'select' : 'text', operators: ['eq'], options: providerOptions.value },
+  { id: 'provider', label: 'Provider', type: 'text', operators: ['eq'], placeholder: 'provider name' },
   { id: 'route', label: 'Route', type: 'text', operators: ['contains'], placeholder: 'chat/completions' },
 ])
 
@@ -42,8 +37,9 @@ function setItems(next: FilterItem[]): void {
 const filtered = computed(() => filterEvents(events.events, filter.value))
 const shown = ref(PAGE_STEP)
 watch(filter, () => (shown.value = PAGE_STEP))
-const visible = computed(() => filtered.value.slice(0, shown.value))
-const remaining = computed(() => filtered.value.length - visible.value.length)
+const grouped = computed(() => collapseEvents(filtered.value))
+const visible = computed(() => grouped.value.slice(0, shown.value))
+const remaining = computed(() => grouped.value.length - visible.value.length)
 
 // --- Live tail: the store polls while mounted and not paused ---
 const live = ref(true)
@@ -95,9 +91,9 @@ const countNote = computed(() => (filtered.value.length === events.events.length
           <span>{{ sourceNote }}</span>
         </div>
         <StateView :state="state" :empty-title="emptyTitle" :empty-description="emptyDescription" :error-message="events.error" :updated-at="events.lastUpdated ?? undefined" @retry="events.refresh()">
-          <RecentEvents :events="visible" label="Events" with-message />
+          <RecentEvents :groups="visible" label="Events" with-message />
           <div v-if="remaining > 0" class="flex items-center justify-between gap-2">
-            <span class="text-muted-foreground text-xs">Showing {{ visible.length.toLocaleString('en-US') }} of {{ filtered.length.toLocaleString('en-US') }}</span>
+            <span class="text-muted-foreground text-xs">Showing {{ visible.length.toLocaleString('en-US') }} of {{ grouped.length.toLocaleString('en-US') }} rows</span>
             <Button variant="outline" size="sm" @click="shown += PAGE_STEP">Show {{ Math.min(PAGE_STEP, remaining) }} more</Button>
           </div>
         </StateView>

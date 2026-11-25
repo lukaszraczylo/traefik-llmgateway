@@ -77,9 +77,14 @@ async function loadCallers(): Promise<void> {
 }
 watch([targetRef, () => filters.window, () => filters.span], () => void loadCallers(), { immediate: true })
 
+// Only a configured user has a panel to open; other callers (e.g. "internal") stay plain text.
+const knownUsers = computed(() => new Set((dashboard.usage?.users ?? []).map((u) => u.id)))
 const callerRows = computed(() =>
   callers.value
-    .map((r) => ({ id: r.id, caller: parseTargetCallerId(r.id).caller || r.id, requests: r.values.req ?? 0 }))
+    .map((r) => {
+      const caller = parseTargetCallerId(r.id).caller || r.id
+      return { id: r.id, caller, requests: r.values.req ?? 0, isUser: knownUsers.value.has(caller) }
+    })
     .sort((a, b) => b.requests - a.requests || a.caller.localeCompare(b.caller)),
 )
 </script>
@@ -129,10 +134,14 @@ const callerRows = computed(() =>
           <StateView :state="callersState" empty-title="No callers in this range" :error-message="callersError" :rows="3" @retry="loadCallers()">
             <ul class="m-0 flex list-none flex-col p-0" aria-label="Top callers">
               <li v-for="c in callerRows" :key="c.id">
-                <button type="button" class="hover:bg-accent flex h-8 w-full items-center justify-between gap-3 rounded px-2 text-left text-sm" :title="c.caller" @click="openEntity('user', c.caller)">
+                <button v-if="c.isUser" type="button" class="hover:bg-accent flex h-8 w-full items-center justify-between gap-3 rounded px-2 text-left text-sm" :title="c.caller" @click="openEntity('user', c.caller)">
                   <span class="min-w-0 truncate">{{ c.caller }}</span>
                   <span class="shrink-0 font-mono text-xs tabular-nums">{{ formatCompactCount(c.requests) }} req</span>
                 </button>
+                <div v-else class="flex h-8 w-full items-center justify-between gap-3 px-2 text-sm" :title="`${c.caller} (not a configured user)`">
+                  <span class="text-muted-foreground min-w-0 truncate">{{ c.caller }}</span>
+                  <span class="shrink-0 font-mono text-xs tabular-nums">{{ formatCompactCount(c.requests) }} req</span>
+                </div>
               </li>
             </ul>
           </StateView>

@@ -1,0 +1,29 @@
+{
+ "kind": "targetcaller",
+ "window": "day",
+ "metrics": [
+  "req"
+ ],
+ "rows": [
+  {
+   "id": "mcp/readitall/internal",
+   "values": {
+    "req": 12759
+   }
+  },
+  {
+   "id": "mcp/readitall/user-01",
+   "values": {
+    "req": 1840
+   }
+  },
+  {
+   "id": "mcp/readitall/gateway-probe",
+   "values": {
+    "req": 312
+   }
+  }
+ ],
+ "span": 7,
+ "offset": 0
+}

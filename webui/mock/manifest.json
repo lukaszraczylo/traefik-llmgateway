@@ -5217,6 +5217,19 @@
     "status": 200
   },
   {
+    "file": "usage_totals__kind-targetcaller_metrics-req_window-day_span-7_limit-10_target-mcp~readitall.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "targetcaller",
+      "window": "day",
+      "span": "7",
+      "metrics": "req",
+      "limit": "10",
+      "target": "mcp/readitall"
+    },
+    "status": 200
+  },
+  {
     "file": "usage_totals__kind-targetcaller_metrics-req_window-day_span-7_limit-10_target-agent~agentkit.json",
     "path": "/admin/api/usage/totals",
     "query": {

@@ -230,7 +230,7 @@
    "group": "friends",
    "route": "pacing",
    "kind": "paced",
-   "message": "request paced 8.333333333s"
+   "message": "request paced 8.3s"
   },
   {
    "time": "2026-11-25T00:38:08.870258606Z",
@@ -240,7 +240,7 @@
    "group": "friends",
    "route": "pacing",
    "kind": "paced",
-   "message": "request paced 6.666666666s"
+   "message": "request paced 6.7s"
   },
   {
    "time": "2026-11-25T00:38:08.427318063Z",
@@ -250,7 +250,7 @@
    "group": "friends",
    "route": "pacing",
    "kind": "paced",
-   "message": "request paced 1.666666666s"
+   "message": "request paced 1.7s"
   },
   {
    "time": "2026-11-25T00:37:04.66491348Z",
@@ -269,7 +269,7 @@
    "group": "friends",
    "route": "pacing",
    "kind": "paced",
-   "message": "request paced 8.333333333s"
+   "message": "request paced 8.3s"
   },
   {
    "time": "2026-11-25T00:36:07.061720559Z",
@@ -279,7 +279,7 @@
    "group": "friends",
    "route": "pacing",
    "kind": "paced",
-   "message": "request paced 3.333333333s"
+   "message": "request paced 3.3s"
   },
   {
    "time": "2026-11-25T00:36:05.250311853Z",
@@ -289,7 +289,7 @@
    "group": "friends",
    "route": "pacing",
    "kind": "paced",
-   "message": "request paced 1.666666666s"
+   "message": "request paced 1.7s"
   },
   {
    "time": "2026-11-25T00:36:01.834717092Z",

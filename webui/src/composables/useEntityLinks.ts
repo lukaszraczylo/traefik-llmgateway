@@ -15,7 +15,7 @@ export function useEntityLinks() {
   function openLink(link: AttentionLink): void {
     const sel = parseSel(link.sel)
     if (!sel) {
-      nav.goTo(link.page, {}, { replace: false })
+      nav.goTo(link.page, link.params ?? {}, { replace: false })
       return
     }
     nav.goTo(link.page)

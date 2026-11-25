@@ -43,6 +43,7 @@ async function sampleIds(page: Page, scenario: string): Promise<Record<string, s
     'provider-degraded': `provider:${encodeURIComponent('amd')}`,
     'provider-open': `provider:${encodeURIComponent('alibaba')}`,
     router: `router:${encodeURIComponent(catalog.routers[0].name)}`,
+    'target-callers': `target:${encodeURIComponent('mcp/readitall')}`,
     'router-uni': `router:${encodeURIComponent(catalog.routers[1].name)}`,
     target: `target:${encodeURIComponent(targets.mcpServers[0] ? `mcp/${targets.mcpServers[0].name}` : `agent/${targets.agents[0].name}`)}`,
   }
@@ -60,6 +61,7 @@ const PANEL_PAGES: Array<{ page: (typeof PAGE_IDS)[number]; kind: string; scenar
   { page: 'routers', kind: 'router', scenario: 'router-escalations' },
   { page: 'routers', kind: 'router-uni' },
   { page: 'targets', kind: 'target' },
+  { page: 'targets', kind: 'target-callers' },
 ]
 
 async function visit(page: Page, hash: string, scenario: string, theme: string): Promise<void> {
@@ -233,4 +235,29 @@ test('events rows are capped and show more', async ({ page }) => {
   expect(await rows.count()).toBeLessThanOrEqual(50)
   await page.getByRole('button', { name: /Show \d+ more/ }).click()
   expect(await rows.count()).toBeGreaterThan(50)
+})
+
+// A caller that is a configured user opens its panel; "gateway-probe" is not a user and stays plain text.
+test('target panel callers link only known users', async ({ page }) => {
+  await page.setViewportSize(VIEWPORTS.desktop)
+  const sel = (await sampleIds(page, 'live'))['target-callers']
+  await visit(page, `#targets?sel=${encodeURIComponent(sel)}`, 'live', 'light')
+  const callers = page.getByRole('list', { name: 'Top callers' })
+  await expect(callers.getByText('gateway-probe')).toBeVisible()
+  await expect(callers.getByRole('button', { name: /^gateway-probe/ })).toHaveCount(0)
+  await callers.getByRole('button', { name: /^user-01/ }).click()
+  await expect(page).toHaveURL(/#users\?.*sel=user%3Auser-01/)
+})
+
+// Events from earlier days carry a date; the unpriced row links to the models search.
+test('events show dates for older rows and unpriced rows are clickable', async ({ page }) => {
+  await page.setViewportSize(VIEWPORTS.desktop)
+  await visit(page, '#events', 'live', 'light')
+  const feed = page.getByRole('list', { name: 'Events' })
+  const more = page.getByRole('button', { name: /Show \d+ more/ })
+  for (let i = 0; i < 4 && (await more.count()) > 0; i++) await more.click()
+  await expect(feed.getByText(/^[A-Z][a-z]{2} \d+ \d\d:\d\d$/).first()).toBeVisible()
+  await page.goto(page.url().replace(/#events.*/, '#events?kind=unpriced'))
+  await feed.getByRole('button').first().click()
+  await expect(page).toHaveURL(/#models\?/)
 })

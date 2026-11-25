@@ -7,6 +7,8 @@ export type AttentionSeverity = 'danger' | 'warning' | 'info'
 export interface AttentionLink {
   page: PageId
   sel?: string
+  /** Page params when no panel opens, e.g. a search. */
+  params?: Record<string, string>
 }
 
 export interface AttentionItem {
