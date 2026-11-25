@@ -21,12 +21,20 @@ import type { LimitKey, LimitsConfig } from '@/types/api'
 const props = defineProps<{
   groupNames: string[]
   userNames: string[]
+  /** Pre-selects the target (a detail panel opens the form for its own entity). */
+  presetKind?: 'group' | 'user'
+  presetName?: string
 }>()
 
 const { targetKind, targetName, targetNames, nameValid, snippetLabel } = useTargetPicker(
   () => props.groupNames,
   () => props.userNames,
 )
+
+if (props.presetName) {
+  targetKind.value = props.presetKind ?? 'user'
+  targetName.value = props.presetName
+}
 
 /** INTEGER_FIELDS is every LimitsConfig field Go decodes as `int64` (llmgateway.go) — requestsPerMinute/requestsPerDay/tokensPerDay/tokensPerMonth reject a fractional value like "1.5" at json.Unmarshal outright (P2 item 12), unlike costPerDayUSD/costPerMonthUSD, which are `float64`. */
 const INTEGER_FIELDS = new Set<LimitKey>(['requestsPerMinute', 'requestsPerDay', 'tokensPerMinute', 'tokensPerDay', 'tokensPerMonth'])

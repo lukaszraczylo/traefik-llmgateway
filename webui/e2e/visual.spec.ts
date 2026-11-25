@@ -17,20 +17,37 @@ const KEY_STORAGE = 'llmgwAdminKey'
 const OUT = join(import.meta.dirname, '..', '.screenshots')
 const SETTLE_MS = 600
 
-async function sampleIds(page: Page): Promise<Record<string, string>> {
-  const key = { 'x-api-key': 'e2e-dummy-key' }
-  const get = async (path: string) => (await page.request.get(`/admin/api/${path}`, { headers: key })).json()
+interface UsageSample {
+  id: string
+  requestsPerMinute: number
+  limits?: { requestsPerMinute?: number }
+  memberLimits?: unknown
+}
+
+/** The user closest to its per-minute request limit: under limits-hot this is a paced user. */
+function hottestUser(users: UsageSample[]): string {
+  const fill = (u: UsageSample) => (u.limits?.requestsPerMinute ? u.requestsPerMinute / u.limits.requestsPerMinute : 0)
+  return [...users].sort((a, b) => fill(b) - fill(a))[0].id
+}
+
+async function sampleIds(page: Page, scenario: string): Promise<Record<string, string>> {
+  const headers = { 'x-api-key': 'e2e-dummy-key', 'x-mock-scenario': scenario }
+  const get = async (path: string) => (await page.request.get(`/admin/api/${path}`, { headers })).json()
   const [usage, catalog, targets] = await Promise.all([get('usage'), get('catalog'), get('targets')])
+  const memberGroup = usage.groups.find((g: UsageSample) => g.memberLimits) ?? usage.groups[0]
   return {
-    user: `user:${encodeURIComponent(usage.users[0].id)}`,
+    user: `user:${encodeURIComponent(scenario === 'limits-hot' ? hottestUser(usage.users) : usage.users[0].id)}`,
+    group: `group:${encodeURIComponent(memberGroup.id)}`,
     model: `model:${encodeURIComponent(catalog.providers[0].models[0].id)}`,
     router: `router:${encodeURIComponent(catalog.routers[0].name)}`,
     target: `target:${encodeURIComponent((targets.mcpServers[0] ?? targets.agents[0]).name)}`,
   }
 }
 
-const PANEL_PAGES: Array<{ page: (typeof PAGE_IDS)[number]; kind: string }> = [
+const PANEL_PAGES: Array<{ page: (typeof PAGE_IDS)[number]; kind: string; scenario?: string }> = [
   { page: 'users', kind: 'user' },
+  { page: 'users', kind: 'user', scenario: 'limits-hot' },
+  { page: 'users', kind: 'group', scenario: 'limits-hot' },
   { page: 'models', kind: 'model' },
   { page: 'routers', kind: 'router' },
   { page: 'targets', kind: 'target' },
@@ -78,13 +95,13 @@ for (const id of PAGE_IDS) {
   }
 }
 
-for (const { page: pageId, kind } of PANEL_PAGES) {
+for (const { page: pageId, kind, scenario = 'live' } of PANEL_PAGES) {
   for (const [vp, size] of Object.entries(VIEWPORTS)) {
     for (const theme of THEMES) {
-      test(`${pageId} panel ${kind} live ${vp} ${theme}`, async ({ page }) => {
+      test(`${pageId} panel ${kind} ${scenario} ${vp} ${theme}`, async ({ page }) => {
         await page.setViewportSize(size)
-        const sel = (await sampleIds(page))[kind]
-        await exercise(page, `${pageId}-panel-${kind}`, `#${pageId}?sel=${encodeURIComponent(sel)}`, 'live', vp as keyof typeof VIEWPORTS, theme)
+        const sel = (await sampleIds(page, scenario))[kind]
+        await exercise(page, `${pageId}-panel-${kind}`, `#${pageId}?sel=${encodeURIComponent(sel)}`, scenario, vp as keyof typeof VIEWPORTS, theme)
       })
     }
   }
