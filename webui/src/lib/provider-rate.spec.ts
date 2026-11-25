@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  breakerRows,
   dayRateTitle,
   formatErrorRatePercent,
   formatRatePercent,
@@ -180,5 +181,37 @@ describe('formatErrorRatePercent', () => {
 
   it('renders null as the caller-supplied nullLabel instead of the "no data" default', () => {
     expect(formatErrorRatePercent(null, 'no traffic')).toBe('no traffic')
+  })
+})
+
+describe('breakerRows', () => {
+  const p = (name: string, healthState: 'closed' | 'open' | 'half-open', extra: { openUntil?: string; lastErr?: string } = {}) => ({
+    name,
+    healthState,
+    openUntil: extra.openUntil ?? '0001-01-01T00:00:00Z',
+    lastErr: extra.lastErr,
+  })
+
+  it('open and half-open sorted first', () => {
+    const rows = breakerRows({
+      providers: [p('a-closed', 'closed'), p('b-half', 'half-open'), p('c-closed', 'closed'), p('d-open', 'open', { openUntil: '2026-01-01T00:00:00Z' })],
+    })
+    expect(rows.map((r) => r.provider)).toEqual(['d-open', 'b-half', 'a-closed', 'c-closed'])
+    expect(rows.map((r) => r.state)).toEqual(['open', 'half-open', 'closed', 'closed'])
+  })
+
+  it('sorts by name within the same state', () => {
+    const rows = breakerRows({ providers: [p('z', 'open'), p('m', 'open')] })
+    expect(rows.map((r) => r.provider)).toEqual(['m', 'z'])
+  })
+
+  it('carries openUntil and lastErr, blank when unset', () => {
+    const [row] = breakerRows({ providers: [p('x', 'open', { openUntil: '2026-01-01T00:00:00Z', lastErr: 'boom' })] })
+    expect(row).toEqual({ provider: 'x', state: 'open', openUntil: '2026-01-01T00:00:00Z', lastErr: 'boom' })
+    expect(breakerRows({ providers: [p('y', 'closed')] })[0]!.lastErr).toBe('')
+  })
+
+  it('returns nothing without an overview', () => {
+    expect(breakerRows(null)).toEqual([])
   })
 })

@@ -74,6 +74,10 @@ export const useReliabilityStore = defineStore('reliability', {
     windowUsed: 'day' as Extract<HistoryWindow, 'hour' | 'day'>,
     /** Per-provider fail/attempt ratio, one entry per configured provider. */
     errorRate: [] as ProviderRatioSeries[],
+    /** Per-provider attempt count series (metric `attempt`). */
+    attempts: [] as CountSeries[],
+    /** Per-provider failure count series (metric `fail`). */
+    failures: [] as CountSeries[],
     /** Per-provider timeout count series (metric `timeout`). */
     timeouts: [] as CountSeries[],
     /** Per-provider failover count series (metric `fover`) — a provider's OWN candidates that were failed away FROM, per accountExtras.failoverFrom's own doc comment (redesign-plan.md section 2b). */
@@ -131,6 +135,8 @@ export const useReliabilityStore = defineStore('reliability', {
           this.buckets = []
           this.windowUsed = hourOrDayWindow(filters.window, filters.span).window
           this.errorRate = []
+          this.attempts = []
+          this.failures = []
           this.timeouts = []
           this.failovers = []
           this.rejections = []
@@ -158,6 +164,8 @@ export const useReliabilityStore = defineStore('reliability', {
         // A provider with no attempts in the window is idle, not healthy: keep it out of every legend.
         const active = activeScopes(attemptRes.series)
         this.errorRate = errorRateSeries(attemptRes, failRes).filter((s) => active.has(s.scope))
+        this.attempts = attemptRes.series.filter((s) => active.has(s.scope))
+        this.failures = failRes.series.filter((s) => active.has(s.scope))
         this.timeouts = timeoutRes.series.filter((s) => active.has(s.scope))
         this.failovers = foverRes.series.filter((s) => active.has(s.scope))
         this.rejections = rejRes.series[0]?.points ?? []

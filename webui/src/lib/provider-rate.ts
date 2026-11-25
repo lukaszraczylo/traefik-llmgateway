@@ -6,6 +6,8 @@
 // ts's `test` block) exercise the threshold math directly, with no
 // component mount required.
 
+import type { AdminProviderView, ProviderHealthState } from '@/types/api'
+
 /**
  * PROVIDER_RATE_AMBER_THRESHOLD is the day-window success-rate fraction
  * (0-1) at and above which a provider or model reads as healthy ("muted"
@@ -171,4 +173,21 @@ export function dayRateTitle(attemptsDay: number, failuresDay: number): string {
   const rate = providerSuccessRate(attemptsDay, failuresDay)
   const pct = rate === null ? '' : ` (${formatRatePercent(rate)})`
   return `${attemptsDay} ${countWord(attemptsDay, 'attempt', 'attempts')}, ${failuresDay} ${countWord(failuresDay, 'failure', 'failures')} today${pct}`
+}
+
+export interface BreakerRow {
+  provider: string
+  state: ProviderHealthState
+  openUntil: string
+  lastErr: string
+}
+
+const BREAKER_STATE_ORDER: Record<ProviderHealthState, number> = { open: 0, 'half-open': 1, closed: 2 }
+
+/** One row per provider, open then half-open breakers first, ties by name. */
+export function breakerRows(
+  overview: { providers: ReadonlyArray<Pick<AdminProviderView, 'name' | 'healthState' | 'openUntil' | 'lastErr'>> } | null,
+): BreakerRow[] {
+  const rows = (overview?.providers ?? []).map((p) => ({ provider: p.name, state: p.healthState, openUntil: p.openUntil, lastErr: p.lastErr ?? '' }))
+  return rows.sort((a, b) => BREAKER_STATE_ORDER[a.state] - BREAKER_STATE_ORDER[b.state] || a.provider.localeCompare(b.provider))
 }

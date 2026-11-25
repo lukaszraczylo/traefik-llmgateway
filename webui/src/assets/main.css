@@ -211,6 +211,8 @@
 /* Phone cards layout: drop the share bar from compact top lists. */
 @media (max-width: 639px) { .wb-hide-share-sm .wb-share { display: none; } }
 @media (min-width: 640px) { .wb-clip td.wb-text { max-width: 9rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } }
+/* Breaker lastErr: one clamped line, full text in the title. */
+.wb-err { display: block; max-width: 14rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* Model id cell: provider as a muted prefix, model name ellipsized at its end; the column takes the free width. */
 .wb-model { display: inline-flex; align-items: baseline; gap: 1px; max-width: 100%; min-width: 0; vertical-align: bottom; }

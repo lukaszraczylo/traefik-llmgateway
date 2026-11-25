@@ -51,7 +51,7 @@ const PAGES: Record<PageId, Component> = {
   models: lazyPage(() => import('@/pages/ModelsPage.vue')),
   routers: lazyPage(() => import('@/pages/ModelsPage.vue')),
   targets: lazyPage(() => import('@/pages/TargetsPage.vue')),
-  events: lazyPage(() => import('@/pages/ReliabilityPage.vue')),
+  events: lazyPage(() => import('@/pages/LegacyReliabilityPage.vue')),
   config: lazyPage(() => import('@/pages/ConfigPage.vue')),
 }
 
