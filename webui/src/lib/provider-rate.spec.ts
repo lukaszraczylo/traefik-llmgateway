@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import {
   breakerRows,
+  ratePercentSeries,
   dayRateTitle,
   formatErrorRatePercent,
   formatRatePercent,
@@ -207,11 +208,30 @@ describe('breakerRows', () => {
 
   it('carries openUntil and lastErr, blank when unset', () => {
     const [row] = breakerRows({ providers: [p('x', 'open', { openUntil: '2026-01-01T00:00:00Z', lastErr: 'boom' })] })
-    expect(row).toEqual({ provider: 'x', state: 'open', openUntil: '2026-01-01T00:00:00Z', lastErr: 'boom' })
+    expect(row).toEqual({ provider: 'x', state: 'open', openUntil: '2026-01-01T00:00:00Z', lastErr: 'boom', degraded: false })
     expect(breakerRows({ providers: [p('y', 'closed')] })[0]!.lastErr).toBe('')
+  })
+
+  it('puts closed-with-error (degraded) after half-open and before healthy', () => {
+    const rows = breakerRows({ providers: [p('a-ok', 'closed'), p('b-err', 'closed', { lastErr: 'x' }), p('c-half', 'half-open'), p('d-open', 'open')] })
+    expect(rows.map((r) => r.provider)).toEqual(['d-open', 'c-half', 'b-err', 'a-ok'])
+    expect(rows.map((r) => r.degraded)).toEqual([false, false, true, false])
   })
 
   it('returns nothing without an overview', () => {
     expect(breakerRows(null)).toEqual([])
+  })
+})
+
+describe('ratePercentSeries', () => {
+  it('computes percent of attempts per bucket', () => {
+    expect(ratePercentSeries([1, 5], [100, 10])).toEqual([1, 50])
+  })
+  it('gives null, never NaN, for a bucket with no attempts', () => {
+    expect(ratePercentSeries([0, 3], [0, 0])).toEqual([null, null])
+    expect(ratePercentSeries([2], [Number.NaN])).toEqual([null])
+  })
+  it('treats a missing part as zero', () => {
+    expect(ratePercentSeries([], [10])).toEqual([0])
   })
 })

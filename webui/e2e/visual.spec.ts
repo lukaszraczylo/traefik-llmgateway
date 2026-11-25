@@ -118,3 +118,25 @@ for (const theme of THEMES) {
     await expect(page.locator('text=Previous period >> visible=true').first()).toBeVisible()
   })
 }
+
+// Only alibaba at 14d and 30d carries TTFB points in the fixtures: the chart must draw, not fall back to the empty state.
+for (const theme of THEMES) {
+  test(`reliability-ttfb live desktop ${theme}`, async ({ page }) => {
+    await page.setViewportSize(VIEWPORTS.desktop)
+    await exercise(page, 'reliability-ttfb', '#reliability?range=30d&provider=alibaba', 'live', 'desktop', theme)
+    const chart = page.getByTestId('ttfb-chart')
+    await expect(chart).toBeVisible()
+    // The fixture has two isolated points, drawn as markers; a line needs adjacent points.
+    expect(await chart.locator('svg path, svg circle').count()).toBeGreaterThan(0)
+    await expect(page.getByText('No latency samples in this range')).toHaveCount(0)
+  })
+}
+
+// Month ranges clamp to 30 days; the page says so.
+for (const theme of THEMES) {
+  test(`reliability-3mo live desktop ${theme}`, async ({ page }) => {
+    await page.setViewportSize(VIEWPORTS.desktop)
+    await exercise(page, 'reliability-3mo', '#reliability?range=3mo', 'live', 'desktop', theme)
+    await expect(page.getByTestId('clamped-range')).toBeVisible()
+  })
+}

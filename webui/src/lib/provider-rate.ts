@@ -180,14 +180,32 @@ export interface BreakerRow {
   state: ProviderHealthState
   openUntil: string
   lastErr: string
+  /** Closed breaker that still reports a last error. */
+  degraded: boolean
 }
+
+type BreakerSource = Pick<AdminProviderView, 'name' | 'healthState' | 'openUntil' | 'lastErr'>
 
 const BREAKER_STATE_ORDER: Record<ProviderHealthState, number> = { open: 0, 'half-open': 1, closed: 2 }
 
-/** One row per provider, open then half-open breakers first, ties by name. */
-export function breakerRows(
-  overview: { providers: ReadonlyArray<Pick<AdminProviderView, 'name' | 'healthState' | 'openUntil' | 'lastErr'>> } | null,
-): BreakerRow[] {
-  const rows = (overview?.providers ?? []).map((p) => ({ provider: p.name, state: p.healthState, openUntil: p.openUntil, lastErr: p.lastErr ?? '' }))
-  return rows.sort((a, b) => BREAKER_STATE_ORDER[a.state] - BREAKER_STATE_ORDER[b.state] || a.provider.localeCompare(b.provider))
+/** Sort tier: open, half-open, closed with an error, healthy. */
+function breakerTier(r: BreakerRow): number {
+  return r.state === 'closed' && !r.degraded ? 3 : BREAKER_STATE_ORDER[r.state]
+}
+
+/** One row per provider, ordered open, half-open, degraded, healthy; ties by name. */
+export function breakerRows(overview: { providers: ReadonlyArray<BreakerSource> } | null): BreakerRow[] {
+  const rows = (overview?.providers ?? []).map((p) => ({
+    provider: p.name,
+    state: p.healthState,
+    openUntil: p.openUntil,
+    lastErr: p.lastErr ?? '',
+    degraded: p.healthState === 'closed' && !!p.lastErr,
+  }))
+  return rows.sort((a, b) => breakerTier(a) - breakerTier(b) || a.provider.localeCompare(b.provider))
+}
+
+/** Per-bucket `part` as a percent of `attempts`; null where a bucket has no attempts, never NaN. */
+export function ratePercentSeries(part: readonly number[], attempts: readonly number[]): (number | null)[] {
+  return attempts.map((a, i) => (Number.isFinite(a) && a > 0 ? (100 * (part[i] ?? 0)) / a : null))
 }

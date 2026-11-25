@@ -102,6 +102,8 @@ export const useReliabilityStore = defineStore('reliability', {
     /** AdminFeaturesView.latencyStats, as this SPECIFIC response reported it — ReliabilityPage.vue already reads dashboard.overview.features.latencyStats to decide whether to fetch at all, but keeping the response's own copy here avoids a stale read if the config toggles between fetches. */
     providerPerfLatencyEnabled: false,
     providerPerfLoading: false,
+    /** Provider whose perf response last landed successfully; '' until one does, so a miss never reads as an empty success. */
+    providerPerfLoadedFor: '',
     providerPerfError: '',
     /** Same latest-request-wins guard as `reqId` above, scoped to fetchProviderPerf's own independent fetch lifecycle. */
     providerPerfReqId: 0,
@@ -206,6 +208,7 @@ export const useReliabilityStore = defineStore('reliability', {
         this.providerPerfBuckets = []
         this.providerPerfPoints = []
         this.providerPerfLatencyEnabled = false
+        this.providerPerfLoadedFor = ''
         this.providerPerfError = ''
         this.providerPerfLoading = false
         return
@@ -225,9 +228,11 @@ export const useReliabilityStore = defineStore('reliability', {
         this.providerPerfPoints = res.points ?? []
         this.providerPerfLatencyEnabled = res.latencyEnabled
         this.providerPerfError = ''
+        this.providerPerfLoadedFor = provider
       } catch (err) {
         if (requestId !== this.providerPerfReqId) return
         if (isAuthRejection(err)) return
+        this.providerPerfLoadedFor = ''
         this.providerPerfError = messageOf(err)
       } finally {
         if (requestId === this.providerPerfReqId) this.providerPerfLoading = false
