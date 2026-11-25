@@ -665,6 +665,7 @@ export type AdminEventKind =
   | 'timeout'
   | 'unpriced'
   | 'capacity'
+  | 'paced'
 
 /**
  * One row in GET /admin/api/events (admin.go/events.go: gatewayEvent — the

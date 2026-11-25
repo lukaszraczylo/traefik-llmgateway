@@ -30,7 +30,7 @@ describe('EVENT_KIND_LABEL', () => {
 describe('EVENT_KINDS', () => {
   it('contains every known AdminEventKind, derived from EVENT_KIND_LABEL', () => {
     expect(EVENT_KINDS).toEqual(Object.keys(EVENT_KIND_LABEL))
-    expect(EVENT_KINDS).toEqual(['rate_limit', 'budget', 'store_down', 'upstream', 'timeout', 'unpriced', 'capacity'])
+    expect(EVENT_KINDS).toEqual(['rate_limit', 'budget', 'store_down', 'upstream', 'timeout', 'unpriced', 'capacity', 'paced'])
   })
 
   it('every entry has a truthy label (no silently-empty display text)', () => {

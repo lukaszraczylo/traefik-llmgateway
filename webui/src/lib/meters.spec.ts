@@ -82,6 +82,11 @@ describe('effectiveLimitRows', () => {
     expect(rows.find((r) => r.label === 'Requests/day')).toMatchObject({ value: '3,000', source: 'user' })
     expect(rows.find((r) => r.label === 'Pacing')).toMatchObject({ value: 'from 80%, up to 10s delay' })
   })
+  it('formats cost limits with the shared cost format and marks pacing as prose', () => {
+    const rows = effectiveLimitRows({ costPerMonthUSD: 25, pacing: PACING }, undefined)
+    expect(rows.find((r) => r.key === 'costPerMonthUSD')?.value).toBe('$25.00')
+    expect(rows.find((r) => r.key === 'pacing')?.prose).toBe(true)
+  })
   it('returns no rows without limits', () => {
     expect(effectiveLimitRows(undefined, undefined)).toEqual([])
   })

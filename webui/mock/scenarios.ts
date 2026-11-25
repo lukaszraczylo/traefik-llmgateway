@@ -31,6 +31,10 @@ const HOT_MINUTE_FRACTION = 0.93
 const HOT_DAY_FRACTION = 0.9
 const BREAKER_OPEN_MS = 90_000
 const HUGE_FACTOR = 3
+/** Each captured user becomes this many in the huge scenario. */
+const HUGE_USER_FACTOR = 20
+const HOT_TOKENS_IN_PER_REQUEST = 1500
+const HOT_TOKENS_OUT_PER_REQUEST = 400
 
 export interface ScenarioContext {
   now: number
@@ -231,7 +235,20 @@ function limitsHot(path: string, body: Obj, ctx: ScenarioContext) {
         addToGroupAndTotal(body, HOT_GROUP, 'tokensPerMinute', tpm - (u.tokensPerMinute ?? 0))
         u.tokensPerMinute = tpm
       }
-      if (u.limits.requestsPerDay > 0) u.requestsPerDay = Math.floor(u.limits.requestsPerDay * HOT_DAY_FRACTION)
+      if (u.limits.requestsPerDay > 0) {
+        const day = Math.floor(u.limits.requestsPerDay * HOT_DAY_FRACTION)
+        addToGroupAndTotal(body, HOT_GROUP, 'requestsPerDay', day - u.requestsPerDay)
+        u.requestsPerDay = day
+      }
+      const tokensIn = u.requestsPerDay * HOT_TOKENS_IN_PER_REQUEST
+      const tokensOut = u.requestsPerDay * HOT_TOKENS_OUT_PER_REQUEST
+      addToGroupAndTotal(body, HOT_GROUP, 'tokensInPerDay', tokensIn - u.tokensInPerDay)
+      addToGroupAndTotal(body, HOT_GROUP, 'tokensOutPerDay', tokensOut - u.tokensOutPerDay)
+      u.tokensInPerDay = tokensIn
+      u.tokensOutPerDay = tokensOut
+      u.tokensInPerMonth = Math.max(u.tokensInPerMonth ?? 0, tokensIn)
+      u.tokensOutPerMonth = Math.max(u.tokensOutPerMonth ?? 0, tokensOut)
+      u.lastSeen = Math.floor(ctx.now / 1000)
       u.rejectionsPerDay = Math.max(u.rejectionsPerDay ?? 0, 9)
     }
   } else if (path === '/admin/api/events') {
@@ -261,6 +278,13 @@ function hugeModelIds(id: string): string[] {
 
 const expandRows = (rows: Obj[], ids: (id: string) => string[]): Obj[] => rows.flatMap((r) => ids(r.id).map((id) => ({ ...r, id })))
 
+/** A clone of one user with a distinct id and a spread of traffic, so rankings and shares differ. */
+function hugeUser(u: Obj, n: number): Obj {
+  const scale = 1 / (n + 1)
+  const scaled = (v: unknown) => (typeof v === 'number' ? Math.floor(v * scale) : v)
+  return { ...u, id: `${u.id}-${n + 1}`, requestsPerDay: scaled(u.requestsPerDay), tokensInPerDay: scaled(u.tokensInPerDay), tokensOutPerDay: scaled(u.tokensOutPerDay) }
+}
+
 function huge(path: string, body: Obj) {
   if (path === '/admin/api/overview') {
     body.providers = (body.providers as Obj[]).flatMap((p) =>
@@ -278,6 +302,10 @@ function huge(path: string, body: Obj) {
         return { ...p, name, models }
       }),
     )
+  } else if (path === '/admin/api/usage' && Array.isArray(body.users)) {
+    body.users = (body.users as Obj[]).flatMap((u) => copies(HUGE_USER_FACTOR, (n) => (n === 0 ? u : hugeUser(u, n))))
+  } else if (path === '/admin/api/consumers' && Array.isArray(body.users)) {
+    body.users = (body.users as Obj[]).flatMap((u) => copies(HUGE_USER_FACTOR, (n) => (n === 0 ? u : { ...u, name: `${u.name}-${n + 1}` })))
   } else if (path === '/admin/api/usage/models' && Array.isArray(body.models)) {
     body.models = expandRows(body.models, hugeModelIds)
   } else if (path === '/admin/api/performance' && Array.isArray(body.rows)) {

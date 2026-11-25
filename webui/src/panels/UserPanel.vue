@@ -48,13 +48,13 @@ const exempt = computed(() => entry.value?.exemptRequestsPerMonth ?? 0)
 // --- Models used ------------------------------------------------------------
 
 const userModelStats = computed(() => dashboard.overview?.features.userModelStats ?? false)
-const detail = computed(() => consumers.detail[props.id])
+const detail = computed(() => consumers.models[props.id])
 const modelRows = computed(() =>
-  [...(detail.value?.modelTotals?.rows ?? [])].sort((a, b) => (b.values.req ?? 0) - (a.values.req ?? 0)),
+  [...(detail.value?.totals?.rows ?? [])].sort((a, b) => (b.values.req ?? 0) - (a.values.req ?? 0)),
 )
 const modelsState = computed<ViewState>(() => {
-  if (dashboard.overview !== null && (!userModelStats.value || detail.value?.modelTotalsUnavailable)) return 'empty'
-  const s = loadState({ loading: detail.value?.loading ?? true, hasData: detail.value?.modelTotals != null, error: detail.value?.modelError ?? '' })
+  if (dashboard.overview !== null && (!userModelStats.value || detail.value?.unavailable)) return 'empty'
+  const s = loadState({ loading: detail.value?.loading ?? true, hasData: detail.value?.totals != null, error: detail.value?.error ?? '' })
   if (s === 'skeleton') return 'loading'
   if (s === 'error') return 'error'
   return modelRows.value.length === 0 ? 'empty' : 'ready'
@@ -63,7 +63,7 @@ const modelsEmptyTitle = computed(() => (userModelStats.value ? 'No model traffi
 const modelsEmptyDescription = computed(() => (userModelStats.value ? undefined : 'Enable admin.stats.userModel to see which models this user calls.'))
 
 function loadModels(): Promise<void> {
-  return consumers.fetchUserDetail(props.id, filters.window, filters.span, userModelStats.value)
+  return userModelStats.value ? consumers.fetchUserModels(props.id, filters.window, filters.span) : Promise.resolve()
 }
 
 // --- Throttle events --------------------------------------------------------
@@ -85,15 +85,25 @@ function clock(iso: string): string {
 // --- Access ----------------------------------------------------------------
 
 const groupRows = computed(() => (consumers.data?.groups ?? []).filter((g) => groups.value.includes(g.name)))
-const providers = computed(() => {
-  const out = new Map<string, string>()
+interface ProviderAccess {
+  name: string
+  detail: string
+  zero: boolean
+  allowed: number
+}
+
+// With several groups, the most permissive one decides what the user can reach.
+const providers = computed<ProviderAccess[]>(() => {
+  const best = new Map<string, ProviderAccess>()
   for (const g of groupRows.value) {
-    for (const p of g.allowedProviders) {
-      const cell = providerAccessCell(g, p)
-      if (!out.has(p) || (cell.detail && !out.get(p))) out.set(p, cell.detail ?? '')
+    for (const name of g.allowedProviders) {
+      const cell = providerAccessCell(g, name)
+      const allowed = g.modelAccess[name]?.allowed ?? Number.POSITIVE_INFINITY
+      const prev = best.get(name)
+      if (!prev || allowed > prev.allowed) best.set(name, { name, detail: cell.detail ?? '', zero: cell.zero === true, allowed })
     }
   }
-  return [...out].map(([name, detail]) => ({ name, detail })).sort((a, b) => a.name.localeCompare(b.name))
+  return [...best.values()].sort((a, b) => a.name.localeCompare(b.name))
 })
 const accessState = computed<ViewState>(() => (consumers.data ? 'ready' : consumers.error ? 'error' : 'loading'))
 
@@ -147,19 +157,23 @@ onUnmounted(() => {
         <PanelSection title="Effective limits">
           <DescriptionList v-if="limitRows.length || exempt" variant="inline" size="sm" density="compact">
             <DescriptionItem v-for="r in limitRows" :key="r.key" :term="r.label">
-              <span class="font-mono tabular-nums">{{ r.value }}</span>
-              <span v-if="r.source" class="text-muted-foreground"> · {{ r.source }}</span>
+              <span class="flex flex-col items-end text-right">
+                <span :class="r.prose ? '' : 'font-mono tabular-nums'">{{ r.value }}</span>
+                <span v-if="r.source" class="text-muted-foreground text-xs">{{ r.source }}</span>
+              </span>
             </DescriptionItem>
             <DescriptionItem v-if="exempt" term="Exempt requests/month">
-              <span class="font-mono tabular-nums">{{ formatCompactCount(exempt) }}</span>
-              <span class="text-muted-foreground"> · limitExemptKinds</span>
+              <span class="flex flex-col items-end text-right">
+                <span class="font-mono tabular-nums">{{ formatCompactCount(exempt) }}</span>
+                <span class="text-muted-foreground text-xs">limitExemptKinds</span>
+              </span>
             </DescriptionItem>
           </DescriptionList>
           <p v-else class="text-muted-foreground m-0 text-sm">No limits set.</p>
         </PanelSection>
 
         <PanelSection title="Models used">
-          <StateView :state="modelsState" :empty-title="modelsEmptyTitle" :empty-description="modelsEmptyDescription" :error-message="detail?.modelError" :rows="3" @retry="loadModels()">
+          <StateView :state="modelsState" :empty-title="modelsEmptyTitle" :empty-description="modelsEmptyDescription" :error-message="detail?.error" :rows="3" @retry="loadModels()">
             <ul class="m-0 flex list-none flex-col p-0" aria-label="Models used">
               <li v-for="m in modelRows" :key="m.id" class="flex h-8 items-center justify-between gap-3 px-2 text-sm">
                 <ModelName :id="m.id" class="min-w-0" />
@@ -188,7 +202,7 @@ onUnmounted(() => {
               <DescriptionItem term="Providers">
                 <span v-if="providers.length === 0" class="text-muted-foreground">None granted by group</span>
                 <span v-else class="flex flex-wrap gap-1">
-                  <Badge v-for="p in providers" :key="p.name" tone="neutral" variant="outline" size="sm" class="font-mono">{{ p.name }}<template v-if="p.detail"> · {{ p.detail }}</template></Badge>
+                  <Badge v-for="p in providers" :key="p.name" :tone="p.zero ? 'warning' : 'neutral'" variant="outline" size="sm" class="font-mono" :title="p.zero ? 'Provider granted, but no model matches the group model list' : undefined">{{ p.name }}<template v-if="p.detail"> · {{ p.detail }}</template></Badge>
                 </span>
               </DescriptionItem>
               <DescriptionItem v-if="consumer?.providers?.length" term="Personal providers">

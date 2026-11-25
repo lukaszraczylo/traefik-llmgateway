@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Card, CardAction, CardContent, CardHeader, CardTitle, Pagination, SegmentedControl } from '@perfect-design/ui'
+import { Card, CardAction, CardContent, CardHeader, CardTitle, Pagination, SearchInput, SegmentedControl } from '@perfect-design/ui'
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 
 import { useNow } from '@/composables/useNow'
@@ -78,29 +78,40 @@ function toRow(e: AdminUsageEntryView): Row {
 const byRequests = (a: Row, b: Row): number => b.requests - a.requests || a.name.localeCompare(b.name)
 const userRows = computed<Row[]>(() => (usage.value?.users ?? []).map(toRow).sort(byRequests))
 const groupRows = computed<Row[]>(() => (usage.value?.groups ?? []).map(toRow).sort(byRequests))
-const rows = computed(() => (tab.value === 'users' ? userRows.value : groupRows.value))
+const query = computed<string>({
+  get: () => nav.params.q ?? '',
+  set: (v) => {
+    const { q: _q, ...rest } = nav.params
+    nav.goTo('users', v ? { ...rest, q: v } : rest)
+  },
+})
+const needle = computed(() => query.value.trim().toLowerCase())
+const allRows = computed(() => (tab.value === 'users' ? userRows.value : groupRows.value))
+const rows = computed(() =>
+  needle.value === '' ? allRows.value : allRows.value.filter((r) => r.name.toLowerCase().includes(needle.value) || (tab.value === 'users' && r.group.toLowerCase().includes(needle.value))),
+)
 
 const userColumns = wbColumns<Row>([
   { key: 'name', header: 'Name', kind: 'text' },
   { key: 'group', header: 'Group', kind: 'text' },
   { key: 'lastSeen', header: 'Last seen', kind: 'time', sortable: false },
-  { key: 'requests', header: 'Req/day', kind: 'number' },
-  { key: 'tokens', header: 'Tokens/day', kind: 'number' },
+  { key: 'requests', header: 'Req today', kind: 'number' },
+  { key: 'tokens', header: 'Tokens today', kind: 'number' },
   { key: 'share', header: 'Share', kind: 'share' },
   { key: 'limit', header: 'Limit', kind: 'limit', sortable: false },
 ])
 const groupColumns = wbColumns<Row>([
   { key: 'name', header: 'Name', kind: 'text' },
   { key: 'members', header: 'Members', kind: 'number' },
-  { key: 'requests', header: 'Req/day', kind: 'number' },
-  { key: 'tokens', header: 'Tokens/day', kind: 'number' },
+  { key: 'requests', header: 'Req today', kind: 'number' },
+  { key: 'tokens', header: 'Tokens today', kind: 'number' },
   { key: 'share', header: 'Share', kind: 'share' },
   { key: 'limit', header: 'Limit', kind: 'limit', sortable: false },
 ])
 const columns = computed(() => (tab.value === 'users' ? userColumns : groupColumns))
 
 const page = ref(1)
-watch(tab, () => (page.value = 1))
+watch([tab, needle], () => (page.value = 1))
 const window_ = computed(() => pageWindow(rows.value.length, PAGE_SIZE, page.value - 1))
 const paged = computed(() => rows.value.slice(window_.value.from, window_.value.to))
 
@@ -110,7 +121,9 @@ const state = computed<ViewState>(() => {
   if (s === 'error') return 'error'
   return rows.value.length === 0 ? 'empty' : 'ready'
 })
-const emptyTitle = computed(() => (tab.value === 'users' ? 'No users configured' : 'No groups configured'))
+const emptyTitle = computed(() =>
+  needle.value !== '' ? `No ${tab.value} match "${query.value.trim()}"` : tab.value === 'users' ? 'No users configured' : 'No groups configured',
+)
 
 const selection = computed(() => nav.selection)
 const activeKey = computed(() => (selection.value?.kind === (tab.value === 'users' ? 'user' : 'group') ? selection.value.id : null))
@@ -149,6 +162,7 @@ onUnmounted(stopClock)
         </CardAction>
       </CardHeader>
       <CardContent class="flex flex-col gap-2">
+        <SearchInput v-model="query" size="sm" class="max-w-sm" :placeholder="tab === 'users' ? 'Filter by name or group' : 'Filter by name'" :aria-label="`Filter ${tab}`" />
         <StateView :state="state" :empty-title="emptyTitle" :error-message="dashboard.error" :updated-at="dashboard.lastUpdated ?? undefined" @retry="dashboard.refresh()">
           <WbTable
             class="wb-clip"

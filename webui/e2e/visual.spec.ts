@@ -107,6 +107,27 @@ for (const { page: pageId, kind, scenario = 'live' } of PANEL_PAGES) {
   }
 }
 
+// The limits snippet form inside the user panel, opened.
+for (const [vp, size] of Object.entries(VIEWPORTS)) {
+  for (const theme of THEMES) {
+    test(`users panel snippet limits-hot ${vp} ${theme}`, async ({ page }) => {
+      await page.setViewportSize(size)
+      const sel = (await sampleIds(page, 'limits-hot')).user
+      await visit(page, `#users?sel=${encodeURIComponent(sel)}`, 'limits-hot', theme)
+      await page.getByRole('button', { name: 'Generate limits snippet' }).click()
+      await page.getByLabel('Requests/minute').fill('45')
+      const snippet = page.locator('pre', { hasText: 'requestsPerMinute' })
+      await snippet.scrollIntoViewIfNeeded()
+      await expect(snippet).toBeVisible()
+      const name = `users-panel-snippet-limits-hot-${vp}-${theme}`
+      mkdirSync(OUT, { recursive: true })
+      await page.screenshot({ path: join(OUT, `${name}.png`), fullPage: true })
+      const results = await runChecks(page, [])
+      for (const r of results) expect.soft(r.ok, `${r.name}: ${r.detail}`).toBe(true)
+    })
+  }
+}
+
 // Compare mode: tiles show a delta and the chart adds a dashed previous-period series.
 for (const theme of THEMES) {
   test(`overview-cmp live desktop ${theme}`, async ({ page }) => {

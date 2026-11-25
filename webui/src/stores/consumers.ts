@@ -43,6 +43,16 @@ export interface UserDetailState {
   span: number | null
 }
 
+/** UserModelsState is one user's per-model totals alone (UserPanel), without the two series UserDetail also fetches. */
+export interface UserModelsState {
+  loading: boolean
+  error: string
+  totals: AdminTotalsResponse | null
+  /** The usermodel call came back 404: the feature is off server-side. */
+  unavailable: boolean
+  reqId: number
+}
+
 /** MAX_CACHED_USER_DETAILS caps how many opened users' detail the store keeps in memory. */
 export const MAX_CACHED_USER_DETAILS = 20
 
@@ -96,6 +106,7 @@ export const useConsumersStore = defineStore('consumers', {
     error: '',
     fetchedAt: null as number | null,
     detail: {} as Record<string, UserDetailState>,
+    models: {} as Record<string, UserModelsState>,
   }),
   actions: {
     /**
@@ -129,6 +140,26 @@ export const useConsumersStore = defineStore('consumers', {
       if (this.loading) return
       if (this.data && this.fetchedAt !== null && Date.now() - this.fetchedAt < REFRESH_STALE_MS) return
       await this.fetchConsumers()
+    },
+    /** fetchUserModels loads only the usermodel totals (latest request wins); a 404 sets `unavailable` instead of an error. */
+    async fetchUserModels(userId: string, window: HistoryWindow, span: number): Promise<void> {
+      const auth = useAuthStore()
+      if (!auth.isAuthenticated) return
+      const prev = this.models[userId]
+      const reqId = (prev?.reqId ?? 0) + 1
+      this.models[userId] = { loading: true, error: '', totals: prev?.totals ?? null, unavailable: false, reqId }
+      const clamped = dayOrMonthWindow(window, span)
+      try {
+        const totals = await adminFetch<AdminTotalsResponse>(
+          totalsUrl({ kind: 'usermodel', user: userId, window: clamped.window, span: clamped.span, metrics: ['req', 'cost'] }),
+        )
+        if (this.models[userId]?.reqId !== reqId) return
+        this.models[userId] = { loading: false, error: '', totals, unavailable: false, reqId }
+      } catch (err) {
+        if (this.models[userId]?.reqId !== reqId || isAuthRejection(err)) return
+        const unavailable = err instanceof AdminApiError && err.status === 404
+        this.models[userId] = { loading: false, error: unavailable ? '' : messageOf(err), totals: null, unavailable, reqId }
+      }
     },
     /**
      * fetchUserDetail loads one user's timeline (req + cost series) and,

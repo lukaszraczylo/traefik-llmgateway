@@ -57,6 +57,6 @@ const BUTTON_LABEL: Record<typeof state.value, string> = {
         {{ BUTTON_LABEL[state] }}
       </Button>
     </div>
-    <pre ref="pre" class="overflow-x-auto rounded-md border bg-muted p-3 font-mono text-xs select-text whitespace-pre">{{ text }}</pre>
+    <pre ref="pre" tabindex="0" class="overflow-x-auto rounded-md border bg-muted p-3 font-mono text-xs select-text whitespace-pre">{{ text }}</pre>
   </div>
 </template>

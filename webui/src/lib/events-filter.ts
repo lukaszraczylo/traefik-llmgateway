@@ -9,6 +9,7 @@ export const EVENT_KIND_LABEL: Record<AdminEventKind, string> = {
   timeout: 'Timeout',
   unpriced: 'Unpriced model',
   capacity: 'Capacity',
+  paced: 'Paced',
 }
 
 /**

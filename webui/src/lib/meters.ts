@@ -1,4 +1,4 @@
-import { formatCompactCount } from '@/lib/format'
+import { formatCompactCount, formatCostDisplay, usdToMicros } from '@/lib/format'
 import type { AdminUsageEntryView, LimitSources, LimitsConfig } from '@/types/api'
 
 /** Pacing starts here when a scope sets no pacing block; matches the budget bars' amber tier. */
@@ -75,6 +75,8 @@ export interface LimitRow {
   label: string
   value: string
   source: string
+  /** Prose rather than a number: the value is not set in mono. */
+  prose?: boolean
 }
 
 const LIMIT_FIELDS: Array<{ key: Exclude<keyof LimitsConfig, 'pacing'>; label: string; usd?: boolean }> = [
@@ -100,10 +102,10 @@ export function effectiveLimitRows(limits: LimitsConfig | undefined, sources: Li
   const rows: LimitRow[] = []
   for (const f of LIMIT_FIELDS) {
     const v = limits[f.key]
-    if (has(v)) rows.push({ key: f.key, label: f.label, value: f.usd ? `$${v}` : formatCompactCount(v), source: sourceLabel(sources?.[f.key]) })
+    if (has(v)) rows.push({ key: f.key, label: f.label, value: f.usd ? formatCostDisplay(usdToMicros(v)) : formatCompactCount(v), source: sourceLabel(sources?.[f.key]) })
   }
   if (limits.pacing) {
-    rows.push({ key: 'pacing', label: 'Pacing', value: `from ${limits.pacing.startPct}%, up to ${limits.pacing.maxDelay} delay`, source: sourceLabel(sources?.pacing) })
+    rows.push({ key: 'pacing', label: 'Pacing', value: `from ${limits.pacing.startPct}%, up to ${limits.pacing.maxDelay} delay`, source: sourceLabel(sources?.pacing), prose: true })
   }
   return rows
 }

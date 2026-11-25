@@ -24,7 +24,6 @@ const members = computed(() =>
     .filter((u) => (u.groups ?? [u.groupName]).includes(props.id))
     .sort((a, b) => b.requestsPerDay - a.requestsPerDay || a.id.localeCompare(b.id)),
 )
-const memberCount = computed(() => dashboard.overview?.groups.find((g) => g.name === props.id)?.memberCount ?? members.value.length)
 const shownMembers = computed(() => members.value.slice(0, MEMBER_ROWS))
 
 const meters = computed(() => (entry.value ? meterModel(entry.value, entry.value.limits) : []))
@@ -50,26 +49,19 @@ const usageRows = computed(() => {
     <div class="flex flex-col divide-y px-1 pb-4" data-testid="group-panel">
       <div v-if="!entry" class="text-muted-foreground py-3 text-sm">This group has no usage data yet.</div>
       <template v-else>
-        <PanelSection title="Usage">
-          <DescriptionList variant="inline" size="sm" density="compact">
-            <DescriptionItem term="Members"><span class="font-mono tabular-nums">{{ formatCompactCount(memberCount) }}</span></DescriptionItem>
-            <DescriptionItem v-for="r in usageRows" :key="r.term" :term="r.term"><span class="font-mono tabular-nums">{{ r.value }}</span></DescriptionItem>
-          </DescriptionList>
-        </PanelSection>
-
         <PanelSection title="Aggregate limits">
           <div v-if="meters.length" class="flex flex-col gap-3">
             <MeterBar v-for="m in meters" :key="m.label" :meter="m" />
           </div>
           <p v-else class="text-muted-foreground m-0 text-sm">No aggregate limits. Members are limited individually.</p>
           <DescriptionList v-if="aggregateRows.length" variant="inline" size="sm" density="compact">
-            <DescriptionItem v-for="r in aggregateRows" :key="r.key" :term="r.label"><span class="font-mono tabular-nums">{{ r.value }}</span></DescriptionItem>
+            <DescriptionItem v-for="r in aggregateRows" :key="r.key" :term="r.label"><span :class="r.prose ? '' : 'font-mono tabular-nums'">{{ r.value }}</span></DescriptionItem>
           </DescriptionList>
         </PanelSection>
 
         <PanelSection title="Per-member limits">
           <DescriptionList v-if="memberRows.length" variant="inline" size="sm" density="compact">
-            <DescriptionItem v-for="r in memberRows" :key="r.key" :term="r.label"><span class="font-mono tabular-nums">{{ r.value }}</span></DescriptionItem>
+            <DescriptionItem v-for="r in memberRows" :key="r.key" :term="r.label"><span :class="r.prose ? '' : 'font-mono tabular-nums'">{{ r.value }}</span></DescriptionItem>
           </DescriptionList>
           <p v-else class="text-muted-foreground m-0 text-sm">No per-member limits.</p>
         </PanelSection>
@@ -84,7 +76,18 @@ const usageRows = computed(() => {
             </li>
           </ul>
           <p v-else class="text-muted-foreground m-0 text-sm">No members.</p>
-          <p v-if="members.length > MEMBER_ROWS" class="text-muted-foreground m-0 px-2 text-xs">Top {{ MEMBER_ROWS }} by requests. {{ (members.length - MEMBER_ROWS).toLocaleString('en-US') }} more on the Users tab.</p>
+          <p v-if="members.length > MEMBER_ROWS" class="text-muted-foreground m-0 px-2 text-xs">
+            Top {{ MEMBER_ROWS }} by requests.
+            <button type="button" class="text-primary underline-offset-2 hover:underline" @click="nav.goTo('users', { q: id }, { replace: false })">
+              Show all {{ members.length.toLocaleString('en-US') }} on the Users tab
+            </button>
+          </p>
+        </PanelSection>
+
+        <PanelSection title="Usage">
+          <DescriptionList variant="inline" size="sm" density="compact">
+            <DescriptionItem v-for="r in usageRows" :key="r.term" :term="r.term"><span class="font-mono tabular-nums">{{ r.value }}</span></DescriptionItem>
+          </DescriptionList>
         </PanelSection>
       </template>
     </div>

@@ -66,24 +66,24 @@ const raw = reactive<Record<LimitKey, string>>({
 
 /** invalidFields lists every field whose entered text is non-empty but fails its own domain check (fieldValid above) — surfaced individually rather than one generic "invalid input" message, so the operator can see exactly which field to fix. Split by INTEGER_FIELDS so the error text is accurate for both: a fraction is invalid for requestsPerMinute etc. but perfectly valid for costPerDayUSD/costPerMonthUSD. */
 const invalidFields = computed(() =>
-  FIELDS.filter(({ key }) => raw[key].trim() !== '' && !fieldValid(key, Number(raw[key]))).map((f) => f.label),
+  FIELDS.filter(({ key }) => String(raw[key]).trim() !== '' && !fieldValid(key, Number(raw[key]))).map((f) => f.label),
 )
 /** fieldInvalid is the per-input twin of invalidFields, so each input can carry aria-invalid. */
 function fieldInvalid(key: (typeof FIELDS)[number]['key']): boolean {
-  return raw[key].trim() !== '' && !fieldValid(key, Number(raw[key]))
+  return String(raw[key]).trim() !== '' && !fieldValid(key, Number(raw[key]))
 }
 const invalidIntegerFields = computed(() =>
-  FIELDS.filter(({ key }) => INTEGER_FIELDS.has(key) && raw[key].trim() !== '' && !fieldValid(key, Number(raw[key]))).map((f) => f.label),
+  FIELDS.filter(({ key }) => INTEGER_FIELDS.has(key) && String(raw[key]).trim() !== '' && !fieldValid(key, Number(raw[key]))).map((f) => f.label),
 )
 const invalidDecimalFields = computed(() =>
-  FIELDS.filter(({ key }) => !INTEGER_FIELDS.has(key) && raw[key].trim() !== '' && !fieldValid(key, Number(raw[key]))).map((f) => f.label),
+  FIELDS.filter(({ key }) => !INTEGER_FIELDS.has(key) && String(raw[key]).trim() !== '' && !fieldValid(key, Number(raw[key]))).map((f) => f.label),
 )
 
 const limits = computed<LimitsConfig>(() => {
   const out: LimitsConfig = {}
   for (const { key } of FIELDS) {
     const value = Number(raw[key])
-    if (raw[key].trim() !== '' && fieldValid(key, value) && value > 0) out[key] = value
+    if (String(raw[key]).trim() !== '' && fieldValid(key, value) && value > 0) out[key] = value
   }
   return out
 })
