@@ -232,6 +232,9 @@ func (lc *LimitsConfig) validate() error {
 	if err := lc.Pacing.validate(); err != nil {
 		return err
 	}
+	if lc.Pacing != nil && lc.RequestsPerMinute <= 0 {
+		return fmt.Errorf("llmgateway: limits: pacing requires requestsPerMinute above 0 in the same block")
+	}
 
 	costs := []struct {
 		name string
@@ -779,8 +782,10 @@ type limiter struct {
 	// lastSeenEntries safely regardless of whether admin stats end up
 	// enabled.
 	lastSeen *lastSeenGate
-	fallback *memoryStore     // in-process counter store, always available
-	nowFn    func() time.Time // injected for tests; defaults to time.Now
+	// pacedSlots bounds each user's concurrent paced requests.
+	pacedSlots *pacedSlotGate
+	fallback   *memoryStore     // in-process counter store, always available
+	nowFn      func() time.Time // injected for tests; defaults to time.Now
 	// logf is a bound method value (g.errorf), injectable for tests; defaults
 	// to a no-op. Its own call site (logStoreError) passes exactly one
 	// variadic argument — never extend that to two or more without first
@@ -1080,6 +1085,7 @@ func newLimiter(store counterStore, failOpen bool) *limiter {
 		failOpen:    failOpen,
 		spawnTokens: make(chan struct{}, providerAttemptSpawnCap),
 		lastSeen:    &lastSeenGate{},
+		pacedSlots:  &pacedSlotGate{},
 	}
 	l.spawn = func(f func()) {
 		select {

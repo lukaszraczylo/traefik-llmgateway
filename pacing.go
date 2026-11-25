@@ -6,12 +6,17 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
 const (
-	// maxPacingDelay keeps a paced request below common CDN 100s timeouts.
-	maxPacingDelay = 60 * time.Second
+	// maxPacingDelay keeps a paced request inside a CDN's time-to-first-byte
+	// budget.
+	maxPacingDelay = 20 * time.Second
+	// maxConcurrentPaced caps the requests one user can have waiting in a
+	// pacing delay at once.
+	maxConcurrentPaced = 4
 	// pacedHeader reports the pacing delay applied to a request.
 	pacedHeader = "X-Llmgw-Paced-Ms"
 	// eventKindPaced tags the rate-gated pacing event.
@@ -74,6 +79,37 @@ func (p *PacingConfig) delay(frac float64) time.Duration {
 		return maxD
 	}
 	return d
+}
+
+// pacedSlotGate counts each user's requests currently waiting in a pacing
+// delay.
+type pacedSlotGate struct {
+	waiting map[string]int
+	mu      sync.Mutex
+}
+
+// acquire reserves a pacing slot for user. It reports false at the cap.
+func (p *pacedSlotGate) acquire(user string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.waiting == nil {
+		p.waiting = map[string]int{}
+	}
+	if p.waiting[user] >= maxConcurrentPaced {
+		return false
+	}
+	p.waiting[user]++
+	return true
+}
+
+func (p *pacedSlotGate) release(user string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.waiting[user] <= 1 {
+		delete(p.waiting, user)
+		return
+	}
+	p.waiting[user]--
 }
 
 // rateInfo is one admitted-or-refused request's view of the user scope's
@@ -268,9 +304,13 @@ func pace(ctx context.Context, d time.Duration) bool {
 
 // admitCounted runs checkAndCount for scopes, writes the rate-limit headers
 // on w for the user's effective limits, and on admission waits out the
-// pacing delay. The wait happens before any body is read, so it holds no
-// body-admission or concurrency slot. gone is true when the client
-// cancelled during the wait; the caller must then write nothing.
+// pacing delay. Unified and passthrough routes wait before reading the body;
+// /v1/messages waits after, because it must decode the body first to reject
+// streaming without charging the limit. Validation therefore requires
+// requestsPerMinute for pacing, which bounds how many requests can wait, and
+// each user has at most maxConcurrentPaced waiting: further requests proceed
+// without delay. gone is true when the client cancelled during the wait; the
+// caller must then write nothing.
 func (g *Gateway) admitCounted(ctx context.Context, w http.ResponseWriter, scopes []limitScope) (*limitViolation, bool) {
 	violation, info := g.limiter.checkAndCountInfo(scopes)
 	now := g.limiter.now()
@@ -287,6 +327,11 @@ func (g *Gateway) admitCounted(ctx context.Context, w http.ResponseWriter, scope
 	if d <= 0 {
 		return nil, false
 	}
+	user := userScopeName(scopes)
+	if !g.limiter.pacedSlots.acquire(user) {
+		return nil, false
+	}
+	defer g.limiter.pacedSlots.release(user)
 	w.Header().Set(pacedHeader, strconv.FormatInt(d.Milliseconds(), 10))
 	g.recordPacedEvent(scopes, d)
 	if !pace(ctx, d) {
@@ -304,4 +349,13 @@ func (g *Gateway) recordPacedEvent(scopes []limitScope, d time.Duration) {
 		return
 	}
 	g.recordEvent(ev)
+}
+
+func userScopeName(scopes []limitScope) string {
+	for _, sc := range scopes {
+		if sc.kind == "user" {
+			return sc.id
+		}
+	}
+	return ""
 }

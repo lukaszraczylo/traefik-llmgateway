@@ -187,16 +187,16 @@ type Config struct {
 	// from overload answers (429/503/504/timeout) and advertises
 	// min(MaxConcurrency, learned). Defaults to false.
 	ConcurrencyAutodetect bool `json:"concurrencyAutodetect,omitempty"`
+	// RateLimitHeaders, when true, writes the minute-window rate-limit
+	// headers (x-ratelimit-*, anthropic-ratelimit-*, RateLimit,
+	// RateLimit-Policy) for users with a per-minute limit. Defaults to false.
+	RateLimitHeaders bool `json:"rateLimitHeaders,omitempty"`
 	// MaxConcurrency, when > 0, is advertised on every response as a
 	// RateLimit-Policy concurrent-requests quota
 	// (draft-ietf-httpapi-ratelimit-headers). The gateway does not queue or
 	// reject on it. It wins over any learned value. 0 (the default) sends
 	// nothing. Negative values are rejected at construction.
 	MaxConcurrency int `json:"maxConcurrency,omitempty"`
-	// RateLimitHeaders, when true, writes the minute-window rate-limit
-	// headers (x-ratelimit-*, anthropic-ratelimit-*, RateLimit,
-	// RateLimit-Policy) for users with a per-minute limit. Defaults to false.
-	RateLimitHeaders bool `json:"rateLimitHeaders,omitempty"`
 }
 
 // ProviderConfig describes one upstream LLM provider.

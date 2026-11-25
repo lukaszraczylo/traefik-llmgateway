@@ -60,6 +60,32 @@ func setLimitCostField(lc *LimitsConfig, name string, v float64) {
 	lc.CostPerMonthUSD = v
 }
 
+// strictestPacing combines the members' pacing blocks: the earliest startPct
+// and the longest maxDelay. It returns the group that set the earliest
+// startPct as the source, or nil when no member sets pacing.
+func strictestPacing(members []*group) (*PacingConfig, string) {
+	var start *PacingConfig
+	var longest *PacingConfig
+	src := ""
+	for _, m := range members {
+		if m.memberLimits == nil || m.memberLimits.Pacing == nil {
+			continue
+		}
+		p := m.memberLimits.Pacing
+		if start == nil || p.StartPct < start.StartPct {
+			start = p
+			src = limitSourceMemberGroup + m.name
+		}
+		if longest == nil || p.maxDelayDuration() > longest.maxDelayDuration() {
+			longest = p
+		}
+	}
+	if start == nil {
+		return nil, ""
+	}
+	return &PacingConfig{StartPct: start.StartPct, MaxDelay: longest.MaxDelay, maxDelay: longest.maxDelay}, src
+}
+
 // effectiveUserLimits merges a user's own limits with the memberLimits of
 // the groups the user belongs to, and reports which source set each
 // non-zero field. A non-zero own value wins; otherwise the strictest
@@ -137,19 +163,8 @@ func effectiveUserLimits(own *LimitsConfig, members []*group) (*LimitsConfig, ma
 		}
 		sources[limitFieldPacing] = limitSourceUser
 	case hasMember:
-		var best *PacingConfig
-		src := ""
-		for _, m := range members {
-			if m.memberLimits == nil || m.memberLimits.Pacing == nil {
-				continue
-			}
-			if best == nil || m.memberLimits.Pacing.StartPct < best.StartPct {
-				best = m.memberLimits.Pacing
-				src = limitSourceMemberGroup + m.name
-			}
-		}
-		if best != nil {
-			eff.Pacing = best
+		if merged, src := strictestPacing(members); merged != nil {
+			eff.Pacing = merged
 			sources[limitFieldPacing] = src
 		}
 	}

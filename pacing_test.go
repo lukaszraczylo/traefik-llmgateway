@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -41,8 +42,9 @@ func TestPacingValidate(t *testing.T) {
 	}{
 		{nil, "nil", false},
 		{&PacingConfig{StartPct: 80, MaxDelay: "10s"}, "ok", false},
-		{&PacingConfig{StartPct: 1, MaxDelay: "60s"}, "max 60s", false},
-		{&PacingConfig{StartPct: 80, MaxDelay: "61s"}, "over 60s", true},
+		{&PacingConfig{StartPct: 1, MaxDelay: "20s"}, "max 20s", false},
+		{&PacingConfig{StartPct: 80, MaxDelay: "21s"}, "over 20s", true},
+		{&PacingConfig{StartPct: 80, MaxDelay: "60s"}, "old 60s cap", true},
 		{&PacingConfig{StartPct: 80, MaxDelay: "0s"}, "zero delay", true},
 		{&PacingConfig{StartPct: 80, MaxDelay: "-1s"}, "negative delay", true},
 		{&PacingConfig{StartPct: 80, MaxDelay: "soon"}, "bad duration", true},
@@ -53,10 +55,38 @@ func TestPacingValidate(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			err := (&LimitsConfig{Pacing: c.p}).validate()
+			err := (&LimitsConfig{RequestsPerMinute: 10, Pacing: c.p}).validate()
 			assert.Equal(t, c.wantErr, err != nil, "err=%v", err)
 		})
 	}
+}
+
+func TestPacingValidate_RequiresRequestsPerMinute(t *testing.T) {
+	p := &PacingConfig{StartPct: 80, MaxDelay: "1s"}
+	err := (&LimitsConfig{Pacing: p}).validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "pacing requires requestsPerMinute")
+	err = (&LimitsConfig{TokensPerMinute: 1000, Pacing: p}).validate()
+	require.Error(t, err, "tokensPerMinute alone does not bound concurrent paced requests")
+	assert.Contains(t, err.Error(), "pacing requires requestsPerMinute")
+	assert.NoError(t, (&LimitsConfig{RequestsPerMinute: 5, Pacing: p}).validate())
+}
+
+func TestPacing_RejectedOnGroupAggregateLimits(t *testing.T) {
+	cfg := &Config{
+		Providers: map[string]*ProviderConfig{"openai": {Type: "openai", APIKey: "k"}},
+		Groups: map[string]*GroupConfig{"g": {Limits: &LimitsConfig{
+			RequestsPerMinute: 5, Pacing: &PacingConfig{StartPct: 50, MaxDelay: "1s"}}}},
+		Users: &UsersConfig{Inline: []*UserConfig{{Name: "a", Group: "g", APIKey: "sk-a"}}},
+	}
+	_, err := newAuthStore(cfg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "pacing")
+	assert.Contains(t, err.Error(), "memberLimits")
+
+	cfg.Groups["g"] = &GroupConfig{MemberLimits: &LimitsConfig{RequestsPerMinute: 5, Pacing: &PacingConfig{StartPct: 50, MaxDelay: "1s"}}}
+	_, err = newAuthStore(cfg)
+	assert.NoError(t, err, "memberLimits pacing stays valid")
 }
 
 func TestPace_CancellationDuringWait(t *testing.T) {
@@ -76,17 +106,19 @@ func TestMemberLimits_PacingMergesAndSources(t *testing.T) {
 	a, err := newAuthStore(&Config{
 		Providers: map[string]*ProviderConfig{"openai": {Type: "openai", APIKey: "k"}},
 		Groups: map[string]*GroupConfig{
-			"g1": {MemberLimits: &LimitsConfig{Pacing: &PacingConfig{StartPct: 90, MaxDelay: "5s"}}},
-			"g2": {MemberLimits: &LimitsConfig{Pacing: &PacingConfig{StartPct: 70, MaxDelay: "2s"}}},
+			"g1": {MemberLimits: &LimitsConfig{RequestsPerMinute: 5, Pacing: &PacingConfig{StartPct: 90, MaxDelay: "5s"}}},
+			"g2": {MemberLimits: &LimitsConfig{RequestsPerMinute: 5, Pacing: &PacingConfig{StartPct: 70, MaxDelay: "2s"}}},
 		},
 		Users: &UsersConfig{Inline: []*UserConfig{
 			{Name: "a", Group: "g1", Groups: []string{"g2"}, APIKey: "sk-a"},
-			{Name: "b", Group: "g1", APIKey: "sk-b", Limits: &LimitsConfig{Pacing: &PacingConfig{StartPct: 50, MaxDelay: "1s"}}},
+			{Name: "b", Group: "g1", APIKey: "sk-b", Limits: &LimitsConfig{RequestsPerMinute: 5, Pacing: &PacingConfig{StartPct: 50, MaxDelay: "1s"}}},
 		}},
 	})
 	require.NoError(t, err)
 	ua, _, _ := identifyWithKey(a, "sk-a")
 	assert.EqualValues(t, 70, ua.limits.Pacing.StartPct, "earliest startPct is strictest")
+	assert.Equal(t, "5s", ua.limits.Pacing.MaxDelay, "longest maxDelay is strictest")
+	assert.Equal(t, 5*time.Second, ua.limits.Pacing.maxDelayDuration())
 	assert.Equal(t, "memberLimits:g2", ua.limitSources["pacing"])
 	ub, _, _ := identifyWithKey(a, "sk-b")
 	assert.EqualValues(t, 50, ub.limits.Pacing.StartPct, "user pacing wins")
@@ -255,7 +287,7 @@ func TestPacing_DelaysAboveStartPct(t *testing.T) {
 func TestPacing_ClientCancelDuringWaitWritesNothing(t *testing.T) {
 	h, _ := pacingGateway(t, nil, &LimitsConfig{
 		RequestsPerMinute: 2,
-		Pacing:            &PacingConfig{StartPct: 1, MaxDelay: "30s"},
+		Pacing:            &PacingConfig{StartPct: 1, MaxDelay: "20s"},
 	})
 	body := map[string]any{"model": "gpt-test", "messages": []any{map[string]any{"role": "user", "content": "hi"}}}
 	req := newUnifiedRequest(t, http.MethodPost, "/v1/chat/completions", "sk-a", body)
@@ -358,4 +390,27 @@ func TestRateLimitHeaders_429FromDayLimitReportsZeroUntilReset(t *testing.T) {
 	retry := rec.Header().Get("Retry-After")
 	require.NotEmpty(t, retry)
 	assert.Equal(t, retry+"s", rec.Header().Get("x-ratelimit-reset-requests"), "reset matches Retry-After, not the minute window")
+}
+
+func TestPacing_ConcurrentPacedRequestsCappedPerUser(t *testing.T) {
+	h, _ := pacingGateway(t, nil, &LimitsConfig{
+		RequestsPerMinute: 100,
+		Pacing:            &PacingConfig{StartPct: 1, MaxDelay: "400ms"},
+	})
+	const n = 12
+	var paced atomic.Int64
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			rec := memberLimitsChat(t, h, "sk-a")
+			if rec.Header().Get(pacedHeader) != "" {
+				paced.Add(1)
+			}
+		}()
+	}
+	wg.Wait()
+	assert.LessOrEqual(t, paced.Load(), int64(maxConcurrentPaced), "requests above the cap proceed undelayed")
+	assert.Greater(t, paced.Load(), int64(0))
 }

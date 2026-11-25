@@ -746,6 +746,9 @@ func newAuthStore(cfg *Config) (*authStore, error) {
 		if err := gc.Limits.validate(); err != nil {
 			return nil, fmt.Errorf("llmgateway: group %q: %w", name, err)
 		}
+		if gc.Limits != nil && gc.Limits.Pacing != nil {
+			return nil, fmt.Errorf("llmgateway: group %q: pacing is not supported on a group's aggregate limits; set it in memberLimits or on a user", name)
+		}
 		if err := gc.MemberLimits.validate(); err != nil {
 			return nil, fmt.Errorf("llmgateway: group %q memberLimits: %w", name, err)
 		}
