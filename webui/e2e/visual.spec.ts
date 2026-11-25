@@ -183,6 +183,24 @@ test('config change helper opens from the header and Back closes it', async ({ p
   await expect(page.locator('[data-panel-kind="helper"]')).toHaveCount(0)
 })
 
+// A toast raised while the helper Sheet is open must be the topmost element at its centre, not hidden behind the overlay.
+test('toast stacks above an open sheet', async ({ page }) => {
+  await page.setViewportSize(VIEWPORTS.desktop)
+  await visit(page, '#config', 'live', 'light')
+  await page.getByRole('button', { name: 'Change helper' }).click()
+  await page.getByRole('button', { name: 'New user' }).click()
+  await page.getByRole('button', { name: 'Generate' }).click()
+  const toast = page.getByText('Generated a new API key.')
+  await expect(toast).toBeVisible()
+  const topmost = await toast.evaluate((el) => {
+    const r = el.getBoundingClientRect()
+    const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2)
+    return hit === el || el.contains(hit)
+  })
+  expect(topmost).toBe(true)
+  await expect(page.locator('[data-panel-kind="helper"]')).toBeVisible()
+})
+
 test('config page starts compact on desktop', async ({ page }) => {
   await page.setViewportSize(VIEWPORTS.desktop)
   await visit(page, '#config', 'live', 'light')

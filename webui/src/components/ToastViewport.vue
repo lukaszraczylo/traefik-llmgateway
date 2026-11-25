@@ -47,7 +47,7 @@ function onDismiss(toast: Toast): void {
 
 <template>
   <div
-    class="pointer-events-none fixed inset-x-0 bottom-0 z-50 flex flex-col-reverse gap-2 p-4 pb-[calc(env(safe-area-inset-bottom)+1rem)] sm:inset-x-auto sm:right-4 sm:bottom-4 sm:w-96"
+    class="pointer-events-none fixed inset-x-0 bottom-0 z-(--z-toast) flex flex-col-reverse gap-2 p-4 pb-[calc(env(safe-area-inset-bottom)+1rem)] sm:inset-x-auto sm:right-4 sm:bottom-4 sm:w-96"
   >
     <div aria-live="assertive" class="flex flex-col-reverse gap-2">
       <TransitionGroup
