@@ -610,6 +610,8 @@ const (
 // limitViolation describes the first limit a request breached.
 type limitViolation struct {
 	message string
+	// limit names the breached limit ("requests-per-minute", ...).
+	limit string
 	// kind is one of the eventKindRateLimit/eventKindBudget/
 	// eventKindStoreDown vocabulary (events.go, F3 v0.3 dashboard task) —
 	// set once, at construction (storeDownViolation, requestLimitViolation,
@@ -1603,27 +1605,45 @@ func (l *limiter) checkAndCountInfo(scopes []limitScope) (*limitViolation, *rate
 		return storeDownViolation(), nil
 	}
 
-	var info *rateInfo
+	userIdx := -1
+	for i, sc := range scopes {
+		if sc.limits != nil && sc.kind == "user" {
+			userIdx = i
+			break
+		}
+	}
+	infoFor := func(v *limitViolation, violatedIdx int) *rateInfo {
+		if userIdx < 0 {
+			return nil
+		}
+		minCount := incrVals[userIdx*checkAndCountKeysPerScope]
+		if v != nil && violatedIdx != userIdx {
+			// settleRejection rolled this request's count back off the user scope.
+			minCount--
+		}
+		info := buildRateInfo(scopes[userIdx], minCount, minuteTokensUsed(probes, readVals, userIdx), now)
+		if v != nil {
+			info.refuse(v, now)
+		}
+		return info
+	}
 	for i, sc := range scopes {
 		if sc.limits == nil {
 			continue
 		}
 		minCount := incrVals[i*checkAndCountKeysPerScope]
-		if sc.kind == "user" && info == nil {
-			info = buildRateInfo(sc, minCount, minuteTokensUsed(probes, readVals, i), now)
-		}
 		dayCount := incrVals[i*checkAndCountKeysPerScope+1]
 		// incrVals[i*checkAndCountKeysPerScope+2] is the req:hour count —
 		// stats-only, deliberately never read here.
 		if v := requestLimitViolation(sc, "requests-per-minute", sc.limits.RequestsPerMinute, minCount, windowMin, now); v != nil {
 			l.rejections.increment(sc.kind, sc.id)
 			l.settleRejection(entries, i, scopes, wb, et)
-			return v, info
+			return v, infoFor(v, i)
 		}
 		if v := requestLimitViolation(sc, "requests-per-day", sc.limits.RequestsPerDay, dayCount, windowDay, now); v != nil {
 			l.rejections.increment(sc.kind, sc.id)
 			l.settleRejection(entries, i, scopes, wb, et)
-			return v, info
+			return v, infoFor(v, i)
 		}
 		for _, p := range probes {
 			if p.scopeIdx != i {
@@ -1638,14 +1658,16 @@ func (l *limiter) checkAndCountInfo(scopes []limitScope) (*limitViolation, *rate
 			}
 			l.rejections.increment(sc.kind, sc.id)
 			l.settleRejection(entries, i, scopes, wb, et)
-			return &limitViolation{
+			v := &limitViolation{
+				limit:      p.name,
 				message:    fmt.Sprintf("%s %q exceeded %s budget", sc.kind, sc.id, p.name),
 				retryAfter: retryAfterSeconds(now, p.window),
 				kind:       eventKindBudget,
-			}, info
+			}
+			return v, infoFor(v, i)
 		}
 	}
-	return nil, info
+	return nil, infoFor(nil, -1)
 }
 
 // minuteTokensUsed returns the tokens-per-minute probe's already-read usage
@@ -1766,6 +1788,7 @@ func requestLimitViolation(sc limitScope, name string, limit, count int64, windo
 		return nil
 	}
 	return &limitViolation{
+		limit:      name,
 		message:    fmt.Sprintf("%s %q exceeded %s limit (%d)", sc.kind, sc.id, name, limit),
 		retryAfter: retryAfterSeconds(now, window),
 		kind:       eventKindRateLimit,

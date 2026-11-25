@@ -109,9 +109,10 @@ func TestRateLimitHeaders_AllDialects(t *testing.T) {
 	assert.Equal(t, "5", h.Get("anthropic-ratelimit-requests-limit"))
 	assert.Equal(t, "3", h.Get("anthropic-ratelimit-requests-remaining"))
 	assert.Equal(t, "2026-08-20T10:01:00Z", h.Get("anthropic-ratelimit-requests-reset"))
-	assert.Equal(t, "1000", h.Get("anthropic-ratelimit-input-tokens-limit"))
-	assert.Equal(t, "400", h.Get("anthropic-ratelimit-input-tokens-remaining"))
-	assert.Equal(t, "2026-08-20T10:01:00Z", h.Get("anthropic-ratelimit-input-tokens-reset"))
+	assert.Equal(t, "1000", h.Get("anthropic-ratelimit-tokens-limit"))
+	assert.Equal(t, "400", h.Get("anthropic-ratelimit-tokens-remaining"))
+	assert.Equal(t, "2026-08-20T10:01:00Z", h.Get("anthropic-ratelimit-tokens-reset"))
+	assert.Empty(t, h.Get("anthropic-ratelimit-input-tokens-limit"), "tokens-* is the combined count; input-tokens-* would mislabel it")
 
 	assert.Equal(t, `"requests";r=3;t=30, "tokens";r=400;t=30`, h.Get("RateLimit"))
 	assert.Equal(t, `"requests";q=5;w=60, "tokens";q=1000;w=60`, h.Get("RateLimit-Policy"))
@@ -192,11 +193,13 @@ func TestCheckAndCountInfo_TokenRemainingAndFraction(t *testing.T) {
 	assert.InDelta(t, 0.8, info.frac, 1e-9, "tokens fraction beats requests fraction 0.1")
 }
 
+func withRateLimitHeaders(c *Config) { c.RateLimitHeaders = true }
+
 func pacingGateway(t *testing.T, limits *LimitsConfig, memberLimits *LimitsConfig) (http.Handler, *Gateway) {
 	t.Helper()
 	groups := map[string]*GroupConfig{"friends": {MemberLimits: memberLimits}}
 	users := []*UserConfig{{Name: "a", Group: "friends", APIKey: "sk-a", Limits: limits}}
-	return memberLimitsGateway(t, groups, users)
+	return memberLimitsGateway(t, groups, users, withRateLimitHeaders)
 }
 
 func TestPacing_EndToEndHeadersAnd429(t *testing.T) {
@@ -274,6 +277,7 @@ func TestPacing_StreamingStillWorks(t *testing.T) {
 	}))
 	defer srv.Close()
 	cfg := CreateConfig()
+	cfg.RateLimitHeaders = true
 	cfg.Providers = map[string]*ProviderConfig{"openai": {Type: "openai", BaseURL: srv.URL, APIKey: "k", Models: []string{"gpt-test"}}}
 	cfg.Groups = map[string]*GroupConfig{"friends": {MemberLimits: &LimitsConfig{
 		RequestsPerMinute: 4,
@@ -307,4 +311,51 @@ func TestPacing_EventRateGated(t *testing.T) {
 		}
 	}
 	assert.Equal(t, 1, n, "one paced event per user per throttle window")
+}
+
+func TestRateLimitHeaders_OffByDefault(t *testing.T) {
+	groups := map[string]*GroupConfig{"friends": {}}
+	users := []*UserConfig{{Name: "a", Group: "friends", APIKey: "sk-a", Limits: &LimitsConfig{RequestsPerMinute: 5, TokensPerMinute: 1000}}}
+	h, _ := memberLimitsGateway(t, groups, users)
+	rec := memberLimitsChat(t, h, "sk-a")
+	require.Equal(t, http.StatusOK, rec.Code)
+	for k := range rec.Header() {
+		assert.False(t, isRateLimitHeader(k), "default config must not add header %s", k)
+	}
+}
+
+func rateLimitedUser429(t *testing.T, groupLimits, userLimits *LimitsConfig, calls int) *httptest.ResponseRecorder {
+	t.Helper()
+	groups := map[string]*GroupConfig{"friends": {Limits: groupLimits}}
+	users := []*UserConfig{{Name: "a", Group: "friends", APIKey: "sk-a", Limits: userLimits}}
+	h, _ := memberLimitsGateway(t, groups, users, withRateLimitHeaders)
+	var rec *httptest.ResponseRecorder
+	for i := 0; i < calls; i++ {
+		rec = memberLimitsChat(t, h, "sk-a")
+	}
+	return rec
+}
+
+func TestRateLimitHeaders_429FromGroupRequestLimitReportsZero(t *testing.T) {
+	rec := rateLimitedUser429(t, &LimitsConfig{RequestsPerMinute: 2}, &LimitsConfig{RequestsPerMinute: 10}, 3)
+	require.Equal(t, http.StatusTooManyRequests, rec.Code)
+	assert.Equal(t, "0", rec.Header().Get("x-ratelimit-remaining-requests"))
+	assert.Equal(t, "0", rec.Header().Get("anthropic-ratelimit-requests-remaining"))
+	assert.Equal(t, `"requests";r=0;t=30`, rec.Header().Get("RateLimit"))
+}
+
+func TestRateLimitHeaders_429FromGroupTokenLimitRollsBackRequestCount(t *testing.T) {
+	rec := rateLimitedUser429(t, &LimitsConfig{TokensPerMinute: 100}, &LimitsConfig{RequestsPerMinute: 10, TokensPerMinute: 1_000_000}, 3)
+	require.Equal(t, http.StatusTooManyRequests, rec.Code)
+	assert.Equal(t, "0", rec.Header().Get("x-ratelimit-remaining-tokens"), "the refused window reports zero")
+	assert.Equal(t, "8", rec.Header().Get("x-ratelimit-remaining-requests"), "two admitted requests; the refused one was rolled back")
+}
+
+func TestRateLimitHeaders_429FromDayLimitReportsZeroUntilReset(t *testing.T) {
+	rec := rateLimitedUser429(t, nil, &LimitsConfig{RequestsPerMinute: 10, RequestsPerDay: 1}, 2)
+	require.Equal(t, http.StatusTooManyRequests, rec.Code)
+	assert.Equal(t, "0", rec.Header().Get("x-ratelimit-remaining-requests"))
+	retry := rec.Header().Get("Retry-After")
+	require.NotEmpty(t, retry)
+	assert.Equal(t, retry+"s", rec.Header().Get("x-ratelimit-reset-requests"), "reset matches Retry-After, not the minute window")
 }

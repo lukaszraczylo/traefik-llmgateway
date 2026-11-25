@@ -118,6 +118,29 @@ func buildRateInfo(sc limitScope, minCount, tokUsed int64, now time.Time) *rateI
 	return info
 }
 
+// refuse makes the view agree with a 429: the refused window reports zero
+// remaining. A refusal on a window the headers do not describe (a day limit,
+// another scope's limit) zeroes every reported window and moves the reset to
+// the refused window's end, matching Retry-After.
+func (info *rateInfo) refuse(v *limitViolation, now time.Time) {
+	if info == nil || v == nil {
+		return
+	}
+	switch {
+	case v.limit == "requests-per-minute" && info.reqLimit > 0:
+		info.reqRemaining = 0
+		return
+	case v.limit == "tokens-per-minute" && info.tokLimit > 0:
+		info.tokRemaining = 0
+		return
+	}
+	info.reqRemaining = 0
+	info.tokRemaining = 0
+	if v.retryAfter > 0 {
+		info.reset = now.Add(time.Duration(v.retryAfter) * time.Second)
+	}
+}
+
 func resetSeconds(reset, now time.Time) int64 {
 	s := int64(reset.Sub(now).Seconds() + 0.999)
 	if s < 0 {
@@ -174,9 +197,9 @@ func writeRateLimitHeaders(h http.Header, info *rateInfo, now time.Time) {
 		h.Set("x-ratelimit-limit-tokens", strconv.FormatInt(info.tokLimit, 10))
 		h.Set("x-ratelimit-remaining-tokens", strconv.FormatInt(info.tokRemaining, 10))
 		h.Set("x-ratelimit-reset-tokens", resetDur)
-		h.Set("anthropic-ratelimit-input-tokens-limit", strconv.FormatInt(info.tokLimit, 10))
-		h.Set("anthropic-ratelimit-input-tokens-remaining", strconv.FormatInt(info.tokRemaining, 10))
-		h.Set("anthropic-ratelimit-input-tokens-reset", resetAt)
+		h.Set("anthropic-ratelimit-tokens-limit", strconv.FormatInt(info.tokLimit, 10))
+		h.Set("anthropic-ratelimit-tokens-remaining", strconv.FormatInt(info.tokRemaining, 10))
+		h.Set("anthropic-ratelimit-tokens-reset", resetAt)
 		quota = append(quota, `"tokens";r=`+strconv.FormatInt(info.tokRemaining, 10)+";t="+strconv.FormatInt(secs, 10))
 		policy = append(policy, `"tokens";q=`+strconv.FormatInt(info.tokLimit, 10)+";w=60")
 	}
@@ -251,7 +274,9 @@ func pace(ctx context.Context, d time.Duration) bool {
 func (g *Gateway) admitCounted(ctx context.Context, w http.ResponseWriter, scopes []limitScope) (*limitViolation, bool) {
 	violation, info := g.limiter.checkAndCountInfo(scopes)
 	now := g.limiter.now()
-	writeRateLimitHeaders(w.Header(), info, now)
+	if g.cfg.RateLimitHeaders {
+		writeRateLimitHeaders(w.Header(), info, now)
+	}
 	if violation != nil || info == nil {
 		return violation, false
 	}

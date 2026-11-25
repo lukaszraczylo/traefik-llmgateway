@@ -15,7 +15,7 @@ const memberLimitsUpstreamBody = `{"id":"c1","choices":[{"message":{"role":"assi
 
 // memberLimitsGateway builds a gateway whose upstream answers every chat call
 // with 60 total tokens, and pins its limiter clock inside one minute window.
-func memberLimitsGateway(t *testing.T, groups map[string]*GroupConfig, users []*UserConfig) (http.Handler, *Gateway) {
+func memberLimitsGateway(t *testing.T, groups map[string]*GroupConfig, users []*UserConfig, opts ...func(*Config)) (http.Handler, *Gateway) {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -30,6 +30,9 @@ func memberLimitsGateway(t *testing.T, groups map[string]*GroupConfig, users []*
 	}
 	cfg.Groups = groups
 	cfg.Users = &UsersConfig{Inline: users}
+	for _, o := range opts {
+		o(cfg)
+	}
 	h, gw := newAdminGatewayHandle(t, cfg)
 	now := time.Date(2026, 8, 20, 10, 0, 30, 0, time.UTC)
 	gw.limiter.nowFn = func() time.Time { return now }

@@ -24,6 +24,7 @@ func passthroughHeaderGateway(t *testing.T, limits *LimitsConfig) http.Handler {
 	}))
 	t.Cleanup(srv.Close)
 	cfg := CreateConfig()
+	cfg.RateLimitHeaders = true
 	cfg.Providers = map[string]*ProviderConfig{"openai": {Type: providerTypeOpenAI, BaseURL: srv.URL, APIKey: "k"}}
 	cfg.Groups = map[string]*GroupConfig{"default": {}}
 	cfg.Users = &UsersConfig{Inline: []*UserConfig{{Name: "alice", Group: "default", APIKey: "sk-alice", Limits: limits}}}
