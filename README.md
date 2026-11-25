@@ -1105,6 +1105,13 @@ All keys sit under `smartRouters.<name>`. The gateway refuses the config when a 
 | `contextEscalation` | `true` | Skip models whose known context window is too small. |
 | `saturationDowngrade` | `false` | Start one tier lower when the classified tier is full. Needs two tiers. |
 | `downgradeBand` | `100` | Points above a threshold in which a downgrade can happen, 0 to 300. |
+| `decision` | none | Ask a THX-02 decision model about requests near a tier boundary. See [Decision model assist](#decision-model-assist). The router needs `classifier: v2`. |
+| `decision.provider` | required | Name of the `providers` entry that serves the decision path. |
+| `decision.path` | `/v1/decide` | Decision endpoint. It must start with `/`. The provider needs a `pathBaseUrls` prefix that matches it. |
+| `decision.mode` | `shadow` | `off`, `shadow`, or `live`. |
+| `decision.timeout` | `500ms` | Go duration for one call, `50ms` to `2s`. |
+| `decision.minProb` | `700` | Least answer probability that can move a tier, per mille, 1 to 1000. |
+| `decision.band` | `100` | Score distance from a tier boundary that triggers a call, 1 to 1000. |
 
 ### Tiers, scoring and floors
 
@@ -1138,6 +1145,44 @@ A shadow scoring runs beside the live one and never changes routing. Use one of 
 - **`shadowClassifier: v2`**: scores each request with v2 on a v1 router.
 
 For each request the gateway counts the live tier against the shadow tier. It stores no prompt text and no per-request record. The counters use monthly buckets, shared through Redis when configured and kept per instance otherwise. The admin Models page shows the counts as an agreement matrix: rows hold the live tier, columns hold the shadow tier, and the diagonal holds the requests where both agree. Mass below the diagonal means the shadow routes lower. Mass above it means the shadow routes higher.
+
+### Decision model assist
+
+A router can ask a THX-02 decision model to settle requests that the v2 score cannot place with confidence. The feature is off when `decision` is absent. A router without it routes as before.
+
+```yaml
+decision:
+  provider: gx10
+  mode: shadow
+  timeout: 500ms
+  minProb: 700
+  band: 100
+```
+
+- **Requirements**: the router needs `classifier: v2`. The `provider` must exist and must have a `pathBaseUrls` prefix that matches `path` on whole path segments. The gateway refuses the config otherwise. With `mode: off` the gateway skips these checks and sends no calls.
+- **When it asks**: the gateway calls the model only when all of these hold. The score step decided the tier, so a session-pinned request never asks. The request has user text. The score lies within `band` of the `minScore` of any tier above the first.
+- **Request**: the gateway sends the first 1024 bytes of the system text, then the newest user ask capped at 8192 bytes. It also sends the tier names, cheapest first. The model returns one probability for each tier. The tier with the highest probability is the model tier.
+- **One-step limit**: the model can move the tier by one step toward its own tier, never further. It can move the tier only when its probability reaches `minProb`. A lower probability counts as `lowconf` and changes nothing. A moved tier gets the routing reason `model`.
+- **Shadow and live**: `shadow` makes the same call and records the same outcome, but never changes the tier or the reason. Run `shadow` first, compare the grid, then set `live`.
+- **Floors still win**: keyword rules and floors, such as `toolsMinTier`, run after the model. They only raise a tier. The model can lower a tier, but it cannot go below a floor.
+- **Fallback**: on a timeout, an error, an open breaker, or a low probability, the heuristic tier stands. The request never waits longer than `timeout`. A non-2xx status, bad JSON, or an unknown tier index counts as an error.
+- **Breaker**: three failures in a row (timeouts or errors) open the breaker for 30 seconds. The gateway makes no calls while it is open. One success resets the count.
+- **Cache**: each router keeps up to 1024 answers in memory for 10 minutes. The key is a hash of the text sent to the model. The cache holds the tier and the probability, not the text. A hit has the outcome `cache` and applies like a fresh answer.
+- **Outcomes**: a request that is not near a boundary records nothing. Each other request records one outcome.
+
+| Outcome | Meaning |
+|---|---|
+| `agree` | The model tier equals the heuristic tier. |
+| `override` | The model tier differs and its probability reached `minProb`. In `live` mode the tier moves. |
+| `lowconf` | The model tier differs, but its probability is below `minProb`. |
+| `timeout` | The call exceeded `timeout`. |
+| `error` | The call failed, returned a non-2xx status, or returned an answer the gateway cannot read. |
+| `breaker` | The breaker was open, so the gateway made no call. |
+| `cache` | A cached answer served the request. |
+
+- **Metrics**: `llmgateway_router_decision_total{router,outcome}` counts the outcomes. `llmgateway_router_decision_tiers_total{router,heuristic,model}` counts the heuristic tier against the model tier. It counts only answers from the model or the cache.
+- **Admin panel**: the router panel shows the decision settings, a grid with the heuristic tier in the rows and the model tier in the columns, and one row for each outcome. Mass off the diagonal shows where the model disagrees.
+- **No retention**: the gateway does not store or log prompt text for this feature. No log line, event, or counter holds it. The decision call writes no log line.
 
 ### Sessions
 
