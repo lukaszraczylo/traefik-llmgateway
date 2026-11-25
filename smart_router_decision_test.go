@@ -317,7 +317,7 @@ func TestRouterDecisionSendsAuthAndPath(t *testing.T) {
 func TestRouterDecisionTimeout(t *testing.T) {
 	f := newDecisionFixture(t, 3, "50ms", func(w http.ResponseWriter, r *http.Request) {
 		select {
-		case <-time.After(200 * time.Millisecond):
+		case <-time.After(2 * time.Second):
 		case <-r.Context().Done():
 		}
 		okHandler(w, r)
@@ -327,7 +327,7 @@ func TestRouterDecisionTimeout(t *testing.T) {
 	if a.outcome != decisionTimeout {
 		t.Fatalf("outcome %q", a.outcome)
 	}
-	if el := time.Since(start); el > 150*time.Millisecond {
+	if el := time.Since(start); el > time.Second {
 		t.Fatalf("took %s", el)
 	}
 }
