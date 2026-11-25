@@ -1,6 +1,7 @@
 package traefikllmgateway
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -115,9 +116,9 @@ func TestCalibShadowNoEffect(t *testing.T) {
 	assert.Equal(t, 300, shadowRt.tierMin(1))
 
 	req := userReq(sessionLongAsk())
-	a, err := shadowGw.planSmartRouter(shadowRt, req, cacheEndpointChat, nil, &group{}, nil)
+	a, err := shadowGw.planSmartRouter(context.Background(), shadowRt, req, cacheEndpointChat, nil, &group{}, nil)
 	require.NoError(t, err)
-	b, err := offGw.planSmartRouter(offRt, req, cacheEndpointChat, nil, &group{}, nil)
+	b, err := offGw.planSmartRouter(context.Background(), offRt, req, cacheEndpointChat, nil, &group{}, nil)
 	require.NoError(t, err)
 	assert.Equal(t, planShape(b), planShape(a))
 	assert.Equal(t, b.reason, a.reason)
@@ -185,7 +186,7 @@ func TestCalibCountsOnlyScoreOutcomes(t *testing.T) {
 func TestCalibOffWritesNothing(t *testing.T) {
 	gw, rt := calibGateway(t, nil)
 	require.Nil(t, rt.calibState)
-	plan, err := gw.planSmartRouter(rt, userReq("hi"), cacheEndpointChat, nil, &group{}, nil)
+	plan, err := gw.planSmartRouter(context.Background(), rt, userReq("hi"), cacheEndpointChat, nil, &group{}, nil)
 	require.NoError(t, err)
 	assert.False(t, plan.calibrate)
 	gw.countCalibration(plan, 0, true, true)
@@ -346,9 +347,9 @@ func TestCalibOffPlansIdentical(t *testing.T) {
 	plain, plainRt := calibGateway(t, nil)
 	off, offRt := calibGateway(t, &SmartRouterCalibrationConfig{Mode: smartCalibOff})
 	for _, ask := range []string{"hi", sessionLongAsk(), "prove the lemma and derive the invariant for this scheduler", "summarize this"} {
-		a, err := plain.planSmartRouter(plainRt, userReq(ask), cacheEndpointChat, nil, &group{}, nil)
+		a, err := plain.planSmartRouter(context.Background(), plainRt, userReq(ask), cacheEndpointChat, nil, &group{}, nil)
 		require.NoError(t, err)
-		b, err := off.planSmartRouter(offRt, userReq(ask), cacheEndpointChat, nil, &group{}, nil)
+		b, err := off.planSmartRouter(context.Background(), offRt, userReq(ask), cacheEndpointChat, nil, &group{}, nil)
 		require.NoError(t, err)
 		assert.Equal(t, planShape(a), planShape(b), ask)
 		assert.Equal(t, a.reason, b.reason, ask)

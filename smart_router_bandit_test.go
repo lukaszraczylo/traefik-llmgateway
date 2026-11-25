@@ -1,6 +1,7 @@
 package traefikllmgateway
 
 import (
+	"context"
 	"errors"
 	"sort"
 	"strconv"
@@ -56,7 +57,7 @@ func TestBanditPermutationOnly(t *testing.T) {
 	adGw, adRt := banditGateway(t, smartSelectionAdaptive, nil)
 	adRt.bandit.rnd = newSmartRandom(7)
 	for _, ask := range []string{"hi", "please review the architecture trade-offs of this distributed system design and prove its invariant"} {
-		want, err := ordGw.planSmartRouter(ordRt, userReq(ask), cacheEndpointChat, nil, &group{}, nil)
+		want, err := ordGw.planSmartRouter(context.Background(), ordRt, userReq(ask), cacheEndpointChat, nil, &group{}, nil)
 		require.NoError(t, err)
 		wantKeys := planShape(want)
 		sort.Strings(wantKeys)
@@ -65,7 +66,7 @@ func TestBanditPermutationOnly(t *testing.T) {
 			wantTiers = append(wantTiers, e.tier)
 		}
 		for i := 0; i < 100; i++ {
-			got, err := adGw.planSmartRouter(adRt, userReq(ask), cacheEndpointChat, nil, &group{}, nil)
+			got, err := adGw.planSmartRouter(context.Background(), adRt, userReq(ask), cacheEndpointChat, nil, &group{}, nil)
 			require.NoError(t, err)
 			gotKeys := planShape(got)
 			sort.Strings(gotKeys)
@@ -87,10 +88,10 @@ func TestBanditOrderedUnchangedWhenOff(t *testing.T) {
 	require.Nil(t, plainRt.bandit)
 	require.Nil(t, hashRt.bandit, "adaptive settings alone never enable the bandit")
 	for _, ask := range []string{"hi", "hello there", "summarize this"} {
-		a, err := plain.planSmartRouter(plainRt, userReq(ask), cacheEndpointChat, nil, &group{}, nil)
+		a, err := plain.planSmartRouter(context.Background(), plainRt, userReq(ask), cacheEndpointChat, nil, &group{}, nil)
 		require.NoError(t, err)
 		assert.Nil(t, a.bandit)
-		b, err := hash.planSmartRouter(hashRt, userReq(ask), cacheEndpointChat, nil, &group{}, nil)
+		b, err := hash.planSmartRouter(context.Background(), hashRt, userReq(ask), cacheEndpointChat, nil, &group{}, nil)
 		require.NoError(t, err)
 		assert.ElementsMatch(t, planShape(a), planShape(b))
 	}
@@ -227,7 +228,7 @@ func TestBanditLearnsFromCounters(t *testing.T) {
 
 func TestBanditObserveCountsReward(t *testing.T) {
 	gw, rt := banditGateway(t, smartSelectionAdaptive, &SmartRouterAdaptiveConfig{ExplorePct: zeroPct()})
-	plan, err := gw.planSmartRouter(rt, userReq("hi"), cacheEndpointChat, nil, &group{}, nil)
+	plan, err := gw.planSmartRouter(context.Background(), rt, userReq("hi"), cacheEndpointChat, nil, &group{}, nil)
 	require.NoError(t, err)
 	require.NotNil(t, plan.bandit)
 	read := func(i int) (int64, int64) {
@@ -381,7 +382,7 @@ func TestBanditSelectionValidationAndAdminView(t *testing.T) {
 
 func TestBanditStartsLearningTicker(t *testing.T) {
 	gw, rt := banditGateway(t, smartSelectionAdaptive, nil)
-	_, err := gw.planSmartRouter(rt, userReq("hi"), cacheEndpointChat, nil, &group{}, nil)
+	_, err := gw.planSmartRouter(context.Background(), rt, userReq("hi"), cacheEndpointChat, nil, &group{}, nil)
 	require.NoError(t, err)
 	assert.True(t, gw.routerLearn.running)
 	require.NoError(t, gw.Close())

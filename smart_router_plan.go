@@ -1,6 +1,7 @@
 package traefikllmgateway
 
 import (
+	"context"
 	"fmt"
 	"hash/fnv"
 	"net/http"
@@ -44,6 +45,10 @@ type routerPlan struct {
 	startTier string
 	// shadowTier is the tier the router's shadowWeights chose; empty when unset.
 	shadowTier string
+	// heuristicTier, decisionTier and decisionOutcome describe the decision-model call; empty when none was made.
+	heuristicTier   string
+	decisionTier    string
+	decisionOutcome string
 	// downgradedFrom is the classified tier a saturation downgrade started below; empty when not downgraded.
 	downgradedFrom string
 	router         string
@@ -109,7 +114,7 @@ func smartTextHash(s string) int {
 // Invariants plan_bounded (at most maxAttempts entries) and downgrade_gated (a lower start needs the
 // saturation gate) have one runtime exception: with timeoutFallback, addTimeoutFallback appends one
 // lower-tier entry after an all-slow plan, so entries can reach maxAttempts+1.
-func (g *Gateway) planSmartRouter(rt *smartRouter, req map[string]any, endpoint string, hdr http.Header, grp *group, scopes []limitScope) (*routerPlan, error) {
+func (g *Gateway) planSmartRouter(ctx context.Context, rt *smartRouter, req map[string]any, endpoint string, hdr http.Header, grp *group, scopes []limitScope) (*routerPlan, error) {
 	if !grp.allowsModelName(rt.name) {
 		return nil, errModelDenied
 	}
@@ -119,7 +124,7 @@ func (g *Gateway) planSmartRouter(rt *smartRouter, req map[string]any, endpoint 
 	g.registry.noteRouterShadow(rt.name, grp)
 	g.touchRouterLearning(rt)
 
-	cls, sess := g.classifyWithSession(rt, req, endpoint, hdr, scopes)
+	cls, sess := g.classifyWithSession(ctx, rt, req, endpoint, hdr, scopes)
 	start, reason, scored, hasImage := cls.rank, cls.reason, cls.scoredText, cls.hasImage
 	promptBytes, imageTokens := smartPromptBytes(req, endpoint)
 	facts := routerRequestFacts{
@@ -132,6 +137,13 @@ func (g *Gateway) planSmartRouter(rt *smartRouter, req map[string]any, endpoint 
 	plan := &routerPlan{router: rt.name, reason: reason, startTier: rt.tiers[start].name, promptBytes: promptBytes, hasImage: hasImage, maxTokensSet: facts.outputTokens > 0, sess: sess, calibrate: rt.calibState != nil, bandit: rt.bandit, firstByte: rt.firstByte}
 	if cls.shadowRank >= 0 {
 		plan.shadowTier = rt.tiers[cls.shadowRank].name
+	}
+	if cls.decisionOutcome != "" {
+		plan.decisionOutcome = cls.decisionOutcome
+		plan.heuristicTier = rt.tiers[cls.heuristicRank].name
+		if cls.decisionTier >= 0 {
+			plan.decisionTier = rt.tiers[cls.decisionTier].name
+		}
 	}
 	seen := make(map[string]bool)
 	var skips routerSkips

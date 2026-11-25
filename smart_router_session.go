@@ -2,6 +2,7 @@ package traefikllmgateway
 
 import (
 	"container/list"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -589,13 +590,23 @@ func (rs *routerSessions) open(rt *smartRouter, req map[string]any, f *smartFeat
 }
 
 // classifyWithSession classifies the request, with session state when the router uses it.
-func (g *Gateway) classifyWithSession(rt *smartRouter, req map[string]any, endpoint string, hdr http.Header, scopes []limitScope) (smartClassification, *smartSessionRun) {
+func (g *Gateway) classifyWithSession(ctx context.Context, rt *smartRouter, req map[string]any, endpoint string, hdr http.Header, scopes []limitScope) (smartClassification, *smartSessionRun) {
+	var assist smartAssist
+	if rt.decision != nil {
+		assist = func(f *smartFeatures) decisionAnswer {
+			return g.askDecisionModel(ctx, rt, decisionState(f.system, f.ask))
+		}
+	}
 	if !rt.session.active() || g.routerSessions == nil {
-		return classifySmart(rt, req, endpoint), nil
+		if assist == nil {
+			return classifySmart(rt, req, endpoint), nil
+		}
+		f := extractSmartV2(req, endpoint)
+		return classifySmartWith(rt, req, endpoint, &f, nil, assist), nil
 	}
 	f := extractSmartV2(req, endpoint)
 	sc := g.routerSessions.open(rt, req, &f, hdr, scopes)
-	cls := classifySmartWith(rt, req, endpoint, &f, sc)
+	cls := classifySmartWith(rt, req, endpoint, &f, sc, assist)
 	return cls, sc
 }
 

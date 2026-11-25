@@ -444,7 +444,7 @@ func BenchRun(n int) int {
 		if benchSessions != nil {
 			f := extractSmartV2(fx.Request, endpoint)
 			sc := benchSessions.open(benchRouter, fx.Request, &f, nil, nil)
-			sum += classifySmartWith(benchRouter, fx.Request, endpoint, &f, sc).rank + 1
+			sum += classifySmartWith(benchRouter, fx.Request, endpoint, &f, sc, nil).rank + 1
 			if sc.dirty {
 				benchSessions.put(sc.key, sc.next, time.Hour)
 			}

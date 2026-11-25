@@ -4,6 +4,7 @@ import "strings"
 
 const (
 	smartReasonScore   = "score"
+	smartReasonModel   = "model"
 	smartReasonKeyword = "keyword"
 	smartReasonFloor   = "floor"
 	smartReasonDefault = "default"
@@ -62,14 +63,70 @@ type smartExtract struct {
 type smartClassification struct {
 	reason     string
 	scoredText string
-	rank       int
+	// decisionOutcome is the decision-model outcome; empty when no call was made.
+	decisionOutcome string
+	rank            int
 	// shadowRank is the rank the router's shadowWeights would have chosen, or -1 when unset.
 	shadowRank int
 	// score is the router's score before any risk margin, and hardRank the highest floor or keyword
 	// rank; the saturation downgrade reads both. hardRank is 0 when nothing floors the request and includes the session pin.
 	score    int
 	hardRank int
-	hasImage bool
+	// decisionTier is the rank the decision model answered, or -1 when it gave none.
+	decisionTier int
+	// heuristicRank is the rank before the decision model; meaningful only when decisionOutcome is set.
+	heuristicRank int
+	hasImage      bool
+}
+
+// smartAssist returns the model's view for a near-boundary request; nil means no assist.
+type smartAssist func(f *smartFeatures) decisionAnswer
+
+// smartNearBoundary reports whether score sits within the decision band of a tier boundary.
+func smartNearBoundary(rt *smartRouter, score int) bool {
+	for i := 1; i < len(rt.tiers); i++ {
+		d := score - rt.tierMin(i)
+		if d < 0 {
+			d = -d
+		}
+		if d <= rt.decision.band {
+			return true
+		}
+	}
+	return false
+}
+
+// applyDecision folds a model answer into the heuristic rank, moving at most one tier toward the model.
+func applyDecision(rt *smartRouter, rank int, ans decisionAnswer) (int, string) {
+	switch ans.outcome {
+	case decisionTimeout, decisionError, decisionBreaker:
+		return rank, ans.outcome
+	}
+	outcome := ans.outcome
+	if outcome == "" {
+		outcome = decisionOverride
+	}
+	newRank := rank
+	switch {
+	case ans.prob < rt.decision.minProb:
+		if ans.outcome == "" {
+			outcome = decisionLowConf
+		}
+	case ans.rank == rank:
+		if ans.outcome == "" {
+			outcome = decisionAgree
+		}
+	case ans.rank > rank:
+		newRank = rank + 1
+	default:
+		newRank = rank - 1
+	}
+	return newRank, outcome
+}
+
+// smartTransportOutcome reports whether the outcome says the model gave no answer.
+func smartTransportOutcome(outcome string) bool {
+	return outcome == decisionTimeout || outcome == decisionError || outcome == decisionBreaker
 }
 
 // classifySmartRequest scores req and returns the starting tier rank, why that
@@ -84,14 +141,14 @@ func classifySmartRequest(rt *smartRouter, req map[string]any, endpoint string) 
 // classifySmart is classifySmartRequest plus the shadow rank. The shadow pass
 // reuses the extracted features and only re-weights them.
 func classifySmart(rt *smartRouter, req map[string]any, endpoint string) smartClassification {
-	return classifySmartWith(rt, req, endpoint, nil, nil)
+	return classifySmartWith(rt, req, endpoint, nil, nil, nil)
 }
 
-// classifySmartWith classifies with optional pre-extracted v2 features and session state.
-// A v1 router passes the session to the shadow pass only, so it never routes on it.
-func classifySmartWith(rt *smartRouter, req map[string]any, endpoint string, f *smartFeatures, sc *smartSessionRun) smartClassification {
+// classifySmartWith classifies with optional pre-extracted v2 features, session state and decision assist.
+// A v1 router passes the session to the shadow pass only, so it never routes on it or asks the assist.
+func classifySmartWith(rt *smartRouter, req map[string]any, endpoint string, f *smartFeatures, sc *smartSessionRun, assist smartAssist) smartClassification {
 	if rt.classifier == smartClassifierV2 {
-		out := classifySmartV2With(rt, req, endpoint, f, sc)
+		out := classifySmartV2With(rt, req, endpoint, f, sc, assist)
 		if rt.shadowV2 {
 			out.shadowRank = out.rank
 		}
@@ -99,7 +156,7 @@ func classifySmartWith(rt *smartRouter, req map[string]any, endpoint string, f *
 	}
 	out := classifySmartV1(rt, req, endpoint)
 	if rt.shadowV2 {
-		out.shadowRank = classifySmartV2With(rt, req, endpoint, f, sc).rank
+		out.shadowRank = classifySmartV2With(rt, req, endpoint, f, sc, nil).rank
 	}
 	return out
 }
@@ -107,7 +164,7 @@ func classifySmartWith(rt *smartRouter, req map[string]any, endpoint string, f *
 func classifySmartV1(rt *smartRouter, req map[string]any, endpoint string) smartClassification {
 	ex := extractSmartRequest(req, endpoint)
 	top := len(rt.tiers) - 1
-	out := smartClassification{shadowRank: -1, hasImage: ex.hasImage}
+	out := smartClassification{shadowRank: -1, hasImage: ex.hasImage, decisionTier: -1, heuristicRank: -1}
 
 	floorRank := 0
 	if ex.hasTools || ex.toolHist {
@@ -446,14 +503,14 @@ func smartContentSize(content any, depth int) (chars, images int) {
 // classifySmartV2With is the v2 counterpart of classifySmartV1: it scores the prose of
 // the newest ask with an uncertainty margin, then raises the tier for floors and
 // keyword rules. It never lowers a rank.
-// It takes optional pre-extracted features and session state.
-func classifySmartV2With(rt *smartRouter, req map[string]any, endpoint string, f *smartFeatures, sc *smartSessionRun) smartClassification {
+// It takes optional pre-extracted features, session state and decision assist.
+func classifySmartV2With(rt *smartRouter, req map[string]any, endpoint string, f *smartFeatures, sc *smartSessionRun, assist smartAssist) smartClassification {
 	if f == nil {
 		ext := extractSmartV2(req, endpoint)
 		f = &ext
 	}
 	top := len(rt.tiers) - 1
-	out := smartClassification{shadowRank: -1, hasImage: f.hasImage}
+	out := smartClassification{shadowRank: -1, hasImage: f.hasImage, decisionTier: -1, heuristicRank: -1}
 
 	floorRank := 0
 	if f.hasTools || f.toolHist {
@@ -505,6 +562,17 @@ func classifySmartV2With(rt *smartRouter, req map[string]any, endpoint string, f
 	if sc != nil {
 		rank, reason, next = smartSessionRoute(&rt.session, top, f, sc.sess, verdict, sc.now, askHash)
 		out.hardRank = smartMaxInt(out.hardRank, next.pin)
+	}
+	if assist != nil && reason == smartReasonScore && f.found && smartNearBoundary(rt, verdict.score) {
+		ans := assist(f)
+		newRank, outcome := applyDecision(rt, rank, ans)
+		out.heuristicRank, out.decisionOutcome = rank, outcome
+		if !smartTransportOutcome(ans.outcome) {
+			out.decisionTier = ans.rank
+		}
+		if rt.decision.live && newRank != rank {
+			rank, reason = newRank, smartReasonModel
+		}
 	}
 	out.rank, out.reason = smartRaiseRank(rank, reason, kwRank, floorRank)
 	if sc != nil {

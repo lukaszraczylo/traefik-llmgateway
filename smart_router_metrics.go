@@ -262,7 +262,7 @@ func (g *Gateway) writeRouterMetrics(m *metricWriter) {
 			return x.reason < y.reason
 		})
 		m.family("llmgateway_router_requests_total", "counter",
-			"Smart router requests by router, first attempted tier and routing reason (score, keyword, floor, default, or skipped when lower tiers had no usable target)."+aggregationNotePerProcess)
+			"Smart router requests by router, first attempted tier and routing reason (score, keyword, floor, model, default, or skipped when lower tiers had no usable target)."+aggregationNotePerProcess)
 		for _, k := range keys {
 			m.sampleInt("llmgateway_router_requests_total",
 				[]metricLabel{{"router", k.router}, {"tier", k.tier}, {"reason", k.reason}}, reqs[k])

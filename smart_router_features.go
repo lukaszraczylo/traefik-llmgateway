@@ -76,18 +76,20 @@ type smartFeatures struct {
 	// prose is the ask without fenced code and paste paragraphs; lower is its lowercase form.
 	prose, lower string
 	system       string
-	intent       int
-	hard         int
-	codeBytes    int
-	logBytes     int
-	msgCount     int
-	questions    int
-	toolSeen     int
-	lists        int
-	promptBytes  int
-	outTokens    int64
-	jsonMode     int
-	nonLatin     bool
+	// ask is the raw newest ask, bounded, for the decision model.
+	ask         string
+	intent      int
+	hard        int
+	codeBytes   int
+	logBytes    int
+	msgCount    int
+	questions   int
+	toolSeen    int
+	lists       int
+	promptBytes int
+	outTokens   int64
+	jsonMode    int
+	nonLatin    bool
 	// foreign marks prose the English markers cannot classify.
 	foreign      bool
 	truncated    bool
@@ -150,6 +152,7 @@ func extractSmartV2(req map[string]any, endpoint string) smartFeatures {
 		f.truncated = len(msgs) > smartAskScanMax
 		return f
 	}
+	f.ask = boundSmartText(ask, smartTextCap)
 	f.splitAsk(ask)
 	f.classifyIntent()
 	return f

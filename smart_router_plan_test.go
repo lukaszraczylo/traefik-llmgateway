@@ -1,6 +1,7 @@
 package traefikllmgateway
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -36,7 +37,7 @@ func TestPlanSmartRouter_ContextEstimateIgnoresImageBytes(t *testing.T) {
 		map[string]any{"type": "text", "text": "what is this"},
 		map[string]any{"type": "image_url", "image_url": map[string]any{"url": "data:image/png;base64," + huge}},
 	})
-	plan, err := gw.planSmartRouter(rt, req, cacheEndpointChat, nil, &group{}, nil)
+	plan, err := gw.planSmartRouter(context.Background(), rt, req, cacheEndpointChat, nil, &group{}, nil)
 	require.NoError(t, err)
 	assert.Equal(t, "alpha/a1", plan.entries[0].cand.canonical, "image bytes must not count as prompt tokens")
 }
@@ -51,7 +52,7 @@ func TestPlanSmartRouter_ContextEstimateCountsWholeConversation(t *testing.T) {
 		map[string]any{"role": "assistant", "content": "ok"},
 		map[string]any{"role": "user", "content": "hi"},
 	}}
-	plan, err := gw.planSmartRouter(rt, req, cacheEndpointChat, nil, &group{}, nil)
+	plan, err := gw.planSmartRouter(context.Background(), rt, req, cacheEndpointChat, nil, &group{}, nil)
 	require.NoError(t, err)
 	assert.Equal(t, "gamma/c1", plan.entries[0].cand.canonical, "earlier turns must count toward the context estimate")
 }
@@ -61,7 +62,7 @@ func TestPlanSmartRouter_ContextSkipsEliminatingEverythingFallBackToLargest(t *t
 		c.ModelMeta = map[string]*ModelMetaConfig{"a1": {ContextTokens: 50}, "c1": {ContextTokens: 80}}
 		twoTiers(c, "a1")
 	})
-	plan, err := gw.planSmartRouter(rt, userReq(strings.Repeat("word ", 400)), cacheEndpointChat, nil, &group{}, nil)
+	plan, err := gw.planSmartRouter(context.Background(), rt, userReq(strings.Repeat("word ", 400)), cacheEndpointChat, nil, &group{}, nil)
 	require.NoError(t, err, "context skips alone must not 404")
 	require.Len(t, plan.entries, 1)
 	assert.Equal(t, "gamma/c1", plan.entries[0].cand.canonical)
@@ -78,7 +79,7 @@ func TestPlanSmartRouter_ReservesSlotForHigherTier(t *testing.T) {
 		c.SmartRouters[routerName].KeywordRules = nil
 		c.SmartRouters[routerName].MaxAttempts = 3
 	})
-	plan, err := gw.planSmartRouter(rt, userReq("hi"), cacheEndpointChat, nil, &group{}, nil)
+	plan, err := gw.planSmartRouter(context.Background(), rt, userReq("hi"), cacheEndpointChat, nil, &group{}, nil)
 	require.NoError(t, err)
 	var tiers []string
 	for _, e := range plan.entries {
@@ -87,7 +88,7 @@ func TestPlanSmartRouter_ReservesSlotForHigherTier(t *testing.T) {
 	assert.Equal(t, []string{"t0", "t0", "t1"}, tiers, "the last slot must stay reachable for the higher tier")
 
 	rt.maxAttempts = 1
-	plan, err = gw.planSmartRouter(rt, userReq("hi"), cacheEndpointChat, nil, &group{}, nil)
+	plan, err = gw.planSmartRouter(context.Background(), rt, userReq("hi"), cacheEndpointChat, nil, &group{}, nil)
 	require.NoError(t, err)
 	require.Len(t, plan.entries, 1)
 	assert.Equal(t, "t0", plan.entries[0].tier, "a single attempt still starts at the classified tier")
@@ -103,7 +104,7 @@ func TestPlanSmartRouter_NoUsableTargetMessageHidesDeniedCount(t *testing.T) {
 		c.SmartRouters[routerName].KeywordRules = nil
 	})
 	grp := &group{models: []string{routerName, "b1"}}
-	_, err := gw.planSmartRouter(rt, userReq("hi"), cacheEndpointChat, nil, grp, nil)
+	_, err := gw.planSmartRouter(context.Background(), rt, userReq("hi"), cacheEndpointChat, nil, grp, nil)
 	rerr, ok := err.(*routerTargetError)
 	require.True(t, ok, "got %v", err)
 	assert.Equal(t, 404, rerr.status)
@@ -162,7 +163,7 @@ func TestModelRegistry_ListFor_RouterHidesBareDiscoveredIDForEveryCaller(t *test
 
 func firstPlanModel(t *testing.T, gw *Gateway, rt *smartRouter, req map[string]any, endpoint string) string {
 	t.Helper()
-	plan, err := gw.planSmartRouter(rt, req, endpoint, nil, &group{}, nil)
+	plan, err := gw.planSmartRouter(context.Background(), rt, req, endpoint, nil, &group{}, nil)
 	require.NoError(t, err)
 	return plan.entries[0].cand.canonical
 }
