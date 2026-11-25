@@ -9,6 +9,13 @@ export const DIST = fileURLToPath(new URL('../dist/assets', import.meta.url))
 
 export const hasDist = () => existsSync(DIST)
 
+export function readCss(dir = DIST) {
+  return readdirSync(dir)
+    .filter((f) => f.endsWith('.css'))
+    .map((f) => readFileSync(join(dir, f), 'utf8'))
+    .join('\n')
+}
+
 export function totalGzip(dir = DIST) {
   return measure(dir).reduce((n, r) => n + r.gzip, 0)
 }
