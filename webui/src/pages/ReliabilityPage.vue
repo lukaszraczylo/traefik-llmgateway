@@ -2,9 +2,10 @@
 import { Button, Card, CardAction, CardContent, CardHeader, CardTitle, LineChart, NativeSelect, Pagination, SegmentedControl, StatusBadge } from '@perfect-design/ui'
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 
+import { useEntityLinks } from '@/composables/useEntityLinks'
 import { useNow } from '@/composables/useNow'
 import { thinLabels } from '@/lib/chart-labels'
-import { formatBucketLabel, formatCompactCount, formatUntil } from '@/lib/format'
+import { formatBucketLabel, formatCompactCount, formatLatencyMs, formatPercentValue, formatUntil } from '@/lib/format'
 import { loadState } from '@/lib/load-state'
 import { pageWindow } from '@/lib/paging'
 import { sortThenSlice } from '@/lib/table-sort'
@@ -38,6 +39,7 @@ interface BreakerView extends BreakerRow {
 const dashboard = useDashboardStore()
 const filters = useFiltersStore()
 const nav = useNavStore()
+const { openEntity } = useEntityLinks()
 const reliability = useReliabilityStore()
 const { now, start: startClock, stop: stopClock } = useNow()
 
@@ -103,8 +105,6 @@ const rejectionLines = computed(() => [
   { name: '402 unpriced', data: reliability.unpriced, tone: 'warning' as const },
 ])
 
-const formatPercent = (n: number): string => `${Number(n.toFixed(2))}%`
-const formatMs = (n: number): string => `${Math.round(n).toLocaleString('en-US')} ms`
 
 const seriesState = computed<ViewState>(() => {
   if (providers.value.length === 0 && overview.value !== null) return 'empty'
@@ -243,7 +243,7 @@ const windowUsed = computed(() => hourOrDayWindow(filters.window, filters.span))
                 :labels="bucketLabels"
                 :series="activityLines"
                 :height="220"
-                :value-formatter="formatPercent"
+                :value-formatter="formatPercentValue"
                 :label="`Failure, timeout and failover rate as percent of attempts for ${selected} per ${windowUsed.window}`"
               />
             </div>
@@ -266,7 +266,7 @@ const windowUsed = computed(() => hourOrDayWindow(filters.window, filters.span))
                 :labels="perfLabels"
                 :series="ttfbLines"
                 :height="220"
-                :value-formatter="formatMs"
+                :value-formatter="formatLatencyMs"
                 :label="`Time to first byte p50 and p95 for ${selected}`"
               />
             </div>
@@ -291,7 +291,7 @@ const windowUsed = computed(() => hourOrDayWindow(filters.window, filters.span))
               row-key="provider"
               label="Provider circuit breakers"
               @update:sort="onBreakerSort"
-              @row-activate="(row: BreakerView) => nav.openPanel('provider', row.provider)"
+              @row-activate="(row: BreakerView) => openEntity('provider', row.provider)"
             >
               <template #cell-status="{ value }">
                 <StatusBadge :status="value as string" :tones="STATE_TONE" size="sm" />

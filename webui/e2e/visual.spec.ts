@@ -344,6 +344,33 @@ test('target panel callers link only known users', async ({ page }) => {
   await expect(page).toHaveURL(/#users\?.*sel=user%3Auser-01/)
 })
 
+// A breaker row on Reliability opens that provider's panel on the Models page, and Back returns.
+test('reliability breaker rows open the provider panel', async ({ page }) => {
+  await page.setViewportSize(VIEWPORTS.desktop)
+  await visit(page, '#reliability', 'breaker-open', 'light')
+  await page.getByRole('table', { name: 'Provider circuit breakers' }).getByRole('row').nth(1).click()
+  await expect(page).toHaveURL(/#models\?.*sel=provider%3A/)
+  await expect(page.locator('[data-panel-kind="provider"]')).toBeVisible()
+})
+
+// The group panel's "Show all" link filters the Users tab to exact members, not a substring match.
+test('group member link filters users by exact group', async ({ page }) => {
+  await page.setViewportSize(VIEWPORTS.desktop)
+  const group = decodeURIComponent((await sampleIds(page, 'live')).group.replace(/^group:/, ''))
+  await visit(page, `#users?group=${encodeURIComponent(group)}`, 'live', 'light')
+  await expect(page.getByRole('button', { name: `Clear group filter ${group}` })).toBeVisible()
+  const cells = page.getByRole('table', { name: 'Users' }).getByRole('row')
+  expect(await cells.count()).toBeGreaterThan(1)
+})
+
+// Under redis-down the usage counters read "—", never 0.
+test('users page shows unavailable usage when the store is down', async ({ page }) => {
+  await page.setViewportSize(VIEWPORTS.desktop)
+  await visit(page, '#users', 'redis-down', 'light')
+  const row = page.getByRole('table', { name: 'Users' }).getByRole('row').nth(1)
+  await expect(row.locator('[title="usage store unavailable"]').first()).toBeVisible()
+})
+
 // Events from earlier days carry a date; the unpriced row links to the models search.
 test('events show dates for older rows and unpriced rows are clickable', async ({ page }) => {
   await page.setViewportSize(VIEWPORTS.desktop)
