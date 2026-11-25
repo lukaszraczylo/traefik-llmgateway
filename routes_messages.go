@@ -104,10 +104,11 @@ func (g *Gateway) handleMessages(w http.ResponseWriter, r *http.Request, u *user
 		return
 	}
 
-	scopes, ok := g.admitRequestForRoute(r.Context(), sw, u, grp, writeAnthropicError, routeMessages)
+	scopes, ok := g.admitRequestForRoute(r.Context(), sw, u, grp, writeAnthropicError, routeMessages, int64(len(body)))
 	if !ok {
 		return
 	}
+	defer g.limiter.releaseReservations(scopes)
 
 	g.runMeteredCall(sw, r, scopes, body, req, requestedModel, grp, cacheEndpointMessages, "messages route", writeAnthropicError, writeAnthropicProviderUpstreamError,
 		func(a providerAdapter, ctx context.Context, w http.ResponseWriter, req map[string]any) (usage, error) {

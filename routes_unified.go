@@ -222,10 +222,11 @@ func (g *Gateway) handleEmbeddings(w http.ResponseWriter, r *http.Request, u *us
 func (g *Gateway) runUnified(w http.ResponseWriter, r *http.Request, u *user, grp *group, endpoint string, call adapterCall) {
 	sw := &statusTrackingWriter{ResponseWriter: w}
 
-	scopes, ok := g.admitRequestForRoute(r.Context(), sw, u, grp, writeOAIError, eventRouteForEndpoint(endpoint))
+	scopes, ok := g.admitRequestForRoute(r.Context(), sw, u, grp, writeOAIError, eventRouteForEndpoint(endpoint), r.ContentLength)
 	if !ok {
 		return
 	}
+	defer g.limiter.releaseReservations(scopes)
 
 	body, req, ok := g.readAndDecodeUnifiedBody(sw, r, writeOAIError)
 	if !ok {
@@ -933,9 +934,10 @@ func withTotalScope(scopes []limitScope) []limitScope {
 // 2026-08-22 review) lets routes_messages.go answer a violation in
 // Anthropic's own error shape instead of OpenAI's, without a second copy
 // of this function's own logic.
-func (g *Gateway) admitRequestForRoute(ctx context.Context, sw *statusTrackingWriter, u *user, grp *group, envelope envelopeWriter, route string) (scopes []limitScope, ok bool) {
+func (g *Gateway) admitRequestForRoute(ctx context.Context, sw *statusTrackingWriter, u *user, grp *group, envelope envelopeWriter, route string, bodyBytes int64) (scopes []limitScope, ok bool) {
+	reserve := reserveTokensFor(bodyBytes)
 	scopes = withTotalScope(buildLimitScopes(u, grp))
-	violation, gone := g.admitCounted(ctx, sw, scopes)
+	violation, gone := g.admitCounted(ctx, sw, scopes, reserve)
 	if gone {
 		return scopes, false
 	}
@@ -1445,6 +1447,15 @@ func (w *cacheCaptureWriter) Write(b []byte) (int, error) {
 		}
 	}
 	return w.statusTrackingWriter.Write(b)
+}
+
+// reserveTokensFor is the tokensPerMinute pre-charge for a request body of
+// bodyBytes. An unknown (negative) or empty size reserves nothing.
+func reserveTokensFor(bodyBytes int64) int64 {
+	if bodyBytes <= 0 {
+		return 0
+	}
+	return estimatePromptTokens(bodyBytes)
 }
 
 // maxEstimatedPromptTokens caps a body-size estimate, so a padded request

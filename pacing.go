@@ -311,8 +311,8 @@ func pace(ctx context.Context, d time.Duration) bool {
 // each user has at most maxConcurrentPaced waiting: further requests proceed
 // without delay. gone is true when the client cancelled during the wait; the
 // caller must then write nothing.
-func (g *Gateway) admitCounted(ctx context.Context, w http.ResponseWriter, scopes []limitScope) (*limitViolation, bool) {
-	violation, info := g.limiter.checkAndCountInfo(scopes)
+func (g *Gateway) admitCounted(ctx context.Context, w http.ResponseWriter, scopes []limitScope, reserve int64) (*limitViolation, bool) {
+	violation, info := g.limiter.checkAndCountInfo(scopes, reserve)
 	now := g.limiter.now()
 	if g.cfg.RateLimitHeaders {
 		writeRateLimitHeaders(w.Header(), info, now)
@@ -335,6 +335,7 @@ func (g *Gateway) admitCounted(ctx context.Context, w http.ResponseWriter, scope
 	w.Header().Set(pacedHeader, strconv.FormatInt(d.Milliseconds(), 10))
 	g.recordPacedEvent(scopes, d)
 	if !pace(ctx, d) {
+		g.limiter.releaseReservations(scopes)
 		return nil, true
 	}
 	return nil, false

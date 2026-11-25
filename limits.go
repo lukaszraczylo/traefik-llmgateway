@@ -592,8 +592,51 @@ func (u usage) minutePrompt() int64 {
 // its group's limits in one call.
 type limitScope struct {
 	limits *LimitsConfig
-	kind   string // "user", "group", or "total"
-	id     string
+	// resv is the tokensPerMinute pre-charge made at admission. It is nil
+	// when none was made. Copies of the scope share it.
+	resv *tpmReservation
+	kind string // "user", "group", or "total"
+	id   string
+}
+
+// tpmReservation is a prompt-token estimate added to a scope's minute window
+// at admission. Exactly one of accountWith, settleRejection or
+// releaseReservations takes it back out, via claim.
+type tpmReservation struct {
+	bucket  string
+	amount  int64
+	mu      sync.Mutex
+	settled bool
+}
+
+// claim reports true to the first caller only.
+func (r *tpmReservation) claim() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.settled {
+		return false
+	}
+	r.settled = true
+	return true
+}
+
+func (r *tpmReservation) refund(sc limitScope, et enforceTTLSet) counterIncr {
+	return counterIncr{key: windowKeyForBucket(sc.kind, sc.id, metricTokIn, windowMin, r.bucket), delta: -r.amount, ttl: minWindowTTL, enforceTTL: et.min}
+}
+
+// releaseReservations gives back every reservation in scopes that nothing has
+// settled yet (a request that never reached accounting).
+func (l *limiter) releaseReservations(scopes []limitScope) {
+	var entries []counterIncr
+	et := enforceTTLsFor()
+	for _, sc := range scopes {
+		if sc.resv != nil && sc.resv.claim() {
+			entries = append(entries, sc.resv.refund(sc, et))
+		}
+	}
+	if len(entries) > 0 {
+		l.storeIncrMulti(entries)
+	}
 }
 
 // totalScopeKind and totalScopeID name the synthetic "all LLM traffic"
@@ -1577,13 +1620,21 @@ func buildBudgetProbes(scopes []limitScope, now time.Time) (probes []budgetProbe
 // call completes, one request may still push a scope over its budget — an
 // accepted trade-off, unchanged from before this round.
 func (l *limiter) checkAndCount(scopes []limitScope) *limitViolation {
-	v, _ := l.checkAndCountInfo(scopes)
+	v, _ := l.checkAndCountInfo(scopes, 0)
 	return v
 }
 
 // checkAndCountInfo is checkAndCount plus the user scope's minute-window
 // view, built from the same round trip's counters (no extra store call).
-func (l *limiter) checkAndCountInfo(scopes []limitScope) (*limitViolation, *rateInfo) {
+//
+// A positive reserve adds that many prompt tokens to every scope's
+// tokensPerMinute window in the same round trip, and the limit compares
+// against the value before the addition, so concurrent requests cannot all
+// pass on the same stale reading. The reservation is stored in scopes[i].resv
+// (the caller's slice is updated in place); accountWith, a rejection or
+// releaseReservations takes it back out. A scope without tokensPerMinute
+// makes no reservation and costs no extra store work.
+func (l *limiter) checkAndCountInfo(scopes []limitScope, reserve int64) (*limitViolation, *rateInfo) {
 	now := l.now()
 	wb := bucketsFor(now)
 	et := enforceTTLsFor()
@@ -1605,10 +1656,45 @@ func (l *limiter) checkAndCountInfo(scopes []limitScope) (*limitViolation, *rate
 	// branch instead — see its own doc comment.
 	probes, reads := buildBudgetProbes(scopes, now)
 
+	var resvIdx []int
+	if reserve > 0 {
+		for i := range scopes {
+			if scopes[i].limits == nil || scopes[i].limits.TokensPerMinute <= 0 {
+				continue
+			}
+			if resvIdx == nil {
+				resvIdx = make([]int, len(scopes))
+				for j := range resvIdx {
+					resvIdx[j] = -1
+				}
+			}
+			sc := scopes[i]
+			scopes[i].resv = &tpmReservation{bucket: wb.min, amount: reserve}
+			resvIdx[i] = len(entries)
+			entries = append(entries, counterIncr{key: windowKeyForBucket(sc.kind, sc.id, metricTokIn, windowMin, wb.min), delta: reserve, ttl: minWindowTTL, enforceTTL: et.min})
+		}
+	}
+
 	incrVals, readVals, ok := l.storeIncrAndGetMulti(entries, reads)
 	if !ok || len(incrVals) != len(entries) || len(readVals) != len(reads) {
+		for i := range scopes {
+			scopes[i].resv = nil
+		}
 		l.rejections.increment(rejectionScopeStoreDown, rejectionScopeStoreDown)
 		return storeDownViolation(), nil
+	}
+
+	// probeUsed returns a budget probe's usage including this request's own
+	// reservation.
+	probeUsed := func(p budgetProbe) int64 {
+		used := readVals[p.keyStart]
+		if p.tokens {
+			used += readVals[p.keyStart+1]
+		}
+		if p.window == windowMin && resvIdx != nil && resvIdx[p.scopeIdx] >= 0 {
+			used = incrVals[resvIdx[p.scopeIdx]] + readVals[p.keyStart+1]
+		}
+		return used
 	}
 
 	userIdx := -1
@@ -1627,7 +1713,19 @@ func (l *limiter) checkAndCountInfo(scopes []limitScope) (*limitViolation, *rate
 			// settleRejection rolled this request's count back off the user scope.
 			minCount--
 		}
-		info := buildRateInfo(scopes[userIdx], minCount, minuteTokensUsed(probes, readVals, userIdx), now)
+		var tokUsed int64
+		for _, p := range probes {
+			if p.scopeIdx == userIdx && p.window == windowMin {
+				tokUsed = probeUsed(p)
+			}
+		}
+		if v != nil && scopes[userIdx].resv != nil {
+			tokUsed -= scopes[userIdx].resv.amount
+			if tokUsed < 0 {
+				tokUsed = 0
+			}
+		}
+		info := buildRateInfo(scopes[userIdx], minCount, tokUsed, now)
 		if v != nil {
 			info.refuse(v, now)
 		}
@@ -1655,9 +1753,9 @@ func (l *limiter) checkAndCountInfo(scopes []limitScope) (*limitViolation, *rate
 			if p.scopeIdx != i {
 				continue
 			}
-			used := readVals[p.keyStart]
-			if p.tokens {
-				used += readVals[p.keyStart+1]
+			used := probeUsed(p)
+			if p.window == windowMin && resvIdx != nil && resvIdx[i] >= 0 {
+				used -= scopes[i].resv.amount
 			}
 			if used < p.limit {
 				continue
@@ -1674,17 +1772,6 @@ func (l *limiter) checkAndCountInfo(scopes []limitScope) (*limitViolation, *rate
 		}
 	}
 	return nil, infoFor(nil, -1)
-}
-
-// minuteTokensUsed returns the tokens-per-minute probe's already-read usage
-// for scope idx, or 0 when that scope has no such probe.
-func minuteTokensUsed(probes []budgetProbe, readVals []int64, idx int) int64 {
-	for _, p := range probes {
-		if p.scopeIdx == idx && p.window == windowMin {
-			return readVals[p.keyStart] + readVals[p.keyStart+1]
-		}
-	}
-	return 0
 }
 
 // recordLastSeen writes the absolute last-seen SET entries lastSeenEntries
@@ -1753,6 +1840,13 @@ func (l *limiter) settleRejection(entries []counterIncr, violatedIdx int, scopes
 		}
 		if sc.kind == totalScopeKind && sc.id == totalScopeID {
 			totalPresent = true
+		}
+	}
+	// A refused request gives back its tokensPerMinute reservations on every
+	// scope, the violated one included.
+	for _, sc := range scopes {
+		if sc.resv != nil && sc.resv.claim() {
+			comp = append(comp, sc.resv.refund(sc, et))
 		}
 	}
 	violated := scopes[violatedIdx]
@@ -1959,7 +2053,15 @@ func (l *limiter) accountWith(scopes []limitScope, u usage, costMicros int64, x 
 		// The per-minute token window is read only by a tokensPerMinute
 		// limit, so it is written only for scopes that set one.
 		if sc.limits != nil && sc.limits.TokensPerMinute > 0 {
-			if mp := u.minutePrompt(); mp != 0 {
+			mp := u.minutePrompt()
+			if sc.resv != nil && sc.resv.claim() {
+				if sc.resv.bucket == wb.min {
+					mp -= sc.resv.amount
+				} else {
+					entries = append(entries, sc.resv.refund(sc, et))
+				}
+			}
+			if mp != 0 {
 				entries = append(entries, counterIncr{key: windowKeyForBucket(sc.kind, sc.id, metricTokIn, windowMin, wb.min), delta: mp, ttl: minWindowTTL, enforceTTL: et.min})
 			}
 			if u.completion != 0 {

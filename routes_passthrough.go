@@ -1247,7 +1247,7 @@ func (g *Gateway) handlePassthrough(w http.ResponseWriter, r *http.Request, u *u
 	}
 
 	scopes := withTotalScope(buildLimitScopes(u, grp))
-	violation, gone := g.admitCounted(r.Context(), w, scopes)
+	violation, gone := g.admitCounted(r.Context(), w, scopes, reserveTokensFor(r.ContentLength))
 	if gone {
 		return
 	}
@@ -1259,6 +1259,7 @@ func (g *Gateway) handlePassthrough(w http.ResponseWriter, r *http.Request, u *u
 	// P9 fix (admin dashboard redesign verify round): last-seen only for
 	// an admitted request — recordLastSeen's own doc comment (limits.go).
 	g.limiter.recordLastSeen(scopes, g.limiter.now())
+	defer g.limiter.releaseReservations(scopes)
 
 	// providerName is only ever passed here by ServeHTTP's dispatch, which
 	// already confirmed it is a key of g.adapters before calling in.

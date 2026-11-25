@@ -206,7 +206,7 @@ func TestCheckAndCountInfo_NoExtraStoreCall(t *testing.T) {
 	store := &callCountingStore{counterStore: newMemoryStore()}
 	l := newLimiter(store, true)
 	scopes := []limitScope{{kind: "user", id: "u", limits: &LimitsConfig{RequestsPerMinute: 5, TokensPerMinute: 100, Pacing: &PacingConfig{StartPct: 50, MaxDelay: "1s"}}}}
-	v, info := l.checkAndCountInfo(scopes)
+	v, info := l.checkAndCountInfo(scopes, 0)
 	require.Nil(t, v)
 	require.NotNil(t, info)
 	assert.EqualValues(t, 1, store.calls.Load(), "one round trip, headers included")
@@ -219,7 +219,7 @@ func TestCheckAndCountInfo_TokenRemainingAndFraction(t *testing.T) {
 	l.nowFn = func() time.Time { return time.Date(2026, 8, 20, 10, 0, 30, 0, time.UTC) }
 	scopes := []limitScope{{kind: "user", id: "u", limits: &LimitsConfig{RequestsPerMinute: 10, TokensPerMinute: 100}}}
 	l.account(scopes, usage{prompt: 60, completion: 20}, 0)
-	v, info := l.checkAndCountInfo(scopes)
+	v, info := l.checkAndCountInfo(scopes, 0)
 	require.Nil(t, v)
 	assert.EqualValues(t, 20, info.tokRemaining)
 	assert.InDelta(t, 0.8, info.frac, 1e-9, "tokens fraction beats requests fraction 0.1")
