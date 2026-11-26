@@ -168,8 +168,16 @@ type smartDecider struct {
 	items     map[uint64]*list.Element
 	order     *list.List
 	openUntil time.Time
-	mu        sync.Mutex
-	fails     int
+	// shared layers the fleet breaker over the local one, keyed by the decision provider; nil means local only.
+	shared *sharedBreaker
+	key    string
+	mu     sync.Mutex
+	fails  int
+}
+
+// share attaches the fleet breaker. Call it before the decider serves requests.
+func (d *smartDecider) share(b *sharedBreaker, key string) {
+	d.shared, d.key = b, key
 }
 
 func newSmartDecider(nowFn func() time.Time) *smartDecider {
@@ -221,7 +229,10 @@ func (d *smartDecider) cachePut(key uint64, rank, prob int) {
 func (d *smartDecider) breakerOpen() bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	return d.now().Before(d.openUntil)
+	if d.now().Before(d.openUntil) {
+		return true
+	}
+	return d.shared != nil && d.shared.sharedOpen(d.key)
 }
 
 // record counts one call result; a failure at the threshold opens the breaker.
@@ -230,7 +241,13 @@ func (d *smartDecider) record(success bool) {
 	defer d.mu.Unlock()
 	if success {
 		d.fails = 0
+		if d.shared != nil {
+			d.shared.recordSuccess(d.key)
+		}
 		return
+	}
+	if d.shared != nil {
+		d.shared.recordFailure(d.key)
 	}
 	d.fails++
 	if d.fails >= decisionBreakerFails {
