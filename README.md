@@ -720,13 +720,13 @@ byte-identically to before multi-group support existed.
 | `failOpen` | `*bool` | `true` | `true`: a Redis error switches that operation to the in-process fallback store and logs (rate-limited to once per 30s). `false`: a Redis error returns 503 instead of enforcing against a non-shared fallback. |
 | `poolSize` | `int` | `0` (self-tuned) | Maximum pooled RESP connections. `0` self-tunes from the host's `GOMAXPROCS`, clamped to `4`-`8`; an explicit value always overrides the auto-tuned size (house engineering rule), up to a maximum of `256`. Negative, or above that maximum, is a construction error. |
 | `tls` | `bool` | `false` | Dial Redis over TLS instead of plaintext, verifying the server certificate against `address`'s host. `false` preserves a plaintext connection exactly as before this field existed; enable it unless the path to Redis is already encrypted some other way (service-mesh mTLS, an stunnel/TLS sidecar, a private link). |
-| `sharedState` | `*bool` | `false` | Share breaker, in-flight and token-size state across replicas. Needs `address`; `true` without it is a construction error. See [Shared state across replicas](#shared-state-across-replicas). |
+| `sharedState` | `*bool` | `false` | Share breaker, in-flight, token-size and failed-auth state across replicas. Needs `address`; `true` without it is a construction error. See [Shared state across replicas](#shared-state-across-replicas). |
 
 ### Shared state across replicas
 
 Traefik calls `New()` once per route and runs several pods. Without `redis.sharedState`, each pod and each route instance keeps its own breaker and in-flight state. A dead provider then needs 3 failures on every pod before every pod skips it. Each pod also sees only a part of the real in-flight count.
 
-`redis.sharedState: true` shares five states through Redis. It is off by default. It needs `redis.address`. With the switch off, or with no `redis` block, behaviour does not change and the gateway never reads or writes the keys below.
+`redis.sharedState: true` shares six states through Redis. It is off by default. It needs `redis.address`. With the switch off, or with no `redis` block, behaviour does not change and the gateway never reads or writes the keys below.
 
 | State | Key prefix | What is shared |
 |---|---|---|
@@ -735,6 +735,7 @@ Traefik calls `New()` once per route and runs several pods. Without `redis.share
 | Decision-model breaker | `llmgw:brk:dec:{provider}:` | The same three values, one breaker per decision provider. |
 | Busy-provider tracking | `llmgw:inf:{provider}:` | In-flight count (started and finished counters per 5 minute epoch) and the limit learned from a 429 (10 minute expiry). |
 | Token-size estimate | `llmgw:cal:{provider}/{model}:` | Day counters of prompt bytes, prompt tokens and samples. |
+| Failed-auth count | `llmgw:authfail:{minute}:{source IP}` | Failed API-key checks per source IP per minute (2 minute expiry). |
 
 How it works:
 
@@ -744,6 +745,7 @@ How it works:
 - In-flight load is the larger of the local count and the shared count. The read window is the longest request timeout in 5 minute epochs, plus one epoch. A request stops counting when its start epoch leaves the window. A request timeout is progress-based: a stream that keeps sending data can run longer than the timeout. Such a stream drops out of the shared count when the window passes, so the shared count can be too low for long streams. It is never too high because of them.
 - The request path never calls Redis. It reads a local copy. A background loop sends the counts and refreshes the copy every second, so a change on one replica reaches the others in about 1 second. The token-size estimate refreshes every 60 seconds with the router learning loop, and it applies after 50 shared samples.
 - A Redis outage never fails or slows a request, and `redis.failOpen` does not apply to this state. After 3 failed refreshes in a row the gateway drops the shared values and uses its own local state. A failed token-size refresh keeps the last ratios.
+- The failed-auth count only decides when the gateway logs the "throttle engaged" line for a source IP. It never rejects a request. A replica sends its failures with the next flush and reads the fleet count from the reply, so its view can lag by 1 second. A replica queues at most 4096 source IPs per minute; an IP past that keeps only its local count.
 - While you change the switch on a rolling restart, replicas with the switch off write nothing. Counts can then be too low for a short time. Turn the switch on after the code is deployed on every replica.
 
 ### `RetryConfig`

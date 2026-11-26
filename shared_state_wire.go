@@ -28,6 +28,9 @@ func (g *Gateway) wireSharedState(cfg *Config) {
 			sharedDiscoveryFleetThreshold, brk.openBase, brk.openMax, 2*brk.openMax))
 	}
 	g.shareDecisionBreakers()
+	if g.auth != nil {
+		g.auth.share(g.sharedState)
+	}
 	if g.tokenCalib != nil && g.limiter != nil {
 		g.tokenCalib.share(func() time.Time { return g.limiter.now() })
 	}

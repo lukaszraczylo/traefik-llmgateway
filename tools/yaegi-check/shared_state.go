@@ -1,4 +1,4 @@
-// This file probes the shared breaker and shared in-flight counter under Yaegi. Two loops stand for two pods over
+// This file probes the shared breaker, shared in-flight counter and shared auth failures under Yaegi. Two loops stand for two pods over
 // one in-memory store, so the interpreter runs the loop, the flush, the refresh and the merge, not only the import.
 package main
 
@@ -118,6 +118,21 @@ const ssProbeSource = `func sharedStateProbe() string {
 	if got := ia.shared("p"); got != 0 {
 		return fmt.Sprintf("inflight: %%d still in flight after every end, want 0", got)
 	}
+
+	fa := PKG.newSharedAuthFailures(la)
+	fb := PKG.newSharedAuthFailures(lb)
+	for i := 0; i < 3; i++ {
+		fa.record("203.0.113.9")
+	}
+	fb.record("203.0.113.9")
+	la.refresh()
+	lb.refresh()
+	if got := fb.count("203.0.113.9"); got != 4 {
+		return fmt.Sprintf("auth: second instance counts %%d failures, want the fleet's 4", got)
+	}
+	if fa.pending() || fb.pending() {
+		return "auth: failures still queued after both flushed"
+	}
 	return "ok"
 }`
 
@@ -142,6 +157,6 @@ func exerciseSharedState(i *interp.Interpreter, pkgName string) error {
 	if got := v.String(); got != ssProbeOK {
 		return fmt.Errorf("shared state probe: %s", got)
 	}
-	fmt.Println("yaegi-check: shared breaker and shared in-flight matched native Go under the interpreter")
+	fmt.Println("yaegi-check: shared breaker, shared in-flight and shared auth failures matched native Go under the interpreter")
 	return nil
 }
