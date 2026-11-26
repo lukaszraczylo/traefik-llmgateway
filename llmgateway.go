@@ -447,10 +447,13 @@ type UserConfig struct {
 
 // RedisConfig configures the distributed limit-state backend.
 type RedisConfig struct {
-	FailOpen *bool  `json:"failOpen,omitempty"`
-	Address  string `json:"address"`
-	Password string `json:"password,omitempty"`
-	DB       int    `json:"db,omitempty"`
+	FailOpen *bool `json:"failOpen,omitempty"`
+	// SharedState shares circuit-breaker and in-flight state across gateway
+	// instances through Redis. nil and false both mean off.
+	SharedState *bool  `json:"sharedState,omitempty"`
+	Address     string `json:"address"`
+	Password    string `json:"password,omitempty"`
+	DB          int    `json:"db,omitempty"`
 	// PoolSize overrides respClient's self-tuned connection pool size
 	// (defaultRespPoolSize, resp.go: GOMAXPROCS clamped to [4, 8]) — perf
 	// finding 1, 2026-08-2x audit. Left at 0 (the default), the pool
@@ -870,6 +873,7 @@ type Gateway struct {
 	promptCacheStats              promptCacheStats
 	routerSessions                *routerSessions
 	routerLearn                   *routerLearner
+	sharedState                   *sharedStateLoop
 	tokenCalib                    *smartTokenCalibrator
 	name                          string
 	replica                       string
@@ -996,6 +1000,7 @@ func New(ctx context.Context, next http.Handler, config *Config, name string) (h
 // plugin a way to do better.
 func (g *Gateway) Close() error {
 	g.closeRouterLearning()
+	g.sharedState.close()
 	if g.redisClient == nil {
 		return nil
 	}
@@ -1184,6 +1189,9 @@ func newGateway(ctx context.Context, next http.Handler, config *Config, name str
 	// limiter's redisStore (one connection, one config)". Building it
 	// separately per consumer would dial (and AUTH/SELECT) a second TCP
 	// connection to the exact same server for no benefit.
+	if config.Redis != nil && config.Redis.SharedState != nil && *config.Redis.SharedState && config.Redis.Address == "" {
+		return nil, errors.New("llmgateway: redis: sharedState requires redis.address")
+	}
 	redisClient, err := buildRedisClient(config.Redis)
 	if err != nil {
 		return nil, err
@@ -1192,6 +1200,9 @@ func newGateway(ctx context.Context, next http.Handler, config *Config, name str
 	lim := newConfiguredLimiter(config, redisClient)
 	lim.logf = g.errorf
 	g.limiter = lim
+	if sharedStateEnabled(config.Redis) {
+		g.sharedState = newSharedStateLoop(lim.store, lim.spawn, g.errorf)
+	}
 	// events (F3, v0.3 dashboard task): built here, after redisClient/
 	// limiter both exist — shares the SAME respClient (spec §2, above)
 	// and reuses the limiter's own bounded spawn (limits.go's
@@ -1343,6 +1354,11 @@ func reservedRoutePrefix(path string) bool {
 // one respClient — one dialled connection, one AUTH/SELECT handshake —
 // between the limiter's redisStore and the response cache (cache.go),
 // instead of each dialing its own connection to the identical server.
+// sharedStateEnabled reports whether redis.sharedState is on.
+func sharedStateEnabled(rc *RedisConfig) bool {
+	return rc != nil && rc.SharedState != nil && *rc.SharedState && rc.Address != ""
+}
+
 func buildRedisClient(rc *RedisConfig) (*respClient, error) {
 	if rc == nil {
 		return nil, nil
