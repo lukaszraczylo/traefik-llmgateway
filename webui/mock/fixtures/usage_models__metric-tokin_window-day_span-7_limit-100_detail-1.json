@@ -12,7 +12,10 @@
    "r402": 0,
    "id": "uni/deepseek-v4.1-flash-1017",
    "priceSource": "unpriced",
-   "value": 1288155471
+   "value": 1288155471,
+   "promptCacheReadTokens": 0,
+   "promptCacheWriteTokens": 0,
+   "promptCacheSavedMicroUsd": 0
   },
   {
    "requests": 19003,
@@ -25,7 +28,10 @@
    "id": "uni/deepseek-v4-flash-0731",
    "priceSource": "free",
    "value": 1148150684,
-   "free": true
+   "free": true,
+   "promptCacheReadTokens": 1033335616,
+   "promptCacheWriteTokens": 0,
+   "promptCacheSavedMicroUsd": 130200288
   },
   {
    "requests": 3254,
@@ -37,7 +43,10 @@
    "r402": 0,
    "id": "uni/glm-5.3-flash",
    "priceSource": "unpriced",
-   "value": 461625105
+   "value": 461625105,
+   "promptCacheReadTokens": 0,
+   "promptCacheWriteTokens": 0,
+   "promptCacheSavedMicroUsd": 0
   },
   {
    "requests": 2540,
@@ -50,7 +59,10 @@
    "id": "gx10/DeepSeek-V4.1-Flash-EXL3",
    "priceSource": "free",
    "value": 368472873,
-   "free": true
+   "free": true,
+   "promptCacheReadTokens": 0,
+   "promptCacheWriteTokens": 0,
+   "promptCacheSavedMicroUsd": 0
   },
   {
    "requests": 1221,
@@ -62,7 +74,10 @@
    "r402": 0,
    "id": "uni/qwen3.8-flash-next",
    "priceSource": "unpriced",
-   "value": 157548452
+   "value": 157548452,
+   "promptCacheReadTokens": 0,
+   "promptCacheWriteTokens": 0,
+   "promptCacheSavedMicroUsd": 0
   },
   {
    "requests": 332111,
@@ -74,7 +89,10 @@
    "r402": 0,
    "id": "uni/text-embedding-multilingual-e5-base",
    "priceSource": "unpriced",
-   "value": 65434388
+   "value": 65434388,
+   "promptCacheReadTokens": 0,
+   "promptCacheWriteTokens": 0,
+   "promptCacheSavedMicroUsd": 0
   },
   {
    "requests": 1159,
@@ -86,7 +104,10 @@
    "r402": 0,
    "id": "minimax/MiniMax-M3",
    "priceSource": "litellm",
-   "value": 15556543
+   "value": 15556543,
+   "promptCacheReadTokens": 0,
+   "promptCacheWriteTokens": 0,
+   "promptCacheSavedMicroUsd": 0
   },
   {
    "requests": 1273,
@@ -98,7 +119,10 @@
    "r402": 0,
    "id": "minimax/MiniMax-M3.1-Flash",
    "priceSource": "unpriced",
-   "value": 12504315
+   "value": 12504315,
+   "promptCacheReadTokens": 0,
+   "promptCacheWriteTokens": 0,
+   "promptCacheSavedMicroUsd": 0
   },
   {
    "requests": 16,
@@ -111,7 +135,10 @@
    "id": "gx10/Inkling-2-Mini",
    "priceSource": "free",
    "value": 75501,
-   "free": true
+   "free": true,
+   "promptCacheReadTokens": 0,
+   "promptCacheWriteTokens": 0,
+   "promptCacheSavedMicroUsd": 0
   },
   {
    "requests": 103,
@@ -123,7 +150,10 @@
    "r402": 0,
    "id": "uni/qwen3.8-27b",
    "priceSource": "unpriced",
-   "value": 7444
+   "value": 7444,
+   "promptCacheReadTokens": 0,
+   "promptCacheWriteTokens": 0,
+   "promptCacheSavedMicroUsd": 0
   },
   {
    "requests": 24,
@@ -135,7 +165,10 @@
    "r402": 0,
    "id": "minimax/MiniMax-M2.5-highspeed",
    "priceSource": "litellm",
-   "value": 5858
+   "value": 5858,
+   "promptCacheReadTokens": 0,
+   "promptCacheWriteTokens": 0,
+   "promptCacheSavedMicroUsd": 0
   },
   {
    "requests": 23,
@@ -147,7 +180,10 @@
    "r402": 0,
    "id": "minimax/MiniMax-M2.7-highspeed",
    "priceSource": "unpriced",
-   "value": 5693
+   "value": 5693,
+   "promptCacheReadTokens": 0,
+   "promptCacheWriteTokens": 0,
+   "promptCacheSavedMicroUsd": 0
   },
   {
    "requests": 23,
@@ -159,7 +195,10 @@
    "r402": 0,
    "id": "minimax/MiniMax-M2.7",
    "priceSource": "unpriced",
-   "value": 5654
+   "value": 5654,
+   "promptCacheReadTokens": 0,
+   "promptCacheWriteTokens": 0,
+   "promptCacheSavedMicroUsd": 0
   },
   {
    "requests": 22,
@@ -171,7 +210,10 @@
    "r402": 0,
    "id": "minimax/MiniMax-M2.5",
    "priceSource": "litellm",
-   "value": 5463
+   "value": 5463,
+   "promptCacheReadTokens": 0,
+   "promptCacheWriteTokens": 0,
+   "promptCacheSavedMicroUsd": 0
   },
   {
    "requests": 38,
@@ -184,7 +226,10 @@
    "id": "gx10/Qwen3.8-27B",
    "priceSource": "free",
    "value": 2672,
-   "free": true
+   "free": true,
+   "promptCacheReadTokens": 0,
+   "promptCacheWriteTokens": 0,
+   "promptCacheSavedMicroUsd": 0
   },
   {
    "requests": 24,
@@ -196,7 +241,10 @@
    "r402": 0,
    "id": "uni/model-fast",
    "priceSource": "unpriced",
-   "value": 1449
+   "value": 1449,
+   "promptCacheReadTokens": 0,
+   "promptCacheWriteTokens": 0,
+   "promptCacheSavedMicroUsd": 0
   },
   {
    "requests": 7,
@@ -208,7 +256,10 @@
    "r402": 0,
    "id": "uni/ornith-1.5-397b",
    "priceSource": "unpriced",
-   "value": 319
+   "value": 319,
+   "promptCacheReadTokens": 0,
+   "promptCacheWriteTokens": 0,
+   "promptCacheSavedMicroUsd": 0
   },
   {
    "requests": 4,
@@ -220,7 +271,10 @@
    "r402": 0,
    "id": "uni/qwen3.8-27b-uncensored",
    "priceSource": "unpriced",
-   "value": 293
+   "value": 293,
+   "promptCacheReadTokens": 0,
+   "promptCacheWriteTokens": 0,
+   "promptCacheSavedMicroUsd": 0
   },
   {
    "requests": 3,
@@ -232,7 +286,10 @@
    "r402": 0,
    "id": "uni/model-light",
    "priceSource": "unpriced",
-   "value": 233
+   "value": 233,
+   "promptCacheReadTokens": 0,
+   "promptCacheWriteTokens": 0,
+   "promptCacheSavedMicroUsd": 0
   },
   {
    "requests": 3,
@@ -245,7 +302,10 @@
    "id": "uni/qwen3.6-27b",
    "priceSource": "free",
    "value": 201,
-   "free": true
+   "free": true,
+   "promptCacheReadTokens": 0,
+   "promptCacheWriteTokens": 0,
+   "promptCacheSavedMicroUsd": 0
   },
   {
    "requests": 4,
@@ -258,7 +318,10 @@
    "id": "uni/ornith-397b",
    "priceSource": "free",
    "value": 93,
-   "free": true
+   "free": true,
+   "promptCacheReadTokens": 0,
+   "promptCacheWriteTokens": 0,
+   "promptCacheSavedMicroUsd": 0
   },
   {
    "requests": 3,
@@ -270,7 +333,10 @@
    "r402": 0,
    "id": "uni/ornith-1.5-35b",
    "priceSource": "unpriced",
-   "value": 75
+   "value": 75,
+   "promptCacheReadTokens": 0,
+   "promptCacheWriteTokens": 0,
+   "promptCacheSavedMicroUsd": 0
   },
   {
    "requests": 5,
@@ -283,7 +349,10 @@
    "id": "gx10/current",
    "priceSource": "free",
    "value": 69,
-   "free": true
+   "free": true,
+   "promptCacheReadTokens": 0,
+   "promptCacheWriteTokens": 0,
+   "promptCacheSavedMicroUsd": 0
   },
   {
    "requests": 1,
@@ -295,7 +364,10 @@
    "r402": 0,
    "id": "uni/model-heavy",
    "priceSource": "unpriced",
-   "value": 45
+   "value": 45,
+   "promptCacheReadTokens": 0,
+   "promptCacheWriteTokens": 0,
+   "promptCacheSavedMicroUsd": 0
   }
  ],
  "span": 7,

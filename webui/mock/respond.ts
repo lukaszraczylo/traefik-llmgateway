@@ -45,6 +45,15 @@ function validQuery(path: string, query: URLSearchParams): string | null {
   return null
 }
 
+const PROMPT_CACHE_FIELDS = ['promptCacheReadTokens', 'promptCacheWriteTokens', 'promptCacheSavedMicroUsd']
+
+/** The live API returns the prompt-cache fields only with detail=1. */
+function stripDetailOnly(path: string, query: URLSearchParams, body: Obj): Obj {
+  if (path !== MODELS || query.get('detail') || !Array.isArray(body.models)) return body
+  const models = body.models.map((m: Obj) => Object.fromEntries(Object.entries(m).filter(([k]) => !PROMPT_CACHE_FIELDS.includes(k))))
+  return { ...body, models }
+}
+
 function limitRows(path: string, query: URLSearchParams, body: Obj): Obj {
   const limit = Number(query.get('limit') ?? 0)
   if (!(limit > 0)) return body
@@ -79,12 +88,12 @@ function resolveBase(i: RespondInput): { status: number; body: unknown } {
     if (sameRange) {
       let body = shiftTimestamps(i.readFixture(exact.file), CAPTURE_AT, now) as Obj
       if (path === SERIES) body = fitSeriesScopes(body, query)
-      return { status: 200, body: limitRows(path, query, body) }
+      return { status: 200, body: limitRows(path, query, stripDetailOnly(path, query, body)) }
     }
   }
   const near = exact ?? nearestFixture(manifest, path, query)
   if (!near) return notFound('no data for this query')
-  return { status: 200, body: limitRows(path, query, synthesise(near, i.readFixture(near.file) as Obj, query, now)) }
+  return { status: 200, body: limitRows(path, query, stripDetailOnly(path, query, synthesise(near, i.readFixture(near.file) as Obj, query, now))) }
 }
 
 const wobble = (v: number, rng: () => number, cap?: number) => {

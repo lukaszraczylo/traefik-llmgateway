@@ -8,6 +8,7 @@ import { adminFetch, isAuthRejection, messageOf } from '@/lib/api'
 import { formatCompactCount, formatContextWindow, formatLatencyMs, formatModelCostHover } from '@/lib/format'
 import { priceStatus } from '@/lib/models-view'
 import { formatSel } from '@/lib/panel-selection'
+import { formatHitRate, promptCacheHitRate } from '@/lib/prompt-cache'
 import { providerRateStatus, providerSuccessRate } from '@/lib/provider-rate'
 import { seriesUrl } from '@/lib/range'
 import { routersByModel } from '@/lib/router-index'
@@ -151,6 +152,9 @@ function openRouter(name: string): void {
             <DescriptionItem term="Requests"><span class="font-mono tabular-nums">{{ row.ranked === false ? '—' : formatCompactCount(row.requests) }}</span></DescriptionItem>
             <DescriptionItem term="Tokens in / out">
               <span class="font-mono tabular-nums">{{ formatCompactCount(row.tokensIn) }} / {{ formatCompactCount(row.tokensOut) }}</span>
+            </DescriptionItem>
+            <DescriptionItem term="Prompt cache hit rate">
+              <span class="font-mono tabular-nums">{{ formatHitRate(promptCacheHitRate(row)) }}</span>
             </DescriptionItem>
             <DescriptionItem term="Latency p50 / p95">
               <span class="font-mono tabular-nums">{{ row.p50Ms !== undefined ? formatLatencyMs(row.p50Ms) : '—' }} / {{ row.p95Ms !== undefined ? formatLatencyMs(row.p95Ms) : '—' }}</span>

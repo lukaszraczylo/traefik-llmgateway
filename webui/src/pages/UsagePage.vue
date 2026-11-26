@@ -23,6 +23,7 @@ import type { ChartLine } from '@/lib/overview-metrics'
 import { parseScope, scopeBudgetLimits, scopeId, scopeMtdMicros } from '@/lib/scope'
 import { seriesToStacked } from '@/lib/series'
 import { breakdownCsv } from '@/lib/usage-csv'
+import { formatHitRate, promptCacheHitRate, promptCacheSavedMicros } from '@/lib/prompt-cache'
 import { wbColumns } from '@/lib/wb-columns'
 import { useCatalogStore } from '@/stores/catalog'
 import { useDashboardStore } from '@/stores/dashboard'
@@ -164,6 +165,8 @@ interface BreakdownRow {
   share: number | null
   /** Set for a zero-valued model row with detail: what to show instead of a zero cost. */
   zeroText: string | null
+  /** Prompt-cache hit rate; null when unknown or not a model row. */
+  cacheRate: number | null
 }
 
 const columns = computed(() =>
@@ -171,11 +174,12 @@ const columns = computed(() =>
     { key: 'name', header: BREAKDOWN_LABEL[by.value], kind: 'text', sortable: false },
     { key: 'value', header: SPEND_METRIC_LABEL[metric.value], kind: 'number', sortable: false },
     { key: 'share', header: 'Share', kind: 'share', sortable: false },
+    ...(by.value === 'model' && spend.detailAvailable ? [{ key: 'cacheRate', header: 'Prompt cache', kind: 'number' as const, sortable: false }] : []),
   ]),
 )
 
-const sourceRows = computed<{ id: string; value: number; free?: boolean }[]>(() => {
-  if (by.value === 'model') return spend.modelRanking.map((m) => ({ id: m.id, value: m.value, free: m.free }))
+const sourceRows = computed<{ id: string; value: number; free?: boolean; cacheRate?: number | null }[]>(() => {
+  if (by.value === 'model') return spend.modelRanking.map((m) => ({ id: m.id, value: m.value, free: m.free, cacheRate: promptCacheHitRate(m) }))
   if (by.value === 'group') return spend.drilldownRows.map((r) => ({ id: r.id, value: r.values[metric.value] ?? 0 }))
   return users.rows
 })
@@ -189,7 +193,7 @@ const tableRows = computed<BreakdownRow[]>(() => {
   const rows = sourceRows.value.filter((r) => r.value > 0 || by.value === 'model').sort((a, b) => b.value - a.value)
   const sum = rows.reduce((acc, r) => acc + r.value, 0)
   const total = filters.scope === 'all' && totalInRange.value > 0 ? totalInRange.value : sum
-  return rows.map((r) => ({ id: r.id, name: r.id, value: r.value, share: total > 0 ? Math.min(1, r.value / total) : null, zeroText: zeroText(r) }))
+  return rows.map((r) => ({ id: r.id, name: r.id, value: r.value, share: total > 0 ? Math.min(1, r.value / total) : null, zeroText: zeroText(r), cacheRate: r.cacheRate ?? null }))
 })
 
 const tablePage = ref(1)
@@ -254,6 +258,7 @@ const freeTokens = computed(() => ({
 }))
 const comparisons = computed(() => costComparisons(freeUsage.value, catalog.modelsById))
 const rateText = (inP: number | null, outP: number | null): string => (inP === null || outP === null ? 'n/a' : `$${inP} / $${outP} per 1M`)
+const promptCacheSaved = computed(() => promptCacheSavedMicros(spend.modelRanking))
 const cacheSavedMicros = computed(() => spend.modelRanking.reduce((acc, m) => acc + (m.cacheSavedMicroUsd ?? 0), 0))
 const avoidedState = computed<ViewState>(() => {
   if (spend.rankingError && spend.modelRanking.length === 0) return 'error'
@@ -415,6 +420,9 @@ const money = (micros: number | null): string | null => (micros === null ? null 
                 <template v-else>{{ value }}</template>
               </template>
               <template #cell-value="{ value, row }">{{ (row as BreakdownRow).zeroText ?? fmtValue(value) }}</template>
+              <template #cell-cacheRate="{ value }">
+                <span class="font-mono tabular-nums">{{ formatHitRate(value as number | null) }}</span>
+              </template>
               <template #cell-share="{ value, row }">
                 <ShareCell v-if="!(row as BreakdownRow).zeroText" :value="value as number" />
                 <span v-else aria-hidden="true" />
@@ -473,13 +481,22 @@ const money = (micros: number | null): string | null => (micros === null ? null 
                   </li>
                 </ul>
               </div>
-              <StatGroup v-if="cacheEnabled" :columns="1" gap="sm" aria-label="Savings">
+              <StatGroup v-if="cacheEnabled || spend.detailAvailable" :columns="1" gap="sm" aria-label="Savings">
                 <KpiTile
+                  v-if="cacheEnabled"
                   label="Cache savings"
                   size="compact"
                   :value="spend.detailAvailable && cacheSavings.available ? formatCostDisplay(cacheSavedMicros) : 'n/a'"
                   good-when="none"
                   :hint="cacheSavings.note ?? rangeLabel"
+                />
+                <KpiTile
+                  v-if="spend.detailAvailable"
+                  label="Prompt-cache savings"
+                  size="compact"
+                  :value="formatCostDisplay(promptCacheSaved)"
+                  good-when="none"
+                  hint="Paid providers: cached input vs full price"
                 />
               </StatGroup>
               <p v-if="!spend.detailAvailable" class="text-muted-foreground m-0 text-xs">{{ DETAIL_NOTICE }}</p>

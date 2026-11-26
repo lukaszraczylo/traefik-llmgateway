@@ -561,6 +561,10 @@ export interface AdminUsageModelEntry {
   /** Cache hits/savings for this model today — present only when `detail=1` AND AdminFeaturesView.cacheStats is on (admin.go). cacheSavedMicroUsd is micro-USD, same unit as costMicroUsd. */
   cacheHits?: number
   cacheSavedMicroUsd?: number
+  /** Provider prompt-cache usage — `detail=1` only (admin.go). Read/write are input-token counts; saved is micro-USD vs full input price. */
+  promptCacheReadTokens?: number
+  promptCacheWriteTokens?: number
+  promptCacheSavedMicroUsd?: number
   /** Count of 402 (unpriced-refusal) responses for this model today — `detail=1` only (admin.go). */
   r402?: number
   /** This model's billing price source — `detail=1` only (admin.go). */

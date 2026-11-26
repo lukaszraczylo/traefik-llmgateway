@@ -42,6 +42,10 @@ export interface ModelCatalogRow {
   tokensIn: number
   tokensOut: number
   costMicroUsd: number
+  /** Detail-only; undefined when the backend omits it. */
+  promptCacheReadTokens?: number
+  promptCacheWriteTokens?: number
+  promptCacheSavedMicroUsd?: number
   p50Ms?: number
   p95Ms?: number
   attempts: number
@@ -84,6 +88,9 @@ export function buildModelCatalogRows(
         tokensIn: usage?.tokensIn ?? 0,
         tokensOut: usage?.tokensOut ?? 0,
         costMicroUsd: usage?.costMicroUsd ?? 0,
+        promptCacheReadTokens: usage?.promptCacheReadTokens,
+        promptCacheWriteTokens: usage?.promptCacheWriteTokens,
+        promptCacheSavedMicroUsd: usage?.promptCacheSavedMicroUsd,
         p50Ms: perfRow?.p50Ms,
         p95Ms: perfRow?.p95Ms,
         attempts: perfRow?.attempts ?? 0,
