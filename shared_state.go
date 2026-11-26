@@ -30,7 +30,7 @@ const (
 	sharedBreakerOpensTTLFactor = 4
 	// sharedDiscoveryFleetThreshold is the fleet count of instance trips that opens the discovery breaker.
 	sharedDiscoveryFleetThreshold = 1
-	sharedBreakerMaxDoublings   = 30
+	sharedBreakerMaxDoublings     = 30
 	// sharedBreakerKeysPerID counts the keys keys() lists per id: open, fails, opens.
 	sharedBreakerKeysPerID = 3
 
