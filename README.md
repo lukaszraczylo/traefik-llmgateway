@@ -427,6 +427,7 @@ also a construction error, never a panic (`providers.go`, `mcp_a2a.go`,
 | `pathBaseUrls` | `map[string]string` | `{}` | Only for `openai`-type providers. Maps a native passthrough path prefix (such as `/v1/decide`) to a base URL, for requests whose body names no `modelBaseUrls` model. Longest prefix wins, matched on whole path segments. Same URL rules as `modelBaseUrls`. |
 | `passthrough` | `*bool` | `nil` (enabled) | `nil` or `true`: this provider's native passthrough route (`/{name}/...`) stays reachable, unchanged from before this field existed. `false`: the route is disabled — `ServeHTTP` treats it exactly like an unconfigured provider name, falling through to the ordinary unknown-route 404 without even reaching authentication. Does not affect the MCP/A2A target proxy, which has its own routing prefix. |
 | `requestTimeout` | `string` (Go duration) | Inherits the top-level `requestTimeout` (`5m` if that is also unset) | Overrides the global request timeout for this provider alone, including its native passthrough route — see [Request timeout](#request-timeout). An explicit override always wins over the global default. Empty inherits; a value that fails to parse, or parses to zero or a negative duration, is a construction error. |
+| `promptCache` | `*PromptCacheConfig` | `nil` (off) | Opt-in prompt-caching body changes. `inject: true` (`anthropic` type only) adds `cache_control` breakpoints. `key: true` (`openai` type only) adds a hashed `prompt_cache_key`. A wrong provider type is a construction error that names the provider. See [Prompt caching](#prompt-caching). |
 
 ### `GroupConfig`
 
@@ -790,6 +791,8 @@ gates only the background probe sweep.
 |---|---|---|
 | `inputPerM` | `float64` | USD per 1,000,000 input/prompt tokens. |
 | `outputPerM` | `float64` | USD per 1,000,000 output/completion tokens. |
+| `cachedInputPerM` | `*float64` | Optional. USD per 1,000,000 prompt tokens read from the provider prompt cache. Must be 0 or more. Absent: the `inputPerM` rate applies. See [Prompt caching](#prompt-caching). |
+| `cacheWritePerM` | `*float64` | Optional. USD per 1,000,000 prompt tokens written to the provider prompt cache (Anthropic). Must be 0 or more. Absent: the `inputPerM` rate applies. |
 
 ### `ModelMetaConfig` (a `modelMeta` entry)
 
@@ -2027,6 +2030,67 @@ cached bodies for the same request.
   rate-limited) and never fails the request; the upstream call still
   happens and the client still gets a correct answer.
 
+## Prompt caching
+
+Agent traffic repeats about 95% of the prompt on every turn. Only the model server can reuse that prefix. The gateway cannot cache it. The gateway does three things instead. It measures cache use, it prices it, and (opt-in) it helps the server hit its own cache.
+
+### Measured fields
+
+The gateway reads cache tokens from the upstream usage object. This works on stream, non-stream and passthrough paths.
+
+| Provider | Cache-read field | Cache-write field |
+|---|---|---|
+| OpenAI-compatible | `usage.prompt_tokens_details.cached_tokens` | none |
+| DeepSeek | `usage.prompt_cache_hit_tokens` | none |
+| Anthropic | `usage.cache_read_input_tokens` | `usage.cache_creation_input_tokens` |
+| Gemini | `usageMetadata.cachedContentTokenCount` | none |
+
+If a provider sends both OpenAI and DeepSeek fields, the larger value wins. The gateway does not add them.
+
+Cached tokens still count toward the day and month token limits. Only the per-minute window excludes cached reads.
+
+### Cost
+
+Set `cachedInputPerM` and `cacheWritePerM` under `pricing.<model>` (USD per million tokens, 0 or more, both optional). The built-in table carries LiteLLM cache prices. A missing cache price falls back to `inputPerM`. The gateway computes the cost as:
+
+```
+cost = (prompt - cached - cacheWrite) * inputPerM
+     + cached * cachedInputPerM
+     + cacheWrite * cacheWritePerM
+     + completion * outputPerM
+```
+
+The gateway clamps `cached` and `cacheWrite` so the cost never goes below zero or above the all-uncached cost.
+
+Release note: cost now drops for cached traffic wherever a cached price is known. This corrects a prior over-count. Cost budgets (`costPerDayUSD`, `costPerMonthUSD`) therefore consume more slowly for cached traffic.
+
+### Observability
+
+- `/metrics`: `llmgateway_prompt_cache_tokens_total{provider,model,kind}`, where `kind` is `read`, `write` or `uncached`. The counter is per instance. See [Metrics](#metrics).
+- Admin: Redis-shared counters back the cache totals. `GET /admin/api/usage/models?detail=1` adds `promptCacheReadTokens`, `promptCacheWriteTokens` and `promptCacheSavedMicroUsd` to each row. Rows omit these fields without `detail`.
+- Dashboard: a "Prompt cache" hit-rate column (read tokens divided by input tokens) on Usage by model and in the model panel, and a "Prompt-cache savings" tile.
+
+### Options
+
+Both options sit under `providers.<name>.promptCache`. Both default to off. With no option set, the gateway sends request bodies upstream unchanged.
+
+```yaml
+providers:
+  anthropic:
+    type: anthropic
+    apiKey: env:ANTHROPIC_API_KEY
+    promptCache: {inject: true}
+  openai:
+    type: openai
+    apiKey: env:OPENAI_API_KEY
+    promptCache: {key: true}
+```
+
+- `inject: true` (`anthropic` type only). The gateway adds up to 4 rolling `cache_control: {type: ephemeral}` breakpoints: the last tool, the last system block, and the last content block of the second-to-last and last user messages. If the request already carries any `cache_control`, the gateway adds none. It applies to translated chat requests and to `/v1/messages`.
+- `key: true` (`openai` type only). When the client sent no `prompt_cache_key`, the gateway sets one: a 32-character hex hash of the caller and the conversation id. A client value, even an empty one, always wins. The key never contains a raw id or prompt text. It does not change the response-cache key.
+
+The chat-to-Anthropic translation always keeps a `cache_control` marker that the client put on a system message.
+
 ## Provider health (discovery circuit breaker)
 
 A per-provider, in-memory, three-state circuit breaker (`closed` →
@@ -2982,6 +3046,7 @@ Page details:
 
 - **Usage & spend**: a Cost avoided card prices the free-tier tokens (input and output) against two reference models. The first is MiniMax M3.1 Flash. The card uses the gateway catalog price when the catalog has one, else a built-in list price of 0.15 USD input and 0.60 USD output per million tokens. The second is the latest priced `anthropic/claude-sonnet-*` model in the catalog. It shows `n/a` when the catalog has none (`webui/src/lib/cost-avoided.ts`).
 - **Users & groups**: the user and group detail panels show a Tokens/min meter next to Requests/min. The meter reads `tokensPerMinute` from `GET /admin/api/usage`, the live fixed-window count per scope.
+- **Usage & spend** also shows a "Prompt cache" hit-rate column on Usage by model and a "Prompt-cache savings" tile. The model panel shows the same hit rate. See [Prompt caching](#prompt-caching).
 - **Models & providers**: the model panel shows Vision as `yes`, `no` or `unknown`, from `modelMeta.vision`.
 - **Smart routers**: the router panel shows the decision model settings, the heuristic-by-model tier grid and the outcome counts. See [Decision model assist](#decision-model-assist).
 
@@ -3148,6 +3213,9 @@ plugin's config.
     `llmgateway_router_escalations_total{router,from_tier,to_tier}` —
     per-process counters for [smart routers](#smart-routers). They
     appear after the first routed request.
+  - `llmgateway_prompt_cache_tokens_total{provider,model,kind}` — prompt
+    tokens by `kind`: `read`, `write` or `uncached`. Per instance. See
+    [Prompt caching](#prompt-caching).
   - `llmgateway_provider_healthy{provider}` — `1`/`0` gauge from the
     discovery circuit breaker (`healthState` in the admin API); see
     [Provider health](#provider-health-discovery-circuit-breaker).

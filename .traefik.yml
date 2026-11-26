@@ -18,6 +18,8 @@ testData:
     openai:
       type: openai
       apiKey: test-key
+      promptCache:
+        key: true
       models:
         - gpt-test
         - gpt-test-large

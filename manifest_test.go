@@ -32,7 +32,7 @@ func testDataConfig(t *testing.T) *Config {
 	// mirror blob below must appear in the raw manifest bytes.
 	mirrorTokens := []string{
 		"providers", "groups", "users", "smartRouters", // top-level testData keys
-		"openai", "type: openai", "test-key", "gpt-test", "gpt-test-large", // providers.openai
+		"openai", "type: openai", "promptCache:", "key: true", "test-key", "gpt-test", "gpt-test-large", // providers.openai
 		"auto", "classifier: v2", "name: small", "name: large", "minScore: 400", // smartRouters.auto
 		"[openai/gpt-test]", "[openai/gpt-test-large]", // smartRouters.auto tier models
 		"decider", "decider-test", "pathBaseUrls", "/v1/decide: http://decider.example.invalid", // providers.decider
@@ -54,7 +54,7 @@ func testDataConfig(t *testing.T) *Config {
 
 	cfg := CreateConfig()
 	// mirror of testData, kept in sync by this test living next to the manifest
-	blob := `{"providers":{"openai":{"type":"openai","apiKey":"test-key","models":["gpt-test","gpt-test-large"]},
+	blob := `{"providers":{"openai":{"type":"openai","apiKey":"test-key","promptCache":{"key":true},"models":["gpt-test","gpt-test-large"]},
 	    "decider":{"type":"openai","apiKey":"test-key","models":["decider-test"],"pathBaseUrls":{"/v1/decide":"http://decider.example.invalid"}}},
 	  "smartRouters":{"auto":{"classifier":"v2","decision":{"provider":"decider","mode":"shadow"},"tiers":[
 	    {"name":"small","minScore":0,"models":["openai/gpt-test"]},
