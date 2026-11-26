@@ -17,9 +17,9 @@ import (
 )
 
 const (
-	refreshIDs        = 19
-	refreshCoresPerGW = 4.0 // gateways per pod, each refreshing once a second
-	refreshTarget     = 400 * time.Millisecond
+	refreshIDs       = 19
+	refreshGWsPerPod = 4.0 // gateways per pod, each refreshing once a second
+	refreshTarget    = 400 * time.Millisecond
 )
 
 // refreshHook is the interpreted-side half of -mode refresh: it wires the loop as wireSharedState does.
@@ -206,7 +206,7 @@ func summarize(label string, ss []sample) {
 	by, _, _ := median(col(func(s sample) float64 { return s.bytes }))
 	al, _, _ := median(col(func(s sample) float64 { return s.allocs }))
 	fmt.Printf("%-24s n=%d  median %12.0f ns/op  [%.0f..%.0f]  %9.0f B/op  %6.0f allocs/op  = %.4f cores/pod\n",
-		label, len(ss), ns, nlo, nhi, by, al, ns*refreshCoresPerGW/1e9)
+		label, len(ss), ns, nlo, nhi, by, al, ns*refreshGWsPerPod/1e9)
 }
 
 // copyPlugin copies the plugin into dir/src/<module> and writes the hook.
