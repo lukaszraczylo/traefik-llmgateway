@@ -34,22 +34,29 @@ type sharedPrimitive interface {
 	apply(vals []int64)
 }
 
+// sharedFlusher is a primitive that accumulates writes locally and sends them from the loop.
+type sharedFlusher interface {
+	// flush writes the accumulated deltas; on error it keeps them for the next tick.
+	flush(l *sharedStateLoop, now time.Time) error
+	pending() bool
+}
+
 // sharedStateLoop refreshes every registered primitive from the store in the background, so request paths read local copies only.
 type sharedStateLoop struct {
 	store counterStore
 	nowFn func() time.Time
 	logf  func(string, ...any)
 	// lossy runs best-effort writes and may drop them under pressure.
-	lossy func(func())
-	// sure runs writes that must not be dropped.
-	sure     func(func())
+	lossy    func(func())
 	lastUse  time.Time
 	stop     chan struct{}
 	done     chan struct{}
 	prims    []sharedPrimitive
+	flushers []sharedFlusher
 	every    time.Duration
 	failures int
 	mu       sync.Mutex
+	flushMu  sync.Mutex
 	running  bool
 	closed   bool
 }
@@ -60,18 +67,17 @@ func newSharedStateLoop(store counterStore, lossy func(func()), logf func(string
 		logf = func(string, ...any) {}
 	}
 	l := &sharedStateLoop{store: store, nowFn: time.Now, logf: logf, lossy: lossy, every: sharedStateRefreshInterval}
-	l.sure = func(f func()) {
-		go func() { //nolint:gosec // G118: in-flight writes must never drop; bounded by request concurrency
-			defer func() {
-				if rec := recover(); rec != nil {
-					logf("shared state write panicked: %v", rec)
-				}
-			}()
-			f()
-		}()
-	}
 	if l.lossy == nil {
-		l.lossy = l.sure
+		l.lossy = func(f func()) {
+			go func() { //nolint:gosec // G118: best-effort write; bounded by the caller's request rate
+				defer func() {
+					if rec := recover(); rec != nil {
+						logf("shared state write panicked: %v", rec)
+					}
+				}()
+				f()
+			}()
+		}
 	}
 	return l
 }
@@ -79,6 +85,39 @@ func newSharedStateLoop(store counterStore, lossy func(func()), logf func(string
 // log forwards to logf; calling the func field directly with two or more variadic args panics under yaegi v0.16.1.
 func (l *sharedStateLoop) log(format string, args ...any) {
 	l.logf(format, args...)
+}
+
+func (l *sharedStateLoop) registerFlusher(f sharedFlusher) {
+	l.mu.Lock()
+	l.flushers = append(l.flushers, f)
+	l.mu.Unlock()
+}
+
+// flush sends every flusher's accumulated deltas. A failed flusher keeps its deltas for the next call.
+func (l *sharedStateLoop) flush() {
+	// One flush at a time: concurrent ones would send the same deltas twice.
+	l.flushMu.Lock()
+	defer l.flushMu.Unlock()
+	l.mu.Lock()
+	fl := make([]sharedFlusher, len(l.flushers))
+	copy(fl, l.flushers)
+	l.mu.Unlock()
+	now := l.nowFn()
+	for _, f := range fl {
+		if err := f.flush(l, now); err != nil {
+			l.log("shared state flush failed: %v", err)
+		}
+	}
+}
+
+// hasPending reports whether any flusher holds unsent deltas. The caller holds l.mu.
+func (l *sharedStateLoop) hasPending() bool {
+	for _, f := range l.flushers {
+		if f.pending() {
+			return true
+		}
+	}
+	return false
 }
 
 func (l *sharedStateLoop) register(p sharedPrimitive) {
@@ -134,7 +173,7 @@ func (l *sharedStateLoop) run(stop, done chan struct{}) {
 			return
 		case <-t.C:
 			l.mu.Lock()
-			idle := l.nowFn().Sub(l.lastUse) > sharedStateIdleStop
+			idle := l.nowFn().Sub(l.lastUse) > sharedStateIdleStop && !l.hasPending()
 			if idle {
 				l.running = false
 			}
@@ -154,12 +193,13 @@ func (l *sharedStateLoop) close() {
 		return
 	}
 	l.mu.Lock()
-	defer l.mu.Unlock()
 	l.closed = true
 	if l.running {
 		l.running = false
 		close(l.stop)
 	}
+	l.mu.Unlock()
+	l.flush()
 }
 
 func (l *sharedStateLoop) snapshot() []sharedPrimitive {
@@ -177,8 +217,9 @@ func (l *sharedStateLoop) clearAll() {
 	}
 }
 
-// refresh reads every primitive's keys in chunked getMulti calls and hands each its values.
+// refresh flushes pending deltas, then reads every primitive's keys in chunked getMulti calls and hands each its values.
 func (l *sharedStateLoop) refresh() {
+	l.flush()
 	prims := l.snapshot()
 	now := l.nowFn()
 	var all []string
@@ -283,6 +324,7 @@ type sharedBreaker struct {
 	local      map[string]*breakerLocal
 	openUntil  map[string]int64
 	failsSeen  map[string]int64
+	failAcc    map[string]int64
 	kind       string
 	ids        []string
 	openBase   time.Duration
@@ -297,11 +339,12 @@ func newSharedBreaker(loop *sharedStateLoop, kind string, ids []string, threshol
 	b := &sharedBreaker{
 		loop: loop, nowFn: time.Now, kind: kind, ids: ids,
 		threshold: threshold, openBase: openBase, openMax: openMax, failWindow: failWindow,
-		local: make(map[string]*breakerLocal), openUntil: make(map[string]int64), failsSeen: make(map[string]int64),
+		local: make(map[string]*breakerLocal), openUntil: make(map[string]int64), failsSeen: make(map[string]int64), failAcc: make(map[string]int64),
 	}
 	if loop != nil {
 		b.nowFn = loop.nowFn
 		loop.register(b)
+		loop.registerFlusher(b)
 	}
 	return b
 }
@@ -350,16 +393,15 @@ func (b *sharedBreaker) isOpen(id string) bool {
 	return b.openUntil[id] > now.UnixMilli()
 }
 
-// recordFailure updates local state and, in the background, the shared failure count.
+// recordFailure updates local state and queues the failure for the loop to flush.
 func (b *sharedBreaker) recordFailure(id string) {
 	b.mu.Lock()
 	b.recordFailureLocal(b.localFor(id), b.nowFn())
-	b.mu.Unlock()
-	if b.loop == nil {
-		return
+	if b.loop != nil {
+		b.failAcc[id]++
 	}
+	b.mu.Unlock()
 	b.loop.touch()
-	b.loop.lossy(func() { b.shareFailure(id) })
 }
 
 // recordFailureLocal is requestHealthTracker.record's failure arm with this breaker's tunables.
@@ -387,13 +429,55 @@ func (b *sharedBreaker) recordFailureLocal(st *breakerLocal, now time.Time) {
 	}
 }
 
-// shareFailure counts one failure fleet-wide; only the instance that reaches the threshold opens the breaker.
-func (b *sharedBreaker) shareFailure(id string) {
-	l := b.loop
-	fails, ok := l.incrAndGet(counterIncr{key: sharedBreakerKey(b.kind, id, "fails"), delta: 1, ttl: b.failWindow, enforceTTL: b.failWindow})
-	if !ok || fails != int64(b.threshold) {
-		return
+func (b *sharedBreaker) pending() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return len(b.failAcc) > 0
+}
+
+// flush adds the queued failures to the fleet counts. The instance whose flush takes a count from below the
+// threshold to at or above it is the single opener.
+func (b *sharedBreaker) flush(l *sharedStateLoop, _ time.Time) error {
+	b.mu.Lock()
+	ids := make([]string, 0, len(b.failAcc))
+	deltas := make([]int64, 0, len(b.failAcc))
+	for id, n := range b.failAcc {
+		ids = append(ids, id)
+		deltas = append(deltas, n)
 	}
+	b.mu.Unlock()
+	if len(ids) == 0 {
+		return nil
+	}
+	entries := make([]counterIncr, len(ids))
+	for i, id := range ids {
+		entries[i] = counterIncr{key: sharedBreakerKey(b.kind, id, "fails"), delta: deltas[i], ttl: b.failWindow, enforceTTL: b.failWindow}
+	}
+	post, _, err := l.store.incrAndGetMulti(entries, nil)
+	if err != nil {
+		return err
+	}
+	if len(post) != len(ids) {
+		return nil
+	}
+	b.mu.Lock()
+	for i, id := range ids {
+		if left := b.failAcc[id] - deltas[i]; left > 0 {
+			b.failAcc[id] = left
+		} else {
+			delete(b.failAcc, id)
+		}
+	}
+	b.mu.Unlock()
+	for i, id := range ids {
+		if post[i]-deltas[i] < int64(b.threshold) && post[i] >= int64(b.threshold) {
+			b.trip(l, id)
+		}
+	}
+	return nil
+}
+
+func (b *sharedBreaker) trip(l *sharedStateLoop, id string) {
 	opensTTL := b.openMax * sharedBreakerOpensTTLFactor
 	opens, ok := l.incrAndGet(counterIncr{key: sharedBreakerKey(b.kind, id, "opens"), delta: 1, ttl: opensTTL, enforceTTL: opensTTL})
 	if !ok {
@@ -428,6 +512,7 @@ func (b *sharedBreaker) recordSuccess(id string) {
 	b.mu.Lock()
 	st := b.localFor(id)
 	dirty := st.consecutiveFailures > 0 || b.failsSeen[id] > 0
+	delete(b.failAcc, id)
 	st.open = false
 	st.consecutiveFailures = 0
 	st.backoff = 0
@@ -445,12 +530,20 @@ func (b *sharedBreaker) recordSuccess(id string) {
 	b.mu.Unlock()
 }
 
+// infDelta is one counter's unflushed increment.
+type infDelta struct {
+	key   string
+	epoch int64
+	n     int64
+}
+
 // sharedInflight counts in-flight requests per provider fleet-wide with epoch-bucketed started/finished counters, so a crashed pod's leak ages out.
 type sharedInflight struct {
 	loop   *sharedStateLoop
 	nowFn  func() time.Time
 	counts map[string]int
 	limits map[string]int
+	acc    map[string]*infDelta
 	ids    []string
 	epochs int
 	mu     sync.Mutex
@@ -462,10 +555,11 @@ func newSharedInflight(loop *sharedStateLoop, ids []string, maxRequestTimeout ti
 	if m < 1 {
 		m = 1
 	}
-	s := &sharedInflight{loop: loop, nowFn: time.Now, ids: ids, epochs: m, counts: make(map[string]int), limits: make(map[string]int)}
+	s := &sharedInflight{loop: loop, nowFn: time.Now, ids: ids, epochs: m, counts: make(map[string]int), limits: make(map[string]int), acc: make(map[string]*infDelta)}
 	if loop != nil {
 		s.nowFn = loop.nowFn
 		loop.register(s)
+		loop.registerFlusher(s)
 	}
 	return s
 }
@@ -517,25 +611,70 @@ func (s *sharedInflight) apply(vals []int64) {
 	}
 }
 
-// begin records a started request and returns the func that records its end, once. Writes are never dropped.
+// begin records a started request and returns the func that records its end, once.
+// It only adds to a local accumulator; the loop flushes it.
 func (s *sharedInflight) begin(provider string) func() {
 	if s.loop == nil {
 		return func() {}
 	}
 	s.loop.touch()
 	epoch := s.epochOf(s.nowFn())
-	ttl := s.ttl()
-	s.loop.sure(func() {
-		s.loop.write([]counterIncr{{key: s.epochKey(provider, epoch, "s"), delta: 1, ttl: ttl, enforceTTL: ttl}})
-	})
+	s.add(provider, epoch, "s")
 	var once sync.Once
 	return func() {
-		once.Do(func() {
-			s.loop.sure(func() {
-				s.loop.write([]counterIncr{{key: s.epochKey(provider, epoch, "f"), delta: 1, ttl: ttl, enforceTTL: ttl}})
-			})
-		})
+		once.Do(func() { s.add(provider, epoch, "f") })
 	}
+}
+
+func (s *sharedInflight) add(provider string, epoch int64, kind string) {
+	key := s.epochKey(provider, epoch, kind)
+	s.mu.Lock()
+	d, ok := s.acc[key]
+	if !ok {
+		d = &infDelta{key: key, epoch: epoch}
+		s.acc[key] = d
+	}
+	d.n++
+	s.mu.Unlock()
+}
+
+func (s *sharedInflight) pending() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.acc) > 0
+}
+
+// flush writes every non-zero delta in one incrMulti. Epochs outside the read window are discarded.
+// On error the deltas stay and later begin/end calls add on top of them.
+func (s *sharedInflight) flush(l *sharedStateLoop, now time.Time) error {
+	oldest := s.epochOf(now) - int64(s.epochs)
+	s.mu.Lock()
+	entries := make([]counterIncr, 0, len(s.acc))
+	for k, d := range s.acc {
+		if d.epoch <= oldest {
+			delete(s.acc, k)
+		} else if d.n > 0 {
+			entries = append(entries, counterIncr{key: d.key, delta: d.n, ttl: s.ttl(), enforceTTL: s.ttl()})
+		}
+	}
+	s.mu.Unlock()
+	if len(entries) == 0 {
+		return nil
+	}
+	if _, err := l.store.incrMulti(entries); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	for _, e := range entries {
+		if d, ok := s.acc[e.key]; ok {
+			d.n -= e.delta
+			if d.n <= 0 {
+				delete(s.acc, e.key)
+			}
+		}
+	}
+	s.mu.Unlock()
+	return nil
 }
 
 // shared returns the fleet-wide in-flight count from the last refresh.

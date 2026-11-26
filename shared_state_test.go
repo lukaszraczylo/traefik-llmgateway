@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -30,10 +31,11 @@ func (c *sharedClock) advance(d time.Duration) {
 // sharedRecStore wraps a counterStore, logging every key touched and optionally failing reads.
 type sharedRecStore struct {
 	counterStore
-	failGet error
-	reads   []string
-	writes  []counterIncr
-	mu      sync.Mutex
+	failGet  error
+	failIncr error
+	reads    []string
+	writes   []counterIncr
+	mu       sync.Mutex
 }
 
 func (r *sharedRecStore) getMulti(keys []string) ([]int64, error) {
@@ -49,6 +51,11 @@ func (r *sharedRecStore) getMulti(keys []string) ([]int64, error) {
 
 func (r *sharedRecStore) incrMulti(e []counterIncr) ([]int64, error) {
 	r.mu.Lock()
+	if r.failIncr != nil {
+		err := r.failIncr
+		r.mu.Unlock()
+		return nil, err
+	}
 	r.writes = append(r.writes, e...)
 	r.mu.Unlock()
 	return r.counterStore.incrMulti(e)
@@ -56,6 +63,11 @@ func (r *sharedRecStore) incrMulti(e []counterIncr) ([]int64, error) {
 
 func (r *sharedRecStore) incrAndGetMulti(e []counterIncr, reads []string) ([]int64, []int64, error) {
 	r.mu.Lock()
+	if r.failIncr != nil {
+		err := r.failIncr
+		r.mu.Unlock()
+		return nil, nil, err
+	}
 	r.writes = append(r.writes, e...)
 	r.mu.Unlock()
 	return r.counterStore.incrAndGetMulti(e, reads)
@@ -71,6 +83,12 @@ func (r *sharedRecStore) writesTo(suffix string) int {
 		}
 	}
 	return n
+}
+
+func (r *sharedRecStore) setFailIncr(err error) {
+	r.mu.Lock()
+	r.failIncr = err
+	r.mu.Unlock()
 }
 
 func (r *sharedRecStore) setFail(err error) {
@@ -91,7 +109,7 @@ func sharedTestLoop(store counterStore, clk *sharedClock) *sharedStateLoop {
 	l := newSharedStateLoop(store, nil, nil)
 	l.nowFn = clk.now
 	sync := func(f func()) { f() }
-	l.lossy, l.sure = sync, sync
+	l.lossy = sync
 	// Tests drive refresh by hand; closed keeps touch from starting the goroutine.
 	l.closed = true
 	return l
@@ -114,11 +132,13 @@ func TestSharedBreakerTripsFleetWide(t *testing.T) {
 
 	a.recordFailure("p")
 	a.recordFailure("p")
+	la.refresh()
 	lc.refresh()
 	if c.isOpen("p") {
 		t.Fatal("C open after 2 fleet failures, want closed")
 	}
 	b.recordFailure("p")
+	lb.refresh()
 	if c.isOpen("p") {
 		t.Fatal("C open before refresh, isOpen must not read the store")
 	}
@@ -136,9 +156,15 @@ func TestSharedBreakerOnlyOneOpener(t *testing.T) {
 	store, clk := sharedTestEnv()
 	loops := []*sharedStateLoop{sharedTestLoop(store, clk), sharedTestLoop(store, clk)}
 	brks := []*sharedBreaker{testBreaker(loops[0]), testBreaker(loops[1])}
-	for i := 0; i < 5; i++ {
-		brks[i%2].recordFailure("p")
-	}
+	// A flushes 2 (0 to 2), B flushes 2 (2 to 4, crosses 3), A flushes 1 more (reset after the trip, 1 to 2).
+	brks[0].recordFailure("p")
+	brks[0].recordFailure("p")
+	loops[0].refresh()
+	brks[1].recordFailure("p")
+	brks[1].recordFailure("p")
+	loops[1].refresh()
+	brks[0].recordFailure("p")
+	loops[0].refresh()
 	if got := store.writesTo(":open"); got != 1 {
 		t.Errorf("writes to open = %d, want 1", got)
 	}
@@ -154,6 +180,7 @@ func TestSharedBreakerSuccessResets(t *testing.T) {
 
 	a.recordFailure("p")
 	a.recordFailure("p")
+	la.refresh()
 	lb.refresh()
 	b.recordSuccess("p")
 	// A's own local count stays; the fleet count is what C reads.
@@ -161,11 +188,13 @@ func TestSharedBreakerSuccessResets(t *testing.T) {
 	a2 := testBreaker(sharedTestLoop(store, clk))
 	a2.recordFailure("p")
 	a2.recordFailure("p")
+	a2.loop.refresh()
 	lc.refresh()
 	if c.isOpen("p") {
 		t.Fatal("C open after success reset then 2 failures, want closed")
 	}
 	a2.recordFailure("p")
+	a2.loop.refresh()
 	lc.refresh()
 	if !c.isOpen("p") {
 		t.Fatal("C closed after 3 failures since the reset, want open")
@@ -198,6 +227,7 @@ func TestSharedBreakerBackoffDoubles(t *testing.T) {
 		for i := 0; i < 3; i++ {
 			b.recordFailure("p")
 		}
+		l.refresh()
 	}
 	want := []time.Duration{testBrkOpenBase, 2 * testBrkOpenBase, 4 * testBrkOpenBase, 8 * testBrkOpenBase, testBrkOpenMax, testBrkOpenMax}
 	for i, w := range want {
@@ -260,19 +290,25 @@ func inflightEnv(maxReq time.Duration) (*sharedRecStore, *sharedClock, func() (*
 }
 
 func TestSharedInflightSums(t *testing.T) {
-	_, _, mk := inflightEnv(10 * time.Minute)
-	_, a := mk()
-	_, b := mk()
+	store, _, mk := inflightEnv(10 * time.Minute)
+	la, a := mk()
+	lb, b := mk()
 	lc, c := mk()
 	end1 := a.begin("p")
 	a.begin("p")
 	b.begin("p")
+	if got := store.writesTo(":s"); got != 0 {
+		t.Fatalf("begin wrote %d entries before a flush, want 0", got)
+	}
+	la.refresh()
+	lb.refresh()
 	lc.refresh()
 	if got := c.shared("p"); got != 3 {
 		t.Fatalf("shared = %d, want 3", got)
 	}
 	end1()
 	end1() // a second end must not double-count
+	la.refresh()
 	lc.refresh()
 	if got := c.shared("p"); got != 2 {
 		t.Fatalf("shared after one end = %d, want 2", got)
@@ -287,9 +323,10 @@ func TestSharedInflightSums(t *testing.T) {
 
 func TestSharedInflightCrashLeakExpires(t *testing.T) {
 	_, clk, mk := inflightEnv(10 * time.Minute)
-	_, a := mk()
+	la, a := mk()
 	lc, c := mk()
 	a.begin("p") // never ended: the pod crashed
+	la.refresh()
 	lc.refresh()
 	if got := c.shared("p"); got != 1 {
 		t.Fatalf("shared = %d, want 1", got)
@@ -303,11 +340,13 @@ func TestSharedInflightCrashLeakExpires(t *testing.T) {
 
 func TestSharedInflightEndInLaterEpochCreditsStartEpoch(t *testing.T) {
 	_, clk, mk := inflightEnv(10 * time.Minute)
-	_, a := mk()
+	la, a := mk()
 	lc, c := mk()
 	end := a.begin("p")
+	la.refresh()
 	clk.advance(sharedInflightEpoch + time.Second)
 	end()
+	la.refresh()
 	lc.refresh()
 	if got := c.shared("p"); got != 0 {
 		t.Fatalf("shared = %d, want 0 (end credited to the start epoch)", got)
@@ -359,6 +398,7 @@ func TestSharedStateStoreErrorFallsBackLocal(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		a.recordFailure("p")
 	}
+	la.refresh()
 	lc.refresh()
 	if !c.isOpen("p") {
 		t.Fatal("setup: C should see the shared open")
@@ -580,4 +620,120 @@ func TestSharedStateIDs(t *testing.T) {
 	if got != "a,b,c" {
 		t.Errorf("ids = %q, want a,b,c", got)
 	}
+}
+
+func TestSharedInflightFlushErrorRetains(t *testing.T) {
+	store, _, mk := inflightEnv(10 * time.Minute)
+	la, a := mk()
+	lc, c := mk()
+	end := a.begin("p")
+	a.begin("p")
+	a.begin("p")
+	end()
+	store.setFailIncr(errors.New("redis down"))
+	la.refresh()
+	a.begin("p") // lands on top of the retained deltas
+	la.refresh()
+	lc.refresh()
+	if got := c.shared("p"); got != 0 {
+		t.Fatalf("shared during outage = %d, want 0", got)
+	}
+	store.setFailIncr(nil)
+	la.refresh()
+	lc.refresh()
+	if got := c.shared("p"); got != 3 {
+		t.Fatalf("shared after recovery = %d, want 3 (4 started, 1 finished)", got)
+	}
+	if got := store.writesTo(":s"); got != 1 {
+		t.Errorf("start-counter writes = %d, want 1 summed delta", got)
+	}
+	for _, w := range store.writes {
+		if strings.HasSuffix(w.key, ":s") && w.delta != 4 {
+			t.Errorf("start delta = %d, want 4", w.delta)
+		}
+	}
+	la.refresh()
+	if got := store.writesTo(":s"); got != 1 {
+		t.Errorf("a flushed delta was written again: %d writes", got)
+	}
+}
+
+func TestSharedInflightDropsDeadEpochDeltas(t *testing.T) {
+	store, clk, mk := inflightEnv(10 * time.Minute)
+	la, a := mk()
+	a.begin("p")
+	store.setFailIncr(errors.New("redis down"))
+	clk.advance(time.Duration(a.epochs+1) * sharedInflightEpoch)
+	la.refresh()
+	store.setFailIncr(nil)
+	la.refresh()
+	if got := store.writesTo(":s"); got != 0 {
+		t.Errorf("wrote %d counters for an epoch past its TTL, want 0", got)
+	}
+	a.mu.Lock()
+	n := len(a.acc)
+	a.mu.Unlock()
+	if n != 0 {
+		t.Errorf("accumulator holds %d dead entries", n)
+	}
+}
+
+func TestSharedInflightNoGoroutinePerRequest(t *testing.T) {
+	store, _, mk := inflightEnv(10 * time.Minute)
+	_, a := mk()
+	before := runtime.NumGoroutine()
+	for i := 0; i < 1000; i++ {
+		a.begin("p")()
+	}
+	if after := runtime.NumGoroutine(); after > before+1 {
+		t.Errorf("goroutines %d -> %d across 1000 begin/end", before, after)
+	}
+	if len(store.writes) != 0 {
+		t.Errorf("begin/end wrote %d entries to the store, want 0", len(store.writes))
+	}
+}
+
+func TestSharedStateCloseFlushes(t *testing.T) {
+	store, clk := sharedTestEnv()
+	l := newSharedStateLoop(store, nil, nil)
+	l.nowFn = clk.now
+	l.every = time.Hour
+	in := newSharedInflight(l, []string{"p"}, time.Minute)
+	b := testBreaker(l)
+	b.recordFailure("p")
+	in.begin("p")
+	l.close()
+	if got := store.writesTo(":s"); got != 1 {
+		t.Errorf("close flushed %d in-flight writes, want 1", got)
+	}
+	if got := store.writesTo(":fails"); got != 1 {
+		t.Errorf("close flushed %d failure writes, want 1", got)
+	}
+}
+
+func TestSharedStateNoIdleStopWithPendingDeltas(t *testing.T) {
+	store, clk := sharedTestEnv()
+	l := newSharedStateLoop(store, nil, nil)
+	l.nowFn = clk.now
+	l.every = 5 * time.Millisecond
+	in := newSharedInflight(l, []string{"p"}, 20*time.Minute)
+	store.setFailIncr(errors.New("redis down"))
+	in.begin("p")
+	clk.advance(sharedStateIdleStop + time.Second)
+	time.Sleep(50 * time.Millisecond)
+	l.mu.Lock()
+	running := l.running
+	l.mu.Unlock()
+	if !running {
+		t.Fatal("loop idle-stopped with unflushed deltas")
+	}
+	store.setFailIncr(nil)
+	deadline := time.Now().Add(2 * time.Second)
+	for store.writesTo(":s") == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if store.writesTo(":s") != 1 {
+		t.Error("pending delta never flushed")
+	}
+	l.close()
 }
