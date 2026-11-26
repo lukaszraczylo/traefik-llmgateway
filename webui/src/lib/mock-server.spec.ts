@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import manifestJson from '../../mock/manifest.json'
 import { matchFixture, type Fixture } from '../../mock/match'
-import { respond } from '../../mock/respond'
+import { isDetail, respond, stripDetailOnly } from '../../mock/respond'
 import { applyScenarios, hotUserIds, SCENARIOS, scenarioDelayMs, parseScenarios } from '../../mock/scenarios'
 import { bucketsFor, CAPTURE_AT, shiftTimestamps } from '../../mock/time-shift'
 
@@ -386,5 +386,48 @@ describe('huge scenario consistency', () => {
     expect(prov.series.map((s: Any) => s.scope)).toEqual(['provider:alibaba-2'])
     expect(model.series.map((s: Any) => s.scope)).toEqual(['model:alibaba-3/deepseek-v4-flash-0731-v2'])
     for (const s of [...prov.series, ...model.series]) expect(s.points).toHaveLength(7)
+  })
+})
+
+describe('usage/models detail parsing', () => {
+  const MODELS = '/admin/api/usage/models'
+  const base = 'metric=req&window=day&span=7&limit=100'
+  const hasField = (query: string): boolean => (get(MODELS, query).body as Any).models.some((m: Any) => 'promptCacheReadTokens' in m)
+
+  it('mirrors parseUsageModelsDetail', () => {
+    for (const v of ['', '0', 'false']) expect(isDetail(q(v === '' ? 'detail=' : `detail=${v}`))).toBe(false)
+    for (const v of ['1', 'true']) expect(isDetail(q(`detail=${v}`))).toBe(true)
+    for (const v of ['TRUE', 'yes', '2']) expect(isDetail(q(`detail=${v}`))).toBeNull()
+    expect(isDetail(q(''))).toBe(false)
+  })
+
+  it('returns the prompt-cache fields only for detail=1 and detail=true', () => {
+    expect(hasField(`${base}&detail=1`)).toBe(true)
+    expect(hasField(`${base}&detail=true`)).toBe(true)
+    expect(hasField(`${base}&detail=0`)).toBe(false)
+    expect(hasField(`${base}&detail=false`)).toBe(false)
+    expect(hasField(base)).toBe(false)
+  })
+
+  it('rejects an unknown detail value with 400', () => {
+    expect(get(MODELS, `${base}&detail=yes`).status).toBe(400)
+  })
+
+  it('does not apply the range limit to detail=0', () => {
+    expect(get(MODELS, 'metric=req&window=day&span=30&limit=100&detail=0').status).toBe(200)
+    expect(get(MODELS, 'metric=req&window=day&span=30&limit=100&detail=1').status).toBe(400)
+  })
+})
+
+describe('stripDetailOnly', () => {
+  const body = { models: [{ id: 'a', tokensIn: 5, promptCacheReadTokens: 1, promptCacheWriteTokens: 2, promptCacheSavedMicroUsd: 3 }] }
+
+  it('removes only the prompt-cache fields when detail is off', () => {
+    expect((stripDetailOnly('/admin/api/usage/models', q('detail=0'), body) as Any).models).toEqual([{ id: 'a', tokensIn: 5 }])
+  })
+
+  it('keeps the body when detail is on or the path is another route', () => {
+    expect(stripDetailOnly('/admin/api/usage/models', q('detail=1'), body)).toBe(body)
+    expect(stripDetailOnly('/admin/api/usage/totals', q(''), body)).toBe(body)
   })
 })

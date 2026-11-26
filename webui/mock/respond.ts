@@ -47,9 +47,17 @@ function validQuery(path: string, query: URLSearchParams): string | null {
 
 const PROMPT_CACHE_FIELDS = ['promptCacheReadTokens', 'promptCacheWriteTokens', 'promptCacheSavedMicroUsd']
 
-/** The live API returns the prompt-cache fields only with detail=1. */
-function stripDetailOnly(path: string, query: URLSearchParams, body: Obj): Obj {
-  if (path !== MODELS || query.get('detail') || !Array.isArray(body.models)) return body
+/** Mirrors admin.go parseUsageModelsDetail: ''/'0'/'false' are off, '1'/'true' on (case-sensitive), anything else is null (400). */
+export function isDetail(query: URLSearchParams): boolean | null {
+  const raw = query.get('detail') ?? ''
+  if (raw === '' || raw === '0' || raw === 'false') return false
+  if (raw === '1' || raw === 'true') return true
+  return null
+}
+
+/** The live API returns the prompt-cache fields only with detail on. */
+export function stripDetailOnly(path: string, query: URLSearchParams, body: Obj): Obj {
+  if (path !== MODELS || isDetail(query) || !Array.isArray(body.models)) return body
   const models = body.models.map((m: Obj) => Object.fromEntries(Object.entries(m).filter(([k]) => !PROMPT_CACHE_FIELDS.includes(k))))
   return { ...body, models }
 }
@@ -70,12 +78,13 @@ function resolveBase(i: RespondInput): { status: number; body: unknown } {
     const invalid = seriesQueryError(query)
     if (invalid) return { status: 400, body: errorEnvelope(400, 'invalid_request_error', invalid) }
   }
+  if (path === MODELS && isDetail(query) === null) return { status: 400, body: errorEnvelope(400, 'invalid_request_error', 'invalid detail') }
   const bad = validQuery(path, query)
   if (bad) return notFound(bad)
 
   const exact = matchFixture(manifest, path, query)
   if (exact && exact.status !== 200) return { status: exact.status, body: i.readFixture(exact.file) }
-  const detail = query.get('detail')
+  const detail = isDetail(query)
   const window = query.get('window') ?? ''
   if (path === MODELS && detail && Number(query.get('span')) >= (DETAIL_MAX_SPAN[window] ?? Infinity)) {
     return { status: 400, body: errorEnvelope(400, 'invalid_request_error', RANGE_TOO_LARGE) }
