@@ -49,6 +49,50 @@ const ssProbeSource = `func sharedStateProbe() string {
 		return "breaker: second instance still open after its own success"
 	}
 
+	lc := PKG.newSharedStateLoop(store, sync, nil)
+	defer lc.close()
+	c := PKG.newSharedBreaker(lc, "probe2", []string{"q"}, 3, %d, %d, %d)
+	trip := func() {
+		for i := 0; i < 3; i++ {
+			c.recordFailure("q")
+		}
+		lc.refresh()
+		lc.refresh()
+	}
+	openFor := func() time.Duration {
+		got, _ := store.getMulti([]string{PKG.sharedBreakerKey("probe2", "q", "open")})
+		return time.UnixMilli(got[0]).Sub(time.Now())
+	}
+	trip()
+	c.recordSuccess("q")
+	lc.refresh()
+	trip()
+	if d := openFor(); d > time.Duration(%d)+5*time.Second {
+		return fmt.Sprintf("breaker: trip after a success opens for %%v, want the base duration", d)
+	}
+
+	inner := fmt.Errorf("inner")
+	if !PKG.respNotApplied(&PKG.notAppliedError{err: inner}) {
+		return "resp: a not-applied error was not recognised"
+	}
+	if PKG.respNotApplied(inner) {
+		return "resp: a plain error was reported as not applied"
+	}
+	dead := PKG.newRedisStore(PKG.newRESPClient("127.0.0.1:1", "", 0))
+	_, deadErr := dead.incrMulti([]PKG.counterIncr{{key: "k", delta: 1, ttl: time.Minute, enforceTTL: time.Minute}})
+	if deadErr == nil || !PKG.respNotApplied(deadErr) {
+		return fmt.Sprintf("resp: a dial failure through redisStore was not marked not applied: %%v", deadErr)
+	}
+
+	logged := 0
+	ll := PKG.newSharedStateLoop(store, sync, func(string, ...any) { logged++ })
+	for i := 0; i < 3; i++ {
+		ll.logErr("store error %%d: %%v", i, inner)
+	}
+	if logged != 1 {
+		return fmt.Sprintf("log: %%d error lines in one interval, want 1", logged)
+	}
+
 	ia := PKG.newSharedInflight(la, []string{"p"}, %d)
 	ib := PKG.newSharedInflight(lb, []string{"p"}, %d)
 	e1 := ia.begin("p")
@@ -80,9 +124,13 @@ const ssProbeSource = `func sharedStateProbe() string {
 // exerciseSharedState trips a shared breaker through one interpreted instance, reads it from another, and sums in-flight across two.
 func exerciseSharedState(i *interp.Interpreter, pkgName string) error {
 	src := fmt.Sprintf(strings.ReplaceAll(ssProbeSource, "PKG", pkgName),
-		ssOpenBase, ssOpenMax, ssFailWindow, ssOpenBase, ssOpenMax, ssFailWindow, ssMaxRequest, ssMaxRequest)
+		ssOpenBase, ssOpenMax, ssFailWindow, ssOpenBase, ssOpenMax, ssFailWindow,
+		ssOpenBase, ssOpenMax, ssFailWindow, ssOpenBase, ssMaxRequest, ssMaxRequest)
 	if _, err := i.Eval(`import "fmt"`); err != nil {
 		return fmt.Errorf("shared state probe: import fmt under yaegi: %w", err)
+	}
+	if _, err := i.Eval(`import "time"`); err != nil {
+		return fmt.Errorf("shared state probe: import time under yaegi: %w", err)
 	}
 	if _, err := i.Eval(src); err != nil {
 		return fmt.Errorf("shared state probe: declare the probe under yaegi: %w", err)
