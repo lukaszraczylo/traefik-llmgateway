@@ -20,10 +20,9 @@ func (g *Gateway) wireSharedState(cfg *Config) {
 		if err != nil {
 			brk = breakerConfig{failureThreshold: defaultBreakerFailureThreshold, openBase: defaultBreakerOpenDuration, openMax: defaultBreakerMaxOpenDuration}
 		}
-		// With a shared breaker, brk.failureThreshold counts failed refreshes across all route instances and replicas
-		// inside 2*openMax, not consecutive failures on one instance.
+		// Each instance counts its own consecutive failures and shares only its trip, so the fleet opens on the first one.
 		g.registry.shareBreaker(newSharedBreaker(g.sharedState, sharedKindDiscovery, ids,
-			brk.failureThreshold, brk.openBase, brk.openMax, 2*brk.openMax))
+			sharedDiscoveryFleetThreshold, brk.openBase, brk.openMax, 2*brk.openMax))
 	}
 	g.shareDecisionBreakers(ids)
 	if g.tokenCalib != nil && g.limiter != nil {

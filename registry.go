@@ -512,9 +512,12 @@ func (st *providerState) recordHealthLocked(now time.Time, err error) {
 	if st.breakerThreshold <= 0 {
 		return
 	}
-	st.shareOutcomeLocked(true)
 	st.consecutiveFailures++
 	if st.consecutiveFailures >= st.breakerThreshold {
+		// Only this instance's own trip reaches the fleet: one failed round on every instance must not trip it.
+		if st.consecutiveFailures == st.breakerThreshold {
+			st.shareOutcomeLocked(true)
+		}
 		st.openBreakerLocked(now, false)
 	}
 }

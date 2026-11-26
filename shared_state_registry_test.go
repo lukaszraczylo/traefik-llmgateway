@@ -79,3 +79,28 @@ func TestSharedStateOffIdenticalDiscoveryBreaker(t *testing.T) {
 		t.Fatalf("store touched with sharedState off: %d reads, %d writes", len(rec.reads), len(rec.writes))
 	}
 }
+
+// One failed round on every instance must not trip the fleet breaker: only an instance whose own consecutive
+// failures reach the threshold trips it (formal SharedState local_gate_no_trip_before_t, local_gate_trips_at_t).
+func TestSharedDiscoveryBreakerCountsPerInstance(t *testing.T) {
+	a, b, _, _, _ := sharedGatewayPair(t, nil)
+	boom := errors.New("discovery down")
+	now := time.Now()
+	for i := 0; i < defaultBreakerFailureThreshold-1; i++ {
+		a.registry.finishRefresh(a.registry.states["alpha"], now, nil, boom)
+		b.registry.finishRefresh(b.registry.states["alpha"], now, nil, boom)
+	}
+	a.sharedState.refresh()
+	b.sharedState.refresh()
+	a.sharedState.refresh()
+	b.sharedState.refresh()
+	if !a.registry.discoveryHealthy("alpha") || !b.registry.discoveryHealthy("alpha") {
+		t.Fatalf("fleet breaker open after %d failures per instance, below the threshold of %d on each", defaultBreakerFailureThreshold-1, defaultBreakerFailureThreshold)
+	}
+	a.registry.finishRefresh(a.registry.states["alpha"], now, nil, boom)
+	a.sharedState.refresh()
+	b.sharedState.refresh()
+	if b.registry.discoveryHealthy("alpha") {
+		t.Fatal("B healthy after A reached the threshold on its own")
+	}
+}
