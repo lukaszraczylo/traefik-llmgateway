@@ -293,6 +293,25 @@ func (l *sharedStateLoop) refreshFailed(prims []sharedPrimitive, err error) {
 	}
 }
 
+// chunkedGet reads keys straight from the store in chunks. Unlike the limiter's reads it never latches the chat route's limiter
+// on an error. ok is false when any chunk fails.
+func (l *sharedStateLoop) chunkedGet(keys []string) ([]int64, bool) {
+	out := make([]int64, 0, len(keys))
+	for off := 0; off < len(keys); off += sharedStateChunk {
+		end := off + sharedStateChunk
+		if end > len(keys) {
+			end = len(keys)
+		}
+		got, err := l.store.getMulti(keys[off:end])
+		if err != nil || len(got) != end-off {
+			l.logErr("shared state read of %d keys failed: %v", end-off, err)
+			return nil, false
+		}
+		out = append(out, got...)
+	}
+	return out, true
+}
+
 func (l *sharedStateLoop) incrAndGet(e counterIncr) (int64, bool) {
 	got, _, err := l.store.incrAndGetMulti([]counterIncr{e}, nil)
 	if err != nil || len(got) != 1 {

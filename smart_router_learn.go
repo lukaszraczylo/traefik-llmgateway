@@ -446,7 +446,7 @@ func (g *Gateway) calibrationTargets() []smartCalibKey {
 // refreshSharedCalibration reads the fleet counters of every calibrating router's targets and keeps one bytes-per-token ratio per model.
 // A failed read keeps the previous ratios.
 func (g *Gateway) refreshSharedCalibration(now time.Time) {
-	if !g.tokenCalib.sharing() || g.limiter == nil {
+	if !g.tokenCalib.sharing() || g.sharedState == nil {
 		return
 	}
 	targets := g.calibrationTargets()
@@ -463,7 +463,7 @@ func (g *Gateway) refreshSharedCalibration(now time.Time) {
 			names = append(names, calibFleetKey(k, calibMetricBytes, bucket), calibFleetKey(k, calibMetricToken, bucket), calibFleetKey(k, calibMetricCount, bucket))
 		}
 	}
-	vals, ok := g.limiter.chunkedGetMulti(names, usageModelsChunkKeys)
+	vals, ok := g.sharedState.chunkedGet(names)
 	if !ok {
 		return
 	}

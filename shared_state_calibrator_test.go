@@ -1,6 +1,7 @@
 package traefikllmgateway
 
 import (
+	"errors"
 	"testing"
 )
 
@@ -90,5 +91,25 @@ func TestSharedStateOffIdenticalCalibrator(t *testing.T) {
 	gw.refreshRouterLearning(gw.limiter.now())
 	if len(rec.reads) != 0 || len(rec.writes) != 0 {
 		t.Fatalf("store touched with sharedState off: %d reads, %d writes", len(rec.reads), len(rec.writes))
+	}
+}
+
+func TestSharedCalibrationReadErrorDoesNotLatchLimiter(t *testing.T) {
+	a, _, store, _, _ := sharedGatewayPair(t, nil)
+	shareLimiterStore(a, store)
+	for i := 0; i < smartCalibMinSamples; i++ {
+		observeShared(a, "alpha", "a1", 1000, 400)
+	}
+	a.refreshRouterLearning(a.limiter.now())
+	if got := a.tokenCalib.promptTokens("alpha", "a1", 1000); got != 400 {
+		t.Fatalf("setup: shared estimate = %d, want 400", got)
+	}
+	store.setFail(errors.New("redis down"))
+	a.refreshRouterLearning(a.limiter.now())
+	if a.limiter.storeLatched() {
+		t.Error("a failed shared-state read latched the chat route's limiter store")
+	}
+	if got := a.tokenCalib.promptTokens("alpha", "a1", 1000); got != 400 {
+		t.Errorf("estimate after a failed read = %d, want the previous 400", got)
 	}
 }
