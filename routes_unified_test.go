@@ -2498,7 +2498,8 @@ func (b *readTrackingBody) Close() error { return nil }
 func TestHandleChat_RequestLimitExceeded_BodyNeverRead(t *testing.T) {
 	cfg := CreateConfig()
 	cfg.Providers = map[string]*ProviderConfig{
-		"openai": {Type: "openai", APIKey: "k", Models: []string{"gpt-test"}},
+		// An unreachable local upstream: the first request must not leave the test process.
+		"openai": {Type: "openai", APIKey: "k", BaseURL: "http://127.0.0.1:1", Models: []string{"gpt-test"}},
 	}
 	cfg.Groups = map[string]*GroupConfig{"default": {}}
 	cfg.Users = &UsersConfig{Inline: []*UserConfig{
@@ -2509,6 +2510,9 @@ func TestHandleChat_RequestLimitExceeded_BodyNeverRead(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
+	// Both requests must share one minute window; at a minute boundary the second one got a fresh budget.
+	fixed := time.Date(2026, 1, 1, 12, 0, 30, 0, time.UTC)
+	h.(*Gateway).limiter.nowFn = func() time.Time { return fixed }
 
 	// First request consumes the one-per-minute budget; its body is a
 	// real, valid body so the request completes normally end to end
