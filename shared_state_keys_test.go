@@ -46,3 +46,27 @@ func TestSharedInflightKeys_MatchFreshBuild(t *testing.T) {
 		assert.Equal(t, freshInflightKeys(s, now), s.keys(now))
 	}
 }
+
+func TestShareDecisionBreakers_KeysOnlyDecisionProviders(t *testing.T) {
+	routers := map[string]*smartRouter{}
+	for name, prov := range map[string]string{"r1": "p3", "r2": "p1", "r3": "p3", "r4": ""} {
+		rt := &smartRouter{name: name}
+		if prov != "" {
+			rt.decision = &smartDecisionCfg{provider: prov, dec: newSmartDecider(time.Now)}
+		}
+		routers[name] = rt
+	}
+	l := newSharedStateLoop(newMemoryStore(), func(f func()) {}, nil)
+	g := &Gateway{sharedState: l, registry: &modelRegistry{routers: routers}}
+	g.shareDecisionBreakers()
+
+	prims := l.snapshot()
+	if !assert.Len(t, prims, 1) {
+		return
+	}
+	assert.Equal(t, freshBreakerKeys(sharedKindDecision, []string{"p1", "p3"}), prims[0].keys(time.Now()))
+	for _, rt := range []*smartRouter{routers["r1"], routers["r2"], routers["r3"]} {
+		assert.NotNil(t, rt.decision.dec.shared)
+		assert.Equal(t, rt.decision.provider, rt.decision.dec.key)
+	}
+}

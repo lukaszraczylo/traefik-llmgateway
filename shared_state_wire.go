@@ -1,6 +1,9 @@
 package traefikllmgateway
 
-import "time"
+import (
+	"sort"
+	"time"
+)
 
 // wireSharedState layers fleet-wide state over the local trackers. It is a no-op without a shared-state loop.
 func (g *Gateway) wireSharedState(cfg *Config) {
@@ -24,7 +27,7 @@ func (g *Gateway) wireSharedState(cfg *Config) {
 		g.registry.shareBreaker(newSharedBreaker(g.sharedState, sharedKindDiscovery, ids,
 			sharedDiscoveryFleetThreshold, brk.openBase, brk.openMax, 2*brk.openMax))
 	}
-	g.shareDecisionBreakers(ids)
+	g.shareDecisionBreakers()
 	if g.tokenCalib != nil && g.limiter != nil {
 		g.tokenCalib.share(func() time.Time { return g.limiter.now() })
 	}
@@ -50,18 +53,29 @@ func maxProviderTimeout(cfg *Config) time.Duration {
 }
 
 // shareDecisionBreakers gives every router's decider one fleet breaker. Routers on the same decision provider share a key on purpose.
-func (g *Gateway) shareDecisionBreakers(ids []string) {
+// The breaker covers only the decision providers: a decider is only ever queried with its own router's provider.
+func (g *Gateway) shareDecisionBreakers() {
 	if g.registry == nil {
 		return
 	}
-	var brk *sharedBreaker
+	seen := make(map[string]bool)
+	var ids []string
+	for _, rt := range g.registry.routers {
+		if rt == nil || rt.decision == nil || rt.decision.dec == nil || seen[rt.decision.provider] {
+			continue
+		}
+		seen[rt.decision.provider] = true
+		ids = append(ids, rt.decision.provider)
+	}
+	if len(ids) == 0 {
+		return
+	}
+	sort.Strings(ids)
+	brk := newSharedBreaker(g.sharedState, sharedKindDecision, ids,
+		decisionBreakerFails, decisionBreakerOpen, decisionBreakerOpen, 2*decisionBreakerOpen)
 	for _, rt := range g.registry.routers {
 		if rt == nil || rt.decision == nil || rt.decision.dec == nil {
 			continue
-		}
-		if brk == nil {
-			brk = newSharedBreaker(g.sharedState, sharedKindDecision, ids,
-				decisionBreakerFails, decisionBreakerOpen, decisionBreakerOpen, 2*decisionBreakerOpen)
 		}
 		rt.decision.dec.share(brk, rt.decision.provider)
 	}

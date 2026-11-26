@@ -53,7 +53,7 @@ func BenchRefreshSetup(redisAddr string, n int) int {
 	newSharedBreaker(l, sharedKindRequest, ids, 5, time.Second, time.Minute, 2*time.Minute)
 	newSharedInflight(l, ids, 15*time.Minute)
 	newSharedBreaker(l, sharedKindDiscovery, ids, 5, time.Second, time.Minute, 2*time.Minute)
-	newSharedBreaker(l, sharedKindDecision, ids, 5, time.Second, time.Minute, 2*time.Minute)
+	newSharedBreaker(l, sharedKindDecision, ids[:3], 5, time.Second, time.Minute, 2*time.Minute)
 	benchLoop = l
 	benchStore = store
 	benchBig = make([]string, usageModelsChunkKeys)
