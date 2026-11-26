@@ -1814,6 +1814,8 @@ func monthRangeToDayBuckets(now time.Time, span, offset int) (daySpan, dayOffset
 // anyway. It returns ids unchanged where that does not hold: no configured
 // store (the in-process fallback's month key can expire before a day key) or
 // a month window (the caller's own read is already the month read).
+// It also assumes the store never evicts single keys at random (noeviction,
+// LRU or LFU are safe): a lost month key would hide that model's row.
 func (g *Gateway) activeModelIDs(ids, metrics []string, window string, now time.Time, span, offset int) ([]string, bool) {
 	if g.limiter.store == nil || window == windowMonth || len(ids) == 0 || span < 1 {
 		return ids, true
