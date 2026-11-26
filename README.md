@@ -2060,14 +2060,14 @@ cost = (prompt - cached - cacheWrite) * inputPerM
      + completion * outputPerM
 ```
 
-The gateway clamps `cached` and `cacheWrite` so the cost never goes below zero or above the all-uncached cost.
+The gateway clamps `cached` and `cacheWrite` to the prompt size, so the uncached share is never negative. Cache writes can cost more than plain input, so a write-heavy first turn can cost more than an uncached one.
 
 Release note: cost now drops for cached traffic wherever a cached price is known. This corrects a prior over-count. Cost budgets (`costPerDayUSD`, `costPerMonthUSD`) therefore consume more slowly for cached traffic.
 
 ### Observability
 
 - `/metrics`: `llmgateway_prompt_cache_tokens_total{provider,model,kind}`, where `kind` is `read`, `write` or `uncached`. The counter is per instance. See [Metrics](#metrics).
-- Admin: Redis-shared counters back the cache totals. `GET /admin/api/usage/models?detail=1` adds `promptCacheReadTokens`, `promptCacheWriteTokens` and `promptCacheSavedMicroUsd` to each row. Rows omit these fields without `detail`.
+- Admin: limit-store counters (shared through Redis when Redis is configured) back the cache totals. `GET /admin/api/usage/models?detail=1` adds `promptCacheReadTokens`, `promptCacheWriteTokens` and `promptCacheSavedMicroUsd` to each row. Rows omit these fields without `detail`.
 - Dashboard: a "Prompt cache" hit-rate column (read tokens divided by input tokens) on Usage by model and in the model panel, and a "Prompt-cache savings" tile.
 
 ### Options
