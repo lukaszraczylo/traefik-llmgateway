@@ -720,6 +720,30 @@ byte-identically to before multi-group support existed.
 | `failOpen` | `*bool` | `true` | `true`: a Redis error switches that operation to the in-process fallback store and logs (rate-limited to once per 30s). `false`: a Redis error returns 503 instead of enforcing against a non-shared fallback. |
 | `poolSize` | `int` | `0` (self-tuned) | Maximum pooled RESP connections. `0` self-tunes from the host's `GOMAXPROCS`, clamped to `4`-`8`; an explicit value always overrides the auto-tuned size (house engineering rule), up to a maximum of `256`. Negative, or above that maximum, is a construction error. |
 | `tls` | `bool` | `false` | Dial Redis over TLS instead of plaintext, verifying the server certificate against `address`'s host. `false` preserves a plaintext connection exactly as before this field existed; enable it unless the path to Redis is already encrypted some other way (service-mesh mTLS, an stunnel/TLS sidecar, a private link). |
+| `sharedState` | `*bool` | `false` | Share breaker, in-flight and token-size state across replicas. Needs `address`; `true` without it is a construction error. See [Shared state across replicas](#shared-state-across-replicas). |
+
+### Shared state across replicas
+
+Traefik calls `New()` once per route and runs several pods. Without `redis.sharedState`, each pod and each route instance keeps its own breaker and in-flight state. A dead provider then needs 3 failures on every pod before every pod skips it. Each pod also sees only a part of the real in-flight count.
+
+`redis.sharedState: true` shares five states through Redis. It is off by default. It needs `redis.address`. With the switch off, or with no `redis` block, behaviour does not change and the gateway never reads or writes the keys below.
+
+| State | Key prefix | What is shared |
+|---|---|---|
+| Failover request breaker | `llmgw:brk:req:{provider}:` | Consecutive failure count, open-until time, number of trips. |
+| Discovery breaker | `llmgw:brk:disc:{provider}:` | The same three values. The discovered model sets are not shared. |
+| Decision-model breaker | `llmgw:brk:dec:{provider}:` | The same three values, one breaker per decision provider. |
+| Busy-provider tracking | `llmgw:inf:{provider}:` | In-flight count (started and finished counters per 5 minute epoch) and the limit learned from a 429 (10 minute expiry). |
+| Token-size estimate | `llmgw:cal:{provider}/{model}:` | Day counters of prompt bytes, prompt tokens and samples. |
+
+How it works:
+
+- A breaker counts consecutive failures across all replicas. A success on any replica resets the count and closes an open breaker. The replica whose flush takes the count from below the threshold to the threshold or above opens the breaker for all replicas. Open times and thresholds are the local ones: 3 failures and 30 seconds, doubling to 5 minutes, for the request breaker; the `breaker` block for the discovery breaker; 3 failures and 30 seconds for the decision breaker.
+- A breaker reads as open when its local breaker or the shared breaker is open.
+- In-flight load is the larger of the local count and the shared count. A request that never ends stops counting after its start epoch leaves the read window. The window is the longest request timeout in 5 minute epochs, plus one epoch.
+- The request path never calls Redis. It reads a local copy. A background loop sends the counts and refreshes the copy every second, so a change on one replica reaches the others in about 1 second. The token-size estimate refreshes every 60 seconds with the router learning loop, and it applies after 50 shared samples.
+- A Redis outage never fails or slows a request, and `redis.failOpen` does not apply to this state. After 3 failed refreshes in a row the gateway drops the shared values and uses its own local state. A failed token-size refresh keeps the last ratios.
+- While you change the switch on a rolling restart, replicas with the switch off write nothing. Counts can then be too low for a short time. Turn the switch on after the code is deployed on every replica.
 
 ### `RetryConfig`
 
@@ -2066,7 +2090,7 @@ Release note: cost now drops for cached traffic wherever a cached price is known
 
 ### Observability
 
-- `/metrics`: `llmgateway_prompt_cache_tokens_total{provider,model,kind}`, where `kind` is `read`, `write` or `uncached`. The counter is per instance. See [Metrics](#metrics).
+- `/metrics`: `llmgateway_prompt_cache_tokens_total{provider,model,kind}`, where `kind` is `read`, `write` or `uncached`. With `redis` the counter is fleet-wide. Without it, the counter is per instance. See [Metrics](#metrics).
 - Admin: limit-store counters (shared through Redis when Redis is configured) back the cache totals. `GET /admin/api/usage/models?detail=1` adds `promptCacheReadTokens`, `promptCacheWriteTokens` and `promptCacheSavedMicroUsd` to each row. Rows omit these fields without `detail`.
 - Dashboard: a "Prompt cache" hit-rate column (read tokens divided by input tokens) on Usage by model and in the model panel, and a "Prompt-cache savings" tile.
 
@@ -3283,9 +3307,12 @@ plugin's config.
     read shared month-window counters instead and follow the `max()`
     rule, like the router, latency and prompt-cache families.
   - `llmgateway_provider_healthy` reflects each replica's own,
-    independently-running discovery circuit breaker — never shared via
-    Redis either — so two replicas can legitimately disagree about one
-    provider's health at the same instant. Read it per-instance where
+    independently-running discovery circuit breaker, so two replicas can
+    legitimately disagree about one provider's health at the same
+    instant. With `redis.sharedState` on, the gauge is also 0 while the
+    shared discovery breaker is open (see
+    [Shared state across replicas](#shared-state-across-replicas)), and
+    replicas agree within about 1 second. Read it per-instance where
     possible; if you must aggregate, `min()` surfaces "at least one
     replica sees this provider as unhealthy" — `sum()` is meaningless for
     a 0/1 gauge.
@@ -3299,6 +3326,20 @@ plugin's config.
     itself be read from the store it describes, so it is inherently
     per-replica too. Same guidance as `llmgateway_provider_healthy`:
     prefer per-instance, `min()` if you must aggregate.
+
+- **Store-backed families**: with `redis` configured, these families
+  read shared counters and take `max()`: `llmgateway_requests_total`,
+  `llmgateway_tokens_total`, `llmgateway_cost_micro_usd_total`,
+  `llmgateway_budget_consumed_ratio`, the `llmgateway_provider_*_total`
+  families, `llmgateway_rate_limit_rejections_total`, the
+  `llmgateway_usage_provenance_*` families and
+  `llmgateway_prompt_cache_tokens_total`. The `llmgateway_router_requests_total`,
+  `llmgateway_router_escalations_total` and `llmgateway_router_decision_*`
+  families need `admin.enabled` as well. The upstream
+  latency histograms need `admin.stats.latency` as well. Without `redis`,
+  or without those options, they are per process and take `sum()`.
+  `redis.sharedState` does not change which metric families are
+  store-backed.
 
 - **Labels are escaped**: a label value that is user- or
   upstream-controlled (a user/group name, a model id) is escaped for
