@@ -51,35 +51,12 @@ func (s *promptCacheStats) snapshot() map[promptCacheKey]int64 {
 	return out
 }
 
-// promptCacheSplit clamps like computeCostMicros: cached in [0,prompt], write in [0,prompt-cached].
-func promptCacheSplit(u usage) (int64, int64, int64) {
-	cached := u.cached
-	if cached < 0 {
-		cached = 0
-	}
-	if cached > u.prompt {
-		cached = u.prompt
-	}
-	write := u.cacheWrite
-	if write < 0 {
-		write = 0
-	}
-	if write > u.prompt-cached {
-		write = u.prompt - cached
-	}
-	rest := u.prompt - cached - write
-	if rest < 0 {
-		rest = 0
-	}
-	return cached, write, rest
-}
-
 // recordPromptCache counts one real upstream response; never call it for a response-cache hit.
 func (g *Gateway) recordPromptCache(provider, model string, u usage) {
 	if !metricsEnabled(g.cfg) {
 		return
 	}
-	cached, write, rest := promptCacheSplit(u)
+	cached, write, rest := splitPromptTokens(u)
 	g.promptCacheStats.add(promptCacheKey{provider, model, promptCacheKindRead}, cached)
 	g.promptCacheStats.add(promptCacheKey{provider, model, promptCacheKindWrite}, write)
 	g.promptCacheStats.add(promptCacheKey{provider, model, promptCacheKindUncached}, rest)

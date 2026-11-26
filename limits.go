@@ -2080,7 +2080,7 @@ func (l *limiter) accountWith(scopes []limitScope, u usage, costMicros int64, x 
 
 	var pcRead, pcWrite, pcSave int64
 	if !x.responseCacheHit {
-		pcRead, pcWrite, _ = promptCacheSplit(u)
+		pcRead, pcWrite, _ = splitPromptTokens(u)
 		pcSave = x.promptCacheSaved
 		if pcSave < 0 || pcSave > maxCostMicrosPerRequest {
 			pcSave = 0

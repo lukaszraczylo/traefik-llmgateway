@@ -192,3 +192,20 @@ func TestAdminUsageModelsDetailBudgetUnchanged(t *testing.T) {
 	require.NotNil(t, got.Models[0].PromptCacheReadTokens)
 	assert.EqualValues(t, 7, *got.Models[0].PromptCacheReadTokens)
 }
+
+func TestSplitPromptTokensNegativePrompt(t *testing.T) {
+	t.Parallel()
+	u := usage{prompt: -5, cached: 3, cacheWrite: 2}
+	cached, write, rest := splitPromptTokens(u)
+	assert.Zero(t, cached)
+	assert.Zero(t, write)
+	assert.Zero(t, rest)
+
+	cfg := newAdminTestConfig()
+	cfg.Metrics = &MetricsConfig{Enabled: true}
+	_, gw := newAdminGatewayHandle(t, cfg)
+	gw.recordPromptCache("p", "m", u)
+	for k, v := range gw.promptCacheStats.snapshot() {
+		assert.Zero(t, v, "%v", k)
+	}
+}
