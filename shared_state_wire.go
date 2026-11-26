@@ -24,6 +24,11 @@ func (g *Gateway) wireSharedState(cfg *Config) {
 			brk.failureThreshold, brk.openBase, brk.openMax, 2*brk.openMax))
 	}
 	g.shareDecisionBreakers(ids)
+	if g.tokenCalib != nil && g.limiter != nil {
+		g.tokenCalib.share(
+			func(entries []counterIncr) { g.limiter.countAsync(entries) },
+			func() time.Time { return g.limiter.now() })
+	}
 }
 
 // maxProviderTimeout is the longest request timeout any provider can run, which bounds how long an in-flight count stays live.

@@ -316,7 +316,7 @@ func (rt *smartRouter) learns() bool {
 // touchRouterLearning notes a routed request and starts the refresh goroutine if it is not running.
 func (g *Gateway) touchRouterLearning(rt *smartRouter) {
 	l := g.routerLearn
-	if l == nil || !rt.learns() {
+	if l == nil || (!rt.learns() && !g.sharesCalibration(rt)) {
 		return
 	}
 	l.mu.Lock()
@@ -397,6 +397,91 @@ func (g *Gateway) refreshRouterLearning(now time.Time) {
 			g.refreshBandit(rt, now)
 		}
 	}
+	g.refreshSharedCalibration(now)
+}
+
+// sharesCalibration reports whether rt's token estimate reads the fleet counters.
+func (g *Gateway) sharesCalibration(rt *smartRouter) bool {
+	return rt.contextEscalation && g.tokenCalib.sharing()
+}
+
+// calibrationTargets lists the upstream (provider, model) pairs the calibrating routers can send to.
+func (g *Gateway) calibrationTargets() []smartCalibKey {
+	seen := make(map[smartCalibKey]bool)
+	var out []smartCalibKey
+	grp := &group{}
+	for _, rt := range g.registry.routers {
+		if !g.sharesCalibration(rt) {
+			continue
+		}
+		for _, tier := range rt.tiers {
+			for _, target := range tier.models {
+				var cands []resolveCandidate
+				if g.failover.enabled {
+					primary, extra, err := g.registry.resolveWithCandidates(target, grp)
+					if err != nil {
+						continue
+					}
+					cands = append([]resolveCandidate{primary}, extra...)
+				} else {
+					primary, err := g.registry.resolvePrimaryOnly(target, grp)
+					if err != nil {
+						continue
+					}
+					cands = []resolveCandidate{primary}
+				}
+				for _, cand := range cands {
+					k := smartCalibKey{provider: cand.providerName, model: cand.upstreamModel}
+					if !seen[k] {
+						seen[k] = true
+						out = append(out, k)
+					}
+				}
+			}
+		}
+	}
+	return out
+}
+
+// refreshSharedCalibration reads the fleet counters of every calibrating router's targets and keeps one bytes-per-token ratio per model.
+// A failed read keeps the previous ratios.
+func (g *Gateway) refreshSharedCalibration(now time.Time) {
+	if !g.tokenCalib.sharing() || g.limiter == nil {
+		return
+	}
+	targets := g.calibrationTargets()
+	if len(targets) == 0 {
+		return
+	}
+	buckets := make([]string, calibFleetDays)
+	for i := range buckets {
+		buckets[i] = bucketFor(now.Add(-time.Duration(i)*24*time.Hour), windowDay)
+	}
+	names := make([]string, 0, len(targets)*len(buckets)*3)
+	for _, k := range targets {
+		for _, bucket := range buckets {
+			names = append(names, calibFleetKey(k, calibMetricBytes, bucket), calibFleetKey(k, calibMetricToken, bucket), calibFleetKey(k, calibMetricCount, bucket))
+		}
+	}
+	vals, ok := g.limiter.chunkedGetMulti(names, usageModelsChunkKeys)
+	if !ok {
+		return
+	}
+	fleet := make(map[smartCalibKey]smartCalibStat, len(targets))
+	pos := 0
+	for _, k := range targets {
+		var bytes, tokens, n int64
+		for range buckets {
+			bytes += vals[pos]
+			tokens += vals[pos+1]
+			n += vals[pos+2]
+			pos += 3
+		}
+		if bytes > 0 && tokens > 0 {
+			fleet[k] = smartCalibStat{ratio: float64(bytes) / float64(tokens), samples: int(n)}
+		}
+	}
+	g.tokenCalib.setFleet(fleet)
 }
 
 // warnRouterLearning notes learning settings that stay per instance.
