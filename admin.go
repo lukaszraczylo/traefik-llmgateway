@@ -1673,7 +1673,13 @@ func (g *Gateway) serveAdminUsageModels(sw *statusTrackingWriter, r *http.Reques
 		return
 	}
 
-	totals, storeOK := g.chunkedModelSpanTotals(ids, metric, window, g.limiter.now(), span, offset)
+	now := g.limiter.now()
+	ids, storeOK := g.activeModelIDs(ids, []string{metric}, window, now, span, offset)
+	if !storeOK {
+		writeOAIError(sw, http.StatusServiceUnavailable, "server_error", "usage history store unavailable")
+		return
+	}
+	totals, storeOK := g.chunkedModelSpanTotals(ids, metric, window, now, span, offset)
 	if !storeOK {
 		writeOAIError(sw, http.StatusServiceUnavailable, "server_error", "usage history store unavailable")
 		return
@@ -1799,13 +1805,78 @@ func monthRangeToDayBuckets(now time.Time, span, offset int) (daySpan, dayOffset
 	return daySpan, dayOffset
 }
 
+// activeModelIDs narrows ids to those whose month buckets, for every month
+// the span touches, hold a non-zero total for any of metrics. accountWith
+// writes each model-scope req/tokin/tokout/cost delta (never negative) to the
+// hour, day and month bucket of one instant in one batch, and the month key
+// outlives the hour and day keys, so an id with a zero month total has zero in
+// every bucket of the span and the caller's own zero-row filter would drop it
+// anyway. It returns ids unchanged where that does not hold: no configured
+// store (the in-process fallback's month key can expire before a day key) or
+// a month window (the caller's own read is already the month read).
+func (g *Gateway) activeModelIDs(ids, metrics []string, window string, now time.Time, span, offset int) ([]string, bool) {
+	if g.limiter.store == nil || window == windowMonth || len(ids) == 0 || span < 1 {
+		return ids, true
+	}
+	monthSpan, monthOffset := monthsTouched(window, now, span, offset)
+	totals, ok := g.limiter.spanTotalsMulti(kindModel, ids, metrics, windowMonth, now, monthSpan, monthOffset)
+	if !ok {
+		return nil, false
+	}
+	active := make([]string, 0, len(ids))
+	for i, id := range ids {
+		for m := range metrics {
+			if totals[m][i] != 0 {
+				active = append(active, id)
+				break
+			}
+		}
+	}
+	return active, true
+}
+
+// dropZeroModels keeps the ids whose four core totals are not all zero,
+// compacting totals (one slice per metric, index-aligned with ids) to match.
+func dropZeroModels(ids []string, totals [][]int64) ([]string, [][]int64) {
+	keptIDs := make([]string, 0, len(ids))
+	kept := make([][]int64, len(totals))
+	for m := range kept {
+		kept[m] = make([]int64, 0, len(ids))
+	}
+	for i, id := range ids {
+		nonZero := false
+		for m := range totals {
+			if totals[m][i] != 0 {
+				nonZero = true
+				break
+			}
+		}
+		if !nonZero {
+			continue
+		}
+		keptIDs = append(keptIDs, id)
+		for m := range totals {
+			kept[m] = append(kept[m], totals[m][i])
+		}
+	}
+	return keptIDs, kept
+}
+
 func (g *Gateway) serveAdminUsageModelsDetail(sw *statusTrackingWriter, ids []string, metric, window string, span, offset, limit int) {
 	now := g.limiter.now()
 	metrics := usageModelsDetailMetrics()
+	ids, storeOK := g.activeModelIDs(ids, metrics, window, now, span, offset)
+	if !storeOK {
+		writeOAIError(sw, http.StatusServiceUnavailable, "server_error", "usage history store unavailable")
+		return
+	}
 	totalsByMetric, storeOK := g.chunkedModelSpanTotalsMulti(ids, metrics, window, now, span, offset)
 	if !storeOK {
 		writeOAIError(sw, http.StatusServiceUnavailable, "server_error", "usage history store unavailable")
 		return
+	}
+	if window == windowMonth {
+		ids, totalsByMetric = dropZeroModels(ids, totalsByMetric)
 	}
 	valueIdx := usageModelsMetricIndex(metric)
 

@@ -3234,6 +3234,22 @@ func historyBucketKeysAt(kind, id, metric, window string, now time.Time, span, o
 	return keys, buckets
 }
 
+// monthsTouched returns the windowMonth span and offset (relative to now)
+// covering every calendar month that historyBucketKeysAt's own span of window
+// buckets falls in. For windowMonth it returns span and offset unchanged.
+func monthsTouched(window string, now time.Time, span, offset int) (monthSpan, monthOffset int) {
+	newest := now
+	if offset > 0 {
+		newest = historyStepBack(now, window, offset)
+	}
+	oldest := historyStepBack(newest, window, span-1)
+	monthIndex := func(t time.Time) int {
+		u := t.UTC()
+		return u.Year()*12 + int(u.Month())
+	}
+	return monthIndex(newest) - monthIndex(oldest) + 1, monthIndex(now) - monthIndex(newest)
+}
+
 // historyBucketKeys returns the span counterStore keys and their matching
 // bucket label strings for (kind, id, metric, window), stepping back from
 // now one whole window unit at a time — oldest first, the current
