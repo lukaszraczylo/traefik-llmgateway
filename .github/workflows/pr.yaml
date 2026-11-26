@@ -10,6 +10,7 @@ on:
       - "!main"
 
 permissions:
+  actions: read
   contents: read
   pull-requests: write
   security-events: write
