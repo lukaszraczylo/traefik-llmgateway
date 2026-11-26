@@ -39,7 +39,7 @@ func TestAccountWithPromptCacheCounters(t *testing.T) {
 	t.Parallel()
 	l := newLimiter(newMemoryStore(), false)
 	now := time.Now()
-	scopes := []limitScope{{kind: kindModel, id: "p/m"}}
+	scopes := []limitScope{{kind: "user", id: "alice"}, {kind: kindModel, id: "p/m"}}
 	l.accountWith(scopes, usage{prompt: 1000, cached: 900, cacheWrite: 50}, 0, accountExtras{promptCacheSaved: 2430})
 
 	for _, window := range []string{windowHour, windowDay, windowMonth} {
@@ -50,6 +50,10 @@ func TestAccountWithPromptCacheCounters(t *testing.T) {
 	}
 	tokIn, _ := l.getCounter(kindModel, "p/m", metricTokIn, windowDay, now)
 	assert.EqualValues(t, 1000, tokIn, "day token limits keep counting full prompt tokens")
+	for _, metric := range []string{metricPcRead, metricPcWrite, metricPcSave} {
+		got, _ := l.getCounter("user", "alice", metric, windowDay, now)
+		assert.Zero(t, got, "%s must not be written for non-model scopes", metric)
+	}
 }
 
 func TestAccountWithNoCacheNoExtraWrites(t *testing.T) {
@@ -157,7 +161,7 @@ func TestCacheHitDoesNotRecordPromptCache(t *testing.T) {
 		gw.ServeHTTP(rec, newUnifiedRequest(t, http.MethodPost, "/v1/chat/completions", "sk-alice", body))
 		require.Equal(t, want, rec.Header().Get("X-Llmgw-Cache"))
 	}
-	pcr, _ := gw.limiter.getCounter("user", "alice", metricPcRead, windowDay, time.Now())
+	pcr, _ := gw.limiter.getCounter(kindModel, "openai/gpt-test", metricPcRead, windowDay, time.Now())
 	assert.EqualValues(t, 8, pcr, "only the upstream response counts, not the replay")
 }
 

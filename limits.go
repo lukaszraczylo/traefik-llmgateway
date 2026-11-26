@@ -2144,7 +2144,10 @@ func (l *limiter) accountWith(scopes []limitScope, u usage, costMicros int64, x 
 				counterIncr{key: windowKeyForBucket(sc.kind, sc.id, metricTokIn, windowMonth, wb.month), delta: u.prompt, ttl: monthWindowTTL, enforceTTL: et.month},
 			)
 		}
-		entries = appendPromptCacheEntries(entries, sc, pcRead, pcWrite, pcSave, wb, et)
+		// Only the model scope is ever read (admin usage/models).
+		if sc.kind == kindModel {
+			entries = appendPromptCacheEntries(entries, sc, pcRead, pcWrite, pcSave, wb, et)
+		}
 		if u.completion != 0 {
 			entries = append(entries,
 				counterIncr{key: windowKeyForBucket(sc.kind, sc.id, metricTokOut, windowHour, wb.hour), delta: u.completion, ttl: hourWindowTTL, enforceTTL: et.hour},
