@@ -40,9 +40,11 @@ func TestSharedBreakerSuccessResetsBackoff(t *testing.T) {
 // fussyStore applies a write and still fails it, short-changes the reply, or fails writes to one key suffix.
 type fussyStore struct {
 	counterStore
+	incrErr       error
 	failSuffix    string
 	applyThenFail int
 	mu            sync.Mutex
+	incrApply     bool
 	shortReply    bool
 }
 
@@ -157,5 +159,101 @@ func TestSharedBreakerShortReplyKeepsDeltas(t *testing.T) {
 	}
 	if !b.pending() {
 		t.Fatal("deltas dropped after a short reply")
+	}
+}
+
+func (f *fussyStore) incrMulti(e []counterIncr) ([]int64, error) {
+	f.mu.Lock()
+	err, apply := f.incrErr, f.incrApply
+	f.mu.Unlock()
+	if err == nil {
+		return f.counterStore.incrMulti(e)
+	}
+	if apply {
+		_, _ = f.counterStore.incrMulti(e)
+	}
+	return nil, err
+}
+
+func (f *fussyStore) failIncr(err error, applied bool) {
+	f.mu.Lock()
+	f.incrErr, f.incrApply = err, applied
+	f.mu.Unlock()
+}
+
+func startedTotal(t *testing.T, st counterStore, clk *sharedClock, epochs int) int64 {
+	t.Helper()
+	in := newSharedInflight(nil, []string{"p"}, time.Minute)
+	var keys []string
+	for i := 0; i < epochs; i++ {
+		keys = append(keys, in.epochKey("p", in.epochOf(clk.now())-int64(i), "s"))
+	}
+	got, err := st.getMulti(keys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sum int64
+	for _, v := range got {
+		sum += v
+	}
+	return sum
+}
+
+func TestSharedInflightAmbiguousFailureResendsOnce(t *testing.T) {
+	st, clk, _, _ := fussyEnv()
+	l := sharedTestLoop(st, clk)
+	in := newSharedInflight(l, []string{"p"}, time.Minute)
+	for i := 0; i < 3; i++ {
+		in.begin("p")
+	}
+	st.failIncr(errors.New("reply lost"), true)
+	l.refresh() // applied, reply lost
+	l.refresh() // resent once, applied again, reply lost: dropped now
+	st.failIncr(nil, false)
+	l.refresh()
+	l.refresh()
+	if in.pending() {
+		t.Error("deltas still queued after two ambiguous failures")
+	}
+	if got := startedTotal(t, st, clk, in.epochs); got > 6 {
+		t.Errorf("started total = %d for 3 begins, want at most 2x one batch (6)", got)
+	}
+}
+
+func TestSharedInflightNotWrittenFailureKeepsExactTotal(t *testing.T) {
+	st, clk, _, _ := fussyEnv()
+	l := sharedTestLoop(st, clk)
+	in := newSharedInflight(l, []string{"p"}, time.Minute)
+	st.failIncr(&notAppliedError{err: errors.New("dial refused")}, false)
+	for i := 0; i < 4; i++ {
+		in.begin("p")
+		l.refresh()
+	}
+	if !in.pending() {
+		t.Fatal("deltas dropped after failures that never wrote")
+	}
+	st.failIncr(nil, false)
+	l.refresh()
+	if got := startedTotal(t, st, clk, in.epochs); got != 4 {
+		t.Errorf("started total = %d, want exactly 4", got)
+	}
+	if in.pending() {
+		t.Error("deltas queued after the successful flush")
+	}
+}
+
+func TestSharedInflightNewDeltasSurviveAfterAmbiguousDrop(t *testing.T) {
+	st, clk, _, _ := fussyEnv()
+	l := sharedTestLoop(st, clk)
+	in := newSharedInflight(l, []string{"p"}, time.Minute)
+	in.begin("p")
+	st.failIncr(errors.New("reply lost"), false)
+	l.refresh()
+	in.begin("p") // new delta lands on the once-sent batch
+	l.refresh()   // batch of 1 dropped, new delta kept
+	st.failIncr(nil, false)
+	l.refresh()
+	if got := startedTotal(t, st, clk, in.epochs); got != 1 {
+		t.Errorf("started total = %d, want 1 (the dropped batch is gone, the new delta lands once)", got)
 	}
 }

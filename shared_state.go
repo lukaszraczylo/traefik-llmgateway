@@ -579,6 +579,8 @@ type infDelta struct {
 	key   string
 	epoch int64
 	n     int64
+	// tried is the oldest part of n that an earlier flush sent and may have landed.
+	tried int64
 }
 
 // sharedInflight counts in-flight requests per provider fleet-wide with epoch-bucketed started/finished counters, so a crashed pod's leak ages out.
@@ -689,7 +691,8 @@ func (s *sharedInflight) pending() bool {
 }
 
 // flush writes every non-zero delta in one incrMulti. Epochs outside the read window are discarded.
-// On error the deltas stay and later begin/end calls add on top of them.
+// A failure that never wrote keeps every delta. A failure that may have landed (written, reply lost or timed out)
+// resends each batch once and then drops it, which equals the leak a crashed pod leaves and the epoch scheme bounds.
 func (s *sharedInflight) flush(l *sharedStateLoop, now time.Time) error {
 	oldest := s.epochOf(now) - int64(s.epochs)
 	s.mu.Lock()
@@ -706,12 +709,19 @@ func (s *sharedInflight) flush(l *sharedStateLoop, now time.Time) error {
 		return nil
 	}
 	if _, err := l.store.incrMulti(entries); err != nil {
+		if !respNotApplied(err) {
+			s.markAmbiguous(entries)
+		}
 		return err
 	}
 	s.mu.Lock()
 	for _, e := range entries {
 		if d, ok := s.acc[e.key]; ok {
 			d.n -= e.delta
+			d.tried -= e.delta
+			if d.tried < 0 {
+				d.tried = 0
+			}
 			if d.n <= 0 {
 				delete(s.acc, e.key)
 			}
@@ -719,6 +729,27 @@ func (s *sharedInflight) flush(l *sharedStateLoop, now time.Time) error {
 	}
 	s.mu.Unlock()
 	return nil
+}
+
+// markAmbiguous drops the part of each sent batch that an earlier flush already sent, and marks the rest as sent once.
+func (s *sharedInflight) markAmbiguous(sent []counterIncr) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, e := range sent {
+		d, ok := s.acc[e.key]
+		if !ok {
+			continue
+		}
+		old := d.tried
+		if old > e.delta {
+			old = e.delta
+		}
+		d.n -= old
+		d.tried = e.delta - old
+		if d.n <= 0 {
+			delete(s.acc, e.key)
+		}
+	}
 }
 
 // shared returns the fleet-wide in-flight count from the last refresh.

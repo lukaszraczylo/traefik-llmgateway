@@ -630,7 +630,7 @@ func TestSharedInflightFlushErrorRetains(t *testing.T) {
 	a.begin("p")
 	a.begin("p")
 	end()
-	store.setFailIncr(errors.New("redis down"))
+	store.setFailIncr(&notAppliedError{err: errors.New("redis down")})
 	la.refresh()
 	a.begin("p") // lands on top of the retained deltas
 	la.refresh()
@@ -717,7 +717,7 @@ func TestSharedStateNoIdleStopWithPendingDeltas(t *testing.T) {
 	l.nowFn = clk.now
 	l.every = 5 * time.Millisecond
 	in := newSharedInflight(l, []string{"p"}, 20*time.Minute)
-	store.setFailIncr(errors.New("redis down"))
+	store.setFailIncr(&notAppliedError{err: errors.New("redis down")})
 	in.begin("p")
 	clk.advance(sharedStateIdleStop + time.Second)
 	time.Sleep(50 * time.Millisecond)
