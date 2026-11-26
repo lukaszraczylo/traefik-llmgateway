@@ -2237,10 +2237,10 @@ func (l *limiter) accountWith(scopes []limitScope, u usage, costMicros int64, x 
 
 	if x.hasLat && l.statsLatency {
 		if x.provider != "" {
-			entries = append(entries, latencyCounterEntries(kindProvider, x.provider, x.lat, wb, et)...)
+			entries = append(entries, latencyCounterEntries(kindProvider, x.provider, x.lat, wb, et, l.store != nil)...)
 		}
 		if hasModelScope && !x.noModelHistograms {
-			entries = append(entries, latencyCounterEntries(kindModel, modelCanonical, x.lat, wb, et)...)
+			entries = append(entries, latencyCounterEntries(kindModel, modelCanonical, x.lat, wb, et, l.store != nil)...)
 		}
 	}
 
@@ -2272,8 +2272,8 @@ func (l *limiter) accountWith(scopes []limitScope, u usage, costMicros int64, x 
 // provider and, separately, for the served model. latencyBucketIndex
 // (metrics.go) already folds "past every configured bound" into its own
 // returned index (len(latencyBucketBounds)), so no separate overflow
-// branch is needed here.
-func latencyCounterEntries(kind, id string, lat latencySample, wb windowBuckets, et enforceTTLSet) []counterIncr {
+// branch is needed here. fleet adds the shared-store sum counters, which only a configured store reads.
+func latencyCounterEntries(kind, id string, lat latencySample, wb windowBuckets, et enforceTTLSet, fleet bool) []counterIncr {
 	durIdx, _ := latencyBucketIndex(lat.duration)
 	durMetric := latencyDurationMetric(durIdx)
 	out := []counterIncr{
@@ -2287,6 +2287,9 @@ func latencyCounterEntries(kind, id string, lat latencySample, wb windowBuckets,
 			counterIncr{key: windowKeyForBucket(kind, id, ttfbMetric, windowHour, wb.hour), delta: 1, ttl: hourWindowTTL, enforceTTL: et.hour},
 			counterIncr{key: windowKeyForBucket(kind, id, ttfbMetric, windowDay, wb.day), delta: 1, ttl: dayWindowTTL, enforceTTL: et.day},
 		)
+	}
+	if !fleet {
+		return out
 	}
 	return append(out, fleetLatencyEntries(kind, id, lat, wb, et)...)
 }

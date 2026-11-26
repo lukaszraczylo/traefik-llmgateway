@@ -157,7 +157,7 @@ func TestFleetMetricsHistogramSumAndBuckets(t *testing.T) {
 		{duration: 700 * time.Second, hasTTFB: false},
 	}
 	for _, s := range samples {
-		_, ok := gw.limiter.storeIncrMulti(latencyCounterEntries(kindProvider, "alpha", s, wb, et))
+		_, ok := gw.limiter.storeIncrMulti(latencyCounterEntries(kindProvider, "alpha", s, wb, et, true))
 		require.True(t, ok)
 	}
 

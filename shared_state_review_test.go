@@ -419,3 +419,25 @@ func TestSharedCalibratorCountersRideTheAccountBatch(t *testing.T) {
 		t.Errorf("calibrator counters in %d batches (%d shared with usage counters), want 1 batch shared with them", calBatches, mixed)
 	}
 }
+
+func TestFleetLatencyEntriesOnlyWithStore(t *testing.T) {
+	a, _, store, _, _ := sharedGatewayPair(t, nil)
+	a.limiter.statsLatency = true
+	lat := latencySample{duration: 300 * time.Millisecond, ttfb: 100 * time.Millisecond, hasTTFB: true}
+	sumKey := func() string {
+		return windowKeyForBucket(kindProvider, "alpha", metricLatDurSum, windowDay, bucketsFor(a.limiter.now()).day)
+	}
+	read := func(s counterStore) int64 {
+		got, _ := s.getMulti([]string{sumKey()})
+		return got[0]
+	}
+	a.limiter.accountWith(nil, usage{}, 0, accountExtras{provider: "alpha", lat: lat, hasLat: true})
+	if got := read(a.limiter.fallback); got != 0 {
+		t.Errorf("fleet latency sum in the in-memory fallback = %d, want 0 without a store", got)
+	}
+	shareLimiterStore(a, store)
+	a.limiter.accountWith(nil, usage{}, 0, accountExtras{provider: "alpha", lat: lat, hasLat: true})
+	if got := read(store); got != 300 {
+		t.Errorf("fleet latency sum in the store = %d, want 300", got)
+	}
+}
