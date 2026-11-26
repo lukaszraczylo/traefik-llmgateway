@@ -230,11 +230,14 @@ type ProviderConfig struct {
 	// operators who route native tools like macstudio-rerank/parakeet-
 	// mlx/piper-tts through THIS field's route must leave it unset or
 	// true to keep that traffic flowing.
-	Passthrough       *bool  `json:"passthrough,omitempty"`
-	Type              string `json:"type"`
-	BaseURL           string `json:"baseUrl,omitempty"`
-	APIKey            string `json:"apiKey"`
-	DiscoveryInterval string `json:"discoveryInterval,omitempty"`
+	// PromptCache opts this provider into prompt-caching body changes.
+	// nil (the default) leaves every request body unchanged.
+	PromptCache       *PromptCacheConfig `json:"promptCache,omitempty"`
+	Passthrough       *bool              `json:"passthrough,omitempty"`
+	Type              string             `json:"type"`
+	BaseURL           string             `json:"baseUrl,omitempty"`
+	APIKey            string             `json:"apiKey"`
+	DiscoveryInterval string             `json:"discoveryInterval,omitempty"`
 	// RequestTimeout overrides the global Config.RequestTimeout for this
 	// provider alone — an explicit per-provider override always wins over
 	// the global default (house rule). Same Go-duration-string form,

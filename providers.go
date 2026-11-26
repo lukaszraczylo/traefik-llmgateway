@@ -684,6 +684,10 @@ func buildAdapters(cfg *Config) (map[string]providerAdapter, error) {
 			return nil, fmt.Errorf("llmgateway: provider %q: modelBaseUrls and pathBaseUrls are supported for type %q only", name, providerTypeOpenAI)
 		}
 
+		if err := validatePromptCache(name, pc.Type, pc.PromptCache); err != nil {
+			return nil, err
+		}
+
 		switch pc.Type {
 		case providerTypeOpenAI:
 			a := newOpenAIAdapter(name, base, apiKey)
@@ -710,6 +714,7 @@ func buildAdapters(cfg *Config) (map[string]providerAdapter, error) {
 			a.retry = policy
 			a.timeout = timeout
 			a.client = newAdapterHTTPClient(timeout)
+			a.cacheInject = pc.PromptCache != nil && pc.PromptCache.Inject
 			adapters[name] = a
 		case providerTypeGemini:
 			g, err := newGeminiAdapter(name, base, apiKey)
