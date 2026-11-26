@@ -79,6 +79,15 @@ func unifiedPromptCacheSaved(canonical, bare string, u usage, overrides map[stri
 
 func (g *Gateway) writePromptCacheMetrics(m *metricWriter) {
 	snap := g.promptCacheStats.snapshot()
+	note := aggregationNotePerProcess
+	if g.fleetStore() {
+		fleet, ok := g.fleetPromptCache()
+		if !ok {
+			return
+		}
+		snap = fleet
+		note = aggregationNoteStoreBacked
+	}
 	if len(snap) == 0 {
 		return
 	}
@@ -97,7 +106,7 @@ func (g *Gateway) writePromptCacheMetrics(m *metricWriter) {
 		return x.kind < y.kind
 	})
 	m.family("llmgateway_prompt_cache_tokens_total", "counter",
-		"Prompt tokens by provider, model and kind (read: served from the provider prompt cache, write: written to it, uncached: neither)."+aggregationNotePerProcess)
+		"Prompt tokens by provider, model and kind (read: served from the provider prompt cache, write: written to it, uncached: neither)."+note)
 	for _, k := range keys {
 		m.sampleInt("llmgateway_prompt_cache_tokens_total",
 			[]metricLabel{{"provider", k.provider}, {"model", k.model}, {"kind", k.kind}}, snap[k])

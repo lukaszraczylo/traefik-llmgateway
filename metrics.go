@@ -1054,6 +1054,15 @@ func (g *Gateway) recordLatency(provider, model string, sample latencySample) {
 // writeRejectionMetrics' own sort.Slice above.
 func (g *Gateway) writeLatencyMetrics(m *metricWriter) {
 	snaps := g.latency.snapshot()
+	note := aggregationNoteLatency
+	if g.fleetLatencyEnabled() {
+		fleet, ok := g.fleetLatencySnapshots()
+		if !ok {
+			return
+		}
+		snaps = fleet
+		note = aggregationNoteStoreBacked
+	}
 	if len(snaps) == 0 {
 		return
 	}
@@ -1084,18 +1093,18 @@ func (g *Gateway) writeLatencyMetrics(m *metricWriter) {
 	}
 
 	writeUpstreamLatencyFamily(m, "llmgateway_upstream_ttfb_seconds",
-		"Time to first successful byte read from an upstream response body, in seconds, measured from just before the request was sent (watchdogBody, timeout.go). Meaningful as a distinct \"how fast did the provider start responding\" signal only for stream=\"true\": a non-streaming provider buffers its whole completion before sending anything, so its own TTFB is approximately equal to its own llmgateway_upstream_duration_seconds and carries the same output-length contamination duration does — always split by the stream label before comparing across requests of different lengths, never averaged across it."+aggregationNoteLatency,
+		"Time to first successful byte read from an upstream response body, in seconds, measured from just before the request was sent (watchdogBody, timeout.go). Meaningful as a distinct \"how fast did the provider start responding\" signal only for stream=\"true\": a non-streaming provider buffers its whole completion before sending anything, so its own TTFB is approximately equal to its own llmgateway_upstream_duration_seconds and carries the same output-length contamination duration does — always split by the stream label before comparing across requests of different lengths, never averaged across it."+note,
 		"llmgateway_upstream_duration_seconds",
-		"Total upstream response body duration, in seconds, from just before the request was sent to the last successful read or Close (watchdogBody, timeout.go) — covers the whole body, not just headers. Roughly TTFB + output_tokens/tokens_per_sec: a long generation legitimately takes longer than a short one on an equally healthy provider, so a raw average across requests of very different output length is not by itself a \"provider degraded\" signal — llmgateway_tokens_total's completion direction (this file) gives the token side of that ratio for the non-streaming population, where duration approximates total generation time."+aggregationNoteLatency,
+		"Total upstream response body duration, in seconds, from just before the request was sent to the last successful read or Close (watchdogBody, timeout.go) — covers the whole body, not just headers. Roughly TTFB + output_tokens/tokens_per_sec: a long generation legitimately takes longer than a short one on an equally healthy provider, so a raw average across requests of very different output length is not by itself a \"provider degraded\" signal — llmgateway_tokens_total's completion direction (this file) gives the token side of that ratio for the non-streaming population, where duration approximates total generation time."+note,
 		base, false)
 
 	if len(withModel) == 0 {
 		return
 	}
 	writeUpstreamLatencyFamily(m, "llmgateway_upstream_model_ttfb_seconds",
-		"Time to first successful byte read from an upstream response body, in seconds, by provider, stream, and model. Opt-in via metrics.modelLabel — see MetricsConfig's own doc comment for the cardinality trade-off. A separate metric name from llmgateway_upstream_ttfb_seconds (M4 fix), not the same series with an extra label, so summing one family never double-counts the other's requests."+aggregationNoteLatency,
+		"Time to first successful byte read from an upstream response body, in seconds, by provider, stream, and model. Opt-in via metrics.modelLabel — see MetricsConfig's own doc comment for the cardinality trade-off. A separate metric name from llmgateway_upstream_ttfb_seconds (M4 fix), not the same series with an extra label, so summing one family never double-counts the other's requests."+note,
 		"llmgateway_upstream_model_duration_seconds",
-		"Total upstream response body duration, in seconds, by provider, stream, and model. Opt-in via metrics.modelLabel. A separate metric name from llmgateway_upstream_duration_seconds (M4 fix), not the same series with an extra label, so summing one family never double-counts the other's requests."+aggregationNoteLatency,
+		"Total upstream response body duration, in seconds, by provider, stream, and model. Opt-in via metrics.modelLabel. A separate metric name from llmgateway_upstream_duration_seconds (M4 fix), not the same series with an extra label, so summing one family never double-counts the other's requests."+note,
 		withModel, true)
 }
 
@@ -1254,6 +1263,7 @@ func (s *provenanceStore) snapshot() []provenanceSnapshot {
 // with metrics off calls this exactly zero times.
 func (g *Gateway) recordUsageProvenance(provider, provenance string, tokens int64) {
 	g.provenance.record(provider, provenance, tokens)
+	g.countProvenanceShared(provider, provenance, tokens)
 }
 
 // writeProvenanceMetrics emits llmgateway_usage_provenance_requests_total
@@ -1267,6 +1277,15 @@ func (g *Gateway) recordUsageProvenance(provider, provenance string, tokens int6
 // writeLatencyMetrics' own reasoning.
 func (g *Gateway) writeProvenanceMetrics(m *metricWriter) {
 	snaps := g.provenance.snapshot()
+	note := aggregationNotePerProcess
+	if g.fleetStore() {
+		fleet, ok := g.fleetProvenance()
+		if !ok {
+			return
+		}
+		snaps = fleet
+		note = aggregationNoteStoreBacked
+	}
 	if len(snaps) == 0 {
 		return
 	}
@@ -1284,14 +1303,14 @@ func (g *Gateway) writeProvenanceMetrics(m *metricWriter) {
 	// exposition format requires one metric's lines to form a single
 	// contiguous group.
 	m.family("llmgateway_usage_provenance_requests_total", "counter",
-		"Total accounted candidate outcomes (a successful upstream response, callErr == nil, that reached usage accounting in runUnified, routes_unified.go), by provider and provenance. provenance is \"reported\" (the provider returned real usage), \"estimated\" (a non-streaming response carried none, so prompt was substituted with ceil(len(body)/4) and completion billed as zero — usage.estimated, limits.go), or \"unbilled\" (a streaming response carried none, so the request is counted but zero tokens are billed). This family only reports how an already-billed number was arrived at; it never changes what gets billed."+aggregationNotePerProcess)
+		"Total accounted candidate outcomes (a successful upstream response, callErr == nil, that reached usage accounting in runUnified, routes_unified.go), by provider and provenance. provenance is \"reported\" (the provider returned real usage), \"estimated\" (a non-streaming response carried none, so prompt was substituted with ceil(len(body)/4) and completion billed as zero — usage.estimated, limits.go), or \"unbilled\" (a streaming response carried none, so the request is counted but zero tokens are billed). This family only reports how an already-billed number was arrived at; it never changes what gets billed."+note)
 	for _, s := range snaps {
 		m.sampleInt("llmgateway_usage_provenance_requests_total",
 			[]metricLabel{{"provider", s.key.provider}, {"provenance", s.key.provenance}}, s.requests)
 	}
 
 	m.family("llmgateway_usage_provenance_tokens_total", "counter",
-		"Total tokens billed under each provenance (the SAME result.total() runUnified already passed to accounting, routes_unified.go — never a second, independent count), by provider and provenance. sum(...{provenance=\"reported\"}) / sum(...) across every provenance is the fraction of billed tokens that came from real provider-reported usage."+aggregationNotePerProcess)
+		"Total tokens billed under each provenance (the SAME result.total() runUnified already passed to accounting, routes_unified.go — never a second, independent count), by provider and provenance. sum(...{provenance=\"reported\"}) / sum(...) across every provenance is the fraction of billed tokens that came from real provider-reported usage."+note)
 	for _, s := range snaps {
 		m.sampleInt("llmgateway_usage_provenance_tokens_total",
 			[]metricLabel{{"provider", s.key.provider}, {"provenance", s.key.provenance}}, s.tokens)
@@ -1308,6 +1327,10 @@ func (g *Gateway) writeProvenanceMetrics(m *metricWriter) {
 // -only, per-process-lifetime counter rather than a new windowed
 // counterStore key.
 func (g *Gateway) writeRejectionMetrics(m *metricWriter) {
+	if g.fleetStore() {
+		g.writeFleetRejectionMetrics(m)
+		return
+	}
 	snaps := g.limiter.rejectionSnapshot()
 	sort.Slice(snaps, func(i, j int) bool {
 		if snaps[i].kind != snaps[j].kind {

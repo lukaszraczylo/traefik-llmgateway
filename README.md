@@ -2941,6 +2941,7 @@ counting calls is exactly counting round trips):
 | `admin.enabled: false` | 3 (2 sync — `checkAndCount`, `accountWith` — + 1 async — `recordProviderAttempt`) — `l.statsAdmin` (`adminEnabled(cfg)`, `newConfiguredLimiter`) is false, so no "always-on-with-admin" family, last-seen included, ever writes (`TestRoundTrips_SingleGroupChat_Defaults_TwoSyncOneAsync`, `stats_write_test.go`) |
 | `admin.enabled: true` (`admin.stats.userModel`/`latency` on or off — **both default off, and neither changes this row**: `l.statsAdmin` is `adminEnabled(cfg)` alone, so last-seen and the rest of the always-on family are gated on `admin.enabled` by itself), cache miss or no cache, this scope's last-seen already written within `lastSeenGateThrottle` by this replica | 3 — every new counter family except last-seen rides one of the two existing sync batches above, never a new round trip; `userModel`/`latency`, when on, add entries to those SAME batches, never a new call |
 | Same as above, but this scope's last-seen is DUE (its first admitted request ever, or `lastSeenGateThrottle` — 60s — has elapsed since this replica's last write for it) | 4 — adds `recordLastSeen`'s own async write (P9 fix, moved off `checkAndCount`'s own batch — see [Limits and accounting](#limits-and-accounting)). This is the common case for a request from a SCOPE'S FIRST admitted request under a fresh limiter, `admin.enabled: true` regardless of the opt-in stats (`TestRoundTrips_SingleGroupChat_AdminEnabledStatsOff_FourRoundTripsWhenLastSeenDue`, `TestRoundTrips_SingleGroupChat_AllStatsOn_NoNewSyncRoundTrips`, `stats_write_test.go`) |
+| Any row above that completes an upstream call with `metrics.enabled: true` and a store | +1 async — the usage-provenance mirror (`countProvenanceShared`, `fleet_metrics.go`) that `llmgateway_usage_provenance_*` reads fleet-wide (`TestRoundTrips_SingleGroupChat_AllStatsOn_NoNewSyncRoundTrips`) |
 | Cache hit (`cache.enabled: true`, `admin.enabled: true`), last-seen already throttled | 2 (`checkAndCount` + `recordCacheHit`'s async write) — `accountWith`/`recordProviderAttempt` never run at all, since the hit branch returns before either is reached |
 | Cache hit, last-seen due | 3 — adds `recordLastSeen`'s own async write, same condition as the row above |
 
@@ -3208,14 +3209,22 @@ plugin's config.
     carries the identical measurements broken out per `(provider, stream,
     model)` too. These are distinct metric names, not the unlabelled pair
     re-emitted under a wider label set, so a query against the unlabelled
-    families is unaffected either way.
+    families is unaffected either way. With `redis` and
+    `admin.stats.latency`, all four read the shared latency counters (UTC
+    day window; counters restart at the day rollover, which `rate()` treats
+    as a reset) and `_sum` starts at the deploy, so it can lag `_count` on
+    the first day; otherwise they are per process.
   - `llmgateway_router_requests_total{router,tier,reason}` /
     `llmgateway_router_escalations_total{router,from_tier,to_tier}` —
-    per-process counters for [smart routers](#smart-routers). They
-    appear after the first routed request.
+    counters for [smart routers](#smart-routers). They appear after the
+    first routed request. With `redis` and `admin.enabled`, they and the
+    decision families read the shared router counters (month window), so
+    every replica reports the fleet-wide value; otherwise they are per
+    process.
   - `llmgateway_prompt_cache_tokens_total{provider,model,kind}` — prompt
-    tokens by `kind`: `read`, `write` or `uncached`. Per instance. See
-    [Prompt caching](#prompt-caching).
+    tokens by `kind`: `read`, `write` or `uncached`. With `redis` it reads
+    the model-scope counters (UTC month window), so it is fleet-wide;
+    otherwise it is per instance. See [Prompt caching](#prompt-caching).
   - `llmgateway_provider_healthy{provider}` — `1`/`0` gauge from the
     discovery circuit breaker (`healthState` in the admin API); see
     [Provider health](#provider-health-discovery-circuit-breaker).
@@ -3237,7 +3246,10 @@ plugin's config.
   - `llmgateway_rate_limit_rejections_total{scope_kind,scope_id}` — how
     many requests a rate or budget limit actually refused, by scope. This
     one has no equivalent in the admin JSON API: nothing else tracks it.
-    It does **not** reset only on process restart: a scope's own count
+    With `redis` it is a UTC-month counter shared by all replicas
+    (`user` and `group` scopes only; `store_down` rejections stay local and
+    are not exported). Without `redis`, it does **not** reset only on
+    process restart: a scope's own count
     also resets to `0` when that user is removed via a hot-reloaded users
     file, and **every** tracked scope resets together, in one bulk cliff,
     the instant more than 2000 distinct scopes have ever been seen in
@@ -3263,9 +3275,11 @@ plugin's config.
   becomes the correct aggregation instead. This flips on that one config
   bit; know which one you are running before wiring an alert. Four
   families do **not** follow this rule:
-  - `llmgateway_rate_limit_rejections_total` lives only in each replica's
-    own process memory, **never** in Redis, regardless of the `redis`
-    config — `sum()` is always correct for it.
+  - Without `redis`, `llmgateway_rate_limit_rejections_total` and the
+    `llmgateway_usage_provenance_*` families live only in each replica's
+    own process memory — `sum()` is correct for them. With `redis` they
+    read shared month-window counters instead and follow the `max()`
+    rule, like the router, latency and prompt-cache families.
   - `llmgateway_provider_healthy` reflects each replica's own,
     independently-running discovery circuit breaker — never shared via
     Redis either — so two replicas can legitimately disagree about one

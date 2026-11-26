@@ -158,7 +158,9 @@ func TestRoundTrips_SingleGroupChat_Defaults_TwoSyncOneAsync(t *testing.T) {
 // this is a SEPARATE async call, not a batch this one rides. 2 sync + 2
 // async = 4 total, once per admitted request from a scope l.lastSeen.due
 // has not already throttled within lastSeenGateThrottle (60s) — a fresh
-// limiter's first request for a scope, as this test drives.
+// limiter's first request for a scope, as this test drives. With metrics
+// on and a store, the usage-provenance mirror (countProvenanceShared) adds a
+// fifth, async round trip.
 func TestRoundTrips_SingleGroupChat_AllStatsOn_NoNewSyncRoundTrips(t *testing.T) {
 	srv := roundTripTestUpstream(t)
 	gw, counting := buildRoundTripTestGateway(t, srv, func(cfg *Config) {
@@ -174,8 +176,8 @@ func TestRoundTrips_SingleGroupChat_AllStatsOn_NoNewSyncRoundTrips(t *testing.T)
 
 	got := counting.total()
 	t.Logf("AFTER (admin.stats.userModel=true, admin.stats.latency=true, metrics on, no cache): %d counterStore round trips for the SAME single-group chat request", got)
-	if got != 4 {
-		t.Errorf("round trips with all stats on = %d, want 4 (2 sync + 2 async: checkAndCount, accountWith, recordProviderAttempt, recordLastSeen) — every new counter family rides an EXISTING sync batch except last-seen, which is its own async write by design (P9 fix)", got)
+	if got != 5 {
+		t.Errorf("round trips with all stats on = %d, want 5 (2 sync + 3 async: checkAndCount, accountWith, recordProviderAttempt, recordLastSeen, provenance) — every new counter family rides an EXISTING sync batch except last-seen and, with metrics on, provenance, which are their own async writes by design", got)
 	}
 }
 

@@ -318,10 +318,38 @@ func decisionAnswered(outcome string) bool {
 	return outcome == decisionAgree || outcome == decisionOverride || outcome == decisionLowConf || outcome == decisionCache
 }
 
+// routerMetricSet is the counter source one scrape renders the router families from.
+type routerMetricSet struct {
+	reqs  map[routerRequestKey]int64
+	escs  map[routerEscalationKey]int64
+	decs  map[routerDecisionKey]int64
+	decMx map[routerDecisionTierKey]int64
+	note  string
+}
+
+// routerMetricSource reads the shared counters when the store backs them, else this pod's own.
+// ok is false when the shared read fails, so the scrape skips the families.
+func (g *Gateway) routerMetricSource() (routerMetricSet, bool) {
+	if g.routerSharedEnabled() {
+		c, ok := g.readRouterShared(g.limiter.now())
+		if !ok {
+			return routerMetricSet{}, false
+		}
+		return routerMetricSet{reqs: c.reqs, escs: c.escs, decs: c.decs, decMx: c.decMx, note: aggregationNoteStoreBacked}, true
+	}
+	reqs, escs := g.routerStats.snapshot()
+	decs, decMx := g.routerStats.decisionSnapshot()
+	return routerMetricSet{reqs: reqs, escs: escs, decs: decs, decMx: decMx, note: aggregationNotePerProcess}, true
+}
+
 // writeRouterMetrics emits the router counter families; absent until the first observation.
 func (g *Gateway) writeRouterMetrics(m *metricWriter) {
 	g.writeRouterCalibrationMetrics(m)
-	reqs, escs := g.routerStats.snapshot()
+	src, ok := g.routerMetricSource()
+	if !ok {
+		return
+	}
+	reqs, escs, note := src.reqs, src.escs, src.note
 	if len(reqs) > 0 {
 		keys := make([]routerRequestKey, 0, len(reqs))
 		for k := range reqs {
@@ -338,13 +366,13 @@ func (g *Gateway) writeRouterMetrics(m *metricWriter) {
 			return x.reason < y.reason
 		})
 		m.family("llmgateway_router_requests_total", "counter",
-			"Smart router requests by router, first attempted tier and routing reason (score, keyword, floor, model, default, or skipped when lower tiers had no usable target)."+aggregationNotePerProcess)
+			"Smart router requests by router, first attempted tier and routing reason (score, keyword, floor, model, default, or skipped when lower tiers had no usable target)."+note)
 		for _, k := range keys {
 			m.sampleInt("llmgateway_router_requests_total",
 				[]metricLabel{{"router", k.router}, {"tier", k.tier}, {"reason", k.reason}}, reqs[k])
 		}
 	}
-	g.writeRouterDecisionMetrics(m)
+	g.writeRouterDecisionMetrics(m, src)
 	if len(escs) > 0 {
 		keys := make([]routerEscalationKey, 0, len(escs))
 		for k := range escs {
@@ -361,7 +389,7 @@ func (g *Gateway) writeRouterMetrics(m *metricWriter) {
 			return x.to < y.to
 		})
 		m.family("llmgateway_router_escalations_total", "counter",
-			"Smart router attempts that moved to a higher tier after a failure, by router, from_tier and to_tier. Same-tier failover is not counted."+aggregationNotePerProcess)
+			"Smart router attempts that moved to a higher tier after a failure, by router, from_tier and to_tier. Same-tier failover is not counted."+note)
 		for _, k := range keys {
 			m.sampleInt("llmgateway_router_escalations_total",
 				[]metricLabel{{"router", k.router}, {"from_tier", k.from}, {"to_tier", k.to}}, escs[k])
@@ -369,8 +397,8 @@ func (g *Gateway) writeRouterMetrics(m *metricWriter) {
 	}
 }
 
-func (g *Gateway) writeRouterDecisionMetrics(m *metricWriter) {
-	dec, mx := g.routerStats.decisionSnapshot()
+func (g *Gateway) writeRouterDecisionMetrics(m *metricWriter, src routerMetricSet) {
+	dec, mx, note := src.decs, src.decMx, src.note
 	if len(dec) > 0 {
 		keys := make([]routerDecisionKey, 0, len(dec))
 		for k := range dec {
@@ -383,7 +411,7 @@ func (g *Gateway) writeRouterDecisionMetrics(m *metricWriter) {
 			return keys[a].outcome < keys[b].outcome
 		})
 		m.family("llmgateway_router_decision_total", "counter",
-			"Smart router decision-model calls by router and outcome (agree, override, lowconf, timeout, error, breaker, cache)."+aggregationNotePerProcess)
+			"Smart router decision-model calls by router and outcome (agree, override, lowconf, timeout, error, breaker, cache)."+note)
 		for _, k := range keys {
 			m.sampleInt("llmgateway_router_decision_total",
 				[]metricLabel{{"router", k.router}, {"outcome", k.outcome}}, dec[k])
@@ -405,7 +433,7 @@ func (g *Gateway) writeRouterDecisionMetrics(m *metricWriter) {
 			return x.model < y.model
 		})
 		m.family("llmgateway_router_decision_tiers_total", "counter",
-			"Smart router answers from the decision model or its cache by router, heuristic tier and model-ranked tier."+aggregationNotePerProcess)
+			"Smart router answers from the decision model or its cache by router, heuristic tier and model-ranked tier."+note)
 		for _, k := range keys {
 			m.sampleInt("llmgateway_router_decision_tiers_total",
 				[]metricLabel{{"router", k.router}, {"heuristic", k.heuristic}, {"model", k.model}}, mx[k])

@@ -1908,6 +1908,9 @@ func (l *limiter) settleRejection(entries []counterIncr, violatedIdx int, scopes
 	if totalPresent {
 		comp = append(comp, rejectionCounterIncr(totalScopeKind, totalScopeID, windowDay, wb.day, et.day))
 	}
+	if l.store != nil {
+		comp = append(comp, rejectionCounterIncr(violated.kind, violated.id, windowMonth, wb.month, et.month))
+	}
 	// rej/hour (always-on-with-admin, DECISIONS): rides this SAME
 	// compensation batch, never a second round trip, alongside the
 	// existing always-on rej/day entries above.
@@ -1924,13 +1927,16 @@ func (l *limiter) settleRejection(entries []counterIncr, violatedIdx int, scopes
 
 // rejectionCounterIncr builds the single rej counterIncr entry
 // settleRejection adds per scope it attributes a rejection to, for window
-// (windowDay, always-on; windowHour, admin-gated) — delta 1, ttl the
-// window's own matching constant (dayWindowTTL/hourWindowTTL), enforceTTL
-// the caller's own et.day/et.hour.
+// (windowDay, always-on; windowHour, admin-gated; windowMonth, store-only,
+// read by /metrics) — delta 1, ttl the window's own matching constant,
+// enforceTTL the caller's own et value.
 func rejectionCounterIncr(kind, id, window, bucket string, enforceTTL time.Duration) counterIncr {
 	ttl := dayWindowTTL
-	if window == windowHour {
+	switch window {
+	case windowHour:
 		ttl = hourWindowTTL
+	case windowMonth:
+		ttl = monthWindowTTL
 	}
 	return counterIncr{key: windowKeyForBucket(kind, id, metricRej, window, bucket), delta: 1, ttl: ttl, enforceTTL: enforceTTL}
 }
@@ -2267,7 +2273,7 @@ func latencyCounterEntries(kind, id string, lat latencySample, wb windowBuckets,
 			counterIncr{key: windowKeyForBucket(kind, id, ttfbMetric, windowDay, wb.day), delta: 1, ttl: dayWindowTTL, enforceTTL: et.day},
 		)
 	}
-	return out
+	return append(out, fleetLatencyEntries(kind, id, lat, wb, et)...)
 }
 
 // recordCacheHit accounts one response-cache HIT (Q7, DECISIONS:
