@@ -134,6 +134,13 @@ cosign verify ghcr.io/lukaszraczylo/traefik-llmgateway:<version> \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
 
+For Kubernetes, [`examples/standalone/`](examples/standalone/) is a complete
+kustomization: a 3-replica Deployment with restart draining, a Service, a
+PodDisruptionBudget, the config as a `configMapGenerator` (an edit rolls
+the pods), placeholder Secrets for provider keys and users, and an optional
+Traefik IngressRoute with a long response timeout. Apply it with
+`kubectl apply -k examples/standalone`.
+
 To build from source:
 
 ```sh

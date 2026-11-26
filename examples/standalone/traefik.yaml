@@ -1,0 +1,29 @@
+# Optional: Traefik in front. Any reverse proxy works; keep its response
+# timeout above your longest non-streaming generation. Remove this file
+# from the kustomization if you use another ingress.
+apiVersion: traefik.io/v1alpha1
+kind: ServersTransport
+metadata:
+  name: llmgateway
+spec:
+  forwardingTimeouts:
+    dialTimeout: 30s
+    # Set explicitly: a short global responseHeaderTimeout (for example 30s)
+    # would cut off slow generations, which can take minutes.
+    responseHeaderTimeout: 20m
+---
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: llmgateway
+spec:
+  entryPoints:
+    - websecure
+  routes:
+    - match: Host(`llm.example.com`)
+      kind: Rule
+      services:
+        - name: llmgateway
+          port: 8080
+          serversTransport: llmgateway
+  tls: {}
