@@ -1991,8 +1991,13 @@ type accountExtras struct {
 	// increments prov/{failoverFrom}:fover when non-empty and admin stats
 	// are on.
 	failoverFrom string
+	// provenance is a completed candidate's usage provenance (empty for none);
+	// with a store, accountWith mirrors it, and provenanceTokens, into the
+	// shared month counters.
+	provenance string
 	// promptCacheSaved is the micro-USD the provider prompt cache saved this call.
 	promptCacheSaved int64
+	provenanceTokens int64
 	// lat/hasLat carry one completed upstream watchdogBody's latency
 	// sample (metrics.go), when withLatencyRecorder was wired for this
 	// call and it actually fired — hasLat false means no sample arrived
@@ -2220,6 +2225,10 @@ func (l *limiter) accountWith(scopes []limitScope, u usage, costMicros int64, x 
 	// each hour+day, duration always, TTFB only when the sample carries
 	// one (a body that never delivered a successful byte has nothing
 	// meaningful to report there).
+	if x.provenance != "" && l.store != nil {
+		entries = append(entries, provenanceEntries(x.provider, x.provenance, x.provenanceTokens, wb.month)...)
+	}
+
 	if x.hasLat && l.statsLatency {
 		if x.provider != "" {
 			entries = append(entries, latencyCounterEntries(kindProvider, x.provider, x.lat, wb, et)...)

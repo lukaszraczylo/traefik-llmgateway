@@ -786,6 +786,21 @@ func (g *Gateway) runMeteredCall(sw *statusTrackingWriter, r *http.Request, scop
 			extras.lat = latSample
 			extras.hasLat = true
 		}
+		// Provenance is derived here, before accounting, so the shared-store
+		// mirror rides accountWith's own batch; the in-memory record below
+		// stays after it.
+		var provenance string
+		if callErr == nil && metricsEnabled(g.cfg) {
+			provenance = provenanceReported
+			switch {
+			case result.estimated:
+				provenance = provenanceEstimated
+			case streaming && result.total() == 0:
+				provenance = provenanceUnbilled
+			}
+			extras.provenance = provenance
+			extras.provenanceTokens = result.total()
+		}
 		extras.promptCacheSaved = unifiedPromptCacheSaved(cand.canonical, cand.upstreamModel, result, g.cfg.Pricing, g.cfg.ModelMeta)
 		g.recordPromptCache(providerName, cand.upstreamModel, result)
 		g.limiter.accountWith(acctScopes, result, unifiedCostMicros(cand.canonical, cand.upstreamModel, result, g.cfg.Pricing, g.cfg.ModelMeta, g.pricingWarn), extras)
@@ -817,14 +832,7 @@ func (g *Gateway) runMeteredCall(sw *statusTrackingWriter, r *http.Request, scop
 		// extra here. Observation only: nothing recorded here feeds back
 		// into result or the account call above, both of which already
 		// ran — see g.recordUsageProvenance's own doc comment (metrics.go).
-		if callErr == nil && metricsEnabled(g.cfg) {
-			provenance := provenanceReported
-			switch {
-			case result.estimated:
-				provenance = provenanceEstimated
-			case streaming && result.total() == 0:
-				provenance = provenanceUnbilled
-			}
+		if provenance != "" {
 			g.recordUsageProvenance(providerName, provenance, result.total())
 		}
 

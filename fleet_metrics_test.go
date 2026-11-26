@@ -274,3 +274,92 @@ func TestFleetMetricsFallsBackWhenPrerequisiteOff(t *testing.T) {
 	assert.Contains(t, help, "aggregate with sum()")
 	assert.Contains(t, fleetHelp(t, gw, "llmgateway_router_requests_total"), "aggregate with max()", "router stays store-backed")
 }
+
+// familyFailStore fails getMulti only for batches that carry a key matching
+// fail; every other read and every write goes through.
+type familyFailStore struct {
+	counterStore
+	fail func(key string) bool
+}
+
+func (s familyFailStore) getMulti(keys []string) ([]int64, error) {
+	for _, k := range keys {
+		if s.fail(k) {
+			return nil, errStoreDownStub
+		}
+	}
+	return s.counterStore.getMulti(keys)
+}
+
+// A failed read latches the limiter store down (storeLatched), so every read
+// after it in the same scrape is skipped too. Families rendered before the
+// failing one are unaffected; for the last store-backed family, only it is
+// missing.
+func TestFleetMetricsPartialStoreFailure(t *testing.T) {
+	isLatency := func(k string) bool {
+		for _, m := range []string{":ld", ":lt", ":lsd", ":lst"} {
+			if strings.Contains(k, m) {
+				return true
+			}
+		}
+		return false
+	}
+	isRejection := func(k string) bool { return strings.Contains(k, ":"+metricRej+":"+windowMonth+":") }
+	allFleet := []string{
+		"llmgateway_router_requests_total{", "llmgateway_router_escalations_total{",
+		"llmgateway_upstream_duration_seconds_count{", "llmgateway_upstream_ttfb_seconds_count{",
+		"llmgateway_prompt_cache_tokens_total{", "llmgateway_usage_provenance_requests_total{",
+		"llmgateway_usage_provenance_tokens_total{", "llmgateway_rate_limit_rejections_total{",
+	}
+	except := func(drop ...string) []string {
+		var out []string
+		for _, f := range allFleet {
+			keep := true
+			for _, d := range drop {
+				if f == d {
+					keep = false
+				}
+			}
+			if keep {
+				out = append(out, f)
+			}
+		}
+		return out
+	}
+	tests := []struct {
+		name    string
+		fail    func(string) bool
+		missing []string
+		present []string
+	}{
+		{"last family only", isRejection,
+			[]string{"llmgateway_rate_limit_rejections_total{"},
+			append(except("llmgateway_rate_limit_rejections_total{"), "llmgateway_requests_total{", "llmgateway_provider_healthy{")},
+		{"latency, then latched", isLatency,
+			[]string{"llmgateway_upstream_duration_seconds_count{", "llmgateway_upstream_ttfb_seconds_count{"},
+			[]string{"llmgateway_requests_total{", "llmgateway_provider_attempts_total{", "llmgateway_provider_healthy{"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mem := newMemoryStore()
+			cfg, closeAll := fleetConfig([3]int{503, 200, 200}, fleetCachedBody, 1)
+			defer closeAll()
+			gw := fleetGateway(t, cfg, mem)
+			require.Equal(t, 200, routerChat(t, gw, routerName, "hi", nil).Code)
+			require.Equal(t, 429, routerChat(t, gw, routerName, "hi", nil).Code)
+			base := scrape(gw)
+			for _, f := range allFleet {
+				require.True(t, strings.Contains(base, f), "baseline lacks %s", f)
+			}
+
+			gw.limiter.store = familyFailStore{counterStore: mem, fail: tt.fail}
+			out := scrape(gw)
+			for _, f := range tt.missing {
+				assert.False(t, strings.Contains(out, f), "%s must be absent", f)
+			}
+			for _, f := range tt.present {
+				assert.True(t, strings.Contains(out, f), "%s must be present", f)
+			}
+		})
+	}
+}

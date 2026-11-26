@@ -1263,7 +1263,6 @@ func (s *provenanceStore) snapshot() []provenanceSnapshot {
 // with metrics off calls this exactly zero times.
 func (g *Gateway) recordUsageProvenance(provider, provenance string, tokens int64) {
 	g.provenance.record(provider, provenance, tokens)
-	g.countProvenanceShared(provider, provenance, tokens)
 }
 
 // writeProvenanceMetrics emits llmgateway_usage_provenance_requests_total

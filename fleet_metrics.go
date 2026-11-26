@@ -240,18 +240,14 @@ func (g *Gateway) fleetPromptCache() (map[promptCacheKey]int64, bool) {
 	return out, true
 }
 
-// countProvenanceShared mirrors one provenance observation into the shared
-// month counters, async and droppable.
-func (g *Gateway) countProvenanceShared(provider, provenance string, tokens int64) {
-	if !g.fleetStore() || g.cfg == nil || !metricsEnabled(g.cfg) {
-		return
-	}
-	bucket := bucketFor(g.limiter.now(), windowMonth)
-	entries := []counterIncr{{key: provenanceKeyFor(provider, metricProvenanceReq, provenance, bucket), delta: 1, ttl: monthWindowTTL, enforceTTL: enforceTTLMonthWindow}}
+// provenanceEntries returns the month-window shared counters for one
+// provenance observation; they ride accountWith's own batch.
+func provenanceEntries(provider, provenance string, tokens int64, monthBucket string) []counterIncr {
+	out := []counterIncr{{key: provenanceKeyFor(provider, metricProvenanceReq, provenance, monthBucket), delta: 1, ttl: monthWindowTTL, enforceTTL: enforceTTLMonthWindow}}
 	if tokens > 0 {
-		entries = append(entries, counterIncr{key: provenanceKeyFor(provider, metricProvenanceTok, provenance, bucket), delta: tokens, ttl: monthWindowTTL, enforceTTL: enforceTTLMonthWindow})
+		out = append(out, counterIncr{key: provenanceKeyFor(provider, metricProvenanceTok, provenance, monthBucket), delta: tokens, ttl: monthWindowTTL, enforceTTL: enforceTTLMonthWindow})
 	}
-	g.limiter.countAsync(entries)
+	return out
 }
 
 func provenanceKeyFor(provider, metric, provenance, bucket string) string {

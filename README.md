@@ -2941,7 +2941,6 @@ counting calls is exactly counting round trips):
 | `admin.enabled: false` | 3 (2 sync — `checkAndCount`, `accountWith` — + 1 async — `recordProviderAttempt`) — `l.statsAdmin` (`adminEnabled(cfg)`, `newConfiguredLimiter`) is false, so no "always-on-with-admin" family, last-seen included, ever writes (`TestRoundTrips_SingleGroupChat_Defaults_TwoSyncOneAsync`, `stats_write_test.go`) |
 | `admin.enabled: true` (`admin.stats.userModel`/`latency` on or off — **both default off, and neither changes this row**: `l.statsAdmin` is `adminEnabled(cfg)` alone, so last-seen and the rest of the always-on family are gated on `admin.enabled` by itself), cache miss or no cache, this scope's last-seen already written within `lastSeenGateThrottle` by this replica | 3 — every new counter family except last-seen rides one of the two existing sync batches above, never a new round trip; `userModel`/`latency`, when on, add entries to those SAME batches, never a new call |
 | Same as above, but this scope's last-seen is DUE (its first admitted request ever, or `lastSeenGateThrottle` — 60s — has elapsed since this replica's last write for it) | 4 — adds `recordLastSeen`'s own async write (P9 fix, moved off `checkAndCount`'s own batch — see [Limits and accounting](#limits-and-accounting)). This is the common case for a request from a SCOPE'S FIRST admitted request under a fresh limiter, `admin.enabled: true` regardless of the opt-in stats (`TestRoundTrips_SingleGroupChat_AdminEnabledStatsOff_FourRoundTripsWhenLastSeenDue`, `TestRoundTrips_SingleGroupChat_AllStatsOn_NoNewSyncRoundTrips`, `stats_write_test.go`) |
-| Any row above that completes an upstream call with `metrics.enabled: true` and a store | +1 async — the usage-provenance mirror (`countProvenanceShared`, `fleet_metrics.go`) that `llmgateway_usage_provenance_*` reads fleet-wide (`TestRoundTrips_SingleGroupChat_AllStatsOn_NoNewSyncRoundTrips`) |
 | Cache hit (`cache.enabled: true`, `admin.enabled: true`), last-seen already throttled | 2 (`checkAndCount` + `recordCacheHit`'s async write) — `accountWith`/`recordProviderAttempt` never run at all, since the hit branch returns before either is reached |
 | Cache hit, last-seen due | 3 — adds `recordLastSeen`'s own async write, same condition as the row above |
 
@@ -3213,7 +3212,9 @@ plugin's config.
     `admin.stats.latency`, all four read the shared latency counters (UTC
     day window; counters restart at the day rollover, which `rate()` treats
     as a reset) and `_sum` starts at the deploy, so it can lag `_count` on
-    the first day; otherwise they are per process.
+    the first day; otherwise they are per process. On rollout day,
+    streaming latency recorded before the upgrade shows as `stream="false"`
+    until the day rolls over.
   - `llmgateway_router_requests_total{router,tier,reason}` /
     `llmgateway_router_escalations_total{router,from_tier,to_tier}` —
     counters for [smart routers](#smart-routers). They appear after the
@@ -3248,7 +3249,8 @@ plugin's config.
     one has no equivalent in the admin JSON API: nothing else tracks it.
     With `redis` it is a UTC-month counter shared by all replicas
     (`user` and `group` scopes only; `store_down` rejections stay local and
-    are not exported). Without `redis`, it does **not** reset only on
+    are not exported; a series disappears when its user or group is
+    removed from config). Without `redis`, it does **not** reset only on
     process restart: a scope's own count
     also resets to `0` when that user is removed via a hot-reloaded users
     file, and **every** tracked scope resets together, in one bulk cliff,
