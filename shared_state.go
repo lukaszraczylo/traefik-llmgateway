@@ -26,6 +26,8 @@ const (
 
 	sharedBreakerOpensTTLFactor = 4
 	sharedBreakerMaxDoublings   = 30
+	// sharedBreakerKeysPerID counts the keys keys() lists per id: open, fails, opens.
+	sharedBreakerKeysPerID = 3
 
 	sharedInflightEpochSecs = 300
 	sharedInflightEpoch     = 5 * time.Minute
@@ -328,6 +330,7 @@ type sharedBreaker struct {
 	nowFn      func() time.Time
 	local      map[string]*breakerLocal
 	openUntil  map[string]int64
+	opensSeen  map[string]int64
 	failsSeen  map[string]int64
 	failAcc    map[string]int64
 	kind       string
@@ -344,7 +347,7 @@ func newSharedBreaker(loop *sharedStateLoop, kind string, ids []string, threshol
 	b := &sharedBreaker{
 		loop: loop, nowFn: time.Now, kind: kind, ids: ids,
 		threshold: threshold, openBase: openBase, openMax: openMax, failWindow: failWindow,
-		local: make(map[string]*breakerLocal), openUntil: make(map[string]int64), failsSeen: make(map[string]int64), failAcc: make(map[string]int64),
+		local: make(map[string]*breakerLocal), openUntil: make(map[string]int64), opensSeen: make(map[string]int64), failsSeen: make(map[string]int64), failAcc: make(map[string]int64),
 	}
 	if loop != nil {
 		b.nowFn = loop.nowFn
@@ -354,11 +357,11 @@ func newSharedBreaker(loop *sharedStateLoop, kind string, ids []string, threshol
 	return b
 }
 
-// keys lists, per id, the open-until and fail-count keys.
+// keys lists, per id, the open-until, fail-count and open-count keys.
 func (b *sharedBreaker) keys(_ time.Time) []string {
-	out := make([]string, 0, 2*len(b.ids))
+	out := make([]string, 0, sharedBreakerKeysPerID*len(b.ids))
 	for _, id := range b.ids {
-		out = append(out, sharedBreakerKey(b.kind, id, "open"), sharedBreakerKey(b.kind, id, "fails"))
+		out = append(out, sharedBreakerKey(b.kind, id, "open"), sharedBreakerKey(b.kind, id, "fails"), sharedBreakerKey(b.kind, id, "opens"))
 	}
 	return out
 }
@@ -370,9 +373,11 @@ func (b *sharedBreaker) apply(vals []int64) {
 		if vals == nil {
 			delete(b.openUntil, id)
 			delete(b.failsSeen, id)
+			delete(b.opensSeen, id)
 		} else {
-			b.openUntil[id] = vals[2*i]
-			b.failsSeen[id] = vals[2*i+1]
+			b.openUntil[id] = vals[sharedBreakerKeysPerID*i]
+			b.failsSeen[id] = vals[sharedBreakerKeysPerID*i+1]
+			b.opensSeen[id] = vals[sharedBreakerKeysPerID*i+2]
 		}
 	}
 }
@@ -521,13 +526,14 @@ func (b *sharedBreaker) openDuration(opens int64) time.Duration {
 	return d
 }
 
-// recordSuccess resets local state and clears the fleet failure count and open mark when either may exist.
+// recordSuccess resets local state and clears the fleet failure count, open mark and open count when any may exist.
 func (b *sharedBreaker) recordSuccess(id string) {
 	b.mu.Lock()
 	st := b.localFor(id)
-	dirty := st.consecutiveFailures > 0 || b.failsSeen[id] > 0
+	dirty := st.consecutiveFailures > 0 || b.failsSeen[id] > 0 || b.opensSeen[id] > 0
 	// A success closes the fleet breaker too, as it closes the local one.
 	wasOpen := b.openUntil[id] > b.nowFn().UnixMilli()
+	opensSeen := b.opensSeen[id] > 0
 	delete(b.failAcc, id)
 	st.open = false
 	st.consecutiveFailures = 0
@@ -543,10 +549,15 @@ func (b *sharedBreaker) recordSuccess(id string) {
 		if wasOpen {
 			entries = append(entries, counterIncr{key: sharedBreakerKey(b.kind, id, "open"), delta: 0, ttl: b.openBase, enforceTTL: b.openBase, absolute: true})
 		}
+		if opensSeen {
+			opensTTL := b.openMax * sharedBreakerOpensTTLFactor
+			entries = append(entries, counterIncr{key: sharedBreakerKey(b.kind, id, "opens"), delta: 0, ttl: opensTTL, enforceTTL: opensTTL, absolute: true})
+		}
 		b.loop.write(entries)
 	})
 	b.mu.Lock()
 	b.failsSeen[id] = 0
+	b.opensSeen[id] = 0
 	if wasOpen {
 		delete(b.openUntil, id)
 	}

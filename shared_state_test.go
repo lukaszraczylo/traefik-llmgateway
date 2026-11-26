@@ -443,8 +443,8 @@ func TestSharedStateChunkedRefresh(t *testing.T) {
 	b := newSharedBreaker(l, "req", ids, 3, testBrkOpenBase, testBrkOpenMax, testBrkWindow)
 	b.recordFailure(ids[699])
 	l.refresh()
-	if len(store.reads) != 1400 {
-		t.Fatalf("keys read = %d, want 1400", len(store.reads))
+	if want := 700 * sharedBreakerKeysPerID; len(store.reads) != want {
+		t.Fatalf("keys read = %d, want %d", len(store.reads), want)
 	}
 	if l.stale() {
 		t.Error("stale after a chunked successful refresh")
