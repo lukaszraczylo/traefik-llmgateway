@@ -1080,6 +1080,9 @@ func run() error {
 	// instance (own config, own fake Redis, own upstream) rather than the
 	// shared `handler` above — see that function's own doc comment for
 	// why.
+	if err := exercisePromptCache(i, pkgName); err != nil {
+		return err
+	}
 	if err := exerciseRouterV2(i, pkgName); err != nil {
 		return err
 	}
