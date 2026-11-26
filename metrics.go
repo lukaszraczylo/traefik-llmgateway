@@ -130,7 +130,7 @@ func (g *Gateway) handleMetrics(sw *statusTrackingWriter, r *http.Request) {
 		g.serveMetrics(sw)
 		return
 	}
-	u, _, ok := g.auth.identify(r)
+	u, _, ok := g.auth.identifyKeyed(r)
 	g.logAuthEvent(ok, authEventUserName(u), r)
 	if !ok {
 		writeOAIError(sw, http.StatusUnauthorized, "authentication_error", "invalid or missing API key")

@@ -33,7 +33,13 @@ testData:
   groups:
     default:
       providers: []
+    # Keyless callers, see README.md#anonymous-access.
+    public:
+      models: [gpt-test]
+      memberLimits:
+        requestsPerMinute: 10
   users:
+    anonymousGroup: public
     inline:
       - name: tester
         group: default

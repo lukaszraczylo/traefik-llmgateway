@@ -729,13 +729,16 @@ type authStore struct {
 	groups               map[string]*group
 	byDigest             map[[32]byte]*authEntry
 	inline               map[[32]byte]*authEntry
-	lastReloadErrMsg     string
-	failureLog           logGate
-	throttleLog          logGate
-	fileUserCount        int
-	mu                   sync.RWMutex
-	buildMu              sync.Mutex
-	reloadMu             sync.Mutex
+	// anonymous is the principal for keyless requests; nil unless
+	// UsersConfig.AnonymousGroup is set.
+	anonymous        *authEntry
+	lastReloadErrMsg string
+	failureLog       logGate
+	throttleLog      logGate
+	fileUserCount    int
+	mu               sync.RWMutex
+	buildMu          sync.Mutex
+	reloadMu         sync.Mutex
 }
 
 // newAuthStore builds an authStore from cfg's groups and inline users. It
@@ -800,6 +803,14 @@ func newAuthStore(cfg *Config) (*authStore, error) {
 			agents:           gc.Agents,
 			passthroughPaths: gc.PassthroughPaths,
 		}
+	}
+
+	if cfg.Users != nil && cfg.Users.AnonymousGroup != "" {
+		anon, err := a.anonymousEntry(cfg.Users.AnonymousGroup)
+		if err != nil {
+			return nil, err
+		}
+		a.anonymous = anon
 	}
 
 	if cfg.Users != nil {
@@ -1003,6 +1014,9 @@ func (a *authStore) buildEntry(uc *UserConfig) (*authEntry, error) {
 	}
 	if uc.Name == "" {
 		return nil, fmt.Errorf("llmgateway: user config entry must have a non-empty name")
+	}
+	if a.anonymous != nil && uc.Name == anonymousUserName {
+		return nil, fmt.Errorf("llmgateway: user name %q is reserved while users.anonymousGroup is set", uc.Name)
 	}
 	groupNames := effectiveGroupNames(uc.Group, uc.Groups)
 	if len(groupNames) == 0 {
@@ -1262,6 +1276,15 @@ func (a *authStore) shouldLogThrottleEngaged() (log bool, suppressed int64) {
 // — there is no separate secret-bytes compare here for a non-constant-time
 // implementation to leak timing from).
 func (a *authStore) identify(r *http.Request) (*user, *group, bool) {
+	if a.anonymous != nil && !hasCredentialHeader(r.Header) {
+		return a.anonymous.user, a.anonymous.group, true
+	}
+	return a.identifyKeyed(r)
+}
+
+// identifyKeyed is identify without the anonymous fallback: the request
+// must present a configured user's key. The admin API uses it.
+func (a *authStore) identifyKeyed(r *http.Request) (*user, *group, bool) {
 	key, ok := presentedKey(r)
 	if ok {
 		digest := sha256.Sum256([]byte(key))
@@ -1274,6 +1297,39 @@ func (a *authStore) identify(r *http.Request) (*user, *group, bool) {
 	}
 	a.recordAuthFailure(clientIP(r))
 	return nil, nil, false
+}
+
+// hasCredentialHeader reports whether h carries an Authorization or
+// x-api-key header at all. Any such header, even a malformed or empty one,
+// opts the request out of anonymous access, so a bad credential still
+// gets a 401 instead of silently running as "anonymous".
+func hasCredentialHeader(h http.Header) bool {
+	return len(h.Values("Authorization")) > 0 || len(h.Values("x-api-key")) > 0
+}
+
+// anonymousUserName is the reserved name of the anonymous principal.
+const anonymousUserName = "anonymous"
+
+// anonymousEntry builds the anonymous principal: a member of groupName
+// with that group's memberLimits as its per-user limits. It has no
+// digest, so no presented key can ever resolve to it.
+func (a *authStore) anonymousEntry(groupName string) (*authEntry, error) {
+	grp, ok := a.groups[groupName]
+	if !ok {
+		return nil, fmt.Errorf("llmgateway: users.anonymousGroup references unknown group %q", groupName)
+	}
+	members := []*group{grp}
+	limits, sources := effectiveUserLimits(nil, members)
+	return &authEntry{
+		user: &user{
+			limits:       limits,
+			limitSources: sources,
+			groupNames:   []string{groupName},
+			name:         anonymousUserName,
+			groupName:    groupName,
+		},
+		group: effectiveGroup(members, nil),
+	}, nil
 }
 
 // presentedKey extracts the API key from r's Authorization Bearer header or

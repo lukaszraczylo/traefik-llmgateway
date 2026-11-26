@@ -363,8 +363,13 @@ type PacingConfig struct {
 
 // UsersConfig combines inline users with an optional file-backed source.
 type UsersConfig struct {
-	File   string        `json:"file,omitempty"`
-	Inline []*UserConfig `json:"inline,omitempty"`
+	File string `json:"file,omitempty"`
+	// AnonymousGroup, when set, serves requests that carry no API key as
+	// the reserved user "anonymous" in this group. A presented key that
+	// matches no user is still rejected, and the admin API always needs a
+	// key. Empty (the default) requires a key on every route.
+	AnonymousGroup string        `json:"anonymousGroup,omitempty"`
+	Inline         []*UserConfig `json:"inline,omitempty"`
 }
 
 // UserConfig describes one API-key holder.
