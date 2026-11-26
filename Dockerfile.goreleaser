@@ -1,0 +1,10 @@
+# Image for the standalone gateway, built by GoReleaser (dockers_v2) from the
+# binaries it already compiled: dist/<os>/<arch>/llmgateway. `Dockerfile`
+# builds the same image from source for local use (make docker-build).
+FROM gcr.io/distroless/static-debian12:nonroot
+ARG TARGETPLATFORM
+COPY ${TARGETPLATFORM}/llmgateway /usr/local/bin/llmgateway
+USER nonroot:nonroot
+EXPOSE 8080
+ENTRYPOINT ["/usr/local/bin/llmgateway"]
+CMD ["-config", "/etc/llmgateway/config.yaml"]

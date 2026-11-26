@@ -1,9 +1,36 @@
 version: 2
 
-# Traefik plugins are source-only - no binary builds
-# Traefik loads plugins via Yaegi interpreter at runtime
+# Traefik loads the plugin from this repository's source under Yaegi, so the
+# plugin form needs no binary. The build below is the standalone gateway
+# (cmd/gateway), which runs behind a reverse proxy instead of inside Traefik.
 builds:
-  - skip: true
+  - id: llmgateway
+    main: ./cmd/gateway
+    binary: llmgateway
+    env:
+      - CGO_ENABLED=0
+      - GOFLAGS=-mod=vendor
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X main.version={{ .Version }}
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+
+archives:
+  - id: llmgateway
+    ids:
+      - llmgateway
+    formats: [tar.gz]
+    name_template: "llmgateway_v{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - LICENSE
+      - README.md
 
 # Source archive for GitHub releases, built with `git archive` under the
 # hood. `git archive` reads .gitattributes export-ignore at the archived
@@ -60,3 +87,31 @@ signs:
       - "--yes"
     artifacts: checksum
     output: true
+
+dockers_v2:
+  - ids:
+      - llmgateway
+    images:
+      - "ghcr.io/lukaszraczylo/traefik-llmgateway"
+    tags:
+      - "{{ .Version }}"
+      - "latest"
+    platforms:
+      - linux/amd64
+      - linux/arm64
+    dockerfile: Dockerfile.goreleaser
+    labels:
+      "org.opencontainers.image.title": "llmgateway"
+      "org.opencontainers.image.version": "{{ .Version }}"
+      "org.opencontainers.image.source": "https://github.com/lukaszraczylo/traefik-llmgateway"
+      "org.opencontainers.image.description": "Standalone multi-provider LLM gateway, the compiled form of the traefik-llmgateway plugin"
+      "org.opencontainers.image.licenses": "MIT"
+
+docker_signs:
+  - cmd: cosign
+    artifacts: manifests
+    output: true
+    args:
+      - sign
+      - "${artifact}@${digest}"
+      - "--yes"

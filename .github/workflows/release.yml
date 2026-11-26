@@ -9,6 +9,7 @@ on:
       - "go.mod"
       - "go.sum"
       - ".goreleaser.yaml"
+      - "Dockerfile.goreleaser"
       - ".gitattributes"
       - ".traefik.yml"
       - "version.go"
@@ -25,4 +26,5 @@ jobs:
     uses: lukaszraczylo/shared-actions/.github/workflows/go-release.yaml@main
     with:
       go-version: "1.26.x"
+      docker-enabled: true
     secrets: inherit
