@@ -194,7 +194,10 @@ type providerState struct {
 	// outcome, not the stale-while-error discovered set: a provider can
 	// show a non-empty lastErr while modelCount still reflects its last
 	// successful discovery.
-	lastErr  string
+	lastErr string
+	// shared layers the fleet discovery breaker over the local one; nil means local only. name is its key.
+	shared   *sharedBreaker
+	name     string
 	interval time.Duration
 	mu       sync.Mutex
 	// --- feat/provider-health: discovery circuit breaker, guarded by mu
@@ -493,6 +496,7 @@ func (st *providerState) recordHealthLocked(now time.Time, err error) {
 	}
 	failed := err != nil
 	if st.health == breakerHalfOpen {
+		st.shareOutcomeLocked(failed)
 		if failed {
 			st.openBreakerLocked(now, true)
 		} else {
@@ -501,6 +505,7 @@ func (st *providerState) recordHealthLocked(now time.Time, err error) {
 		return
 	}
 	if !failed {
+		st.shareOutcomeLocked(false)
 		st.closeBreakerLocked()
 		return
 	}
@@ -509,8 +514,24 @@ func (st *providerState) recordHealthLocked(now time.Time, err error) {
 	}
 	st.consecutiveFailures++
 	if st.consecutiveFailures >= st.breakerThreshold {
+		// Only this instance's own trip reaches the fleet: one failed round on every instance must not trip it.
+		if st.consecutiveFailures == st.breakerThreshold {
+			st.shareOutcomeLocked(true)
+		}
 		st.openBreakerLocked(now, false)
 	}
+}
+
+// shareOutcomeLocked feeds one discovery outcome to the fleet breaker. Caller must already hold st.mu.
+func (st *providerState) shareOutcomeLocked(failed bool) {
+	if st.shared == nil {
+		return
+	}
+	if failed {
+		st.shared.recordFailure(st.name)
+		return
+	}
+	st.shared.recordSuccess(st.name)
 }
 
 // closeBreakerLocked resets st to a healthy, closed breaker — reachable
@@ -553,7 +574,20 @@ func (st *providerState) openBreakerLocked(now time.Time, escalate bool) {
 func (st *providerState) discoveryHealthy() bool {
 	st.mu.Lock()
 	defer st.mu.Unlock()
-	return st.health != breakerOpen
+	if st.health == breakerOpen {
+		return false
+	}
+	return st.shared == nil || !st.shared.sharedOpen(st.name)
+}
+
+// shareBreaker attaches the fleet discovery breaker to every provider. Call it before the registry serves requests.
+func (m *modelRegistry) shareBreaker(b *sharedBreaker) {
+	for name, st := range m.states {
+		st.mu.Lock()
+		st.shared = b
+		st.name = name
+		st.mu.Unlock()
+	}
 }
 
 // snapshot returns st's read-only view for the admin dashboard (spec §4,
@@ -910,6 +944,9 @@ func newModelRegistry(adapters map[string]providerAdapter, cfg *Config, log func
 		return nil, err
 	}
 	if err = validateRouterFirstByte(routers, cfg); err != nil {
+		return nil, err
+	}
+	if err = validateRouterDecisions(routers, cfg); err != nil {
 		return nil, err
 	}
 	m.routers = routers

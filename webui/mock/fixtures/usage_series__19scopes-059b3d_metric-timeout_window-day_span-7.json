@@ -1,0 +1,246 @@
+{
+ "metric": "timeout",
+ "window": "day",
+ "buckets": [
+  "20261119",
+  "20261120",
+  "20261121",
+  "20261122",
+  "20261123",
+  "20261124",
+  "20261125"
+ ],
+ "series": [
+  {
+   "scope": "provider:alibaba",
+   "points": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+   ]
+  },
+  {
+   "scope": "provider:amd",
+   "points": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+   ]
+  },
+  {
+   "scope": "provider:anthropic",
+   "points": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+   ]
+  },
+  {
+   "scope": "provider:cerebras",
+   "points": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+   ]
+  },
+  {
+   "scope": "provider:codex",
+   "points": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+   ]
+  },
+  {
+   "scope": "provider:copilot",
+   "points": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+   ]
+  },
+  {
+   "scope": "provider:deepseek",
+   "points": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+   ]
+  },
+  {
+   "scope": "provider:gx10",
+   "points": [
+    0,
+    0,
+    0,
+    3,
+    4,
+    0,
+    0
+   ]
+  },
+  {
+   "scope": "provider:macstudio",
+   "points": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+   ]
+  },
+  {
+   "scope": "provider:minimax",
+   "points": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+   ]
+  },
+  {
+   "scope": "provider:nvidia-nim",
+   "points": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+   ]
+  },
+  {
+   "scope": "provider:nvidia-retrieval",
+   "points": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+   ]
+  },
+  {
+   "scope": "provider:openai",
+   "points": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+   ]
+  },
+  {
+   "scope": "provider:openai-audio",
+   "points": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+   ]
+  },
+  {
+   "scope": "provider:parakeet-mlx",
+   "points": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+   ]
+  },
+  {
+   "scope": "provider:piper-tts",
+   "points": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+   ]
+  },
+  {
+   "scope": "provider:uni",
+   "points": [
+    0,
+    3,
+    0,
+    0,
+    1,
+    1,
+    0
+   ]
+  },
+  {
+   "scope": "provider:xai",
+   "points": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+   ]
+  },
+  {
+   "scope": "provider:xiaomi",
+   "points": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+   ]
+  }
+ ],
+ "unknown": [],
+ "span": 7,
+ "offset": 0
+}

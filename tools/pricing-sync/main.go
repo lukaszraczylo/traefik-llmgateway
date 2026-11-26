@@ -276,6 +276,8 @@ type litellmEntry struct {
 	DeprecationDate    string   `json:"deprecation_date"`
 	InputCostPerToken  *float64 `json:"input_cost_per_token"`
 	OutputCostPerToken *float64 `json:"output_cost_per_token"`
+	CacheReadCost      *float64 `json:"cache_read_input_token_cost"`
+	CacheCreationCost  *float64 `json:"cache_creation_input_token_cost"`
 	MaxInputTokens     *float64 `json:"max_input_tokens"`
 	MaxTokens          *float64 `json:"max_tokens"`
 	LiteLLMProvider    string   `json:"litellm_provider"`
@@ -287,9 +289,11 @@ type litellmEntry struct {
 // importing the plugin package, so this generator never depends on the
 // (interpreted-only-constrained) plugin module at all.
 type builtinEntry struct {
-	ContextTokens             int
-	InputCostPerMTokMicroUSD  int64
-	OutputCostPerMTokMicroUSD int64
+	ContextTokens                  int
+	InputCostPerMTokMicroUSD       int64
+	OutputCostPerMTokMicroUSD      int64
+	CachedInputCostPerMTokMicroUSD int64
+	CacheWriteCostPerMTokMicroUSD  int64
 }
 
 // candidate is one surviving LiteLLM key considered for a given bare
@@ -414,15 +418,22 @@ func parseAndPrune(data []byte, opts pruneOptions) (map[string]builtinEntry, int
 		if isStale(bare, e.DeprecationDate, opts) {
 			continue
 		}
+		entry := builtinEntry{
+			ContextTokens:             contextTokens(e),
+			InputCostPerMTokMicroUSD:  microUSDPerMTok(*e.InputCostPerToken),
+			OutputCostPerMTokMicroUSD: microUSDPerMTok(*e.OutputCostPerToken),
+		}
+		if e.CacheReadCost != nil && *e.CacheReadCost > 0 {
+			entry.CachedInputCostPerMTokMicroUSD = microUSDPerMTok(*e.CacheReadCost)
+		}
+		if e.CacheCreationCost != nil && *e.CacheCreationCost > 0 {
+			entry.CacheWriteCostPerMTokMicroUSD = microUSDPerMTok(*e.CacheCreationCost)
+		}
 		byBare[bare] = append(byBare[bare], candidate{
 			fullKey:  key,
 			provider: e.LiteLLMProvider,
 			bare:     isBareKey,
-			entry: builtinEntry{
-				ContextTokens:             contextTokens(e),
-				InputCostPerMTokMicroUSD:  microUSDPerMTok(*e.InputCostPerToken),
-				OutputCostPerMTokMicroUSD: microUSDPerMTok(*e.OutputCostPerToken),
-			},
+			entry:    entry,
 		})
 	}
 
@@ -578,8 +589,15 @@ func renderGoSource(table map[string]builtinEntry, meta sourceMeta) (string, err
 	b.WriteString("var builtinModelMetaTable = map[string]builtinModelMeta{\n")
 	for _, k := range keys {
 		e := table[k]
-		fmt.Fprintf(&b, "\t%q: {ContextTokens: %d, InputCostPerMTokMicroUSD: %d, OutputCostPerMTokMicroUSD: %d},\n",
+		fmt.Fprintf(&b, "\t%q: {ContextTokens: %d, InputCostPerMTokMicroUSD: %d, OutputCostPerMTokMicroUSD: %d",
 			k, e.ContextTokens, e.InputCostPerMTokMicroUSD, e.OutputCostPerMTokMicroUSD)
+		if e.CachedInputCostPerMTokMicroUSD > 0 {
+			fmt.Fprintf(&b, ", CachedInputCostPerMTokMicroUSD: %d", e.CachedInputCostPerMTokMicroUSD)
+		}
+		if e.CacheWriteCostPerMTokMicroUSD > 0 {
+			fmt.Fprintf(&b, ", CacheWriteCostPerMTokMicroUSD: %d", e.CacheWriteCostPerMTokMicroUSD)
+		}
+		b.WriteString("},\n")
 	}
 	b.WriteString("}\n")
 

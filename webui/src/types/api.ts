@@ -52,6 +52,8 @@ export interface AdminModelMetaView {
   contextTokens?: number
   inputPerMTokUsd?: number
   outputPerMTokUsd?: number
+  /** Explicit modelMeta.vision; absent when unset (unknown). */
+  vision?: boolean
 }
 
 /**
@@ -265,6 +267,25 @@ export interface AdminRouterOutcomeView {
   count: number
 }
 
+/** One heuristic-tier by model-tier decision cell (admin_routers.go: adminRouterDecisionTierView). */
+export interface AdminRouterDecisionTierView {
+  heuristic: string
+  model: string
+  count: number
+}
+
+/** Decision-model settings of a router (admin_routers.go: adminRouterDecisionView); absent when not configured. */
+export interface AdminRouterDecisionView {
+  provider: string
+  path: string
+  mode: 'live' | 'shadow'
+  timeout: string
+  /** Minimum model probability in per-mille. */
+  minProb: number
+  /** Score distance from a tier boundary in per-mille that triggers a call. */
+  band: number
+}
+
 /** Router counters (admin_routers.go: adminRouterStatsView); scope "shared" sums all gateway instances this month, "instance" is this process since start. */
 export interface AdminRouterStatsView {
   scope: 'shared' | 'instance'
@@ -275,6 +296,10 @@ export interface AdminRouterStatsView {
   /** Non-zero cells of the live-by-shadow tier matrix; empty without shadowWeights. */
   shadow: AdminRouterShadowView[]
   outcomes: AdminRouterOutcomeView[]
+  /** Non-zero heuristic-by-model cells; empty without a decision block. */
+  decision?: AdminRouterDecisionTierView[]
+  /** One row per decision outcome, zeros included; empty without a decision block. */
+  decisionOutcomes?: AdminRouterCountView[]
 }
 
 /** One tier's calibration offset: points its threshold sits below the configured minScore. */
@@ -333,6 +358,7 @@ export interface AdminRouterView {
   contextEscalation: boolean
   /** Advertised context window in tokens; absent when no target declares one. */
   contextTokens?: number
+  decision?: AdminRouterDecisionView
   stats?: AdminRouterStatsView
 }
 
@@ -443,6 +469,8 @@ export interface AdminUsageEntryView {
   mcpServers?: string[]
   agents?: string[]
   requestsPerMinute: number
+  /** Live minute-window tokens (uncached input + output); 0 when the scope has no tokensPerMinute limit. */
+  tokensPerMinute?: number
   requestsPerDay: number
   tokensInPerDay: number
   tokensOutPerDay: number
@@ -533,6 +561,10 @@ export interface AdminUsageModelEntry {
   /** Cache hits/savings for this model today — present only when `detail=1` AND AdminFeaturesView.cacheStats is on (admin.go). cacheSavedMicroUsd is micro-USD, same unit as costMicroUsd. */
   cacheHits?: number
   cacheSavedMicroUsd?: number
+  /** Provider prompt-cache usage — `detail=1` only (admin.go). Read/write are input-token counts; saved is micro-USD vs full input price. */
+  promptCacheReadTokens?: number
+  promptCacheWriteTokens?: number
+  promptCacheSavedMicroUsd?: number
   /** Count of 402 (unpriced-refusal) responses for this model today — `detail=1` only (admin.go). */
   r402?: number
   /** This model's billing price source — `detail=1` only (admin.go). */
@@ -663,6 +695,9 @@ export type AdminEventKind =
   | 'timeout'
   | 'unpriced'
   | 'capacity'
+  | 'paced'
+  | 'router_escalation'
+  | 'router_timeout_fallback'
 
 /**
  * One row in GET /admin/api/events (admin.go/events.go: gatewayEvent — the
@@ -821,7 +856,7 @@ export interface AdminPerfResponse {
  * final.md): an earlier version filled the two price fields from that
  * same display resolution instead, so a `pricing:` override with no
  * separate modelMeta/discovery price reported `priceSource: 'override'`
- * alongside undefined prices — CostAvoidedCard's pickReferenceModel
+ * alongside undefined prices — CostAvoidedCard's costComparisons
  * (lib/cost-avoided.ts) and PricingHealthTable both read these fields
  * assuming they agree with `priceSource`, and broke for exactly that
  * model.

@@ -2,6 +2,7 @@ package traefikllmgateway
 
 import (
 	"math"
+	"reflect"
 	"strconv"
 	"sync"
 	"testing"
@@ -307,7 +308,7 @@ func TestLookupPricingSource_MatchesLookupPricing(t *testing.T) {
 				t.Fatalf("lookupPricingSource(%q) = (%+v, %q, %v), want source=%q ok=%v", c.model, price, source, ok, c.wantSource, c.wantOK)
 			}
 			wantPrice, wantOK := lookupPricing(c.model, overrides)
-			if wantOK != ok || wantPrice != price {
+			if wantOK != ok || !reflect.DeepEqual(wantPrice, price) {
 				t.Errorf("lookupPricing(%q) = (%+v, %v) disagrees with lookupPricingSource = (%+v, %v)", c.model, wantPrice, wantOK, price, ok)
 			}
 		})
@@ -341,7 +342,7 @@ func TestBillingPriceSource_Table(t *testing.T) {
 		{"modelMeta free wins over everything", "providerA/free-model", "free-model", priceSourceFree, ModelPricing{}},
 		{"override on canonical id", "providerA/canonical-model", "canonical-model", priceSourceOverride, ModelPricing{InputPerM: 1, OutputPerM: 2}},
 		{"override on bare id when canonical has none", "providerB/bare-override-model", "bare-override-model", priceSourceOverride, ModelPricing{InputPerM: 3, OutputPerM: 4}},
-		{"builtin table", "providerC/gpt-5", "gpt-5", priceSourceBuiltin, builtinPricing["gpt-5"]},
+		{"builtin table", "providerC/gpt-5", "gpt-5", priceSourceBuiltin, mustLookupPrice(t, "gpt-5", nil)},
 		{"generated table fallback", "providerC/deepseek-chat", "deepseek-chat", priceSourceLitellm, mustLookupPrice(t, "deepseek-chat", nil)},
 		{"free-tier-suffixed id with no real price is unpriced, not free", "providerD/some-model:free", "some-model:free", priceSourceUnpriced, ModelPricing{}},
 		{"totally unknown model", "providerD/unknown-xyz", "unknown-xyz", priceSourceUnpriced, ModelPricing{}},
@@ -352,7 +353,7 @@ func TestBillingPriceSource_Table(t *testing.T) {
 			if source != c.wantSource {
 				t.Errorf("billingPriceSource(%q, %q) source = %q, want %q", c.canonical, c.bare, source, c.wantSource)
 			}
-			if price != c.wantPrice {
+			if !reflect.DeepEqual(price, c.wantPrice) {
 				t.Errorf("billingPriceSource(%q, %q) price = %+v, want %+v", c.canonical, c.bare, price, c.wantPrice)
 			}
 		})

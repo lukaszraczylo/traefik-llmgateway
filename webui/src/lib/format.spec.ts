@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { formatBucketLabel, formatCompactCount, formatContextWindow, formatCostAxis, formatCostDisplay, formatElapsedAgo, formatLimits, formatLatencyMs, formatModelCostHover, formatPercentAxis, formatUntil, refreshDetailLabel, refreshLabel, ZERO_TIME } from './format'
+import { formatBucketLabel, formatCompactCount, formatContextWindow, formatCostAxis, formatCostDisplay, formatElapsedAgo, formatLimits, formatLatencyMs, formatModelCostHover, formatPercentAxis, formatPercentValue, formatUntil, refreshDetailLabel, refreshLabel, ZERO_TIME } from './format'
 
 describe('refreshLabel', () => {
   it('reads "discovery off" when discovery is disabled, regardless of lastRefresh', () => {
@@ -50,8 +50,8 @@ describe('refreshDetailLabel', () => {
 
 // Feature v0.23: per-model metadata exposure (context window, per-token
 // cost). formatContextWindow is table-driven over good/edge cases;
-// formatModelCostHover covers the free/priced split ModelChip's
-// hover-detail relies on.
+// formatModelCostHover covers the free/priced split of the
+// hover-detail.
 //
 // Review fix: binary-K/M (÷1024) applies ONLY when tokens is an exact
 // power of two; a decimal, round-thousands count uses decimal-K/M
@@ -172,6 +172,17 @@ describe('formatCompactCount', () => {
 // floor-not-round boundary rule like formatCompactCount above — these are
 // averages with no discrete threshold a reader could misinterpret as
 // crossed.
+describe('formatPercentValue', () => {
+  it.each([
+    { n: 0, want: '0%' },
+    { n: 99.5, want: '99.5%' },
+    { n: 12.3456, want: '12.35%' },
+    { n: 100, want: '100%' },
+  ])('formatPercentValue($n) = $want', ({ n, want }) => {
+    expect(formatPercentValue(n)).toBe(want)
+  })
+})
+
 describe('formatLatencyMs', () => {
   it.each([
     { ms: 0, want: '0ms' },

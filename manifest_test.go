@@ -32,9 +32,11 @@ func testDataConfig(t *testing.T) *Config {
 	// mirror blob below must appear in the raw manifest bytes.
 	mirrorTokens := []string{
 		"providers", "groups", "users", "smartRouters", // top-level testData keys
-		"openai", "type: openai", "test-key", "gpt-test", "gpt-test-large", // providers.openai
+		"openai", "type: openai", "promptCache:", "key: true", "test-key", "gpt-test", "gpt-test-large", // providers.openai
 		"auto", "classifier: v2", "name: small", "name: large", "minScore: 400", // smartRouters.auto
 		"[openai/gpt-test]", "[openai/gpt-test-large]", // smartRouters.auto tier models
+		"decider", "decider-test", "pathBaseUrls", "/v1/decide: http://decider.example.invalid", // providers.decider
+		"decision:", "provider: decider", "mode: shadow", // smartRouters.auto.decision
 		"default",       // groups.default and users.inline[0].group
 		"providers: []", // groups.default.providers — zero-semantic hedge, not bare {}
 		"tester",        // users.inline[0].name
@@ -52,8 +54,9 @@ func testDataConfig(t *testing.T) *Config {
 
 	cfg := CreateConfig()
 	// mirror of testData, kept in sync by this test living next to the manifest
-	blob := `{"providers":{"openai":{"type":"openai","apiKey":"test-key","models":["gpt-test","gpt-test-large"]}},
-	  "smartRouters":{"auto":{"classifier":"v2","tiers":[
+	blob := `{"providers":{"openai":{"type":"openai","apiKey":"test-key","promptCache":{"key":true},"models":["gpt-test","gpt-test-large"]},
+	    "decider":{"type":"openai","apiKey":"test-key","models":["decider-test"],"pathBaseUrls":{"/v1/decide":"http://decider.example.invalid"}}},
+	  "smartRouters":{"auto":{"classifier":"v2","decision":{"provider":"decider","mode":"shadow"},"tiers":[
 	    {"name":"small","minScore":0,"models":["openai/gpt-test"]},
 	    {"name":"large","minScore":400,"models":["openai/gpt-test-large"]}]}},
 	  "groups":{"default":{"providers":[]}},
@@ -69,6 +72,9 @@ func TestNewFromTestData(t *testing.T) {
 	cfg := testDataConfig(t)
 	if router := cfg.SmartRouters["auto"]; router == nil || len(router.Tiers) != 2 {
 		t.Fatalf("testData must declare the two-tier smart router %q, got %+v", "auto", router)
+	}
+	if d := cfg.SmartRouters["auto"].Decision; d == nil || d.Provider != "decider" {
+		t.Fatalf("testData must declare the decision block, got %+v", d)
 	}
 	h, err := New(context.Background(), next, cfg, "llmgw")
 	if err != nil {

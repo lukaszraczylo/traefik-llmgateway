@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { faArrowRotateRight, faTriangleExclamation } from '@fortawesome/free-solid-svg-icons'
 
-import { Button } from '@/components/ui/button'
+import { Button } from '@perfect-design/ui'
 
 function reload(): void {
   window.location.reload()

@@ -1,0 +1,17 @@
+{
+ "kind": "group",
+ "window": "hour",
+ "metrics": [
+  "cost"
+ ],
+ "rows": [
+  {
+   "values": {
+    "cost": 22117
+   },
+   "id": "home"
+  }
+ ],
+ "span": 24,
+ "offset": 0
+}

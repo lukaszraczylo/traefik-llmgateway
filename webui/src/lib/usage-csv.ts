@@ -125,3 +125,15 @@ export function usageCsv(
 // redesigned shell — grep confirms only this file and its own now-deleted
 // spec section ever referenced them. The redesigned Models page
 // (ModelCatalogTable.vue) has no CSV export of its own.
+
+export interface BreakdownCsvRow {
+  id: string
+  value: number
+  share: number | null
+}
+
+/** breakdownCsv exports exactly what a Usage breakdown table shows: id, the range-selected metric (raw; cost stays micro-USD) and its share. */
+export function breakdownCsv(idHeader: string, metric: string, rows: BreakdownCsvRow[]): string {
+  const metricHeader = metric === 'cost' ? 'cost (micro-USD)' : metric
+  return toCsv([idHeader, metricHeader, 'share'], rows.map((r) => [r.id, r.value, r.share === null ? '' : r.share]))
+}

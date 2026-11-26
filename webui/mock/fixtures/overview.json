@@ -1,0 +1,3232 @@
+{
+ "version": "0.0.0-dev",
+ "replica": "traefik-03f315a277-05cox",
+ "instance": "traefik-llmgateway@kubernetescrd",
+ "warnings": [],
+ "providers": [
+  {
+   "lastRefresh": "2026-11-25T00:45:24.130858024Z",
+   "openUntil": "0001-01-01T00:00:00Z",
+   "modelMeta": {
+    "deepseek-v4-flash-0731": {
+     "contextTokens": 1000000,
+     "inputPerMTokUsd": 0.2,
+     "outputPerMTokUsd": 0.4
+    },
+    "deepseek-v4-pro": {
+     "contextTokens": 1000000,
+     "inputPerMTokUsd": 1.32,
+     "outputPerMTokUsd": 3.96
+    },
+    "deepseek-v4.1-flash-1017": {},
+    "glm-5.1": {
+     "contextTokens": 202745,
+     "inputPerMTokUsd": 1.4,
+     "outputPerMTokUsd": 4.4
+    },
+    "glm-5.2": {
+     "contextTokens": 1048576,
+     "inputPerMTokUsd": 1.4,
+     "outputPerMTokUsd": 4.4
+    },
+    "kimi-k2.5": {
+     "contextTokens": 262144,
+     "inputPerMTokUsd": 0.6,
+     "outputPerMTokUsd": 3
+    },
+    "kimi-k2.7-code": {
+     "contextTokens": 229376,
+     "inputPerMTokUsd": 0.95,
+     "outputPerMTokUsd": 4
+    },
+    "kimi-k3": {
+     "contextTokens": 1048576,
+     "inputPerMTokUsd": 3,
+     "outputPerMTokUsd": 15
+    },
+    "kimi-k3.1-pro": {},
+    "qwen-flash": {},
+    "qwen-flash-2025-07-28": {},
+    "qwen-image-2.1-pro": {},
+    "qwen-image-3.0": {},
+    "qwen-image-3.0-pro": {},
+    "qwen-mt-flash": {},
+    "qwen-mt-lite": {},
+    "qwen-mt-plus": {},
+    "qwen-plus": {
+     "contextTokens": 129024,
+     "inputPerMTokUsd": 0.4,
+     "outputPerMTokUsd": 1.2
+    },
+    "qwen-plus-2025-12-01": {},
+    "qwen-plus-character": {},
+    "qwen-vl-ocr": {},
+    "qwen-vl-ocr-2025-11-20": {},
+    "qwen3-coder-flash": {},
+    "qwen3-coder-flash-2025-07-28": {},
+    "qwen3-vl-plus": {},
+    "qwen3.5-122b-a10b": {},
+    "qwen3.5-27b": {},
+    "qwen3.5-35b-a3b": {},
+    "qwen3.5-397b-a17b": {},
+    "qwen3.5-flash": {},
+    "qwen3.5-flash-2026-02-23": {},
+    "qwen3.5-plus": {},
+    "qwen3.5-plus-2026-02-15": {},
+    "qwen3.6-35b-a3b": {},
+    "qwen3.6-flash": {},
+    "qwen3.6-flash-2026-04-16": {},
+    "qwen3.6-plus": {},
+    "qwen3.6-plus-2026-04-02": {},
+    "qwen3.7-flash": {},
+    "qwen3.7-flash-2026-07-15": {},
+    "qwen3.7-max": {
+     "contextTokens": 991808,
+     "inputPerMTokUsd": 2.5,
+     "outputPerMTokUsd": 7.5
+    },
+    "qwen3.7-max-2026-05-20": {},
+    "qwen3.7-max-2026-06-08": {},
+    "qwen3.7-plus": {},
+    "qwen3.7-plus-2026-05-26": {},
+    "qwen3.8-flash": {
+     "contextTokens": 991808,
+     "inputPerMTokUsd": 0.15,
+     "outputPerMTokUsd": 0.47
+    },
+    "qwen3.8-max": {
+     "contextTokens": 991808,
+     "inputPerMTokUsd": 2,
+     "outputPerMTokUsd": 6
+    },
+    "qwen3.8-max-0902": {},
+    "qwen4-max": {}
+   },
+   "modelRates": {
+    "deepseek-v4-flash-0731": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "deepseek-v4-pro": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "deepseek-v4.1-flash-1017": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "glm-5.1": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "glm-5.2": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "kimi-k2.5": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "kimi-k2.7-code": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "kimi-k3": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "kimi-k3.1-pro": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "qwen-flash": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "qwen-flash-2025-07-28": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "qwen-image-2.1-pro": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "qwen-image-3.0": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "qwen-image-3.0-pro": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "qwen-mt-flash": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "qwen-mt-lite": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "qwen-mt-plus": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "qwen-plus": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "qwen-plus-2025-12-01": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "qwen-plus-character": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "qwen-vl-ocr": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "qwen-vl-ocr-2025-11-20": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "qwen3-coder-flash": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "qwen3-coder-flash-2025-07-28": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "qwen3-vl-plus": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "qwen3.5-122b-a10b": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "qwen3.5-27b": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "qwen3.5-35b-a3b": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "qwen3.5-397b-a17b": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "qwen3.5-flash": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "qwen3.5-flash-2026-02-23": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "qwen3.5-plus": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "qwen3.5-plus-2026-02-15": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "qwen3.6-35b-a3b": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "qwen3.6-flash": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "qwen3.6-flash-2026-04-16": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "qwen3.6-plus": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "qwen3.6-plus-2026-04-02": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "qwen3.7-flash": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "qwen3.7-flash-2026-07-15": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "qwen3.7-max": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "qwen3.7-max-2026-05-20": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "qwen3.7-max-2026-06-08": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "qwen3.7-plus": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "qwen3.7-plus-2026-05-26": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "qwen3.8-flash": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "qwen3.8-max": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "qwen3.8-max-0902": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "qwen4-max": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    }
+   },
+   "type": "openai",
+   "baseUrl": "https://provider-a.example/compatible-mode",
+   "healthState": "closed",
+   "name": "alibaba",
+   "models": [
+    "deepseek-v4-flash-0731",
+    "deepseek-v4-pro",
+    "deepseek-v4.1-flash-1017",
+    "glm-5.1",
+    "glm-5.2",
+    "kimi-k2.5",
+    "kimi-k2.7-code",
+    "kimi-k3",
+    "kimi-k3.1-pro",
+    "qwen-flash",
+    "qwen-flash-2025-07-28",
+    "qwen-image-2.1-pro",
+    "qwen-image-3.0",
+    "qwen-image-3.0-pro",
+    "qwen-mt-flash",
+    "qwen-mt-lite",
+    "qwen-mt-plus",
+    "qwen-plus",
+    "qwen-plus-2025-12-01",
+    "qwen-plus-character",
+    "qwen-vl-ocr",
+    "qwen-vl-ocr-2025-11-20",
+    "qwen3-coder-flash",
+    "qwen3-coder-flash-2025-07-28",
+    "qwen3-vl-plus",
+    "qwen3.5-122b-a10b",
+    "qwen3.5-27b",
+    "qwen3.5-35b-a3b",
+    "qwen3.5-397b-a17b",
+    "qwen3.5-flash",
+    "qwen3.5-flash-2026-02-23",
+    "qwen3.5-plus",
+    "qwen3.5-plus-2026-02-15",
+    "qwen3.6-35b-a3b",
+    "qwen3.6-flash",
+    "qwen3.6-flash-2026-04-16",
+    "qwen3.6-plus",
+    "qwen3.6-plus-2026-04-02",
+    "qwen3.7-flash",
+    "qwen3.7-flash-2026-07-15",
+    "qwen3.7-max",
+    "qwen3.7-max-2026-05-20",
+    "qwen3.7-max-2026-06-08",
+    "qwen3.7-plus",
+    "qwen3.7-plus-2026-05-26",
+    "qwen3.8-flash",
+    "qwen3.8-max",
+    "qwen3.8-max-0902",
+    "qwen4-max"
+   ],
+   "attemptsDay": 0,
+   "failuresDay": 0,
+   "attemptsMinute": 0,
+   "failuresMinute": 0,
+   "modelCount": 49,
+   "discoveryEnabled": true
+  },
+  {
+   "lastRefresh": "2026-11-25T00:45:46.296837293Z",
+   "openUntil": "0001-01-01T00:00:00Z",
+   "modelMeta": {},
+   "modelRates": {},
+   "type": "openai",
+   "baseUrl": "https://api.tokenlab.amd.com",
+   "lastErr": "context deadline exceeded",
+   "healthState": "closed",
+   "name": "amd",
+   "models": [],
+   "attemptsDay": 0,
+   "failuresDay": 0,
+   "attemptsMinute": 0,
+   "failuresMinute": 0,
+   "modelCount": 0,
+   "discoveryEnabled": true
+  },
+  {
+   "lastRefresh": "2026-11-25T00:45:29.338700086Z",
+   "openUntil": "0001-01-01T00:00:00Z",
+   "modelMeta": {
+    "claude-fable-5": {
+     "contextTokens": 1000000,
+     "inputPerMTokUsd": 10,
+     "outputPerMTokUsd": 50
+    },
+    "claude-fable-5-1": {
+     "contextTokens": 1000000,
+     "inputPerMTokUsd": 10,
+     "outputPerMTokUsd": 50
+    },
+    "claude-fable-5-2": {},
+    "claude-haiku-4-5-20251001": {
+     "contextTokens": 200000,
+     "inputPerMTokUsd": 1,
+     "outputPerMTokUsd": 5
+    },
+    "claude-haiku-5-5": {},
+    "claude-opus-4-5-20251101": {
+     "contextTokens": 200000,
+     "inputPerMTokUsd": 5,
+     "outputPerMTokUsd": 25
+    },
+    "claude-opus-4-6": {
+     "contextTokens": 1000000,
+     "inputPerMTokUsd": 5,
+     "outputPerMTokUsd": 25
+    },
+    "claude-opus-4-7": {
+     "contextTokens": 1000000,
+     "inputPerMTokUsd": 5,
+     "outputPerMTokUsd": 25
+    },
+    "claude-opus-4-8": {
+     "contextTokens": 1000000,
+     "inputPerMTokUsd": 5,
+     "outputPerMTokUsd": 25
+    },
+    "claude-opus-5": {
+     "contextTokens": 1000000,
+     "inputPerMTokUsd": 5,
+     "outputPerMTokUsd": 25
+    },
+    "claude-opus-5-5": {
+     "contextTokens": 1000000,
+     "inputPerMTokUsd": 4,
+     "outputPerMTokUsd": 20
+    },
+    "claude-sonnet-4-5-20250929": {
+     "contextTokens": 1000000,
+     "inputPerMTokUsd": 3,
+     "outputPerMTokUsd": 15
+    },
+    "claude-sonnet-4-6": {
+     "contextTokens": 1000000,
+     "inputPerMTokUsd": 3,
+     "outputPerMTokUsd": 15
+    },
+    "claude-sonnet-5": {
+     "contextTokens": 1000000,
+     "inputPerMTokUsd": 2,
+     "outputPerMTokUsd": 10
+    },
+    "claude-sonnet-5-5": {
+     "contextTokens": 1000000,
+     "inputPerMTokUsd": 2,
+     "outputPerMTokUsd": 10
+    }
+   },
+   "modelRates": {
+    "claude-fable-5": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "claude-fable-5-1": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "claude-fable-5-2": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "claude-haiku-4-5-20251001": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "claude-haiku-5-5": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "claude-opus-4-5-20251101": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "claude-opus-4-6": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "claude-opus-4-7": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "claude-opus-4-8": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "claude-opus-5": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "claude-opus-5-5": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "claude-sonnet-4-5-20250929": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "claude-sonnet-4-6": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "claude-sonnet-5": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "claude-sonnet-5-5": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    }
+   },
+   "type": "anthropic",
+   "baseUrl": "https://api.anthropic.com",
+   "healthState": "closed",
+   "name": "anthropic",
+   "models": [
+    "claude-fable-5",
+    "claude-fable-5-1",
+    "claude-fable-5-2",
+    "claude-haiku-4-5-20251001",
+    "claude-haiku-5-5",
+    "claude-opus-4-5-20251101",
+    "claude-opus-4-6",
+    "claude-opus-4-7",
+    "claude-opus-4-8",
+    "claude-opus-5",
+    "claude-opus-5-5",
+    "claude-sonnet-4-5-20250929",
+    "claude-sonnet-4-6",
+    "claude-sonnet-5",
+    "claude-sonnet-5-5"
+   ],
+   "attemptsDay": 0,
+   "failuresDay": 0,
+   "attemptsMinute": 0,
+   "failuresMinute": 0,
+   "modelCount": 15,
+   "discoveryEnabled": true
+  },
+  {
+   "lastRefresh": "2026-11-25T00:45:29.463073656Z",
+   "openUntil": "0001-01-01T00:00:00Z",
+   "modelMeta": {
+    "gpt-oss-120b": {
+     "contextTokens": 131072,
+     "inputPerMTokUsd": 0.35,
+     "outputPerMTokUsd": 0.75
+    },
+    "qwen-3.8-27b": {
+     "contextTokens": 65536,
+     "inputPerMTokUsd": 0.99,
+     "outputPerMTokUsd": 1.49
+    }
+   },
+   "modelRates": {
+    "gpt-oss-120b": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "qwen-3.8-27b": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    }
+   },
+   "type": "openai",
+   "baseUrl": "https://api.cerebras.ai",
+   "healthState": "closed",
+   "name": "cerebras",
+   "models": [
+    "gpt-oss-120b",
+    "qwen-3.8-27b"
+   ],
+   "attemptsDay": 0,
+   "failuresDay": 0,
+   "attemptsMinute": 0,
+   "failuresMinute": 0,
+   "modelCount": 2,
+   "discoveryEnabled": true
+  },
+  {
+   "lastRefresh": "2026-11-25T00:45:29.468331217Z",
+   "openUntil": "0001-01-01T00:00:00Z",
+   "modelMeta": {
+    "codex-auto-review": {},
+    "gpt-5.6-luna": {
+     "contextTokens": 922000,
+     "inputPerMTokUsd": 0.2,
+     "outputPerMTokUsd": 1.2
+    },
+    "gpt-5.6-sol": {
+     "contextTokens": 922000,
+     "inputPerMTokUsd": 4,
+     "outputPerMTokUsd": 20
+    },
+    "gpt-5.6-terra": {
+     "contextTokens": 922000,
+     "inputPerMTokUsd": 2,
+     "outputPerMTokUsd": 12
+    },
+    "gpt-6-astra": {
+     "contextTokens": 922000,
+     "inputPerMTokUsd": 10,
+     "outputPerMTokUsd": 50
+    },
+    "gpt-6-luna": {
+     "contextTokens": 922000,
+     "inputPerMTokUsd": 0.1,
+     "outputPerMTokUsd": 0.5
+    },
+    "gpt-6-sol": {
+     "contextTokens": 922000,
+     "inputPerMTokUsd": 2,
+     "outputPerMTokUsd": 10
+    },
+    "gpt-6.1-sol": {},
+    "gpt-6.1-terra": {},
+    "gpt-6.2-astra": {},
+    "gpt-6.2-sol": {},
+    "gpt-reserve": {}
+   },
+   "modelRates": {
+    "codex-auto-review": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-5.6-luna": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-5.6-sol": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-5.6-terra": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-6-astra": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-6-luna": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-6-sol": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-6.1-sol": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-6.1-terra": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-6.2-astra": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-6.2-sol": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-reserve": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    }
+   },
+   "type": "openai",
+   "baseUrl": "http://codex-shim.svc-x.internal:8080",
+   "healthState": "closed",
+   "name": "codex",
+   "models": [
+    "codex-auto-review",
+    "gpt-5.6-luna",
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-6-astra",
+    "gpt-6-luna",
+    "gpt-6-sol",
+    "gpt-6.1-sol",
+    "gpt-6.1-terra",
+    "gpt-6.2-astra",
+    "gpt-6.2-sol",
+    "gpt-reserve"
+   ],
+   "attemptsDay": 0,
+   "failuresDay": 0,
+   "attemptsMinute": 0,
+   "failuresMinute": 0,
+   "modelCount": 12,
+   "discoveryEnabled": true
+  },
+  {
+   "lastRefresh": "2026-11-25T00:45:29.67976743Z",
+   "openUntil": "0001-01-01T00:00:00Z",
+   "modelMeta": {
+    "albatross": {},
+    "claude-fable-5": {
+     "contextTokens": 1000000,
+     "inputPerMTokUsd": 10,
+     "outputPerMTokUsd": 50
+    },
+    "claude-fable-5.1": {},
+    "claude-fable-5.2": {},
+    "claude-haiku-4.5": {},
+    "claude-haiku-5.5": {},
+    "claude-opus-4.8-fast": {},
+    "claude-opus-5": {
+     "contextTokens": 1000000,
+     "inputPerMTokUsd": 5,
+     "outputPerMTokUsd": 25
+    },
+    "claude-opus-5.5": {},
+    "claude-sonnet-5": {
+     "contextTokens": 1000000,
+     "inputPerMTokUsd": 2,
+     "outputPerMTokUsd": 10
+    },
+    "claude-sonnet-5.5": {},
+    "copilot-search-a": {},
+    "copilot-search-b": {},
+    "eagle-bald": {},
+    "gemini-3.8-flash": {},
+    "gemini-4-argon": {},
+    "gemini-4-hydrogen": {},
+    "gpt-3.5-turbo": {
+     "contextTokens": 16385,
+     "inputPerMTokUsd": 0.5,
+     "outputPerMTokUsd": 1.5
+    },
+    "gpt-3.5-turbo-0613": {},
+    "gpt-4": {
+     "contextTokens": 8192,
+     "inputPerMTokUsd": 30,
+     "outputPerMTokUsd": 60
+    },
+    "gpt-4-0125-preview": {},
+    "gpt-4-0613": {
+     "contextTokens": 8192,
+     "inputPerMTokUsd": 30,
+     "outputPerMTokUsd": 60
+    },
+    "gpt-4-o-preview": {},
+    "gpt-4.1": {
+     "contextTokens": 1047576,
+     "inputPerMTokUsd": 2,
+     "outputPerMTokUsd": 8
+    },
+    "gpt-4.1-2025-04-14": {},
+    "gpt-41-copilot": {},
+    "gpt-4o": {
+     "contextTokens": 128000,
+     "inputPerMTokUsd": 2.5,
+     "outputPerMTokUsd": 10
+    },
+    "gpt-4o-2024-05-13": {},
+    "gpt-4o-2024-08-06": {},
+    "gpt-4o-2024-11-20": {},
+    "gpt-4o-mini": {
+     "contextTokens": 128000,
+     "inputPerMTokUsd": 0.15,
+     "outputPerMTokUsd": 0.6
+    },
+    "gpt-4o-mini-2024-07-18": {},
+    "gpt-5.3-codex": {},
+    "gpt-5.4-nano": {
+     "contextTokens": 272000,
+     "inputPerMTokUsd": 0.2,
+     "outputPerMTokUsd": 1.25
+    },
+    "gpt-5.6-luna": {
+     "contextTokens": 922000,
+     "inputPerMTokUsd": 0.2,
+     "outputPerMTokUsd": 1.2
+    },
+    "gpt-5.6-sol": {
+     "contextTokens": 922000,
+     "inputPerMTokUsd": 4,
+     "outputPerMTokUsd": 20
+    },
+    "gpt-6-astra": {
+     "contextTokens": 922000,
+     "inputPerMTokUsd": 10,
+     "outputPerMTokUsd": 50
+    },
+    "gpt-6-luna": {
+     "contextTokens": 922000,
+     "inputPerMTokUsd": 0.1,
+     "outputPerMTokUsd": 0.5
+    },
+    "gpt-6-luna-decisions": {},
+    "gpt-6-sol": {
+     "contextTokens": 922000,
+     "inputPerMTokUsd": 2,
+     "outputPerMTokUsd": 10
+    },
+    "gpt-6.1-sol": {},
+    "gpt-6.1-terra": {},
+    "gpt-image-2.5-flare": {},
+    "grok-4.6": {
+     "contextTokens": 500000,
+     "inputPerMTokUsd": 2,
+     "outputPerMTokUsd": 6
+    },
+    "grok-4.7": {
+     "contextTokens": 500000,
+     "inputPerMTokUsd": 2,
+     "outputPerMTokUsd": 6
+    },
+    "kimi-k3": {
+     "contextTokens": 1048576,
+     "inputPerMTokUsd": 3,
+     "outputPerMTokUsd": 15
+    },
+    "kimi-k3-base": {},
+    "kimi-k3-copilot": {},
+    "mai-code-1.1-flash": {},
+    "mai-code-2": {},
+    "mai-code-2-flash": {},
+    "microsoft-decision-1-1": {},
+    "text-embedding-3-small": {
+     "contextTokens": 8191,
+     "inputPerMTokUsd": 0.02,
+     "outputPerMTokUsd": 0
+    },
+    "text-embedding-3-small-inference": {},
+    "text-embedding-ada-002": {
+     "contextTokens": 8191,
+     "inputPerMTokUsd": 0.1,
+     "outputPerMTokUsd": 0
+    }
+   },
+   "modelRates": {
+    "albatross": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "claude-fable-5": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "claude-fable-5.1": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "claude-fable-5.2": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "claude-haiku-4.5": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "claude-haiku-5.5": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "claude-opus-4.8-fast": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "claude-opus-5": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "claude-opus-5.5": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "claude-sonnet-5": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "claude-sonnet-5.5": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "copilot-search-a": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "copilot-search-b": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "eagle-bald": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gemini-3.8-flash": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gemini-4-argon": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gemini-4-hydrogen": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-3.5-turbo": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-3.5-turbo-0613": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-4": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-4-0125-preview": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-4-0613": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-4-o-preview": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-4.1": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-4.1-2025-04-14": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-41-copilot": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-4o": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-4o-2024-05-13": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-4o-2024-08-06": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-4o-2024-11-20": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-4o-mini": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-4o-mini-2024-07-18": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-5.3-codex": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-5.4-nano": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-5.6-luna": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-5.6-sol": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-6-astra": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-6-luna": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-6-luna-decisions": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-6-sol": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-6.1-sol": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-6.1-terra": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-image-2.5-flare": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "grok-4.6": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "grok-4.7": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "kimi-k3": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "kimi-k3-base": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "kimi-k3-copilot": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "mai-code-1.1-flash": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "mai-code-2": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "mai-code-2-flash": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "microsoft-decision-1-1": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "text-embedding-3-small": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "text-embedding-3-small-inference": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "text-embedding-ada-002": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    }
+   },
+   "type": "openai",
+   "baseUrl": "http://copilot-shim.svc-x.internal:8080",
+   "healthState": "closed",
+   "name": "copilot",
+   "models": [
+    "albatross",
+    "claude-fable-5",
+    "claude-fable-5.1",
+    "claude-fable-5.2",
+    "claude-haiku-4.5",
+    "claude-haiku-5.5",
+    "claude-opus-4.8-fast",
+    "claude-opus-5",
+    "claude-opus-5.5",
+    "claude-sonnet-5",
+    "claude-sonnet-5.5",
+    "copilot-search-a",
+    "copilot-search-b",
+    "eagle-bald",
+    "gemini-3.8-flash",
+    "gemini-4-argon",
+    "gemini-4-hydrogen",
+    "gpt-3.5-turbo",
+    "gpt-3.5-turbo-0613",
+    "gpt-4",
+    "gpt-4-0125-preview",
+    "gpt-4-0613",
+    "gpt-4-o-preview",
+    "gpt-4.1",
+    "gpt-4.1-2025-04-14",
+    "gpt-41-copilot",
+    "gpt-4o",
+    "gpt-4o-2024-05-13",
+    "gpt-4o-2024-08-06",
+    "gpt-4o-2024-11-20",
+    "gpt-4o-mini",
+    "gpt-4o-mini-2024-07-18",
+    "gpt-5.3-codex",
+    "gpt-5.4-nano",
+    "gpt-5.6-luna",
+    "gpt-5.6-sol",
+    "gpt-6-astra",
+    "gpt-6-luna",
+    "gpt-6-luna-decisions",
+    "gpt-6-sol",
+    "gpt-6.1-sol",
+    "gpt-6.1-terra",
+    "gpt-image-2.5-flare",
+    "grok-4.6",
+    "grok-4.7",
+    "kimi-k3",
+    "kimi-k3-base",
+    "kimi-k3-copilot",
+    "mai-code-1.1-flash",
+    "mai-code-2",
+    "mai-code-2-flash",
+    "microsoft-decision-1-1",
+    "text-embedding-3-small",
+    "text-embedding-3-small-inference",
+    "text-embedding-ada-002"
+   ],
+   "attemptsDay": 0,
+   "failuresDay": 0,
+   "attemptsMinute": 0,
+   "failuresMinute": 0,
+   "modelCount": 55,
+   "discoveryEnabled": true
+  },
+  {
+   "lastRefresh": "2026-11-25T00:45:29.979354251Z",
+   "openUntil": "0001-01-01T00:00:00Z",
+   "modelMeta": {
+    "deepseek-flash": {
+     "contextTokens": 1000000,
+     "inputPerMTokUsd": 0.3,
+     "outputPerMTokUsd": 1.2
+    },
+    "deepseek-v4-pro": {
+     "contextTokens": 1000000,
+     "inputPerMTokUsd": 1.32,
+     "outputPerMTokUsd": 3.96
+    }
+   },
+   "modelRates": {
+    "deepseek-flash": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "deepseek-v4-pro": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    }
+   },
+   "type": "openai",
+   "baseUrl": "https://api.deepseek.com",
+   "healthState": "closed",
+   "name": "deepseek",
+   "models": [
+    "deepseek-flash",
+    "deepseek-v4-pro"
+   ],
+   "attemptsDay": 0,
+   "failuresDay": 0,
+   "attemptsMinute": 0,
+   "failuresMinute": 0,
+   "modelCount": 2,
+   "discoveryEnabled": true
+  },
+  {
+   "lastRefresh": "2026-11-25T00:45:29.985244627Z",
+   "openUntil": "0001-01-01T00:00:00Z",
+   "modelMeta": {
+    "DeepSeek-V4.1-Flash-EXL3": {
+     "contextTokens": 524288,
+     "inputPerMTokUsd": 0,
+     "outputPerMTokUsd": 0,
+     "vision": true
+    },
+    "Inkling-2-Mini": {
+     "contextTokens": 32768,
+     "inputPerMTokUsd": 0,
+     "outputPerMTokUsd": 0
+    },
+    "Qwen3.8-27B": {
+     "contextTokens": 262144,
+     "inputPerMTokUsd": 0,
+     "outputPerMTokUsd": 0,
+     "vision": false
+    },
+    "current": {
+     "inputPerMTokUsd": 0,
+     "outputPerMTokUsd": 0
+    },
+    "text-embedding-bge-reranker-v2": {
+     "inputPerMTokUsd": 0,
+     "outputPerMTokUsd": 0
+    },
+    "text-embedding-multilingual-e5-base": {
+     "inputPerMTokUsd": 0,
+     "outputPerMTokUsd": 0
+    }
+   },
+   "modelRates": {
+    "DeepSeek-V4.1-Flash-EXL3": {
+     "attemptsDay": 4,
+     "failuresDay": 0
+    },
+    "Inkling-2-Mini": {
+     "attemptsDay": 2,
+     "failuresDay": 0
+    },
+    "Qwen3.8-27B": {
+     "attemptsDay": 7,
+     "failuresDay": 0
+    },
+    "current": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "text-embedding-bge-reranker-v2": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "text-embedding-multilingual-e5-base": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    }
+   },
+   "type": "openai",
+   "baseUrl": "http://llm-api.svc-x.internal:8000",
+   "healthState": "closed",
+   "name": "gx10",
+   "models": [
+    "DeepSeek-V4.1-Flash-EXL3",
+    "Inkling-2-Mini",
+    "Qwen3.8-27B",
+    "current",
+    "text-embedding-bge-reranker-v2",
+    "text-embedding-multilingual-e5-base"
+   ],
+   "kinds": {
+    "/v1/decide": "decision",
+    "text-embedding-bge-reranker-v2": "reranking",
+    "text-embedding-multilingual-e5-base": "embedding"
+   },
+   "endpoints": [
+    "/v1/decide"
+   ],
+   "attemptsDay": 25,
+   "failuresDay": 0,
+   "attemptsMinute": 0,
+   "failuresMinute": 0,
+   "modelCount": 6,
+   "discoveryEnabled": true
+  },
+  {
+   "lastRefresh": "2026-11-25T00:45:41.441051659Z",
+   "openUntil": "0001-01-01T00:00:00Z",
+   "modelMeta": {},
+   "modelRates": {},
+   "type": "openai",
+   "baseUrl": "http://203.0.113.1:1234",
+   "lastErr": "llmgateway: upstream request failed: Get \"http://203.0.113.1:1234/v1/models\": dial tcp 203.0.113.1:1234: connect: connection refused",
+   "healthState": "closed",
+   "name": "macstudio",
+   "models": [],
+   "attemptsDay": 0,
+   "failuresDay": 0,
+   "attemptsMinute": 0,
+   "failuresMinute": 0,
+   "modelCount": 0,
+   "discoveryEnabled": true
+  },
+  {
+   "lastRefresh": "2026-11-25T00:45:30.498138329Z",
+   "openUntil": "0001-01-01T00:00:00Z",
+   "modelMeta": {
+    "MiniMax-M2": {
+     "contextTokens": 200000,
+     "inputPerMTokUsd": 0.3,
+     "outputPerMTokUsd": 1.2
+    },
+    "MiniMax-M2.1": {
+     "contextTokens": 1000000,
+     "inputPerMTokUsd": 0.3,
+     "outputPerMTokUsd": 1.2
+    },
+    "MiniMax-M2.1-highspeed": {
+     "contextTokens": 1000000,
+     "inputPerMTokUsd": 0.3,
+     "outputPerMTokUsd": 2.4
+    },
+    "MiniMax-M2.5": {
+     "contextTokens": 1000000,
+     "inputPerMTokUsd": 0.3,
+     "outputPerMTokUsd": 1.2
+    },
+    "MiniMax-M2.5-highspeed": {
+     "contextTokens": 1000000,
+     "inputPerMTokUsd": 0.3,
+     "outputPerMTokUsd": 2.4
+    },
+    "MiniMax-M2.7": {},
+    "MiniMax-M2.7-highspeed": {},
+    "MiniMax-M3": {
+     "contextTokens": 1000000,
+     "inputPerMTokUsd": 0.3,
+     "outputPerMTokUsd": 1.2
+    },
+    "MiniMax-M3.1-Flash": {}
+   },
+   "modelRates": {
+    "MiniMax-M2": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "MiniMax-M2.1": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "MiniMax-M2.1-highspeed": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "MiniMax-M2.5": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "MiniMax-M2.5-highspeed": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "MiniMax-M2.7": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "MiniMax-M2.7-highspeed": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "MiniMax-M3": {
+     "attemptsDay": 6,
+     "failuresDay": 0
+    },
+    "MiniMax-M3.1-Flash": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    }
+   },
+   "type": "openai",
+   "baseUrl": "https://api.minimax.io",
+   "healthState": "closed",
+   "name": "minimax",
+   "models": [
+    "MiniMax-M2",
+    "MiniMax-M2.1",
+    "MiniMax-M2.1-highspeed",
+    "MiniMax-M2.5",
+    "MiniMax-M2.5-highspeed",
+    "MiniMax-M2.7",
+    "MiniMax-M2.7-highspeed",
+    "MiniMax-M3",
+    "MiniMax-M3.1-Flash"
+   ],
+   "attemptsDay": 6,
+   "failuresDay": 0,
+   "attemptsMinute": 0,
+   "failuresMinute": 0,
+   "modelCount": 9,
+   "discoveryEnabled": true
+  },
+  {
+   "lastRefresh": "2026-11-25T00:45:30.54177391Z",
+   "openUntil": "0001-01-01T00:00:00Z",
+   "modelMeta": {
+    "bigcode/starcoder2-15b": {},
+    "fastino/gliner2-pii": {},
+    "google/gemma-3-12b-it": {},
+    "google/gemma-3-4b-it": {},
+    "minimaxai/minimax-m3.1-flash": {},
+    "mistralai/mistral-large-4-1t-a52b": {},
+    "moonshotai/kimi-k3.1-pro": {},
+    "nvidia/ai-synthetic-video-detector": {},
+    "nvidia/cosmos-reason2-8b": {},
+    "nvidia/embed-qa-4": {},
+    "nvidia/ising-calibration-1.5-31b": {},
+    "nvidia/llama-3.1-nemoguard-8b-topic-control": {},
+    "nvidia/llama-3.1-nemotron-safety-guard-8b-v3": {},
+    "nvidia/llama-3.2-nemoretriever-1b-vlm-embed-v1": {},
+    "nvidia/llama-3.2-nv-embedqa-1b-v1": {},
+    "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning": {},
+    "nvidia/nemotron-3-ultra-550b-a55b": {
+     "inputPerMTokUsd": 0,
+     "outputPerMTokUsd": 0
+    },
+    "nvidia/nemotron-3.5-bolt-e4b": {
+     "inputPerMTokUsd": 0,
+     "outputPerMTokUsd": 0
+    },
+    "nvidia/nemotron-3.5-content-safety": {},
+    "nvidia/nemotron-3.5-embed-1b": {
+     "inputPerMTokUsd": 0,
+     "outputPerMTokUsd": 0
+    },
+    "nvidia/nemotron-3.5-embed-8b": {
+     "inputPerMTokUsd": 0,
+     "outputPerMTokUsd": 0
+    },
+    "nvidia/nemotron-3.5-lightning-30b-a3b": {
+     "inputPerMTokUsd": 0,
+     "outputPerMTokUsd": 0
+    },
+    "nvidia/nemotron-3.5-super-vl-120b-a12b": {},
+    "nvidia/nv-embedqa-mistral-7b-v2": {},
+    "nvidia/nvclip": {},
+    "nvidia/riva-translate-4b-instruct-v2": {},
+    "poolside/laguna-xs-2.1": {},
+    "snowflake/arctic-embed-l": {},
+    "stepfun-ai/step-5-preview": {},
+    "z-ai/glm-5.3-flash": {}
+   },
+   "modelRates": {
+    "bigcode/starcoder2-15b": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "fastino/gliner2-pii": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "google/gemma-3-12b-it": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "google/gemma-3-4b-it": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "minimaxai/minimax-m3.1-flash": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "mistralai/mistral-large-4-1t-a52b": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "moonshotai/kimi-k3.1-pro": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "nvidia/ai-synthetic-video-detector": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "nvidia/cosmos-reason2-8b": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "nvidia/embed-qa-4": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "nvidia/ising-calibration-1.5-31b": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "nvidia/llama-3.1-nemoguard-8b-topic-control": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "nvidia/llama-3.1-nemotron-safety-guard-8b-v3": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "nvidia/llama-3.2-nemoretriever-1b-vlm-embed-v1": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "nvidia/llama-3.2-nv-embedqa-1b-v1": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "nvidia/nemotron-3-ultra-550b-a55b": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "nvidia/nemotron-3.5-bolt-e4b": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "nvidia/nemotron-3.5-content-safety": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "nvidia/nemotron-3.5-embed-1b": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "nvidia/nemotron-3.5-embed-8b": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "nvidia/nemotron-3.5-lightning-30b-a3b": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "nvidia/nemotron-3.5-super-vl-120b-a12b": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "nvidia/nv-embedqa-mistral-7b-v2": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "nvidia/nvclip": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "nvidia/riva-translate-4b-instruct-v2": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "poolside/laguna-xs-2.1": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "snowflake/arctic-embed-l": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "stepfun-ai/step-5-preview": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "z-ai/glm-5.3-flash": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    }
+   },
+   "type": "openai",
+   "baseUrl": "https://integrate.api.nvidia.com",
+   "healthState": "closed",
+   "name": "nvidia-nim",
+   "models": [
+    "bigcode/starcoder2-15b",
+    "fastino/gliner2-pii",
+    "google/gemma-3-12b-it",
+    "google/gemma-3-4b-it",
+    "minimaxai/minimax-m3.1-flash",
+    "mistralai/mistral-large-4-1t-a52b",
+    "moonshotai/kimi-k3.1-pro",
+    "nvidia/ai-synthetic-video-detector",
+    "nvidia/cosmos-reason2-8b",
+    "nvidia/embed-qa-4",
+    "nvidia/ising-calibration-1.5-31b",
+    "nvidia/llama-3.1-nemoguard-8b-topic-control",
+    "nvidia/llama-3.1-nemotron-safety-guard-8b-v3",
+    "nvidia/llama-3.2-nemoretriever-1b-vlm-embed-v1",
+    "nvidia/llama-3.2-nv-embedqa-1b-v1",
+    "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning",
+    "nvidia/nemotron-3-ultra-550b-a55b",
+    "nvidia/nemotron-3.5-bolt-e4b",
+    "nvidia/nemotron-3.5-content-safety",
+    "nvidia/nemotron-3.5-embed-1b",
+    "nvidia/nemotron-3.5-embed-8b",
+    "nvidia/nemotron-3.5-lightning-30b-a3b",
+    "nvidia/nemotron-3.5-super-vl-120b-a12b",
+    "nvidia/nv-embedqa-mistral-7b-v2",
+    "nvidia/nvclip",
+    "nvidia/riva-translate-4b-instruct-v2",
+    "poolside/laguna-xs-2.1",
+    "snowflake/arctic-embed-l",
+    "stepfun-ai/step-5-preview",
+    "z-ai/glm-5.3-flash"
+   ],
+   "attemptsDay": 0,
+   "failuresDay": 0,
+   "attemptsMinute": 0,
+   "failuresMinute": 0,
+   "modelCount": 30,
+   "discoveryEnabled": true
+  },
+  {
+   "lastRefresh": "0001-01-01T00:00:00Z",
+   "openUntil": "0001-01-01T00:00:00Z",
+   "modelMeta": {},
+   "modelRates": {},
+   "type": "openai",
+   "baseUrl": "https://ai.api.nvidia.com",
+   "healthState": "closed",
+   "name": "nvidia-retrieval",
+   "models": [],
+   "attemptsDay": 0,
+   "failuresDay": 0,
+   "attemptsMinute": 0,
+   "failuresMinute": 0,
+   "modelCount": 0,
+   "discoveryEnabled": false
+  },
+  {
+   "lastRefresh": "2026-11-25T00:45:31.04975007Z",
+   "openUntil": "0001-01-01T00:00:00Z",
+   "modelMeta": {
+    "chat-latest": {
+     "contextTokens": 400000,
+     "inputPerMTokUsd": 5,
+     "outputPerMTokUsd": 30
+    },
+    "chatgpt-image-latest": {},
+    "gpt-4.1": {
+     "contextTokens": 1047576,
+     "inputPerMTokUsd": 2,
+     "outputPerMTokUsd": 8
+    },
+    "gpt-4.1-2025-04-14": {},
+    "gpt-4.1-mini": {
+     "contextTokens": 1047576,
+     "inputPerMTokUsd": 0.4,
+     "outputPerMTokUsd": 1.6
+    },
+    "gpt-4.1-mini-2025-04-14": {},
+    "gpt-4o": {
+     "contextTokens": 128000,
+     "inputPerMTokUsd": 2.5,
+     "outputPerMTokUsd": 10
+    },
+    "gpt-4o-2024-08-06": {},
+    "gpt-4o-2024-11-20": {},
+    "gpt-4o-mini": {
+     "contextTokens": 128000,
+     "inputPerMTokUsd": 0.15,
+     "outputPerMTokUsd": 0.6
+    },
+    "gpt-4o-mini-2024-07-18": {},
+    "gpt-4o-mini-transcribe": {},
+    "gpt-4o-mini-transcribe-2025-03-20": {},
+    "gpt-4o-mini-transcribe-2025-12-15": {},
+    "gpt-4o-mini-tts": {},
+    "gpt-4o-mini-tts-2025-03-20": {},
+    "gpt-4o-mini-tts-2025-12-15": {},
+    "gpt-4o-transcribe": {},
+    "gpt-4o-transcribe-diarize": {},
+    "gpt-5": {
+     "contextTokens": 272000,
+     "inputPerMTokUsd": 1.25,
+     "outputPerMTokUsd": 10
+    },
+    "gpt-5-2025-08-07": {},
+    "gpt-5-mini": {
+     "contextTokens": 272000,
+     "inputPerMTokUsd": 0.25,
+     "outputPerMTokUsd": 2
+    },
+    "gpt-5-mini-2025-08-07": {},
+    "gpt-5-nano": {
+     "contextTokens": 272000,
+     "inputPerMTokUsd": 0.05,
+     "outputPerMTokUsd": 0.4
+    },
+    "gpt-5-nano-2025-08-07": {},
+    "gpt-5-pro": {},
+    "gpt-5-pro-2025-10-06": {},
+    "gpt-5-search-api": {
+     "contextTokens": 272000,
+     "inputPerMTokUsd": 1.25,
+     "outputPerMTokUsd": 10
+    },
+    "gpt-5-search-api-2025-10-14": {
+     "contextTokens": 272000,
+     "inputPerMTokUsd": 1.25,
+     "outputPerMTokUsd": 10
+    },
+    "gpt-5.1": {
+     "contextTokens": 272000,
+     "inputPerMTokUsd": 1.25,
+     "outputPerMTokUsd": 10
+    },
+    "gpt-5.1-2025-11-13": {
+     "contextTokens": 272000,
+     "inputPerMTokUsd": 1.25,
+     "outputPerMTokUsd": 10
+    },
+    "gpt-5.2": {
+     "contextTokens": 272000,
+     "inputPerMTokUsd": 1.75,
+     "outputPerMTokUsd": 14
+    },
+    "gpt-5.2-2025-12-11": {
+     "contextTokens": 272000,
+     "inputPerMTokUsd": 1.75,
+     "outputPerMTokUsd": 14
+    },
+    "gpt-5.2-pro": {},
+    "gpt-5.2-pro-2025-12-11": {},
+    "gpt-5.3-codex": {},
+    "gpt-5.4": {
+     "contextTokens": 1050000,
+     "inputPerMTokUsd": 2.5,
+     "outputPerMTokUsd": 15
+    },
+    "gpt-5.4-2026-03-05": {
+     "contextTokens": 1050000,
+     "inputPerMTokUsd": 2.5,
+     "outputPerMTokUsd": 15
+    },
+    "gpt-5.4-mini": {
+     "contextTokens": 272000,
+     "inputPerMTokUsd": 0.75,
+     "outputPerMTokUsd": 4.5
+    },
+    "gpt-5.4-mini-2026-03-17": {
+     "contextTokens": 272000,
+     "inputPerMTokUsd": 0.75,
+     "outputPerMTokUsd": 4.5
+    },
+    "gpt-5.4-nano": {
+     "contextTokens": 272000,
+     "inputPerMTokUsd": 0.2,
+     "outputPerMTokUsd": 1.25
+    },
+    "gpt-5.4-nano-2026-03-17": {
+     "contextTokens": 272000,
+     "inputPerMTokUsd": 0.2,
+     "outputPerMTokUsd": 1.25
+    },
+    "gpt-5.4-pro": {},
+    "gpt-5.4-pro-2026-03-05": {},
+    "gpt-5.5": {
+     "contextTokens": 1050000,
+     "inputPerMTokUsd": 5,
+     "outputPerMTokUsd": 30
+    },
+    "gpt-5.5-2026-04-23": {
+     "contextTokens": 1050000,
+     "inputPerMTokUsd": 5,
+     "outputPerMTokUsd": 30
+    },
+    "gpt-5.5-pro": {},
+    "gpt-5.5-pro-2026-04-23": {},
+    "gpt-5.6-luna": {
+     "contextTokens": 922000,
+     "inputPerMTokUsd": 0.2,
+     "outputPerMTokUsd": 1.2
+    },
+    "gpt-5.6-sol": {
+     "contextTokens": 922000,
+     "inputPerMTokUsd": 4,
+     "outputPerMTokUsd": 20
+    },
+    "gpt-5.6-terra": {
+     "contextTokens": 922000,
+     "inputPerMTokUsd": 2,
+     "outputPerMTokUsd": 12
+    },
+    "gpt-6-astra": {
+     "contextTokens": 922000,
+     "inputPerMTokUsd": 10,
+     "outputPerMTokUsd": 50
+    },
+    "gpt-6-astra-healthcare": {},
+    "gpt-6-luna": {
+     "contextTokens": 922000,
+     "inputPerMTokUsd": 0.1,
+     "outputPerMTokUsd": 0.5
+    },
+    "gpt-6-sol": {
+     "contextTokens": 922000,
+     "inputPerMTokUsd": 2,
+     "outputPerMTokUsd": 10
+    },
+    "gpt-6.1-sol": {},
+    "gpt-6.1-sol-healthcare": {},
+    "gpt-6.1-terra": {},
+    "gpt-6.2-astra": {},
+    "gpt-6.2-astra-healthcare": {},
+    "gpt-6.2-sol": {},
+    "gpt-6.2-sol-healthcare": {},
+    "gpt-audio": {
+     "contextTokens": 128000,
+     "inputPerMTokUsd": 2.5,
+     "outputPerMTokUsd": 10
+    },
+    "gpt-audio-1.5": {
+     "contextTokens": 128000,
+     "inputPerMTokUsd": 2.5,
+     "outputPerMTokUsd": 10
+    },
+    "gpt-audio-2025-08-28": {},
+    "gpt-audio-mini": {
+     "contextTokens": 128000,
+     "inputPerMTokUsd": 0.6,
+     "outputPerMTokUsd": 2.4
+    },
+    "gpt-audio-mini-2025-12-15": {
+     "contextTokens": 128000,
+     "inputPerMTokUsd": 0.6,
+     "outputPerMTokUsd": 2.4
+    },
+    "gpt-image-1-mini": {},
+    "gpt-image-1.5": {},
+    "gpt-image-2": {},
+    "gpt-image-2-2026-04-21": {},
+    "gpt-image-2.5-flare": {},
+    "gpt-image-2.5-flare-2026-09-08": {},
+    "gpt-image-2.5-sunburst": {},
+    "gpt-image-2.5-sunburst-2026-09-08": {},
+    "gpt-image-2.6-flare": {},
+    "gpt-image-2.6-sunburst": {},
+    "gpt-live-1": {},
+    "gpt-live-1.1": {},
+    "gpt-live-transcribe": {},
+    "gpt-realtime": {},
+    "gpt-realtime-1.5": {},
+    "gpt-realtime-2": {},
+    "gpt-realtime-2.1": {},
+    "gpt-realtime-2.1-mini": {},
+    "gpt-realtime-2025-08-28": {},
+    "gpt-realtime-mini": {},
+    "gpt-realtime-mini-2025-12-15": {},
+    "gpt-realtime-translate": {},
+    "gpt-realtime-whisper": {},
+    "gpt-transcribe": {},
+    "o3": {
+     "contextTokens": 200000,
+     "inputPerMTokUsd": 2,
+     "outputPerMTokUsd": 8
+    },
+    "o3-2025-04-16": {},
+    "o3-pro": {},
+    "o3-pro-2025-06-10": {},
+    "omni-moderation-2024-09-26": {},
+    "omni-moderation-latest": {},
+    "text-embedding-3-large": {
+     "contextTokens": 8191,
+     "inputPerMTokUsd": 0.13,
+     "outputPerMTokUsd": 0
+    },
+    "text-embedding-3-small": {
+     "contextTokens": 8191,
+     "inputPerMTokUsd": 0.02,
+     "outputPerMTokUsd": 0
+    },
+    "text-embedding-ada-002": {
+     "contextTokens": 8191,
+     "inputPerMTokUsd": 0.1,
+     "outputPerMTokUsd": 0
+    },
+    "tts-1": {},
+    "tts-1-1106": {},
+    "tts-1-hd": {},
+    "tts-1-hd-1106": {},
+    "whisper-1": {}
+   },
+   "modelRates": {
+    "chat-latest": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "chatgpt-image-latest": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-4.1": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-4.1-2025-04-14": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-4.1-mini": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-4.1-mini-2025-04-14": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-4o": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-4o-2024-08-06": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-4o-2024-11-20": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-4o-mini": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-4o-mini-2024-07-18": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-4o-mini-transcribe": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-4o-mini-transcribe-2025-03-20": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-4o-mini-transcribe-2025-12-15": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-4o-mini-tts": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-4o-mini-tts-2025-03-20": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-4o-mini-tts-2025-12-15": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-4o-transcribe": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-4o-transcribe-diarize": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-5": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-5-2025-08-07": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-5-mini": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-5-mini-2025-08-07": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-5-nano": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-5-nano-2025-08-07": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-5-pro": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-5-pro-2025-10-06": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-5-search-api": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-5-search-api-2025-10-14": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-5.1": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-5.1-2025-11-13": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-5.2": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-5.2-2025-12-11": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-5.2-pro": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-5.2-pro-2025-12-11": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-5.3-codex": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-5.4": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-5.4-2026-03-05": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-5.4-mini": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-5.4-mini-2026-03-17": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-5.4-nano": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-5.4-nano-2026-03-17": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-5.4-pro": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-5.4-pro-2026-03-05": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-5.5": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-5.5-2026-04-23": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-5.5-pro": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-5.5-pro-2026-04-23": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-5.6-luna": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-5.6-sol": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-5.6-terra": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-6-astra": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-6-astra-healthcare": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-6-luna": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-6-sol": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-6.1-sol": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-6.1-sol-healthcare": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-6.1-terra": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-6.2-astra": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-6.2-astra-healthcare": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-6.2-sol": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-6.2-sol-healthcare": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-audio": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-audio-1.5": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-audio-2025-08-28": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-audio-mini": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-audio-mini-2025-12-15": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-image-1-mini": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-image-1.5": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-image-2": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-image-2-2026-04-21": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-image-2.5-flare": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-image-2.5-flare-2026-09-08": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-image-2.5-sunburst": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-image-2.5-sunburst-2026-09-08": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-image-2.6-flare": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-image-2.6-sunburst": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-live-1": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-live-1.1": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-live-transcribe": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-realtime": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-realtime-1.5": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-realtime-2": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-realtime-2.1": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-realtime-2.1-mini": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-realtime-2025-08-28": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-realtime-mini": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-realtime-mini-2025-12-15": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-realtime-translate": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-realtime-whisper": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-transcribe": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "o3": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "o3-2025-04-16": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "o3-pro": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "o3-pro-2025-06-10": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "omni-moderation-2024-09-26": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "omni-moderation-latest": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "text-embedding-3-large": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "text-embedding-3-small": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "text-embedding-ada-002": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "tts-1": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "tts-1-1106": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "tts-1-hd": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "tts-1-hd-1106": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "whisper-1": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    }
+   },
+   "type": "openai",
+   "baseUrl": "https://api.openai.com",
+   "healthState": "closed",
+   "name": "openai",
+   "models": [
+    "chat-latest",
+    "chatgpt-image-latest",
+    "gpt-4.1",
+    "gpt-4.1-2025-04-14",
+    "gpt-4.1-mini",
+    "gpt-4.1-mini-2025-04-14",
+    "gpt-4o",
+    "gpt-4o-2024-08-06",
+    "gpt-4o-2024-11-20",
+    "gpt-4o-mini",
+    "gpt-4o-mini-2024-07-18",
+    "gpt-4o-mini-transcribe",
+    "gpt-4o-mini-transcribe-2025-03-20",
+    "gpt-4o-mini-transcribe-2025-12-15",
+    "gpt-4o-mini-tts",
+    "gpt-4o-mini-tts-2025-03-20",
+    "gpt-4o-mini-tts-2025-12-15",
+    "gpt-4o-transcribe",
+    "gpt-4o-transcribe-diarize",
+    "gpt-5",
+    "gpt-5-2025-08-07",
+    "gpt-5-mini",
+    "gpt-5-mini-2025-08-07",
+    "gpt-5-nano",
+    "gpt-5-nano-2025-08-07",
+    "gpt-5-pro",
+    "gpt-5-pro-2025-10-06",
+    "gpt-5-search-api",
+    "gpt-5-search-api-2025-10-14",
+    "gpt-5.1",
+    "gpt-5.1-2025-11-13",
+    "gpt-5.2",
+    "gpt-5.2-2025-12-11",
+    "gpt-5.2-pro",
+    "gpt-5.2-pro-2025-12-11",
+    "gpt-5.3-codex",
+    "gpt-5.4",
+    "gpt-5.4-2026-03-05",
+    "gpt-5.4-mini",
+    "gpt-5.4-mini-2026-03-17",
+    "gpt-5.4-nano",
+    "gpt-5.4-nano-2026-03-17",
+    "gpt-5.4-pro",
+    "gpt-5.4-pro-2026-03-05",
+    "gpt-5.5",
+    "gpt-5.5-2026-04-23",
+    "gpt-5.5-pro",
+    "gpt-5.5-pro-2026-04-23",
+    "gpt-5.6-luna",
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-6-astra",
+    "gpt-6-astra-healthcare",
+    "gpt-6-luna",
+    "gpt-6-sol",
+    "gpt-6.1-sol",
+    "gpt-6.1-sol-healthcare",
+    "gpt-6.1-terra",
+    "gpt-6.2-astra",
+    "gpt-6.2-astra-healthcare",
+    "gpt-6.2-sol",
+    "gpt-6.2-sol-healthcare",
+    "gpt-audio",
+    "gpt-audio-1.5",
+    "gpt-audio-2025-08-28",
+    "gpt-audio-mini",
+    "gpt-audio-mini-2025-12-15",
+    "gpt-image-1-mini",
+    "gpt-image-1.5",
+    "gpt-image-2",
+    "gpt-image-2-2026-04-21",
+    "gpt-image-2.5-flare",
+    "gpt-image-2.5-flare-2026-09-08",
+    "gpt-image-2.5-sunburst",
+    "gpt-image-2.5-sunburst-2026-09-08",
+    "gpt-image-2.6-flare",
+    "gpt-image-2.6-sunburst",
+    "gpt-live-1",
+    "gpt-live-1.1",
+    "gpt-live-transcribe",
+    "gpt-realtime",
+    "gpt-realtime-1.5",
+    "gpt-realtime-2",
+    "gpt-realtime-2.1",
+    "gpt-realtime-2.1-mini",
+    "gpt-realtime-2025-08-28",
+    "gpt-realtime-mini",
+    "gpt-realtime-mini-2025-12-15",
+    "gpt-realtime-translate",
+    "gpt-realtime-whisper",
+    "gpt-transcribe",
+    "o3",
+    "o3-2025-04-16",
+    "o3-pro",
+    "o3-pro-2025-06-10",
+    "omni-moderation-2024-09-26",
+    "omni-moderation-latest",
+    "text-embedding-3-large",
+    "text-embedding-3-small",
+    "text-embedding-ada-002",
+    "tts-1",
+    "tts-1-1106",
+    "tts-1-hd",
+    "tts-1-hd-1106",
+    "whisper-1"
+   ],
+   "attemptsDay": 0,
+   "failuresDay": 0,
+   "attemptsMinute": 0,
+   "failuresMinute": 0,
+   "modelCount": 105,
+   "discoveryEnabled": true
+  },
+  {
+   "lastRefresh": "0001-01-01T00:00:00Z",
+   "openUntil": "0001-01-01T00:00:00Z",
+   "modelMeta": {
+    "gpt-4o-mini-transcribe": {},
+    "gpt-4o-mini-tts": {},
+    "gpt-4o-transcribe": {},
+    "gpt-audio": {
+     "contextTokens": 128000,
+     "inputPerMTokUsd": 2.5,
+     "outputPerMTokUsd": 10
+    },
+    "gpt-audio-mini": {
+     "contextTokens": 128000,
+     "inputPerMTokUsd": 0.6,
+     "outputPerMTokUsd": 2.4
+    },
+    "gpt-realtime": {},
+    "tts-1": {},
+    "tts-1-hd": {},
+    "whisper-1": {}
+   },
+   "modelRates": {
+    "gpt-4o-mini-transcribe": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-4o-mini-tts": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-4o-transcribe": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-audio": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-audio-mini": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "gpt-realtime": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "tts-1": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "tts-1-hd": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "whisper-1": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    }
+   },
+   "type": "openai",
+   "baseUrl": "https://api.openai.com",
+   "healthState": "closed",
+   "name": "openai-audio",
+   "models": [
+    "gpt-4o-mini-transcribe",
+    "gpt-4o-mini-tts",
+    "gpt-4o-transcribe",
+    "gpt-audio",
+    "gpt-audio-mini",
+    "gpt-realtime",
+    "tts-1",
+    "tts-1-hd",
+    "whisper-1"
+   ],
+   "attemptsDay": 0,
+   "failuresDay": 0,
+   "attemptsMinute": 0,
+   "failuresMinute": 0,
+   "modelCount": 9,
+   "discoveryEnabled": false
+  },
+  {
+   "lastRefresh": "0001-01-01T00:00:00Z",
+   "openUntil": "0001-01-01T00:00:00Z",
+   "modelMeta": {},
+   "modelRates": {},
+   "type": "openai",
+   "baseUrl": "http://203.0.113.1:8001",
+   "healthState": "closed",
+   "name": "parakeet-mlx",
+   "models": [],
+   "attemptsDay": 0,
+   "failuresDay": 0,
+   "attemptsMinute": 0,
+   "failuresMinute": 0,
+   "modelCount": 0,
+   "discoveryEnabled": false
+  },
+  {
+   "lastRefresh": "0001-01-01T00:00:00Z",
+   "openUntil": "0001-01-01T00:00:00Z",
+   "modelMeta": {},
+   "modelRates": {},
+   "type": "openai",
+   "baseUrl": "http://203.0.113.1:8002",
+   "healthState": "closed",
+   "name": "piper-tts",
+   "models": [],
+   "attemptsDay": 0,
+   "failuresDay": 0,
+   "attemptsMinute": 0,
+   "failuresMinute": 0,
+   "modelCount": 0,
+   "discoveryEnabled": false
+  },
+  {
+   "lastRefresh": "2026-11-25T00:45:31.071356203Z",
+   "openUntil": "0001-01-01T00:00:00Z",
+   "modelMeta": {
+    "deepseek-v4-flash-0731": {
+     "contextTokens": 524288,
+     "inputPerMTokUsd": 0,
+     "outputPerMTokUsd": 0
+    },
+    "deepseek-v4.1-flash-1017": {
+     "contextTokens": 524288
+    },
+    "glm-5.3-flash": {
+     "contextTokens": 524288
+    },
+    "model-fast": {
+     "contextTokens": 524288
+    },
+    "model-heavy": {
+     "contextTokens": 262144
+    },
+    "model-light": {
+     "contextTokens": 262144
+    },
+    "ornith-1.5-35b": {
+     "contextTokens": 262144
+    },
+    "ornith-1.5-397b": {
+     "contextTokens": 262144
+    },
+    "ornith-397b": {
+     "contextTokens": 262144,
+     "inputPerMTokUsd": 0,
+     "outputPerMTokUsd": 0
+    },
+    "qwen3.6-27b": {
+     "contextTokens": 262144,
+     "inputPerMTokUsd": 0,
+     "outputPerMTokUsd": 0
+    },
+    "qwen3.8-27b": {
+     "contextTokens": 262144
+    },
+    "qwen3.8-27b-uncensored": {
+     "contextTokens": 262144
+    },
+    "qwen3.8-flash-next": {
+     "contextTokens": 524288
+    },
+    "text-embedding-multilingual-e5-base": {}
+   },
+   "modelRates": {
+    "deepseek-v4-flash-0731": {
+     "attemptsDay": 421,
+     "failuresDay": 0
+    },
+    "deepseek-v4.1-flash-1017": {
+     "attemptsDay": 100,
+     "failuresDay": 0
+    },
+    "glm-5.3-flash": {
+     "attemptsDay": 30,
+     "failuresDay": 0
+    },
+    "model-fast": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "model-heavy": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "model-light": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "ornith-1.5-35b": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "ornith-1.5-397b": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "ornith-397b": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "qwen3.6-27b": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "qwen3.8-27b": {
+     "attemptsDay": 71,
+     "failuresDay": 0
+    },
+    "qwen3.8-27b-uncensored": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "qwen3.8-flash-next": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "text-embedding-multilingual-e5-base": {
+     "attemptsDay": 1080,
+     "failuresDay": 0
+    }
+   },
+   "type": "openai",
+   "baseUrl": "https://provider-b.example",
+   "healthState": "closed",
+   "name": "uni",
+   "models": [
+    "deepseek-v4-flash-0731",
+    "deepseek-v4.1-flash-1017",
+    "glm-5.3-flash",
+    "model-fast",
+    "model-heavy",
+    "model-light",
+    "ornith-1.5-35b",
+    "ornith-1.5-397b",
+    "ornith-397b",
+    "qwen3.6-27b",
+    "qwen3.8-27b",
+    "qwen3.8-27b-uncensored",
+    "qwen3.8-flash-next",
+    "text-embedding-multilingual-e5-base"
+   ],
+   "attemptsDay": 1702,
+   "failuresDay": 0,
+   "attemptsMinute": 7,
+   "failuresMinute": 0,
+   "modelCount": 14,
+   "discoveryEnabled": true
+  },
+  {
+   "lastRefresh": "2026-11-25T00:45:31.241477003Z",
+   "openUntil": "0001-01-01T00:00:00Z",
+   "modelMeta": {
+    "grok-4.20-0309-non-reasoning": {
+     "contextTokens": 1000000,
+     "inputPerMTokUsd": 1.25,
+     "outputPerMTokUsd": 2.5
+    },
+    "grok-4.20-0309-reasoning": {
+     "contextTokens": 1000000,
+     "inputPerMTokUsd": 1.25,
+     "outputPerMTokUsd": 2.5
+    },
+    "grok-4.20-multi-agent-0309": {},
+    "grok-4.3": {
+     "contextTokens": 1000000,
+     "inputPerMTokUsd": 1.25,
+     "outputPerMTokUsd": 2.5
+    },
+    "grok-4.5": {
+     "contextTokens": 500000,
+     "inputPerMTokUsd": 2,
+     "outputPerMTokUsd": 6
+    },
+    "grok-4.6": {
+     "contextTokens": 500000,
+     "inputPerMTokUsd": 2,
+     "outputPerMTokUsd": 6
+    },
+    "grok-4.7": {
+     "contextTokens": 500000,
+     "inputPerMTokUsd": 2,
+     "outputPerMTokUsd": 6
+    },
+    "grok-imagine-image": {},
+    "grok-imagine-image-2.0": {},
+    "grok-imagine-video": {},
+    "grok-imagine-video-1.5": {},
+    "grok-imagine-video-1.5-lite": {}
+   },
+   "modelRates": {
+    "grok-4.20-0309-non-reasoning": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "grok-4.20-0309-reasoning": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "grok-4.20-multi-agent-0309": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "grok-4.3": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "grok-4.5": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "grok-4.6": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "grok-4.7": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "grok-imagine-image": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "grok-imagine-image-2.0": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "grok-imagine-video": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "grok-imagine-video-1.5": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "grok-imagine-video-1.5-lite": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    }
+   },
+   "type": "openai",
+   "baseUrl": "https://api.x.ai",
+   "healthState": "closed",
+   "name": "xai",
+   "models": [
+    "grok-4.20-0309-non-reasoning",
+    "grok-4.20-0309-reasoning",
+    "grok-4.20-multi-agent-0309",
+    "grok-4.3",
+    "grok-4.5",
+    "grok-4.6",
+    "grok-4.7",
+    "grok-imagine-image",
+    "grok-imagine-image-2.0",
+    "grok-imagine-video",
+    "grok-imagine-video-1.5",
+    "grok-imagine-video-1.5-lite"
+   ],
+   "attemptsDay": 0,
+   "failuresDay": 0,
+   "attemptsMinute": 0,
+   "failuresMinute": 0,
+   "modelCount": 12,
+   "discoveryEnabled": true
+  },
+  {
+   "lastRefresh": "2026-11-25T00:45:41.32128593Z",
+   "openUntil": "0001-01-01T00:00:00Z",
+   "modelMeta": {
+    "mimo-v2.5": {},
+    "mimo-v2.5-pro": {}
+   },
+   "modelRates": {
+    "mimo-v2.5": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    },
+    "mimo-v2.5-pro": {
+     "attemptsDay": 0,
+     "failuresDay": 0
+    }
+   },
+   "type": "openai",
+   "baseUrl": "https://token-plan-ams.xiaomimimo.com",
+   "lastErr": "provider returned status 401",
+   "healthState": "closed",
+   "name": "xiaomi",
+   "models": [
+    "mimo-v2.5",
+    "mimo-v2.5-pro"
+   ],
+   "attemptsDay": 0,
+   "failuresDay": 0,
+   "attemptsMinute": 0,
+   "failuresMinute": 0,
+   "modelCount": 2,
+   "discoveryEnabled": true
+  }
+ ],
+ "groups": [
+  {
+   "name": "friends",
+   "memberCount": 16
+  },
+  {
+   "name": "home",
+   "memberCount": 6
+  },
+  {
+   "name": "projects",
+   "memberCount": 1
+  }
+ ],
+ "aliases": [
+  {
+   "modelMeta": {
+    "contextTokens": 524288,
+    "inputPerMTokUsd": 0,
+    "outputPerMTokUsd": 0
+   },
+   "alias": "deepseek",
+   "target": "uni/deepseek-v4-flash-0731"
+  },
+  {
+   "modelMeta": {
+    "inputPerMTokUsd": 0,
+    "outputPerMTokUsd": 0
+   },
+   "alias": "deepseek-v4-flash-vision-exp",
+   "target": "gx10/current"
+  },
+  {
+   "modelMeta": {
+    "inputPerMTokUsd": 0,
+    "outputPerMTokUsd": 0
+   },
+   "alias": "gx10-embedding/text-embedding-multilingual-e5-base",
+   "target": "gx10/text-embedding-multilingual-e5-base"
+  },
+  {
+   "modelMeta": {
+    "inputPerMTokUsd": 0,
+    "outputPerMTokUsd": 0
+   },
+   "alias": "local/current-model",
+   "target": "gx10/current"
+  }
+ ],
+ "routers": [
+  {
+   "name": "smartrouter/gx10",
+   "defaultTier": "low",
+   "selection": "ordered",
+   "classifier": "v2",
+   "firstByteTimeout": "40s",
+   "tiers": [
+    {
+     "name": "low",
+     "models": [
+      "gx10/Qwen3.8-27B"
+     ],
+     "minScore": 0
+    },
+    {
+     "name": "mid",
+     "models": [
+      "gx10/Inkling-2-Mini"
+     ],
+     "minScore": 150
+    },
+    {
+     "name": "top",
+     "models": [
+      "gx10/DeepSeek-V4.1-Flash-EXL3"
+     ],
+     "minScore": 350
+    }
+   ],
+   "keywordRules": [],
+   "contextTokens": 524288,
+   "stats": {
+    "scope": "shared",
+    "tiers": [
+     {
+      "name": "low",
+      "count": 33
+     },
+     {
+      "name": "mid",
+      "count": 15
+     },
+     {
+      "name": "top",
+      "count": 29
+     }
+    ],
+    "reasons": [
+     {
+      "name": "bump",
+      "count": 5
+     },
+     {
+      "name": "floor",
+      "count": 9
+     },
+     {
+      "name": "score",
+      "count": 58
+     },
+     {
+      "name": "session",
+      "count": 2
+     },
+     {
+      "name": "skipped",
+      "count": 3
+     }
+    ],
+    "escalations": [],
+    "shadow": [],
+    "outcomes": [
+     {
+      "tier": "low",
+      "reason": "score",
+      "outcome": "ok",
+      "count": 21
+     },
+     {
+      "tier": "low",
+      "reason": "score",
+      "outcome": "bad",
+      "count": 3
+     },
+     {
+      "tier": "mid",
+      "reason": "score",
+      "outcome": "ok",
+      "count": 1
+     },
+     {
+      "tier": "mid",
+      "reason": "score",
+      "outcome": "bad",
+      "count": 4
+     },
+     {
+      "tier": "mid",
+      "reason": "bump",
+      "outcome": "bad",
+      "count": 1
+     },
+     {
+      "tier": "top",
+      "reason": "score",
+      "outcome": "ok",
+      "count": 10
+     },
+     {
+      "tier": "top",
+      "reason": "floor",
+      "outcome": "ok",
+      "count": 5
+     },
+     {
+      "tier": "top",
+      "reason": "session",
+      "outcome": "ok",
+      "count": 2
+     },
+     {
+      "tier": "top",
+      "reason": "bump",
+      "outcome": "ok",
+      "count": 4
+     }
+    ],
+    "requests": 77
+   },
+   "calibration": {
+    "mode": "shadow",
+    "delta": [
+     {
+      "tier": "mid",
+      "delta": 0
+     },
+     {
+      "tier": "top",
+      "delta": 0
+     }
+    ],
+    "maxLower": 149,
+    "maxRaise": 0,
+    "freeze": false
+   },
+   "maxAttempts": 4,
+   "downgraded": 0,
+   "downgradeBand": 100,
+   "riskZ": 128,
+   "contextEscalation": true,
+   "shadowEnabled": false,
+   "saturationDowngrade": false,
+   "timeoutFallback": false,
+   "fellBack": 0
+  },
+  {
+   "name": "smartrouter/uni",
+   "defaultTier": "low",
+   "selection": "ordered",
+   "classifier": "v2",
+   "firstByteTimeout": "40s",
+   "tiers": [
+    {
+     "name": "low",
+     "models": [
+      "uni/qwen3.8-27b"
+     ],
+     "minScore": 0
+    },
+    {
+     "name": "mid",
+     "models": [
+      "uni/glm-5.3-flash"
+     ],
+     "minScore": 150
+    },
+    {
+     "name": "top",
+     "models": [
+      "uni/deepseek-v4.1-flash-1017"
+     ],
+     "minScore": 350
+    }
+   ],
+   "keywordRules": [],
+   "contextTokens": 524288,
+   "stats": {
+    "scope": "shared",
+    "tiers": [
+     {
+      "name": "low",
+      "count": 35
+     },
+     {
+      "name": "mid",
+      "count": 44
+     },
+     {
+      "name": "top",
+      "count": 127
+     }
+    ],
+    "reasons": [
+     {
+      "name": "bump",
+      "count": 11
+     },
+     {
+      "name": "floor",
+      "count": 12
+     },
+     {
+      "name": "loop",
+      "count": 72
+     },
+     {
+      "name": "score",
+      "count": 108
+     },
+     {
+      "name": "session",
+      "count": 3
+     }
+    ],
+    "escalations": [],
+    "shadow": [],
+    "outcomes": [
+     {
+      "tier": "low",
+      "reason": "score",
+      "outcome": "ok",
+      "count": 16
+     },
+     {
+      "tier": "low",
+      "reason": "score",
+      "outcome": "bad",
+      "count": 7
+     },
+     {
+      "tier": "mid",
+      "reason": "score",
+      "outcome": "ok",
+      "count": 31
+     },
+     {
+      "tier": "mid",
+      "reason": "score",
+      "outcome": "bad",
+      "count": 2
+     },
+     {
+      "tier": "mid",
+      "reason": "session",
+      "outcome": "bad",
+      "count": 1
+     },
+     {
+      "tier": "mid",
+      "reason": "bump",
+      "outcome": "ok",
+      "count": 1
+     },
+     {
+      "tier": "mid",
+      "reason": "bump",
+      "outcome": "bad",
+      "count": 1
+     },
+     {
+      "tier": "top",
+      "reason": "score",
+      "outcome": "ok",
+      "count": 17
+     },
+     {
+      "tier": "top",
+      "reason": "score",
+      "outcome": "error",
+      "count": 4
+     },
+     {
+      "tier": "top",
+      "reason": "score",
+      "outcome": "bad",
+      "count": 10
+     },
+     {
+      "tier": "top",
+      "reason": "floor",
+      "outcome": "ok",
+      "count": 3
+     },
+     {
+      "tier": "top",
+      "reason": "floor",
+      "outcome": "error",
+      "count": 2
+     },
+     {
+      "tier": "top",
+      "reason": "session",
+      "outcome": "ok",
+      "count": 2
+     },
+     {
+      "tier": "top",
+      "reason": "loop",
+      "outcome": "ok",
+      "count": 72
+     },
+     {
+      "tier": "top",
+      "reason": "bump",
+      "outcome": "ok",
+      "count": 8
+     },
+     {
+      "tier": "top",
+      "reason": "bump",
+      "outcome": "bad",
+      "count": 1
+     }
+    ],
+    "requests": 206
+   },
+   "calibration": {
+    "mode": "shadow",
+    "delta": [
+     {
+      "tier": "mid",
+      "delta": 0
+     },
+     {
+      "tier": "top",
+      "delta": 0
+     }
+    ],
+    "maxLower": 149,
+    "maxRaise": 0,
+    "freeze": false
+   },
+   "maxAttempts": 4,
+   "downgraded": 0,
+   "downgradeBand": 100,
+   "riskZ": 128,
+   "contextEscalation": true,
+   "shadowEnabled": false,
+   "saturationDowngrade": false,
+   "timeoutFallback": true,
+   "fellBack": 0
+  }
+ ],
+ "redis": {
+  "lastErrAt": "0001-01-01T00:00:00Z",
+  "configured": true
+ },
+ "cache": {
+  "ttl": "5m0s",
+  "enabled": true
+ },
+ "retry": {
+  "backoff": "250ms",
+  "enabled": true,
+  "attempts": 1
+ },
+ "features": {
+  "userModelStats": true,
+  "latencyStats": true,
+  "cacheStats": true,
+  "lastSeen": true,
+  "failover": true
+ },
+ "pricing": {
+  "override": 0,
+  "builtin": 5,
+  "litellm": 99,
+  "free": 14,
+  "unpriced": 204
+ }
+}

@@ -1,0 +1,273 @@
+{
+ "kind": "model",
+ "window": "day",
+ "rows": [
+  {
+   "p50Ms": 50.02093115006882,
+   "p95Ms": 95.03976918513075,
+   "p99Ms": 99.04144367713627,
+   "ttfbP50Ms": 50.01776776626052,
+   "ttfbP95Ms": 95.03375875589498,
+   "id": "uni/text-embedding-multilingual-e5-base",
+   "count": 332180,
+   "attempts": 333182,
+   "failures": 0
+  },
+  {
+   "p50Ms": 6748.470725313136,
+   "p95Ms": 63123.626373626495,
+   "p99Ms": 267901.77514792903,
+   "ttfbP50Ms": 112.34121122599706,
+   "ttfbP95Ms": 19137.65060240965,
+   "id": "uni/deepseek-v4-flash-0731",
+   "count": 19041,
+   "attempts": 19518,
+   "failures": 157
+  },
+  {
+   "p50Ms": 4917.029835735836,
+   "p95Ms": 200010.40118870718,
+   "p99Ms": 333228.57142856915,
+   "ttfbP50Ms": 251.0647909137842,
+   "ttfbP95Ms": 819.8598130841119,
+   "id": "uni/deepseek-v4.1-flash-1017",
+   "count": 9637,
+   "attempts": 9754,
+   "failures": 79
+  },
+  {
+   "p50Ms": 2205.248359887535,
+   "p95Ms": 13286.363636363625,
+   "p99Ms": 28597.058823529416,
+   "ttfbP50Ms": 834.5471096950388,
+   "ttfbP95Ms": 4298.1343283582055,
+   "id": "uni/glm-5.3-flash",
+   "count": 3254,
+   "attempts": 3265,
+   "failures": 1
+  },
+  {
+   "p50Ms": 10197.628458498024,
+   "p95Ms": 262574.2574257426,
+   "p99Ms": 496271.1864406775,
+   "ttfbP50Ms": 1997.1126082771896,
+   "ttfbP95Ms": 239302.32558139533,
+   "id": "gx10/DeepSeek-V4.1-Flash-EXL3",
+   "count": 2540,
+   "attempts": 2672,
+   "failures": 3
+  },
+  {
+   "p50Ms": 3396.643109540636,
+   "p95Ms": 19459.090909090883,
+   "p99Ms": 50449.99999999997,
+   "ttfbP50Ms": 1319.0709046454767,
+   "ttfbP95Ms": 4993.389830508473,
+   "id": "minimax/MiniMax-M3.1-Flash",
+   "count": 1273,
+   "attempts": 1413,
+   "failures": 132
+  },
+  {
+   "p50Ms": 6058.139534883721,
+   "p95Ms": 202486.23853211018,
+   "p99Ms": 283139.4495412843,
+   "ttfbP50Ms": 242.4141221374046,
+   "ttfbP95Ms": 724.2346938775512,
+   "id": "uni/qwen3.8-flash-next",
+   "count": 1221,
+   "attempts": 1253,
+   "failures": 26
+  },
+  {
+   "p50Ms": 1827.7777777777778,
+   "p95Ms": 44321.42857142854,
+   "p99Ms": 126150.00000000122,
+   "ttfbP50Ms": 1395.0819672131147,
+   "ttfbP95Ms": 9674.342105263155,
+   "id": "minimax/MiniMax-M3",
+   "count": 1159,
+   "attempts": 1162,
+   "failures": 2
+  },
+  {
+   "p50Ms": 293.60465116279073,
+   "p95Ms": 7854.166666666664,
+   "p99Ms": 9570.833333333332,
+   "ttfbP50Ms": 224.21875,
+   "ttfbP95Ms": 7854.166666666664,
+   "id": "uni/qwen3.8-27b",
+   "count": 103,
+   "attempts": 110,
+   "failures": 6
+  },
+  {
+   "p50Ms": 675,
+   "p95Ms": 12750.000000000004,
+   "p99Ms": 24299.99999999996,
+   "ttfbP50Ms": 593.75,
+   "ttfbP95Ms": 12750.000000000004,
+   "id": "gx10/Qwen3.8-27B",
+   "count": 38,
+   "attempts": 38,
+   "failures": 0
+  },
+  {
+   "p50Ms": 1222.2222222222224,
+   "p95Ms": 4849.999999999998,
+   "p99Ms": 8799.99999999999,
+   "ttfbP50Ms": 1125,
+   "ttfbP95Ms": 4849.999999999998,
+   "id": "minimax/MiniMax-M2.5-highspeed",
+   "count": 24,
+   "attempts": 24,
+   "failures": 0
+  },
+  {
+   "p50Ms": 458.33333333333337,
+   "p95Ms": 4699.999999999995,
+   "p99Ms": 52799.99999999994,
+   "ttfbP50Ms": 416.66666666666663,
+   "ttfbP95Ms": 3199.999999999996,
+   "id": "uni/model-fast",
+   "count": 24,
+   "attempts": 25,
+   "failures": 0
+  },
+  {
+   "p50Ms": 1277.7777777777776,
+   "p95Ms": 4309.999999999999,
+   "p99Ms": 4862,
+   "ttfbP50Ms": 1277.7777777777776,
+   "ttfbP95Ms": 4309.999999999999,
+   "id": "minimax/MiniMax-M2.7",
+   "count": 23,
+   "attempts": 23,
+   "failures": 0
+  },
+  {
+   "p50Ms": 1071.4285714285713,
+   "p95Ms": 4887.499999999998,
+   "p99Ms": 8849.999999999998,
+   "ttfbP50Ms": 1071.4285714285713,
+   "ttfbP95Ms": 4887.499999999998,
+   "id": "minimax/MiniMax-M2.7-highspeed",
+   "count": 23,
+   "attempts": 23,
+   "failures": 0
+  },
+  {
+   "p50Ms": 1333.3333333333333,
+   "p95Ms": 4633.333333333333,
+   "p99Ms": 4926.666666666668,
+   "ttfbP50Ms": 1333.3333333333333,
+   "ttfbP95Ms": 4633.333333333333,
+   "id": "minimax/MiniMax-M2.5",
+   "count": 22,
+   "attempts": 22,
+   "failures": 0
+  },
+  {
+   "p50Ms": 5000,
+   "p95Ms": 23999.999999999993,
+   "p99Ms": 28799.999999999996,
+   "ttfbP50Ms": 5000,
+   "ttfbP95Ms": 23999.999999999993,
+   "id": "gx10/Inkling-2-Mini",
+   "count": 16,
+   "attempts": 21,
+   "failures": 4
+  },
+  {
+   "p50Ms": 2375,
+   "p95Ms": 4737.5,
+   "p99Ms": 4947.5,
+   "ttfbP50Ms": 2375,
+   "ttfbP95Ms": 4737.5,
+   "id": "uni/ornith-1.5-397b",
+   "count": 7,
+   "attempts": 13,
+   "failures": 6
+  },
+  {
+   "p50Ms": 625,
+   "p95Ms": 52500,
+   "p99Ms": 58500.00000000001,
+   "ttfbP50Ms": 625,
+   "ttfbP95Ms": 52500,
+   "id": "gx10/current",
+   "count": 5,
+   "attempts": 7,
+   "failures": 0
+  },
+  {
+   "p50Ms": 1000,
+   "p95Ms": 1900,
+   "p99Ms": 1980,
+   "ttfbP50Ms": 1000,
+   "ttfbP95Ms": 1900,
+   "id": "uni/ornith-397b",
+   "count": 4,
+   "attempts": 10,
+   "failures": 6
+  },
+  {
+   "p50Ms": 2000,
+   "p95Ms": 9500,
+   "p99Ms": 9900,
+   "ttfbP50Ms": 2000,
+   "ttfbP95Ms": 9500,
+   "id": "uni/qwen3.8-27b-uncensored",
+   "count": 4,
+   "attempts": 11,
+   "failures": 6
+  },
+  {
+   "p50Ms": 3500,
+   "p95Ms": 9249.999999999998,
+   "p99Ms": 9849.999999999998,
+   "ttfbP50Ms": 3500,
+   "ttfbP95Ms": 9249.999999999998,
+   "id": "uni/model-light",
+   "count": 3,
+   "attempts": 9,
+   "failures": 6
+  },
+  {
+   "p50Ms": 375,
+   "p95Ms": 4549.999999999999,
+   "p99Ms": 4909.999999999999,
+   "ttfbP50Ms": 375,
+   "ttfbP95Ms": 4549.999999999999,
+   "id": "uni/ornith-1.5-35b",
+   "count": 3,
+   "attempts": 9,
+   "failures": 6
+  },
+  {
+   "p50Ms": 750,
+   "p95Ms": 4549.999999999999,
+   "p99Ms": 4909.999999999999,
+   "ttfbP50Ms": 750,
+   "ttfbP95Ms": 4549.999999999999,
+   "id": "uni/qwen3.6-27b",
+   "count": 3,
+   "attempts": 9,
+   "failures": 6
+  },
+  {
+   "p50Ms": 3500,
+   "p95Ms": 4850,
+   "p99Ms": 4970,
+   "ttfbP50Ms": 3500,
+   "ttfbP95Ms": 4850,
+   "id": "uni/model-heavy",
+   "count": 1,
+   "attempts": 7,
+   "failures": 6
+  }
+ ],
+ "span": 7,
+ "offset": 0,
+ "latencyEnabled": true
+}

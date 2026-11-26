@@ -566,6 +566,7 @@ type adminModelMetaView struct {
 	ContextTokens    *int     `json:"contextTokens,omitempty"`
 	InputPerMTokUSD  *float64 `json:"inputPerMTokUsd,omitempty"`
 	OutputPerMTokUSD *float64 `json:"outputPerMTokUsd,omitempty"`
+	Vision           *bool    `json:"vision,omitempty"`
 }
 
 // buildAdminModelMetaView converts resolveModelMeta's result into the
@@ -574,6 +575,7 @@ type adminModelMetaView struct {
 // do this).
 func buildAdminModelMetaView(meta resolvedModelMeta) adminModelMetaView {
 	var v adminModelMetaView
+	v.Vision = meta.Vision
 	if meta.ContextKnown {
 		ctx := meta.ContextTokens
 		v.ContextTokens = &ctx
@@ -960,6 +962,7 @@ type adminUsageEntryView struct {
 	MCPServers           []string `json:"mcpServers,omitempty"`
 	Agents               []string `json:"agents,omitempty"`
 	RequestsPerMinute    int64    `json:"requestsPerMinute"`
+	TokensPerMinute      int64    `json:"tokensPerMinute"`
 	RequestsPerDay       int64    `json:"requestsPerDay"`
 	TokensInPerDay       int64    `json:"tokensInPerDay"`
 	TokensOutPerDay      int64    `json:"tokensOutPerDay"`
@@ -1003,6 +1006,7 @@ func usageEntryView(su scopeUsage, limits *LimitsConfig) adminUsageEntryView {
 		ID:                     su.id,
 		Limits:                 limits,
 		RequestsPerMinute:      su.requestsPerMinute,
+		TokensPerMinute:        su.tokensPerMinute,
 		RequestsPerDay:         su.requestsPerDay,
 		TokensInPerDay:         su.tokensInPerDay,
 		TokensOutPerDay:        su.tokensOutPerDay,
@@ -1033,37 +1037,18 @@ func usageEntryView(su scopeUsage, limits *LimitsConfig) adminUsageEntryView {
 // having nil limits — the dashboard shows usage for every user and group,
 // limited or not.
 // adminUsageChunkScopes bounds how many scopes buildAdminUsage sends to
-// limiter.currentUsage in a single storeGetMulti round trip (security
-// audit finding 4, 2026-08-22). currentUsage's own doc comment (limits.go)
-// already explains why every scope was folded into ONE round trip rather
-// than one per scope — but "one round trip" for the WHOLE catalog means
-// that round trip's own pipeline size, and how long it holds the shared,
-// mutex-guarded Redis connection (respClient, resp.go), now scales with
-// how many users and groups are configured. With 1,000 users that is
-// ~9,000 GETs (usageKeysPerScope=9, F4 v0.3 dashboard task's rej:day
-// counter) in one pipelined call, during which
-// every concurrent checkAndCount from live LLM traffic queues behind the
-// same connection mutex — and the admin dashboard polls this endpoint
-// every 5s. chunkedCurrentUsage (below) keeps each individual round trip's
-// key count bounded, letting live traffic interleave between chunks,
-// while a chunk still batches every scope inside it exactly as before,
-// keeping most of currentUsage's own round-trip-collapsing win. 200
-// scopes (1,600 keys per chunk) comfortably covers the live cluster's 5
-// friends + 4 home users in a single chunk, so today's real deployment
-// sees no behavior change at all — chunking only engages once a
-// deployment's user+group count actually grows past it. One accepted,
-// disclosed side effect: currentUsage's own doc comment notes a transient
-// store error marks every scope in ONE call storeDown together; chunking
-// narrows that blast radius to one chunk's worth of scopes instead of the
-// whole response, which is a strict improvement, not a new risk.
+// limiter.currentUsage in one storeGetMulti round trip. A single round trip
+// for the whole catalog holds the shared, mutex-guarded Redis connection
+// (respClient, resp.go) for a time that scales with the user and group
+// count, and every concurrent checkAndCount queues behind it while the
+// dashboard polls every 5s. chunkedCurrentUsage keeps each round trip's key
+// count bounded so live traffic interleaves between chunks.
 //
-// Lowered from 200 to 160 (admin dashboard redesign, WP-B) when
-// usageKeysPerScope grew from 9 to 10 for the new lastSeen counter
-// (limits.go, WP-A step 1): 160 scopes * 10 keys/scope = 1,600 keys per
-// chunk, keeping this endpoint's per-round-trip key count at the same
-// order of magnitude this constant has always targeted, rather than
-// letting it grow every time a future per-scope counter is added here.
-const adminUsageChunkScopes = 145
+// 123 scopes * usageKeysPerScope (13) = 1,599 keys, within
+// usageModelsChunkKeys (1,600). A deployment under 123 users and groups
+// sends one chunk. A transient store error marks every scope in one chunk
+// storeDown together, so chunking narrows that blast radius to one chunk.
+const adminUsageChunkScopes = 123
 
 // chunkedCurrentUsage calls limiter.currentUsage in batches of at most
 // adminUsageChunkScopes scopes at a time, concatenating the results in
@@ -1484,7 +1469,11 @@ type adminUsageModelEntryView struct {
 	// mode: how many requests for this model were refused as unpriced
 	// under a caller's cost budget (metricR402) over the requested span.
 	R402 *int64 `json:"r402,omitempty"`
-	ID   string `json:"id"`
+	// Prompt-cache counters are set in detail mode only, zero included.
+	PromptCacheReadTokens    *int64 `json:"promptCacheReadTokens,omitempty"`
+	PromptCacheWriteTokens   *int64 `json:"promptCacheWriteTokens,omitempty"`
+	PromptCacheSavedMicroUSD *int64 `json:"promptCacheSavedMicroUsd,omitempty"`
+	ID                       string `json:"id"`
 	// PriceSource (admin dashboard redesign, WP-B) is populated only in
 	// detail mode: billingPriceSource's own result (pricing.go) for this
 	// model — the same "override"|"builtin"|"litellm"|"free"|"unpriced"
@@ -1669,7 +1658,7 @@ func (g *Gateway) serveAdminUsageModels(sw *statusTrackingWriter, r *http.Reques
 	// one through.
 	keyMultiplier := 1
 	if detail {
-		keyMultiplier = len(usageModelsDetailMetrics()) + 1 // +1: r402, always read
+		keyMultiplier = len(usageModelsDetailMetrics()) + 1 // +1: r402
 		if g.buildAdminFeatures().CacheStats {
 			keyMultiplier += 2 // chit, csave
 		}
@@ -1684,7 +1673,13 @@ func (g *Gateway) serveAdminUsageModels(sw *statusTrackingWriter, r *http.Reques
 		return
 	}
 
-	totals, storeOK := g.chunkedModelSpanTotals(ids, metric, window, g.limiter.now(), span, offset)
+	now := g.limiter.now()
+	ids, storeOK := g.activeModelIDs(ids, []string{metric}, window, now, span, offset)
+	if !storeOK {
+		writeOAIError(sw, http.StatusServiceUnavailable, "server_error", "usage history store unavailable")
+		return
+	}
+	totals, storeOK := g.chunkedModelSpanTotals(ids, metric, window, now, span, offset)
 	if !storeOK {
 		writeOAIError(sw, http.StatusServiceUnavailable, "server_error", "usage history store unavailable")
 		return
@@ -1810,13 +1805,80 @@ func monthRangeToDayBuckets(now time.Time, span, offset int) (daySpan, dayOffset
 	return daySpan, dayOffset
 }
 
+// activeModelIDs narrows ids to those whose month buckets, for every month
+// the span touches, hold a non-zero total for any of metrics. accountWith
+// writes each model-scope req/tokin/tokout/cost delta (never negative) to the
+// hour, day and month bucket of one instant in one batch, and the month key
+// outlives the hour and day keys, so an id with a zero month total has zero in
+// every bucket of the span and the caller's own zero-row filter would drop it
+// anyway. It returns ids unchanged where that does not hold: no configured
+// store (the in-process fallback's month key can expire before a day key) or
+// a month window (the caller's own read is already the month read).
+// It also assumes the store never evicts single keys at random (noeviction,
+// LRU or LFU are safe): a lost month key would hide that model's row.
+func (g *Gateway) activeModelIDs(ids, metrics []string, window string, now time.Time, span, offset int) ([]string, bool) {
+	if g.limiter.store == nil || window == windowMonth || len(ids) == 0 || span < 1 {
+		return ids, true
+	}
+	monthSpan, monthOffset := monthsTouched(window, now, span, offset)
+	totals, ok := g.limiter.spanTotalsMulti(kindModel, ids, metrics, windowMonth, now, monthSpan, monthOffset)
+	if !ok {
+		return nil, false
+	}
+	active := make([]string, 0, len(ids))
+	for i, id := range ids {
+		for m := range metrics {
+			if totals[m][i] != 0 {
+				active = append(active, id)
+				break
+			}
+		}
+	}
+	return active, true
+}
+
+// dropZeroModels keeps the ids whose four core totals are not all zero,
+// compacting totals (one slice per metric, index-aligned with ids) to match.
+func dropZeroModels(ids []string, totals [][]int64) ([]string, [][]int64) {
+	keptIDs := make([]string, 0, len(ids))
+	kept := make([][]int64, len(totals))
+	for m := range kept {
+		kept[m] = make([]int64, 0, len(ids))
+	}
+	for i, id := range ids {
+		nonZero := false
+		for m := range totals {
+			if totals[m][i] != 0 {
+				nonZero = true
+				break
+			}
+		}
+		if !nonZero {
+			continue
+		}
+		keptIDs = append(keptIDs, id)
+		for m := range totals {
+			kept[m] = append(kept[m], totals[m][i])
+		}
+	}
+	return keptIDs, kept
+}
+
 func (g *Gateway) serveAdminUsageModelsDetail(sw *statusTrackingWriter, ids []string, metric, window string, span, offset, limit int) {
 	now := g.limiter.now()
 	metrics := usageModelsDetailMetrics()
+	ids, storeOK := g.activeModelIDs(ids, metrics, window, now, span, offset)
+	if !storeOK {
+		writeOAIError(sw, http.StatusServiceUnavailable, "server_error", "usage history store unavailable")
+		return
+	}
 	totalsByMetric, storeOK := g.chunkedModelSpanTotalsMulti(ids, metrics, window, now, span, offset)
 	if !storeOK {
 		writeOAIError(sw, http.StatusServiceUnavailable, "server_error", "usage history store unavailable")
 		return
+	}
+	if window == windowMonth {
+		ids, totalsByMetric = dropZeroModels(ids, totalsByMetric)
 	}
 	valueIdx := usageModelsMetricIndex(metric)
 
@@ -1916,6 +1978,24 @@ func (g *Gateway) serveAdminUsageModelsDetail(sw *statusTrackingWriter, ids []st
 	})
 	if len(models) > limit {
 		models = models[:limit]
+	}
+
+	// Own read over the returned page only: the catalog-wide read would
+	// push the key count past adminMaxKeysPerRequest.
+	pageIDs := make([]string, len(models))
+	for i := range models {
+		pageIDs[i] = models[i].ID
+	}
+	pcMulti, storeOK := g.chunkedModelSpanTotalsMulti(pageIDs, []string{metricPcRead, metricPcWrite, metricPcSave}, window, now, span, offset)
+	if !storeOK {
+		writeOAIError(sw, http.StatusServiceUnavailable, "server_error", "usage history store unavailable")
+		return
+	}
+	for i := range models {
+		pcRead, pcWrite, pcSave := pcMulti[0][i], pcMulti[1][i], pcMulti[2][i]
+		models[i].PromptCacheReadTokens = &pcRead
+		models[i].PromptCacheWriteTokens = &pcWrite
+		models[i].PromptCacheSavedMicroUSD = &pcSave
 	}
 
 	setAdminJSONHeaders(sw)

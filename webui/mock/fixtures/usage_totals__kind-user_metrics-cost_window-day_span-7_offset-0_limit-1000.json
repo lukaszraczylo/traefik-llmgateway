@@ -1,0 +1,41 @@
+{
+ "kind": "user",
+ "window": "day",
+ "metrics": [
+  "cost"
+ ],
+ "rows": [
+  {
+   "values": {
+    "cost": 4941768
+   },
+   "id": "internal"
+  },
+  {
+   "values": {
+    "cost": 577113
+   },
+   "id": "user-20"
+  },
+  {
+   "values": {
+    "cost": 18015
+   },
+   "id": "service-01"
+  },
+  {
+   "values": {
+    "cost": 17033
+   },
+   "id": "user-06"
+  },
+  {
+   "values": {
+    "cost": 144
+   },
+   "id": "user-03"
+  }
+ ],
+ "span": 7,
+ "offset": 0
+}

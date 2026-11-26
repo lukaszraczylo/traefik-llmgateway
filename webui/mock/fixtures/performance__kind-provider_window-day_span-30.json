@@ -1,0 +1,160 @@
+{
+ "kind": "provider",
+ "window": "day",
+ "rows": [
+  {
+   "p50Ms": 4789.855072463768,
+   "p95Ms": 25160.714285714264,
+   "p99Ms": 53534.99999999991,
+   "ttfbP50Ms": 2666.163141993958,
+   "ttfbP95Ms": 8572.499999999996,
+   "id": "alibaba",
+   "count": 731,
+   "attempts": 937,
+   "failures": 366
+  },
+  {
+   "id": "amd",
+   "count": 0,
+   "attempts": 0,
+   "failures": 0
+  },
+  {
+   "p50Ms": 1500,
+   "p95Ms": 1949.9999999999998,
+   "p99Ms": 1990,
+   "ttfbP50Ms": 750,
+   "ttfbP95Ms": 974.9999999999999,
+   "id": "anthropic",
+   "count": 9,
+   "attempts": 10,
+   "failures": 0
+  },
+  {
+   "id": "cerebras",
+   "count": 0,
+   "attempts": 0,
+   "failures": 0
+  },
+  {
+   "id": "codex",
+   "count": 0,
+   "attempts": 0,
+   "failures": 0
+  },
+  {
+   "id": "copilot",
+   "count": 0,
+   "attempts": 0,
+   "failures": 0
+  },
+  {
+   "id": "deepseek",
+   "count": 0,
+   "attempts": 0,
+   "failures": 0
+  },
+  {
+   "p50Ms": 12060.344827586207,
+   "p95Ms": 282891.3043478261,
+   "p99Ms": 533451.9230769227,
+   "ttfbP50Ms": 2313.392857142857,
+   "ttfbP95Ms": 227058.1395348836,
+   "id": "gx10",
+   "count": 3007,
+   "attempts": 9885,
+   "failures": 7,
+   "timeouts": 7
+  },
+  {
+   "id": "macstudio",
+   "count": 0,
+   "attempts": 0,
+   "failures": 0
+  },
+  {
+   "p50Ms": 1929.7619047619048,
+   "p95Ms": 27272.727272727272,
+   "p99Ms": 110571.4285714287,
+   "ttfbP50Ms": 1259.5190380761524,
+   "ttfbP95Ms": 9360.902255639097,
+   "id": "minimax",
+   "count": 3360,
+   "attempts": 3448,
+   "failures": 143
+  },
+  {
+   "id": "nvidia-nim",
+   "count": 0,
+   "attempts": 0,
+   "failures": 0
+  },
+  {
+   "id": "nvidia-retrieval",
+   "count": 0,
+   "attempts": 0,
+   "failures": 0
+  },
+  {
+   "p50Ms": 16640.625,
+   "p95Ms": 54000,
+   "p99Ms": 83999.99999999977,
+   "ttfbP50Ms": 16640.625,
+   "ttfbP95Ms": 54000,
+   "id": "openai",
+   "count": 180,
+   "attempts": 180,
+   "failures": 0
+  },
+  {
+   "id": "openai-audio",
+   "count": 0,
+   "attempts": 0,
+   "failures": 0
+  },
+  {
+   "id": "parakeet-mlx",
+   "count": 0,
+   "attempts": 0,
+   "failures": 0
+  },
+  {
+   "id": "piper-tts",
+   "count": 0,
+   "attempts": 0,
+   "failures": 0
+  },
+  {
+   "p50Ms": 54.80356810345382,
+   "p95Ms": 2627.468756772371,
+   "p99Ms": 24249.487590072047,
+   "ttfbP50Ms": 53.83928782634065,
+   "ttfbP95Ms": 196.31547592780518,
+   "id": "uni",
+   "count": 682813,
+   "attempts": 687167,
+   "failures": 389,
+   "timeouts": 5
+  },
+  {
+   "id": "xai",
+   "count": 0,
+   "attempts": 0,
+   "failures": 0
+  },
+  {
+   "p50Ms": 175,
+   "p95Ms": 242.5,
+   "p99Ms": 248.5,
+   "ttfbP50Ms": 175,
+   "ttfbP95Ms": 242.5,
+   "id": "xiaomi",
+   "count": 1,
+   "attempts": 1,
+   "failures": 0
+  }
+ ],
+ "span": 30,
+ "offset": 0,
+ "latencyEnabled": true
+}

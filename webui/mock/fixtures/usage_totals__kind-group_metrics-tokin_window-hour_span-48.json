@@ -1,0 +1,23 @@
+{
+ "kind": "group",
+ "window": "hour",
+ "metrics": [
+  "tokin"
+ ],
+ "rows": [
+  {
+   "values": {
+    "tokin": 1550442956
+   },
+   "id": "friends"
+  },
+  {
+   "values": {
+    "tokin": 258828723
+   },
+   "id": "home"
+  }
+ ],
+ "span": 48,
+ "offset": 0
+}

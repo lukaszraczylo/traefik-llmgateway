@@ -34,6 +34,23 @@ type adminRouterShadowView struct {
 	Count  int64  `json:"count"`
 }
 
+// adminRouterDecisionTierView is one cell of the heuristic-tier by model-tier matrix.
+type adminRouterDecisionTierView struct {
+	Heuristic string `json:"heuristic"`
+	Model     string `json:"model"`
+	Count     int64  `json:"count"`
+}
+
+// adminRouterDecisionView shows the decision-model settings of a router.
+type adminRouterDecisionView struct {
+	Provider string `json:"provider"`
+	Path     string `json:"path"`
+	Mode     string `json:"mode"`
+	Timeout  string `json:"timeout"`
+	MinProb  int    `json:"minProb"`
+	Band     int    `json:"band"`
+}
+
 // adminRouterOutcomeView counts finished requests by first attempted tier, reason and outcome.
 type adminRouterOutcomeView struct {
 	Tier    string `json:"tier"`
@@ -67,7 +84,10 @@ type adminRouterStatsView struct {
 	Escalations []adminRouterEscalationView `json:"escalations"`
 	Shadow      []adminRouterShadowView     `json:"shadow"`
 	Outcomes    []adminRouterOutcomeView    `json:"outcomes"`
-	Requests    int64                       `json:"requests"`
+	// Decision is the heuristic-vs-model tier matrix; DecisionOutcomes has one row per outcome when the router has a decision block.
+	Decision         []adminRouterDecisionTierView `json:"decision"`
+	DecisionOutcomes []adminRouterCountView        `json:"decisionOutcomes"`
+	Requests         int64                         `json:"requests"`
 }
 
 // adminRouterAdaptiveView shows the settings of adaptive selection.
@@ -81,6 +101,7 @@ type adminRouterAdaptiveView struct {
 // hints, not secrets.
 type adminRouterView struct {
 	Adaptive         *adminRouterAdaptiveView   `json:"adaptive,omitempty"`
+	Decision         *adminRouterDecisionView   `json:"decision,omitempty"`
 	Name             string                     `json:"name"`
 	DefaultTier      string                     `json:"defaultTier"`
 	ToolsMinTier     string                     `json:"toolsMinTier,omitempty"`
@@ -131,6 +152,9 @@ func (g *Gateway) buildAdminRouterViews() []adminRouterView {
 		}
 		if rt.shadowV2 {
 			v.ShadowClassifier = smartClassifierV2
+		}
+		if rt.decision != nil {
+			v.Decision = buildAdminRouterDecision(rt.decision)
 		}
 		if rt.bandit != nil {
 			v.Adaptive = &adminRouterAdaptiveView{ExplorePct: rt.bandit.cfg.explorePct, WindowHours: rt.bandit.cfg.windowHours, LatencyWeightPct: rt.bandit.cfg.latencyPct}
@@ -190,6 +214,9 @@ func buildAdminRouterStats(rt *smartRouter, c routerCounters) adminRouterStatsVi
 		Escalations: []adminRouterEscalationView{},
 		Shadow:      []adminRouterShadowView{},
 		Outcomes:    []adminRouterOutcomeView{},
+		Decision:    []adminRouterDecisionTierView{},
+
+		DecisionOutcomes: []adminRouterCountView{},
 	}
 	tierIdx := make(map[string]int, len(rt.tiers))
 	for i, t := range rt.tiers {
@@ -225,6 +252,8 @@ func buildAdminRouterStats(rt *smartRouter, c routerCounters) adminRouterStatsVi
 	})
 	st.Shadow = buildAdminRouterShadow(rt, c.shadow)
 	st.Outcomes = buildAdminRouterOutcomes(rt, c.outcomes)
+	st.Decision = buildAdminRouterDecisionTiers(rt, c.decMx)
+	st.DecisionOutcomes = buildAdminRouterDecisionOutcomes(rt, c.decs)
 	return st
 }
 
@@ -237,6 +266,39 @@ func buildAdminRouterShadow(rt *smartRouter, counts map[routerShadowKey]int64) [
 				out = append(out, adminRouterShadowView{Live: live.name, Shadow: shadow.name, Count: n})
 			}
 		}
+	}
+	return out
+}
+
+func buildAdminRouterDecision(d *smartDecisionCfg) *adminRouterDecisionView {
+	mode := smartDecisionShadow
+	if d.live {
+		mode = smartDecisionLive
+	}
+	return &adminRouterDecisionView{Provider: d.provider, Path: d.path, Mode: mode, Timeout: d.timeout.String(), MinProb: d.minProb, Band: d.band}
+}
+
+// buildAdminRouterDecisionTiers lists the non-zero heuristic-by-model cells in tier order.
+func buildAdminRouterDecisionTiers(rt *smartRouter, counts map[routerDecisionTierKey]int64) []adminRouterDecisionTierView {
+	out := []adminRouterDecisionTierView{}
+	for _, h := range rt.tiers {
+		for _, m := range rt.tiers {
+			if n := counts[routerDecisionTierKey{router: rt.name, heuristic: h.name, model: m.name}]; n > 0 {
+				out = append(out, adminRouterDecisionTierView{Heuristic: h.name, Model: m.name, Count: n})
+			}
+		}
+	}
+	return out
+}
+
+// buildAdminRouterDecisionOutcomes returns one row per outcome, zeros included, only for routers with a decision block.
+func buildAdminRouterDecisionOutcomes(rt *smartRouter, counts map[routerDecisionKey]int64) []adminRouterCountView {
+	out := []adminRouterCountView{}
+	if rt.decision == nil {
+		return out
+	}
+	for _, name := range routerDecisionOutcomes {
+		out = append(out, adminRouterCountView{Name: name, Count: counts[routerDecisionKey{router: rt.name, outcome: name}]})
 	}
 	return out
 }

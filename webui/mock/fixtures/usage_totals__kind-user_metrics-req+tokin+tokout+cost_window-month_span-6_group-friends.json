@@ -1,0 +1,77 @@
+{
+ "kind": "user",
+ "window": "month",
+ "metrics": [
+  "req",
+  "tokin",
+  "tokout",
+  "cost"
+ ],
+ "rows": [
+  {
+   "values": {
+    "cost": 0,
+    "req": 0,
+    "tokin": 521994684,
+    "tokout": 1320912
+   },
+   "id": "user-02"
+  },
+  {
+   "values": {
+    "cost": 144,
+    "req": 0,
+    "tokin": 3399385809,
+    "tokout": 14188239
+   },
+   "id": "user-03"
+  },
+  {
+   "values": {
+    "cost": 33361,
+    "req": 0,
+    "tokin": 72646,
+    "tokout": 9639
+   },
+   "id": "user-05"
+  },
+  {
+   "values": {
+    "cost": 17033,
+    "req": 0,
+    "tokin": 16933528,
+    "tokout": 266424
+   },
+   "id": "user-06"
+  },
+  {
+   "values": {
+    "cost": 0,
+    "req": 0,
+    "tokin": 10907,
+    "tokout": 9177
+   },
+   "id": "user-07"
+  },
+  {
+   "values": {
+    "cost": 0,
+    "req": 0,
+    "tokin": 15101892,
+    "tokout": 79428
+   },
+   "id": "user-08"
+  },
+  {
+   "values": {
+    "cost": 0,
+    "req": 0,
+    "tokin": 10251128,
+    "tokout": 149746
+   },
+   "id": "user-18"
+  }
+ ],
+ "span": 6,
+ "offset": 0
+}

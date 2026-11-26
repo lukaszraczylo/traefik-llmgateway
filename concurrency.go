@@ -39,8 +39,15 @@ type providerConcurrency struct {
 // memory stays bounded.
 type concurrencyLearner struct {
 	byProvider map[string]*providerConcurrency
-	mu         sync.Mutex
-	explicit   int
+	// shared merges fleet-wide in-flight counts and the learned limit; nil means local only.
+	shared   *sharedInflight
+	mu       sync.Mutex
+	explicit int
+}
+
+// share attaches the fleet tracker. Call it before the learner serves requests.
+func (c *concurrencyLearner) share(s *sharedInflight) {
+	c.shared = s
 }
 
 func newConcurrencyLearner(explicit int) *concurrencyLearner {
@@ -61,12 +68,19 @@ func (c *concurrencyLearner) begin(provider string) func() {
 	c.mu.Lock()
 	c.state(provider).inFlight++
 	c.mu.Unlock()
+	var endShared func()
+	if c.shared != nil {
+		endShared = c.shared.begin(provider)
+	}
 	var once sync.Once
 	return func() {
 		once.Do(func() {
 			c.mu.Lock()
 			c.state(provider).inFlight--
 			c.mu.Unlock()
+			if endShared != nil {
+				endShared()
+			}
 		})
 	}
 }
@@ -91,7 +105,11 @@ func (c *concurrencyLearner) observe(provider string, resp *http.Response, err e
 	s := c.state(provider)
 	if overload {
 		s.successes = 0
-		next := s.inFlight / 2
+		inFlight := s.inFlight
+		if c.shared != nil {
+			inFlight = c.shared.merged(provider, inFlight)
+		}
+		next := inFlight / 2
 		if next < 1 {
 			next = 1
 		}
@@ -100,6 +118,7 @@ func (c *concurrencyLearner) observe(provider string, resp *http.Response, err e
 		}
 		if s.learned == 0 || next < s.learned {
 			s.learned = next
+			c.shareLearnedLocked(provider, s.learned)
 		}
 		return
 	}
@@ -115,6 +134,14 @@ func (c *concurrencyLearner) observe(provider string, resp *http.Response, err e
 	if s.learned >= learnedCeiling {
 		s.learned = 0
 	}
+	c.shareLearnedLocked(provider, s.learned)
+}
+
+// shareLearnedLocked publishes a changed learned limit. A reset to 0 (unknown) is not published; the shared value ages out.
+func (c *concurrencyLearner) shareLearnedLocked(provider string, learned int) {
+	if c.shared != nil {
+		c.shared.setLearnedLimit(provider, learned)
+	}
 }
 
 // limit returns the effective advertised limit for provider: the smaller of
@@ -126,6 +153,9 @@ func (c *concurrencyLearner) limit(provider string) int {
 		learned = s.learned
 	}
 	c.mu.Unlock()
+	if c.shared != nil {
+		learned = c.shared.learnedLimit(provider, learned)
+	}
 	switch {
 	case c.explicit > 0 && (learned == 0 || c.explicit < learned):
 		return c.explicit
@@ -142,6 +172,10 @@ func (c *concurrencyLearner) load(provider string) (int, int) {
 		inFlight, learned = s.inFlight, s.learned
 	}
 	c.mu.Unlock()
+	if c.shared != nil {
+		inFlight = c.shared.merged(provider, inFlight)
+		learned = c.shared.learnedLimit(provider, learned)
+	}
 	if c.explicit > 0 && (learned == 0 || c.explicit < learned) {
 		return inFlight, c.explicit
 	}

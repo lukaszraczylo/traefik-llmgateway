@@ -1,0 +1,306 @@
+{
+ "metric": "tokin",
+ "window": "day",
+ "buckets": [
+  "20261119",
+  "20261120",
+  "20261121",
+  "20261122",
+  "20261123",
+  "20261124",
+  "20261125"
+ ],
+ "series": [
+  {
+   "scope": "model:uni/deepseek-v4.1-flash-1017",
+   "points": [
+    438341985,
+    216312785,
+    136980,
+    204356902,
+    425538151,
+    64120,
+    6538152
+   ]
+  },
+  {
+   "scope": "model:uni/deepseek-v4-flash-0731",
+   "points": [
+    51536869,
+    39821449,
+    17923828,
+    283339155,
+    174025158,
+    481751565,
+    109094214
+   ]
+  },
+  {
+   "scope": "model:uni/glm-5.3-flash",
+   "points": [
+    15216103,
+    190699908,
+    1665,
+    280306,
+    35457076,
+    219935384,
+    34663
+   ]
+  },
+  {
+   "scope": "model:gx10/DeepSeek-V4.1-Flash-EXL3",
+   "points": [
+    6,
+    90867362,
+    23415596,
+    59933436,
+    185182204,
+    9074105,
+    164
+   ]
+  },
+  {
+   "scope": "model:uni/qwen3.8-flash-next",
+   "points": [
+    1902,
+    39196,
+    82519,
+    1281,
+    63253412,
+    94170142,
+    0
+   ]
+  },
+  {
+   "scope": "model:uni/text-embedding-multilingual-e5-base",
+   "points": [
+    11381037,
+    13512399,
+    4922315,
+    3520950,
+    16160289,
+    15878771,
+    60803
+   ]
+  },
+  {
+   "scope": "model:minimax/MiniMax-M3",
+   "points": [
+    147939,
+    62829,
+    89340,
+    2133480,
+    12891716,
+    230021,
+    1218
+   ]
+  },
+  {
+   "scope": "model:minimax/MiniMax-M3.1-Flash",
+   "points": [
+    208,
+    44001,
+    6415,
+    1230,
+    0,
+    12452461,
+    0
+   ]
+  },
+  {
+   "scope": "model:gx10/Inkling-2-Mini",
+   "points": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    75393,
+    108
+   ]
+  },
+  {
+   "scope": "model:uni/qwen3.8-27b",
+   "points": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    2357,
+    5087
+   ]
+  },
+  {
+   "scope": "model:minimax/MiniMax-M2.5-highspeed",
+   "points": [
+    0,
+    0,
+    5655,
+    203,
+    0,
+    0,
+    0
+   ]
+  },
+  {
+   "scope": "model:minimax/MiniMax-M2.7-highspeed",
+   "points": [
+    0,
+    0,
+    5463,
+    0,
+    230,
+    0,
+    0
+   ]
+  },
+  {
+   "scope": "model:minimax/MiniMax-M2.7",
+   "points": [
+    0,
+    0,
+    5654,
+    0,
+    0,
+    0,
+    0
+   ]
+  },
+  {
+   "scope": "model:minimax/MiniMax-M2.5",
+   "points": [
+    0,
+    0,
+    5463,
+    0,
+    0,
+    0,
+    0
+   ]
+  },
+  {
+   "scope": "model:gx10/Qwen3.8-27B",
+   "points": [
+    0,
+    0,
+    0,
+    59,
+    260,
+    1959,
+    394
+   ]
+  },
+  {
+   "scope": "model:uni/model-fast",
+   "points": [
+    0,
+    0,
+    1215,
+    25,
+    209,
+    0,
+    0
+   ]
+  },
+  {
+   "scope": "model:uni/ornith-1.5-397b",
+   "points": [
+    0,
+    0,
+    0,
+    0,
+    75,
+    244,
+    0
+   ]
+  },
+  {
+   "scope": "model:uni/qwen3.8-27b-uncensored",
+   "points": [
+    0,
+    0,
+    0,
+    0,
+    293,
+    0,
+    0
+   ]
+  },
+  {
+   "scope": "model:uni/model-light",
+   "points": [
+    0,
+    0,
+    0,
+    0,
+    179,
+    54,
+    0
+   ]
+  },
+  {
+   "scope": "model:uni/qwen3.6-27b",
+   "points": [
+    0,
+    0,
+    0,
+    0,
+    201,
+    0,
+    0
+   ]
+  },
+  {
+   "scope": "model:uni/ornith-397b",
+   "points": [
+    0,
+    0,
+    0,
+    0,
+    93,
+    0,
+    0
+   ]
+  },
+  {
+   "scope": "model:uni/ornith-1.5-35b",
+   "points": [
+    0,
+    0,
+    0,
+    0,
+    75,
+    0,
+    0
+   ]
+  },
+  {
+   "scope": "model:gx10/current",
+   "points": [
+    10,
+    0,
+    0,
+    24,
+    35,
+    0,
+    0
+   ]
+  },
+  {
+   "scope": "model:uni/model-heavy",
+   "points": [
+    0,
+    0,
+    0,
+    0,
+    45,
+    0,
+    0
+   ]
+  }
+ ],
+ "unknown": [],
+ "span": 7,
+ "offset": 0
+}

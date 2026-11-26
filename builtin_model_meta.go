@@ -22,4 +22,7 @@ type builtinModelMeta struct {
 	ContextTokens             int
 	InputCostPerMTokMicroUSD  int64
 	OutputCostPerMTokMicroUSD int64
+	// Cache prices; 0 means unknown, so billing falls back to the input price.
+	CachedInputCostPerMTokMicroUSD int64
+	CacheWriteCostPerMTokMicroUSD  int64
 }

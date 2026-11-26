@@ -318,7 +318,7 @@ func (c *respClient) pipelineEncoded(payload []byte, n int, mutates bool) ([]any
 
 	pc, err := c.acquire(deadline)
 	if err != nil {
-		return nil, err
+		return nil, &notAppliedError{err: err}
 	}
 	defer func() { c.free <- pc }()
 
@@ -328,18 +328,40 @@ func (c *respClient) pipelineEncoded(payload []byte, n int, mutates bool) ([]any
 	}
 	closeConn(pc)
 	if isTimeout(err) {
-		return nil, err
+		return nil, markNotApplied(err, wrote)
 	}
 	if wrote && readAny && mutates {
 		return nil, err
 	}
 
-	replies, _, _, err = c.attemptEncodedOn(pc, payload, n, deadline)
+	replies, wrote, _, err = c.attemptEncodedOn(pc, payload, n, deadline)
 	if err != nil {
 		closeConn(pc)
-		return nil, err
+		return nil, markNotApplied(err, wrote)
 	}
 	return replies, nil
+}
+
+// notAppliedError marks a pipeline failure that happened before the request reached the wire,
+// so the server cannot have applied any command in it.
+type notAppliedError struct{ err error }
+
+func (e *notAppliedError) Error() string { return e.err.Error() }
+func (e *notAppliedError) Unwrap() error { return e.err }
+
+func markNotApplied(err error, wrote bool) error {
+	if wrote {
+		return err
+	}
+	return &notAppliedError{err: err}
+}
+
+// respNotApplied reports whether err says the failed call never wrote its request.
+// It checks the top-level type only: under yaegi a fmt.Errorf %w wrapper loses the marker, and errors.As is
+// unsupported, so each wrapper that must keep it (redisStore) re-marks its own error.
+func respNotApplied(err error) bool {
+	_, ok := err.(*notAppliedError)
+	return ok
 }
 
 // pipelineMutatingCommands names every RESP command this client ever sends

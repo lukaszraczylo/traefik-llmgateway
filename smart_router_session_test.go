@@ -1,6 +1,7 @@
 package traefikllmgateway
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"reflect"
@@ -93,7 +94,7 @@ func sessionReq(userID string, asks ...string) map[string]any {
 
 func planOf(t *testing.T, gw *Gateway, rt *smartRouter, req map[string]any) *routerPlan {
 	t.Helper()
-	plan, err := gw.planSmartRouter(rt, req, cacheEndpointChat, nil, &group{}, nil)
+	plan, err := gw.planSmartRouter(context.Background(), rt, req, cacheEndpointChat, nil, &group{}, nil)
 	require.NoError(t, err)
 	return plan
 }
@@ -489,7 +490,7 @@ func TestSessionRedisDownFailsUp(t *testing.T) {
 	stateless, rtStateless := planTestGateway(t, func(c *Config) { c.SmartRouters[routerName].Classifier = smartClassifierV2 })
 	for i := 0; i < 3; i++ {
 		req := sessionReq("u1", routerKeyword, "thanks")
-		plan, err := gw.planSmartRouter(rt, req, cacheEndpointChat, nil, &group{}, nil)
+		plan, err := gw.planSmartRouter(context.Background(), rt, req, cacheEndpointChat, nil, &group{}, nil)
 		require.NoError(t, err, "a Redis outage must never fail a request")
 		want := planOf(t, stateless, rtStateless, req)
 		assert.GreaterOrEqual(t, rt.rankOf(plan.startTier), rt.rankOf(want.startTier), "a miss fails up, never below the stateless rank")
@@ -523,7 +524,7 @@ func TestNoPromptTextStored(t *testing.T) {
 	hdr := http.Header{}
 	hdr.Set("X-Session-Id", secrets[3])
 	send := func(req map[string]any, h http.Header) {
-		plan, err := gw.planSmartRouter(rt, req, cacheEndpointChat, h, &group{}, []limitScope{{kind: "user", id: "alice"}})
+		plan, err := gw.planSmartRouter(context.Background(), rt, req, cacheEndpointChat, h, &group{}, []limitScope{{kind: "user", id: "alice"}})
 		require.NoError(t, err)
 		gw.onRouterOutcome(plan, 0, true, true)
 	}

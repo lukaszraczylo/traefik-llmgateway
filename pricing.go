@@ -116,15 +116,86 @@ func costMicrosKnownFor(model string, u usage, overrides map[string]*ModelPricin
 // [math.MinInt64, math.MaxInt64] instead of wrapping, so an absurd
 // upstream-reported token count bills the maximum representable cost
 // rather than a wrapped-around near-zero or negative one.
+//
+// Cache tokens are part of prompt: cached is clamped to [0, prompt] and
+// cacheWrite to [0, prompt-cached] so odd or estimated usage never prices
+// above the all-uncached cost or below zero. A nil cache price falls back
+// to the input rate.
 func computeCostMicros(price ModelPricing, u usage) int64 {
 	inputMicrosPerM := int64(math.Round(price.InputPerM * tokensPerMillion))
 	outputMicrosPerM := int64(math.Round(price.OutputPerM * tokensPerMillion))
+	cachedMicrosPerM := cacheRateMicrosPerM(price.CachedInputPerM, inputMicrosPerM)
+	writeMicrosPerM := cacheRateMicrosPerM(price.CacheWritePerM, inputMicrosPerM)
 
-	inputCost := saturatingMulInt64(u.prompt, inputMicrosPerM)
-	outputCost := saturatingMulInt64(u.completion, outputMicrosPerM)
-	total := saturatingAddInt64(inputCost, outputCost)
+	cached, write, uncached := splitPromptTokens(u)
+
+	total := saturatingMulInt64(uncached, inputMicrosPerM)
+	total = saturatingAddInt64(total, saturatingMulInt64(cached, cachedMicrosPerM))
+	total = saturatingAddInt64(total, saturatingMulInt64(write, writeMicrosPerM))
+	total = saturatingAddInt64(total, saturatingMulInt64(u.completion, outputMicrosPerM))
 
 	return roundedDivInt64(total, tokensPerMillion)
+}
+
+// promptCacheSavedMicros is the micro-USD a cache read saved against the
+// plain input price, never negative.
+func promptCacheSavedMicros(price ModelPricing, u usage) int64 {
+	if price.CachedInputPerM == nil {
+		return 0
+	}
+	inputMicrosPerM := int64(math.Round(price.InputPerM * tokensPerMillion))
+	cachedMicrosPerM := cacheRateMicrosPerM(price.CachedInputPerM, inputMicrosPerM)
+	diff := inputMicrosPerM - cachedMicrosPerM
+	if diff <= 0 {
+		return 0
+	}
+	cached, _, _ := splitPromptTokens(u)
+	return roundedDivInt64(saturatingMulInt64(cached, diff), tokensPerMillion)
+}
+
+// builtinCachePrices converts a table entry's cache prices; nil when unknown.
+func builtinCachePrices(m builtinModelMeta) (*float64, *float64) {
+	var cached, write *float64
+	if m.CachedInputCostPerMTokMicroUSD > 0 {
+		v := microUSDPerMTokToUSD(m.CachedInputCostPerMTokMicroUSD)
+		cached = &v
+	}
+	if m.CacheWriteCostPerMTokMicroUSD > 0 {
+		v := microUSDPerMTokToUSD(m.CacheWriteCostPerMTokMicroUSD)
+		write = &v
+	}
+	return cached, write
+}
+
+func cacheRateMicrosPerM(perM *float64, fallbackMicrosPerM int64) int64 {
+	if perM == nil {
+		return fallbackMicrosPerM
+	}
+	return int64(math.Round(*perM * tokensPerMillion))
+}
+
+// splitPromptTokens clamps the cache shares of u.prompt (R2 ruling) and
+// returns them with the remaining uncached share.
+func splitPromptTokens(u usage) (int64, int64, int64) {
+	prompt := u.prompt
+	if prompt < 0 {
+		prompt = 0
+	}
+	cached := u.cached
+	if cached < 0 {
+		cached = 0
+	}
+	if cached > prompt {
+		cached = prompt
+	}
+	write := u.cacheWrite
+	if write < 0 {
+		write = 0
+	}
+	if write > prompt-cached {
+		write = prompt - cached
+	}
+	return cached, write, prompt - cached - write
 }
 
 // roundedDivInt64 divides total by denom, rounded to the nearest integer
@@ -227,13 +298,24 @@ func lookupPricingSource(model string, overrides map[string]*ModelPricing) (pric
 		return *p, priceSourceOverride, true
 	}
 	if p, ok := builtinPricing[model]; ok {
+		if m, found := builtinModelMetaTable[model]; found {
+			cached, write := builtinCachePrices(m)
+			if p.CachedInputPerM == nil {
+				p.CachedInputPerM = cached
+			}
+			if p.CacheWritePerM == nil {
+				p.CacheWritePerM = write
+			}
+		}
 		return p, priceSourceBuiltin, true
 	}
 	if m, ok := builtinModelMetaTable[model]; ok && (m.InputCostPerMTokMicroUSD > 0 || m.OutputCostPerMTokMicroUSD > 0) {
-		return ModelPricing{
+		p := ModelPricing{
 			InputPerM:  microUSDPerMTokToUSD(m.InputCostPerMTokMicroUSD),
 			OutputPerM: microUSDPerMTokToUSD(m.OutputCostPerMTokMicroUSD),
-		}, priceSourceLitellm, true
+		}
+		p.CachedInputPerM, p.CacheWritePerM = builtinCachePrices(m)
+		return p, priceSourceLitellm, true
 	}
 	return ModelPricing{}, "", false
 }
@@ -344,6 +426,18 @@ func validatePricing(raw map[string]*ModelPricing) (map[string]*ModelPricing, er
 		}{
 			{"inputPerM", p.InputPerM},
 			{"outputPerM", p.OutputPerM},
+		}
+		if p.CachedInputPerM != nil {
+			fields = append(fields, struct {
+				name string
+				v    float64
+			}{"cachedInputPerM", *p.CachedInputPerM})
+		}
+		if p.CacheWritePerM != nil {
+			fields = append(fields, struct {
+				name string
+				v    float64
+			}{"cacheWritePerM", *p.CacheWritePerM})
 		}
 		for _, f := range fields {
 			if math.IsNaN(f.v) || math.IsInf(f.v, 0) {

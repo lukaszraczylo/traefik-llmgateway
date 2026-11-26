@@ -1,0 +1,2553 @@
+{
+ "providers": [
+  {
+   "lastRefresh": "2026-11-25T00:45:24.130858024Z",
+   "openUntil": "0001-01-01T00:00:00Z",
+   "name": "alibaba",
+   "type": "openai",
+   "healthState": "closed",
+   "models": [
+    {
+     "contextTokens": 1000000,
+     "inputPerMTokUsd": 0.2,
+     "outputPerMTokUsd": 0.4,
+     "id": "alibaba/deepseek-v4-flash-0731",
+     "model": "deepseek-v4-flash-0731",
+     "priceSource": "litellm"
+    },
+    {
+     "contextTokens": 1000000,
+     "inputPerMTokUsd": 1.32,
+     "outputPerMTokUsd": 3.96,
+     "id": "alibaba/deepseek-v4-pro",
+     "model": "deepseek-v4-pro",
+     "priceSource": "litellm"
+    },
+    {
+     "id": "alibaba/deepseek-v4.1-flash-1017",
+     "model": "deepseek-v4.1-flash-1017",
+     "priceSource": "unpriced"
+    },
+    {
+     "contextTokens": 202745,
+     "inputPerMTokUsd": 1.4,
+     "outputPerMTokUsd": 4.4,
+     "id": "alibaba/glm-5.1",
+     "model": "glm-5.1",
+     "priceSource": "litellm"
+    },
+    {
+     "contextTokens": 1048576,
+     "inputPerMTokUsd": 1.4,
+     "outputPerMTokUsd": 4.4,
+     "id": "alibaba/glm-5.2",
+     "model": "glm-5.2",
+     "priceSource": "litellm"
+    },
+    {
+     "contextTokens": 262144,
+     "inputPerMTokUsd": 0.6,
+     "outputPerMTokUsd": 3,
+     "id": "alibaba/kimi-k2.5",
+     "model": "kimi-k2.5",
+     "priceSource": "litellm"
+    },
+    {
+     "contextTokens": 229376,
+     "inputPerMTokUsd": 0.95,
+     "outputPerMTokUsd": 4,
+     "id": "alibaba/kimi-k2.7-code",
+     "model": "kimi-k2.7-code",
+     "priceSource": "litellm"
+    },
+    {
+     "contextTokens": 1048576,
+     "inputPerMTokUsd": 3,
+     "outputPerMTokUsd": 15,
+     "id": "alibaba/kimi-k3",
+     "model": "kimi-k3",
+     "priceSource": "litellm"
+    },
+    {
+     "id": "alibaba/kimi-k3.1-pro",
+     "model": "kimi-k3.1-pro",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "alibaba/qwen-flash",
+     "model": "qwen-flash",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "alibaba/qwen-flash-2025-07-28",
+     "model": "qwen-flash-2025-07-28",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "alibaba/qwen-image-2.1-pro",
+     "model": "qwen-image-2.1-pro",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "alibaba/qwen-image-3.0",
+     "model": "qwen-image-3.0",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "alibaba/qwen-image-3.0-pro",
+     "model": "qwen-image-3.0-pro",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "alibaba/qwen-mt-flash",
+     "model": "qwen-mt-flash",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "alibaba/qwen-mt-lite",
+     "model": "qwen-mt-lite",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "alibaba/qwen-mt-plus",
+     "model": "qwen-mt-plus",
+     "priceSource": "unpriced"
+    },
+    {
+     "contextTokens": 129024,
+     "inputPerMTokUsd": 0.4,
+     "outputPerMTokUsd": 1.2,
+     "id": "alibaba/qwen-plus",
+     "model": "qwen-plus",
+     "priceSource": "litellm"
+    },
+    {
+     "id": "alibaba/qwen-plus-2025-12-01",
+     "model": "qwen-plus-2025-12-01",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "alibaba/qwen-plus-character",
+     "model": "qwen-plus-character",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "alibaba/qwen-vl-ocr",
+     "model": "qwen-vl-ocr",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "alibaba/qwen-vl-ocr-2025-11-20",
+     "model": "qwen-vl-ocr-2025-11-20",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "alibaba/qwen3-coder-flash",
+     "model": "qwen3-coder-flash",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "alibaba/qwen3-coder-flash-2025-07-28",
+     "model": "qwen3-coder-flash-2025-07-28",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "alibaba/qwen3-vl-plus",
+     "model": "qwen3-vl-plus",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "alibaba/qwen3.5-122b-a10b",
+     "model": "qwen3.5-122b-a10b",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "alibaba/qwen3.5-27b",
+     "model": "qwen3.5-27b",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "alibaba/qwen3.5-35b-a3b",
+     "model": "qwen3.5-35b-a3b",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "alibaba/qwen3.5-397b-a17b",
+     "model": "qwen3.5-397b-a17b",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "alibaba/qwen3.5-flash",
+     "model": "qwen3.5-flash",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "alibaba/qwen3.5-flash-2026-02-23",
+     "model": "qwen3.5-flash-2026-02-23",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "alibaba/qwen3.5-plus",
+     "model": "qwen3.5-plus",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "alibaba/qwen3.5-plus-2026-02-15",
+     "model": "qwen3.5-plus-2026-02-15",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "alibaba/qwen3.6-35b-a3b",
+     "model": "qwen3.6-35b-a3b",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "alibaba/qwen3.6-flash",
+     "model": "qwen3.6-flash",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "alibaba/qwen3.6-flash-2026-04-16",
+     "model": "qwen3.6-flash-2026-04-16",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "alibaba/qwen3.6-plus",
+     "model": "qwen3.6-plus",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "alibaba/qwen3.6-plus-2026-04-02",
+     "model": "qwen3.6-plus-2026-04-02",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "alibaba/qwen3.7-flash",
+     "model": "qwen3.7-flash",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "alibaba/qwen3.7-flash-2026-07-15",
+     "model": "qwen3.7-flash-2026-07-15",
+     "priceSource": "unpriced"
+    },
+    {
+     "contextTokens": 991808,
+     "inputPerMTokUsd": 2.5,
+     "outputPerMTokUsd": 7.5,
+     "id": "alibaba/qwen3.7-max",
+     "model": "qwen3.7-max",
+     "priceSource": "litellm"
+    },
+    {
+     "id": "alibaba/qwen3.7-max-2026-05-20",
+     "model": "qwen3.7-max-2026-05-20",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "alibaba/qwen3.7-max-2026-06-08",
+     "model": "qwen3.7-max-2026-06-08",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "alibaba/qwen3.7-plus",
+     "model": "qwen3.7-plus",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "alibaba/qwen3.7-plus-2026-05-26",
+     "model": "qwen3.7-plus-2026-05-26",
+     "priceSource": "unpriced"
+    },
+    {
+     "contextTokens": 991808,
+     "inputPerMTokUsd": 0.15,
+     "outputPerMTokUsd": 0.47,
+     "id": "alibaba/qwen3.8-flash",
+     "model": "qwen3.8-flash",
+     "priceSource": "litellm"
+    },
+    {
+     "contextTokens": 991808,
+     "inputPerMTokUsd": 2,
+     "outputPerMTokUsd": 6,
+     "id": "alibaba/qwen3.8-max",
+     "model": "qwen3.8-max",
+     "priceSource": "litellm"
+    },
+    {
+     "id": "alibaba/qwen3.8-max-0902",
+     "model": "qwen3.8-max-0902",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "alibaba/qwen4-max",
+     "model": "qwen4-max",
+     "priceSource": "unpriced"
+    }
+   ],
+   "discoveryEnabled": true
+  },
+  {
+   "lastRefresh": "2026-11-25T00:45:46.296837293Z",
+   "openUntil": "0001-01-01T00:00:00Z",
+   "name": "amd",
+   "type": "openai",
+   "healthState": "closed",
+   "models": [],
+   "discoveryEnabled": true
+  },
+  {
+   "lastRefresh": "2026-11-25T00:45:29.338700086Z",
+   "openUntil": "0001-01-01T00:00:00Z",
+   "name": "anthropic",
+   "type": "anthropic",
+   "healthState": "closed",
+   "models": [
+    {
+     "contextTokens": 1000000,
+     "inputPerMTokUsd": 10,
+     "outputPerMTokUsd": 50,
+     "id": "anthropic/claude-fable-5",
+     "model": "claude-fable-5",
+     "priceSource": "litellm"
+    },
+    {
+     "contextTokens": 1000000,
+     "inputPerMTokUsd": 10,
+     "outputPerMTokUsd": 50,
+     "id": "anthropic/claude-fable-5-1",
+     "model": "claude-fable-5-1",
+     "priceSource": "litellm"
+    },
+    {
+     "id": "anthropic/claude-fable-5-2",
+     "model": "claude-fable-5-2",
+     "priceSource": "unpriced"
+    },
+    {
+     "contextTokens": 200000,
+     "inputPerMTokUsd": 1,
+     "outputPerMTokUsd": 5,
+     "id": "anthropic/claude-haiku-4-5-20251001",
+     "model": "claude-haiku-4-5-20251001",
+     "priceSource": "litellm"
+    },
+    {
+     "id": "anthropic/claude-haiku-5-5",
+     "model": "claude-haiku-5-5",
+     "priceSource": "unpriced"
+    },
+    {
+     "contextTokens": 200000,
+     "inputPerMTokUsd": 5,
+     "outputPerMTokUsd": 25,
+     "id": "anthropic/claude-opus-4-5-20251101",
+     "model": "claude-opus-4-5-20251101",
+     "priceSource": "litellm"
+    },
+    {
+     "contextTokens": 1000000,
+     "inputPerMTokUsd": 5,
+     "outputPerMTokUsd": 25,
+     "id": "anthropic/claude-opus-4-6",
+     "model": "claude-opus-4-6",
+     "priceSource": "litellm"
+    },
+    {
+     "contextTokens": 1000000,
+     "inputPerMTokUsd": 5,
+     "outputPerMTokUsd": 25,
+     "id": "anthropic/claude-opus-4-7",
+     "model": "claude-opus-4-7",
+     "priceSource": "litellm"
+    },
+    {
+     "contextTokens": 1000000,
+     "inputPerMTokUsd": 5,
+     "outputPerMTokUsd": 25,
+     "id": "anthropic/claude-opus-4-8",
+     "model": "claude-opus-4-8",
+     "priceSource": "litellm"
+    },
+    {
+     "contextTokens": 1000000,
+     "inputPerMTokUsd": 5,
+     "outputPerMTokUsd": 25,
+     "id": "anthropic/claude-opus-5",
+     "model": "claude-opus-5",
+     "priceSource": "litellm"
+    },
+    {
+     "contextTokens": 1000000,
+     "inputPerMTokUsd": 4,
+     "outputPerMTokUsd": 20,
+     "id": "anthropic/claude-opus-5-5",
+     "model": "claude-opus-5-5",
+     "priceSource": "litellm"
+    },
+    {
+     "contextTokens": 1000000,
+     "inputPerMTokUsd": 3,
+     "outputPerMTokUsd": 15,
+     "id": "anthropic/claude-sonnet-4-5-20250929",
+     "model": "claude-sonnet-4-5-20250929",
+     "priceSource": "litellm"
+    },
+    {
+     "contextTokens": 1000000,
+     "inputPerMTokUsd": 3,
+     "outputPerMTokUsd": 15,
+     "id": "anthropic/claude-sonnet-4-6",
+     "model": "claude-sonnet-4-6",
+     "priceSource": "litellm"
+    },
+    {
+     "contextTokens": 1000000,
+     "inputPerMTokUsd": 2,
+     "outputPerMTokUsd": 10,
+     "id": "anthropic/claude-sonnet-5",
+     "model": "claude-sonnet-5",
+     "priceSource": "litellm"
+    },
+    {
+     "contextTokens": 1000000,
+     "inputPerMTokUsd": 2,
+     "outputPerMTokUsd": 10,
+     "id": "anthropic/claude-sonnet-5-5",
+     "model": "claude-sonnet-5-5",
+     "priceSource": "litellm"
+    }
+   ],
+   "discoveryEnabled": true
+  },
+  {
+   "lastRefresh": "2026-11-25T00:45:29.463073656Z",
+   "openUntil": "0001-01-01T00:00:00Z",
+   "name": "cerebras",
+   "type": "openai",
+   "healthState": "closed",
+   "models": [
+    {
+     "contextTokens": 131072,
+     "inputPerMTokUsd": 0.35,
+     "outputPerMTokUsd": 0.75,
+     "id": "cerebras/gpt-oss-120b",
+     "model": "gpt-oss-120b",
+     "priceSource": "litellm"
+    },
+    {
+     "contextTokens": 65536,
+     "inputPerMTokUsd": 0.99,
+     "outputPerMTokUsd": 1.49,
+     "id": "cerebras/qwen-3.8-27b",
+     "model": "qwen-3.8-27b",
+     "priceSource": "litellm"
+    }
+   ],
+   "discoveryEnabled": true
+  },
+  {
+   "lastRefresh": "2026-11-25T00:45:29.468331217Z",
+   "openUntil": "0001-01-01T00:00:00Z",
+   "name": "codex",
+   "type": "openai",
+   "healthState": "closed",
+   "models": [
+    {
+     "id": "codex/codex-auto-review",
+     "model": "codex-auto-review",
+     "priceSource": "unpriced"
+    },
+    {
+     "contextTokens": 922000,
+     "inputPerMTokUsd": 0.2,
+     "outputPerMTokUsd": 1.2,
+     "id": "codex/gpt-5.6-luna",
+     "model": "gpt-5.6-luna",
+     "priceSource": "litellm"
+    },
+    {
+     "contextTokens": 922000,
+     "inputPerMTokUsd": 4,
+     "outputPerMTokUsd": 20,
+     "id": "codex/gpt-5.6-sol",
+     "model": "gpt-5.6-sol",
+     "priceSource": "litellm"
+    },
+    {
+     "contextTokens": 922000,
+     "inputPerMTokUsd": 2,
+     "outputPerMTokUsd": 12,
+     "id": "codex/gpt-5.6-terra",
+     "model": "gpt-5.6-terra",
+     "priceSource": "litellm"
+    },
+    {
+     "contextTokens": 922000,
+     "inputPerMTokUsd": 10,
+     "outputPerMTokUsd": 50,
+     "id": "codex/gpt-6-astra",
+     "model": "gpt-6-astra",
+     "priceSource": "litellm"
+    },
+    {
+     "contextTokens": 922000,
+     "inputPerMTokUsd": 0.1,
+     "outputPerMTokUsd": 0.5,
+     "id": "codex/gpt-6-luna",
+     "model": "gpt-6-luna",
+     "priceSource": "litellm"
+    },
+    {
+     "contextTokens": 922000,
+     "inputPerMTokUsd": 2,
+     "outputPerMTokUsd": 10,
+     "id": "codex/gpt-6-sol",
+     "model": "gpt-6-sol",
+     "priceSource": "litellm"
+    },
+    {
+     "id": "codex/gpt-6.1-sol",
+     "model": "gpt-6.1-sol",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "codex/gpt-6.1-terra",
+     "model": "gpt-6.1-terra",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "codex/gpt-6.2-astra",
+     "model": "gpt-6.2-astra",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "codex/gpt-6.2-sol",
+     "model": "gpt-6.2-sol",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "codex/gpt-reserve",
+     "model": "gpt-reserve",
+     "priceSource": "unpriced"
+    }
+   ],
+   "discoveryEnabled": true
+  },
+  {
+   "lastRefresh": "2026-11-25T00:45:29.67976743Z",
+   "openUntil": "0001-01-01T00:00:00Z",
+   "name": "copilot",
+   "type": "openai",
+   "healthState": "closed",
+   "models": [
+    {
+     "id": "copilot/albatross",
+     "model": "albatross",
+     "priceSource": "unpriced"
+    },
+    {
+     "contextTokens": 1000000,
+     "inputPerMTokUsd": 10,
+     "outputPerMTokUsd": 50,
+     "id": "copilot/claude-fable-5",
+     "model": "claude-fable-5",
+     "priceSource": "litellm"
+    },
+    {
+     "id": "copilot/claude-fable-5.1",
+     "model": "claude-fable-5.1",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "copilot/claude-fable-5.2",
+     "model": "claude-fable-5.2",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "copilot/claude-haiku-4.5",
+     "model": "claude-haiku-4.5",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "copilot/claude-haiku-5.5",
+     "model": "claude-haiku-5.5",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "copilot/claude-opus-4.8-fast",
+     "model": "claude-opus-4.8-fast",
+     "priceSource": "unpriced"
+    },
+    {
+     "contextTokens": 1000000,
+     "inputPerMTokUsd": 5,
+     "outputPerMTokUsd": 25,
+     "id": "copilot/claude-opus-5",
+     "model": "claude-opus-5",
+     "priceSource": "litellm"
+    },
+    {
+     "id": "copilot/claude-opus-5.5",
+     "model": "claude-opus-5.5",
+     "priceSource": "unpriced"
+    },
+    {
+     "contextTokens": 1000000,
+     "inputPerMTokUsd": 2,
+     "outputPerMTokUsd": 10,
+     "id": "copilot/claude-sonnet-5",
+     "model": "claude-sonnet-5",
+     "priceSource": "litellm"
+    },
+    {
+     "id": "copilot/claude-sonnet-5.5",
+     "model": "claude-sonnet-5.5",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "copilot/copilot-search-a",
+     "model": "copilot-search-a",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "copilot/copilot-search-b",
+     "model": "copilot-search-b",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "copilot/eagle-bald",
+     "model": "eagle-bald",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "copilot/gemini-3.8-flash",
+     "model": "gemini-3.8-flash",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "copilot/gemini-4-argon",
+     "model": "gemini-4-argon",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "copilot/gemini-4-hydrogen",
+     "model": "gemini-4-hydrogen",
+     "priceSource": "unpriced"
+    },
+    {
+     "contextTokens": 16385,
+     "inputPerMTokUsd": 0.5,
+     "outputPerMTokUsd": 1.5,
+     "id": "copilot/gpt-3.5-turbo",
+     "model": "gpt-3.5-turbo",
+     "priceSource": "litellm"
+    },
+    {
+     "id": "copilot/gpt-3.5-turbo-0613",
+     "model": "gpt-3.5-turbo-0613",
+     "priceSource": "unpriced"
+    },
+    {
+     "contextTokens": 8192,
+     "inputPerMTokUsd": 30,
+     "outputPerMTokUsd": 60,
+     "id": "copilot/gpt-4",
+     "model": "gpt-4",
+     "priceSource": "litellm"
+    },
+    {
+     "id": "copilot/gpt-4-0125-preview",
+     "model": "gpt-4-0125-preview",
+     "priceSource": "unpriced"
+    },
+    {
+     "contextTokens": 8192,
+     "inputPerMTokUsd": 30,
+     "outputPerMTokUsd": 60,
+     "id": "copilot/gpt-4-0613",
+     "model": "gpt-4-0613",
+     "priceSource": "litellm"
+    },
+    {
+     "id": "copilot/gpt-4-o-preview",
+     "model": "gpt-4-o-preview",
+     "priceSource": "unpriced"
+    },
+    {
+     "contextTokens": 1047576,
+     "inputPerMTokUsd": 2,
+     "outputPerMTokUsd": 8,
+     "id": "copilot/gpt-4.1",
+     "model": "gpt-4.1",
+     "priceSource": "litellm"
+    },
+    {
+     "id": "copilot/gpt-4.1-2025-04-14",
+     "model": "gpt-4.1-2025-04-14",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "copilot/gpt-41-copilot",
+     "model": "gpt-41-copilot",
+     "priceSource": "unpriced"
+    },
+    {
+     "contextTokens": 128000,
+     "inputPerMTokUsd": 2.5,
+     "outputPerMTokUsd": 10,
+     "id": "copilot/gpt-4o",
+     "model": "gpt-4o",
+     "priceSource": "builtin"
+    },
+    {
+     "id": "copilot/gpt-4o-2024-05-13",
+     "model": "gpt-4o-2024-05-13",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "copilot/gpt-4o-2024-08-06",
+     "model": "gpt-4o-2024-08-06",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "copilot/gpt-4o-2024-11-20",
+     "model": "gpt-4o-2024-11-20",
+     "priceSource": "unpriced"
+    },
+    {
+     "contextTokens": 128000,
+     "inputPerMTokUsd": 0.15,
+     "outputPerMTokUsd": 0.6,
+     "id": "copilot/gpt-4o-mini",
+     "model": "gpt-4o-mini",
+     "priceSource": "litellm"
+    },
+    {
+     "id": "copilot/gpt-4o-mini-2024-07-18",
+     "model": "gpt-4o-mini-2024-07-18",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "copilot/gpt-5.3-codex",
+     "model": "gpt-5.3-codex",
+     "priceSource": "unpriced"
+    },
+    {
+     "contextTokens": 272000,
+     "inputPerMTokUsd": 0.2,
+     "outputPerMTokUsd": 1.25,
+     "id": "copilot/gpt-5.4-nano",
+     "model": "gpt-5.4-nano",
+     "priceSource": "litellm"
+    },
+    {
+     "contextTokens": 922000,
+     "inputPerMTokUsd": 0.2,
+     "outputPerMTokUsd": 1.2,
+     "id": "copilot/gpt-5.6-luna",
+     "model": "gpt-5.6-luna",
+     "priceSource": "litellm"
+    },
+    {
+     "contextTokens": 922000,
+     "inputPerMTokUsd": 4,
+     "outputPerMTokUsd": 20,
+     "id": "copilot/gpt-5.6-sol",
+     "model": "gpt-5.6-sol",
+     "priceSource": "litellm"
+    },
+    {
+     "contextTokens": 922000,
+     "inputPerMTokUsd": 10,
+     "outputPerMTokUsd": 50,
+     "id": "copilot/gpt-6-astra",
+     "model": "gpt-6-astra",
+     "priceSource": "litellm"
+    },
+    {
+     "contextTokens": 922000,
+     "inputPerMTokUsd": 0.1,
+     "outputPerMTokUsd": 0.5,
+     "id": "copilot/gpt-6-luna",
+     "model": "gpt-6-luna",
+     "priceSource": "litellm"
+    },
+    {
+     "id": "copilot/gpt-6-luna-decisions",
+     "model": "gpt-6-luna-decisions",
+     "priceSource": "unpriced"
+    },
+    {
+     "contextTokens": 922000,
+     "inputPerMTokUsd": 2,
+     "outputPerMTokUsd": 10,
+     "id": "copilot/gpt-6-sol",
+     "model": "gpt-6-sol",
+     "priceSource": "litellm"
+    },
+    {
+     "id": "copilot/gpt-6.1-sol",
+     "model": "gpt-6.1-sol",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "copilot/gpt-6.1-terra",
+     "model": "gpt-6.1-terra",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "copilot/gpt-image-2.5-flare",
+     "model": "gpt-image-2.5-flare",
+     "priceSource": "unpriced"
+    },
+    {
+     "contextTokens": 500000,
+     "inputPerMTokUsd": 2,
+     "outputPerMTokUsd": 6,
+     "id": "copilot/grok-4.6",
+     "model": "grok-4.6",
+     "priceSource": "litellm"
+    },
+    {
+     "contextTokens": 500000,
+     "inputPerMTokUsd": 2,
+     "outputPerMTokUsd": 6,
+     "id": "copilot/grok-4.7",
+     "model": "grok-4.7",
+     "priceSource": "litellm"
+    },
+    {
+     "contextTokens": 1048576,
+     "inputPerMTokUsd": 3,
+     "outputPerMTokUsd": 15,
+     "id": "copilot/kimi-k3",
+     "model": "kimi-k3",
+     "priceSource": "litellm"
+    },
+    {
+     "id": "copilot/kimi-k3-base",
+     "model": "kimi-k3-base",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "copilot/kimi-k3-copilot",
+     "model": "kimi-k3-copilot",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "copilot/mai-code-1.1-flash",
+     "model": "mai-code-1.1-flash",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "copilot/mai-code-2",
+     "model": "mai-code-2",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "copilot/mai-code-2-flash",
+     "model": "mai-code-2-flash",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "copilot/microsoft-decision-1-1",
+     "model": "microsoft-decision-1-1",
+     "priceSource": "unpriced"
+    },
+    {
+     "contextTokens": 8191,
+     "inputPerMTokUsd": 0.02,
+     "outputPerMTokUsd": 0,
+     "id": "copilot/text-embedding-3-small",
+     "model": "text-embedding-3-small",
+     "priceSource": "litellm"
+    },
+    {
+     "id": "copilot/text-embedding-3-small-inference",
+     "model": "text-embedding-3-small-inference",
+     "priceSource": "unpriced"
+    },
+    {
+     "contextTokens": 8191,
+     "inputPerMTokUsd": 0.1,
+     "outputPerMTokUsd": 0,
+     "id": "copilot/text-embedding-ada-002",
+     "model": "text-embedding-ada-002",
+     "priceSource": "litellm"
+    }
+   ],
+   "discoveryEnabled": true
+  },
+  {
+   "lastRefresh": "2026-11-25T00:45:29.979354251Z",
+   "openUntil": "0001-01-01T00:00:00Z",
+   "name": "deepseek",
+   "type": "openai",
+   "healthState": "closed",
+   "models": [
+    {
+     "contextTokens": 1000000,
+     "inputPerMTokUsd": 0.3,
+     "outputPerMTokUsd": 1.2,
+     "id": "deepseek/deepseek-flash",
+     "model": "deepseek-flash",
+     "priceSource": "litellm"
+    },
+    {
+     "contextTokens": 1000000,
+     "inputPerMTokUsd": 1.32,
+     "outputPerMTokUsd": 3.96,
+     "id": "deepseek/deepseek-v4-pro",
+     "model": "deepseek-v4-pro",
+     "priceSource": "litellm"
+    }
+   ],
+   "discoveryEnabled": true
+  },
+  {
+   "lastRefresh": "2026-11-25T01:01:06.216740477Z",
+   "openUntil": "0001-01-01T00:00:00Z",
+   "name": "gx10",
+   "type": "openai",
+   "healthState": "closed",
+   "models": [
+    {
+     "contextTokens": 524288,
+     "id": "gx10/DeepSeek-V4.1-Flash-EXL3",
+     "model": "DeepSeek-V4.1-Flash-EXL3",
+     "priceSource": "free",
+     "routers": [
+      "smartrouter/gx10"
+     ]
+    },
+    {
+     "contextTokens": 32768,
+     "id": "gx10/Inkling-2-Mini",
+     "model": "Inkling-2-Mini",
+     "priceSource": "free",
+     "routers": [
+      "smartrouter/gx10"
+     ]
+    },
+    {
+     "contextTokens": 262144,
+     "id": "gx10/Qwen3.8-27B",
+     "model": "Qwen3.8-27B",
+     "priceSource": "free",
+     "routers": [
+      "smartrouter/gx10"
+     ]
+    },
+    {
+     "id": "gx10/current",
+     "model": "current",
+     "priceSource": "free",
+     "aliases": [
+      "deepseek-v4-flash-vision-exp",
+      "local/current-model"
+     ]
+    },
+    {
+     "id": "gx10/text-embedding-bge-reranker-v2",
+     "model": "text-embedding-bge-reranker-v2",
+     "kind": "reranking",
+     "priceSource": "free"
+    },
+    {
+     "id": "gx10/text-embedding-multilingual-e5-base",
+     "model": "text-embedding-multilingual-e5-base",
+     "kind": "embedding",
+     "priceSource": "free",
+     "aliases": [
+      "gx10-embedding/text-embedding-multilingual-e5-base"
+     ]
+    },
+    {
+     "id": "gx10/v1/decide",
+     "model": "/v1/decide",
+     "kind": "decision",
+     "priceSource": "unpriced",
+     "endpoint": true
+    }
+   ],
+   "discoveryEnabled": true
+  },
+  {
+   "lastRefresh": "2026-11-25T01:01:06.613775021Z",
+   "openUntil": "2026-11-25T01:06:06.613775021Z",
+   "name": "macstudio",
+   "type": "openai",
+   "healthState": "open",
+   "models": [],
+   "discoveryEnabled": true
+  },
+  {
+   "lastRefresh": "2026-11-25T00:45:30.498138329Z",
+   "openUntil": "0001-01-01T00:00:00Z",
+   "name": "minimax",
+   "type": "openai",
+   "healthState": "closed",
+   "models": [
+    {
+     "contextTokens": 200000,
+     "inputPerMTokUsd": 0.3,
+     "outputPerMTokUsd": 1.2,
+     "id": "minimax/MiniMax-M2",
+     "model": "MiniMax-M2",
+     "priceSource": "litellm"
+    },
+    {
+     "contextTokens": 1000000,
+     "inputPerMTokUsd": 0.3,
+     "outputPerMTokUsd": 1.2,
+     "id": "minimax/MiniMax-M2.1",
+     "model": "MiniMax-M2.1",
+     "priceSource": "litellm"
+    },
+    {
+     "contextTokens": 1000000,
+     "inputPerMTokUsd": 0.3,
+     "outputPerMTokUsd": 2.4,
+     "id": "minimax/MiniMax-M2.1-highspeed",
+     "model": "MiniMax-M2.1-highspeed",
+     "priceSource": "litellm"
+    },
+    {
+     "contextTokens": 1000000,
+     "inputPerMTokUsd": 0.3,
+     "outputPerMTokUsd": 1.2,
+     "id": "minimax/MiniMax-M2.5",
+     "model": "MiniMax-M2.5",
+     "priceSource": "litellm"
+    },
+    {
+     "contextTokens": 1000000,
+     "inputPerMTokUsd": 0.3,
+     "outputPerMTokUsd": 2.4,
+     "id": "minimax/MiniMax-M2.5-highspeed",
+     "model": "MiniMax-M2.5-highspeed",
+     "priceSource": "litellm"
+    },
+    {
+     "id": "minimax/MiniMax-M2.7",
+     "model": "MiniMax-M2.7",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "minimax/MiniMax-M2.7-highspeed",
+     "model": "MiniMax-M2.7-highspeed",
+     "priceSource": "unpriced"
+    },
+    {
+     "contextTokens": 1000000,
+     "inputPerMTokUsd": 0.3,
+     "outputPerMTokUsd": 1.2,
+     "id": "minimax/MiniMax-M3",
+     "model": "MiniMax-M3",
+     "priceSource": "litellm"
+    },
+    {
+     "id": "minimax/MiniMax-M3.1-Flash",
+     "model": "MiniMax-M3.1-Flash",
+     "priceSource": "unpriced"
+    }
+   ],
+   "discoveryEnabled": true
+  },
+  {
+   "lastRefresh": "2026-11-25T00:45:30.54177391Z",
+   "openUntil": "0001-01-01T00:00:00Z",
+   "name": "nvidia-nim",
+   "type": "openai",
+   "healthState": "closed",
+   "models": [
+    {
+     "id": "nvidia-nim/bigcode/starcoder2-15b",
+     "model": "bigcode/starcoder2-15b",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "nvidia-nim/fastino/gliner2-pii",
+     "model": "fastino/gliner2-pii",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "nvidia-nim/google/gemma-3-12b-it",
+     "model": "google/gemma-3-12b-it",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "nvidia-nim/google/gemma-3-4b-it",
+     "model": "google/gemma-3-4b-it",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "nvidia-nim/minimaxai/minimax-m3.1-flash",
+     "model": "minimaxai/minimax-m3.1-flash",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "nvidia-nim/mistralai/mistral-large-4-1t-a52b",
+     "model": "mistralai/mistral-large-4-1t-a52b",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "nvidia-nim/moonshotai/kimi-k3.1-pro",
+     "model": "moonshotai/kimi-k3.1-pro",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "nvidia-nim/nvidia/ai-synthetic-video-detector",
+     "model": "nvidia/ai-synthetic-video-detector",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "nvidia-nim/nvidia/cosmos-reason2-8b",
+     "model": "nvidia/cosmos-reason2-8b",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "nvidia-nim/nvidia/embed-qa-4",
+     "model": "nvidia/embed-qa-4",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "nvidia-nim/nvidia/ising-calibration-1.5-31b",
+     "model": "nvidia/ising-calibration-1.5-31b",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "nvidia-nim/nvidia/llama-3.1-nemoguard-8b-topic-control",
+     "model": "nvidia/llama-3.1-nemoguard-8b-topic-control",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "nvidia-nim/nvidia/llama-3.1-nemotron-safety-guard-8b-v3",
+     "model": "nvidia/llama-3.1-nemotron-safety-guard-8b-v3",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "nvidia-nim/nvidia/llama-3.2-nemoretriever-1b-vlm-embed-v1",
+     "model": "nvidia/llama-3.2-nemoretriever-1b-vlm-embed-v1",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "nvidia-nim/nvidia/llama-3.2-nv-embedqa-1b-v1",
+     "model": "nvidia/llama-3.2-nv-embedqa-1b-v1",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "nvidia-nim/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning",
+     "model": "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "nvidia-nim/nvidia/nemotron-3-ultra-550b-a55b",
+     "model": "nvidia/nemotron-3-ultra-550b-a55b",
+     "priceSource": "free"
+    },
+    {
+     "id": "nvidia-nim/nvidia/nemotron-3.5-bolt-e4b",
+     "model": "nvidia/nemotron-3.5-bolt-e4b",
+     "priceSource": "free"
+    },
+    {
+     "id": "nvidia-nim/nvidia/nemotron-3.5-content-safety",
+     "model": "nvidia/nemotron-3.5-content-safety",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "nvidia-nim/nvidia/nemotron-3.5-embed-1b",
+     "model": "nvidia/nemotron-3.5-embed-1b",
+     "priceSource": "free"
+    },
+    {
+     "id": "nvidia-nim/nvidia/nemotron-3.5-embed-8b",
+     "model": "nvidia/nemotron-3.5-embed-8b",
+     "priceSource": "free"
+    },
+    {
+     "id": "nvidia-nim/nvidia/nemotron-3.5-lightning-30b-a3b",
+     "model": "nvidia/nemotron-3.5-lightning-30b-a3b",
+     "priceSource": "free"
+    },
+    {
+     "id": "nvidia-nim/nvidia/nemotron-3.5-super-vl-120b-a12b",
+     "model": "nvidia/nemotron-3.5-super-vl-120b-a12b",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "nvidia-nim/nvidia/nv-embedqa-mistral-7b-v2",
+     "model": "nvidia/nv-embedqa-mistral-7b-v2",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "nvidia-nim/nvidia/nvclip",
+     "model": "nvidia/nvclip",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "nvidia-nim/nvidia/riva-translate-4b-instruct-v2",
+     "model": "nvidia/riva-translate-4b-instruct-v2",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "nvidia-nim/poolside/laguna-xs-2.1",
+     "model": "poolside/laguna-xs-2.1",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "nvidia-nim/snowflake/arctic-embed-l",
+     "model": "snowflake/arctic-embed-l",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "nvidia-nim/stepfun-ai/step-5-preview",
+     "model": "stepfun-ai/step-5-preview",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "nvidia-nim/z-ai/glm-5.3-flash",
+     "model": "z-ai/glm-5.3-flash",
+     "priceSource": "unpriced"
+    }
+   ],
+   "discoveryEnabled": true
+  },
+  {
+   "lastRefresh": "0001-01-01T00:00:00Z",
+   "openUntil": "0001-01-01T00:00:00Z",
+   "name": "nvidia-retrieval",
+   "type": "openai",
+   "healthState": "closed",
+   "models": [],
+   "discoveryEnabled": false
+  },
+  {
+   "lastRefresh": "2026-11-25T00:45:31.04975007Z",
+   "openUntil": "0001-01-01T00:00:00Z",
+   "name": "openai",
+   "type": "openai",
+   "healthState": "closed",
+   "models": [
+    {
+     "contextTokens": 400000,
+     "inputPerMTokUsd": 5,
+     "outputPerMTokUsd": 30,
+     "id": "openai/chat-latest",
+     "model": "chat-latest",
+     "priceSource": "litellm"
+    },
+    {
+     "id": "openai/chatgpt-image-latest",
+     "model": "chatgpt-image-latest",
+     "priceSource": "unpriced"
+    },
+    {
+     "contextTokens": 1047576,
+     "inputPerMTokUsd": 2,
+     "outputPerMTokUsd": 8,
+     "id": "openai/gpt-4.1",
+     "model": "gpt-4.1",
+     "priceSource": "litellm"
+    },
+    {
+     "id": "openai/gpt-4.1-2025-04-14",
+     "model": "gpt-4.1-2025-04-14",
+     "priceSource": "unpriced"
+    },
+    {
+     "contextTokens": 1047576,
+     "inputPerMTokUsd": 0.4,
+     "outputPerMTokUsd": 1.6,
+     "id": "openai/gpt-4.1-mini",
+     "model": "gpt-4.1-mini",
+     "priceSource": "litellm"
+    },
+    {
+     "id": "openai/gpt-4.1-mini-2025-04-14",
+     "model": "gpt-4.1-mini-2025-04-14",
+     "priceSource": "unpriced"
+    },
+    {
+     "contextTokens": 128000,
+     "inputPerMTokUsd": 2.5,
+     "outputPerMTokUsd": 10,
+     "id": "openai/gpt-4o",
+     "model": "gpt-4o",
+     "priceSource": "builtin"
+    },
+    {
+     "id": "openai/gpt-4o-2024-08-06",
+     "model": "gpt-4o-2024-08-06",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "openai/gpt-4o-2024-11-20",
+     "model": "gpt-4o-2024-11-20",
+     "priceSource": "unpriced"
+    },
+    {
+     "contextTokens": 128000,
+     "inputPerMTokUsd": 0.15,
+     "outputPerMTokUsd": 0.6,
+     "id": "openai/gpt-4o-mini",
+     "model": "gpt-4o-mini",
+     "priceSource": "litellm"
+    },
+    {
+     "id": "openai/gpt-4o-mini-2024-07-18",
+     "model": "gpt-4o-mini-2024-07-18",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "openai/gpt-4o-mini-transcribe",
+     "model": "gpt-4o-mini-transcribe",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "openai/gpt-4o-mini-transcribe-2025-03-20",
+     "model": "gpt-4o-mini-transcribe-2025-03-20",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "openai/gpt-4o-mini-transcribe-2025-12-15",
+     "model": "gpt-4o-mini-transcribe-2025-12-15",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "openai/gpt-4o-mini-tts",
+     "model": "gpt-4o-mini-tts",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "openai/gpt-4o-mini-tts-2025-03-20",
+     "model": "gpt-4o-mini-tts-2025-03-20",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "openai/gpt-4o-mini-tts-2025-12-15",
+     "model": "gpt-4o-mini-tts-2025-12-15",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "openai/gpt-4o-transcribe",
+     "model": "gpt-4o-transcribe",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "openai/gpt-4o-transcribe-diarize",
+     "model": "gpt-4o-transcribe-diarize",
+     "priceSource": "unpriced"
+    },
+    {
+     "contextTokens": 272000,
+     "inputPerMTokUsd": 1.25,
+     "outputPerMTokUsd": 10,
+     "id": "openai/gpt-5",
+     "model": "gpt-5",
+     "priceSource": "builtin"
+    },
+    {
+     "id": "openai/gpt-5-2025-08-07",
+     "model": "gpt-5-2025-08-07",
+     "priceSource": "unpriced"
+    },
+    {
+     "contextTokens": 272000,
+     "inputPerMTokUsd": 0.25,
+     "outputPerMTokUsd": 2,
+     "id": "openai/gpt-5-mini",
+     "model": "gpt-5-mini",
+     "priceSource": "builtin"
+    },
+    {
+     "id": "openai/gpt-5-mini-2025-08-07",
+     "model": "gpt-5-mini-2025-08-07",
+     "priceSource": "unpriced"
+    },
+    {
+     "contextTokens": 272000,
+     "inputPerMTokUsd": 0.05,
+     "outputPerMTokUsd": 0.4,
+     "id": "openai/gpt-5-nano",
+     "model": "gpt-5-nano",
+     "priceSource": "litellm"
+    },
+    {
+     "id": "openai/gpt-5-nano-2025-08-07",
+     "model": "gpt-5-nano-2025-08-07",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "openai/gpt-5-pro",
+     "model": "gpt-5-pro",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "openai/gpt-5-pro-2025-10-06",
+     "model": "gpt-5-pro-2025-10-06",
+     "priceSource": "unpriced"
+    },
+    {
+     "contextTokens": 272000,
+     "inputPerMTokUsd": 1.25,
+     "outputPerMTokUsd": 10,
+     "id": "openai/gpt-5-search-api",
+     "model": "gpt-5-search-api",
+     "priceSource": "litellm"
+    },
+    {
+     "contextTokens": 272000,
+     "inputPerMTokUsd": 1.25,
+     "outputPerMTokUsd": 10,
+     "id": "openai/gpt-5-search-api-2025-10-14",
+     "model": "gpt-5-search-api-2025-10-14",
+     "priceSource": "litellm"
+    },
+    {
+     "contextTokens": 272000,
+     "inputPerMTokUsd": 1.25,
+     "outputPerMTokUsd": 10,
+     "id": "openai/gpt-5.1",
+     "model": "gpt-5.1",
+     "priceSource": "litellm"
+    },
+    {
+     "contextTokens": 272000,
+     "inputPerMTokUsd": 1.25,
+     "outputPerMTokUsd": 10,
+     "id": "openai/gpt-5.1-2025-11-13",
+     "model": "gpt-5.1-2025-11-13",
+     "priceSource": "litellm"
+    },
+    {
+     "contextTokens": 272000,
+     "inputPerMTokUsd": 1.75,
+     "outputPerMTokUsd": 14,
+     "id": "openai/gpt-5.2",
+     "model": "gpt-5.2",
+     "priceSource": "litellm"
+    },
+    {
+     "contextTokens": 272000,
+     "inputPerMTokUsd": 1.75,
+     "outputPerMTokUsd": 14,
+     "id": "openai/gpt-5.2-2025-12-11",
+     "model": "gpt-5.2-2025-12-11",
+     "priceSource": "litellm"
+    },
+    {
+     "id": "openai/gpt-5.2-pro",
+     "model": "gpt-5.2-pro",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "openai/gpt-5.2-pro-2025-12-11",
+     "model": "gpt-5.2-pro-2025-12-11",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "openai/gpt-5.3-codex",
+     "model": "gpt-5.3-codex",
+     "priceSource": "unpriced"
+    },
+    {
+     "contextTokens": 1050000,
+     "inputPerMTokUsd": 2.5,
+     "outputPerMTokUsd": 15,
+     "id": "openai/gpt-5.4",
+     "model": "gpt-5.4",
+     "priceSource": "litellm"
+    },
+    {
+     "contextTokens": 1050000,
+     "inputPerMTokUsd": 2.5,
+     "outputPerMTokUsd": 15,
+     "id": "openai/gpt-5.4-2026-03-05",
+     "model": "gpt-5.4-2026-03-05",
+     "priceSource": "litellm"
+    },
+    {
+     "contextTokens": 272000,
+     "inputPerMTokUsd": 0.75,
+     "outputPerMTokUsd": 4.5,
+     "id": "openai/gpt-5.4-mini",
+     "model": "gpt-5.4-mini",
+     "priceSource": "litellm"
+    },
+    {
+     "contextTokens": 272000,
+     "inputPerMTokUsd": 0.75,
+     "outputPerMTokUsd": 4.5,
+     "id": "openai/gpt-5.4-mini-2026-03-17",
+     "model": "gpt-5.4-mini-2026-03-17",
+     "priceSource": "litellm"
+    },
+    {
+     "contextTokens": 272000,
+     "inputPerMTokUsd": 0.2,
+     "outputPerMTokUsd": 1.25,
+     "id": "openai/gpt-5.4-nano",
+     "model": "gpt-5.4-nano",
+     "priceSource": "litellm"
+    },
+    {
+     "contextTokens": 272000,
+     "inputPerMTokUsd": 0.2,
+     "outputPerMTokUsd": 1.25,
+     "id": "openai/gpt-5.4-nano-2026-03-17",
+     "model": "gpt-5.4-nano-2026-03-17",
+     "priceSource": "litellm"
+    },
+    {
+     "id": "openai/gpt-5.4-pro",
+     "model": "gpt-5.4-pro",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "openai/gpt-5.4-pro-2026-03-05",
+     "model": "gpt-5.4-pro-2026-03-05",
+     "priceSource": "unpriced"
+    },
+    {
+     "contextTokens": 1050000,
+     "inputPerMTokUsd": 5,
+     "outputPerMTokUsd": 30,
+     "id": "openai/gpt-5.5",
+     "model": "gpt-5.5",
+     "priceSource": "litellm"
+    },
+    {
+     "contextTokens": 1050000,
+     "inputPerMTokUsd": 5,
+     "outputPerMTokUsd": 30,
+     "id": "openai/gpt-5.5-2026-04-23",
+     "model": "gpt-5.5-2026-04-23",
+     "priceSource": "litellm"
+    },
+    {
+     "id": "openai/gpt-5.5-pro",
+     "model": "gpt-5.5-pro",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "openai/gpt-5.5-pro-2026-04-23",
+     "model": "gpt-5.5-pro-2026-04-23",
+     "priceSource": "unpriced"
+    },
+    {
+     "contextTokens": 922000,
+     "inputPerMTokUsd": 0.2,
+     "outputPerMTokUsd": 1.2,
+     "id": "openai/gpt-5.6-luna",
+     "model": "gpt-5.6-luna",
+     "priceSource": "litellm"
+    },
+    {
+     "contextTokens": 922000,
+     "inputPerMTokUsd": 4,
+     "outputPerMTokUsd": 20,
+     "id": "openai/gpt-5.6-sol",
+     "model": "gpt-5.6-sol",
+     "priceSource": "litellm"
+    },
+    {
+     "contextTokens": 922000,
+     "inputPerMTokUsd": 2,
+     "outputPerMTokUsd": 12,
+     "id": "openai/gpt-5.6-terra",
+     "model": "gpt-5.6-terra",
+     "priceSource": "litellm"
+    },
+    {
+     "contextTokens": 922000,
+     "inputPerMTokUsd": 10,
+     "outputPerMTokUsd": 50,
+     "id": "openai/gpt-6-astra",
+     "model": "gpt-6-astra",
+     "priceSource": "litellm"
+    },
+    {
+     "id": "openai/gpt-6-astra-healthcare",
+     "model": "gpt-6-astra-healthcare",
+     "priceSource": "unpriced"
+    },
+    {
+     "contextTokens": 922000,
+     "inputPerMTokUsd": 0.1,
+     "outputPerMTokUsd": 0.5,
+     "id": "openai/gpt-6-luna",
+     "model": "gpt-6-luna",
+     "priceSource": "litellm"
+    },
+    {
+     "contextTokens": 922000,
+     "inputPerMTokUsd": 2,
+     "outputPerMTokUsd": 10,
+     "id": "openai/gpt-6-sol",
+     "model": "gpt-6-sol",
+     "priceSource": "litellm"
+    },
+    {
+     "id": "openai/gpt-6.1-sol",
+     "model": "gpt-6.1-sol",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "openai/gpt-6.1-sol-healthcare",
+     "model": "gpt-6.1-sol-healthcare",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "openai/gpt-6.1-terra",
+     "model": "gpt-6.1-terra",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "openai/gpt-6.2-astra",
+     "model": "gpt-6.2-astra",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "openai/gpt-6.2-astra-healthcare",
+     "model": "gpt-6.2-astra-healthcare",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "openai/gpt-6.2-sol",
+     "model": "gpt-6.2-sol",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "openai/gpt-6.2-sol-healthcare",
+     "model": "gpt-6.2-sol-healthcare",
+     "priceSource": "unpriced"
+    },
+    {
+     "contextTokens": 128000,
+     "inputPerMTokUsd": 2.5,
+     "outputPerMTokUsd": 10,
+     "id": "openai/gpt-audio",
+     "model": "gpt-audio",
+     "priceSource": "litellm"
+    },
+    {
+     "contextTokens": 128000,
+     "inputPerMTokUsd": 2.5,
+     "outputPerMTokUsd": 10,
+     "id": "openai/gpt-audio-1.5",
+     "model": "gpt-audio-1.5",
+     "priceSource": "litellm"
+    },
+    {
+     "id": "openai/gpt-audio-2025-08-28",
+     "model": "gpt-audio-2025-08-28",
+     "priceSource": "unpriced"
+    },
+    {
+     "contextTokens": 128000,
+     "inputPerMTokUsd": 0.6,
+     "outputPerMTokUsd": 2.4,
+     "id": "openai/gpt-audio-mini",
+     "model": "gpt-audio-mini",
+     "priceSource": "litellm"
+    },
+    {
+     "contextTokens": 128000,
+     "inputPerMTokUsd": 0.6,
+     "outputPerMTokUsd": 2.4,
+     "id": "openai/gpt-audio-mini-2025-12-15",
+     "model": "gpt-audio-mini-2025-12-15",
+     "priceSource": "litellm"
+    },
+    {
+     "id": "openai/gpt-image-1-mini",
+     "model": "gpt-image-1-mini",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "openai/gpt-image-1.5",
+     "model": "gpt-image-1.5",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "openai/gpt-image-2",
+     "model": "gpt-image-2",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "openai/gpt-image-2-2026-04-21",
+     "model": "gpt-image-2-2026-04-21",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "openai/gpt-image-2.5-flare",
+     "model": "gpt-image-2.5-flare",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "openai/gpt-image-2.5-flare-2026-09-08",
+     "model": "gpt-image-2.5-flare-2026-09-08",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "openai/gpt-image-2.5-sunburst",
+     "model": "gpt-image-2.5-sunburst",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "openai/gpt-image-2.5-sunburst-2026-09-08",
+     "model": "gpt-image-2.5-sunburst-2026-09-08",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "openai/gpt-image-2.6-flare",
+     "model": "gpt-image-2.6-flare",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "openai/gpt-image-2.6-sunburst",
+     "model": "gpt-image-2.6-sunburst",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "openai/gpt-live-1",
+     "model": "gpt-live-1",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "openai/gpt-live-1.1",
+     "model": "gpt-live-1.1",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "openai/gpt-live-transcribe",
+     "model": "gpt-live-transcribe",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "openai/gpt-realtime",
+     "model": "gpt-realtime",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "openai/gpt-realtime-1.5",
+     "model": "gpt-realtime-1.5",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "openai/gpt-realtime-2",
+     "model": "gpt-realtime-2",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "openai/gpt-realtime-2.1",
+     "model": "gpt-realtime-2.1",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "openai/gpt-realtime-2.1-mini",
+     "model": "gpt-realtime-2.1-mini",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "openai/gpt-realtime-2025-08-28",
+     "model": "gpt-realtime-2025-08-28",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "openai/gpt-realtime-mini",
+     "model": "gpt-realtime-mini",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "openai/gpt-realtime-mini-2025-12-15",
+     "model": "gpt-realtime-mini-2025-12-15",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "openai/gpt-realtime-translate",
+     "model": "gpt-realtime-translate",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "openai/gpt-realtime-whisper",
+     "model": "gpt-realtime-whisper",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "openai/gpt-transcribe",
+     "model": "gpt-transcribe",
+     "priceSource": "unpriced"
+    },
+    {
+     "contextTokens": 200000,
+     "inputPerMTokUsd": 2,
+     "outputPerMTokUsd": 8,
+     "id": "openai/o3",
+     "model": "o3",
+     "priceSource": "builtin"
+    },
+    {
+     "id": "openai/o3-2025-04-16",
+     "model": "o3-2025-04-16",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "openai/o3-pro",
+     "model": "o3-pro",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "openai/o3-pro-2025-06-10",
+     "model": "o3-pro-2025-06-10",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "openai/omni-moderation-2024-09-26",
+     "model": "omni-moderation-2024-09-26",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "openai/omni-moderation-latest",
+     "model": "omni-moderation-latest",
+     "priceSource": "unpriced"
+    },
+    {
+     "contextTokens": 8191,
+     "inputPerMTokUsd": 0.13,
+     "outputPerMTokUsd": 0,
+     "id": "openai/text-embedding-3-large",
+     "model": "text-embedding-3-large",
+     "priceSource": "litellm"
+    },
+    {
+     "contextTokens": 8191,
+     "inputPerMTokUsd": 0.02,
+     "outputPerMTokUsd": 0,
+     "id": "openai/text-embedding-3-small",
+     "model": "text-embedding-3-small",
+     "priceSource": "litellm"
+    },
+    {
+     "contextTokens": 8191,
+     "inputPerMTokUsd": 0.1,
+     "outputPerMTokUsd": 0,
+     "id": "openai/text-embedding-ada-002",
+     "model": "text-embedding-ada-002",
+     "priceSource": "litellm"
+    },
+    {
+     "id": "openai/tts-1",
+     "model": "tts-1",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "openai/tts-1-1106",
+     "model": "tts-1-1106",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "openai/tts-1-hd",
+     "model": "tts-1-hd",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "openai/tts-1-hd-1106",
+     "model": "tts-1-hd-1106",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "openai/whisper-1",
+     "model": "whisper-1",
+     "priceSource": "unpriced"
+    }
+   ],
+   "discoveryEnabled": true
+  },
+  {
+   "lastRefresh": "0001-01-01T00:00:00Z",
+   "openUntil": "0001-01-01T00:00:00Z",
+   "name": "openai-audio",
+   "type": "openai",
+   "healthState": "closed",
+   "models": [
+    {
+     "id": "openai-audio/gpt-4o-mini-transcribe",
+     "model": "gpt-4o-mini-transcribe",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "openai-audio/gpt-4o-mini-tts",
+     "model": "gpt-4o-mini-tts",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "openai-audio/gpt-4o-transcribe",
+     "model": "gpt-4o-transcribe",
+     "priceSource": "unpriced"
+    },
+    {
+     "contextTokens": 128000,
+     "inputPerMTokUsd": 2.5,
+     "outputPerMTokUsd": 10,
+     "id": "openai-audio/gpt-audio",
+     "model": "gpt-audio",
+     "priceSource": "litellm"
+    },
+    {
+     "contextTokens": 128000,
+     "inputPerMTokUsd": 0.6,
+     "outputPerMTokUsd": 2.4,
+     "id": "openai-audio/gpt-audio-mini",
+     "model": "gpt-audio-mini",
+     "priceSource": "litellm"
+    },
+    {
+     "id": "openai-audio/gpt-realtime",
+     "model": "gpt-realtime",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "openai-audio/tts-1",
+     "model": "tts-1",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "openai-audio/tts-1-hd",
+     "model": "tts-1-hd",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "openai-audio/whisper-1",
+     "model": "whisper-1",
+     "priceSource": "unpriced"
+    }
+   ],
+   "discoveryEnabled": false
+  },
+  {
+   "lastRefresh": "0001-01-01T00:00:00Z",
+   "openUntil": "0001-01-01T00:00:00Z",
+   "name": "parakeet-mlx",
+   "type": "openai",
+   "healthState": "closed",
+   "models": [],
+   "discoveryEnabled": false
+  },
+  {
+   "lastRefresh": "0001-01-01T00:00:00Z",
+   "openUntil": "0001-01-01T00:00:00Z",
+   "name": "piper-tts",
+   "type": "openai",
+   "healthState": "closed",
+   "models": [],
+   "discoveryEnabled": false
+  },
+  {
+   "lastRefresh": "2026-11-25T00:45:31.071356203Z",
+   "openUntil": "0001-01-01T00:00:00Z",
+   "name": "uni",
+   "type": "openai",
+   "healthState": "closed",
+   "models": [
+    {
+     "contextTokens": 524288,
+     "id": "uni/deepseek-v4-flash-0731",
+     "model": "deepseek-v4-flash-0731",
+     "priceSource": "free",
+     "aliases": [
+      "deepseek"
+     ]
+    },
+    {
+     "contextTokens": 524288,
+     "id": "uni/deepseek-v4.1-flash-1017",
+     "model": "deepseek-v4.1-flash-1017",
+     "priceSource": "unpriced",
+     "routers": [
+      "smartrouter/uni"
+     ]
+    },
+    {
+     "contextTokens": 524288,
+     "id": "uni/glm-5.3-flash",
+     "model": "glm-5.3-flash",
+     "priceSource": "unpriced",
+     "routers": [
+      "smartrouter/uni"
+     ]
+    },
+    {
+     "contextTokens": 524288,
+     "id": "uni/model-fast",
+     "model": "model-fast",
+     "priceSource": "unpriced"
+    },
+    {
+     "contextTokens": 262144,
+     "id": "uni/model-heavy",
+     "model": "model-heavy",
+     "priceSource": "unpriced"
+    },
+    {
+     "contextTokens": 262144,
+     "id": "uni/model-light",
+     "model": "model-light",
+     "priceSource": "unpriced"
+    },
+    {
+     "contextTokens": 262144,
+     "id": "uni/ornith-1.5-35b",
+     "model": "ornith-1.5-35b",
+     "priceSource": "unpriced"
+    },
+    {
+     "contextTokens": 262144,
+     "id": "uni/ornith-1.5-397b",
+     "model": "ornith-1.5-397b",
+     "priceSource": "unpriced"
+    },
+    {
+     "contextTokens": 262144,
+     "id": "uni/ornith-397b",
+     "model": "ornith-397b",
+     "priceSource": "free"
+    },
+    {
+     "contextTokens": 262144,
+     "id": "uni/qwen3.6-27b",
+     "model": "qwen3.6-27b",
+     "priceSource": "free"
+    },
+    {
+     "contextTokens": 262144,
+     "id": "uni/qwen3.8-27b",
+     "model": "qwen3.8-27b",
+     "priceSource": "unpriced",
+     "routers": [
+      "smartrouter/uni"
+     ]
+    },
+    {
+     "contextTokens": 262144,
+     "id": "uni/qwen3.8-27b-uncensored",
+     "model": "qwen3.8-27b-uncensored",
+     "priceSource": "unpriced"
+    },
+    {
+     "contextTokens": 524288,
+     "id": "uni/qwen3.8-flash-next",
+     "model": "qwen3.8-flash-next",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "uni/text-embedding-multilingual-e5-base",
+     "model": "text-embedding-multilingual-e5-base",
+     "priceSource": "unpriced"
+    }
+   ],
+   "discoveryEnabled": true
+  },
+  {
+   "lastRefresh": "2026-11-25T00:45:31.241477003Z",
+   "openUntil": "0001-01-01T00:00:00Z",
+   "name": "xai",
+   "type": "openai",
+   "healthState": "closed",
+   "models": [
+    {
+     "contextTokens": 1000000,
+     "inputPerMTokUsd": 1.25,
+     "outputPerMTokUsd": 2.5,
+     "id": "xai/grok-4.20-0309-non-reasoning",
+     "model": "grok-4.20-0309-non-reasoning",
+     "priceSource": "litellm"
+    },
+    {
+     "contextTokens": 1000000,
+     "inputPerMTokUsd": 1.25,
+     "outputPerMTokUsd": 2.5,
+     "id": "xai/grok-4.20-0309-reasoning",
+     "model": "grok-4.20-0309-reasoning",
+     "priceSource": "litellm"
+    },
+    {
+     "id": "xai/grok-4.20-multi-agent-0309",
+     "model": "grok-4.20-multi-agent-0309",
+     "priceSource": "unpriced"
+    },
+    {
+     "contextTokens": 1000000,
+     "inputPerMTokUsd": 1.25,
+     "outputPerMTokUsd": 2.5,
+     "id": "xai/grok-4.3",
+     "model": "grok-4.3",
+     "priceSource": "litellm"
+    },
+    {
+     "contextTokens": 500000,
+     "inputPerMTokUsd": 2,
+     "outputPerMTokUsd": 6,
+     "id": "xai/grok-4.5",
+     "model": "grok-4.5",
+     "priceSource": "litellm"
+    },
+    {
+     "contextTokens": 500000,
+     "inputPerMTokUsd": 2,
+     "outputPerMTokUsd": 6,
+     "id": "xai/grok-4.6",
+     "model": "grok-4.6",
+     "priceSource": "litellm"
+    },
+    {
+     "contextTokens": 500000,
+     "inputPerMTokUsd": 2,
+     "outputPerMTokUsd": 6,
+     "id": "xai/grok-4.7",
+     "model": "grok-4.7",
+     "priceSource": "litellm"
+    },
+    {
+     "id": "xai/grok-imagine-image",
+     "model": "grok-imagine-image",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "xai/grok-imagine-image-2.0",
+     "model": "grok-imagine-image-2.0",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "xai/grok-imagine-video",
+     "model": "grok-imagine-video",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "xai/grok-imagine-video-1.5",
+     "model": "grok-imagine-video-1.5",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "xai/grok-imagine-video-1.5-lite",
+     "model": "grok-imagine-video-1.5-lite",
+     "priceSource": "unpriced"
+    }
+   ],
+   "discoveryEnabled": true
+  },
+  {
+   "lastRefresh": "2026-11-25T00:45:41.32128593Z",
+   "openUntil": "0001-01-01T00:00:00Z",
+   "name": "xiaomi",
+   "type": "openai",
+   "healthState": "closed",
+   "models": [
+    {
+     "id": "xiaomi/mimo-v2.5",
+     "model": "mimo-v2.5",
+     "priceSource": "unpriced"
+    },
+    {
+     "id": "xiaomi/mimo-v2.5-pro",
+     "model": "mimo-v2.5-pro",
+     "priceSource": "unpriced"
+    }
+   ],
+   "discoveryEnabled": true
+  }
+ ],
+ "aliases": [
+  {
+   "modelMeta": {
+    "contextTokens": 524288,
+    "inputPerMTokUsd": 0,
+    "outputPerMTokUsd": 0
+   },
+   "alias": "deepseek",
+   "target": "uni/deepseek-v4-flash-0731"
+  },
+  {
+   "modelMeta": {
+    "inputPerMTokUsd": 0,
+    "outputPerMTokUsd": 0
+   },
+   "alias": "deepseek-v4-flash-vision-exp",
+   "target": "gx10/current"
+  },
+  {
+   "modelMeta": {
+    "inputPerMTokUsd": 0,
+    "outputPerMTokUsd": 0
+   },
+   "alias": "gx10-embedding/text-embedding-multilingual-e5-base",
+   "target": "gx10/text-embedding-multilingual-e5-base"
+  },
+  {
+   "modelMeta": {
+    "inputPerMTokUsd": 0,
+    "outputPerMTokUsd": 0
+   },
+   "alias": "local/current-model",
+   "target": "gx10/current"
+  }
+ ],
+ "routers": [
+  {
+   "name": "smartrouter/gx10",
+   "defaultTier": "low",
+   "selection": "ordered",
+   "classifier": "v2",
+   "firstByteTimeout": "40s",
+   "tiers": [
+    {
+     "name": "low",
+     "models": [
+      "gx10/Qwen3.8-27B"
+     ],
+     "minScore": 0
+    },
+    {
+     "name": "mid",
+     "models": [
+      "gx10/Inkling-2-Mini"
+     ],
+     "minScore": 150
+    },
+    {
+     "name": "top",
+     "models": [
+      "gx10/DeepSeek-V4.1-Flash-EXL3"
+     ],
+     "minScore": 350
+    }
+   ],
+   "keywordRules": [],
+   "contextTokens": 524288,
+   "stats": {
+    "scope": "shared",
+    "tiers": [
+     {
+      "name": "low",
+      "count": 33
+     },
+     {
+      "name": "mid",
+      "count": 15
+     },
+     {
+      "name": "top",
+      "count": 29
+     }
+    ],
+    "reasons": [
+     {
+      "name": "bump",
+      "count": 5
+     },
+     {
+      "name": "floor",
+      "count": 9
+     },
+     {
+      "name": "score",
+      "count": 58
+     },
+     {
+      "name": "session",
+      "count": 2
+     },
+     {
+      "name": "skipped",
+      "count": 3
+     }
+    ],
+    "escalations": [],
+    "shadow": [],
+    "outcomes": [
+     {
+      "tier": "low",
+      "reason": "score",
+      "outcome": "ok",
+      "count": 21
+     },
+     {
+      "tier": "low",
+      "reason": "score",
+      "outcome": "bad",
+      "count": 3
+     },
+     {
+      "tier": "mid",
+      "reason": "score",
+      "outcome": "ok",
+      "count": 1
+     },
+     {
+      "tier": "mid",
+      "reason": "score",
+      "outcome": "bad",
+      "count": 4
+     },
+     {
+      "tier": "mid",
+      "reason": "bump",
+      "outcome": "bad",
+      "count": 1
+     },
+     {
+      "tier": "top",
+      "reason": "score",
+      "outcome": "ok",
+      "count": 10
+     },
+     {
+      "tier": "top",
+      "reason": "floor",
+      "outcome": "ok",
+      "count": 5
+     },
+     {
+      "tier": "top",
+      "reason": "session",
+      "outcome": "ok",
+      "count": 2
+     },
+     {
+      "tier": "top",
+      "reason": "bump",
+      "outcome": "ok",
+      "count": 4
+     }
+    ],
+    "requests": 77
+   },
+   "calibration": {
+    "mode": "shadow",
+    "delta": [
+     {
+      "tier": "mid",
+      "delta": 0
+     },
+     {
+      "tier": "top",
+      "delta": 0
+     }
+    ],
+    "maxLower": 149,
+    "maxRaise": 0,
+    "freeze": false
+   },
+   "maxAttempts": 4,
+   "downgraded": 0,
+   "downgradeBand": 100,
+   "riskZ": 128,
+   "contextEscalation": true,
+   "shadowEnabled": false,
+   "saturationDowngrade": false,
+   "timeoutFallback": false,
+   "fellBack": 0
+  },
+  {
+   "name": "smartrouter/uni",
+   "defaultTier": "low",
+   "selection": "ordered",
+   "classifier": "v2",
+   "firstByteTimeout": "40s",
+   "tiers": [
+    {
+     "name": "low",
+     "models": [
+      "uni/qwen3.8-27b"
+     ],
+     "minScore": 0
+    },
+    {
+     "name": "mid",
+     "models": [
+      "uni/glm-5.3-flash"
+     ],
+     "minScore": 150
+    },
+    {
+     "name": "top",
+     "models": [
+      "uni/deepseek-v4.1-flash-1017"
+     ],
+     "minScore": 350
+    }
+   ],
+   "keywordRules": [],
+   "contextTokens": 524288,
+   "stats": {
+    "scope": "shared",
+    "tiers": [
+     {
+      "name": "low",
+      "count": 35
+     },
+     {
+      "name": "mid",
+      "count": 44
+     },
+     {
+      "name": "top",
+      "count": 127
+     }
+    ],
+    "reasons": [
+     {
+      "name": "bump",
+      "count": 11
+     },
+     {
+      "name": "floor",
+      "count": 12
+     },
+     {
+      "name": "loop",
+      "count": 72
+     },
+     {
+      "name": "score",
+      "count": 108
+     },
+     {
+      "name": "session",
+      "count": 3
+     }
+    ],
+    "escalations": [],
+    "shadow": [],
+    "outcomes": [
+     {
+      "tier": "low",
+      "reason": "score",
+      "outcome": "ok",
+      "count": 16
+     },
+     {
+      "tier": "low",
+      "reason": "score",
+      "outcome": "bad",
+      "count": 7
+     },
+     {
+      "tier": "mid",
+      "reason": "score",
+      "outcome": "ok",
+      "count": 31
+     },
+     {
+      "tier": "mid",
+      "reason": "score",
+      "outcome": "bad",
+      "count": 2
+     },
+     {
+      "tier": "mid",
+      "reason": "session",
+      "outcome": "bad",
+      "count": 1
+     },
+     {
+      "tier": "mid",
+      "reason": "bump",
+      "outcome": "ok",
+      "count": 1
+     },
+     {
+      "tier": "mid",
+      "reason": "bump",
+      "outcome": "bad",
+      "count": 1
+     },
+     {
+      "tier": "top",
+      "reason": "score",
+      "outcome": "ok",
+      "count": 17
+     },
+     {
+      "tier": "top",
+      "reason": "score",
+      "outcome": "error",
+      "count": 4
+     },
+     {
+      "tier": "top",
+      "reason": "score",
+      "outcome": "bad",
+      "count": 10
+     },
+     {
+      "tier": "top",
+      "reason": "floor",
+      "outcome": "ok",
+      "count": 3
+     },
+     {
+      "tier": "top",
+      "reason": "floor",
+      "outcome": "error",
+      "count": 2
+     },
+     {
+      "tier": "top",
+      "reason": "session",
+      "outcome": "ok",
+      "count": 2
+     },
+     {
+      "tier": "top",
+      "reason": "loop",
+      "outcome": "ok",
+      "count": 72
+     },
+     {
+      "tier": "top",
+      "reason": "bump",
+      "outcome": "ok",
+      "count": 8
+     },
+     {
+      "tier": "top",
+      "reason": "bump",
+      "outcome": "bad",
+      "count": 1
+     }
+    ],
+    "requests": 206
+   },
+   "calibration": {
+    "mode": "shadow",
+    "delta": [
+     {
+      "tier": "mid",
+      "delta": 0
+     },
+     {
+      "tier": "top",
+      "delta": 0
+     }
+    ],
+    "maxLower": 149,
+    "maxRaise": 0,
+    "freeze": false
+   },
+   "maxAttempts": 4,
+   "downgraded": 0,
+   "downgradeBand": 100,
+   "riskZ": 128,
+   "contextEscalation": true,
+   "shadowEnabled": false,
+   "saturationDowngrade": false,
+   "timeoutFallback": true,
+   "fellBack": 0
+  }
+ ]
+}

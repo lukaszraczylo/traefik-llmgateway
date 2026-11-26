@@ -1,10 +1,10 @@
 <script setup lang="ts">
+import { Callout } from '@perfect-design/ui'
 import { computed, reactive, ref } from 'vue'
 
 import TargetPicker from '@/components/forms/TargetPicker.vue'
+import NumberField from '@/components/NumberField.vue'
 import SnippetBlock from '@/components/SnippetBlock.vue'
-import { Alert, AlertDescription } from '@/components/ui/alert'
-import { Input } from '@/components/ui/input'
 import { useTargetPicker } from '@/composables/useTargetPicker'
 import { groupLimitsSnippet, groupMemberLimitsSnippet, isValidNonNegative, isValidNonNegativeInt, userLimitsJsonFragment } from '@/lib/snippets'
 import type { LimitKey, LimitsConfig } from '@/types/api'
@@ -21,12 +21,20 @@ import type { LimitKey, LimitsConfig } from '@/types/api'
 const props = defineProps<{
   groupNames: string[]
   userNames: string[]
+  /** Pre-selects the target (a detail panel opens the form for its own entity). */
+  presetKind?: 'group' | 'user'
+  presetName?: string
 }>()
 
 const { targetKind, targetName, targetNames, nameValid, snippetLabel } = useTargetPicker(
   () => props.groupNames,
   () => props.userNames,
 )
+
+if (props.presetName) {
+  targetKind.value = props.presetKind ?? 'user'
+  targetName.value = props.presetName
+}
 
 /** INTEGER_FIELDS is every LimitsConfig field Go decodes as `int64` (llmgateway.go) — requestsPerMinute/requestsPerDay/tokensPerDay/tokensPerMonth reject a fractional value like "1.5" at json.Unmarshal outright (P2 item 12), unlike costPerDayUSD/costPerMonthUSD, which are `float64`. */
 const INTEGER_FIELDS = new Set<LimitKey>(['requestsPerMinute', 'requestsPerDay', 'tokensPerMinute', 'tokensPerDay', 'tokensPerMonth'])
@@ -58,24 +66,24 @@ const raw = reactive<Record<LimitKey, string>>({
 
 /** invalidFields lists every field whose entered text is non-empty but fails its own domain check (fieldValid above) — surfaced individually rather than one generic "invalid input" message, so the operator can see exactly which field to fix. Split by INTEGER_FIELDS so the error text is accurate for both: a fraction is invalid for requestsPerMinute etc. but perfectly valid for costPerDayUSD/costPerMonthUSD. */
 const invalidFields = computed(() =>
-  FIELDS.filter(({ key }) => raw[key].trim() !== '' && !fieldValid(key, Number(raw[key]))).map((f) => f.label),
+  FIELDS.filter(({ key }) => String(raw[key]).trim() !== '' && !fieldValid(key, Number(raw[key]))).map((f) => f.label),
 )
 /** fieldInvalid is the per-input twin of invalidFields, so each input can carry aria-invalid. */
 function fieldInvalid(key: (typeof FIELDS)[number]['key']): boolean {
-  return raw[key].trim() !== '' && !fieldValid(key, Number(raw[key]))
+  return String(raw[key]).trim() !== '' && !fieldValid(key, Number(raw[key]))
 }
 const invalidIntegerFields = computed(() =>
-  FIELDS.filter(({ key }) => INTEGER_FIELDS.has(key) && raw[key].trim() !== '' && !fieldValid(key, Number(raw[key]))).map((f) => f.label),
+  FIELDS.filter(({ key }) => INTEGER_FIELDS.has(key) && String(raw[key]).trim() !== '' && !fieldValid(key, Number(raw[key]))).map((f) => f.label),
 )
 const invalidDecimalFields = computed(() =>
-  FIELDS.filter(({ key }) => !INTEGER_FIELDS.has(key) && raw[key].trim() !== '' && !fieldValid(key, Number(raw[key]))).map((f) => f.label),
+  FIELDS.filter(({ key }) => !INTEGER_FIELDS.has(key) && String(raw[key]).trim() !== '' && !fieldValid(key, Number(raw[key]))).map((f) => f.label),
 )
 
 const limits = computed<LimitsConfig>(() => {
   const out: LimitsConfig = {}
   for (const { key } of FIELDS) {
     const value = Number(raw[key])
-    if (raw[key].trim() !== '' && fieldValid(key, value) && value > 0) out[key] = value
+    if (String(raw[key]).trim() !== '' && fieldValid(key, value) && value > 0) out[key] = value
   }
   return out
 })
@@ -112,10 +120,9 @@ const snippet = computed<string | null>(() => {
     <div class="grid grid-cols-1 gap-3 sm:grid-cols-3">
       <div v-for="field in FIELDS" :key="field.key" class="flex flex-col gap-1">
         <label :for="`limits-${field.key}`" class="text-xs font-medium text-muted-foreground">{{ field.label }}</label>
-        <Input
+        <NumberField
           :id="`limits-${field.key}`"
           v-model="raw[field.key]"
-          type="number"
           min="0"
           :step="INTEGER_FIELDS.has(field.key) ? '1' : 'any'"
           placeholder="unset"
@@ -125,12 +132,10 @@ const snippet = computed<string | null>(() => {
       </div>
     </div>
 
-    <Alert v-if="invalidFields.length" id="limits-errors" variant="destructive">
-      <AlertDescription>
+    <Callout v-if="invalidFields.length" id="limits-errors" type="danger" role="alert" size="sm">
         <p v-if="invalidIntegerFields.length">Enter a non-negative whole number for: {{ invalidIntegerFields.join(', ') }}.</p>
         <p v-if="invalidDecimalFields.length">Enter a non-negative number for: {{ invalidDecimalFields.join(', ') }}.</p>
-      </AlertDescription>
-    </Alert>
+      </Callout>
 
     <SnippetBlock v-if="snippet" :label="snippetLabel" :text="snippet" />
     <p v-else class="text-sm text-muted-foreground">Pick a target and at least one limit to build a snippet.</p>

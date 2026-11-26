@@ -8,6 +8,16 @@ import vue from '@vitejs/plugin-vue'
 // vitest.config.ts or a triple-slash type reference.
 import { defineConfig } from 'vitest/config'
 
+import { mockAdminApi } from './mock/server.ts'
+import { themeBoot } from './vite-plugins/theme-boot.ts'
+
+// MOCK=1 serves /admin/api/* from webui/mock (dev server only; apply: 'serve' keeps it out of vite build).
+const useMock = process.env.MOCK === '1'
+
+// Keep identical to adminCSP in ../admin.go: `vite preview` serves the built dist under it so a CSP violation shows up in the browser console.
+const ADMIN_CSP =
+  "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
+
 // https://vite.dev/config/
 export default defineConfig({
   // admin.go serves this build's index.html at GET /admin and every hashed
@@ -15,7 +25,7 @@ export default defineConfig({
   // emitted index.html's own <script>/<link> references resolve correctly
   // regardless of what path the browser first loaded the page from.
   base: '/admin/',
-  plugins: [vue(), tailwindcss()],
+  plugins: [vue(), tailwindcss(), themeBoot(), ...(useMock ? [mockAdminApi()] : [])],
   resolve: {
     alias: {
       '@': fileURLToPath(new URL('./src', import.meta.url)),
@@ -32,6 +42,7 @@ export default defineConfig({
     // polyfill has nothing to do here anyway.
     modulePreload: { polyfill: false },
   },
+  preview: { headers: { 'Content-Security-Policy': ADMIN_CSP } },
   server: {
     // `npm run dev` serves this app at :5173 (or whatever Vite picks), but
     // every fetch('/admin/api/...') (lib/api.ts) is a same-origin, relative
@@ -43,12 +54,14 @@ export default defineConfig({
     // (ADMIN_API_PROXY_TARGET) rather than hardcoded, since which gateway
     // instance a developer is pointed at varies by machine; the fallback
     // matches this repo's own `run-local`/integration default port.
-    proxy: {
-      '/admin/api': {
-        target: process.env.ADMIN_API_PROXY_TARGET ?? 'http://localhost:8080',
-        changeOrigin: true,
-      },
-    },
+    proxy: useMock
+      ? undefined
+      : {
+          '/admin/api': {
+            target: process.env.ADMIN_API_PROXY_TARGET ?? 'http://localhost:8080',
+            changeOrigin: true,
+          },
+        },
   },
   test: {
     // Deliberately narrow: lib/'s pure modules (search-expand.ts,

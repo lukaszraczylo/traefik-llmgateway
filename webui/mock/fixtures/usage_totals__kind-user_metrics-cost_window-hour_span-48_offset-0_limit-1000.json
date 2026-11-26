@@ -1,0 +1,29 @@
+{
+ "kind": "user",
+ "window": "hour",
+ "metrics": [
+  "cost"
+ ],
+ "rows": [
+  {
+   "values": {
+    "cost": 3836558
+   },
+   "id": "internal"
+  },
+  {
+   "values": {
+    "cost": 44946
+   },
+   "id": "user-20"
+  },
+  {
+   "values": {
+    "cost": 11551
+   },
+   "id": "service-01"
+  }
+ ],
+ "span": 48,
+ "offset": 0
+}

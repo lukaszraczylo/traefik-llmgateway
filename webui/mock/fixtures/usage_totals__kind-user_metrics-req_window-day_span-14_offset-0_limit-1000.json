@@ -1,0 +1,89 @@
+{
+ "kind": "user",
+ "window": "day",
+ "metrics": [
+  "req"
+ ],
+ "rows": [
+  {
+   "values": {
+    "req": 768837
+   },
+   "id": "internal"
+  },
+  {
+   "values": {
+    "req": 23868
+   },
+   "id": "user-03"
+  },
+  {
+   "values": {
+    "req": 8154
+   },
+   "id": "service-01"
+  },
+  {
+   "values": {
+    "req": 6502
+   },
+   "id": "user-13"
+  },
+  {
+   "values": {
+    "req": 2692
+   },
+   "id": "user-02"
+  },
+  {
+   "values": {
+    "req": 1650
+   },
+   "id": "user-20"
+  },
+  {
+   "values": {
+    "req": 538
+   },
+   "id": "user-06"
+  },
+  {
+   "values": {
+    "req": 341
+   },
+   "id": "user-08"
+  },
+  {
+   "values": {
+    "req": 182
+   },
+   "id": "user-18"
+  },
+  {
+   "values": {
+    "req": 174
+   },
+   "id": "user-07"
+  },
+  {
+   "values": {
+    "req": 121
+   },
+   "id": "user-16"
+  },
+  {
+   "values": {
+    "req": 88
+   },
+   "id": "admin"
+  },
+  {
+   "values": {
+    "req": 7
+   },
+   "id": "user-05"
+  }
+ ],
+ "span": 14,
+ "offset": 0
+}

@@ -1,0 +1,145 @@
+{
+ "kind": "provider",
+ "window": "day",
+ "rows": [
+  {
+   "id": "alibaba",
+   "count": 0,
+   "attempts": 0,
+   "failures": 0
+  },
+  {
+   "id": "amd",
+   "count": 0,
+   "attempts": 0,
+   "failures": 0
+  },
+  {
+   "id": "anthropic",
+   "count": 0,
+   "attempts": 0,
+   "failures": 0
+  },
+  {
+   "id": "cerebras",
+   "count": 0,
+   "attempts": 0,
+   "failures": 0
+  },
+  {
+   "id": "codex",
+   "count": 0,
+   "attempts": 0,
+   "failures": 0
+  },
+  {
+   "id": "copilot",
+   "count": 0,
+   "attempts": 0,
+   "failures": 0
+  },
+  {
+   "id": "deepseek",
+   "count": 0,
+   "attempts": 0,
+   "failures": 0
+  },
+  {
+   "p50Ms": 10746.124031007752,
+   "p95Ms": 279000,
+   "p99Ms": 526220.9302325577,
+   "ttfbP50Ms": 1980.8978032473733,
+   "ttfbP95Ms": 237209.3023255814,
+   "id": "gx10",
+   "count": 2715,
+   "attempts": 6409,
+   "failures": 7,
+   "timeouts": 7
+  },
+  {
+   "id": "macstudio",
+   "count": 0,
+   "attempts": 0,
+   "failures": 0
+  },
+  {
+   "p50Ms": 2545.300113250283,
+   "p95Ms": 25607.142857142844,
+   "p99Ms": 95317.24137931068,
+   "ttfbP50Ms": 1298.9203778677463,
+   "ttfbP95Ms": 8007.009345794387,
+   "id": "minimax",
+   "count": 2593,
+   "attempts": 2673,
+   "failures": 134
+  },
+  {
+   "id": "nvidia-nim",
+   "count": 0,
+   "attempts": 0,
+   "failures": 0
+  },
+  {
+   "id": "nvidia-retrieval",
+   "count": 0,
+   "attempts": 0,
+   "failures": 0
+  },
+  {
+   "id": "openai",
+   "count": 0,
+   "attempts": 0,
+   "failures": 0
+  },
+  {
+   "id": "openai-audio",
+   "count": 0,
+   "attempts": 0,
+   "failures": 0
+  },
+  {
+   "id": "parakeet-mlx",
+   "count": 0,
+   "attempts": 0,
+   "failures": 0
+  },
+  {
+   "id": "piper-tts",
+   "count": 0,
+   "attempts": 0,
+   "failures": 0
+  },
+  {
+   "p50Ms": 55.639155022988604,
+   "p95Ms": 4429.8625504527035,
+   "p99Ms": 29041.113972955518,
+   "ttfbP50Ms": 54.053775580986986,
+   "ttfbP95Ms": 210.34469816687695,
+   "id": "uni",
+   "count": 372483,
+   "attempts": 376745,
+   "failures": 311,
+   "timeouts": 5
+  },
+  {
+   "id": "xai",
+   "count": 0,
+   "attempts": 0,
+   "failures": 0
+  },
+  {
+   "p50Ms": 175,
+   "p95Ms": 242.5,
+   "p99Ms": 248.5,
+   "ttfbP50Ms": 175,
+   "ttfbP95Ms": 242.5,
+   "id": "xiaomi",
+   "count": 1,
+   "attempts": 1,
+   "failures": 0
+  }
+ ],
+ "span": 7,
+ "offset": 0,
+ "latencyEnabled": true
+}

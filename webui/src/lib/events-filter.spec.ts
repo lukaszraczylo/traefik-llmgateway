@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { eventKindVariant, EVENT_KIND_LABEL, EVENT_KINDS, filterEvents, kindLabel } from './events-filter'
+import { eventFilterFromParams, eventKindVariant, EVENT_KIND_LABEL, EVENT_KINDS, filterEvents, itemsFromFilter, kindLabel, paramsFromItems } from './events-filter'
 import type { AdminEventView } from '@/types/api'
 
 function event(overrides: Partial<AdminEventView> = {}): AdminEventView {
@@ -30,7 +30,7 @@ describe('EVENT_KIND_LABEL', () => {
 describe('EVENT_KINDS', () => {
   it('contains every known AdminEventKind, derived from EVENT_KIND_LABEL', () => {
     expect(EVENT_KINDS).toEqual(Object.keys(EVENT_KIND_LABEL))
-    expect(EVENT_KINDS).toEqual(['rate_limit', 'budget', 'store_down', 'upstream', 'timeout', 'unpriced', 'capacity'])
+    expect(EVENT_KINDS).toEqual(['rate_limit', 'budget', 'store_down', 'upstream', 'timeout', 'unpriced', 'capacity', 'paced', 'router_escalation', 'router_timeout_fallback'])
   })
 
   it('every entry has a truthy label (no silently-empty display text)', () => {
@@ -124,5 +124,49 @@ describe('filterEvents', () => {
 
   it('returns an empty array when nothing matches', () => {
     expect(filterEvents(events, { kind: 'unpriced', user: '' })).toEqual([])
+  })
+})
+
+describe('filterEvents provider and route', () => {
+  const rows = [
+    event({ provider: 'alibaba', route: 'chat/completions' }),
+    event({ provider: 'amd', route: 'embeddings' }),
+    event({ route: 'pricing', kind: 'unpriced' }),
+  ]
+  it('matches provider exactly, case-insensitively', () => {
+    expect(filterEvents(rows, { kind: '', user: '', provider: 'AMD' })).toHaveLength(1)
+  })
+  it('matches route by substring', () => {
+    expect(filterEvents(rows, { kind: '', user: '', route: 'chat' })).toHaveLength(1)
+  })
+  it('ignores absent provider and route filters', () => {
+    expect(filterEvents(rows, { kind: '', user: '' })).toHaveLength(3)
+  })
+})
+
+describe('EVENT_KIND_LABEL router_escalation and paced', () => {
+  it('labels both', () => {
+    expect(EVENT_KIND_LABEL.paced).toBeTruthy()
+    expect(EVENT_KIND_LABEL.router_escalation).toBeTruthy()
+  })
+})
+
+describe('event filter hash params', () => {
+  it('reads the four params, dropping empties', () => {
+    expect(eventFilterFromParams({ kind: 'upstream', user: ' bob ', provider: 'amd', route: '' })).toEqual({ kind: 'upstream', user: 'bob', provider: 'amd', route: '' })
+  })
+  it('round-trips through filter items', () => {
+    const f = { kind: 'upstream', user: 'bob', provider: 'amd', route: 'chat' }
+    expect(eventFilterFromParams(paramsFromItems(itemsFromFilter(f)))).toEqual(f)
+  })
+  it('keeps one value per field, the last winning', () => {
+    const items = [
+      { id: 'a', field: 'kind', value: 'budget' },
+      { id: 'b', field: 'kind', value: 'upstream' },
+    ]
+    expect(paramsFromItems(items)).toEqual({ kind: 'upstream' })
+  })
+  it('ignores unknown fields', () => {
+    expect(paramsFromItems([{ id: 'a', field: 'nope', value: 'x' }])).toEqual({})
   })
 })

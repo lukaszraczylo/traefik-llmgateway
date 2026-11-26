@@ -427,6 +427,7 @@ also a construction error, never a panic (`providers.go`, `mcp_a2a.go`,
 | `pathBaseUrls` | `map[string]string` | `{}` | Only for `openai`-type providers. Maps a native passthrough path prefix (such as `/v1/decide`) to a base URL, for requests whose body names no `modelBaseUrls` model. Longest prefix wins, matched on whole path segments. Same URL rules as `modelBaseUrls`. |
 | `passthrough` | `*bool` | `nil` (enabled) | `nil` or `true`: this provider's native passthrough route (`/{name}/...`) stays reachable, unchanged from before this field existed. `false`: the route is disabled — `ServeHTTP` treats it exactly like an unconfigured provider name, falling through to the ordinary unknown-route 404 without even reaching authentication. Does not affect the MCP/A2A target proxy, which has its own routing prefix. |
 | `requestTimeout` | `string` (Go duration) | Inherits the top-level `requestTimeout` (`5m` if that is also unset) | Overrides the global request timeout for this provider alone, including its native passthrough route — see [Request timeout](#request-timeout). An explicit override always wins over the global default. Empty inherits; a value that fails to parse, or parses to zero or a negative duration, is a construction error. |
+| `promptCache` | `*PromptCacheConfig` | `nil` (off) | Opt-in prompt-caching body changes. `inject: true` (`anthropic` type only) adds `cache_control` breakpoints. `key: true` (`openai` type only) adds a hashed `prompt_cache_key`. A wrong provider type is a construction error that names the provider. See [Prompt caching](#prompt-caching). |
 
 ### `GroupConfig`
 
@@ -719,6 +720,33 @@ byte-identically to before multi-group support existed.
 | `failOpen` | `*bool` | `true` | `true`: a Redis error switches that operation to the in-process fallback store and logs (rate-limited to once per 30s). `false`: a Redis error returns 503 instead of enforcing against a non-shared fallback. |
 | `poolSize` | `int` | `0` (self-tuned) | Maximum pooled RESP connections. `0` self-tunes from the host's `GOMAXPROCS`, clamped to `4`-`8`; an explicit value always overrides the auto-tuned size (house engineering rule), up to a maximum of `256`. Negative, or above that maximum, is a construction error. |
 | `tls` | `bool` | `false` | Dial Redis over TLS instead of plaintext, verifying the server certificate against `address`'s host. `false` preserves a plaintext connection exactly as before this field existed; enable it unless the path to Redis is already encrypted some other way (service-mesh mTLS, an stunnel/TLS sidecar, a private link). |
+| `sharedState` | `*bool` | `false` | Share breaker, in-flight, token-size and failed-auth state across replicas. Needs `address`; `true` without it is a construction error. See [Shared state across replicas](#shared-state-across-replicas). |
+
+### Shared state across replicas
+
+Traefik calls `New()` once per route and runs several pods. Without `redis.sharedState`, each pod and each route instance keeps its own breaker and in-flight state. A dead provider then needs 3 failures on every pod before every pod skips it. Each pod also sees only a part of the real in-flight count.
+
+`redis.sharedState: true` shares six states through Redis. It is off by default. It needs `redis.address`. With the switch off, or with no `redis` block, behaviour does not change and the gateway never reads or writes the keys below.
+
+| State | Key prefix | What is shared |
+|---|---|---|
+| Failover request breaker | `llmgw:brk:req:{provider}:` | Consecutive failure count, open-until time, number of trips. |
+| Discovery breaker | `llmgw:brk:disc:{provider}:` | The same three values. The discovered model sets are not shared. |
+| Decision-model breaker | `llmgw:brk:dec:{provider}:` | The same three values, one breaker per decision provider. |
+| Busy-provider tracking | `llmgw:inf:{provider}:` | In-flight count (started and finished counters per 5 minute epoch) and the limit learned from a 429 (10 minute expiry). |
+| Token-size estimate | `llmgw:cal:{provider}/{model}:` | Day counters of prompt bytes, prompt tokens and samples. |
+| Failed-auth count | `llmgw:authfail:{minute}:{source IP}` | Failed API-key checks per source IP per minute (2 minute expiry). |
+
+How it works:
+
+- A breaker counts consecutive failures across all replicas. A success on any replica resets the count and closes an open breaker. A replica whose flush leaves the count at or above the threshold opens the breaker for all replicas, unless its last refresh already shows the breaker open. Two replicas can then open it at nearly the same time. A success also resets the doubling of the open time. Open times and thresholds are the local ones: 3 failures and 30 seconds, doubling to 5 minutes, for the request breaker; the `breaker` block for the discovery breaker, counted on each instance (see below); 3 failures and 30 seconds for the decision breaker.
+- A breaker reads as open when its local breaker or the shared breaker is open.
+- With `redis.sharedState` on, the discovery `breaker.failureThreshold` still counts consecutive failed refreshes on one route instance. Each instance runs its own discovery loop. When one instance opens its own breaker, the shared breaker opens for every instance of every replica. Failures spread over several instances do not add up, so one failed round across the fleet does not open the shared breaker.
+- In-flight load is the larger of the local count and the shared count. The read window is the longest request timeout in 5 minute epochs, plus one epoch. A request stops counting when its start epoch leaves the window. A request timeout is progress-based: a stream that keeps sending data can run longer than the timeout. Such a stream drops out of the shared count when the window passes, so the shared count can be too low for long streams. It is never too high because of them.
+- The request path never calls Redis. It reads a local copy. A background loop sends the counts and refreshes the copy every second, so a change on one replica reaches the others in about 1 second. The token-size estimate refreshes every 60 seconds with the router learning loop, and it applies after 50 shared samples.
+- A Redis outage never fails or slows a request, and `redis.failOpen` does not apply to this state. After 3 failed refreshes in a row the gateway drops the shared values and uses its own local state. A failed token-size refresh keeps the last ratios.
+- The failed-auth count only decides when the gateway logs the "throttle engaged" line for a source IP. It never rejects a request. A replica sends its failures with the next flush and reads the fleet count from the reply, so its view can lag by 1 second. A replica queues at most 4096 source IPs per minute; an IP past that keeps only its local count.
+- While you change the switch on a rolling restart, replicas with the switch off write nothing. Counts can then be too low for a short time. Turn the switch on after the code is deployed on every replica.
 
 ### `RetryConfig`
 
@@ -742,7 +770,7 @@ byte-identically to before multi-group support existed.
 
 | Field | Type | Default | Semantics |
 |---|---|---|---|
-| `failureThreshold` | `int` | `3` | Consecutive failed discovery refreshes that open the breaker — see [Provider health](#provider-health-discovery-circuit-breaker). `0` uses the default. Must be between `1` and `100`, or construction fails. |
+| `failureThreshold` | `int` | `3` | Consecutive failed discovery refreshes that open the breaker — see [Provider health](#provider-health-discovery-circuit-breaker). With `redis.sharedState` on, the first instance that reaches it opens the breaker for the whole fleet — see [Shared state across replicas](#shared-state-across-replicas). `0` uses the default. Must be between `1` and `100`, or construction fails. |
 | `openDuration` | `string` (Go duration) | `1m` | Base backoff a newly opened breaker waits before its first half-open probe; doubles on every further failed probe, capped at `maxOpenDuration`. Invalid or non-positive duration string is a construction error. |
 | `maxOpenDuration` | `string` (Go duration) | `6h` | Ceiling on the backoff `openDuration` doubles into. Must be `>= openDuration` and no more than `24h`, or construction fails. Deliberately longer than the default `discoveryInterval` (1h) — see [Provider health](#provider-health-discovery-circuit-breaker) for why a value at or below `discoveryInterval` suppresses nothing. |
 
@@ -790,6 +818,8 @@ gates only the background probe sweep.
 |---|---|---|
 | `inputPerM` | `float64` | USD per 1,000,000 input/prompt tokens. |
 | `outputPerM` | `float64` | USD per 1,000,000 output/completion tokens. |
+| `cachedInputPerM` | `*float64` | Optional. USD per 1,000,000 prompt tokens read from the provider prompt cache. Must be 0 or more. Absent: the `inputPerM` rate applies. See [Prompt caching](#prompt-caching). |
+| `cacheWritePerM` | `*float64` | Optional. USD per 1,000,000 prompt tokens written to the provider prompt cache (Anthropic). Must be 0 or more. Absent: the `inputPerM` rate applies. |
 
 ### `ModelMetaConfig` (a `modelMeta` entry)
 
@@ -1105,6 +1135,13 @@ All keys sit under `smartRouters.<name>`. The gateway refuses the config when a 
 | `contextEscalation` | `true` | Skip models whose known context window is too small. |
 | `saturationDowngrade` | `false` | Start one tier lower when the classified tier is full. Needs two tiers. |
 | `downgradeBand` | `100` | Points above a threshold in which a downgrade can happen, 0 to 300. |
+| `decision` | none | Ask a THX-02 decision model about requests near a tier boundary. See [Decision model assist](#decision-model-assist). The router needs `classifier: v2`. |
+| `decision.provider` | required | Name of the `providers` entry that serves the decision path. |
+| `decision.path` | `/v1/decide` | Decision endpoint. It must start with `/`. The provider needs a `pathBaseUrls` prefix that matches it. |
+| `decision.mode` | `shadow` | `off`, `shadow`, or `live`. |
+| `decision.timeout` | `500ms` | Go duration for one call, `50ms` to `2s`. |
+| `decision.minProb` | `700` | Least answer probability that can move a tier, per mille, 1 to 1000. |
+| `decision.band` | `100` | Score distance from a tier boundary that triggers a call, 1 to 1000. |
 
 ### Tiers, scoring and floors
 
@@ -1138,6 +1175,45 @@ A shadow scoring runs beside the live one and never changes routing. Use one of 
 - **`shadowClassifier: v2`**: scores each request with v2 on a v1 router.
 
 For each request the gateway counts the live tier against the shadow tier. It stores no prompt text and no per-request record. The counters use monthly buckets, shared through Redis when configured and kept per instance otherwise. The admin Models page shows the counts as an agreement matrix: rows hold the live tier, columns hold the shadow tier, and the diagonal holds the requests where both agree. Mass below the diagonal means the shadow routes lower. Mass above it means the shadow routes higher.
+
+### Decision model assist
+
+A router can ask a THX-02 decision model to settle requests that the v2 score cannot place with confidence. The feature is off when `decision` is absent. A router without it routes as before.
+
+```yaml
+decision:
+  provider: gx10
+  mode: shadow
+  timeout: 500ms
+  minProb: 700
+  band: 100
+```
+
+- **Requirements**: the router needs `classifier: v2`. The `provider` must exist and must have a `pathBaseUrls` prefix that matches `path` on whole path segments. The gateway refuses the config otherwise. The provider must also have `type: openai`. Any other type passes validation, but every call fails with the outcome `error`. With `mode: off` the gateway skips these checks and sends no calls.
+- **When it asks**: the gateway calls the model only when all of these hold. The score step decided the tier, so a session-pinned request never asks. The request has user text. The score lies within `band` of the threshold of any tier above the first. The threshold is the tier `minScore` after the live calibration offset. In `live` mode the gateway also skips the call when a floor or keyword rule already sets the tier at or above one step over the heuristic tier, because no answer can change the result. `shadow` mode still calls, so the statistics stay complete.
+- **Request**: the gateway sends the first 1024 bytes of the system text, a blank line, and the first 8192 bytes of the newest user ask. A cut that falls inside a multi-byte character moves back to the character start. The v2 score does not use these cut texts. It also sends the tier names, cheapest first. The model returns one probability for each tier. The tier with the highest probability is the model tier.
+- **One-step limit**: the model can move the tier by one step toward its own tier, never further. It can move the tier only when its probability reaches `minProb`. A lower probability counts as `lowconf` and changes nothing. A moved tier gets the routing reason `model`, unless a floor or keyword rule then raises it.
+- **Shadow and live**: `shadow` makes the same call and records the same outcome, but never changes the tier or the reason. Run `shadow` first, compare the grid, then set `live`.
+- **Floors still win**: keyword rules and floors, such as `toolsMinTier`, run after the model. They only raise a tier. The model can lower a tier, but it cannot go below a floor.
+- **Fallback**: on a timeout, an error, an open breaker, or a low probability, the heuristic tier stands. The request never waits longer than `timeout`. A client that cancels during the call records `error` and does not count toward the breaker. A non-2xx status, bad JSON, or an unknown tier index counts as an error.
+- **Breaker**: three failures in a row (timeouts or errors) open the breaker for 30 seconds. The gateway makes no calls while it is open. One success resets the count.
+- **Cache**: each router keeps up to 1024 answers in memory for 10 minutes. The key is a hash of the text sent to the model. The cache holds the tier and the probability, not the text. A hit has the outcome `cache` and applies like a fresh answer.
+- **Outcomes**: a request that is not near a boundary records nothing. Each other request records one outcome.
+
+| Outcome | Meaning |
+|---|---|
+| `agree` | The model tier equals the heuristic tier. |
+| `override` | The model tier differs and its probability reached `minProb`. In `live` mode the tier moves. |
+| `lowconf` | The probability of the answer is below `minProb`. The gateway checks this first, so an answer that agrees can still be `lowconf`. |
+| `timeout` | The call exceeded `timeout`. |
+| `error` | The call failed, returned a non-2xx status, or returned an answer the gateway cannot read. |
+| `breaker` | The breaker was open, so the gateway made no call. |
+| `cache` | A cached answer served the request. |
+
+- **Metrics**: `llmgateway_router_decision_total{router,outcome}` counts the outcomes. `llmgateway_router_decision_tiers_total{router,heuristic,model}` counts the heuristic tier against the model tier. It counts only answers from the model or the cache.
+- **Saturation**: the saturation downgrade applies only when the reason is `score`. A tier that the model raised or lowered has the reason `model`, so the downgrade skips it.
+- **Admin panel**: the router panel shows the decision settings and the outcome counts. It also shows a grid with the heuristic tier in the rows and the model tier in the columns. Mass off the diagonal shows where the model disagrees.
+- **No retention**: the gateway does not store or log prompt text for this feature. No log line, event, or counter holds it. The decision call writes no log line.
 
 ### Sessions
 
@@ -1981,6 +2057,67 @@ cached bodies for the same request.
   rate-limited) and never fails the request; the upstream call still
   happens and the client still gets a correct answer.
 
+## Prompt caching
+
+Agent traffic repeats about 95% of the prompt on every turn. Only the model server can reuse that prefix. The gateway cannot cache it. The gateway does three things instead. It measures cache use, it prices it, and (opt-in) it helps the server hit its own cache.
+
+### Measured fields
+
+The gateway reads cache tokens from the upstream usage object. This works on stream, non-stream and passthrough paths.
+
+| Provider | Cache-read field | Cache-write field |
+|---|---|---|
+| OpenAI-compatible | `usage.prompt_tokens_details.cached_tokens` | none |
+| DeepSeek | `usage.prompt_cache_hit_tokens` | none |
+| Anthropic | `usage.cache_read_input_tokens` | `usage.cache_creation_input_tokens` |
+| Gemini | `usageMetadata.cachedContentTokenCount` | none |
+
+If a provider sends both OpenAI and DeepSeek fields, the larger value wins. The gateway does not add them.
+
+Cached tokens still count toward the day and month token limits. Only the per-minute window excludes cached reads.
+
+### Cost
+
+Set `cachedInputPerM` and `cacheWritePerM` under `pricing.<model>` (USD per million tokens, 0 or more, both optional). The built-in table carries LiteLLM cache prices. A missing cache price falls back to `inputPerM`. The gateway computes the cost as:
+
+```
+cost = (prompt - cached - cacheWrite) * inputPerM
+     + cached * cachedInputPerM
+     + cacheWrite * cacheWritePerM
+     + completion * outputPerM
+```
+
+The gateway clamps `cached` and `cacheWrite` to the prompt size, so the uncached share is never negative. Cache writes can cost more than plain input, so a write-heavy first turn can cost more than an uncached one.
+
+Release note: cost now drops for cached traffic wherever a cached price is known. This corrects a prior over-count. Cost budgets (`costPerDayUSD`, `costPerMonthUSD`) therefore consume more slowly for cached traffic.
+
+### Observability
+
+- `/metrics`: `llmgateway_prompt_cache_tokens_total{provider,model,kind}`, where `kind` is `read`, `write` or `uncached`. With `redis` the counter is fleet-wide. Without it, the counter is per instance. See [Metrics](#metrics).
+- Admin: limit-store counters (shared through Redis when Redis is configured) back the cache totals. `GET /admin/api/usage/models?detail=1` adds `promptCacheReadTokens`, `promptCacheWriteTokens` and `promptCacheSavedMicroUsd` to each row. Rows omit these fields without `detail`.
+- Dashboard: a "Prompt cache" hit-rate column (read tokens divided by input tokens) on Usage by model and in the model panel, and a "Prompt-cache savings" tile.
+
+### Options
+
+Both options sit under `providers.<name>.promptCache`. Both default to off. With no option set, the gateway sends request bodies upstream unchanged.
+
+```yaml
+providers:
+  anthropic:
+    type: anthropic
+    apiKey: env:ANTHROPIC_API_KEY
+    promptCache: {inject: true}
+  openai:
+    type: openai
+    apiKey: env:OPENAI_API_KEY
+    promptCache: {key: true}
+```
+
+- `inject: true` (`anthropic` type only). The gateway adds up to 4 rolling `cache_control: {type: ephemeral}` breakpoints: the last tool, the last system block, and the last content block of the second-to-last and last user messages. If the request already carries any `cache_control`, the gateway adds none. It applies to translated chat requests and to `/v1/messages`.
+- `key: true` (`openai` type only). When the client sent no `prompt_cache_key`, the gateway sets one: a 32-character hex hash of the caller and the conversation id. A client value, even an empty one, always wins. The key never contains a raw id or prompt text. It does not change the response-cache key.
+
+The chat-to-Anthropic translation always keeps a `cache_control` marker that the client put on a system message.
+
 ## Provider health (discovery circuit breaker)
 
 A per-provider, in-memory, three-state circuit breaker (`closed` →
@@ -2385,7 +2522,7 @@ or in CI.
   `openUntil` is the zero time when `healthState` is not `"open"`. Each
   alias entry carries its own `modelMeta` too. `usage`
   returns every user's and every group's
-  current-window counter values — `requestsPerMinute`, `requestsPerDay`,
+  current-window counter values — `requestsPerMinute`, `tokensPerMinute`, `requestsPerDay`,
   `rejectionsPerDay` (every `checkAndCount` rejection attributed to this
   scope today — fleet-wide via the shared store, folded into the same
   round trip the rejection itself already pays, so it costs no extra
@@ -2926,31 +3063,20 @@ detail mode.
 
 ### Dashboard
 
-The dashboard was redesigned around a left sidebar of seven pages
-(`webui/src/lib/pages.ts`) replacing the earlier flat-tab shell
-(`ChartsView.vue`/`UsageChart.vue`/`UsageView.vue`/`ProvidersView.vue`,
-and `composables/useTabHash.ts`, all deleted): a request only needs to
-answer one question ("what does this page show"), instead of a tab whose
-own content changed shape depending on a second `tab=` sub-parameter.
+The dashboard has a left sidebar of nine pages (`webui/src/lib/pages.ts`). A request answers one question per page. The sidebar groups them (`webui/src/lib/nav-groups.ts`):
 
-- **Sidebar pages** (`SidebarNav.vue`, horizontal-scrolling on narrow
-  screens): **Home** (spend today/MTD vs. budget, projected month-end,
-  req/min, fleet error rate, open breakers, top 5 users/models, latest
-  events, config warnings + unpriced-model count), **Spend** (stacked
-  time-series with optional dashed period-over-period comparison,
-  burn-down vs. budget with a projected run-out date, group→user→model
-  attribution drill-down, a pricing-health table surfacing unpriced
-  served models first, and a cost-avoided card for free-tier usage
-  against a reference paid model), **Consumers** (the user/group
-  directory — reusing the usage table/bars this section already
-  documented — an access matrix of group × provider/MCP/agent, and a
-  per-user detail view with its own timeline and recent errors),
-  **Models** (the model catalog joined with usage and p50/p95/error-rate
-  performance, and the provider health panel moved from the old
-  Providers tab), **Reliability** (per-provider error-rate/failover/
-  timeout/402 time series, plus the events feed), **Config** (the
-  redacted config tree and the change helper, below), and **MCP &
-  Agents** (unchanged target list, now with a per-caller breakdown card).
+- **Overview**, **Usage & spend** and **Reliability** hold the fleet-wide views.
+- **Users & groups**, **Models & providers**, **Smart routers** and **MCP & agents** hold the directories. Each row opens a detail panel.
+- **Events** and **Config** complete the list.
+
+Page details:
+
+- **Usage & spend**: a Cost avoided card prices the free-tier tokens (input and output) against two reference models. The first is MiniMax M3.1 Flash. The card uses the gateway catalog price when the catalog has one, else a built-in list price of 0.15 USD input and 0.60 USD output per million tokens. The second is the latest priced `anthropic/claude-sonnet-*` model in the catalog. It shows `n/a` when the catalog has none (`webui/src/lib/cost-avoided.ts`).
+- **Users & groups**: the user and group detail panels show a Tokens/min meter next to Requests/min. The meter reads `tokensPerMinute` from `GET /admin/api/usage`, the live fixed-window count per scope.
+- **Usage & spend** also shows a "Prompt cache" hit-rate column on Usage by model and a "Prompt-cache savings" tile. The model panel shows the same hit rate. See [Prompt caching](#prompt-caching).
+- **Models & providers**: the model panel shows Vision as `yes`, `no` or `unknown`, from `modelMeta.vision`.
+- **Smart routers**: the router panel shows the decision model settings, the heuristic-by-model tier grid and the outcome counts. See [Decision model assist](#decision-model-assist).
+
 - **Global filter bar** (`GlobalFilterBar.vue`, under the header, applies
   to every page except MCP & Agents): a `range` preset — `24h`, `48h`,
   `7d` (default), `14d`, `30d`, `3mo`, `6mo`, or `12mo`, each a fixed
@@ -2966,27 +3092,10 @@ own content changed shape depending on a second `tab=` sub-parameter.
   `2×30=60` already exceeds it), and `12mo` (span 12 of 13) cannot be
   compared (the toggle disables itself with a "retention limit" reason);
   the other five ranges can.
-- **Hash schema**: `#<page>?range=7d&cmp=prev&scope=group:friends&<page
-  params>` — global filters and page-specific params share one
-  `location.hash`, so a link or a reload restores exactly what was
-  showing; a default value is always OMITTED from the hash rather than
-  written out explicitly. Per-page params: Spend `by=provider|model|group`,
-  `metric=cost|req|tokin|tokout`, `ref=<canonical>` (cost-avoided
-  reference model), `drill=group:x|user:x` (attribution breadcrumb);
-  Consumers `q`, `view=directory|matrix`, `user=<name>`; Models `q`,
-  `model=<canonical>`; Reliability `provider`, `kind`, `user`; Config
-  `helper=limits|grant|pricing|model|user`; MCP & Agents `q`,
-  `target=mcp/x`. **Legacy mapping** (`LEGACY_PAGE_MAP`,
-  `lib/hash-state.ts`): a bookmark or shared link built against the old
-  shell still lands somewhere sensible — `#providers`→`models`,
-  `#usage`→`consumers`, `#charts`→`spend`, `#events`→`reliability`;
-  `#targets` keeps its own name (the one page that did not move). A
-  legacy hash's own query params never carry over — none of the old
-  names (`#charts`'s `tab=models&metric=cost`, for instance) map cleanly
-  onto the new page's own param names, so a legacy link lands on a clean
-  instance of its mapped page rather than misapplying a stale param.
-- **Config page's change helper** (`ChangeHelper.vue`) is five forms —
-  limits, an access grant, pricing, model metadata, and a new user — each
+- **Hash schema**: `#<page>?range=7d&cmp=prev&scope=group:friends&<page params>`. Global filters and page params share one `location.hash`, so a link or a reload restores what was showing. A default value is omitted from the hash. Page params include `by` and `metric` on Usage & spend, `q`, `provider`, `kind` and `price` on Models & providers, `tab`, `q` and `group` on Users & groups, and `sel` for the open detail panel. **Legacy mapping** (`LEGACY_PAGE_MAP`, `lib/hash-state.ts`): `#home` opens `overview`, `#spend` and `#charts` open `usage`, `#consumers` opens `users`, and `#providers` opens `models`. A legacy hash drops its old query params.
+- **Config page's change helper** (`ChangeHelperPanel.vue`) is six forms —
+  limits, an access grant, pricing, model metadata, a new user, and a smart
+  router — each
   producing a paste-ready YAML or `users.json` snippet
   (`lib/snippets.ts`/`lib/yaml-emit.ts`) in the exact shape the
   production config repo actually uses (nested at
@@ -3126,11 +3235,24 @@ plugin's config.
     carries the identical measurements broken out per `(provider, stream,
     model)` too. These are distinct metric names, not the unlabelled pair
     re-emitted under a wider label set, so a query against the unlabelled
-    families is unaffected either way.
+    families is unaffected either way. With `redis` and
+    `admin.stats.latency`, all four read the shared latency counters (UTC
+    day window; counters restart at the day rollover, which `rate()` treats
+    as a reset) and `_sum` starts at the deploy, so it can lag `_count` on
+    the first day; otherwise they are per process. On rollout day,
+    streaming latency recorded before the upgrade shows as `stream="false"`
+    until the day rolls over.
   - `llmgateway_router_requests_total{router,tier,reason}` /
     `llmgateway_router_escalations_total{router,from_tier,to_tier}` —
-    per-process counters for [smart routers](#smart-routers). They
-    appear after the first routed request.
+    counters for [smart routers](#smart-routers). They appear after the
+    first routed request. With `redis` and `admin.enabled`, they and the
+    decision families read the shared router counters (month window), so
+    every replica reports the fleet-wide value; otherwise they are per
+    process.
+  - `llmgateway_prompt_cache_tokens_total{provider,model,kind}` — prompt
+    tokens by `kind`: `read`, `write` or `uncached`. With `redis` it reads
+    the model-scope counters (UTC month window), so it is fleet-wide;
+    otherwise it is per instance. See [Prompt caching](#prompt-caching).
   - `llmgateway_provider_healthy{provider}` — `1`/`0` gauge from the
     discovery circuit breaker (`healthState` in the admin API); see
     [Provider health](#provider-health-discovery-circuit-breaker).
@@ -3152,7 +3274,11 @@ plugin's config.
   - `llmgateway_rate_limit_rejections_total{scope_kind,scope_id}` — how
     many requests a rate or budget limit actually refused, by scope. This
     one has no equivalent in the admin JSON API: nothing else tracks it.
-    It does **not** reset only on process restart: a scope's own count
+    With `redis` it is a UTC-month counter shared by all replicas
+    (`user` and `group` scopes only; `store_down` rejections stay local and
+    are not exported; a series disappears when its user or group is
+    removed from config). Without `redis`, it does **not** reset only on
+    process restart: a scope's own count
     also resets to `0` when that user is removed via a hot-reloaded users
     file, and **every** tracked scope resets together, in one bulk cliff,
     the instant more than 2000 distinct scopes have ever been seen in
@@ -3178,13 +3304,18 @@ plugin's config.
   becomes the correct aggregation instead. This flips on that one config
   bit; know which one you are running before wiring an alert. Four
   families do **not** follow this rule:
-  - `llmgateway_rate_limit_rejections_total` lives only in each replica's
-    own process memory, **never** in Redis, regardless of the `redis`
-    config — `sum()` is always correct for it.
+  - Without `redis`, `llmgateway_rate_limit_rejections_total` and the
+    `llmgateway_usage_provenance_*` families live only in each replica's
+    own process memory — `sum()` is correct for them. With `redis` they
+    read shared month-window counters instead and follow the `max()`
+    rule, like the router, latency and prompt-cache families.
   - `llmgateway_provider_healthy` reflects each replica's own,
-    independently-running discovery circuit breaker — never shared via
-    Redis either — so two replicas can legitimately disagree about one
-    provider's health at the same instant. Read it per-instance where
+    independently-running discovery circuit breaker, so two replicas can
+    legitimately disagree about one provider's health at the same
+    instant. With `redis.sharedState` on, the gauge is also 0 while the
+    shared discovery breaker is open (see
+    [Shared state across replicas](#shared-state-across-replicas)), and
+    replicas agree within about 1 second. Read it per-instance where
     possible; if you must aggregate, `min()` surfaces "at least one
     replica sees this provider as unhealthy" — `sum()` is meaningless for
     a 0/1 gauge.
@@ -3198,6 +3329,20 @@ plugin's config.
     itself be read from the store it describes, so it is inherently
     per-replica too. Same guidance as `llmgateway_provider_healthy`:
     prefer per-instance, `min()` if you must aggregate.
+
+- **Store-backed families**: with `redis` configured, these families
+  read shared counters and take `max()`: `llmgateway_requests_total`,
+  `llmgateway_tokens_total`, `llmgateway_cost_micro_usd_total`,
+  `llmgateway_budget_consumed_ratio`, the `llmgateway_provider_*_total`
+  families, `llmgateway_rate_limit_rejections_total`, the
+  `llmgateway_usage_provenance_*` families and
+  `llmgateway_prompt_cache_tokens_total`. The `llmgateway_router_requests_total`,
+  `llmgateway_router_escalations_total` and `llmgateway_router_decision_*`
+  families need `admin.enabled` as well. The upstream
+  latency histograms need `admin.stats.latency` as well. Without `redis`,
+  or without those options, they are per process and take `sum()`.
+  `redis.sharedState` does not change which metric families are
+  store-backed.
 
 - **Labels are escaped**: a label value that is user- or
   upstream-controlled (a user/group name, a model id) is escaped for

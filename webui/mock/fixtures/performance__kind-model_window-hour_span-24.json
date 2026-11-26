@@ -1,0 +1,152 @@
+{
+ "kind": "model",
+ "window": "hour",
+ "rows": [
+  {
+   "p50Ms": 50.01306999709556,
+   "p95Ms": 95.02483299448156,
+   "p99Ms": 99.02587859424922,
+   "ttfbP50Ms": 50.011617437774106,
+   "ttfbP95Ms": 95.0220731317708,
+   "id": "uni/text-embedding-multilingual-e5-base",
+   "count": 68878,
+   "attempts": 69573,
+   "failures": 0
+  },
+  {
+   "p50Ms": 5109.682299546142,
+   "p95Ms": 164509.6153846152,
+   "p99Ms": 272901.9230769229,
+   "ttfbP50Ms": 280.4176755447942,
+   "ttfbP95Ms": 16215.240641711202,
+   "id": "uni/deepseek-v4-flash-0731",
+   "count": 4697,
+   "attempts": 4781,
+   "failures": 18
+  },
+  {
+   "p50Ms": 1992.391304347826,
+   "p95Ms": 11994.444444444449,
+   "p99Ms": 27688.461538461543,
+   "ttfbP50Ms": 835.8610567514677,
+   "ttfbP95Ms": 4425.909090909093,
+   "id": "uni/glm-5.3-flash",
+   "count": 1501,
+   "attempts": 1506,
+   "failures": 0
+  },
+  {
+   "p50Ms": 3558.011049723757,
+   "p95Ms": 24139.534883720906,
+   "p99Ms": 57733.333333333314,
+   "ttfbP50Ms": 1298.5611510791366,
+   "ttfbP95Ms": 4954.347826086955,
+   "id": "minimax/MiniMax-M3.1-Flash",
+   "count": 836,
+   "attempts": 948,
+   "failures": 109
+  },
+  {
+   "p50Ms": 5848.484848484849,
+   "p95Ms": 152999.9999999997,
+   "p99Ms": 274028.5714285712,
+   "ttfbP50Ms": 236.8421052631579,
+   "ttfbP95Ms": 673.5294117647053,
+   "id": "uni/qwen3.8-flash-next",
+   "count": 706,
+   "attempts": 715,
+   "failures": 5
+  },
+  {
+   "p50Ms": 3476.923076923077,
+   "p95Ms": 25333.333333333314,
+   "p99Ms": 104800.00000000017,
+   "ttfbP50Ms": 95.65217391304348,
+   "ttfbP95Ms": 3574.999999999996,
+   "id": "uni/deepseek-v4.1-flash-1017",
+   "count": 176,
+   "attempts": 181,
+   "failures": 0
+  },
+  {
+   "p50Ms": 1636.3636363636363,
+   "p95Ms": 8666.666666666666,
+   "p99Ms": 13999.999999999985,
+   "ttfbP50Ms": 1636.3636363636363,
+   "ttfbP95Ms": 8666.666666666666,
+   "id": "minimax/MiniMax-M3",
+   "count": 140,
+   "attempts": 140,
+   "failures": 0
+  },
+  {
+   "p50Ms": 293.60465116279073,
+   "p95Ms": 7854.166666666664,
+   "p99Ms": 9570.833333333332,
+   "ttfbP50Ms": 224.21875,
+   "ttfbP95Ms": 7854.166666666664,
+   "id": "uni/qwen3.8-27b",
+   "count": 103,
+   "attempts": 104,
+   "failures": 0
+  },
+  {
+   "p50Ms": 6000,
+   "p95Ms": 59499.999999999956,
+   "p99Ms": 226199.99999999933,
+   "ttfbP50Ms": 1800,
+   "ttfbP95Ms": 13166.666666666653,
+   "id": "gx10/DeepSeek-V4.1-Flash-EXL3",
+   "count": 82,
+   "attempts": 82,
+   "failures": 0
+  },
+  {
+   "p50Ms": 650,
+   "p95Ms": 1433.3333333333323,
+   "p99Ms": 1886.6666666666654,
+   "ttfbP50Ms": 562.5,
+   "ttfbP95Ms": 1433.3333333333323,
+   "id": "gx10/Qwen3.8-27B",
+   "count": 34,
+   "attempts": 34,
+   "failures": 0
+  },
+  {
+   "p50Ms": 5000,
+   "p95Ms": 23999.999999999993,
+   "p99Ms": 28799.999999999996,
+   "ttfbP50Ms": 5000,
+   "ttfbP95Ms": 23999.999999999993,
+   "id": "gx10/Inkling-2-Mini",
+   "count": 16,
+   "attempts": 17,
+   "failures": 0
+  },
+  {
+   "p50Ms": 3000,
+   "p95Ms": 4800,
+   "p99Ms": 4960,
+   "ttfbP50Ms": 3000,
+   "ttfbP95Ms": 4800,
+   "id": "uni/ornith-1.5-397b",
+   "count": 4,
+   "attempts": 4,
+   "failures": 0
+  },
+  {
+   "p50Ms": 375,
+   "p95Ms": 487.5,
+   "p99Ms": 497.5,
+   "ttfbP50Ms": 375,
+   "ttfbP95Ms": 487.5,
+   "id": "uni/model-light",
+   "count": 1,
+   "attempts": 1,
+   "failures": 0
+  }
+ ],
+ "span": 24,
+ "offset": 0,
+ "latencyEnabled": true
+}

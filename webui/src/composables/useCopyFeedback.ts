@@ -1,9 +1,9 @@
 import { onUnmounted, ref, type Ref } from 'vue'
 
-/** RESET_MS is how long a copy-feedback state (`copied`/`selected`/`failed`) stays visible before reverting to `idle` — SnippetBlock.vue's and ModelChip.vue's own identical 1500ms. */
+/** RESET_MS is how long a copy-feedback state (`copied`/`selected`/`failed`) stays visible before reverting to `idle` */
 const RESET_MS = 1500
 
-/** CopyFeedbackState mirrors lib/clipboard.ts's copyText own return union, plus the resting `idle` state neither SnippetBlock.vue nor ModelChip.vue had a name for before this composable. */
+/** CopyFeedbackState mirrors lib/clipboard.ts's copyText own return union, plus the resting `idle` state. */
 export type CopyFeedbackState = 'idle' | 'copied' | 'selected' | 'failed'
 
 export interface UseCopyFeedback {
@@ -15,10 +15,9 @@ export interface UseCopyFeedback {
 
 /**
  * useCopyFeedback (reuse-audit.md F10) is the ONE "show a transient copy
- * outcome, then revert to idle after 1500ms" composable SnippetBlock.vue
- * and ModelChip.vue used to each hand-roll — the same `state` ref/
- * `resetTimer`/`clearTimeout`-on-unmount triple, with the identical
- * 1500ms magic number declared independently in both. Calls
+ * outcome, then revert to idle after 1500ms" composable: one `state` ref/
+ * `resetTimer`/`clearTimeout`-on-unmount triple behind a single 1500ms
+ * constant. Calls
  * `onUnmounted` itself (this composable is only ever invoked from a
  * component's own `setup()`/`<script setup>`, same as every other
  * composable in this panel), so a caller no longer needs its own cleanup

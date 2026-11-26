@@ -7,7 +7,7 @@ import { useToastsStore } from '@/stores/toasts'
 import type { AdminEventsResponse, AdminEventView } from '@/types/api'
 
 /** How often the Events view polls while mounted — same cadence as the Providers/Usage/Targets dashboard poll (stores/dashboard.ts's own POLL_MS): a rate-limit/upstream event is exactly the kind of thing an operator wants to see within a few seconds, not thirty. */
-const POLL_MS = 5000
+export const EVENTS_POLL_MS = 5000
 
 /** EVENTS_LIMIT matches the ring's own fixed capacity (events.go: eventRingCap, admin.go: adminEventsMaxLimit) — asking for fewer would silently hide events the ring/Redis list still holds. */
 const EVENTS_LIMIT = 200
@@ -56,7 +56,7 @@ export const useEventsStore = defineStore('events', {
     kindFilter: '',
     userFilter: '',
     poller: undefined as VisibilityPoller | undefined,
-    /** Mirrors dashboard.ts's own in-flight guard: a round trip slower than POLL_MS must never stack a second refresh() on top of the first. */
+    /** Mirrors dashboard.ts's own in-flight guard: a round trip slower than EVENTS_POLL_MS must never stack a second refresh() on top of the first. */
     refreshing: false,
     /** toastedForFailure mirrors dashboard.ts's own flag: states-plan.md item 3's "one toast per failure streak per store until it recovers". */
     toastedForFailure: false,
@@ -108,10 +108,10 @@ export const useEventsStore = defineStore('events', {
     setUserFilter(user: string): void {
       this.userFilter = user
     },
-    /** startPolling is idempotent, driven by the shared createVisibilityPoller (lib/polling.ts, F5) — an immediate fetch, then every POLL_MS while the tab is visible. */
+    /** startPolling is idempotent, driven by the shared createVisibilityPoller (lib/polling.ts, F5) — an immediate fetch, then every EVENTS_POLL_MS while the tab is visible. */
     startPolling(): void {
       if (this.poller) return
-      this.poller = createVisibilityPoller({ intervalMs: POLL_MS, tick: () => void this.refresh() })
+      this.poller = createVisibilityPoller({ intervalMs: EVENTS_POLL_MS, tick: () => void this.refresh() })
       this.poller.start()
     },
     stopPolling(): void {

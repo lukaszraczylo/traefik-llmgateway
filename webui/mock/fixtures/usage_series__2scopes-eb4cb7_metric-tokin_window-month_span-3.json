@@ -1,0 +1,30 @@
+{
+ "metric": "tokin",
+ "window": "month",
+ "buckets": [
+  "202609",
+  "202610",
+  "202611"
+ ],
+ "series": [
+  {
+   "scope": "group:friends",
+   "points": [
+    0,
+    0,
+    3973568175
+   ]
+  },
+  {
+   "scope": "group:home",
+   "points": [
+    0,
+    0,
+    1819990209
+   ]
+  }
+ ],
+ "unknown": [],
+ "span": 3,
+ "offset": 0
+}

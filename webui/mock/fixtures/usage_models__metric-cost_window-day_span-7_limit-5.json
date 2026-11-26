@@ -1,0 +1,20 @@
+{
+ "metric": "cost",
+ "window": "day",
+ "models": [
+  {
+   "id": "minimax/MiniMax-M3",
+   "value": 5530972
+  },
+  {
+   "id": "minimax/MiniMax-M2.5-highspeed",
+   "value": 5678
+  },
+  {
+   "id": "minimax/MiniMax-M2.5",
+   "value": 4010
+  }
+ ],
+ "span": 7,
+ "offset": 0
+}

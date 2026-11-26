@@ -37,6 +37,9 @@ type anthropicAdapter struct {
 	// defaultRequestTimeout at construction rather than left at its zero
 	// value the way retry is.
 	timeout time.Duration
+	// cacheInject adds cache_control breakpoints to translated requests
+	// (promptCache.inject). false (the default) leaves the body unchanged.
+	cacheInject bool
 }
 
 // newAnthropicAdapter returns an anthropicAdapter for provider name, with
@@ -127,6 +130,11 @@ func (a *anthropicAdapter) chatCompletion(ctx context.Context, w http.ResponseWr
 	body, err := anthropicRequestFromOpenAI(req)
 	if err != nil {
 		return usage{}, err
+	}
+
+	if a.cacheInject {
+		injected, _ := injectCacheControl(body)
+		body = injected
 	}
 
 	hdr := a.requestHeaders(true)

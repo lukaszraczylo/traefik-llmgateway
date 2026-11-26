@@ -1,0 +1,23 @@
+{
+ "kind": "group",
+ "window": "day",
+ "metrics": [
+  "req"
+ ],
+ "rows": [
+  {
+   "values": {
+    "req": 785354
+   },
+   "id": "home"
+  },
+  {
+   "values": {
+    "req": 27792
+   },
+   "id": "friends"
+  }
+ ],
+ "span": 14,
+ "offset": 0
+}

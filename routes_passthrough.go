@@ -583,11 +583,13 @@ type passthroughUsagePayload struct {
 		CacheCreationInputTokens int64 `json:"cache_creation_input_tokens"`
 		CacheReadInputTokens     int64 `json:"cache_read_input_tokens"`
 		// PromptDetails carries the OpenAI-shaped cached_tokens count.
-		PromptDetails promptTokenDetails `json:"prompt_tokens_details"`
+		PromptDetails        promptTokenDetails `json:"prompt_tokens_details"`
+		PromptCacheHitTokens int64              `json:"prompt_cache_hit_tokens"`
 	} `json:"usage"`
 	UsageMetadata struct {
-		PromptTokenCount     int64 `json:"promptTokenCount"`
-		CandidatesTokenCount int64 `json:"candidatesTokenCount"`
+		PromptTokenCount        int64 `json:"promptTokenCount"`
+		CandidatesTokenCount    int64 `json:"candidatesTokenCount"`
+		CachedContentTokenCount int64 `json:"cachedContentTokenCount"`
 	} `json:"usageMetadata"`
 }
 
@@ -615,11 +617,11 @@ func extractPassthroughUsage(typeName, providerName string, body []byte) (usage,
 
 	switch typeName {
 	case providerTypeOpenAI:
-		return usage{prompt: payload.Usage.PromptTokens, completion: payload.Usage.CompletionTokens, cached: payload.Usage.PromptDetails.CachedTokens}, model, err
+		return usage{prompt: payload.Usage.PromptTokens, completion: payload.Usage.CompletionTokens, cached: cachedPromptTokens(payload.Usage.PromptDetails.CachedTokens, payload.Usage.PromptCacheHitTokens)}, model, err
 	case providerTypeAnthropic:
-		return usage{prompt: payload.Usage.InputTokens + payload.Usage.CacheCreationInputTokens + payload.Usage.CacheReadInputTokens, completion: payload.Usage.OutputTokens, cached: payload.Usage.CacheReadInputTokens}, model, err
+		return usage{prompt: payload.Usage.InputTokens + payload.Usage.CacheCreationInputTokens + payload.Usage.CacheReadInputTokens, completion: payload.Usage.OutputTokens, cached: payload.Usage.CacheReadInputTokens, cacheWrite: payload.Usage.CacheCreationInputTokens}, model, err
 	case providerTypeGemini:
-		return usage{prompt: payload.UsageMetadata.PromptTokenCount, completion: payload.UsageMetadata.CandidatesTokenCount}, model, err
+		return usage{prompt: payload.UsageMetadata.PromptTokenCount, completion: payload.UsageMetadata.CandidatesTokenCount, cached: payload.UsageMetadata.CachedContentTokenCount}, model, err
 	default:
 		return usage{}, model, err
 	}
@@ -667,6 +669,7 @@ func extractPassthroughSSEUsage(typeName, providerName string, head, tail []byte
 	if tailUsage.prompt > 0 {
 		u.prompt = tailUsage.prompt
 		u.cached = tailUsage.cached
+		u.cacheWrite = tailUsage.cacheWrite
 	}
 	if tailUsage.completion > 0 {
 		u.completion = tailUsage.completion
@@ -712,7 +715,7 @@ func parseSSEUsageChunk(typeName string, raw []byte) (usage, string) {
 				return nil
 			}
 			if chunk.Usage.PromptTokens > 0 || chunk.Usage.CompletionTokens > 0 {
-				u = usage{prompt: chunk.Usage.PromptTokens, completion: chunk.Usage.CompletionTokens, cached: chunk.Usage.PromptDetails.CachedTokens}
+				u = usage{prompt: chunk.Usage.PromptTokens, completion: chunk.Usage.CompletionTokens, cached: cachedPromptTokens(chunk.Usage.PromptDetails.CachedTokens, chunk.Usage.PromptCacheHitTokens)}
 			}
 			if chunk.Model != "" {
 				model = chunk.Model
@@ -739,6 +742,7 @@ func parseSSEUsageChunk(typeName string, raw []byte) (usage, string) {
 				}
 				u.prompt = payload.Message.Usage.InputTokens + payload.Message.Usage.CacheCreationInputTokens + payload.Message.Usage.CacheReadInputTokens
 				u.cached = payload.Message.Usage.CacheReadInputTokens
+				u.cacheWrite = payload.Message.Usage.CacheCreationInputTokens
 				if payload.Message.Usage.OutputTokens > 0 {
 					u.completion = payload.Message.Usage.OutputTokens
 				}
@@ -1460,6 +1464,13 @@ func (g *Gateway) handlePassthrough(w http.ResponseWriter, r *http.Request, u *u
 		extras.lat = latSample
 		extras.hasLat = true
 	}
+	extras.promptCacheSaved = unifiedPromptCacheSaved(providerName+"/"+billModel, billModel, respUsage, g.cfg.Pricing, g.cfg.ModelMeta)
+	// The echoed id is upstream-controlled; an uncatalogued one must not mint label series.
+	statModel := respModel
+	if canonical == "" {
+		statModel = "unknown"
+	}
+	g.recordPromptCache(providerName, statModel, respUsage)
 	g.limiter.accountWith(withModelScope(scopes, canonical), respUsage, cost, extras)
 }
 

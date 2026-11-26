@@ -322,7 +322,7 @@ func evalSessionRouter(tb testing.TB, mins [3]int) *smartRouter {
 func classifyInSession(rt *smartRouter, req map[string]any, endpoint string, st smartSession, now int64) (smartClassification, *smartSessionRun) {
 	f := extractSmartV2(req, endpoint)
 	sc := &smartSessionRun{rt: rt, key: "eval", sess: st, now: now}
-	return classifySmartWith(rt, req, endpoint, &f, sc), sc
+	return classifySmartWith(rt, req, endpoint, &f, sc, nil), sc
 }
 
 // replaySession runs every earlier user ask of the fixture's conversation through the router in order.

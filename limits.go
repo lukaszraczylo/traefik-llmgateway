@@ -574,6 +574,29 @@ type usage struct {
 	// cache (Anthropic cache reads, OpenAI cached_tokens). The minute token
 	// window excludes it; the day and month windows keep the full prompt.
 	cached int64
+	// cacheWrite is the part of prompt the provider wrote to its prompt
+	// cache (Anthropic cache_creation_input_tokens); included in prompt.
+	cacheWrite int64
+}
+
+// uncachedPrompt returns the prompt tokens billed at the full input price.
+func (u usage) uncachedPrompt() int64 {
+	n := u.prompt - u.cached - u.cacheWrite
+	if n < 0 {
+		return 0
+	}
+	return n
+}
+
+// cachedPromptTokens returns the cache-read count of an OpenAI-shaped
+// usage object. DeepSeek reports prompt_cache_hit_tokens; OpenAI reports
+// prompt_tokens_details.cached_tokens. A provider sending both is not
+// summed: the larger wins.
+func cachedPromptTokens(details, deepSeekHits int64) int64 {
+	if deepSeekHits > details {
+		return deepSeekHits
+	}
+	return details
 }
 
 // total returns the request's combined prompt and completion tokens.
@@ -1885,6 +1908,9 @@ func (l *limiter) settleRejection(entries []counterIncr, violatedIdx int, scopes
 	if totalPresent {
 		comp = append(comp, rejectionCounterIncr(totalScopeKind, totalScopeID, windowDay, wb.day, et.day))
 	}
+	if l.store != nil {
+		comp = append(comp, rejectionCounterIncr(violated.kind, violated.id, windowMonth, wb.month, et.month))
+	}
 	// rej/hour (always-on-with-admin, DECISIONS): rides this SAME
 	// compensation batch, never a second round trip, alongside the
 	// existing always-on rej/day entries above.
@@ -1901,13 +1927,16 @@ func (l *limiter) settleRejection(entries []counterIncr, violatedIdx int, scopes
 
 // rejectionCounterIncr builds the single rej counterIncr entry
 // settleRejection adds per scope it attributes a rejection to, for window
-// (windowDay, always-on; windowHour, admin-gated) — delta 1, ttl the
-// window's own matching constant (dayWindowTTL/hourWindowTTL), enforceTTL
-// the caller's own et.day/et.hour.
+// (windowDay, always-on; windowHour, admin-gated; windowMonth, store-only,
+// read by /metrics) — delta 1, ttl the window's own matching constant,
+// enforceTTL the caller's own et value.
 func rejectionCounterIncr(kind, id, window, bucket string, enforceTTL time.Duration) counterIncr {
 	ttl := dayWindowTTL
-	if window == windowHour {
+	switch window {
+	case windowHour:
 		ttl = hourWindowTTL
+	case windowMonth:
+		ttl = monthWindowTTL
 	}
 	return counterIncr{key: windowKeyForBucket(kind, id, metricRej, window, bucket), delta: 1, ttl: ttl, enforceTTL: enforceTTL}
 }
@@ -1962,6 +1991,15 @@ type accountExtras struct {
 	// increments prov/{failoverFrom}:fover when non-empty and admin stats
 	// are on.
 	failoverFrom string
+	// provenance is a completed candidate's usage provenance (empty for none);
+	// with a store, accountWith mirrors it, and provenanceTokens, into the
+	// shared month counters.
+	provenance string
+	// calibration is the shared token-calibrator counters of this call; accountWith adds them only with a store.
+	calibration []counterIncr
+	// promptCacheSaved is the micro-USD the provider prompt cache saved this call.
+	promptCacheSaved int64
+	provenanceTokens int64
 	// lat/hasLat carry one completed upstream watchdogBody's latency
 	// sample (metrics.go), when withLatencyRecorder was wired for this
 	// call and it actually fired — hasLat false means no sample arrived
@@ -1976,6 +2014,8 @@ type accountExtras struct {
 	// calling it); recordCacheHit, below, is that path's own async
 	// counterpart.
 	cacheMiss bool
+	// responseCacheHit marks a gateway-cache replay: no provider prompt cache was involved.
+	responseCacheHit bool
 	// noModelHistograms suppresses accountWith's own model-scope latency
 	// AND user x model (umodel) writes even when scopes DOES carry a
 	// kindModel scope (P13 fix, admin dashboard redesign verify round:
@@ -2051,6 +2091,14 @@ func (l *limiter) accountWith(scopes []limitScope, u usage, costMicros int64, x 
 		}
 	}
 
+	var pcRead, pcWrite, pcSave int64
+	if !x.responseCacheHit {
+		pcRead, pcWrite, _ = splitPromptTokens(u)
+		pcSave = x.promptCacheSaved
+		if pcSave < 0 || pcSave > maxCostMicrosPerRequest {
+			pcSave = 0
+		}
+	}
 	entries := make([]counterIncr, 0, len(scopes)*12+16)
 	userScopeCount := 0
 	var userScopeID string
@@ -2108,6 +2156,10 @@ func (l *limiter) accountWith(scopes []limitScope, u usage, costMicros int64, x 
 				counterIncr{key: windowKeyForBucket(sc.kind, sc.id, metricTokIn, windowDay, wb.day), delta: u.prompt, ttl: dayWindowTTL, enforceTTL: et.day},
 				counterIncr{key: windowKeyForBucket(sc.kind, sc.id, metricTokIn, windowMonth, wb.month), delta: u.prompt, ttl: monthWindowTTL, enforceTTL: et.month},
 			)
+		}
+		// Only the model scope is ever read (admin usage/models).
+		if sc.kind == kindModel {
+			entries = appendPromptCacheEntries(entries, sc, pcRead, pcWrite, pcSave, wb, et)
 		}
 		if u.completion != 0 {
 			entries = append(entries,
@@ -2175,12 +2227,20 @@ func (l *limiter) accountWith(scopes []limitScope, u usage, costMicros int64, x 
 	// each hour+day, duration always, TTFB only when the sample carries
 	// one (a body that never delivered a successful byte has nothing
 	// meaningful to report there).
+	if x.provenance != "" && l.store != nil {
+		entries = append(entries, provenanceEntries(x.provider, x.provenance, x.provenanceTokens, wb.month)...)
+	}
+
+	if l.store != nil && len(x.calibration) > 0 {
+		entries = append(entries, x.calibration...)
+	}
+
 	if x.hasLat && l.statsLatency {
 		if x.provider != "" {
-			entries = append(entries, latencyCounterEntries(kindProvider, x.provider, x.lat, wb, et)...)
+			entries = append(entries, latencyCounterEntries(kindProvider, x.provider, x.lat, wb, et, l.store != nil)...)
 		}
 		if hasModelScope && !x.noModelHistograms {
-			entries = append(entries, latencyCounterEntries(kindModel, modelCanonical, x.lat, wb, et)...)
+			entries = append(entries, latencyCounterEntries(kindModel, modelCanonical, x.lat, wb, et, l.store != nil)...)
 		}
 	}
 
@@ -2212,8 +2272,8 @@ func (l *limiter) accountWith(scopes []limitScope, u usage, costMicros int64, x 
 // provider and, separately, for the served model. latencyBucketIndex
 // (metrics.go) already folds "past every configured bound" into its own
 // returned index (len(latencyBucketBounds)), so no separate overflow
-// branch is needed here.
-func latencyCounterEntries(kind, id string, lat latencySample, wb windowBuckets, et enforceTTLSet) []counterIncr {
+// branch is needed here. fleet adds the shared-store sum counters, which only a configured store reads.
+func latencyCounterEntries(kind, id string, lat latencySample, wb windowBuckets, et enforceTTLSet, fleet bool) []counterIncr {
 	durIdx, _ := latencyBucketIndex(lat.duration)
 	durMetric := latencyDurationMetric(durIdx)
 	out := []counterIncr{
@@ -2228,7 +2288,10 @@ func latencyCounterEntries(kind, id string, lat latencySample, wb windowBuckets,
 			counterIncr{key: windowKeyForBucket(kind, id, ttfbMetric, windowDay, wb.day), delta: 1, ttl: dayWindowTTL, enforceTTL: et.day},
 		)
 	}
-	return out
+	if !fleet {
+		return out
+	}
+	return append(out, fleetLatencyEntries(kind, id, lat, wb, et)...)
 }
 
 // recordCacheHit accounts one response-cache HIT (Q7, DECISIONS:
@@ -2940,17 +3003,9 @@ func (l *limiter) providerUsage(scopes []limitScope) []providerCounters {
 }
 
 // usageKeysPerScope is the number of windowKey strings usageWindowKeys
-// builds per scope, and the stride currentUsage's flat storeGetMulti
-// result is sliced back into per-scope chunks by. Named here, closing a
-// v0.2 final review wave follow-up (2026-08-20) that flagged the previous
-// literal "6" as a magic-number stride: this task grows the per-scope key
-// count from 6 to 8 for the tokens-in/tokens-out split, which is exactly
-// the moment a silent off-by-N here would have gone unnoticed. F4 (v0.3
-// dashboard task) grows it again, 8 to 9, for the fleet-wide
-// rejectionsPerDay counter (metricRej) usageWindowKeys now appends. Grows
-// once more, 9 to 10, for the last-seen counter (Q6, DECISIONS) — see
-// usageWindowKeys' own doc comment for the appended field's position.
-const usageKeysPerScope = 11
+// builds per scope, and the stride currentUsage's flat storeGetMulti result
+// is sliced back into per-scope chunks by. Keep in step with usageWindowKeys.
+const usageKeysPerScope = 13
 
 // scopeUsage is one scope's (a user's, a group's, or the synthetic total
 // scope's — totalScopeKind) current-window counter values — the admin
@@ -2985,6 +3040,8 @@ type scopeUsage struct {
 	lastSeen int64
 	// exemptPerMonth is the scope's limit-exempt request count this month.
 	exemptPerMonth int64
+	// tokensPerMinute is the minute-window uncached input plus output; 0 for scopes with no tokensPerMinute limit (nothing is written).
+	tokensPerMinute int64
 	// storeDown reports whether reading any of the usageKeysPerScope
 	// counters above failed closed (a configured store errored and
 	// failOpen is false) — mirrors limitViolation.storeDown. Every value
@@ -3017,6 +3074,8 @@ func usageWindowKeys(sc limitScope, now time.Time) []string {
 		windowKey(sc.kind, sc.id, metricRej, windowDay, now),
 		lastSeenKey(sc.kind, sc.id),
 		windowKey(sc.kind, sc.id, metricExempt, windowMonth, now),
+		windowKey(sc.kind, sc.id, metricTokIn, windowMin, now),
+		windowKey(sc.kind, sc.id, metricTokOut, windowMin, now),
 	}
 }
 
@@ -3092,6 +3151,7 @@ func (l *limiter) currentUsage(scopes []limitScope) []scopeUsage {
 			tokensOutPerDay: v[4], tokensOutPerMonth: v[5],
 			costPerDayMicros: v[6], costPerMonthMicros: v[7],
 			rejectionsPerDay: v[8], lastSeen: v[9], exemptPerMonth: v[10],
+			tokensPerMinute: v[11] + v[12],
 		}
 	}
 	return out
@@ -3172,6 +3232,22 @@ func historyBucketKeysAt(kind, id, metric, window string, now time.Time, span, o
 		buckets[i] = bucketFor(t, window)
 	}
 	return keys, buckets
+}
+
+// monthsTouched returns the windowMonth span and offset (relative to now)
+// covering every calendar month that historyBucketKeysAt's own span of window
+// buckets falls in. For windowMonth it returns span and offset unchanged.
+func monthsTouched(window string, now time.Time, span, offset int) (monthSpan, monthOffset int) {
+	newest := now
+	if offset > 0 {
+		newest = historyStepBack(now, window, offset)
+	}
+	oldest := historyStepBack(newest, window, span-1)
+	monthIndex := func(t time.Time) int {
+		u := t.UTC()
+		return u.Year()*12 + int(u.Month())
+	}
+	return monthIndex(newest) - monthIndex(oldest) + 1, monthIndex(now) - monthIndex(newest)
 }
 
 // historyBucketKeys returns the span counterStore keys and their matching

@@ -10,7 +10,7 @@
 // function here directly, no component mount required.
 import { sumGroupBudgetMicros } from '@/lib/kpi'
 import { microsToUsd } from '@/lib/usage-bars'
-import type { AdminGroupView, AdminUsageEntryView, LimitsConfig } from '@/types/api'
+import type { AdminGroupView, AdminUsageEntryView, AdminUsageResponse, LimitsConfig } from '@/types/api'
 
 /** ScopeKind is every prefix a "kind:id" scope string can carry across this panel — not every caller accepts every kind (a Spend burn-down scope never carries 'provider', a Reliability series scope never carries 'group'/'user'), but the prefix syntax itself is the same everywhere. */
 export type ScopeKind = 'group' | 'user' | 'model' | 'provider'
@@ -88,4 +88,14 @@ export function scopeBudgetLimits(scope: string, groups: AdminGroupView[], users
   if (parsed.kind === 'group') return groups.find((g) => g.name === parsed.id)?.limits
   if (parsed.kind === 'user') return users.find((u) => u.id === parsed.id)?.limits
   return undefined
+}
+
+/** scopeMtdMicros reads the month-to-date cost (micro-USD) of the scope's own entry in the polled usage snapshot; 0 when it has none (provider scope, unknown id, no snapshot yet). */
+export function scopeMtdMicros(scope: string, usage: AdminUsageResponse | null): number {
+  if (!usage) return 0
+  const parsed = parseScope(scope)
+  if (!parsed) return usage.total.costPerMonthMicroUsd
+  if (parsed.kind === 'group') return usage.groups.find((g) => g.id === parsed.id)?.costPerMonthMicroUsd ?? 0
+  if (parsed.kind === 'user') return usage.users.find((u) => u.id === parsed.id)?.costPerMonthMicroUsd ?? 0
+  return 0
 }

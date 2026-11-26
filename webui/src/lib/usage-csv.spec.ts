@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { usageCsv } from './usage-csv'
+import { breakdownCsv, usageCsv } from './usage-csv'
 import type { AdminUsageEntryView } from '@/types/api'
 
 function testEntry(overrides: Partial<AdminUsageEntryView> = {}): AdminUsageEntryView {
@@ -93,3 +93,14 @@ describe('usageCsv', () => {
 // modelRankingCsv/modelDetailCsv (and their own describe blocks here)
 // were removed with the functions themselves (P3 item 25, dead code) —
 // see usage-csv.ts's own doc comment.
+
+describe('breakdownCsv', () => {
+  it('exports id, selected metric and share', () => {
+    const csv = breakdownCsv('user', 'req', [{ id: 'alice', value: 9, share: 0.75 }, { id: 'bob', value: 3, share: null }])
+    expect(csv.trim().split(/\r?\n/)).toEqual(['user,req,share', 'alice,9,0.75', 'bob,3,'])
+  })
+
+  it('labels the cost column with its unit', () => {
+    expect(breakdownCsv('group', 'cost', []).split(/\r?\n/)[0]).toBe('group,cost (micro-USD),share')
+  })
+})

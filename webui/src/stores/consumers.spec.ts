@@ -334,3 +334,35 @@ describe('evictOldestDetails', () => {
     expect(Object.keys(detail).sort()).toEqual(want)
   })
 })
+
+describe('useConsumersStore.fetchUserModels', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    mockedAdminFetch.mockReset()
+    useAuthStore().submit('test-admin-key')
+  })
+
+  it('fetches only the usermodel totals', async () => {
+    mockedAdminFetch.mockResolvedValue(emptyTotals)
+    const store = useConsumersStore()
+    await store.fetchUserModels('alice', 'day', 7)
+    expect(mockedAdminFetch).toHaveBeenCalledTimes(1)
+    expect(String(mockedAdminFetch.mock.calls[0]?.[0])).toContain('kind=usermodel')
+    expect(store.models.alice).toMatchObject({ loading: false, error: '', unavailable: false })
+    expect(store.models.alice?.totals).toEqual(emptyTotals)
+  })
+
+  it('a 404 marks the feature unavailable without an error', async () => {
+    mockedAdminFetch.mockRejectedValue(new AdminApiError('not found', 404))
+    const store = useConsumersStore()
+    await store.fetchUserModels('alice', 'day', 7)
+    expect(store.models.alice).toMatchObject({ unavailable: true, error: '', totals: null })
+  })
+
+  it('other failures surface as an error', async () => {
+    mockedAdminFetch.mockRejectedValue(new AdminApiError('boom', 500))
+    const store = useConsumersStore()
+    await store.fetchUserModels('alice', 'day', 7)
+    expect(store.models.alice?.error).not.toBe('')
+  })
+})

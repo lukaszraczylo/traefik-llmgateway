@@ -6,6 +6,8 @@
 // ts's `test` block) exercise the threshold math directly, with no
 // component mount required.
 
+import type { AdminProviderView, ProviderHealthState } from '@/types/api'
+
 /**
  * PROVIDER_RATE_AMBER_THRESHOLD is the day-window success-rate fraction
  * (0-1) at and above which a provider or model reads as healthy ("muted"
@@ -64,7 +66,7 @@ export function providerRateStatus(rate: number | null): ProviderRateStatus {
 
 /**
  * isModelDegraded reports whether a model's OWN day-window rate should
- * show a badge beside its ModelChip at all — the spec's "only when that
+ * show a badge beside its model name at all — the spec's "only when that
  * model is degraded (<99% w/ attempts>0)" rule: a healthy or no-traffic
  * model gets no badge, so the accordion is not cluttered with a badge
  * beside every single model.
@@ -171,4 +173,39 @@ export function dayRateTitle(attemptsDay: number, failuresDay: number): string {
   const rate = providerSuccessRate(attemptsDay, failuresDay)
   const pct = rate === null ? '' : ` (${formatRatePercent(rate)})`
   return `${attemptsDay} ${countWord(attemptsDay, 'attempt', 'attempts')}, ${failuresDay} ${countWord(failuresDay, 'failure', 'failures')} today${pct}`
+}
+
+export interface BreakerRow {
+  provider: string
+  state: ProviderHealthState
+  openUntil: string
+  lastErr: string
+  /** Closed breaker that still reports a last error. */
+  degraded: boolean
+}
+
+type BreakerSource = Pick<AdminProviderView, 'name' | 'healthState' | 'openUntil' | 'lastErr'>
+
+const BREAKER_STATE_ORDER: Record<ProviderHealthState, number> = { open: 0, 'half-open': 1, closed: 2 }
+
+/** Sort tier: open, half-open, closed with an error, healthy. */
+function breakerTier(r: BreakerRow): number {
+  return r.state === 'closed' && !r.degraded ? 3 : BREAKER_STATE_ORDER[r.state]
+}
+
+/** One row per provider, ordered open, half-open, degraded, healthy; ties by name. */
+export function breakerRows(overview: { providers: ReadonlyArray<BreakerSource> } | null): BreakerRow[] {
+  const rows = (overview?.providers ?? []).map((p) => ({
+    provider: p.name,
+    state: p.healthState,
+    openUntil: p.openUntil,
+    lastErr: p.lastErr ?? '',
+    degraded: p.healthState === 'closed' && !!p.lastErr,
+  }))
+  return rows.sort((a, b) => breakerTier(a) - breakerTier(b) || a.provider.localeCompare(b.provider))
+}
+
+/** Per-bucket `part` as a percent of `attempts`; null where a bucket has no attempts, never NaN. */
+export function ratePercentSeries(part: readonly number[], attempts: readonly number[]): (number | null)[] {
+  return attempts.map((a, i) => (Number.isFinite(a) && a > 0 ? (100 * (part[i] ?? 0)) / a : null))
 }

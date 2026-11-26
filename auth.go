@@ -723,6 +723,7 @@ type authStore struct {
 	lastReloadErrModTime time.Time
 	log                  gatewayLogger
 	failures             *authFailureTracker
+	shared               *sharedAuthFailures
 	usersFile            *usersFile
 	nowFn                func() time.Time
 	groups               map[string]*group
@@ -1157,7 +1158,13 @@ func clientIP(r *http.Request) string {
 // round 2, 2026-08-22, critical finding 1 — see identify's own doc
 // comment for why).
 func (a *authStore) authThrottled(ip string) bool {
-	return a.failures.get(ip) >= authFailureLimit
+	n := a.failures.get(ip)
+	if a.shared != nil {
+		if f := a.shared.count(ip); f > n {
+			n = f
+		}
+	}
+	return n >= authFailureLimit
 }
 
 // recordAuthFailure increments ip's failure count for the current
@@ -1168,6 +1175,17 @@ func (a *authStore) authThrottled(ip string) bool {
 // logAuthEvent's distinct throttle-engaged line.
 func (a *authStore) recordAuthFailure(ip string) {
 	a.failures.increment(ip)
+	if a.shared != nil {
+		a.shared.record(ip)
+	}
+}
+
+// share adds the fleet-wide failure count (nil without shared state) to authThrottled. Call it before the store serves requests.
+func (a *authStore) share(loop *sharedStateLoop) {
+	if loop == nil {
+		return
+	}
+	a.shared = newSharedAuthFailures(loop)
 }
 
 // shouldLogAuthFailure reports whether the next ROUTINE failed-auth log

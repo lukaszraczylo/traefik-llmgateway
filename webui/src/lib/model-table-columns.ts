@@ -1,12 +1,3 @@
-import type { ColumnDef } from '@tanstack/vue-table'
-import { h } from 'vue'
-
-import ModelChip from '@/components/ModelChip.vue'
-import { Badge } from '@/components/ui/badge'
-import CompactNumber from '@/components/CompactNumber.vue'
-import { EMPTY_CELL, optionalColumn, usageMetricColumns } from '@/lib/columns'
-import { formatCost, formatLatencyMs, formatModelCostHover, formatModelPriceShort } from '@/lib/format'
-import { formatErrorRatePercent, providerErrorRate } from '@/lib/provider-rate'
 import type { AdminCatalogResponse, AdminPerfResponse, AdminUsageModelsResponse, PriceSource } from '@/types/api'
 
 /**
@@ -45,10 +36,16 @@ export interface ModelCatalogRow {
   aliases: string[]
   /** Smart routers that target this model. */
   routers?: string[]
+  /** False when the range ranking (capped by the server) has no entry: requests is then 0 by absence, not a measured zero. */
+  ranked?: boolean
   requests: number
   tokensIn: number
   tokensOut: number
   costMicroUsd: number
+  /** Detail-only; undefined when the backend omits it. */
+  promptCacheReadTokens?: number
+  promptCacheWriteTokens?: number
+  promptCacheSavedMicroUsd?: number
   p50Ms?: number
   p95Ms?: number
   attempts: number
@@ -86,10 +83,14 @@ export function buildModelCatalogRows(
         displayFree: m.displayFree,
         aliases: m.aliases ?? [],
         routers: m.routers ?? [],
+        ranked: usage !== undefined,
         requests: usage?.requests ?? 0,
         tokensIn: usage?.tokensIn ?? 0,
         tokensOut: usage?.tokensOut ?? 0,
         costMicroUsd: usage?.costMicroUsd ?? 0,
+        promptCacheReadTokens: usage?.promptCacheReadTokens,
+        promptCacheWriteTokens: usage?.promptCacheWriteTokens,
+        promptCacheSavedMicroUsd: usage?.promptCacheSavedMicroUsd,
         p50Ms: perfRow?.p50Ms,
         p95Ms: perfRow?.p95Ms,
         attempts: perfRow?.attempts ?? 0,
@@ -98,160 +99,4 @@ export function buildModelCatalogRows(
     }
   }
   return rows
-}
-
-/** PRICE_SOURCE_LABEL is the price-source Badge's visible text for the three "priced by a rule" sources — 'free'/'unpriced' get their own dedicated badge treatment in priceCell below, never this generic label. */
-const PRICE_SOURCE_LABEL: Record<Extract<PriceSource, 'override' | 'builtin' | 'litellm'>, string> = {
-  override: 'override',
-  builtin: 'builtin',
-  litellm: 'litellm',
-}
-
-const FREE_SUFFIX_TITLE = "':free' suffix model — display-only, billing follows the price source"
-
-function priceCell(row: ModelCatalogRow) {
-  if (row.endpoint) return h('span', { class: 'text-muted-foreground' }, EMPTY_CELL)
-  if (row.priceSource === 'unpriced') {
-    return h(
-      Badge,
-      { as: 'span', variant: 'destructive', class: 'font-normal', title: 'No pricing rule matched — billed as $0.' },
-      () => 'unpriced',
-    )
-  }
-  if (row.priceSource === 'free') {
-    return h(Badge, { as: 'span', variant: 'secondary', class: 'font-normal', title: 'Configured free (modelMeta.free) — priced at $0.' }, () => 'free')
-  }
-  const known = row.inputPerMTokUsd !== undefined && row.outputPerMTokUsd !== undefined
-  // Narrowed to a local BEFORE the h() callback below — TS control-flow
-  // narrowing on `row.priceSource` (from the two early returns above)
-  // does not cross a closure boundary, so the callback itself still sees
-  // the full PriceSource union unless the already-narrowed value is
-  // captured into its own variable first.
-  const source = row.priceSource as Exclude<PriceSource, 'unpriced' | 'free'>
-  return h('span', { class: 'inline-flex flex-wrap items-center gap-1.5' }, [
-    h(
-      'span',
-      known ? { class: 'tabular-nums', title: formatModelCostHover(row.inputPerMTokUsd as number, row.outputPerMTokUsd as number) } : {},
-      known ? formatModelPriceShort(row.inputPerMTokUsd as number, row.outputPerMTokUsd as number) : EMPTY_CELL,
-    ),
-    h(Badge, { as: 'span', variant: 'outline', class: 'font-normal' }, () => PRICE_SOURCE_LABEL[source]),
-    ...(row.displayFree ? [h(Badge, { as: 'span', variant: 'secondary', class: 'font-normal', title: FREE_SUFFIX_TITLE }, () => ':free')] : []),
-  ])
-}
-
-/**
- * priceSortValue orders unpriced first (nothing to report, worth an
- * operator's attention), then by ascending input price — accessorFn's
- * numeric return, not the rendered text, is what DataTable actually sorts
- * on.
- */
-function priceSortValue(row: ModelCatalogRow): number {
-  if (row.endpoint) return 0
-  if (row.priceSource === 'unpriced') return -1
-  return row.inputPerMTokUsd ?? 0
-}
-
-/**
- * modelCatalogColumns builds the Models page's catalog table (redesign-
- * plan.md section 3.4): id, context, price + source badge (plus a ':free' badge for
- * the suffix flag, distinct from the 'free' priceSource badge), aliases,
- * req/tokens/cost for the current global range, p50/p95, and error rate.
- * p50/p95 read "—" whenever undefined, regardless of WHY (no observations
- * yet, or admin.stats.latency off entirely) — ModelCatalogTable.vue itself
- * carries the admin.stats.latency hint at the table level (task
- * instruction: "handle latencyEnabled=false with a hint naming
- * admin.stats.latency"), not repeated on every row.
- */
-export function modelCatalogColumns(): ColumnDef<ModelCatalogRow, unknown>[] {
-  return [
-    {
-      id: 'id',
-      header: 'Model',
-      accessorFn: (r) => r.id,
-      cell: ({ row }) =>
-        h(ModelChip, {
-          id: row.original.id,
-          contextTokens: row.original.contextTokens,
-          inputPerMTokUsd: row.original.inputPerMTokUsd,
-          outputPerMTokUsd: row.original.outputPerMTokUsd,
-        }),
-    },
-    {
-      id: 'price',
-      header: 'Price $/MTok',
-      accessorFn: (r) => priceSortValue(r),
-      cell: ({ row }) => priceCell(row.original),
-    },
-    {
-      id: 'aliases',
-      header: 'Aliases',
-      enableSorting: false,
-      accessorFn: (r) => r.aliases.join(', '),
-      cell: ({ row }) => {
-        const aliases = row.original.aliases
-        if (aliases.length === 0) return h('span', { class: 'text-muted-foreground' }, EMPTY_CELL)
-        return h(
-          'div',
-          { class: 'flex flex-wrap gap-1' },
-          aliases.map((a) => h(Badge, { key: a, as: 'span', variant: 'outline', class: 'font-mono font-normal' }, () => a)),
-        )
-      },
-    },
-    {
-      id: 'routers',
-      header: 'Routers',
-      enableSorting: false,
-      accessorFn: (r) => (r.routers ?? []).join(', '),
-      cell: ({ row }) => {
-        const routers = row.original.routers ?? []
-        if (routers.length === 0) return h('span', { class: 'text-muted-foreground' }, EMPTY_CELL)
-        return h(
-          'div',
-          { class: 'flex flex-wrap gap-1' },
-          routers.map((r) => h(Badge, { key: r, as: 'span', variant: 'secondary', class: 'font-mono font-normal', title: 'Smart router target' }, () => r)),
-        )
-      },
-    },
-    // reuse-audit.md F9: requests/tokensIn/tokensOut share the shared
-    // usageMetricColumns factory; 'cost' stays hand-written below since
-    // this table's cost cell has an extra free-priced-model badge case
-    // usageMetricColumns' own plain costColumn does not (and should not —
-    // PricingHealthTable.vue's identical-shaped cost column has no such
-    // badge) carry.
-    ...usageMetricColumns<ModelCatalogRow>().filter((c) => c.id === 'requests'),
-    {
-      id: 'tokens',
-      header: 'Tokens',
-      meta: { align: 'right' },
-      accessorFn: (r) => r.tokensIn + r.tokensOut,
-      cell: ({ row }) =>
-        h('span', { class: 'inline-flex items-center gap-1 whitespace-nowrap', title: 'input / output tokens' }, [
-          h(CompactNumber, { value: row.original.tokensIn }),
-          h('span', { class: 'text-muted-foreground' }, '/'),
-          h(CompactNumber, { value: row.original.tokensOut }),
-        ]),
-    },
-    {
-      id: 'cost',
-      header: 'Cost',
-      meta: { align: 'right' },
-      accessorFn: (r) => r.costMicroUsd,
-      cell: ({ row }) => {
-        const r = row.original
-        if ((r.priceSource === 'free' || r.displayFree) && r.costMicroUsd === 0) {
-          return h(Badge, { as: 'span', variant: 'secondary', class: 'font-normal', title: 'priced at $0 per token' }, () => 'free')
-        }
-        return formatCost(r.costMicroUsd)
-      },
-    },
-    optionalColumn<ModelCatalogRow>('p50', 'p50', (r) => r.p50Ms, formatLatencyMs, { sortSentinel: -1 }),
-    optionalColumn<ModelCatalogRow>('p95', 'p95', (r) => r.p95Ms, formatLatencyMs, { sortSentinel: -1 }),
-    {
-      id: 'errorRate',
-      header: 'Errors',
-      meta: { align: 'right' },
-      accessorFn: (r) => providerErrorRate(r.attempts, r.failures) ?? -1,
-      cell: ({ row }) => h('span', { class: 'tabular-nums' }, formatErrorRatePercent(providerErrorRate(row.original.attempts, row.original.failures))),
-    },
-  ]
 }

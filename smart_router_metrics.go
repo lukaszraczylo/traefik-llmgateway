@@ -32,6 +32,16 @@ type routerShadowKey struct {
 	router, live, shadow string
 }
 
+// routerDecisionKey counts decision-model calls by outcome.
+type routerDecisionKey struct {
+	router, outcome string
+}
+
+// routerDecisionTierKey counts model answers by the heuristic tier and the tier the model ranked.
+type routerDecisionTierKey struct {
+	router, heuristic, model string
+}
+
 // routerOutcomeKey counts finished requests by first attempted tier, routing reason and outcome.
 type routerOutcomeKey struct {
 	router, tier, reason, outcome string
@@ -56,6 +66,8 @@ type routerStats struct {
 	escalations map[routerEscalationKey]int64
 	shadow      map[routerShadowKey]int64
 	outcomes    map[routerOutcomeKey]int64
+	decisions   map[routerDecisionKey]int64
+	decisionMx  map[routerDecisionTierKey]int64
 	mu          sync.Mutex
 }
 
@@ -65,7 +77,45 @@ func newRouterStats() *routerStats {
 		escalations: make(map[routerEscalationKey]int64),
 		shadow:      make(map[routerShadowKey]int64),
 		outcomes:    make(map[routerOutcomeKey]int64),
+		decisions:   make(map[routerDecisionKey]int64),
+		decisionMx:  make(map[routerDecisionTierKey]int64),
 	}
+}
+
+func (s *routerStats) addDecision(k routerDecisionKey) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.decisions[k]++
+	s.mu.Unlock()
+}
+
+func (s *routerStats) addDecisionTier(k routerDecisionTierKey) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.decisionMx[k]++
+	s.mu.Unlock()
+}
+
+// decisionSnapshot copies the decision outcome and tier-matrix counters.
+func (s *routerStats) decisionSnapshot() (map[routerDecisionKey]int64, map[routerDecisionTierKey]int64) {
+	dec := make(map[routerDecisionKey]int64)
+	mx := make(map[routerDecisionTierKey]int64)
+	if s == nil {
+		return dec, mx
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for k, v := range s.decisions {
+		dec[k] = v
+	}
+	for k, v := range s.decisionMx {
+		mx[k] = v
+	}
+	return dec, mx
 }
 
 func (s *routerStats) addShadow(k routerShadowKey) {
@@ -168,6 +218,7 @@ func (g *Gateway) recordRouterAttempt(plan *routerPlan, i int, endpoint string, 
 			}
 			g.countRouterShared(func(bucket string) string { return routerShadowKeyFor(sk, bucket) })
 		}
+		g.recordRouterDecision(plan)
 		return
 	}
 	if i == plan.fallbackAt {
@@ -242,10 +293,63 @@ func (g *Gateway) recordRouterEventKind(plan *routerPlan, i int, endpoint string
 	g.recordEvent(ev)
 }
 
+// recordRouterDecision counts the decision-model outcome and, for answered calls, the heuristic-vs-model tier pair.
+func (g *Gateway) recordRouterDecision(plan *routerPlan) {
+	if plan.decisionOutcome == "" {
+		return
+	}
+	dk := routerDecisionKey{router: plan.router, outcome: plan.decisionOutcome}
+	if metricsEnabled(g.cfg) {
+		g.routerStats.addDecision(dk)
+	}
+	g.countRouterShared(func(bucket string) string { return routerDecisionKeyFor(dk, bucket) })
+	if !decisionAnswered(plan.decisionOutcome) || plan.heuristicTier == "" || plan.decisionTier == "" {
+		return
+	}
+	mk := routerDecisionTierKey{router: plan.router, heuristic: plan.heuristicTier, model: plan.decisionTier}
+	if metricsEnabled(g.cfg) {
+		g.routerStats.addDecisionTier(mk)
+	}
+	g.countRouterShared(func(bucket string) string { return routerDecisionTierKeyFor(mk, bucket) })
+}
+
+// decisionAnswered reports whether the outcome carries a model rank.
+func decisionAnswered(outcome string) bool {
+	return outcome == decisionAgree || outcome == decisionOverride || outcome == decisionLowConf || outcome == decisionCache
+}
+
+// routerMetricSet is the counter source one scrape renders the router families from.
+type routerMetricSet struct {
+	reqs  map[routerRequestKey]int64
+	escs  map[routerEscalationKey]int64
+	decs  map[routerDecisionKey]int64
+	decMx map[routerDecisionTierKey]int64
+	note  string
+}
+
+// routerMetricSource reads the shared counters when the store backs them, else this pod's own.
+// ok is false when the shared read fails, so the scrape skips the families.
+func (g *Gateway) routerMetricSource() (routerMetricSet, bool) {
+	if g.routerSharedEnabled() {
+		c, ok := g.readRouterShared(g.limiter.now())
+		if !ok {
+			return routerMetricSet{}, false
+		}
+		return routerMetricSet{reqs: c.reqs, escs: c.escs, decs: c.decs, decMx: c.decMx, note: aggregationNoteStoreBacked}, true
+	}
+	reqs, escs := g.routerStats.snapshot()
+	decs, decMx := g.routerStats.decisionSnapshot()
+	return routerMetricSet{reqs: reqs, escs: escs, decs: decs, decMx: decMx, note: aggregationNotePerProcess}, true
+}
+
 // writeRouterMetrics emits the router counter families; absent until the first observation.
 func (g *Gateway) writeRouterMetrics(m *metricWriter) {
 	g.writeRouterCalibrationMetrics(m)
-	reqs, escs := g.routerStats.snapshot()
+	src, ok := g.routerMetricSource()
+	if !ok {
+		return
+	}
+	reqs, escs, note := src.reqs, src.escs, src.note
 	if len(reqs) > 0 {
 		keys := make([]routerRequestKey, 0, len(reqs))
 		for k := range reqs {
@@ -262,12 +366,13 @@ func (g *Gateway) writeRouterMetrics(m *metricWriter) {
 			return x.reason < y.reason
 		})
 		m.family("llmgateway_router_requests_total", "counter",
-			"Smart router requests by router, first attempted tier and routing reason (score, keyword, floor, default, or skipped when lower tiers had no usable target)."+aggregationNotePerProcess)
+			"Smart router requests by router, first attempted tier and routing reason (score, keyword, floor, model, default, or skipped when lower tiers had no usable target)."+note)
 		for _, k := range keys {
 			m.sampleInt("llmgateway_router_requests_total",
 				[]metricLabel{{"router", k.router}, {"tier", k.tier}, {"reason", k.reason}}, reqs[k])
 		}
 	}
+	g.writeRouterDecisionMetrics(m, src)
 	if len(escs) > 0 {
 		keys := make([]routerEscalationKey, 0, len(escs))
 		for k := range escs {
@@ -284,10 +389,54 @@ func (g *Gateway) writeRouterMetrics(m *metricWriter) {
 			return x.to < y.to
 		})
 		m.family("llmgateway_router_escalations_total", "counter",
-			"Smart router attempts that moved to a higher tier after a failure, by router, from_tier and to_tier. Same-tier failover is not counted."+aggregationNotePerProcess)
+			"Smart router attempts that moved to a higher tier after a failure, by router, from_tier and to_tier. Same-tier failover is not counted."+note)
 		for _, k := range keys {
 			m.sampleInt("llmgateway_router_escalations_total",
 				[]metricLabel{{"router", k.router}, {"from_tier", k.from}, {"to_tier", k.to}}, escs[k])
+		}
+	}
+}
+
+func (g *Gateway) writeRouterDecisionMetrics(m *metricWriter, src routerMetricSet) {
+	dec, mx, note := src.decs, src.decMx, src.note
+	if len(dec) > 0 {
+		keys := make([]routerDecisionKey, 0, len(dec))
+		for k := range dec {
+			keys = append(keys, k)
+		}
+		sort.Slice(keys, func(a, b int) bool {
+			if keys[a].router != keys[b].router {
+				return keys[a].router < keys[b].router
+			}
+			return keys[a].outcome < keys[b].outcome
+		})
+		m.family("llmgateway_router_decision_total", "counter",
+			"Smart router decision-model calls by router and outcome (agree, override, lowconf, timeout, error, breaker, cache)."+note)
+		for _, k := range keys {
+			m.sampleInt("llmgateway_router_decision_total",
+				[]metricLabel{{"router", k.router}, {"outcome", k.outcome}}, dec[k])
+		}
+	}
+	if len(mx) > 0 {
+		keys := make([]routerDecisionTierKey, 0, len(mx))
+		for k := range mx {
+			keys = append(keys, k)
+		}
+		sort.Slice(keys, func(a, b int) bool {
+			x, y := keys[a], keys[b]
+			if x.router != y.router {
+				return x.router < y.router
+			}
+			if x.heuristic != y.heuristic {
+				return x.heuristic < y.heuristic
+			}
+			return x.model < y.model
+		})
+		m.family("llmgateway_router_decision_tiers_total", "counter",
+			"Smart router answers from the decision model or its cache by router, heuristic tier and model-ranked tier."+note)
+		for _, k := range keys {
+			m.sampleInt("llmgateway_router_decision_tiers_total",
+				[]metricLabel{{"router", k.router}, {"heuristic", k.heuristic}, {"model", k.model}}, mx[k])
 		}
 	}
 }

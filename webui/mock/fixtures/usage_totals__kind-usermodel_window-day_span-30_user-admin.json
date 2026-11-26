@@ -1,0 +1,59 @@
+{
+ "kind": "usermodel",
+ "window": "day",
+ "metrics": [
+  "req",
+  "tokin",
+  "tokout",
+  "cost"
+ ],
+ "rows": [
+  {
+   "values": {
+    "cost": 0,
+    "req": 28,
+    "tokin": 2018,
+    "tokout": 921
+   },
+   "id": "gx10/Qwen3.8-27B"
+  },
+  {
+   "values": {
+    "cost": 0,
+    "req": 26,
+    "tokin": 137079,
+    "tokout": 4496
+   },
+   "id": "gx10/DeepSeek-V4.1-Flash-EXL3"
+  },
+  {
+   "values": {
+    "cost": 0,
+    "req": 15,
+    "tokin": 75484,
+    "tokout": 1494
+   },
+   "id": "gx10/Inkling-2-Mini"
+  },
+  {
+   "values": {
+    "cost": 0,
+    "req": 1,
+    "tokin": 32,
+    "tokout": 20
+   },
+   "id": "uni/deepseek-v4.1-flash-1017"
+  },
+  {
+   "values": {
+    "cost": 0,
+    "req": 1,
+    "tokin": 53,
+    "tokout": 5
+   },
+   "id": "uni/qwen3.8-27b"
+  }
+ ],
+ "span": 30,
+ "offset": 0
+}

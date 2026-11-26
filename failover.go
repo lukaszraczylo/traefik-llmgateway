@@ -622,7 +622,14 @@ type requestHealthState struct {
 type requestHealthTracker struct {
 	states map[string]*requestHealthState
 	nowFn  func() time.Time
+	// shared layers the fleet view over the local breaker; nil means local only.
+	shared *sharedBreaker
 	mu     sync.Mutex
+}
+
+// share attaches the fleet breaker. Call it before the tracker serves requests.
+func (t *requestHealthTracker) share(b *sharedBreaker) {
+	t.shared = b
 }
 
 // newRequestHealthTracker returns an empty tracker — every provider name
@@ -712,11 +719,15 @@ func (t *requestHealthTracker) record(provider string, success bool) {
 	defer st.mu.Unlock()
 	now := t.nowFn()
 
+	sb := t.shared
 	if success {
 		st.open = false
 		st.consecutiveFailures = 0
 		st.backoff = 0
 		st.openUntil = time.Time{}
+		if sb != nil {
+			sb.recordSuccess(provider)
+		}
 		return
 	}
 
@@ -724,6 +735,9 @@ func (t *requestHealthTracker) record(provider string, success bool) {
 	// nothing (F5 fix, above).
 	if st.open && now.Before(st.openUntil) {
 		return
+	}
+	if sb != nil {
+		sb.recordFailure(provider)
 	}
 
 	if st.open {
@@ -762,11 +776,13 @@ func (t *requestHealthTracker) healthy(provider string) bool {
 	}
 	st := t.stateFor(provider)
 	st.mu.Lock()
-	defer st.mu.Unlock()
-	if !st.open {
-		return true
+	local := !st.open || !t.nowFn().Before(st.openUntil)
+	st.mu.Unlock()
+	if !local {
+		return false
 	}
-	return !t.nowFn().Before(st.openUntil)
+	sb := t.shared
+	return sb == nil || !sb.sharedOpen(provider)
 }
 
 // contextOverflowScanBytes bounds how much of an upstream 400 body is scanned.

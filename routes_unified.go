@@ -290,7 +290,7 @@ func (g *Gateway) runMeteredCall(sw *statusTrackingWriter, r *http.Request, scop
 	var candidates []resolveCandidate
 	if rt := g.registry.routers[requestedModel]; rt != nil {
 		var planErr error
-		plan, planErr = g.planSmartRouter(rt, req, endpoint, r.Header, grp, scopes)
+		plan, planErr = g.planSmartRouter(r.Context(), rt, req, endpoint, r.Header, grp, scopes)
 		if planErr != nil {
 			writeModelResolveErrorEnvelope(sw, planErr, envelope)
 			return
@@ -346,6 +346,12 @@ func (g *Gateway) runMeteredCall(sw *statusTrackingWriter, r *http.Request, scop
 	pristineReq := make(map[string]any, len(req)+1)
 	for k, v := range req {
 		pristineReq[k] = v
+	}
+
+	// Computed from the client body before any attempt sets the key.
+	pck := ""
+	if endpoint == cacheEndpointChat || endpoint == cacheEndpointMessages {
+		pck = g.promptCacheKeyForRequest(pristineReq, r.Header, scopes, candidates)
 	}
 
 	// preFailoverHeaders snapshots sw.Header() ONCE, before the loop below
@@ -469,6 +475,7 @@ func (g *Gateway) runMeteredCall(sw *statusTrackingWriter, r *http.Request, scop
 		if cacheable {
 			cacheKeyStr = cacheKey(cand.providerName, cand.upstreamModel, requestedModel, endpoint, attemptReq)
 		}
+		g.applyPromptCacheKey(attemptReq, endpoint, cand.providerName, pck)
 		attemptReq[gatewayAliasKey] = requestedModel
 		if plan != nil {
 			setRouterHeaders(sw.Header(), plan, i)
@@ -523,7 +530,7 @@ func (g *Gateway) runMeteredCall(sw *statusTrackingWriter, r *http.Request, scop
 				// actually saves the parse.
 				if g.cfg.Cache.AccountHits {
 					hitUsage := cachedUsage(cached.Body)
-					g.limiter.accountWith(scopes, hitUsage, unifiedCostMicros(cand.canonical, cand.upstreamModel, hitUsage, g.cfg.Pricing, g.cfg.ModelMeta, g.pricingWarn), accountExtras{provider: cand.providerName})
+					g.limiter.accountWith(scopes, hitUsage, unifiedCostMicros(cand.canonical, cand.upstreamModel, hitUsage, g.cfg.Pricing, g.cfg.ModelMeta, g.pricingWarn), accountExtras{provider: cand.providerName, responseCacheHit: true})
 				}
 				if g.limiter.statsAdmin {
 					saved := unifiedCostMicros(cand.canonical, cand.upstreamModel, cachedUsage(cached.Body), g.cfg.Pricing, g.cfg.ModelMeta, func(string) {})
@@ -779,12 +786,33 @@ func (g *Gateway) runMeteredCall(sw *statusTrackingWriter, r *http.Request, scop
 			extras.lat = latSample
 			extras.hasLat = true
 		}
+		// Provenance is derived here, before accounting, so the shared-store
+		// mirror rides accountWith's own batch; the in-memory record below
+		// stays after it.
+		var provenance string
+		if callErr == nil && metricsEnabled(g.cfg) {
+			provenance = provenanceReported
+			switch {
+			case result.estimated:
+				provenance = provenanceEstimated
+			case streaming && result.total() == 0:
+				provenance = provenanceUnbilled
+			}
+			extras.provenance = provenance
+			extras.provenanceTokens = result.total()
+		}
+		calibrate := plan != nil && callErr == nil && !plan.hasImage && !result.estimated
+		if calibrate {
+			extras.calibration = g.tokenCalib.fleetEntries(providerName, cand.upstreamModel, plan.promptBytes, result.prompt)
+		}
+		extras.promptCacheSaved = unifiedPromptCacheSaved(cand.canonical, cand.upstreamModel, result, g.cfg.Pricing, g.cfg.ModelMeta)
+		g.recordPromptCache(providerName, cand.upstreamModel, result)
 		g.limiter.accountWith(acctScopes, result, unifiedCostMicros(cand.canonical, cand.upstreamModel, result, g.cfg.Pricing, g.cfg.ModelMeta, g.pricingWarn), extras)
 		if result.estimated {
 			g.logf("%s: usage for model %q logged as estimated (%d prompt tokens derived from request body size, not the provider's reported usage)", logPrefix, cand.canonical, result.prompt)
 		}
 
-		if plan != nil && callErr == nil && !plan.hasImage && !result.estimated {
+		if calibrate {
 			g.tokenCalib.observe(providerName, cand.upstreamModel, plan.promptBytes, result.prompt)
 		}
 		if plan != nil && plan.bandit != nil {
@@ -808,14 +836,7 @@ func (g *Gateway) runMeteredCall(sw *statusTrackingWriter, r *http.Request, scop
 		// extra here. Observation only: nothing recorded here feeds back
 		// into result or the account call above, both of which already
 		// ran — see g.recordUsageProvenance's own doc comment (metrics.go).
-		if callErr == nil && metricsEnabled(g.cfg) {
-			provenance := provenanceReported
-			switch {
-			case result.estimated:
-				provenance = provenanceEstimated
-			case streaming && result.total() == 0:
-				provenance = provenanceUnbilled
-			}
+		if provenance != "" {
 			g.recordUsageProvenance(providerName, provenance, result.total())
 		}
 

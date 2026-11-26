@@ -308,7 +308,7 @@ func (g *Gateway) buildAdminConsumers() adminConsumersResponse {
 		for _, s := range snaps {
 			allowed := 0
 			for _, model := range s.models {
-				if grp != nil && grp.allowsProviderModel(s.name, model) {
+				if grp != nil && grp.allowsProviderModel(s.name, model, providerModelScopeID(s.name, model)) {
 					allowed++
 				}
 			}

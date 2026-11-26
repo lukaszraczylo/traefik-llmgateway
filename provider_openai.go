@@ -112,6 +112,8 @@ type chatStreamUsage struct {
 	PromptTokens     int64              `json:"prompt_tokens"`
 	CompletionTokens int64              `json:"completion_tokens"`
 	PromptDetails    promptTokenDetails `json:"prompt_tokens_details"`
+	// PromptCacheHitTokens is DeepSeek's cache-read count.
+	PromptCacheHitTokens int64 `json:"prompt_cache_hit_tokens"`
 }
 
 // promptTokenDetails is OpenAI's prompt_tokens_details object.
@@ -249,7 +251,7 @@ func (a *openaiAdapter) forwardJSON(w http.ResponseWriter, resp *http.Response) 
 	w.WriteHeader(resp.StatusCode)
 	_, _ = w.Write(body)
 
-	u := usage{prompt: payload.Usage.PromptTokens, completion: payload.Usage.CompletionTokens, cached: payload.Usage.PromptDetails.CachedTokens}
+	u := usage{prompt: payload.Usage.PromptTokens, completion: payload.Usage.CompletionTokens, cached: cachedPromptTokens(payload.Usage.PromptDetails.CachedTokens, payload.Usage.PromptCacheHitTokens)}
 	if len(payload.Choices) > 0 {
 		c := payload.Choices[0]
 		u = withAnswerFlags(u, c.FinishReason, !smartJSONEmpty(c.Message.Content) || !smartJSONEmpty(c.Message.ToolCalls))
@@ -295,7 +297,7 @@ func (a *openaiAdapter) forwardStream(w http.ResponseWriter, body io.Reader, cli
 		if hasUsage {
 			u.prompt = chunk.Usage.PromptTokens
 			u.completion = chunk.Usage.CompletionTokens
-			u.cached = chunk.Usage.PromptDetails.CachedTokens
+			u.cached = cachedPromptTokens(chunk.Usage.PromptDetails.CachedTokens, chunk.Usage.PromptCacheHitTokens)
 		}
 
 		isUsageOnlyChunk := hasUsage && len(chunk.Choices) == 0

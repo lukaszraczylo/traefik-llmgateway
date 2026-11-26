@@ -3288,8 +3288,8 @@ func TestAdminUsage_LastSeen(t *testing.T) {
 // without a test catching it.
 func TestAdminUsage_ChunkScopesLoweredForLastSeenKey(t *testing.T) {
 	t.Parallel()
-	if adminUsageChunkScopes != 145 {
-		t.Errorf("adminUsageChunkScopes = %d, want 145", adminUsageChunkScopes)
+	if adminUsageChunkScopes != 123 {
+		t.Errorf("adminUsageChunkScopes = %d, want 123", adminUsageChunkScopes)
 	}
 	if adminUsageChunkScopes*usageKeysPerScope > 1600 {
 		t.Errorf("adminUsageChunkScopes*usageKeysPerScope = %d, want <= 1600", adminUsageChunkScopes*usageKeysPerScope)

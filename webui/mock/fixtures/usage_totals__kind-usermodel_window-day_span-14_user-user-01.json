@@ -1,0 +1,13 @@
+{
+ "kind": "usermodel",
+ "window": "day",
+ "metrics": [
+  "req",
+  "tokin",
+  "tokout",
+  "cost"
+ ],
+ "rows": [],
+ "span": 14,
+ "offset": 0
+}

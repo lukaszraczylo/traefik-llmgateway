@@ -227,7 +227,13 @@ func (g *Gateway) callAnthropicMessagesPassthrough(ctx context.Context, w http.R
 	// documented, not incidental.
 	adapter.injectAuth(&http.Request{Header: hdr})
 
-	resp, err := upstreamJSON(ctx, adapter.httpClient(), http.MethodPost, adapter.base()+anthropicMessagesPath, hdr, req, retry, adapter.requestTimeout(), adapter.name())
+	upstreamBody := req
+	if g.providerPromptCache(adapter.name()).Inject {
+		injected, _ := injectCacheControl(req)
+		upstreamBody = injected
+	}
+
+	resp, err := upstreamJSON(ctx, adapter.httpClient(), http.MethodPost, adapter.base()+anthropicMessagesPath, hdr, upstreamBody, retry, adapter.requestTimeout(), adapter.name())
 	if err != nil {
 		return usage{}, err
 	}
@@ -271,7 +277,7 @@ func (g *Gateway) callAnthropicMessagesPassthrough(ctx context.Context, w http.R
 		// own doc comment, translate_anthropic.go, for why dropping them
 		// under-bills a cache-heavy caller (the common case for Claude
 		// Code) by orders of magnitude.
-		billed = withAnswerFlags(usage{prompt: parsed.Usage.totalInputTokens(), completion: parsed.Usage.OutputTokens, cached: parsed.Usage.CacheReadInputTokens}, anthropicFinishReason(parsed.StopReason), anthropicHasOutput(parsed.Content))
+		billed = withAnswerFlags(usage{prompt: parsed.Usage.totalInputTokens(), completion: parsed.Usage.OutputTokens, cached: parsed.Usage.CacheReadInputTokens, cacheWrite: parsed.Usage.CacheCreationInputTokens}, anthropicFinishReason(parsed.StopReason), anthropicHasOutput(parsed.Content))
 	}
 
 	out, err := rewriteModelField(raw, requestedModel)
@@ -404,6 +410,8 @@ func (g *Gateway) callTranslatedMessages(ctx context.Context, w http.ResponseWri
 	for _, field := range dropped {
 		g.warnf("messages route: request field %q has no OpenAI equivalent for provider %q and was dropped in translation", field, adapter.name())
 	}
+
+	g.applyTranslatedPromptCacheKey(openaiReq, req, adapter.name())
 
 	rec := newMessagesResponseRecorder()
 	result, err := adapter.chatCompletion(ctx, rec, openaiReq)

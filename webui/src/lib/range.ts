@@ -75,6 +75,16 @@ export function comparison(range: RangeKey): ComparisonResult {
   return { available: true, offset: span }
 }
 
+/** Spans from which GET /usage/models?detail=1 answers 400 "range too large" (observed on the live API: 48h and 30d fail, 24h and 14d pass). */
+const DETAIL_REJECTED_FROM_SPAN: Partial<Record<HistoryWindow, number>> = { hour: 48, day: 30 }
+
+/** Pre-flight optimisation only (avoids a failed request); the retry-on-400 in stores/spend.ts fetchModelsRanking is the real guard for any range the backend rejects. */
+/** modelDetailSupported is false for ranges where asking for per-model detail is known to fail, so callers skip the doomed request. */
+export function modelDetailSupported(window: HistoryWindow, span: number): boolean {
+  const limit = DETAIL_REJECTED_FROM_SPAN[window]
+  return limit === undefined || span < limit
+}
+
 /**
  * dayOrMonthWindow clamps an arbitrary HistoryWindow/span pair (usually the
  * global filters store's current range) down to the day/month-only window

@@ -1,0 +1,22 @@
+{
+ "metric": "tokout",
+ "window": "month",
+ "buckets": [
+  "202606",
+  "202607",
+  "202608"
+ ],
+ "series": [
+  {
+   "scope": "total",
+   "points": [
+    0,
+    0,
+    0
+   ]
+  }
+ ],
+ "unknown": [],
+ "span": 3,
+ "offset": 3
+}

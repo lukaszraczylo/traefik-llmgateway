@@ -444,7 +444,7 @@ func BenchRun(n int) int {
 		if benchSessions != nil {
 			f := extractSmartV2(fx.Request, endpoint)
 			sc := benchSessions.open(benchRouter, fx.Request, &f, nil, nil)
-			sum += classifySmartWith(benchRouter, fx.Request, endpoint, &f, sc).rank + 1
+			sum += classifySmartWith(benchRouter, fx.Request, endpoint, &f, sc, nil).rank + 1
 			if sc.dirty {
 				benchSessions.put(sc.key, sc.next, time.Hour)
 			}
@@ -468,10 +468,44 @@ func main() {
 	dump := flag.Bool("ranks", false, "print each fixture's rank under yaegi, to diff against a native run")
 	passes := flag.Int("passes", 3, "timed passes over the fixture set; the fastest counts")
 	fixtures := flag.String("fixtures", "testdata/router_fixtures", "fixture directory, relative to the repo root")
+	mode := flag.String("mode", "router", "router | refresh (one shared-state refresh tick) | refresh-native | request | request-native | upstream (internal)")
+	redisAddr := flag.String("redis", "", "refresh modes: host:port of a local redis to also time redisStore")
+	samples := flag.Int("samples", 5, "refresh and request modes: samples per measurement")
+	reqN := flag.Int("n", 100, "request mode: requests per sample")
 	flag.Parse()
 	root := "."
 	if flag.NArg() > 0 {
 		root = flag.Arg(0)
+	}
+	switch *mode {
+	case "upstream":
+		if err := runUpstream(); err != nil {
+			fmt.Fprintln(os.Stderr, "yaegi-bench: FAIL:", err)
+			os.Exit(1)
+		}
+		return
+	case "request":
+		if err := runRequest(root, *redisAddr, *samples, *reqN); err != nil {
+			fmt.Fprintln(os.Stderr, "yaegi-bench: FAIL:", err)
+			os.Exit(1)
+		}
+		return
+	case "request-native":
+		if err := runRequestNative(root, *redisAddr, *samples); err != nil {
+			fmt.Fprintln(os.Stderr, "yaegi-bench: FAIL:", err)
+			os.Exit(1)
+		}
+		return
+	case "refresh", "refresh-native":
+		fn := runRefresh
+		if *mode == "refresh-native" {
+			fn = runRefreshNative
+		}
+		if err := fn(root, *redisAddr, *samples); err != nil {
+			fmt.Fprintln(os.Stderr, "yaegi-bench: FAIL:", err)
+			os.Exit(1)
+		}
+		return
 	}
 	if err := run(root, *fixtures, *minDPS, *passes, *dump); err != nil {
 		fmt.Fprintln(os.Stderr, "yaegi-bench: FAIL:", err)

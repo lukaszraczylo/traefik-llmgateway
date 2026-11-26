@@ -76,6 +76,8 @@ type smartFeatures struct {
 	// prose is the ask without fenced code and paste paragraphs; lower is its lowercase form.
 	prose, lower string
 	system       string
+	// sysHead and ask are raw heads of the system text and newest ask, for the decision model.
+	sysHead, ask string
 	intent       int
 	hard         int
 	codeBytes    int
@@ -143,6 +145,7 @@ func extractSmartV2(req map[string]any, endpoint string) smartFeatures {
 			}
 		}
 	}
+	f.sysHead = smartRuneHead(f.system, decisionSystemCap)
 	f.system = boundSmartText(f.system, smartSystemCap)
 
 	ask := f.findAsk(msgs)
@@ -150,9 +153,21 @@ func extractSmartV2(req map[string]any, endpoint string) smartFeatures {
 		f.truncated = len(msgs) > smartAskScanMax
 		return f
 	}
+	f.ask = smartRuneHead(ask, decisionAskCap)
 	f.splitAsk(ask)
 	f.classifyIntent()
 	return f
+}
+
+// smartRuneHead returns the first limit bytes of s, moved back to a rune start.
+func smartRuneHead(s string, limit int) string {
+	if len(s) <= limit {
+		return s
+	}
+	for limit > 0 && !utf8.RuneStart(s[limit]) {
+		limit--
+	}
+	return s[:limit]
 }
 
 // findAsk scans newest first for the user message that carries text and no tool

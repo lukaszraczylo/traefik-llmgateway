@@ -227,6 +227,16 @@ func (s *redisStore) repairRecreatedExpires(entries []counterIncr, recreated []b
 	}
 }
 
+// wrapStoreErr wraps a pipeline error with its operation name. A failure that never reached the wire stays marked
+// as not applied, for the shared-state flushers.
+func wrapStoreErr(op string, err error) error {
+	wrapped := fmt.Errorf("redisStore: %s: %w", op, err)
+	if respNotApplied(err) {
+		return &notAppliedError{err: wrapped}
+	}
+	return wrapped
+}
+
 // applyIncrReplies decodes the INCRBY replies for entries — each entry's
 // own reply located via incrReplyIdx[i], not a fixed stride (a skipped
 // EXPIRE shifts every later entry's commands left by one; see incrMulti/
@@ -384,7 +394,7 @@ func (s *redisStore) incrMulti(entries []counterIncr) ([]int64, error) {
 
 	replies, err := s.client.pipeline(cmds)
 	if err != nil {
-		return nil, fmt.Errorf("redisStore: incrMulti: %w", err)
+		return nil, wrapStoreErr("incrMulti", err)
 	}
 	if len(replies) != len(cmds) {
 		return nil, fmt.Errorf("redisStore: incrMulti: expected %d replies, got %d", len(cmds), len(replies))
@@ -451,7 +461,7 @@ func (s *redisStore) incrAndGetMulti(entries []counterIncr, reads []string) ([]i
 
 	replies, err := s.client.pipeline(cmds)
 	if err != nil {
-		return nil, nil, fmt.Errorf("redisStore: incrAndGetMulti: %w", err)
+		return nil, nil, wrapStoreErr("incrAndGetMulti", err)
 	}
 	if len(replies) != len(cmds) {
 		return nil, nil, fmt.Errorf("redisStore: incrAndGetMulti: expected %d replies, got %d", len(cmds), len(replies))

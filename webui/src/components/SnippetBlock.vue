@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { faCheck, faCopy, faTriangleExclamation } from '@fortawesome/free-solid-svg-icons'
+import { Button } from '@perfect-design/ui'
 import { useTemplateRef } from 'vue'
 
-import { Button } from '@/components/ui/button'
 import { useCopyFeedback } from '@/composables/useCopyFeedback'
 import { copyText } from '@/lib/clipboard'
 import { useToastsStore } from '@/stores/toasts'
@@ -12,7 +12,7 @@ import { useToastsStore } from '@/stores/toasts'
  * paste into a file" surface every ChangeHelper form and ConfigTree.vue
  * share — a `<pre>` plus a copy button (lib/clipboard.ts's copyText, same
  * Clipboard-API-with-selection-fallback convention CsvExportButton.vue's
- * download path and ModelChip.vue's own click-to-copy already use).
+ * download path already uses).
  */
 const props = defineProps<{
   /** The exact text to display and copy — YAML (lib/snippets.ts) or a single-line JSON fragment, verbatim, never re-formatted by this component. */
@@ -29,8 +29,7 @@ async function onCopy(): Promise<void> {
   const result = await copyText(props.text, preRef.value ?? undefined)
   setCopyFeedback(result)
   // Only a FAILURE also gets a toast (states-plan.md item 3) — see
-  // ModelChip.vue's own identical doc comment: 'copied'/'selected'
-  // already have clear inline feedback (the button's own icon/label
+  // 'copied'/'selected' already have clear inline feedback (the button's own icon/label
   // swap right below), so a success toast would double-notify.
   if (result === 'failed') toasts.push({ kind: 'error', message: 'Could not copy the snippet.' })
 }
@@ -57,6 +56,6 @@ const BUTTON_LABEL: Record<typeof state.value, string> = {
         {{ BUTTON_LABEL[state] }}
       </Button>
     </div>
-    <pre ref="pre" class="overflow-x-auto rounded-md border bg-muted p-3 font-mono text-xs select-text whitespace-pre">{{ text }}</pre>
+    <pre ref="pre" tabindex="0" class="overflow-x-auto rounded-md border bg-muted p-3 font-mono text-xs select-text whitespace-pre">{{ text }}</pre>
   </div>
 </template>

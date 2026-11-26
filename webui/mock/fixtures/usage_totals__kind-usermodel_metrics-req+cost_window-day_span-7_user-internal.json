@@ -1,0 +1,89 @@
+{
+ "kind": "usermodel",
+ "window": "day",
+ "metrics": [
+  "req",
+  "cost"
+ ],
+ "rows": [
+  {
+   "values": {
+    "cost": 0,
+    "req": 332155
+   },
+   "id": "uni/text-embedding-multilingual-e5-base"
+  },
+  {
+   "values": {
+    "cost": 0,
+    "req": 14523
+   },
+   "id": "uni/deepseek-v4-flash-0731"
+  },
+  {
+   "values": {
+    "cost": 0,
+    "req": 1240
+   },
+   "id": "minimax/MiniMax-M3.1-Flash"
+  },
+  {
+   "values": {
+    "cost": 4941768,
+    "req": 217
+   },
+   "id": "minimax/MiniMax-M3"
+  },
+  {
+   "values": {
+    "cost": 0,
+    "req": 119
+   },
+   "id": "uni/deepseek-v4.1-flash-1017"
+  },
+  {
+   "values": {
+    "cost": 0,
+    "req": 15
+   },
+   "id": "uni/glm-5.3-flash"
+  },
+  {
+   "values": {
+    "cost": 0,
+    "req": 3
+   },
+   "id": "gx10/Qwen3.8-27B"
+  },
+  {
+   "values": {
+    "cost": 0,
+    "req": 2
+   },
+   "id": "gx10/current"
+  },
+  {
+   "values": {
+    "cost": 0,
+    "req": 2
+   },
+   "id": "uni/qwen3.8-27b"
+  },
+  {
+   "values": {
+    "cost": 0,
+    "req": 1
+   },
+   "id": "gx10/DeepSeek-V4.1-Flash-EXL3"
+  },
+  {
+   "values": {
+    "cost": 0,
+    "req": 1
+   },
+   "id": "minimax/MiniMax-M2.7-highspeed"
+  }
+ ],
+ "span": 7,
+ "offset": 0
+}

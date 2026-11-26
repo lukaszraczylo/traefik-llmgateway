@@ -8,6 +8,7 @@ import {
   DEFAULT_RANGE,
   isCmpMode,
   isRangeKey,
+  modelDetailSupported,
   RANGE_KEYS,
   RANGE_PRESETS,
   seriesUrl,
@@ -136,5 +137,19 @@ describe('totalsUrl', () => {
       user: 'alice',
     })
     expect(url).toBe('/admin/api/usage/totals?kind=usermodel&window=month&span=1&metrics=req%2Ccost&limit=5&user=alice')
+  })
+})
+
+describe('modelDetailSupported', () => {
+  it('rejects the ranges the API answers 400 for', () => {
+    expect(modelDetailSupported('hour', 48)).toBe(false)
+    expect(modelDetailSupported('day', 30)).toBe(false)
+  })
+
+  it('accepts the other presets', () => {
+    for (const key of RANGE_KEYS) {
+      const { window, span } = RANGE_PRESETS[key]
+      expect(modelDetailSupported(window, span)).toBe(key !== '48h' && key !== '30d')
+    }
   })
 })

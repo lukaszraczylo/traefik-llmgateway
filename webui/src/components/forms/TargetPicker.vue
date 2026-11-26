@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { useId } from 'vue'
+import { NativeSelect } from '@perfect-design/ui'
+import { computed, useId } from 'vue'
 
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import type { GrantTargetKind } from '@/composables/useTargetPicker'
 
 /**
@@ -26,8 +26,14 @@ const emit = defineEmits<{
   'update:targetName': [value: string]
 }>()
 
-const kindLabelId = `target-picker-kind-${useId()}`
-const nameLabelId = `target-picker-name-${useId()}`
+const kindId = `target-picker-kind-${useId()}`
+const nameId = `target-picker-name-${useId()}`
+
+const kindOptions = computed(() => [
+  { value: 'group', label: 'Group' },
+  { value: 'user', label: props.userOptionLabel },
+])
+const nameOptions = computed(() => props.targetNames.map((name) => ({ value: name, label: name })))
 
 function onKindUpdate(value: unknown): void {
   if (value === 'group' || value === 'user') emit('update:targetKind', value)
@@ -40,23 +46,12 @@ function onNameUpdate(value: unknown): void {
 <template>
   <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
     <div class="flex flex-col gap-1">
-      <label :id="kindLabelId" class="text-xs font-medium text-muted-foreground">Target</label>
-      <Select :model-value="targetKind" @update:model-value="onKindUpdate">
-        <SelectTrigger :aria-labelledby="kindLabelId"><SelectValue /></SelectTrigger>
-        <SelectContent>
-          <SelectItem value="group">Group</SelectItem>
-          <SelectItem value="user">{{ props.userOptionLabel }}</SelectItem>
-        </SelectContent>
-      </Select>
+      <label :for="kindId" class="text-xs font-medium text-muted-foreground">Target</label>
+      <NativeSelect :id="kindId" :model-value="targetKind" :options="kindOptions" @update:model-value="onKindUpdate" />
     </div>
     <div class="flex flex-col gap-1">
-      <label :id="nameLabelId" class="text-xs font-medium text-muted-foreground">{{ targetKind === 'group' ? 'Group name' : 'User name' }}</label>
-      <Select :model-value="targetName" @update:model-value="onNameUpdate">
-        <SelectTrigger :aria-labelledby="nameLabelId"><SelectValue placeholder="Select…" /></SelectTrigger>
-        <SelectContent>
-          <SelectItem v-for="name in targetNames" :key="name" :value="name">{{ name }}</SelectItem>
-        </SelectContent>
-      </Select>
+      <label :for="nameId" class="text-xs font-medium text-muted-foreground">{{ targetKind === 'group' ? 'Group name' : 'User name' }}</label>
+      <NativeSelect :id="nameId" :model-value="targetName" :options="nameOptions" placeholder="Select…" @update:model-value="onNameUpdate" />
       <p v-if="targetNames.length === 0" class="text-xs text-muted-foreground">No {{ targetKind === 'group' ? 'groups' : 'users' }} loaded yet.</p>
     </div>
   </div>

@@ -14,6 +14,7 @@ vi.mock('@/lib/api', async () => {
 import { adminFetch } from '@/lib/api'
 import { useAuthStore } from '@/stores/auth'
 import { useCatalogStore } from '@/stores/catalog'
+import { useFiltersStore } from '@/stores/filters'
 import { useModelsStore } from '@/stores/models'
 import type { AdminCatalogResponse, AdminPerfResponse, AdminUsageModelsResponse } from '@/types/api'
 
@@ -192,5 +193,40 @@ describe('useModelsStore.fetch', () => {
     await first
     expect(models.rows[0]?.id).toBe('openai/gpt-5')
     expect(models.loading).toBe(false)
+  })
+
+  it('fetchProviderRequests keeps the later request when replies land out of order', async () => {
+    const resolvers: Array<(v: never) => void> = []
+    mockedAdminFetch.mockImplementation((() => new Promise<never>((resolve) => resolvers.push(resolve))) as typeof adminFetch)
+    const series = (n: number) => ({ series: [{ scope: 'provider:openai', points: [n] }] })
+
+    const models = useModelsStore()
+    const first = models.fetchProviderRequests(['openai'])
+    expect(models.providerRequests).toBeNull()
+    const second = models.fetchProviderRequests(['openai'])
+
+    resolvers[1](series(7) as never)
+    await second
+    expect(models.providerRequests).toEqual({ openai: 7 })
+
+    resolvers[0](series(999) as never)
+    await first
+    expect(models.providerRequests).toEqual({ openai: 7 })
+  })
+
+  it('fetchProviderRequests asks for the attempt metric on an hour/day window, clamping a month range', async () => {
+    mockedAdminFetch.mockResolvedValue({ series: [{ scope: 'provider:openai', points: [2, 3] }] } as never)
+    const filters = useFiltersStore()
+    filters.setFilters({ range: '12mo' })
+    const models = useModelsStore()
+    await models.fetchProviderRequests(['openai'])
+
+    const url = new URL(String(mockedAdminFetch.mock.calls[0]?.[0]), 'http://x')
+    expect(url.pathname).toBe('/admin/api/usage/series')
+    expect(url.searchParams.get('metric')).toBe('attempt')
+    expect(url.searchParams.get('window')).toBe('day')
+    expect(url.searchParams.get('span')).toBe('30')
+    expect(models.providerRequests).toEqual({ openai: 5 })
+    expect(models.providerRequestsRange).toEqual({ window: 'day', span: 30 })
   })
 })

@@ -90,7 +90,7 @@ export function formatShortDate(d: Date): string {
   return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
 }
 
-/** formatExactInt renders a raw integer count with thousands separators ("1,234,567") — the precise value CompactNumber.vue and the usage chart's tooltip carry alongside a compact rendering, never lost. */
+/** formatExactInt renders a raw integer count with thousands separators ("1,234,567") — the precise value to pair with a compact rendering. */
 export function formatExactInt(n: number): string {
   return n.toLocaleString('en-US')
 }
@@ -106,7 +106,7 @@ export function formatExactInt(n: number): string {
  * count of 999,950 must never display as "1,000k", which would imply a
  * boundary the raw value has not actually crossed. This is DISPLAY
  * only — every caller pairs it with the exact value via a title/
- * aria-label (CompactNumber.vue's own doc comment), and no accessor/sort
+ * aria-label, and no accessor/sort
  * key ever calls this; DataTable columns sort on the raw number.
  */
 export function formatCompactCount(n: number): string {
@@ -203,18 +203,18 @@ function roundScaled(value: number): string {
   return value < 10 ? String(Math.round(value * 10) / 10) : String(Math.round(value))
 }
 
-/** formatUsdPerMTok renders a USD-per-million-tokens float as "$0.19" (2 decimals) — the shared building block for both the visible cost chip and ModelChip's hover detail. */
+/** formatUsdPerMTok renders a USD-per-million-tokens float as "$0.19" (2 decimals) — the shared building block for both the visible cost chip and the hover detail. */
 function formatUsdPerMTok(usd: number): string {
   return `$${usd.toFixed(2)}`
 }
 
 /**
- * formatModelCostHover renders ModelChip's hover-detail cost phrase
+ * formatModelCostHover renders the hover-detail cost phrase
  * (feature v0.23, hover-detail refinement): "in $0.19 / out $0.51 per
  * MTok" for a priced model, or "free" when both sides are exactly 0 (a
  * KNOWN zero cost, ModelMetaConfig.Free — distinct from the caller never
- * passing a cost at all, which ModelChip's own metaDetail computed
- * handles by omitting the phrase entirely rather than calling this).
+ * passing a cost at all, which callers handle by omitting the
+ * phrase entirely rather than calling this).
  */
 export function formatModelCostHover(inputUsd: number, outputUsd: number): string {
   if (inputUsd === 0 && outputUsd === 0) return 'free'
@@ -224,6 +224,11 @@ export function formatModelCostHover(inputUsd: number, outputUsd: number): strin
 /** formatPercentAxis labels a 0-1 rate axis tick with up to one decimal, so half-percent ticks stay distinct ("0.5%" not "1%"). */
 export function formatPercentAxis(rate: number): string {
   return `${Math.round(rate * 1000) / 10}%`
+}
+
+/** formatPercentValue renders a 0-100 percentage with up to two decimals ("12.5%"). */
+export function formatPercentValue(n: number): string {
+  return `${Number(n.toFixed(2))}%`
 }
 
 /** formatModelPriceShort is the table-cell form of formatModelCostHover: "$1.00 / $2.00" (input / output per MTok). */

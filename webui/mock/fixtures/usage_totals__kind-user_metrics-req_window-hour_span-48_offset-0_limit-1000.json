@@ -1,0 +1,71 @@
+{
+ "kind": "user",
+ "window": "hour",
+ "metrics": [
+  "req"
+ ],
+ "rows": [
+  {
+   "values": {
+    "req": 187295
+   },
+   "id": "internal"
+  },
+  {
+   "values": {
+    "req": 6984
+   },
+   "id": "user-03"
+  },
+  {
+   "values": {
+    "req": 2692
+   },
+   "id": "user-02"
+  },
+  {
+   "values": {
+    "req": 1500
+   },
+   "id": "service-01"
+  },
+  {
+   "values": {
+    "req": 572
+   },
+   "id": "user-13"
+  },
+  {
+   "values": {
+    "req": 283
+   },
+   "id": "user-20"
+  },
+  {
+   "values": {
+    "req": 174
+   },
+   "id": "user-07"
+  },
+  {
+   "values": {
+    "req": 121
+   },
+   "id": "user-16"
+  },
+  {
+   "values": {
+    "req": 88
+   },
+   "id": "admin"
+  },
+  {
+   "values": {
+    "req": 23
+   },
+   "id": "user-08"
+  }
+ ],
+ "span": 48,
+ "offset": 0
+}

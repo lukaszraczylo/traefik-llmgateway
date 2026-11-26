@@ -4,6 +4,7 @@ import { useConsumersStore } from '@/stores/consumers'
 import { useDashboardStore } from '@/stores/dashboard'
 import { useEventsStore } from '@/stores/events'
 import { useModelsStore } from '@/stores/models'
+import { useOverviewStore } from '@/stores/overview'
 import { useReliabilityStore } from '@/stores/reliability'
 import { useSpendStore } from '@/stores/spend'
 
@@ -16,6 +17,7 @@ export function resetSessionData(): void {
     useDashboardStore(),
     useEventsStore(),
     useModelsStore(),
+    useOverviewStore(),
     useReliabilityStore(),
     useSpendStore(),
   ]) {

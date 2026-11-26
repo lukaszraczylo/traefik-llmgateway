@@ -74,6 +74,10 @@ export const useReliabilityStore = defineStore('reliability', {
     windowUsed: 'day' as Extract<HistoryWindow, 'hour' | 'day'>,
     /** Per-provider fail/attempt ratio, one entry per configured provider. */
     errorRate: [] as ProviderRatioSeries[],
+    /** Per-provider attempt count series (metric `attempt`). */
+    attempts: [] as CountSeries[],
+    /** Per-provider failure count series (metric `fail`). */
+    failures: [] as CountSeries[],
     /** Per-provider timeout count series (metric `timeout`). */
     timeouts: [] as CountSeries[],
     /** Per-provider failover count series (metric `fover`) — a provider's OWN candidates that were failed away FROM, per accountExtras.failoverFrom's own doc comment (redesign-plan.md section 2b). */
@@ -98,6 +102,8 @@ export const useReliabilityStore = defineStore('reliability', {
     /** AdminFeaturesView.latencyStats, as this SPECIFIC response reported it — ReliabilityPage.vue already reads dashboard.overview.features.latencyStats to decide whether to fetch at all, but keeping the response's own copy here avoids a stale read if the config toggles between fetches. */
     providerPerfLatencyEnabled: false,
     providerPerfLoading: false,
+    /** Provider whose perf response last landed successfully; '' until one does, so a miss never reads as an empty success. */
+    providerPerfLoadedFor: '',
     providerPerfError: '',
     /** Same latest-request-wins guard as `reqId` above, scoped to fetchProviderPerf's own independent fetch lifecycle. */
     providerPerfReqId: 0,
@@ -131,6 +137,8 @@ export const useReliabilityStore = defineStore('reliability', {
           this.buckets = []
           this.windowUsed = hourOrDayWindow(filters.window, filters.span).window
           this.errorRate = []
+          this.attempts = []
+          this.failures = []
           this.timeouts = []
           this.failovers = []
           this.rejections = []
@@ -158,6 +166,8 @@ export const useReliabilityStore = defineStore('reliability', {
         // A provider with no attempts in the window is idle, not healthy: keep it out of every legend.
         const active = activeScopes(attemptRes.series)
         this.errorRate = errorRateSeries(attemptRes, failRes).filter((s) => active.has(s.scope))
+        this.attempts = attemptRes.series.filter((s) => active.has(s.scope))
+        this.failures = failRes.series.filter((s) => active.has(s.scope))
         this.timeouts = timeoutRes.series.filter((s) => active.has(s.scope))
         this.failovers = foverRes.series.filter((s) => active.has(s.scope))
         this.rejections = rejRes.series[0]?.points ?? []
@@ -198,6 +208,7 @@ export const useReliabilityStore = defineStore('reliability', {
         this.providerPerfBuckets = []
         this.providerPerfPoints = []
         this.providerPerfLatencyEnabled = false
+        this.providerPerfLoadedFor = ''
         this.providerPerfError = ''
         this.providerPerfLoading = false
         return
@@ -217,9 +228,11 @@ export const useReliabilityStore = defineStore('reliability', {
         this.providerPerfPoints = res.points ?? []
         this.providerPerfLatencyEnabled = res.latencyEnabled
         this.providerPerfError = ''
+        this.providerPerfLoadedFor = provider
       } catch (err) {
         if (requestId !== this.providerPerfReqId) return
         if (isAuthRejection(err)) return
+        this.providerPerfLoadedFor = ''
         this.providerPerfError = messageOf(err)
       } finally {
         if (requestId === this.providerPerfReqId) this.providerPerfLoading = false

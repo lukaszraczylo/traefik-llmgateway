@@ -1,0 +1,6128 @@
+[
+  {
+    "file": "catalog.json",
+    "path": "/admin/api/catalog",
+    "query": {},
+    "status": 200
+  },
+  {
+    "file": "config.json",
+    "path": "/admin/api/config",
+    "query": {},
+    "status": 200
+  },
+  {
+    "file": "consumers.json",
+    "path": "/admin/api/consumers",
+    "query": {},
+    "status": 200
+  },
+  {
+    "file": "events__limit-200.json",
+    "path": "/admin/api/events",
+    "query": {
+      "limit": "200"
+    },
+    "status": 200
+  },
+  {
+    "file": "overview.json",
+    "path": "/admin/api/overview",
+    "query": {},
+    "status": 200
+  },
+  {
+    "file": "performance__kind-model_window-day_span-14.json",
+    "path": "/admin/api/performance",
+    "query": {
+      "kind": "model",
+      "window": "day",
+      "span": "14"
+    },
+    "status": 200
+  },
+  {
+    "file": "performance__kind-model_window-day_span-30.json",
+    "path": "/admin/api/performance",
+    "query": {
+      "kind": "model",
+      "window": "day",
+      "span": "30"
+    },
+    "status": 200
+  },
+  {
+    "file": "performance__kind-model_window-day_span-7.json",
+    "path": "/admin/api/performance",
+    "query": {
+      "kind": "model",
+      "window": "day",
+      "span": "7"
+    },
+    "status": 200
+  },
+  {
+    "file": "performance__kind-model_window-hour_span-24.json",
+    "path": "/admin/api/performance",
+    "query": {
+      "kind": "model",
+      "window": "hour",
+      "span": "24"
+    },
+    "status": 200
+  },
+  {
+    "file": "performance__kind-model_window-hour_span-48.json",
+    "path": "/admin/api/performance",
+    "query": {
+      "kind": "model",
+      "window": "hour",
+      "span": "48"
+    },
+    "status": 200
+  },
+  {
+    "file": "performance__kind-provider_window-day_span-14.json",
+    "path": "/admin/api/performance",
+    "query": {
+      "kind": "provider",
+      "window": "day",
+      "span": "14"
+    },
+    "status": 200
+  },
+  {
+    "file": "performance__kind-provider_window-day_span-14_series-1_id-alibaba.json",
+    "path": "/admin/api/performance",
+    "query": {
+      "kind": "provider",
+      "window": "day",
+      "span": "14",
+      "series": "1",
+      "id": "alibaba"
+    },
+    "status": 200
+  },
+  {
+    "file": "performance__kind-provider_window-day_span-14_series-1_id-amd.json",
+    "path": "/admin/api/performance",
+    "query": {
+      "kind": "provider",
+      "window": "day",
+      "span": "14",
+      "series": "1",
+      "id": "amd"
+    },
+    "status": 200
+  },
+  {
+    "file": "performance__kind-provider_window-day_span-30.json",
+    "path": "/admin/api/performance",
+    "query": {
+      "kind": "provider",
+      "window": "day",
+      "span": "30"
+    },
+    "status": 200
+  },
+  {
+    "file": "performance__kind-provider_window-day_span-30_series-1_id-alibaba.json",
+    "path": "/admin/api/performance",
+    "query": {
+      "kind": "provider",
+      "window": "day",
+      "span": "30",
+      "series": "1",
+      "id": "alibaba"
+    },
+    "status": 200
+  },
+  {
+    "file": "performance__kind-provider_window-day_span-30_series-1_id-amd.json",
+    "path": "/admin/api/performance",
+    "query": {
+      "kind": "provider",
+      "window": "day",
+      "span": "30",
+      "series": "1",
+      "id": "amd"
+    },
+    "status": 200
+  },
+  {
+    "file": "performance__kind-provider_window-day_span-7.json",
+    "path": "/admin/api/performance",
+    "query": {
+      "kind": "provider",
+      "window": "day",
+      "span": "7"
+    },
+    "status": 200
+  },
+  {
+    "file": "performance__kind-provider_window-day_span-7_series-1_id-alibaba.json",
+    "path": "/admin/api/performance",
+    "query": {
+      "kind": "provider",
+      "window": "day",
+      "span": "7",
+      "series": "1",
+      "id": "alibaba"
+    },
+    "status": 200
+  },
+  {
+    "file": "performance__kind-provider_window-day_span-7_series-1_id-amd.json",
+    "path": "/admin/api/performance",
+    "query": {
+      "kind": "provider",
+      "window": "day",
+      "span": "7",
+      "series": "1",
+      "id": "amd"
+    },
+    "status": 200
+  },
+  {
+    "file": "performance__kind-provider_window-hour_span-24.json",
+    "path": "/admin/api/performance",
+    "query": {
+      "kind": "provider",
+      "window": "hour",
+      "span": "24"
+    },
+    "status": 200
+  },
+  {
+    "file": "performance__kind-provider_window-hour_span-24_series-1_id-alibaba.json",
+    "path": "/admin/api/performance",
+    "query": {
+      "kind": "provider",
+      "window": "hour",
+      "span": "24",
+      "series": "1",
+      "id": "alibaba"
+    },
+    "status": 200
+  },
+  {
+    "file": "performance__kind-provider_window-hour_span-24_series-1_id-amd.json",
+    "path": "/admin/api/performance",
+    "query": {
+      "kind": "provider",
+      "window": "hour",
+      "span": "24",
+      "series": "1",
+      "id": "amd"
+    },
+    "status": 200
+  },
+  {
+    "file": "performance__kind-provider_window-hour_span-48.json",
+    "path": "/admin/api/performance",
+    "query": {
+      "kind": "provider",
+      "window": "hour",
+      "span": "48"
+    },
+    "status": 200
+  },
+  {
+    "file": "performance__kind-provider_window-hour_span-48_series-1_id-alibaba.json",
+    "path": "/admin/api/performance",
+    "query": {
+      "kind": "provider",
+      "window": "hour",
+      "span": "48",
+      "series": "1",
+      "id": "alibaba"
+    },
+    "status": 200
+  },
+  {
+    "file": "performance__kind-provider_window-hour_span-48_series-1_id-amd.json",
+    "path": "/admin/api/performance",
+    "query": {
+      "kind": "provider",
+      "window": "hour",
+      "span": "48",
+      "series": "1",
+      "id": "amd"
+    },
+    "status": 200
+  },
+  {
+    "file": "targets.json",
+    "path": "/admin/api/targets",
+    "query": {},
+    "status": 200
+  },
+  {
+    "file": "usage.json",
+    "path": "/admin/api/usage",
+    "query": {},
+    "status": 200
+  },
+  {
+    "file": "usage_models__metric-cost_window-day_span-14_limit-100_detail-1.json",
+    "path": "/admin/api/usage/models",
+    "query": {
+      "metric": "cost",
+      "window": "day",
+      "span": "14",
+      "limit": "100",
+      "detail": "1"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_models__metric-cost_window-day_span-14_limit-5.json",
+    "path": "/admin/api/usage/models",
+    "query": {
+      "metric": "cost",
+      "window": "day",
+      "span": "14",
+      "limit": "5"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_models__metric-cost_window-day_span-30_limit-100_detail-1.json",
+    "path": "/admin/api/usage/models",
+    "query": {
+      "metric": "cost",
+      "window": "day",
+      "span": "30",
+      "limit": "100",
+      "detail": "1"
+    },
+    "status": 400
+  },
+  {
+    "file": "usage_models__metric-cost_window-day_span-30_limit-5.json",
+    "path": "/admin/api/usage/models",
+    "query": {
+      "metric": "cost",
+      "window": "day",
+      "span": "30",
+      "limit": "5"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_models__metric-cost_window-day_span-7_limit-100_detail-1.json",
+    "path": "/admin/api/usage/models",
+    "query": {
+      "metric": "cost",
+      "window": "day",
+      "span": "7",
+      "limit": "100",
+      "detail": "1"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_models__metric-cost_window-day_span-7_limit-5.json",
+    "path": "/admin/api/usage/models",
+    "query": {
+      "metric": "cost",
+      "window": "day",
+      "span": "7",
+      "limit": "5"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_models__metric-cost_window-hour_span-24_limit-100_detail-1.json",
+    "path": "/admin/api/usage/models",
+    "query": {
+      "metric": "cost",
+      "window": "hour",
+      "span": "24",
+      "limit": "100",
+      "detail": "1"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_models__metric-cost_window-hour_span-24_limit-5.json",
+    "path": "/admin/api/usage/models",
+    "query": {
+      "metric": "cost",
+      "window": "hour",
+      "span": "24",
+      "limit": "5"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_models__metric-cost_window-hour_span-48_limit-100_detail-1.json",
+    "path": "/admin/api/usage/models",
+    "query": {
+      "metric": "cost",
+      "window": "hour",
+      "span": "48",
+      "limit": "100",
+      "detail": "1"
+    },
+    "status": 400
+  },
+  {
+    "file": "usage_models__metric-cost_window-hour_span-48_limit-5.json",
+    "path": "/admin/api/usage/models",
+    "query": {
+      "metric": "cost",
+      "window": "hour",
+      "span": "48",
+      "limit": "5"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_models__metric-cost_window-month_span-12_limit-100_detail-1.json",
+    "path": "/admin/api/usage/models",
+    "query": {
+      "metric": "cost",
+      "window": "month",
+      "span": "12",
+      "limit": "100",
+      "detail": "1"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_models__metric-cost_window-month_span-12_limit-5.json",
+    "path": "/admin/api/usage/models",
+    "query": {
+      "metric": "cost",
+      "window": "month",
+      "span": "12",
+      "limit": "5"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_models__metric-cost_window-month_span-3_limit-100_detail-1.json",
+    "path": "/admin/api/usage/models",
+    "query": {
+      "metric": "cost",
+      "window": "month",
+      "span": "3",
+      "limit": "100",
+      "detail": "1"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_models__metric-cost_window-month_span-3_limit-5.json",
+    "path": "/admin/api/usage/models",
+    "query": {
+      "metric": "cost",
+      "window": "month",
+      "span": "3",
+      "limit": "5"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_models__metric-cost_window-month_span-6_limit-100_detail-1.json",
+    "path": "/admin/api/usage/models",
+    "query": {
+      "metric": "cost",
+      "window": "month",
+      "span": "6",
+      "limit": "100",
+      "detail": "1"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_models__metric-cost_window-month_span-6_limit-5.json",
+    "path": "/admin/api/usage/models",
+    "query": {
+      "metric": "cost",
+      "window": "month",
+      "span": "6",
+      "limit": "5"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_models__metric-req_window-day_span-14_limit-100_detail-1.json",
+    "path": "/admin/api/usage/models",
+    "query": {
+      "metric": "req",
+      "window": "day",
+      "span": "14",
+      "limit": "100",
+      "detail": "1"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_models__metric-req_window-day_span-30_limit-100_detail-1.json",
+    "path": "/admin/api/usage/models",
+    "query": {
+      "metric": "req",
+      "window": "day",
+      "span": "30",
+      "limit": "100",
+      "detail": "1"
+    },
+    "status": 400
+  },
+  {
+    "file": "usage_models__metric-req_window-day_span-7_limit-100_detail-1.json",
+    "path": "/admin/api/usage/models",
+    "query": {
+      "metric": "req",
+      "window": "day",
+      "span": "7",
+      "limit": "100",
+      "detail": "1"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_models__metric-req_window-hour_span-24_limit-100_detail-1.json",
+    "path": "/admin/api/usage/models",
+    "query": {
+      "metric": "req",
+      "window": "hour",
+      "span": "24",
+      "limit": "100",
+      "detail": "1"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_models__metric-req_window-hour_span-48_limit-100_detail-1.json",
+    "path": "/admin/api/usage/models",
+    "query": {
+      "metric": "req",
+      "window": "hour",
+      "span": "48",
+      "limit": "100",
+      "detail": "1"
+    },
+    "status": 400
+  },
+  {
+    "file": "usage_models__metric-req_window-month_span-12_limit-100_detail-1.json",
+    "path": "/admin/api/usage/models",
+    "query": {
+      "metric": "req",
+      "window": "month",
+      "span": "12",
+      "limit": "100",
+      "detail": "1"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_models__metric-req_window-month_span-3_limit-100_detail-1.json",
+    "path": "/admin/api/usage/models",
+    "query": {
+      "metric": "req",
+      "window": "month",
+      "span": "3",
+      "limit": "100",
+      "detail": "1"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_models__metric-req_window-month_span-6_limit-100_detail-1.json",
+    "path": "/admin/api/usage/models",
+    "query": {
+      "metric": "req",
+      "window": "month",
+      "span": "6",
+      "limit": "100",
+      "detail": "1"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_models__metric-tokin_window-day_span-14_limit-100_detail-1.json",
+    "path": "/admin/api/usage/models",
+    "query": {
+      "metric": "tokin",
+      "window": "day",
+      "span": "14",
+      "limit": "100",
+      "detail": "1"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_models__metric-tokin_window-day_span-30_limit-100_detail-1.json",
+    "path": "/admin/api/usage/models",
+    "query": {
+      "metric": "tokin",
+      "window": "day",
+      "span": "30",
+      "limit": "100",
+      "detail": "1"
+    },
+    "status": 400
+  },
+  {
+    "file": "usage_models__metric-tokin_window-day_span-7_limit-100_detail-1.json",
+    "path": "/admin/api/usage/models",
+    "query": {
+      "metric": "tokin",
+      "window": "day",
+      "span": "7",
+      "limit": "100",
+      "detail": "1"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_models__metric-tokin_window-hour_span-24_limit-100_detail-1.json",
+    "path": "/admin/api/usage/models",
+    "query": {
+      "metric": "tokin",
+      "window": "hour",
+      "span": "24",
+      "limit": "100",
+      "detail": "1"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_models__metric-tokin_window-hour_span-48_limit-100_detail-1.json",
+    "path": "/admin/api/usage/models",
+    "query": {
+      "metric": "tokin",
+      "window": "hour",
+      "span": "48",
+      "limit": "100",
+      "detail": "1"
+    },
+    "status": 400
+  },
+  {
+    "file": "usage_models__metric-tokin_window-month_span-12_limit-100_detail-1.json",
+    "path": "/admin/api/usage/models",
+    "query": {
+      "metric": "tokin",
+      "window": "month",
+      "span": "12",
+      "limit": "100",
+      "detail": "1"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_models__metric-tokin_window-month_span-3_limit-100_detail-1.json",
+    "path": "/admin/api/usage/models",
+    "query": {
+      "metric": "tokin",
+      "window": "month",
+      "span": "3",
+      "limit": "100",
+      "detail": "1"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_models__metric-tokin_window-month_span-6_limit-100_detail-1.json",
+    "path": "/admin/api/usage/models",
+    "query": {
+      "metric": "tokin",
+      "window": "month",
+      "span": "6",
+      "limit": "100",
+      "detail": "1"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_models__metric-tokout_window-day_span-14_limit-100_detail-1.json",
+    "path": "/admin/api/usage/models",
+    "query": {
+      "metric": "tokout",
+      "window": "day",
+      "span": "14",
+      "limit": "100",
+      "detail": "1"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_models__metric-tokout_window-day_span-30_limit-100_detail-1.json",
+    "path": "/admin/api/usage/models",
+    "query": {
+      "metric": "tokout",
+      "window": "day",
+      "span": "30",
+      "limit": "100",
+      "detail": "1"
+    },
+    "status": 400
+  },
+  {
+    "file": "usage_models__metric-tokout_window-day_span-7_limit-100_detail-1.json",
+    "path": "/admin/api/usage/models",
+    "query": {
+      "metric": "tokout",
+      "window": "day",
+      "span": "7",
+      "limit": "100",
+      "detail": "1"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_models__metric-tokout_window-hour_span-24_limit-100_detail-1.json",
+    "path": "/admin/api/usage/models",
+    "query": {
+      "metric": "tokout",
+      "window": "hour",
+      "span": "24",
+      "limit": "100",
+      "detail": "1"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_models__metric-tokout_window-hour_span-48_limit-100_detail-1.json",
+    "path": "/admin/api/usage/models",
+    "query": {
+      "metric": "tokout",
+      "window": "hour",
+      "span": "48",
+      "limit": "100",
+      "detail": "1"
+    },
+    "status": 400
+  },
+  {
+    "file": "usage_models__metric-tokout_window-month_span-12_limit-100_detail-1.json",
+    "path": "/admin/api/usage/models",
+    "query": {
+      "metric": "tokout",
+      "window": "month",
+      "span": "12",
+      "limit": "100",
+      "detail": "1"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_models__metric-tokout_window-month_span-3_limit-100_detail-1.json",
+    "path": "/admin/api/usage/models",
+    "query": {
+      "metric": "tokout",
+      "window": "month",
+      "span": "3",
+      "limit": "100",
+      "detail": "1"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_models__metric-tokout_window-month_span-6_limit-100_detail-1.json",
+    "path": "/admin/api/usage/models",
+    "query": {
+      "metric": "tokout",
+      "window": "month",
+      "span": "6",
+      "limit": "100",
+      "detail": "1"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__13scopes-3597a8_metric-tokin_window-hour_span-24.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "model:uni/deepseek-v4-flash-0731",
+        "model:uni/glm-5.3-flash",
+        "model:uni/qwen3.8-flash-next",
+        "model:uni/text-embedding-multilingual-e5-base",
+        "model:minimax/MiniMax-M3.1-Flash",
+        "model:gx10/DeepSeek-V4.1-Flash-EXL3",
+        "model:uni/deepseek-v4.1-flash-1017",
+        "model:gx10/Inkling-2-Mini",
+        "model:minimax/MiniMax-M3",
+        "model:uni/qwen3.8-27b",
+        "model:gx10/Qwen3.8-27B",
+        "model:uni/ornith-1.5-397b",
+        "model:uni/model-light"
+      ],
+      "metric": "tokin",
+      "window": "hour",
+      "span": "24"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__13scopes-5535b8_metric-req_window-hour_span-24.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "model:uni/text-embedding-multilingual-e5-base",
+        "model:uni/deepseek-v4-flash-0731",
+        "model:uni/glm-5.3-flash",
+        "model:minimax/MiniMax-M3.1-Flash",
+        "model:uni/qwen3.8-flash-next",
+        "model:minimax/MiniMax-M3",
+        "model:uni/deepseek-v4.1-flash-1017",
+        "model:uni/qwen3.8-27b",
+        "model:gx10/DeepSeek-V4.1-Flash-EXL3",
+        "model:gx10/Qwen3.8-27B",
+        "model:gx10/Inkling-2-Mini",
+        "model:uni/ornith-1.5-397b",
+        "model:uni/model-light"
+      ],
+      "metric": "req",
+      "window": "hour",
+      "span": "24"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__13scopes-bf0de0_metric-cost_window-hour_span-24.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "model:minimax/MiniMax-M3",
+        "model:uni/text-embedding-multilingual-e5-base",
+        "model:uni/deepseek-v4-flash-0731",
+        "model:uni/glm-5.3-flash",
+        "model:minimax/MiniMax-M3.1-Flash",
+        "model:uni/qwen3.8-flash-next",
+        "model:uni/deepseek-v4.1-flash-1017",
+        "model:uni/qwen3.8-27b",
+        "model:gx10/DeepSeek-V4.1-Flash-EXL3",
+        "model:gx10/Qwen3.8-27B",
+        "model:gx10/Inkling-2-Mini",
+        "model:uni/ornith-1.5-397b",
+        "model:uni/model-light"
+      ],
+      "metric": "cost",
+      "window": "hour",
+      "span": "24"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__13scopes-c73732_metric-tokout_window-hour_span-24.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "model:uni/deepseek-v4-flash-0731",
+        "model:uni/glm-5.3-flash",
+        "model:minimax/MiniMax-M3.1-Flash",
+        "model:uni/qwen3.8-flash-next",
+        "model:gx10/DeepSeek-V4.1-Flash-EXL3",
+        "model:uni/deepseek-v4.1-flash-1017",
+        "model:minimax/MiniMax-M3",
+        "model:gx10/Inkling-2-Mini",
+        "model:uni/qwen3.8-27b",
+        "model:gx10/Qwen3.8-27B",
+        "model:uni/ornith-1.5-397b",
+        "model:uni/model-light",
+        "model:uni/text-embedding-multilingual-e5-base"
+      ],
+      "metric": "tokout",
+      "window": "hour",
+      "span": "24"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__19scopes-059b3d_metric-attempt_window-day_span-14.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "provider:alibaba",
+        "provider:amd",
+        "provider:anthropic",
+        "provider:cerebras",
+        "provider:codex",
+        "provider:copilot",
+        "provider:deepseek",
+        "provider:gx10",
+        "provider:macstudio",
+        "provider:minimax",
+        "provider:nvidia-nim",
+        "provider:nvidia-retrieval",
+        "provider:openai",
+        "provider:openai-audio",
+        "provider:parakeet-mlx",
+        "provider:piper-tts",
+        "provider:uni",
+        "provider:xai",
+        "provider:xiaomi"
+      ],
+      "metric": "attempt",
+      "window": "day",
+      "span": "14"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__19scopes-059b3d_metric-attempt_window-day_span-30.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "provider:alibaba",
+        "provider:amd",
+        "provider:anthropic",
+        "provider:cerebras",
+        "provider:codex",
+        "provider:copilot",
+        "provider:deepseek",
+        "provider:gx10",
+        "provider:macstudio",
+        "provider:minimax",
+        "provider:nvidia-nim",
+        "provider:nvidia-retrieval",
+        "provider:openai",
+        "provider:openai-audio",
+        "provider:parakeet-mlx",
+        "provider:piper-tts",
+        "provider:uni",
+        "provider:xai",
+        "provider:xiaomi"
+      ],
+      "metric": "attempt",
+      "window": "day",
+      "span": "30"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__19scopes-059b3d_metric-attempt_window-day_span-7.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "provider:alibaba",
+        "provider:amd",
+        "provider:anthropic",
+        "provider:cerebras",
+        "provider:codex",
+        "provider:copilot",
+        "provider:deepseek",
+        "provider:gx10",
+        "provider:macstudio",
+        "provider:minimax",
+        "provider:nvidia-nim",
+        "provider:nvidia-retrieval",
+        "provider:openai",
+        "provider:openai-audio",
+        "provider:parakeet-mlx",
+        "provider:piper-tts",
+        "provider:uni",
+        "provider:xai",
+        "provider:xiaomi"
+      ],
+      "metric": "attempt",
+      "window": "day",
+      "span": "7"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__19scopes-059b3d_metric-attempt_window-hour_span-24.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "provider:alibaba",
+        "provider:amd",
+        "provider:anthropic",
+        "provider:cerebras",
+        "provider:codex",
+        "provider:copilot",
+        "provider:deepseek",
+        "provider:gx10",
+        "provider:macstudio",
+        "provider:minimax",
+        "provider:nvidia-nim",
+        "provider:nvidia-retrieval",
+        "provider:openai",
+        "provider:openai-audio",
+        "provider:parakeet-mlx",
+        "provider:piper-tts",
+        "provider:uni",
+        "provider:xai",
+        "provider:xiaomi"
+      ],
+      "metric": "attempt",
+      "window": "hour",
+      "span": "24"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__19scopes-059b3d_metric-attempt_window-hour_span-48.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "provider:alibaba",
+        "provider:amd",
+        "provider:anthropic",
+        "provider:cerebras",
+        "provider:codex",
+        "provider:copilot",
+        "provider:deepseek",
+        "provider:gx10",
+        "provider:macstudio",
+        "provider:minimax",
+        "provider:nvidia-nim",
+        "provider:nvidia-retrieval",
+        "provider:openai",
+        "provider:openai-audio",
+        "provider:parakeet-mlx",
+        "provider:piper-tts",
+        "provider:uni",
+        "provider:xai",
+        "provider:xiaomi"
+      ],
+      "metric": "attempt",
+      "window": "hour",
+      "span": "48"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__19scopes-059b3d_metric-fail_window-day_span-14.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "provider:alibaba",
+        "provider:amd",
+        "provider:anthropic",
+        "provider:cerebras",
+        "provider:codex",
+        "provider:copilot",
+        "provider:deepseek",
+        "provider:gx10",
+        "provider:macstudio",
+        "provider:minimax",
+        "provider:nvidia-nim",
+        "provider:nvidia-retrieval",
+        "provider:openai",
+        "provider:openai-audio",
+        "provider:parakeet-mlx",
+        "provider:piper-tts",
+        "provider:uni",
+        "provider:xai",
+        "provider:xiaomi"
+      ],
+      "metric": "fail",
+      "window": "day",
+      "span": "14"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__19scopes-059b3d_metric-fail_window-day_span-30.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "provider:alibaba",
+        "provider:amd",
+        "provider:anthropic",
+        "provider:cerebras",
+        "provider:codex",
+        "provider:copilot",
+        "provider:deepseek",
+        "provider:gx10",
+        "provider:macstudio",
+        "provider:minimax",
+        "provider:nvidia-nim",
+        "provider:nvidia-retrieval",
+        "provider:openai",
+        "provider:openai-audio",
+        "provider:parakeet-mlx",
+        "provider:piper-tts",
+        "provider:uni",
+        "provider:xai",
+        "provider:xiaomi"
+      ],
+      "metric": "fail",
+      "window": "day",
+      "span": "30"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__19scopes-059b3d_metric-fail_window-day_span-7.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "provider:alibaba",
+        "provider:amd",
+        "provider:anthropic",
+        "provider:cerebras",
+        "provider:codex",
+        "provider:copilot",
+        "provider:deepseek",
+        "provider:gx10",
+        "provider:macstudio",
+        "provider:minimax",
+        "provider:nvidia-nim",
+        "provider:nvidia-retrieval",
+        "provider:openai",
+        "provider:openai-audio",
+        "provider:parakeet-mlx",
+        "provider:piper-tts",
+        "provider:uni",
+        "provider:xai",
+        "provider:xiaomi"
+      ],
+      "metric": "fail",
+      "window": "day",
+      "span": "7"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__19scopes-059b3d_metric-fail_window-hour_span-24.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "provider:alibaba",
+        "provider:amd",
+        "provider:anthropic",
+        "provider:cerebras",
+        "provider:codex",
+        "provider:copilot",
+        "provider:deepseek",
+        "provider:gx10",
+        "provider:macstudio",
+        "provider:minimax",
+        "provider:nvidia-nim",
+        "provider:nvidia-retrieval",
+        "provider:openai",
+        "provider:openai-audio",
+        "provider:parakeet-mlx",
+        "provider:piper-tts",
+        "provider:uni",
+        "provider:xai",
+        "provider:xiaomi"
+      ],
+      "metric": "fail",
+      "window": "hour",
+      "span": "24"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__19scopes-059b3d_metric-fail_window-hour_span-48.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "provider:alibaba",
+        "provider:amd",
+        "provider:anthropic",
+        "provider:cerebras",
+        "provider:codex",
+        "provider:copilot",
+        "provider:deepseek",
+        "provider:gx10",
+        "provider:macstudio",
+        "provider:minimax",
+        "provider:nvidia-nim",
+        "provider:nvidia-retrieval",
+        "provider:openai",
+        "provider:openai-audio",
+        "provider:parakeet-mlx",
+        "provider:piper-tts",
+        "provider:uni",
+        "provider:xai",
+        "provider:xiaomi"
+      ],
+      "metric": "fail",
+      "window": "hour",
+      "span": "48"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__19scopes-059b3d_metric-fover_window-day_span-14.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "provider:alibaba",
+        "provider:amd",
+        "provider:anthropic",
+        "provider:cerebras",
+        "provider:codex",
+        "provider:copilot",
+        "provider:deepseek",
+        "provider:gx10",
+        "provider:macstudio",
+        "provider:minimax",
+        "provider:nvidia-nim",
+        "provider:nvidia-retrieval",
+        "provider:openai",
+        "provider:openai-audio",
+        "provider:parakeet-mlx",
+        "provider:piper-tts",
+        "provider:uni",
+        "provider:xai",
+        "provider:xiaomi"
+      ],
+      "metric": "fover",
+      "window": "day",
+      "span": "14"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__19scopes-059b3d_metric-fover_window-day_span-30.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "provider:alibaba",
+        "provider:amd",
+        "provider:anthropic",
+        "provider:cerebras",
+        "provider:codex",
+        "provider:copilot",
+        "provider:deepseek",
+        "provider:gx10",
+        "provider:macstudio",
+        "provider:minimax",
+        "provider:nvidia-nim",
+        "provider:nvidia-retrieval",
+        "provider:openai",
+        "provider:openai-audio",
+        "provider:parakeet-mlx",
+        "provider:piper-tts",
+        "provider:uni",
+        "provider:xai",
+        "provider:xiaomi"
+      ],
+      "metric": "fover",
+      "window": "day",
+      "span": "30"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__19scopes-059b3d_metric-fover_window-day_span-7.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "provider:alibaba",
+        "provider:amd",
+        "provider:anthropic",
+        "provider:cerebras",
+        "provider:codex",
+        "provider:copilot",
+        "provider:deepseek",
+        "provider:gx10",
+        "provider:macstudio",
+        "provider:minimax",
+        "provider:nvidia-nim",
+        "provider:nvidia-retrieval",
+        "provider:openai",
+        "provider:openai-audio",
+        "provider:parakeet-mlx",
+        "provider:piper-tts",
+        "provider:uni",
+        "provider:xai",
+        "provider:xiaomi"
+      ],
+      "metric": "fover",
+      "window": "day",
+      "span": "7"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__19scopes-059b3d_metric-fover_window-hour_span-24.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "provider:alibaba",
+        "provider:amd",
+        "provider:anthropic",
+        "provider:cerebras",
+        "provider:codex",
+        "provider:copilot",
+        "provider:deepseek",
+        "provider:gx10",
+        "provider:macstudio",
+        "provider:minimax",
+        "provider:nvidia-nim",
+        "provider:nvidia-retrieval",
+        "provider:openai",
+        "provider:openai-audio",
+        "provider:parakeet-mlx",
+        "provider:piper-tts",
+        "provider:uni",
+        "provider:xai",
+        "provider:xiaomi"
+      ],
+      "metric": "fover",
+      "window": "hour",
+      "span": "24"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__19scopes-059b3d_metric-fover_window-hour_span-48.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "provider:alibaba",
+        "provider:amd",
+        "provider:anthropic",
+        "provider:cerebras",
+        "provider:codex",
+        "provider:copilot",
+        "provider:deepseek",
+        "provider:gx10",
+        "provider:macstudio",
+        "provider:minimax",
+        "provider:nvidia-nim",
+        "provider:nvidia-retrieval",
+        "provider:openai",
+        "provider:openai-audio",
+        "provider:parakeet-mlx",
+        "provider:piper-tts",
+        "provider:uni",
+        "provider:xai",
+        "provider:xiaomi"
+      ],
+      "metric": "fover",
+      "window": "hour",
+      "span": "48"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__19scopes-059b3d_metric-timeout_window-day_span-14.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "provider:alibaba",
+        "provider:amd",
+        "provider:anthropic",
+        "provider:cerebras",
+        "provider:codex",
+        "provider:copilot",
+        "provider:deepseek",
+        "provider:gx10",
+        "provider:macstudio",
+        "provider:minimax",
+        "provider:nvidia-nim",
+        "provider:nvidia-retrieval",
+        "provider:openai",
+        "provider:openai-audio",
+        "provider:parakeet-mlx",
+        "provider:piper-tts",
+        "provider:uni",
+        "provider:xai",
+        "provider:xiaomi"
+      ],
+      "metric": "timeout",
+      "window": "day",
+      "span": "14"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__19scopes-059b3d_metric-timeout_window-day_span-30.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "provider:alibaba",
+        "provider:amd",
+        "provider:anthropic",
+        "provider:cerebras",
+        "provider:codex",
+        "provider:copilot",
+        "provider:deepseek",
+        "provider:gx10",
+        "provider:macstudio",
+        "provider:minimax",
+        "provider:nvidia-nim",
+        "provider:nvidia-retrieval",
+        "provider:openai",
+        "provider:openai-audio",
+        "provider:parakeet-mlx",
+        "provider:piper-tts",
+        "provider:uni",
+        "provider:xai",
+        "provider:xiaomi"
+      ],
+      "metric": "timeout",
+      "window": "day",
+      "span": "30"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__19scopes-059b3d_metric-timeout_window-day_span-7.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "provider:alibaba",
+        "provider:amd",
+        "provider:anthropic",
+        "provider:cerebras",
+        "provider:codex",
+        "provider:copilot",
+        "provider:deepseek",
+        "provider:gx10",
+        "provider:macstudio",
+        "provider:minimax",
+        "provider:nvidia-nim",
+        "provider:nvidia-retrieval",
+        "provider:openai",
+        "provider:openai-audio",
+        "provider:parakeet-mlx",
+        "provider:piper-tts",
+        "provider:uni",
+        "provider:xai",
+        "provider:xiaomi"
+      ],
+      "metric": "timeout",
+      "window": "day",
+      "span": "7"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__19scopes-059b3d_metric-timeout_window-hour_span-24.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "provider:alibaba",
+        "provider:amd",
+        "provider:anthropic",
+        "provider:cerebras",
+        "provider:codex",
+        "provider:copilot",
+        "provider:deepseek",
+        "provider:gx10",
+        "provider:macstudio",
+        "provider:minimax",
+        "provider:nvidia-nim",
+        "provider:nvidia-retrieval",
+        "provider:openai",
+        "provider:openai-audio",
+        "provider:parakeet-mlx",
+        "provider:piper-tts",
+        "provider:uni",
+        "provider:xai",
+        "provider:xiaomi"
+      ],
+      "metric": "timeout",
+      "window": "hour",
+      "span": "24"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__19scopes-059b3d_metric-timeout_window-hour_span-48.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "provider:alibaba",
+        "provider:amd",
+        "provider:anthropic",
+        "provider:cerebras",
+        "provider:codex",
+        "provider:copilot",
+        "provider:deepseek",
+        "provider:gx10",
+        "provider:macstudio",
+        "provider:minimax",
+        "provider:nvidia-nim",
+        "provider:nvidia-retrieval",
+        "provider:openai",
+        "provider:openai-audio",
+        "provider:parakeet-mlx",
+        "provider:piper-tts",
+        "provider:uni",
+        "provider:xai",
+        "provider:xiaomi"
+      ],
+      "metric": "timeout",
+      "window": "hour",
+      "span": "48"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__24scopes-1e7dbc_metric-req_window-day_span-7.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "model:uni/text-embedding-multilingual-e5-base",
+        "model:uni/deepseek-v4-flash-0731",
+        "model:uni/deepseek-v4.1-flash-1017",
+        "model:uni/glm-5.3-flash",
+        "model:gx10/DeepSeek-V4.1-Flash-EXL3",
+        "model:minimax/MiniMax-M3.1-Flash",
+        "model:uni/qwen3.8-flash-next",
+        "model:minimax/MiniMax-M3",
+        "model:uni/qwen3.8-27b",
+        "model:gx10/Qwen3.8-27B",
+        "model:minimax/MiniMax-M2.5-highspeed",
+        "model:uni/model-fast",
+        "model:minimax/MiniMax-M2.7",
+        "model:minimax/MiniMax-M2.7-highspeed",
+        "model:minimax/MiniMax-M2.5",
+        "model:gx10/Inkling-2-Mini",
+        "model:uni/ornith-1.5-397b",
+        "model:gx10/current",
+        "model:uni/ornith-397b",
+        "model:uni/qwen3.8-27b-uncensored",
+        "model:uni/model-light",
+        "model:uni/ornith-1.5-35b",
+        "model:uni/qwen3.6-27b",
+        "model:uni/model-heavy"
+      ],
+      "metric": "req",
+      "window": "day",
+      "span": "7"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__24scopes-3df778_metric-tokout_window-day_span-7.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "model:uni/deepseek-v4-flash-0731",
+        "model:uni/deepseek-v4.1-flash-1017",
+        "model:gx10/DeepSeek-V4.1-Flash-EXL3",
+        "model:uni/glm-5.3-flash",
+        "model:uni/qwen3.8-flash-next",
+        "model:minimax/MiniMax-M3",
+        "model:minimax/MiniMax-M3.1-Flash",
+        "model:gx10/Qwen3.8-27B",
+        "model:uni/model-fast",
+        "model:minimax/MiniMax-M2.7-highspeed",
+        "model:minimax/MiniMax-M2.5",
+        "model:minimax/MiniMax-M2.5-highspeed",
+        "model:minimax/MiniMax-M2.7",
+        "model:gx10/Inkling-2-Mini",
+        "model:uni/qwen3.8-27b",
+        "model:uni/ornith-1.5-397b",
+        "model:uni/model-light",
+        "model:uni/qwen3.8-27b-uncensored",
+        "model:uni/qwen3.6-27b",
+        "model:uni/ornith-397b",
+        "model:uni/ornith-1.5-35b",
+        "model:uni/model-heavy",
+        "model:gx10/current",
+        "model:uni/text-embedding-multilingual-e5-base"
+      ],
+      "metric": "tokout",
+      "window": "day",
+      "span": "7"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__24scopes-afbd0c_metric-tokin_window-day_span-7.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "model:uni/deepseek-v4.1-flash-1017",
+        "model:uni/deepseek-v4-flash-0731",
+        "model:uni/glm-5.3-flash",
+        "model:gx10/DeepSeek-V4.1-Flash-EXL3",
+        "model:uni/qwen3.8-flash-next",
+        "model:uni/text-embedding-multilingual-e5-base",
+        "model:minimax/MiniMax-M3",
+        "model:minimax/MiniMax-M3.1-Flash",
+        "model:gx10/Inkling-2-Mini",
+        "model:uni/qwen3.8-27b",
+        "model:minimax/MiniMax-M2.5-highspeed",
+        "model:minimax/MiniMax-M2.7-highspeed",
+        "model:minimax/MiniMax-M2.7",
+        "model:minimax/MiniMax-M2.5",
+        "model:gx10/Qwen3.8-27B",
+        "model:uni/model-fast",
+        "model:uni/ornith-1.5-397b",
+        "model:uni/qwen3.8-27b-uncensored",
+        "model:uni/model-light",
+        "model:uni/qwen3.6-27b",
+        "model:uni/ornith-397b",
+        "model:uni/ornith-1.5-35b",
+        "model:gx10/current",
+        "model:uni/model-heavy"
+      ],
+      "metric": "tokin",
+      "window": "day",
+      "span": "7"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__24scopes-e59eb3_metric-cost_window-day_span-7.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "model:minimax/MiniMax-M3",
+        "model:minimax/MiniMax-M2.5-highspeed",
+        "model:minimax/MiniMax-M2.5",
+        "model:uni/text-embedding-multilingual-e5-base",
+        "model:uni/deepseek-v4-flash-0731",
+        "model:uni/deepseek-v4.1-flash-1017",
+        "model:uni/glm-5.3-flash",
+        "model:gx10/DeepSeek-V4.1-Flash-EXL3",
+        "model:minimax/MiniMax-M3.1-Flash",
+        "model:uni/qwen3.8-flash-next",
+        "model:uni/qwen3.8-27b",
+        "model:gx10/Qwen3.8-27B",
+        "model:uni/model-fast",
+        "model:minimax/MiniMax-M2.7",
+        "model:minimax/MiniMax-M2.7-highspeed",
+        "model:gx10/Inkling-2-Mini",
+        "model:uni/ornith-1.5-397b",
+        "model:gx10/current",
+        "model:uni/ornith-397b",
+        "model:uni/qwen3.8-27b-uncensored",
+        "model:uni/model-light",
+        "model:uni/ornith-1.5-35b",
+        "model:uni/qwen3.6-27b",
+        "model:uni/model-heavy"
+      ],
+      "metric": "cost",
+      "window": "day",
+      "span": "7"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__27scopes-8e9979_metric-tokout_window-day_span-14.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "model:uni/deepseek-v4-flash-0731",
+        "model:uni/deepseek-v4.1-flash-1017",
+        "model:uni/glm-5.3-flash",
+        "model:gx10/DeepSeek-V4.1-Flash-EXL3",
+        "model:minimax/MiniMax-M3",
+        "model:uni/qwen3.8-flash-next",
+        "model:minimax/MiniMax-M3.1-Flash",
+        "model:gx10/Qwen3.8-27B",
+        "model:alibaba/deepseek-v4.1-flash-1017",
+        "model:openai/gpt-5.5",
+        "model:uni/model-fast",
+        "model:minimax/MiniMax-M2.7-highspeed",
+        "model:anthropic/claude-haiku-5-5",
+        "model:minimax/MiniMax-M2.5",
+        "model:minimax/MiniMax-M2.5-highspeed",
+        "model:minimax/MiniMax-M2.7",
+        "model:gx10/Inkling-2-Mini",
+        "model:uni/qwen3.8-27b",
+        "model:uni/ornith-1.5-397b",
+        "model:uni/model-light",
+        "model:uni/qwen3.8-27b-uncensored",
+        "model:uni/qwen3.6-27b",
+        "model:uni/ornith-397b",
+        "model:uni/ornith-1.5-35b",
+        "model:uni/model-heavy",
+        "model:gx10/current",
+        "model:uni/text-embedding-multilingual-e5-base"
+      ],
+      "metric": "tokout",
+      "window": "day",
+      "span": "14"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__27scopes-8e9979_metric-tokout_window-month_span-12.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "model:uni/deepseek-v4-flash-0731",
+        "model:uni/deepseek-v4.1-flash-1017",
+        "model:uni/glm-5.3-flash",
+        "model:gx10/DeepSeek-V4.1-Flash-EXL3",
+        "model:minimax/MiniMax-M3",
+        "model:uni/qwen3.8-flash-next",
+        "model:minimax/MiniMax-M3.1-Flash",
+        "model:gx10/Qwen3.8-27B",
+        "model:alibaba/deepseek-v4.1-flash-1017",
+        "model:openai/gpt-5.5",
+        "model:uni/model-fast",
+        "model:minimax/MiniMax-M2.7-highspeed",
+        "model:anthropic/claude-haiku-5-5",
+        "model:minimax/MiniMax-M2.5",
+        "model:minimax/MiniMax-M2.5-highspeed",
+        "model:minimax/MiniMax-M2.7",
+        "model:gx10/Inkling-2-Mini",
+        "model:uni/qwen3.8-27b",
+        "model:uni/ornith-1.5-397b",
+        "model:uni/model-light",
+        "model:uni/qwen3.8-27b-uncensored",
+        "model:uni/qwen3.6-27b",
+        "model:uni/ornith-397b",
+        "model:uni/ornith-1.5-35b",
+        "model:uni/model-heavy",
+        "model:gx10/current",
+        "model:uni/text-embedding-multilingual-e5-base"
+      ],
+      "metric": "tokout",
+      "window": "month",
+      "span": "12"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__27scopes-8e9979_metric-tokout_window-month_span-3.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "model:uni/deepseek-v4-flash-0731",
+        "model:uni/deepseek-v4.1-flash-1017",
+        "model:uni/glm-5.3-flash",
+        "model:gx10/DeepSeek-V4.1-Flash-EXL3",
+        "model:minimax/MiniMax-M3",
+        "model:uni/qwen3.8-flash-next",
+        "model:minimax/MiniMax-M3.1-Flash",
+        "model:gx10/Qwen3.8-27B",
+        "model:alibaba/deepseek-v4.1-flash-1017",
+        "model:openai/gpt-5.5",
+        "model:uni/model-fast",
+        "model:minimax/MiniMax-M2.7-highspeed",
+        "model:anthropic/claude-haiku-5-5",
+        "model:minimax/MiniMax-M2.5",
+        "model:minimax/MiniMax-M2.5-highspeed",
+        "model:minimax/MiniMax-M2.7",
+        "model:gx10/Inkling-2-Mini",
+        "model:uni/qwen3.8-27b",
+        "model:uni/ornith-1.5-397b",
+        "model:uni/model-light",
+        "model:uni/qwen3.8-27b-uncensored",
+        "model:uni/qwen3.6-27b",
+        "model:uni/ornith-397b",
+        "model:uni/ornith-1.5-35b",
+        "model:uni/model-heavy",
+        "model:gx10/current",
+        "model:uni/text-embedding-multilingual-e5-base"
+      ],
+      "metric": "tokout",
+      "window": "month",
+      "span": "3"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__27scopes-8e9979_metric-tokout_window-month_span-6.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "model:uni/deepseek-v4-flash-0731",
+        "model:uni/deepseek-v4.1-flash-1017",
+        "model:uni/glm-5.3-flash",
+        "model:gx10/DeepSeek-V4.1-Flash-EXL3",
+        "model:minimax/MiniMax-M3",
+        "model:uni/qwen3.8-flash-next",
+        "model:minimax/MiniMax-M3.1-Flash",
+        "model:gx10/Qwen3.8-27B",
+        "model:alibaba/deepseek-v4.1-flash-1017",
+        "model:openai/gpt-5.5",
+        "model:uni/model-fast",
+        "model:minimax/MiniMax-M2.7-highspeed",
+        "model:anthropic/claude-haiku-5-5",
+        "model:minimax/MiniMax-M2.5",
+        "model:minimax/MiniMax-M2.5-highspeed",
+        "model:minimax/MiniMax-M2.7",
+        "model:gx10/Inkling-2-Mini",
+        "model:uni/qwen3.8-27b",
+        "model:uni/ornith-1.5-397b",
+        "model:uni/model-light",
+        "model:uni/qwen3.8-27b-uncensored",
+        "model:uni/qwen3.6-27b",
+        "model:uni/ornith-397b",
+        "model:uni/ornith-1.5-35b",
+        "model:uni/model-heavy",
+        "model:gx10/current",
+        "model:uni/text-embedding-multilingual-e5-base"
+      ],
+      "metric": "tokout",
+      "window": "month",
+      "span": "6"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__27scopes-9f5267_metric-cost_window-day_span-14.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "model:openai/gpt-5.5",
+        "model:minimax/MiniMax-M3",
+        "model:minimax/MiniMax-M2.5-highspeed",
+        "model:minimax/MiniMax-M2.5",
+        "model:uni/text-embedding-multilingual-e5-base",
+        "model:uni/deepseek-v4-flash-0731",
+        "model:uni/deepseek-v4.1-flash-1017",
+        "model:uni/glm-5.3-flash",
+        "model:gx10/DeepSeek-V4.1-Flash-EXL3",
+        "model:uni/qwen3.8-flash-next",
+        "model:minimax/MiniMax-M3.1-Flash",
+        "model:alibaba/deepseek-v4.1-flash-1017",
+        "model:gx10/Qwen3.8-27B",
+        "model:uni/qwen3.8-27b",
+        "model:uni/model-fast",
+        "model:minimax/MiniMax-M2.7",
+        "model:minimax/MiniMax-M2.7-highspeed",
+        "model:gx10/Inkling-2-Mini",
+        "model:anthropic/claude-haiku-5-5",
+        "model:uni/ornith-1.5-397b",
+        "model:gx10/current",
+        "model:uni/ornith-397b",
+        "model:uni/qwen3.8-27b-uncensored",
+        "model:uni/model-light",
+        "model:uni/ornith-1.5-35b",
+        "model:uni/qwen3.6-27b",
+        "model:uni/model-heavy"
+      ],
+      "metric": "cost",
+      "window": "day",
+      "span": "14"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__27scopes-9f5267_metric-cost_window-month_span-12.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "model:openai/gpt-5.5",
+        "model:minimax/MiniMax-M3",
+        "model:minimax/MiniMax-M2.5-highspeed",
+        "model:minimax/MiniMax-M2.5",
+        "model:uni/text-embedding-multilingual-e5-base",
+        "model:uni/deepseek-v4-flash-0731",
+        "model:uni/deepseek-v4.1-flash-1017",
+        "model:uni/glm-5.3-flash",
+        "model:gx10/DeepSeek-V4.1-Flash-EXL3",
+        "model:uni/qwen3.8-flash-next",
+        "model:minimax/MiniMax-M3.1-Flash",
+        "model:alibaba/deepseek-v4.1-flash-1017",
+        "model:gx10/Qwen3.8-27B",
+        "model:uni/qwen3.8-27b",
+        "model:uni/model-fast",
+        "model:minimax/MiniMax-M2.7",
+        "model:minimax/MiniMax-M2.7-highspeed",
+        "model:gx10/Inkling-2-Mini",
+        "model:anthropic/claude-haiku-5-5",
+        "model:uni/ornith-1.5-397b",
+        "model:gx10/current",
+        "model:uni/ornith-397b",
+        "model:uni/qwen3.8-27b-uncensored",
+        "model:uni/model-light",
+        "model:uni/ornith-1.5-35b",
+        "model:uni/qwen3.6-27b",
+        "model:uni/model-heavy"
+      ],
+      "metric": "cost",
+      "window": "month",
+      "span": "12"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__27scopes-9f5267_metric-cost_window-month_span-3.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "model:openai/gpt-5.5",
+        "model:minimax/MiniMax-M3",
+        "model:minimax/MiniMax-M2.5-highspeed",
+        "model:minimax/MiniMax-M2.5",
+        "model:uni/text-embedding-multilingual-e5-base",
+        "model:uni/deepseek-v4-flash-0731",
+        "model:uni/deepseek-v4.1-flash-1017",
+        "model:uni/glm-5.3-flash",
+        "model:gx10/DeepSeek-V4.1-Flash-EXL3",
+        "model:uni/qwen3.8-flash-next",
+        "model:minimax/MiniMax-M3.1-Flash",
+        "model:alibaba/deepseek-v4.1-flash-1017",
+        "model:gx10/Qwen3.8-27B",
+        "model:uni/qwen3.8-27b",
+        "model:uni/model-fast",
+        "model:minimax/MiniMax-M2.7",
+        "model:minimax/MiniMax-M2.7-highspeed",
+        "model:gx10/Inkling-2-Mini",
+        "model:anthropic/claude-haiku-5-5",
+        "model:uni/ornith-1.5-397b",
+        "model:gx10/current",
+        "model:uni/ornith-397b",
+        "model:uni/qwen3.8-27b-uncensored",
+        "model:uni/model-light",
+        "model:uni/ornith-1.5-35b",
+        "model:uni/qwen3.6-27b",
+        "model:uni/model-heavy"
+      ],
+      "metric": "cost",
+      "window": "month",
+      "span": "3"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__27scopes-9f5267_metric-cost_window-month_span-6.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "model:openai/gpt-5.5",
+        "model:minimax/MiniMax-M3",
+        "model:minimax/MiniMax-M2.5-highspeed",
+        "model:minimax/MiniMax-M2.5",
+        "model:uni/text-embedding-multilingual-e5-base",
+        "model:uni/deepseek-v4-flash-0731",
+        "model:uni/deepseek-v4.1-flash-1017",
+        "model:uni/glm-5.3-flash",
+        "model:gx10/DeepSeek-V4.1-Flash-EXL3",
+        "model:uni/qwen3.8-flash-next",
+        "model:minimax/MiniMax-M3.1-Flash",
+        "model:alibaba/deepseek-v4.1-flash-1017",
+        "model:gx10/Qwen3.8-27B",
+        "model:uni/qwen3.8-27b",
+        "model:uni/model-fast",
+        "model:minimax/MiniMax-M2.7",
+        "model:minimax/MiniMax-M2.7-highspeed",
+        "model:gx10/Inkling-2-Mini",
+        "model:anthropic/claude-haiku-5-5",
+        "model:uni/ornith-1.5-397b",
+        "model:gx10/current",
+        "model:uni/ornith-397b",
+        "model:uni/qwen3.8-27b-uncensored",
+        "model:uni/model-light",
+        "model:uni/ornith-1.5-35b",
+        "model:uni/qwen3.6-27b",
+        "model:uni/model-heavy"
+      ],
+      "metric": "cost",
+      "window": "month",
+      "span": "6"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__27scopes-b4d65c_metric-req_window-day_span-14.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "model:uni/text-embedding-multilingual-e5-base",
+        "model:uni/deepseek-v4-flash-0731",
+        "model:uni/deepseek-v4.1-flash-1017",
+        "model:uni/glm-5.3-flash",
+        "model:gx10/DeepSeek-V4.1-Flash-EXL3",
+        "model:minimax/MiniMax-M3",
+        "model:uni/qwen3.8-flash-next",
+        "model:minimax/MiniMax-M3.1-Flash",
+        "model:alibaba/deepseek-v4.1-flash-1017",
+        "model:gx10/Qwen3.8-27B",
+        "model:openai/gpt-5.5",
+        "model:uni/qwen3.8-27b",
+        "model:uni/model-fast",
+        "model:minimax/MiniMax-M2.5-highspeed",
+        "model:minimax/MiniMax-M2.7",
+        "model:minimax/MiniMax-M2.7-highspeed",
+        "model:minimax/MiniMax-M2.5",
+        "model:gx10/Inkling-2-Mini",
+        "model:anthropic/claude-haiku-5-5",
+        "model:uni/ornith-1.5-397b",
+        "model:gx10/current",
+        "model:uni/ornith-397b",
+        "model:uni/qwen3.8-27b-uncensored",
+        "model:uni/model-light",
+        "model:uni/ornith-1.5-35b",
+        "model:uni/qwen3.6-27b",
+        "model:uni/model-heavy"
+      ],
+      "metric": "req",
+      "window": "day",
+      "span": "14"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__27scopes-b4d65c_metric-req_window-month_span-12.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "model:uni/text-embedding-multilingual-e5-base",
+        "model:uni/deepseek-v4-flash-0731",
+        "model:uni/deepseek-v4.1-flash-1017",
+        "model:uni/glm-5.3-flash",
+        "model:gx10/DeepSeek-V4.1-Flash-EXL3",
+        "model:minimax/MiniMax-M3",
+        "model:uni/qwen3.8-flash-next",
+        "model:minimax/MiniMax-M3.1-Flash",
+        "model:alibaba/deepseek-v4.1-flash-1017",
+        "model:gx10/Qwen3.8-27B",
+        "model:openai/gpt-5.5",
+        "model:uni/qwen3.8-27b",
+        "model:uni/model-fast",
+        "model:minimax/MiniMax-M2.5-highspeed",
+        "model:minimax/MiniMax-M2.7",
+        "model:minimax/MiniMax-M2.7-highspeed",
+        "model:minimax/MiniMax-M2.5",
+        "model:gx10/Inkling-2-Mini",
+        "model:anthropic/claude-haiku-5-5",
+        "model:uni/ornith-1.5-397b",
+        "model:gx10/current",
+        "model:uni/ornith-397b",
+        "model:uni/qwen3.8-27b-uncensored",
+        "model:uni/model-light",
+        "model:uni/ornith-1.5-35b",
+        "model:uni/qwen3.6-27b",
+        "model:uni/model-heavy"
+      ],
+      "metric": "req",
+      "window": "month",
+      "span": "12"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__27scopes-b4d65c_metric-req_window-month_span-3.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "model:uni/text-embedding-multilingual-e5-base",
+        "model:uni/deepseek-v4-flash-0731",
+        "model:uni/deepseek-v4.1-flash-1017",
+        "model:uni/glm-5.3-flash",
+        "model:gx10/DeepSeek-V4.1-Flash-EXL3",
+        "model:minimax/MiniMax-M3",
+        "model:uni/qwen3.8-flash-next",
+        "model:minimax/MiniMax-M3.1-Flash",
+        "model:alibaba/deepseek-v4.1-flash-1017",
+        "model:gx10/Qwen3.8-27B",
+        "model:openai/gpt-5.5",
+        "model:uni/qwen3.8-27b",
+        "model:uni/model-fast",
+        "model:minimax/MiniMax-M2.5-highspeed",
+        "model:minimax/MiniMax-M2.7",
+        "model:minimax/MiniMax-M2.7-highspeed",
+        "model:minimax/MiniMax-M2.5",
+        "model:gx10/Inkling-2-Mini",
+        "model:anthropic/claude-haiku-5-5",
+        "model:uni/ornith-1.5-397b",
+        "model:gx10/current",
+        "model:uni/ornith-397b",
+        "model:uni/qwen3.8-27b-uncensored",
+        "model:uni/model-light",
+        "model:uni/ornith-1.5-35b",
+        "model:uni/qwen3.6-27b",
+        "model:uni/model-heavy"
+      ],
+      "metric": "req",
+      "window": "month",
+      "span": "3"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__27scopes-b4d65c_metric-req_window-month_span-6.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "model:uni/text-embedding-multilingual-e5-base",
+        "model:uni/deepseek-v4-flash-0731",
+        "model:uni/deepseek-v4.1-flash-1017",
+        "model:uni/glm-5.3-flash",
+        "model:gx10/DeepSeek-V4.1-Flash-EXL3",
+        "model:minimax/MiniMax-M3",
+        "model:uni/qwen3.8-flash-next",
+        "model:minimax/MiniMax-M3.1-Flash",
+        "model:alibaba/deepseek-v4.1-flash-1017",
+        "model:gx10/Qwen3.8-27B",
+        "model:openai/gpt-5.5",
+        "model:uni/qwen3.8-27b",
+        "model:uni/model-fast",
+        "model:minimax/MiniMax-M2.5-highspeed",
+        "model:minimax/MiniMax-M2.7",
+        "model:minimax/MiniMax-M2.7-highspeed",
+        "model:minimax/MiniMax-M2.5",
+        "model:gx10/Inkling-2-Mini",
+        "model:anthropic/claude-haiku-5-5",
+        "model:uni/ornith-1.5-397b",
+        "model:gx10/current",
+        "model:uni/ornith-397b",
+        "model:uni/qwen3.8-27b-uncensored",
+        "model:uni/model-light",
+        "model:uni/ornith-1.5-35b",
+        "model:uni/qwen3.6-27b",
+        "model:uni/model-heavy"
+      ],
+      "metric": "req",
+      "window": "month",
+      "span": "6"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__27scopes-ef5a3e_metric-tokin_window-day_span-14.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "model:uni/deepseek-v4.1-flash-1017",
+        "model:uni/deepseek-v4-flash-0731",
+        "model:uni/glm-5.3-flash",
+        "model:gx10/DeepSeek-V4.1-Flash-EXL3",
+        "model:alibaba/deepseek-v4.1-flash-1017",
+        "model:uni/qwen3.8-flash-next",
+        "model:uni/text-embedding-multilingual-e5-base",
+        "model:gx10/Qwen3.8-27B",
+        "model:minimax/MiniMax-M3",
+        "model:minimax/MiniMax-M3.1-Flash",
+        "model:openai/gpt-5.5",
+        "model:gx10/Inkling-2-Mini",
+        "model:anthropic/claude-haiku-5-5",
+        "model:uni/qwen3.8-27b",
+        "model:minimax/MiniMax-M2.5-highspeed",
+        "model:minimax/MiniMax-M2.7-highspeed",
+        "model:minimax/MiniMax-M2.7",
+        "model:minimax/MiniMax-M2.5",
+        "model:uni/model-fast",
+        "model:uni/ornith-1.5-397b",
+        "model:uni/qwen3.8-27b-uncensored",
+        "model:uni/model-light",
+        "model:uni/qwen3.6-27b",
+        "model:uni/ornith-397b",
+        "model:uni/ornith-1.5-35b",
+        "model:gx10/current",
+        "model:uni/model-heavy"
+      ],
+      "metric": "tokin",
+      "window": "day",
+      "span": "14"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__27scopes-ef5a3e_metric-tokin_window-month_span-12.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "model:uni/deepseek-v4.1-flash-1017",
+        "model:uni/deepseek-v4-flash-0731",
+        "model:uni/glm-5.3-flash",
+        "model:gx10/DeepSeek-V4.1-Flash-EXL3",
+        "model:alibaba/deepseek-v4.1-flash-1017",
+        "model:uni/qwen3.8-flash-next",
+        "model:uni/text-embedding-multilingual-e5-base",
+        "model:gx10/Qwen3.8-27B",
+        "model:minimax/MiniMax-M3",
+        "model:minimax/MiniMax-M3.1-Flash",
+        "model:openai/gpt-5.5",
+        "model:gx10/Inkling-2-Mini",
+        "model:anthropic/claude-haiku-5-5",
+        "model:uni/qwen3.8-27b",
+        "model:minimax/MiniMax-M2.5-highspeed",
+        "model:minimax/MiniMax-M2.7-highspeed",
+        "model:minimax/MiniMax-M2.7",
+        "model:minimax/MiniMax-M2.5",
+        "model:uni/model-fast",
+        "model:uni/ornith-1.5-397b",
+        "model:uni/qwen3.8-27b-uncensored",
+        "model:uni/model-light",
+        "model:uni/qwen3.6-27b",
+        "model:uni/ornith-397b",
+        "model:uni/ornith-1.5-35b",
+        "model:gx10/current",
+        "model:uni/model-heavy"
+      ],
+      "metric": "tokin",
+      "window": "month",
+      "span": "12"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__27scopes-ef5a3e_metric-tokin_window-month_span-3.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "model:uni/deepseek-v4.1-flash-1017",
+        "model:uni/deepseek-v4-flash-0731",
+        "model:uni/glm-5.3-flash",
+        "model:gx10/DeepSeek-V4.1-Flash-EXL3",
+        "model:alibaba/deepseek-v4.1-flash-1017",
+        "model:uni/qwen3.8-flash-next",
+        "model:uni/text-embedding-multilingual-e5-base",
+        "model:gx10/Qwen3.8-27B",
+        "model:minimax/MiniMax-M3",
+        "model:minimax/MiniMax-M3.1-Flash",
+        "model:openai/gpt-5.5",
+        "model:gx10/Inkling-2-Mini",
+        "model:anthropic/claude-haiku-5-5",
+        "model:uni/qwen3.8-27b",
+        "model:minimax/MiniMax-M2.5-highspeed",
+        "model:minimax/MiniMax-M2.7-highspeed",
+        "model:minimax/MiniMax-M2.7",
+        "model:minimax/MiniMax-M2.5",
+        "model:uni/model-fast",
+        "model:uni/ornith-1.5-397b",
+        "model:uni/qwen3.8-27b-uncensored",
+        "model:uni/model-light",
+        "model:uni/qwen3.6-27b",
+        "model:uni/ornith-397b",
+        "model:uni/ornith-1.5-35b",
+        "model:gx10/current",
+        "model:uni/model-heavy"
+      ],
+      "metric": "tokin",
+      "window": "month",
+      "span": "3"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__27scopes-ef5a3e_metric-tokin_window-month_span-6.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "model:uni/deepseek-v4.1-flash-1017",
+        "model:uni/deepseek-v4-flash-0731",
+        "model:uni/glm-5.3-flash",
+        "model:gx10/DeepSeek-V4.1-Flash-EXL3",
+        "model:alibaba/deepseek-v4.1-flash-1017",
+        "model:uni/qwen3.8-flash-next",
+        "model:uni/text-embedding-multilingual-e5-base",
+        "model:gx10/Qwen3.8-27B",
+        "model:minimax/MiniMax-M3",
+        "model:minimax/MiniMax-M3.1-Flash",
+        "model:openai/gpt-5.5",
+        "model:gx10/Inkling-2-Mini",
+        "model:anthropic/claude-haiku-5-5",
+        "model:uni/qwen3.8-27b",
+        "model:minimax/MiniMax-M2.5-highspeed",
+        "model:minimax/MiniMax-M2.7-highspeed",
+        "model:minimax/MiniMax-M2.7",
+        "model:minimax/MiniMax-M2.5",
+        "model:uni/model-fast",
+        "model:uni/ornith-1.5-397b",
+        "model:uni/qwen3.8-27b-uncensored",
+        "model:uni/model-light",
+        "model:uni/qwen3.6-27b",
+        "model:uni/ornith-397b",
+        "model:uni/ornith-1.5-35b",
+        "model:gx10/current",
+        "model:uni/model-heavy"
+      ],
+      "metric": "tokin",
+      "window": "month",
+      "span": "6"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__2scopes-818406_metric-cost_window-day_span-14.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "group:home",
+        "group:friends"
+      ],
+      "metric": "cost",
+      "window": "day",
+      "span": "14"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__2scopes-818406_metric-cost_window-day_span-30.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "group:home",
+        "group:friends"
+      ],
+      "metric": "cost",
+      "window": "day",
+      "span": "30"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__2scopes-818406_metric-cost_window-day_span-7.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "group:home",
+        "group:friends"
+      ],
+      "metric": "cost",
+      "window": "day",
+      "span": "7"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__2scopes-818406_metric-cost_window-month_span-12.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "group:home",
+        "group:friends"
+      ],
+      "metric": "cost",
+      "window": "month",
+      "span": "12"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__2scopes-818406_metric-cost_window-month_span-3.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "group:home",
+        "group:friends"
+      ],
+      "metric": "cost",
+      "window": "month",
+      "span": "3"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__2scopes-818406_metric-cost_window-month_span-6.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "group:home",
+        "group:friends"
+      ],
+      "metric": "cost",
+      "window": "month",
+      "span": "6"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__2scopes-818406_metric-req_window-day_span-14.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "group:home",
+        "group:friends"
+      ],
+      "metric": "req",
+      "window": "day",
+      "span": "14"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__2scopes-818406_metric-req_window-day_span-30.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "group:home",
+        "group:friends"
+      ],
+      "metric": "req",
+      "window": "day",
+      "span": "30"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__2scopes-818406_metric-req_window-day_span-7.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "group:home",
+        "group:friends"
+      ],
+      "metric": "req",
+      "window": "day",
+      "span": "7"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__2scopes-818406_metric-req_window-hour_span-24.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "group:home",
+        "group:friends"
+      ],
+      "metric": "req",
+      "window": "hour",
+      "span": "24"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__2scopes-818406_metric-req_window-hour_span-48.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "group:home",
+        "group:friends"
+      ],
+      "metric": "req",
+      "window": "hour",
+      "span": "48"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__2scopes-818406_metric-tokout_window-day_span-14.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "group:home",
+        "group:friends"
+      ],
+      "metric": "tokout",
+      "window": "day",
+      "span": "14"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__2scopes-818406_metric-tokout_window-day_span-30.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "group:home",
+        "group:friends"
+      ],
+      "metric": "tokout",
+      "window": "day",
+      "span": "30"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__2scopes-818406_metric-tokout_window-day_span-7.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "group:home",
+        "group:friends"
+      ],
+      "metric": "tokout",
+      "window": "day",
+      "span": "7"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__2scopes-818406_metric-tokout_window-hour_span-48.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "group:home",
+        "group:friends"
+      ],
+      "metric": "tokout",
+      "window": "hour",
+      "span": "48"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__2scopes-818406_metric-tokout_window-month_span-12.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "group:home",
+        "group:friends"
+      ],
+      "metric": "tokout",
+      "window": "month",
+      "span": "12"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__2scopes-818406_metric-tokout_window-month_span-3.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "group:home",
+        "group:friends"
+      ],
+      "metric": "tokout",
+      "window": "month",
+      "span": "3"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__2scopes-818406_metric-tokout_window-month_span-6.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "group:home",
+        "group:friends"
+      ],
+      "metric": "tokout",
+      "window": "month",
+      "span": "6"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__2scopes-eb4cb7_metric-tokin_window-day_span-14.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "group:friends",
+        "group:home"
+      ],
+      "metric": "tokin",
+      "window": "day",
+      "span": "14"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__2scopes-eb4cb7_metric-tokin_window-day_span-30.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "group:friends",
+        "group:home"
+      ],
+      "metric": "tokin",
+      "window": "day",
+      "span": "30"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__2scopes-eb4cb7_metric-tokin_window-day_span-7.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "group:friends",
+        "group:home"
+      ],
+      "metric": "tokin",
+      "window": "day",
+      "span": "7"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__2scopes-eb4cb7_metric-tokin_window-hour_span-24.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "group:friends",
+        "group:home"
+      ],
+      "metric": "tokin",
+      "window": "hour",
+      "span": "24"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__2scopes-eb4cb7_metric-tokin_window-hour_span-48.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "group:friends",
+        "group:home"
+      ],
+      "metric": "tokin",
+      "window": "hour",
+      "span": "48"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__2scopes-eb4cb7_metric-tokin_window-month_span-12.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "group:friends",
+        "group:home"
+      ],
+      "metric": "tokin",
+      "window": "month",
+      "span": "12"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__2scopes-eb4cb7_metric-tokin_window-month_span-3.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "group:friends",
+        "group:home"
+      ],
+      "metric": "tokin",
+      "window": "month",
+      "span": "3"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__2scopes-eb4cb7_metric-tokin_window-month_span-6.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "group:friends",
+        "group:home"
+      ],
+      "metric": "tokin",
+      "window": "month",
+      "span": "6"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__2scopes-eb4cb7_metric-tokout_window-hour_span-24.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "group:friends",
+        "group:home"
+      ],
+      "metric": "tokout",
+      "window": "hour",
+      "span": "24"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__group-friends_metric-cost_window-day_span-14.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "group:friends"
+      ],
+      "metric": "cost",
+      "window": "day",
+      "span": "14"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__group-friends_metric-cost_window-day_span-25.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "group:friends"
+      ],
+      "metric": "cost",
+      "window": "day",
+      "span": "25"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__group-friends_metric-cost_window-day_span-30.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "group:friends"
+      ],
+      "metric": "cost",
+      "window": "day",
+      "span": "30"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__group-friends_metric-cost_window-day_span-7.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "group:friends"
+      ],
+      "metric": "cost",
+      "window": "day",
+      "span": "7"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__group-friends_metric-cost_window-hour_span-24.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "group:friends"
+      ],
+      "metric": "cost",
+      "window": "hour",
+      "span": "24"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__group-friends_metric-cost_window-hour_span-48.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "group:friends"
+      ],
+      "metric": "cost",
+      "window": "hour",
+      "span": "48"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__group-friends_metric-cost_window-month_span-12.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "group:friends"
+      ],
+      "metric": "cost",
+      "window": "month",
+      "span": "12"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__group-friends_metric-cost_window-month_span-3.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "group:friends"
+      ],
+      "metric": "cost",
+      "window": "month",
+      "span": "3"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__group-friends_metric-cost_window-month_span-6.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "group:friends"
+      ],
+      "metric": "cost",
+      "window": "month",
+      "span": "6"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__group-friends_metric-req_window-day_span-14.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "group:friends"
+      ],
+      "metric": "req",
+      "window": "day",
+      "span": "14"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__group-friends_metric-req_window-day_span-30.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "group:friends"
+      ],
+      "metric": "req",
+      "window": "day",
+      "span": "30"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__group-friends_metric-req_window-day_span-7.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "group:friends"
+      ],
+      "metric": "req",
+      "window": "day",
+      "span": "7"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__group-friends_metric-req_window-hour_span-24.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "group:friends"
+      ],
+      "metric": "req",
+      "window": "hour",
+      "span": "24"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__group-friends_metric-req_window-hour_span-48.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "group:friends"
+      ],
+      "metric": "req",
+      "window": "hour",
+      "span": "48"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__group-friends_metric-req_window-month_span-12.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "group:friends"
+      ],
+      "metric": "req",
+      "window": "month",
+      "span": "12"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__group-friends_metric-req_window-month_span-3.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "group:friends"
+      ],
+      "metric": "req",
+      "window": "month",
+      "span": "3"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__group-friends_metric-req_window-month_span-6.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "group:friends"
+      ],
+      "metric": "req",
+      "window": "month",
+      "span": "6"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__group-friends_metric-tokin_window-day_span-14.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "group:friends"
+      ],
+      "metric": "tokin",
+      "window": "day",
+      "span": "14"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__group-friends_metric-tokin_window-day_span-30.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "group:friends"
+      ],
+      "metric": "tokin",
+      "window": "day",
+      "span": "30"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__group-friends_metric-tokin_window-day_span-7.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "group:friends"
+      ],
+      "metric": "tokin",
+      "window": "day",
+      "span": "7"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__group-friends_metric-tokin_window-hour_span-24.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "group:friends"
+      ],
+      "metric": "tokin",
+      "window": "hour",
+      "span": "24"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__group-friends_metric-tokin_window-hour_span-48.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "group:friends"
+      ],
+      "metric": "tokin",
+      "window": "hour",
+      "span": "48"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__group-friends_metric-tokin_window-month_span-12.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "group:friends"
+      ],
+      "metric": "tokin",
+      "window": "month",
+      "span": "12"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__group-friends_metric-tokin_window-month_span-3.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "group:friends"
+      ],
+      "metric": "tokin",
+      "window": "month",
+      "span": "3"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__group-friends_metric-tokin_window-month_span-6.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "group:friends"
+      ],
+      "metric": "tokin",
+      "window": "month",
+      "span": "6"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__group-friends_metric-tokout_window-day_span-14.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "group:friends"
+      ],
+      "metric": "tokout",
+      "window": "day",
+      "span": "14"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__group-friends_metric-tokout_window-day_span-30.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "group:friends"
+      ],
+      "metric": "tokout",
+      "window": "day",
+      "span": "30"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__group-friends_metric-tokout_window-day_span-7.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "group:friends"
+      ],
+      "metric": "tokout",
+      "window": "day",
+      "span": "7"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__group-friends_metric-tokout_window-hour_span-24.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "group:friends"
+      ],
+      "metric": "tokout",
+      "window": "hour",
+      "span": "24"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__group-friends_metric-tokout_window-hour_span-48.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "group:friends"
+      ],
+      "metric": "tokout",
+      "window": "hour",
+      "span": "48"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__group-friends_metric-tokout_window-month_span-12.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "group:friends"
+      ],
+      "metric": "tokout",
+      "window": "month",
+      "span": "12"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__group-friends_metric-tokout_window-month_span-3.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "group:friends"
+      ],
+      "metric": "tokout",
+      "window": "month",
+      "span": "3"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__group-friends_metric-tokout_window-month_span-6.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "group:friends"
+      ],
+      "metric": "tokout",
+      "window": "month",
+      "span": "6"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__group-home_metric-cost_window-day_span-14.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "group:home"
+      ],
+      "metric": "cost",
+      "window": "day",
+      "span": "14"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__group-home_metric-cost_window-day_span-25.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "group:home"
+      ],
+      "metric": "cost",
+      "window": "day",
+      "span": "25"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__group-home_metric-cost_window-day_span-30.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "group:home"
+      ],
+      "metric": "cost",
+      "window": "day",
+      "span": "30"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__group-home_metric-cost_window-day_span-7.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "group:home"
+      ],
+      "metric": "cost",
+      "window": "day",
+      "span": "7"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__group-home_metric-cost_window-hour_span-24.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "group:home"
+      ],
+      "metric": "cost",
+      "window": "hour",
+      "span": "24"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__group-home_metric-cost_window-hour_span-48.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "group:home"
+      ],
+      "metric": "cost",
+      "window": "hour",
+      "span": "48"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__group-home_metric-cost_window-month_span-12.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "group:home"
+      ],
+      "metric": "cost",
+      "window": "month",
+      "span": "12"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__group-home_metric-cost_window-month_span-3.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "group:home"
+      ],
+      "metric": "cost",
+      "window": "month",
+      "span": "3"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__group-home_metric-cost_window-month_span-6.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "group:home"
+      ],
+      "metric": "cost",
+      "window": "month",
+      "span": "6"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__group-home_metric-req_window-day_span-14.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "group:home"
+      ],
+      "metric": "req",
+      "window": "day",
+      "span": "14"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__group-home_metric-req_window-day_span-30.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "group:home"
+      ],
+      "metric": "req",
+      "window": "day",
+      "span": "30"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__group-home_metric-req_window-day_span-7.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "group:home"
+      ],
+      "metric": "req",
+      "window": "day",
+      "span": "7"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__group-home_metric-req_window-hour_span-24.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "group:home"
+      ],
+      "metric": "req",
+      "window": "hour",
+      "span": "24"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__group-home_metric-req_window-hour_span-48.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "group:home"
+      ],
+      "metric": "req",
+      "window": "hour",
+      "span": "48"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__group-home_metric-req_window-month_span-12.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "group:home"
+      ],
+      "metric": "req",
+      "window": "month",
+      "span": "12"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__group-home_metric-req_window-month_span-3.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "group:home"
+      ],
+      "metric": "req",
+      "window": "month",
+      "span": "3"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__group-home_metric-req_window-month_span-6.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "group:home"
+      ],
+      "metric": "req",
+      "window": "month",
+      "span": "6"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__group-home_metric-tokin_window-day_span-14.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "group:home"
+      ],
+      "metric": "tokin",
+      "window": "day",
+      "span": "14"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__group-home_metric-tokin_window-day_span-30.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "group:home"
+      ],
+      "metric": "tokin",
+      "window": "day",
+      "span": "30"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__group-home_metric-tokin_window-day_span-7.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "group:home"
+      ],
+      "metric": "tokin",
+      "window": "day",
+      "span": "7"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__group-home_metric-tokin_window-hour_span-24.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "group:home"
+      ],
+      "metric": "tokin",
+      "window": "hour",
+      "span": "24"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__group-home_metric-tokin_window-hour_span-48.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "group:home"
+      ],
+      "metric": "tokin",
+      "window": "hour",
+      "span": "48"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__group-home_metric-tokin_window-month_span-12.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "group:home"
+      ],
+      "metric": "tokin",
+      "window": "month",
+      "span": "12"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__group-home_metric-tokin_window-month_span-3.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "group:home"
+      ],
+      "metric": "tokin",
+      "window": "month",
+      "span": "3"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__group-home_metric-tokin_window-month_span-6.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "group:home"
+      ],
+      "metric": "tokin",
+      "window": "month",
+      "span": "6"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__group-home_metric-tokout_window-day_span-14.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "group:home"
+      ],
+      "metric": "tokout",
+      "window": "day",
+      "span": "14"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__group-home_metric-tokout_window-day_span-30.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "group:home"
+      ],
+      "metric": "tokout",
+      "window": "day",
+      "span": "30"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__group-home_metric-tokout_window-day_span-7.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "group:home"
+      ],
+      "metric": "tokout",
+      "window": "day",
+      "span": "7"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__group-home_metric-tokout_window-hour_span-24.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "group:home"
+      ],
+      "metric": "tokout",
+      "window": "hour",
+      "span": "24"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__group-home_metric-tokout_window-hour_span-48.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "group:home"
+      ],
+      "metric": "tokout",
+      "window": "hour",
+      "span": "48"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__group-home_metric-tokout_window-month_span-12.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "group:home"
+      ],
+      "metric": "tokout",
+      "window": "month",
+      "span": "12"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__group-home_metric-tokout_window-month_span-3.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "group:home"
+      ],
+      "metric": "tokout",
+      "window": "month",
+      "span": "3"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__group-home_metric-tokout_window-month_span-6.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "group:home"
+      ],
+      "metric": "tokout",
+      "window": "month",
+      "span": "6"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__total_metric-cost_window-day_span-14.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "total"
+      ],
+      "metric": "cost",
+      "window": "day",
+      "span": "14"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__total_metric-cost_window-day_span-14_offset-14.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "total"
+      ],
+      "metric": "cost",
+      "window": "day",
+      "span": "14",
+      "offset": "14"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__total_metric-cost_window-day_span-25.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "total"
+      ],
+      "metric": "cost",
+      "window": "day",
+      "span": "25"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__total_metric-cost_window-day_span-30.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "total"
+      ],
+      "metric": "cost",
+      "window": "day",
+      "span": "30"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__total_metric-cost_window-day_span-7.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "total"
+      ],
+      "metric": "cost",
+      "window": "day",
+      "span": "7"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__total_metric-cost_window-day_span-7_offset-7.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "total"
+      ],
+      "metric": "cost",
+      "window": "day",
+      "span": "7",
+      "offset": "7"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__total_metric-cost_window-hour_span-24.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "total"
+      ],
+      "metric": "cost",
+      "window": "hour",
+      "span": "24"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__total_metric-cost_window-hour_span-24_offset-24.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "total"
+      ],
+      "metric": "cost",
+      "window": "hour",
+      "span": "24",
+      "offset": "24"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__total_metric-cost_window-hour_span-48.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "total"
+      ],
+      "metric": "cost",
+      "window": "hour",
+      "span": "48"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__total_metric-cost_window-month_span-12.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "total"
+      ],
+      "metric": "cost",
+      "window": "month",
+      "span": "12"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__total_metric-cost_window-month_span-3.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "total"
+      ],
+      "metric": "cost",
+      "window": "month",
+      "span": "3"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__total_metric-cost_window-month_span-3_offset-3.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "total"
+      ],
+      "metric": "cost",
+      "window": "month",
+      "span": "3",
+      "offset": "3"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__total_metric-cost_window-month_span-6.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "total"
+      ],
+      "metric": "cost",
+      "window": "month",
+      "span": "6"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__total_metric-cost_window-month_span-6_offset-6.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "total"
+      ],
+      "metric": "cost",
+      "window": "month",
+      "span": "6",
+      "offset": "6"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__total_metric-r402_window-day_span-14.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "total"
+      ],
+      "metric": "r402",
+      "window": "day",
+      "span": "14"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__total_metric-r402_window-day_span-30.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "total"
+      ],
+      "metric": "r402",
+      "window": "day",
+      "span": "30"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__total_metric-r402_window-day_span-7.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "total"
+      ],
+      "metric": "r402",
+      "window": "day",
+      "span": "7"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__total_metric-r402_window-hour_span-24.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "total"
+      ],
+      "metric": "r402",
+      "window": "hour",
+      "span": "24"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__total_metric-r402_window-hour_span-48.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "total"
+      ],
+      "metric": "r402",
+      "window": "hour",
+      "span": "48"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__total_metric-rej_window-day_span-14.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "total"
+      ],
+      "metric": "rej",
+      "window": "day",
+      "span": "14"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__total_metric-rej_window-day_span-30.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "total"
+      ],
+      "metric": "rej",
+      "window": "day",
+      "span": "30"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__total_metric-rej_window-day_span-7.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "total"
+      ],
+      "metric": "rej",
+      "window": "day",
+      "span": "7"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__total_metric-rej_window-hour_span-24.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "total"
+      ],
+      "metric": "rej",
+      "window": "hour",
+      "span": "24"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__total_metric-rej_window-hour_span-48.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "total"
+      ],
+      "metric": "rej",
+      "window": "hour",
+      "span": "48"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__total_metric-req_window-day_span-14.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "total"
+      ],
+      "metric": "req",
+      "window": "day",
+      "span": "14"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__total_metric-req_window-day_span-14_offset-14.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "total"
+      ],
+      "metric": "req",
+      "window": "day",
+      "span": "14",
+      "offset": "14"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__total_metric-req_window-day_span-30.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "total"
+      ],
+      "metric": "req",
+      "window": "day",
+      "span": "30"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__total_metric-req_window-day_span-7.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "total"
+      ],
+      "metric": "req",
+      "window": "day",
+      "span": "7"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__total_metric-req_window-day_span-7_offset-7.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "total"
+      ],
+      "metric": "req",
+      "window": "day",
+      "span": "7",
+      "offset": "7"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__total_metric-req_window-hour_span-24.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "total"
+      ],
+      "metric": "req",
+      "window": "hour",
+      "span": "24"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__total_metric-req_window-hour_span-24_offset-24.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "total"
+      ],
+      "metric": "req",
+      "window": "hour",
+      "span": "24",
+      "offset": "24"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__total_metric-req_window-hour_span-48.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "total"
+      ],
+      "metric": "req",
+      "window": "hour",
+      "span": "48"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__total_metric-req_window-month_span-12.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "total"
+      ],
+      "metric": "req",
+      "window": "month",
+      "span": "12"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__total_metric-req_window-month_span-3.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "total"
+      ],
+      "metric": "req",
+      "window": "month",
+      "span": "3"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__total_metric-req_window-month_span-3_offset-3.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "total"
+      ],
+      "metric": "req",
+      "window": "month",
+      "span": "3",
+      "offset": "3"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__total_metric-req_window-month_span-6.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "total"
+      ],
+      "metric": "req",
+      "window": "month",
+      "span": "6"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__total_metric-req_window-month_span-6_offset-6.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "total"
+      ],
+      "metric": "req",
+      "window": "month",
+      "span": "6",
+      "offset": "6"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__total_metric-tokin_window-day_span-14.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "total"
+      ],
+      "metric": "tokin",
+      "window": "day",
+      "span": "14"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__total_metric-tokin_window-day_span-14_offset-14.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "total"
+      ],
+      "metric": "tokin",
+      "window": "day",
+      "span": "14",
+      "offset": "14"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__total_metric-tokin_window-day_span-30.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "total"
+      ],
+      "metric": "tokin",
+      "window": "day",
+      "span": "30"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__total_metric-tokin_window-day_span-7.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "total"
+      ],
+      "metric": "tokin",
+      "window": "day",
+      "span": "7"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__total_metric-tokin_window-day_span-7_offset-7.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "total"
+      ],
+      "metric": "tokin",
+      "window": "day",
+      "span": "7",
+      "offset": "7"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__total_metric-tokin_window-hour_span-24.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "total"
+      ],
+      "metric": "tokin",
+      "window": "hour",
+      "span": "24"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__total_metric-tokin_window-hour_span-24_offset-24.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "total"
+      ],
+      "metric": "tokin",
+      "window": "hour",
+      "span": "24",
+      "offset": "24"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__total_metric-tokin_window-hour_span-48.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "total"
+      ],
+      "metric": "tokin",
+      "window": "hour",
+      "span": "48"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__total_metric-tokin_window-month_span-12.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "total"
+      ],
+      "metric": "tokin",
+      "window": "month",
+      "span": "12"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__total_metric-tokin_window-month_span-3.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "total"
+      ],
+      "metric": "tokin",
+      "window": "month",
+      "span": "3"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__total_metric-tokin_window-month_span-3_offset-3.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "total"
+      ],
+      "metric": "tokin",
+      "window": "month",
+      "span": "3",
+      "offset": "3"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__total_metric-tokin_window-month_span-6.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "total"
+      ],
+      "metric": "tokin",
+      "window": "month",
+      "span": "6"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__total_metric-tokin_window-month_span-6_offset-6.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "total"
+      ],
+      "metric": "tokin",
+      "window": "month",
+      "span": "6",
+      "offset": "6"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__total_metric-tokout_window-day_span-14.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "total"
+      ],
+      "metric": "tokout",
+      "window": "day",
+      "span": "14"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__total_metric-tokout_window-day_span-14_offset-14.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "total"
+      ],
+      "metric": "tokout",
+      "window": "day",
+      "span": "14",
+      "offset": "14"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__total_metric-tokout_window-day_span-30.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "total"
+      ],
+      "metric": "tokout",
+      "window": "day",
+      "span": "30"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__total_metric-tokout_window-day_span-7.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "total"
+      ],
+      "metric": "tokout",
+      "window": "day",
+      "span": "7"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__total_metric-tokout_window-day_span-7_offset-7.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "total"
+      ],
+      "metric": "tokout",
+      "window": "day",
+      "span": "7",
+      "offset": "7"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__total_metric-tokout_window-hour_span-24.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "total"
+      ],
+      "metric": "tokout",
+      "window": "hour",
+      "span": "24"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__total_metric-tokout_window-hour_span-24_offset-24.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "total"
+      ],
+      "metric": "tokout",
+      "window": "hour",
+      "span": "24",
+      "offset": "24"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__total_metric-tokout_window-hour_span-48.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "total"
+      ],
+      "metric": "tokout",
+      "window": "hour",
+      "span": "48"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__total_metric-tokout_window-month_span-12.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "total"
+      ],
+      "metric": "tokout",
+      "window": "month",
+      "span": "12"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__total_metric-tokout_window-month_span-3.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "total"
+      ],
+      "metric": "tokout",
+      "window": "month",
+      "span": "3"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__total_metric-tokout_window-month_span-3_offset-3.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "total"
+      ],
+      "metric": "tokout",
+      "window": "month",
+      "span": "3",
+      "offset": "3"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__total_metric-tokout_window-month_span-6.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "total"
+      ],
+      "metric": "tokout",
+      "window": "month",
+      "span": "6"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__total_metric-tokout_window-month_span-6_offset-6.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "total"
+      ],
+      "metric": "tokout",
+      "window": "month",
+      "span": "6",
+      "offset": "6"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__user-admin_metric-cost_window-day_span-14.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "user:admin"
+      ],
+      "metric": "cost",
+      "window": "day",
+      "span": "14"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__user-admin_metric-cost_window-day_span-25.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "user:admin"
+      ],
+      "metric": "cost",
+      "window": "day",
+      "span": "25"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__user-admin_metric-cost_window-day_span-30.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "user:admin"
+      ],
+      "metric": "cost",
+      "window": "day",
+      "span": "30"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__user-admin_metric-cost_window-day_span-7.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "user:admin"
+      ],
+      "metric": "cost",
+      "window": "day",
+      "span": "7"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__user-admin_metric-cost_window-hour_span-24.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "user:admin"
+      ],
+      "metric": "cost",
+      "window": "hour",
+      "span": "24"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__user-admin_metric-cost_window-hour_span-48.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "user:admin"
+      ],
+      "metric": "cost",
+      "window": "hour",
+      "span": "48"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__user-admin_metric-cost_window-month_span-12.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "user:admin"
+      ],
+      "metric": "cost",
+      "window": "month",
+      "span": "12"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__user-admin_metric-cost_window-month_span-3.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "user:admin"
+      ],
+      "metric": "cost",
+      "window": "month",
+      "span": "3"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__user-admin_metric-cost_window-month_span-6.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "user:admin"
+      ],
+      "metric": "cost",
+      "window": "month",
+      "span": "6"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__user-admin_metric-req_window-day_span-14.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "user:admin"
+      ],
+      "metric": "req",
+      "window": "day",
+      "span": "14"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__user-admin_metric-req_window-day_span-30.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "user:admin"
+      ],
+      "metric": "req",
+      "window": "day",
+      "span": "30"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__user-admin_metric-req_window-day_span-7.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "user:admin"
+      ],
+      "metric": "req",
+      "window": "day",
+      "span": "7"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__user-admin_metric-req_window-hour_span-24.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "user:admin"
+      ],
+      "metric": "req",
+      "window": "hour",
+      "span": "24"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__user-admin_metric-req_window-hour_span-48.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "user:admin"
+      ],
+      "metric": "req",
+      "window": "hour",
+      "span": "48"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__user-admin_metric-req_window-month_span-12.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "user:admin"
+      ],
+      "metric": "req",
+      "window": "month",
+      "span": "12"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__user-admin_metric-req_window-month_span-3.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "user:admin"
+      ],
+      "metric": "req",
+      "window": "month",
+      "span": "3"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__user-admin_metric-req_window-month_span-6.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "user:admin"
+      ],
+      "metric": "req",
+      "window": "month",
+      "span": "6"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__user-internal_metric-cost_window-day_span-14.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "user:internal"
+      ],
+      "metric": "cost",
+      "window": "day",
+      "span": "14"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__user-internal_metric-cost_window-day_span-25.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "user:internal"
+      ],
+      "metric": "cost",
+      "window": "day",
+      "span": "25"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__user-internal_metric-cost_window-day_span-30.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "user:internal"
+      ],
+      "metric": "cost",
+      "window": "day",
+      "span": "30"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__user-internal_metric-cost_window-day_span-7.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "user:internal"
+      ],
+      "metric": "cost",
+      "window": "day",
+      "span": "7"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__user-internal_metric-cost_window-hour_span-24.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "user:internal"
+      ],
+      "metric": "cost",
+      "window": "hour",
+      "span": "24"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__user-internal_metric-cost_window-hour_span-48.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "user:internal"
+      ],
+      "metric": "cost",
+      "window": "hour",
+      "span": "48"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__user-internal_metric-cost_window-month_span-12.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "user:internal"
+      ],
+      "metric": "cost",
+      "window": "month",
+      "span": "12"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__user-internal_metric-cost_window-month_span-3.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "user:internal"
+      ],
+      "metric": "cost",
+      "window": "month",
+      "span": "3"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__user-internal_metric-cost_window-month_span-6.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "user:internal"
+      ],
+      "metric": "cost",
+      "window": "month",
+      "span": "6"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__user-internal_metric-req_window-day_span-14.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "user:internal"
+      ],
+      "metric": "req",
+      "window": "day",
+      "span": "14"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__user-internal_metric-req_window-day_span-30.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "user:internal"
+      ],
+      "metric": "req",
+      "window": "day",
+      "span": "30"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__user-internal_metric-req_window-day_span-7.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "user:internal"
+      ],
+      "metric": "req",
+      "window": "day",
+      "span": "7"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__user-internal_metric-req_window-hour_span-24.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "user:internal"
+      ],
+      "metric": "req",
+      "window": "hour",
+      "span": "24"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__user-internal_metric-req_window-hour_span-48.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "user:internal"
+      ],
+      "metric": "req",
+      "window": "hour",
+      "span": "48"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__user-internal_metric-req_window-month_span-12.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "user:internal"
+      ],
+      "metric": "req",
+      "window": "month",
+      "span": "12"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__user-internal_metric-req_window-month_span-3.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "user:internal"
+      ],
+      "metric": "req",
+      "window": "month",
+      "span": "3"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_series__user-internal_metric-req_window-month_span-6.json",
+    "path": "/admin/api/usage/series",
+    "query": {
+      "scope": [
+        "user:internal"
+      ],
+      "metric": "req",
+      "window": "month",
+      "span": "6"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-group_metrics-cost_window-day_span-14.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "group",
+      "window": "day",
+      "span": "14",
+      "metrics": "cost"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-group_metrics-cost_window-day_span-30.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "group",
+      "window": "day",
+      "span": "30",
+      "metrics": "cost"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-group_metrics-cost_window-day_span-7.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "group",
+      "window": "day",
+      "span": "7",
+      "metrics": "cost"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-group_metrics-cost_window-hour_span-24.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "group",
+      "window": "hour",
+      "span": "24",
+      "metrics": "cost"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-group_metrics-cost_window-hour_span-48.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "group",
+      "window": "hour",
+      "span": "48",
+      "metrics": "cost"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-group_metrics-cost_window-month_span-12.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "group",
+      "window": "month",
+      "span": "12",
+      "metrics": "cost"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-group_metrics-cost_window-month_span-3.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "group",
+      "window": "month",
+      "span": "3",
+      "metrics": "cost"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-group_metrics-cost_window-month_span-6.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "group",
+      "window": "month",
+      "span": "6",
+      "metrics": "cost"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-group_metrics-req+tokin+tokout+cost_window-day_span-14.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "group",
+      "window": "day",
+      "span": "14",
+      "metrics": "req,tokin,tokout,cost"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-group_metrics-req+tokin+tokout+cost_window-day_span-30.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "group",
+      "window": "day",
+      "span": "30",
+      "metrics": "req,tokin,tokout,cost"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-group_metrics-req+tokin+tokout+cost_window-day_span-7.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "group",
+      "window": "day",
+      "span": "7",
+      "metrics": "req,tokin,tokout,cost"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-group_metrics-req+tokin+tokout+cost_window-hour_span-24.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "group",
+      "window": "hour",
+      "span": "24",
+      "metrics": "req,tokin,tokout,cost"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-group_metrics-req+tokin+tokout+cost_window-hour_span-48.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "group",
+      "window": "hour",
+      "span": "48",
+      "metrics": "req,tokin,tokout,cost"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-group_metrics-req+tokin+tokout+cost_window-month_span-12.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "group",
+      "window": "month",
+      "span": "12",
+      "metrics": "req,tokin,tokout,cost"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-group_metrics-req+tokin+tokout+cost_window-month_span-3.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "group",
+      "window": "month",
+      "span": "3",
+      "metrics": "req,tokin,tokout,cost"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-group_metrics-req+tokin+tokout+cost_window-month_span-6.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "group",
+      "window": "month",
+      "span": "6",
+      "metrics": "req,tokin,tokout,cost"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-group_metrics-req_window-day_span-14.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "group",
+      "window": "day",
+      "span": "14",
+      "metrics": "req"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-group_metrics-req_window-day_span-30.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "group",
+      "window": "day",
+      "span": "30",
+      "metrics": "req"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-group_metrics-req_window-day_span-7.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "group",
+      "window": "day",
+      "span": "7",
+      "metrics": "req"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-group_metrics-req_window-hour_span-24.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "group",
+      "window": "hour",
+      "span": "24",
+      "metrics": "req"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-group_metrics-req_window-hour_span-48.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "group",
+      "window": "hour",
+      "span": "48",
+      "metrics": "req"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-group_metrics-req_window-month_span-12.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "group",
+      "window": "month",
+      "span": "12",
+      "metrics": "req"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-group_metrics-req_window-month_span-3.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "group",
+      "window": "month",
+      "span": "3",
+      "metrics": "req"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-group_metrics-req_window-month_span-6.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "group",
+      "window": "month",
+      "span": "6",
+      "metrics": "req"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-group_metrics-tokin_window-day_span-14.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "group",
+      "window": "day",
+      "span": "14",
+      "metrics": "tokin"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-group_metrics-tokin_window-day_span-30.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "group",
+      "window": "day",
+      "span": "30",
+      "metrics": "tokin"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-group_metrics-tokin_window-day_span-7.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "group",
+      "window": "day",
+      "span": "7",
+      "metrics": "tokin"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-group_metrics-tokin_window-hour_span-24.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "group",
+      "window": "hour",
+      "span": "24",
+      "metrics": "tokin"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-group_metrics-tokin_window-hour_span-48.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "group",
+      "window": "hour",
+      "span": "48",
+      "metrics": "tokin"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-group_metrics-tokin_window-month_span-12.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "group",
+      "window": "month",
+      "span": "12",
+      "metrics": "tokin"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-group_metrics-tokin_window-month_span-3.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "group",
+      "window": "month",
+      "span": "3",
+      "metrics": "tokin"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-group_metrics-tokin_window-month_span-6.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "group",
+      "window": "month",
+      "span": "6",
+      "metrics": "tokin"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-group_metrics-tokout_window-day_span-14.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "group",
+      "window": "day",
+      "span": "14",
+      "metrics": "tokout"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-group_metrics-tokout_window-day_span-30.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "group",
+      "window": "day",
+      "span": "30",
+      "metrics": "tokout"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-group_metrics-tokout_window-day_span-7.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "group",
+      "window": "day",
+      "span": "7",
+      "metrics": "tokout"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-group_metrics-tokout_window-hour_span-24.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "group",
+      "window": "hour",
+      "span": "24",
+      "metrics": "tokout"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-group_metrics-tokout_window-hour_span-48.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "group",
+      "window": "hour",
+      "span": "48",
+      "metrics": "tokout"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-group_metrics-tokout_window-month_span-12.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "group",
+      "window": "month",
+      "span": "12",
+      "metrics": "tokout"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-group_metrics-tokout_window-month_span-3.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "group",
+      "window": "month",
+      "span": "3",
+      "metrics": "tokout"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-group_metrics-tokout_window-month_span-6.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "group",
+      "window": "month",
+      "span": "6",
+      "metrics": "tokout"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-targetcaller_metrics-req_window-day_span-14_limit-10.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "targetcaller",
+      "window": "day",
+      "span": "14",
+      "metrics": "req",
+      "limit": "10"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-targetcaller_metrics-req_window-day_span-30_limit-10.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "targetcaller",
+      "window": "day",
+      "span": "30",
+      "metrics": "req",
+      "limit": "10"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-targetcaller_metrics-req_window-day_span-7_limit-10.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "targetcaller",
+      "window": "day",
+      "span": "7",
+      "metrics": "req",
+      "limit": "10"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-targetcaller_metrics-req_window-day_span-7_limit-10_target-mcp~readitall.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "targetcaller",
+      "window": "day",
+      "span": "7",
+      "metrics": "req",
+      "limit": "10",
+      "target": "mcp/readitall"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-targetcaller_metrics-req_window-day_span-7_limit-10_target-agent~agentkit.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "targetcaller",
+      "window": "day",
+      "span": "7",
+      "metrics": "req",
+      "limit": "10",
+      "target": "agent/agentkit"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-targetcaller_metrics-req_window-day_span-7_limit-10_target-agent~brainstorm.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "targetcaller",
+      "window": "day",
+      "span": "7",
+      "metrics": "req",
+      "limit": "10",
+      "target": "agent/brainstorm"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-targetcaller_metrics-req_window-month_span-12_limit-10.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "targetcaller",
+      "window": "month",
+      "span": "12",
+      "metrics": "req",
+      "limit": "10"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-targetcaller_metrics-req_window-month_span-3_limit-10.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "targetcaller",
+      "window": "month",
+      "span": "3",
+      "metrics": "req",
+      "limit": "10"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-targetcaller_metrics-req_window-month_span-6_limit-10.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "targetcaller",
+      "window": "month",
+      "span": "6",
+      "metrics": "req",
+      "limit": "10"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-user_metrics-cost_window-day_span-14_offset-0_limit-1000.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "user",
+      "window": "day",
+      "span": "14",
+      "offset": "0",
+      "metrics": "cost",
+      "limit": "1000"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-user_metrics-cost_window-day_span-30_offset-0_limit-1000.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "user",
+      "window": "day",
+      "span": "30",
+      "offset": "0",
+      "metrics": "cost",
+      "limit": "1000"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-user_metrics-cost_window-day_span-7_offset-0_limit-1000.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "user",
+      "window": "day",
+      "span": "7",
+      "offset": "0",
+      "metrics": "cost",
+      "limit": "1000"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-user_metrics-cost_window-hour_span-24_offset-0_limit-1000.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "user",
+      "window": "hour",
+      "span": "24",
+      "offset": "0",
+      "metrics": "cost",
+      "limit": "1000"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-user_metrics-cost_window-hour_span-48_offset-0_limit-1000.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "user",
+      "window": "hour",
+      "span": "48",
+      "offset": "0",
+      "metrics": "cost",
+      "limit": "1000"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-user_metrics-cost_window-month_span-12_offset-0_limit-1000.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "user",
+      "window": "month",
+      "span": "12",
+      "offset": "0",
+      "metrics": "cost",
+      "limit": "1000"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-user_metrics-cost_window-month_span-3_offset-0_limit-1000.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "user",
+      "window": "month",
+      "span": "3",
+      "offset": "0",
+      "metrics": "cost",
+      "limit": "1000"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-user_metrics-cost_window-month_span-6_offset-0_limit-1000.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "user",
+      "window": "month",
+      "span": "6",
+      "offset": "0",
+      "metrics": "cost",
+      "limit": "1000"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-user_metrics-req+tokin+tokout+cost_window-day_span-14_group-friends.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "user",
+      "window": "day",
+      "span": "14",
+      "group": "friends",
+      "metrics": "req,tokin,tokout,cost"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-user_metrics-req+tokin+tokout+cost_window-day_span-14_group-home.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "user",
+      "window": "day",
+      "span": "14",
+      "group": "home",
+      "metrics": "req,tokin,tokout,cost"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-user_metrics-req+tokin+tokout+cost_window-day_span-14_group-projects.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "user",
+      "window": "day",
+      "span": "14",
+      "group": "projects",
+      "metrics": "req,tokin,tokout,cost"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-user_metrics-req+tokin+tokout+cost_window-day_span-30_group-friends.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "user",
+      "window": "day",
+      "span": "30",
+      "group": "friends",
+      "metrics": "req,tokin,tokout,cost"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-user_metrics-req+tokin+tokout+cost_window-day_span-30_group-home.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "user",
+      "window": "day",
+      "span": "30",
+      "group": "home",
+      "metrics": "req,tokin,tokout,cost"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-user_metrics-req+tokin+tokout+cost_window-day_span-30_group-projects.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "user",
+      "window": "day",
+      "span": "30",
+      "group": "projects",
+      "metrics": "req,tokin,tokout,cost"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-user_metrics-req+tokin+tokout+cost_window-day_span-7_group-friends.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "user",
+      "window": "day",
+      "span": "7",
+      "group": "friends",
+      "metrics": "req,tokin,tokout,cost"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-user_metrics-req+tokin+tokout+cost_window-day_span-7_group-home.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "user",
+      "window": "day",
+      "span": "7",
+      "group": "home",
+      "metrics": "req,tokin,tokout,cost"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-user_metrics-req+tokin+tokout+cost_window-day_span-7_group-projects.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "user",
+      "window": "day",
+      "span": "7",
+      "group": "projects",
+      "metrics": "req,tokin,tokout,cost"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-user_metrics-req+tokin+tokout+cost_window-hour_span-24_group-friends.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "user",
+      "window": "hour",
+      "span": "24",
+      "group": "friends",
+      "metrics": "req,tokin,tokout,cost"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-user_metrics-req+tokin+tokout+cost_window-hour_span-24_group-home.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "user",
+      "window": "hour",
+      "span": "24",
+      "group": "home",
+      "metrics": "req,tokin,tokout,cost"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-user_metrics-req+tokin+tokout+cost_window-hour_span-24_group-projects.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "user",
+      "window": "hour",
+      "span": "24",
+      "group": "projects",
+      "metrics": "req,tokin,tokout,cost"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-user_metrics-req+tokin+tokout+cost_window-hour_span-48_group-friends.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "user",
+      "window": "hour",
+      "span": "48",
+      "group": "friends",
+      "metrics": "req,tokin,tokout,cost"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-user_metrics-req+tokin+tokout+cost_window-hour_span-48_group-home.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "user",
+      "window": "hour",
+      "span": "48",
+      "group": "home",
+      "metrics": "req,tokin,tokout,cost"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-user_metrics-req+tokin+tokout+cost_window-hour_span-48_group-projects.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "user",
+      "window": "hour",
+      "span": "48",
+      "group": "projects",
+      "metrics": "req,tokin,tokout,cost"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-user_metrics-req+tokin+tokout+cost_window-month_span-12_group-friends.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "user",
+      "window": "month",
+      "span": "12",
+      "group": "friends",
+      "metrics": "req,tokin,tokout,cost"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-user_metrics-req+tokin+tokout+cost_window-month_span-12_group-home.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "user",
+      "window": "month",
+      "span": "12",
+      "group": "home",
+      "metrics": "req,tokin,tokout,cost"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-user_metrics-req+tokin+tokout+cost_window-month_span-12_group-projects.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "user",
+      "window": "month",
+      "span": "12",
+      "group": "projects",
+      "metrics": "req,tokin,tokout,cost"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-user_metrics-req+tokin+tokout+cost_window-month_span-3_group-friends.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "user",
+      "window": "month",
+      "span": "3",
+      "group": "friends",
+      "metrics": "req,tokin,tokout,cost"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-user_metrics-req+tokin+tokout+cost_window-month_span-3_group-home.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "user",
+      "window": "month",
+      "span": "3",
+      "group": "home",
+      "metrics": "req,tokin,tokout,cost"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-user_metrics-req+tokin+tokout+cost_window-month_span-3_group-projects.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "user",
+      "window": "month",
+      "span": "3",
+      "group": "projects",
+      "metrics": "req,tokin,tokout,cost"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-user_metrics-req+tokin+tokout+cost_window-month_span-6_group-friends.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "user",
+      "window": "month",
+      "span": "6",
+      "group": "friends",
+      "metrics": "req,tokin,tokout,cost"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-user_metrics-req+tokin+tokout+cost_window-month_span-6_group-home.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "user",
+      "window": "month",
+      "span": "6",
+      "group": "home",
+      "metrics": "req,tokin,tokout,cost"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-user_metrics-req+tokin+tokout+cost_window-month_span-6_group-projects.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "user",
+      "window": "month",
+      "span": "6",
+      "group": "projects",
+      "metrics": "req,tokin,tokout,cost"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-user_metrics-req_window-day_span-14_offset-0_limit-1000.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "user",
+      "window": "day",
+      "span": "14",
+      "offset": "0",
+      "metrics": "req",
+      "limit": "1000"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-user_metrics-req_window-day_span-30_offset-0_limit-1000.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "user",
+      "window": "day",
+      "span": "30",
+      "offset": "0",
+      "metrics": "req",
+      "limit": "1000"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-user_metrics-req_window-day_span-7_offset-0_limit-1000.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "user",
+      "window": "day",
+      "span": "7",
+      "offset": "0",
+      "metrics": "req",
+      "limit": "1000"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-user_metrics-req_window-hour_span-24_offset-0_limit-1000.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "user",
+      "window": "hour",
+      "span": "24",
+      "offset": "0",
+      "metrics": "req",
+      "limit": "1000"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-user_metrics-req_window-hour_span-48_offset-0_limit-1000.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "user",
+      "window": "hour",
+      "span": "48",
+      "offset": "0",
+      "metrics": "req",
+      "limit": "1000"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-user_metrics-req_window-month_span-12_offset-0_limit-1000.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "user",
+      "window": "month",
+      "span": "12",
+      "offset": "0",
+      "metrics": "req",
+      "limit": "1000"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-user_metrics-req_window-month_span-3_offset-0_limit-1000.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "user",
+      "window": "month",
+      "span": "3",
+      "offset": "0",
+      "metrics": "req",
+      "limit": "1000"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-user_metrics-req_window-month_span-6_offset-0_limit-1000.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "user",
+      "window": "month",
+      "span": "6",
+      "offset": "0",
+      "metrics": "req",
+      "limit": "1000"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-user_metrics-tokin+tokout_window-day_span-14_offset-0_limit-1000.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "user",
+      "window": "day",
+      "span": "14",
+      "offset": "0",
+      "metrics": "tokin,tokout",
+      "limit": "1000"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-user_metrics-tokin+tokout_window-day_span-30_offset-0_limit-1000.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "user",
+      "window": "day",
+      "span": "30",
+      "offset": "0",
+      "metrics": "tokin,tokout",
+      "limit": "1000"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-user_metrics-tokin+tokout_window-day_span-7_offset-0_limit-1000.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "user",
+      "window": "day",
+      "span": "7",
+      "offset": "0",
+      "metrics": "tokin,tokout",
+      "limit": "1000"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-user_metrics-tokin+tokout_window-hour_span-24_offset-0_limit-1000.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "user",
+      "window": "hour",
+      "span": "24",
+      "offset": "0",
+      "metrics": "tokin,tokout",
+      "limit": "1000"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-user_metrics-tokin+tokout_window-hour_span-48_offset-0_limit-1000.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "user",
+      "window": "hour",
+      "span": "48",
+      "offset": "0",
+      "metrics": "tokin,tokout",
+      "limit": "1000"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-user_metrics-tokin+tokout_window-month_span-12_offset-0_limit-1000.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "user",
+      "window": "month",
+      "span": "12",
+      "offset": "0",
+      "metrics": "tokin,tokout",
+      "limit": "1000"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-user_metrics-tokin+tokout_window-month_span-3_offset-0_limit-1000.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "user",
+      "window": "month",
+      "span": "3",
+      "offset": "0",
+      "metrics": "tokin,tokout",
+      "limit": "1000"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-user_metrics-tokin+tokout_window-month_span-6_offset-0_limit-1000.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "user",
+      "window": "month",
+      "span": "6",
+      "offset": "0",
+      "metrics": "tokin,tokout",
+      "limit": "1000"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-usermodel_metrics-req+cost_window-day_span-7_user-admin.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "usermodel",
+      "window": "day",
+      "span": "7",
+      "metrics": "req,cost",
+      "user": "admin"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-usermodel_metrics-req+cost_window-day_span-7_user-internal.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "usermodel",
+      "window": "day",
+      "span": "7",
+      "metrics": "req,cost",
+      "user": "internal"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-usermodel_metrics-req+cost_window-day_span-7_user-user-01.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "usermodel",
+      "window": "day",
+      "span": "7",
+      "metrics": "req,cost",
+      "user": "user-01"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-usermodel_window-day_span-14_user-admin.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "usermodel",
+      "window": "day",
+      "span": "14",
+      "user": "admin"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-usermodel_window-day_span-14_user-internal.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "usermodel",
+      "window": "day",
+      "span": "14",
+      "user": "internal"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-usermodel_window-day_span-14_user-user-01.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "usermodel",
+      "window": "day",
+      "span": "14",
+      "user": "user-01"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-usermodel_window-day_span-30_user-admin.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "usermodel",
+      "window": "day",
+      "span": "30",
+      "user": "admin"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-usermodel_window-day_span-30_user-internal.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "usermodel",
+      "window": "day",
+      "span": "30",
+      "user": "internal"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-usermodel_window-day_span-30_user-user-01.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "usermodel",
+      "window": "day",
+      "span": "30",
+      "user": "user-01"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-usermodel_window-day_span-7_user-admin.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "usermodel",
+      "window": "day",
+      "span": "7",
+      "user": "admin"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-usermodel_window-day_span-7_user-internal.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "usermodel",
+      "window": "day",
+      "span": "7",
+      "user": "internal"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-usermodel_window-day_span-7_user-user-01.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "usermodel",
+      "window": "day",
+      "span": "7",
+      "user": "user-01"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-usermodel_window-month_span-12_user-admin.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "usermodel",
+      "window": "month",
+      "span": "12",
+      "user": "admin"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-usermodel_window-month_span-12_user-internal.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "usermodel",
+      "window": "month",
+      "span": "12",
+      "user": "internal"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-usermodel_window-month_span-12_user-user-01.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "usermodel",
+      "window": "month",
+      "span": "12",
+      "user": "user-01"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-usermodel_window-month_span-3_user-admin.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "usermodel",
+      "window": "month",
+      "span": "3",
+      "user": "admin"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-usermodel_window-month_span-3_user-internal.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "usermodel",
+      "window": "month",
+      "span": "3",
+      "user": "internal"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-usermodel_window-month_span-3_user-user-01.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "usermodel",
+      "window": "month",
+      "span": "3",
+      "user": "user-01"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-usermodel_window-month_span-6_user-admin.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "usermodel",
+      "window": "month",
+      "span": "6",
+      "user": "admin"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-usermodel_window-month_span-6_user-internal.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "usermodel",
+      "window": "month",
+      "span": "6",
+      "user": "internal"
+    },
+    "status": 200
+  },
+  {
+    "file": "usage_totals__kind-usermodel_window-month_span-6_user-user-01.json",
+    "path": "/admin/api/usage/totals",
+    "query": {
+      "kind": "usermodel",
+      "window": "month",
+      "span": "6",
+      "user": "user-01"
+    },
+    "status": 200
+  }
+]

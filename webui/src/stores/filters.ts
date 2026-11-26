@@ -44,6 +44,11 @@ export const useFiltersStore = defineStore('filters', {
     },
   },
   actions: {
+    /** Flips comparison. Turning it OFF is always allowed; turning it ON needs a range that supports one. */
+    toggleCmp(): void {
+      if (this.cmp === 'prev') this.cmp = 'none'
+      else if (this.cmpSpec.available) this.cmp = 'prev'
+    },
     /** setFilters applies any subset of range/cmp/scope in one call — omitted fields keep their current value, the same "apply a partial update, one atomic write" convention the pre-redesign stores/history.ts's own setSelection (deleted; this store replaces it) used, and stores/spend.ts's own setSelection still follows today. */
     setFilters(next: { range?: RangeKey; cmp?: CmpMode; scope?: string }): void {
       if (next.range !== undefined) this.range = next.range
