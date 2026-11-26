@@ -30,17 +30,21 @@ func TestComputeCostMicrosCachedClamp(t *testing.T) {
 	t.Parallel()
 	p := ModelPricing{InputPerM: 3, OutputPerM: 15, CachedInputPerM: f64(0.3), CacheWritePerM: f64(3.75)}
 	uncached := computeCostMicros(ModelPricing{InputPerM: 3, OutputPerM: 15}, usage{prompt: 1_000_000})
-	for _, u := range []usage{
-		{prompt: 1_000_000, cached: 2_000_000},
-		{prompt: 1_000_000, cached: 800_000, cacheWrite: 800_000},
-		{prompt: 1_000_000, cached: -5, cacheWrite: -5},
-	} {
-		got := computeCostMicros(p, u)
-		require.GreaterOrEqual(t, got, int64(0))
-		require.LessOrEqual(t, got, uncached*2)
+	cases := []struct {
+		name string
+		u    usage
+		want int64
+	}{
+		// 1M prompt priced entirely at the cached rate.
+		{"cached above prompt", usage{prompt: 1_000_000, cached: 2_000_000}, 300_000},
+		// cached 800k at 0.3 + write clamped to 200k at 3.75.
+		{"write clamped to remainder", usage{prompt: 1_000_000, cached: 800_000, cacheWrite: 800_000}, 240_000 + 750_000},
+		// negatives clamp to 0: whole prompt uncached at 3.
+		{"negative cache counts", usage{prompt: 1_000_000, cached: -5, cacheWrite: -5}, uncached},
 	}
-	// cached clamped to prompt: all tokens priced at the cached rate.
-	require.EqualValues(t, 300_000, computeCostMicros(p, usage{prompt: 1_000_000, cached: 2_000_000}))
+	for _, c := range cases {
+		require.EqualValues(t, c.want, computeCostMicros(p, c.u), c.name)
+	}
 }
 
 func TestPromptCacheSavedMicros(t *testing.T) {
@@ -81,6 +85,28 @@ func TestBuiltinCachedPriceFlowsToLookup(t *testing.T) {
 
 	builtinModelMetaTable[id] = builtinModelMeta{InputCostPerMTokMicroUSD: 3_000_000}
 	p, _, _ = lookupPricingSource(id, nil)
+	require.Nil(t, p.CachedInputPerM)
+	require.Nil(t, p.CacheWritePerM)
+}
+
+func TestBuiltinPricingGetsGeneratedCachePrices(t *testing.T) {
+	// Mutates package-global tables, so no t.Parallel.
+	const id = "claude-sonnet-4-5"
+	_, curated := builtinPricing[id]
+	require.True(t, curated)
+
+	p, src, ok := lookupPricingSource(id, nil)
+	require.True(t, ok)
+	require.Equal(t, priceSourceBuiltin, src)
+	require.NotNil(t, p.CachedInputPerM)
+	require.NotNil(t, p.CacheWritePerM)
+	require.Equal(t, builtinPricing[id].InputPerM, p.InputPerM)
+	require.Nil(t, builtinPricing[id].CachedInputPerM, "shared map entry must not be mutated")
+
+	// An override stays as written, with no merge.
+	o := map[string]*ModelPricing{id: {InputPerM: 1, OutputPerM: 2}}
+	p, src, _ = lookupPricingSource(id, o)
+	require.Equal(t, priceSourceOverride, src)
 	require.Nil(t, p.CachedInputPerM)
 	require.Nil(t, p.CacheWritePerM)
 }

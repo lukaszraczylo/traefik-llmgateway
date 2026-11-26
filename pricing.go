@@ -153,6 +153,20 @@ func promptCacheSavedMicros(price ModelPricing, u usage) int64 {
 	return roundedDivInt64(saturatingMulInt64(cached, diff), tokensPerMillion)
 }
 
+// builtinCachePrices converts a table entry's cache prices; nil when unknown.
+func builtinCachePrices(m builtinModelMeta) (*float64, *float64) {
+	var cached, write *float64
+	if m.CachedInputCostPerMTokMicroUSD > 0 {
+		v := microUSDPerMTokToUSD(m.CachedInputCostPerMTokMicroUSD)
+		cached = &v
+	}
+	if m.CacheWriteCostPerMTokMicroUSD > 0 {
+		v := microUSDPerMTokToUSD(m.CacheWriteCostPerMTokMicroUSD)
+		write = &v
+	}
+	return cached, write
+}
+
 func cacheRateMicrosPerM(perM *float64, fallbackMicrosPerM int64) int64 {
 	if perM == nil {
 		return fallbackMicrosPerM
@@ -284,6 +298,15 @@ func lookupPricingSource(model string, overrides map[string]*ModelPricing) (pric
 		return *p, priceSourceOverride, true
 	}
 	if p, ok := builtinPricing[model]; ok {
+		if m, found := builtinModelMetaTable[model]; found {
+			cached, write := builtinCachePrices(m)
+			if p.CachedInputPerM == nil {
+				p.CachedInputPerM = cached
+			}
+			if p.CacheWritePerM == nil {
+				p.CacheWritePerM = write
+			}
+		}
 		return p, priceSourceBuiltin, true
 	}
 	if m, ok := builtinModelMetaTable[model]; ok && (m.InputCostPerMTokMicroUSD > 0 || m.OutputCostPerMTokMicroUSD > 0) {
@@ -291,14 +314,7 @@ func lookupPricingSource(model string, overrides map[string]*ModelPricing) (pric
 			InputPerM:  microUSDPerMTokToUSD(m.InputCostPerMTokMicroUSD),
 			OutputPerM: microUSDPerMTokToUSD(m.OutputCostPerMTokMicroUSD),
 		}
-		if m.CachedInputCostPerMTokMicroUSD > 0 {
-			v := microUSDPerMTokToUSD(m.CachedInputCostPerMTokMicroUSD)
-			p.CachedInputPerM = &v
-		}
-		if m.CacheWriteCostPerMTokMicroUSD > 0 {
-			v := microUSDPerMTokToUSD(m.CacheWriteCostPerMTokMicroUSD)
-			p.CacheWritePerM = &v
-		}
+		p.CachedInputPerM, p.CacheWritePerM = builtinCachePrices(m)
 		return p, priceSourceLitellm, true
 	}
 	return ModelPricing{}, "", false

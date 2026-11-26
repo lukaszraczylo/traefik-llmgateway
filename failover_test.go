@@ -716,7 +716,8 @@ func TestResolveUnifiedPricing_BuiltinTable(t *testing.T) {
 	t.Parallel()
 	p, ok := resolveUnifiedPricing("openai/gpt-5", "gpt-5", nil)
 	require.True(t, ok, "the built-in pricing table must still resolve with no operator overrides configured")
-	assert.Equal(t, builtinPricing["gpt-5"], p)
+	assert.Equal(t, builtinPricing["gpt-5"].InputPerM, p.InputPerM)
+	assert.Equal(t, builtinPricing["gpt-5"].OutputPerM, p.OutputPerM)
 }
 
 // TestCandidateCostAllowed is the direct regression test for the
