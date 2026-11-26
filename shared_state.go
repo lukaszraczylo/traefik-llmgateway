@@ -1,6 +1,7 @@
 package traefikllmgateway
 
 import (
+	"fmt"
 	"sort"
 	"strconv"
 	"sync"
@@ -412,6 +413,13 @@ func (b *sharedBreaker) sharedOpen(id string) bool {
 	return b.openUntil[id] > b.nowFn().UnixMilli()
 }
 
+// viewOpen is sharedOpen without the loop touch, for the loop's own goroutine.
+func (b *sharedBreaker) viewOpen(id string, now time.Time) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.openUntil[id] > now.UnixMilli()
+}
+
 // recordFailure updates local state and queues the failure for the loop to flush.
 func (b *sharedBreaker) recordFailure(id string) {
 	b.mu.Lock()
@@ -454,8 +462,8 @@ func (b *sharedBreaker) pending() bool {
 	return len(b.failAcc) > 0
 }
 
-// flush adds the queued failures to the fleet counts. The instance whose flush takes a count from below the
-// threshold to at or above it is the single opener.
+// flush adds the queued failures to the fleet counts. An instance whose flush leaves the count at or above the
+// threshold opens the breaker unless its last refresh already shows it open.
 func (b *sharedBreaker) flush(l *sharedStateLoop, _ time.Time) error {
 	b.mu.Lock()
 	ids := make([]string, 0, len(b.failAcc))
@@ -477,7 +485,7 @@ func (b *sharedBreaker) flush(l *sharedStateLoop, _ time.Time) error {
 		return err
 	}
 	if len(post) != len(ids) {
-		return nil
+		return fmt.Errorf("shared breaker: %d counts for %d keys", len(post), len(ids))
 	}
 	b.mu.Lock()
 	for i, id := range ids {
@@ -489,7 +497,9 @@ func (b *sharedBreaker) flush(l *sharedStateLoop, _ time.Time) error {
 	}
 	b.mu.Unlock()
 	for i, id := range ids {
-		if post[i]-deltas[i] < int64(b.threshold) && post[i] >= int64(b.threshold) {
+		// A crossing test (post-delta below, post at or above) would miss an incr that Redis applied while its reply was lost.
+		// The last refreshed view says whether a trip already happened; a rare double trip only adds one to opens.
+		if post[i] >= int64(b.threshold) && !b.viewOpen(id, l.nowFn()) {
 			b.trip(l, id)
 		}
 	}
