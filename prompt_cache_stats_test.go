@@ -2,6 +2,7 @@ package traefikllmgateway
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -158,4 +159,32 @@ func TestCacheHitDoesNotRecordPromptCache(t *testing.T) {
 	}
 	pcr, _ := gw.limiter.getCounter("user", "alice", metricPcRead, windowDay, time.Now())
 	assert.EqualValues(t, 8, pcr, "only the upstream response counts, not the replay")
+}
+
+func TestAdminUsageModelsDetailBudgetUnchanged(t *testing.T) {
+	t.Parallel()
+	const span = 48
+	const preBranchMultiplier = 5 // req, tokin, tokout, cost, r402
+	n := adminMaxKeysPerRequest/(span*preBranchMultiplier) - 2
+	require.Greater(t, n*span*(preBranchMultiplier+3), adminMaxKeysPerRequest, "catalog must exceed the budget at 8x")
+	cfg := newAdminTestConfig()
+	models := make([]string, n)
+	for i := range models {
+		models[i] = fmt.Sprintf("m%03d", i)
+	}
+	cfg.Providers["alpha"].Models = models
+	h, gw := newAdminGatewayHandle(t, cfg)
+	now := time.Date(2026, 8, 20, 12, 30, 0, 0, time.UTC)
+	gw.limiter.nowFn = func() time.Time { return now }
+	seedModelCounter(gw, "alpha/m001", metricReq, windowHour, now, 1)
+	seedModelCounter(gw, "alpha/m001", metricPcRead, windowHour, now, 7)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, adminRequest(http.MethodGet, adminUsageModelsPath+"?metric=req&window=hour&span=48&detail=1", "sk-admin1"))
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var got adminUsageModelsResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	require.Len(t, got.Models, 1)
+	require.NotNil(t, got.Models[0].PromptCacheReadTokens)
+	assert.EqualValues(t, 7, *got.Models[0].PromptCacheReadTokens)
 }

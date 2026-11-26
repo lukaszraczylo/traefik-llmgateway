@@ -1658,7 +1658,7 @@ func (g *Gateway) serveAdminUsageModels(sw *statusTrackingWriter, r *http.Reques
 	// one through.
 	keyMultiplier := 1
 	if detail {
-		keyMultiplier = len(usageModelsDetailMetrics()) + 1 + 3 // +1: r402, +3: pcr/pcw/pcsave, always read
+		keyMultiplier = len(usageModelsDetailMetrics()) + 1 // +1: r402
 		if g.buildAdminFeatures().CacheStats {
 			keyMultiplier += 2 // chit, csave
 		}
@@ -1834,12 +1834,6 @@ func (g *Gateway) serveAdminUsageModelsDetail(sw *statusTrackingWriter, ids []st
 	}
 	r402ByID := r402Multi[0]
 
-	pcMulti, storeOK := g.chunkedModelSpanTotalsMulti(ids, []string{metricPcRead, metricPcWrite, metricPcSave}, window, now, span, offset)
-	if !storeOK {
-		writeOAIError(sw, http.StatusServiceUnavailable, "server_error", "usage history store unavailable")
-		return
-	}
-
 	// chit/csave (admin dashboard redesign, WP-B): only when
 	// features.cacheStats (the response cache is configured) — nil
 	// otherwise, as before. Unlike r402, a model's chit/csave are ONLY
@@ -1881,7 +1875,6 @@ func (g *Gateway) serveAdminUsageModelsDetail(sw *statusTrackingWriter, ids []st
 		_, bare, _ := strings.Cut(id, "/")
 		source, _ := billingPriceSource(id, bare, g.cfg.Pricing, g.cfg.ModelMeta)
 		r402 := r402ByID[i]
-		pcRead, pcWrite, pcSave := pcMulti[0][i], pcMulti[1][i], pcMulti[2][i]
 		entry := adminUsageModelEntryView{
 			ID:           id,
 			Value:        totalsByMetric[valueIdx][i],
@@ -1892,10 +1885,6 @@ func (g *Gateway) serveAdminUsageModelsDetail(sw *statusTrackingWriter, ids []st
 			Free:         adminUsageModelFree(id, bare, g.cfg.Pricing, g.cfg.ModelMeta),
 			PriceSource:  source,
 			R402:         &r402,
-
-			PromptCacheReadTokens:    &pcRead,
-			PromptCacheWriteTokens:   &pcWrite,
-			PromptCacheSavedMicroUSD: &pcSave,
 		}
 		if chitByID != nil {
 			chit := chitByID[i]
@@ -1916,6 +1905,24 @@ func (g *Gateway) serveAdminUsageModelsDetail(sw *statusTrackingWriter, ids []st
 	})
 	if len(models) > limit {
 		models = models[:limit]
+	}
+
+	// Own read over the returned page only: the catalog-wide read would
+	// push the key count past adminMaxKeysPerRequest.
+	pageIDs := make([]string, len(models))
+	for i := range models {
+		pageIDs[i] = models[i].ID
+	}
+	pcMulti, storeOK := g.chunkedModelSpanTotalsMulti(pageIDs, []string{metricPcRead, metricPcWrite, metricPcSave}, window, now, span, offset)
+	if !storeOK {
+		writeOAIError(sw, http.StatusServiceUnavailable, "server_error", "usage history store unavailable")
+		return
+	}
+	for i := range models {
+		pcRead, pcWrite, pcSave := pcMulti[0][i], pcMulti[1][i], pcMulti[2][i]
+		models[i].PromptCacheReadTokens = &pcRead
+		models[i].PromptCacheWriteTokens = &pcWrite
+		models[i].PromptCacheSavedMicroUSD = &pcSave
 	}
 
 	setAdminJSONHeaders(sw)
