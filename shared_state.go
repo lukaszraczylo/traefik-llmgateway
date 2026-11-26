@@ -16,6 +16,8 @@ const (
 	sharedStateMaxFailures = 3
 	// sharedStateChunk bounds the keys of one getMulti.
 	sharedStateChunk = 500
+	// sharedStateErrorLogEvery bounds how often the loop logs a store error, as the limiter does.
+	sharedStateErrorLogEvery = storeErrorLogEvery
 
 	// Breaker kinds, the {kind} part of a breaker key.
 	sharedKindRequest   = "req"
@@ -55,18 +57,20 @@ type sharedStateLoop struct {
 	nowFn func() time.Time
 	logf  func(string, ...any)
 	// lossy runs best-effort writes and may drop them under pressure.
-	lossy    func(func())
-	lastUse  time.Time
-	stop     chan struct{}
-	done     chan struct{}
-	prims    []sharedPrimitive
-	flushers []sharedFlusher
-	every    time.Duration
-	failures int
-	mu       sync.Mutex
-	flushMu  sync.Mutex
-	running  bool
-	closed   bool
+	lossy   func(func())
+	lastUse time.Time
+	// lastErrLog is guarded by mu.
+	lastErrLog time.Time
+	stop       chan struct{}
+	done       chan struct{}
+	prims      []sharedPrimitive
+	flushers   []sharedFlusher
+	every      time.Duration
+	failures   int
+	mu         sync.Mutex
+	flushMu    sync.Mutex
+	running    bool
+	closed     bool
 }
 
 // newSharedStateLoop returns a loop over store; lossy is the droppable write spawn (the limiter's).
@@ -95,6 +99,20 @@ func (l *sharedStateLoop) log(format string, args ...any) {
 	l.logf(format, args...)
 }
 
+// logErr is log limited to one line per sharedStateErrorLogEvery, so a Redis outage cannot flood the log.
+func (l *sharedStateLoop) logErr(format string, args ...any) {
+	now := l.nowFn()
+	l.mu.Lock()
+	ok := now.Sub(l.lastErrLog) >= sharedStateErrorLogEvery
+	if ok {
+		l.lastErrLog = now
+	}
+	l.mu.Unlock()
+	if ok {
+		l.log(format, args...)
+	}
+}
+
 func (l *sharedStateLoop) registerFlusher(f sharedFlusher) {
 	l.mu.Lock()
 	l.flushers = append(l.flushers, f)
@@ -113,7 +131,7 @@ func (l *sharedStateLoop) flush() {
 	now := l.nowFn()
 	for _, f := range fl {
 		if err := f.flush(l, now); err != nil {
-			l.log("shared state flush failed: %v", err)
+			l.logErr("shared state flush failed: %v", err)
 		}
 	}
 }
@@ -266,7 +284,7 @@ func (l *sharedStateLoop) refreshFailed(prims []sharedPrimitive, err error) {
 	absent := l.failures >= sharedStateMaxFailures
 	n := l.failures
 	l.mu.Unlock()
-	l.log("shared state refresh failed (%d consecutive): %v", n, err)
+	l.logErr("shared state refresh failed (%d consecutive): %v", n, err)
 	if absent {
 		var none []int64
 		for _, p := range prims {
@@ -278,7 +296,7 @@ func (l *sharedStateLoop) refreshFailed(prims []sharedPrimitive, err error) {
 func (l *sharedStateLoop) incrAndGet(e counterIncr) (int64, bool) {
 	got, _, err := l.store.incrAndGetMulti([]counterIncr{e}, nil)
 	if err != nil || len(got) != 1 {
-		l.log("shared state write %q failed: %v", e.key, err)
+		l.logErr("shared state write %q failed: %v", e.key, err)
 		return 0, false
 	}
 	return got[0], true
@@ -286,7 +304,7 @@ func (l *sharedStateLoop) incrAndGet(e counterIncr) (int64, bool) {
 
 func (l *sharedStateLoop) write(entries []counterIncr) {
 	if _, err := l.store.incrMulti(entries); err != nil {
-		l.log("shared state write of %d keys failed: %v", len(entries), err)
+		l.logErr("shared state write of %d keys failed: %v", len(entries), err)
 	}
 }
 

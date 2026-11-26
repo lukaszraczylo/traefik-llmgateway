@@ -324,3 +324,39 @@ func TestSharedStateIdleStopsDuringOutageAfterFailWindow(t *testing.T) {
 	waitLoop(t, l, false)
 	l.close()
 }
+
+func TestSharedStateErrorLogsAreRateLimited(t *testing.T) {
+	store, clk := sharedTestEnv()
+	var mu sync.Mutex
+	var lines []string
+	l := newSharedStateLoop(store, nil, func(f string, a ...any) {
+		mu.Lock()
+		lines = append(lines, f)
+		mu.Unlock()
+	})
+	l.nowFn = clk.now
+	l.closed = true
+	l.lossy = func(f func()) { f() }
+	b := testBreaker(l)
+	store.setFail(errors.New("redis down"))
+	store.setFailIncr(errors.New("redis down"))
+	count := func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(lines)
+	}
+	for i := 0; i < 50; i++ {
+		b.recordFailure("p")
+		l.refresh()
+		l.write([]counterIncr{{key: "k", delta: 1, ttl: time.Minute}})
+	}
+	if got := count(); got != 1 {
+		t.Fatalf("%d error lines inside one interval, want 1", got)
+	}
+	clk.advance(sharedStateErrorLogEvery + time.Second)
+	b.recordFailure("p")
+	l.refresh()
+	if got := count(); got != 2 {
+		t.Errorf("%d error lines after the interval, want 2", got)
+	}
+}
