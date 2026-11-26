@@ -181,6 +181,8 @@ type watchdogBody struct {
 	timedOut        int32
 	ttfbRecorded    int32
 	latencyRecorded int32
+	// idle is set by disarm: the stream may stay silent indefinitely, so no read re-arms the timer.
+	idle int32
 	// done is set once Read observes a clean io.EOF (finding 11 fix,
 	// review-routes.md) — see Read's own doc comment for why the timer
 	// must be stopped THERE, not left armed until Close eventually calls
@@ -189,11 +191,11 @@ type watchdogBody struct {
 	// time.AfterFunc goroutine already started) still cannot record a
 	// spurious failure for an upstream that, in fact, just finished
 	// cleanly.
-	done      int32
-	streaming bool
+	done int32
 	// sse feeds the first-byte guard for a stream, where a keep-alive comment is not a first byte.
-	sse    sseDataDetector
-	fbDone bool
+	sse       sseDataDetector
+	streaming bool
+	fbDone    bool
 }
 
 // newWatchdogBody returns a watchdogBody wrapping rc, arming its watchdog
@@ -283,7 +285,7 @@ func (wb *watchdogBody) fire() {
 	// timer cannot be retracted once its goroutine has started, only
 	// prevented from starting via Stop) must not record a spurious
 	// provider failure for an upstream that, in fact, finished cleanly.
-	if atomic.LoadInt32(&wb.done) == 1 {
+	if atomic.LoadInt32(&wb.done) == 1 || atomic.LoadInt32(&wb.idle) == 1 {
 		return
 	}
 	atomic.StoreInt32(&wb.timedOut, 1)
@@ -376,10 +378,18 @@ func (wb *watchdogBody) Read(p []byte) (int, error) {
 		}
 		return n, err
 	}
-	if n > 0 {
+	if n > 0 && atomic.LoadInt32(&wb.idle) == 0 {
 		wb.timer.Reset(wb.timeout)
 	}
 	return n, nil
+}
+
+// disarm stops the progress watchdog for a stream that may legitimately stay
+// idle, such as an MCP server-to-client event stream. The request context and
+// Close still end it.
+func (wb *watchdogBody) disarm() {
+	atomic.StoreInt32(&wb.idle, 1)
+	wb.timer.Stop()
 }
 
 // Close stops the watchdog timer (a harmless no-op if it already fired)

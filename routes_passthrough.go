@@ -1356,7 +1356,7 @@ func (g *Gateway) handlePassthrough(w http.ResponseWriter, r *http.Request, u *u
 		}))
 	}
 
-	result, complete := g.proxyUpstream(w, r, upstreamURL, adapter.httpClient(), adapter.injectAuth, providerCredentialRetargetHeaders, true, "passthrough (provider "+providerName+")", adapter.requestTimeout())
+	result, complete := g.proxyUpstream(w, r, upstreamURL, adapter.httpClient(), adapter.injectAuth, providerCredentialRetargetHeaders, true, "passthrough (provider "+providerName+")", adapter.requestTimeout(), false)
 	defer result.tee.release()
 	g.recordProxyEvent(scopes, providerName, routePassthrough, result) // F3 hook 3 (v0.3 dashboard task)
 
@@ -1669,7 +1669,7 @@ func (c *cappedBodyReader) bytesRead() int64 {
 // request instead of completing it against a silently truncated prefix
 // (a multipart audio upload over the cap previously still parsed a
 // valid, truncated body and got transcribed with no error at all).
-func (g *Gateway) proxyUpstream(w http.ResponseWriter, r *http.Request, upstreamURL string, client *http.Client, injectAuth func(*http.Request), extraStrip map[string]bool, accountJSON bool, logPrefix string, timeout time.Duration) (result proxyResult, ok bool) {
+func (g *Gateway) proxyUpstream(w http.ResponseWriter, r *http.Request, upstreamURL string, client *http.Client, injectAuth func(*http.Request), extraStrip map[string]bool, accountJSON bool, logPrefix string, timeout time.Duration, idleEventStreams bool) (result proxyResult, ok bool) {
 	if r.ContentLength > maxPassthroughBytes {
 		writeOAIError(w, http.StatusRequestEntityTooLarge, "invalid_request_error", "request body exceeds the maximum allowed size")
 		return proxyResult{}, false
@@ -1787,6 +1787,18 @@ func (g *Gateway) proxyUpstream(w http.ResponseWriter, r *http.Request, upstream
 	// (name ...)" — an MCP/A2A target is not a provider, and the watchdog
 	// error text must not claim it is (finding F9).
 	wb := newWatchdogBody(resp.Body, cancel, timeout, logPrefix, rec)
+	// An MCP server-to-client stream (a GET answered with text/event-stream) is
+	// silent until the server has something to send, so the progress watchdog
+	// would cut it. It runs unwatched and is ended by the client, the upstream,
+	// or DrainIdleStreams.
+	if idleEventStreams && r.Method == http.MethodGet && isEventStreamResponse(resp) {
+		wb.disarm()
+		id, tracked := g.idleStreams.add(cancel)
+		if !tracked {
+			cancel()
+		}
+		defer g.idleStreams.remove(id)
+	}
 	if latRec != nil {
 		wb.armLatency(start, isEventStreamResponse(resp), latRec)
 	}

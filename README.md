@@ -1958,7 +1958,14 @@ Every provider adapter call and every native passthrough
 aborted once this gateway observes no upstream read progress for the
 configured duration, never simply because elapsed time crossed a fixed
 deadline. The MCP/A2A target proxy (`/mcp/{name}/...`, `/a2a/{name}/...`)
-shares the identical mechanism. The federated `/mcp` endpoint
+shares the identical mechanism, with one exception: an MCP `GET` answered
+with `text/event-stream` is the server-to-client message channel, which
+stays silent until the server has something to send, so it runs without
+the watchdog. It ends when the client disconnects or the server closes it.
+The standalone binary also ends these streams when it shuts down or a
+config reload replaces the gateway, so their clients reconnect elsewhere;
+without that, one idle stream would hold a shutdown for its whole timeout.
+The federated `/mcp` endpoint
 (`mcp_federation.go`) does **not** — see the "Federated MCP" note below.
 
 **Behavior change for every deployment, not an invisible bug fix.** Before

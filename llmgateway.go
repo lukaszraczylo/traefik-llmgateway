@@ -852,6 +852,7 @@ const maxExplicitBodyAdmissionCap = 10_000
 type Gateway struct {
 	next                          http.Handler
 	events                        *eventLog
+	idleStreams                   *idleStreamSet
 	bodyAdmission                 chan struct{}
 	unifiedRequestBytes           int64
 	teeBudget                     *teeBudget
@@ -1035,7 +1036,7 @@ func newGateway(ctx context.Context, next http.Handler, config *Config, name str
 	if err != nil {
 		return nil, err
 	}
-	g := &Gateway{next: next, name: name, cfg: config, auth: auth}
+	g := &Gateway{next: next, name: name, cfg: config, auth: auth, idleStreams: newIdleStreamSet()}
 	// replica/collectingWarnings (F4/F9/F10, v0.3 dashboard task): resolved
 	// immediately, before anything below can call warnf — every warnf
 	// call from here to this function's return is a construction-time

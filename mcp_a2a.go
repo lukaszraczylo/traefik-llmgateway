@@ -243,7 +243,7 @@ func (g *Gateway) handleTargetProxy(w http.ResponseWriter, r *http.Request, u *u
 	// recordTargetProxyHealth's own doc comment for the exact
 	// success/failure rule.
 	start := time.Now()
-	result, ok := g.proxyUpstream(w, r, upstreamURL, g.targetClient, nil, nil, false, kind+" target (name "+name+")", g.targetTimeout)
+	result, ok := g.proxyUpstream(w, r, upstreamURL, g.targetClient, nil, nil, false, kind+" target (name "+name+")", g.targetTimeout, kind == targetKindMCP)
 	g.recordTargetProxyHealth(kind, name, targetURL, result, ok, time.Since(start))
 	g.recordProxyEvent(scopes, name, kind, result) // F3 hook 3 (v0.3 dashboard task)
 }

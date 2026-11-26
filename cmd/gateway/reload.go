@@ -51,6 +51,9 @@ func (g *generation) retire(maxWait time.Duration) {
 	if !g.markRetired() {
 		return
 	}
+	// Idle MCP event streams have no end of their own; ending them lets their
+	// clients reconnect to the new generation and this one close.
+	drainIdleStreams(g.h)
 	g.timer.Store(time.AfterFunc(maxWait, g.shut))
 	// A shut that ran before the Store could not stop the timer, so stop it here.
 	if g.shutDone.Load() {
@@ -111,6 +114,22 @@ func (s *swapHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // swap installs next and retires the generation it replaces.
 func (s *swapHandler) swap(next *generation, drain time.Duration) {
 	s.cur.Swap(next).retire(drain)
+}
+
+// drainIdleStreams ends the serving gateway's idle MCP event streams. run
+// calls it when the server shuts down, so those streams do not hold the
+// shutdown for its whole timeout.
+func (s *swapHandler) drainIdleStreams() {
+	if g := s.cur.Load(); g != nil {
+		drainIdleStreams(g.h)
+	}
+}
+
+// drainIdleStreams calls DrainIdleStreams when h is a gateway that has it.
+func drainIdleStreams(h http.Handler) {
+	if d, ok := h.(interface{ DrainIdleStreams() }); ok {
+		d.DrainIdleStreams()
+	}
 }
 
 // closeCurrent closes the serving generation and turns away any request that arrives later.

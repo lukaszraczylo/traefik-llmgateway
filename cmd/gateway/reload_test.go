@@ -372,3 +372,31 @@ func TestGatewayBuilderRejectsUnknownField(t *testing.T) {
 }
 
 var _ http.Handler = (*traefikllmgateway.Gateway)(nil)
+
+// drainCounter is a gateway stand-in that counts DrainIdleStreams calls.
+type drainCounter struct {
+	http.Handler
+	drains atomic.Int32
+}
+
+func (d *drainCounter) DrainIdleStreams() { d.drains.Add(1) }
+
+func TestIdleStreamsDrainedOnRetireAndShutdown(t *testing.T) {
+	old := &drainCounter{Handler: okHandler()}
+	sw := &swapHandler{}
+	sw.cur.Store(newGeneration(old, func() {}))
+	g := sw.cur.Load()
+	g.enter() // a request is still running, so the close waits for it
+	sw.swap(newGeneration(okHandler(), func() {}), time.Hour)
+	if old.drains.Load() != 1 {
+		t.Errorf("retired gateway drains = %d, want 1: its idle MCP streams would hold it open", old.drains.Load())
+	}
+	g.leave()
+
+	cur := &drainCounter{Handler: okHandler()}
+	sw.cur.Store(newGeneration(cur, func() {}))
+	sw.drainIdleStreams()
+	if cur.drains.Load() != 1 {
+		t.Errorf("serving gateway drains = %d, want 1 on shutdown", cur.drains.Load())
+	}
+}
