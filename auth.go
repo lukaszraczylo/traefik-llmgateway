@@ -731,7 +731,9 @@ type authStore struct {
 	inline               map[[32]byte]*authEntry
 	// anonymous is the principal for keyless requests; nil unless
 	// UsersConfig.AnonymousGroup is set.
-	anonymous        *authEntry
+	anonymous *authEntry
+	// anonymousAnyKey admits an unknown key as anonymous instead of 401.
+	anonymousAnyKey  bool
 	lastReloadErrMsg string
 	failureLog       logGate
 	throttleLog      logGate
@@ -811,6 +813,9 @@ func newAuthStore(cfg *Config) (*authStore, error) {
 			return nil, err
 		}
 		a.anonymous = anon
+		a.anonymousAnyKey = cfg.Users.AnonymousAcceptAnyKey
+	} else if cfg.Users != nil && cfg.Users.AnonymousAcceptAnyKey {
+		return nil, fmt.Errorf("llmgateway: users.anonymousAcceptAnyKey needs users.anonymousGroup")
 	}
 
 	if cfg.Users != nil {
@@ -1276,27 +1281,43 @@ func (a *authStore) shouldLogThrottleEngaged() (log bool, suppressed int64) {
 // — there is no separate secret-bytes compare here for a non-constant-time
 // implementation to leak timing from).
 func (a *authStore) identify(r *http.Request) (*user, *group, bool) {
-	if a.anonymous != nil && !hasCredentialHeader(r.Header) {
+	if a.anonymous == nil {
+		return a.identifyKeyed(r)
+	}
+	if !hasCredentialHeader(r.Header) {
 		return a.anonymous.user, a.anonymous.group, true
 	}
-	return a.identifyKeyed(r)
+	if !a.anonymousAnyKey {
+		return a.identifyKeyed(r)
+	}
+	if entry, ok := a.lookupKey(r); ok {
+		return entry.user, entry.group, true
+	}
+	return a.anonymous.user, a.anonymous.group, true
 }
 
 // identifyKeyed is identify without the anonymous fallback: the request
 // must present a configured user's key. The admin API uses it.
 func (a *authStore) identifyKeyed(r *http.Request) (*user, *group, bool) {
-	key, ok := presentedKey(r)
-	if ok {
-		digest := sha256.Sum256([]byte(key))
-		a.mu.RLock()
-		entry, found := a.byDigest[digest]
-		a.mu.RUnlock()
-		if found {
-			return entry.user, entry.group, true
-		}
+	if entry, ok := a.lookupKey(r); ok {
+		return entry.user, entry.group, true
 	}
 	a.recordAuthFailure(clientIP(r))
 	return nil, nil, false
+}
+
+// lookupKey resolves r's presented key to a configured user. A miss records
+// no auth failure; the caller decides whether it is one.
+func (a *authStore) lookupKey(r *http.Request) (*authEntry, bool) {
+	key, ok := presentedKey(r)
+	if !ok {
+		return nil, false
+	}
+	digest := sha256.Sum256([]byte(key))
+	a.mu.RLock()
+	entry, found := a.byDigest[digest]
+	a.mu.RUnlock()
+	return entry, found
 }
 
 // hasCredentialHeader reports whether h carries an Authorization or

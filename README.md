@@ -738,6 +738,7 @@ taken back.
 |---|---|---|---|
 | `file` | `string` | — | Path to a JSON users file, merged over `inline` and hot-reloaded — see [Users file](#users-file-format). |
 | `anonymousGroup` | `string` | — | Opt-in anonymous access — see [Anonymous access](#anonymous-access). Must name a configured group. |
+| `anonymousAcceptAnyKey` | `bool` | `false` | Also serve a key that matches no user as `anonymous`. Needs `anonymousGroup`. |
 | `inline` | `[]UserConfig` | `[]` | Resolved once at plugin construction. |
 
 #### Anonymous access
@@ -765,6 +766,17 @@ users:
 - The admin API (`/admin/api/*`) and the metrics key fallback (outside `metrics.allowedCIDRs`) always need an admin key.
 - The name `anonymous` is reserved while this is set. An inline or file user
   with that name is a config error.
+
+Some clients cannot omit the key: the OpenAI SDKs refuse to start without
+one, so callers set a placeholder. Set `users.anonymousAcceptAnyKey: true`
+to serve those requests as `anonymous` too:
+
+- A key that matches a configured user still runs as that user.
+- Any other key, or a malformed `Authorization` header, runs as
+  `anonymous` and does not count toward the auth-failure throttle.
+- A user who mistypes a key gets the anonymous group's grant instead of a
+  401.
+- The admin API and the metrics key fallback still need a valid admin key.
 
 Anyone who can reach the gateway can spend the providers this group allows.
 Set group `limits` and `memberLimits`, and restrict who can reach the route
