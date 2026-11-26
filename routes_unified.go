@@ -348,6 +348,12 @@ func (g *Gateway) runMeteredCall(sw *statusTrackingWriter, r *http.Request, scop
 		pristineReq[k] = v
 	}
 
+	// Computed from the client body before any attempt sets the key.
+	pck := ""
+	if endpoint == cacheEndpointChat || endpoint == cacheEndpointMessages {
+		pck = g.promptCacheKeyForRequest(pristineReq, r.Header, scopes, candidates)
+	}
+
 	// preFailoverHeaders snapshots sw.Header() ONCE, before the loop below
 	// ever runs (finding 7 fix, review-routes.md): every header present
 	// here was staged by something OTHER than this loop — an earlier,
@@ -469,6 +475,7 @@ func (g *Gateway) runMeteredCall(sw *statusTrackingWriter, r *http.Request, scop
 		if cacheable {
 			cacheKeyStr = cacheKey(cand.providerName, cand.upstreamModel, requestedModel, endpoint, attemptReq)
 		}
+		g.applyPromptCacheKey(attemptReq, cand.providerName, pck)
 		attemptReq[gatewayAliasKey] = requestedModel
 		if plan != nil {
 			setRouterHeaders(sw.Header(), plan, i)

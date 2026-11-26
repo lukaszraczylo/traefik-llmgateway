@@ -411,6 +411,10 @@ func (g *Gateway) callTranslatedMessages(ctx context.Context, w http.ResponseWri
 		g.warnf("messages route: request field %q has no OpenAI equivalent for provider %q and was dropped in translation", field, adapter.name())
 	}
 
+	if key, ok := req[promptCacheKeyField].(string); ok && key != "" {
+		openaiReq[promptCacheKeyField] = key
+	}
+
 	rec := newMessagesResponseRecorder()
 	result, err := adapter.chatCompletion(ctx, rec, openaiReq)
 	if err != nil {

@@ -1,6 +1,11 @@
 package traefikllmgateway
 
-import "fmt"
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+	"net/http"
+)
 
 // PromptCacheConfig holds a provider's opt-in prompt-caching body changes.
 type PromptCacheConfig struct {
@@ -174,4 +179,74 @@ func injectCacheControl(req map[string]any) (map[string]any, int) {
 		return req, 0
 	}
 	return out, added
+}
+
+const (
+	promptCacheKeyField = "prompt_cache_key"
+	promptCacheKeyTag   = "pck\x00"
+	promptCacheKeyBytes = 16
+	promptCacheSep      = "\x1f"
+)
+
+// promptCacheSystemText returns the system prompt of an OpenAI or Anthropic body.
+func promptCacheSystemText(req map[string]any) string {
+	if text, _, _ := smartContentText(req["system"]); text != "" {
+		return text
+	}
+	msgs, _ := req["messages"].([]any)
+	for i := 0; i < len(msgs); i++ {
+		msg, ok := msgs[i].(map[string]any)
+		if !ok {
+			continue
+		}
+		role, _ := msg["role"].(string)
+		if role != "system" && role != "developer" {
+			continue
+		}
+		if text, _, _ := smartContentText(msg["content"]); text != "" {
+			return text
+		}
+	}
+	return ""
+}
+
+// promptCacheSessionID names one conversation: the client's own id, else its
+// system prompt plus first user message, both stable across turns.
+func promptCacheSessionID(req map[string]any, hdr http.Header) string {
+	if id := smartSessionClientID(req, hdr, ""); id != "" {
+		return id
+	}
+	return smartCut(promptCacheSystemText(req), sessionDerivedSys) + promptCacheSep + smartCut(smartFirstUserText(req), sessionDerivedUser)
+}
+
+// hashPromptCacheKey hashes caller and session so the upstream never sees a raw id.
+func hashPromptCacheKey(callerID, sessionID string) string {
+	sum := sha256.Sum256([]byte(promptCacheKeyTag + callerID + "\x00" + sessionID))
+	return hex.EncodeToString(sum[:promptCacheKeyBytes])
+}
+
+// promptCacheKeyForRequest returns the key to send, or "" when the client chose
+// its own prompt_cache_key (even an empty one) or no candidate provider opted in.
+func (g *Gateway) promptCacheKeyForRequest(req map[string]any, hdr http.Header, scopes []limitScope, candidates []resolveCandidate) string {
+	if _, has := req[promptCacheKeyField]; has {
+		return ""
+	}
+	wanted := false
+	for i := 0; i < len(candidates); i++ {
+		if g.providerPromptCache(candidates[i].providerName).Key {
+			wanted = true
+			break
+		}
+	}
+	if !wanted {
+		return ""
+	}
+	return hashPromptCacheKey(smartCallerID(scopes, hdr), promptCacheSessionID(req, hdr))
+}
+
+// applyPromptCacheKey sets key on attemptReq when the candidate's provider opted in.
+func (g *Gateway) applyPromptCacheKey(attemptReq map[string]any, providerName, key string) {
+	if key != "" && g.providerPromptCache(providerName).Key {
+		attemptReq[promptCacheKeyField] = key
+	}
 }
