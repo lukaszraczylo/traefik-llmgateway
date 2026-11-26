@@ -16,6 +16,11 @@ const (
 	// sharedStateChunk bounds the keys of one getMulti.
 	sharedStateChunk = 500
 
+	// Breaker kinds, the {kind} part of a breaker key.
+	sharedKindRequest   = "req"
+	sharedKindDiscovery = "disc"
+	sharedKindDecision  = "dec"
+
 	sharedBreakerPrefix  = "llmgw:brk:"
 	sharedInflightPrefix = "llmgw:inf:"
 
@@ -393,6 +398,15 @@ func (b *sharedBreaker) isOpen(id string) bool {
 	return b.openUntil[id] > now.UnixMilli()
 }
 
+// sharedOpen reports whether the last-refreshed fleet state says id is open, ignoring this breaker's local arm.
+// Callers with their own local breaker use it to layer the fleet view on top. It never calls the store.
+func (b *sharedBreaker) sharedOpen(id string) bool {
+	b.loop.touch()
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.openUntil[id] > b.nowFn().UnixMilli()
+}
+
 // recordFailure updates local state and queues the failure for the loop to flush.
 func (b *sharedBreaker) recordFailure(id string) {
 	b.mu.Lock()
@@ -507,26 +521,35 @@ func (b *sharedBreaker) openDuration(opens int64) time.Duration {
 	return d
 }
 
-// recordSuccess resets local state and, when a failure count may exist in the store, clears it.
+// recordSuccess resets local state and clears the fleet failure count and open mark when either may exist.
 func (b *sharedBreaker) recordSuccess(id string) {
 	b.mu.Lock()
 	st := b.localFor(id)
 	dirty := st.consecutiveFailures > 0 || b.failsSeen[id] > 0
+	// A success closes the fleet breaker too, as it closes the local one.
+	wasOpen := b.openUntil[id] > b.nowFn().UnixMilli()
 	delete(b.failAcc, id)
 	st.open = false
 	st.consecutiveFailures = 0
 	st.backoff = 0
 	st.openUntil = time.Time{}
 	b.mu.Unlock()
-	if b.loop == nil || !dirty {
+	if b.loop == nil || (!dirty && !wasOpen) {
 		return
 	}
 	b.loop.touch()
 	b.loop.lossy(func() {
-		b.loop.write([]counterIncr{{key: sharedBreakerKey(b.kind, id, "fails"), delta: 0, ttl: b.failWindow, enforceTTL: b.failWindow, absolute: true}})
+		entries := []counterIncr{{key: sharedBreakerKey(b.kind, id, "fails"), delta: 0, ttl: b.failWindow, enforceTTL: b.failWindow, absolute: true}}
+		if wasOpen {
+			entries = append(entries, counterIncr{key: sharedBreakerKey(b.kind, id, "open"), delta: 0, ttl: b.openBase, enforceTTL: b.openBase, absolute: true})
+		}
+		b.loop.write(entries)
 	})
 	b.mu.Lock()
 	b.failsSeen[id] = 0
+	if wasOpen {
+		delete(b.openUntil, id)
+	}
 	b.mu.Unlock()
 }
 

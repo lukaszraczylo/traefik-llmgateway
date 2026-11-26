@@ -737,3 +737,25 @@ func TestSharedStateNoIdleStopWithPendingDeltas(t *testing.T) {
 	}
 	l.close()
 }
+
+func TestSharedBreakerSuccessClosesOpen(t *testing.T) {
+	store, clk := sharedTestEnv()
+	la, lb, lc := sharedTestLoop(store, clk), sharedTestLoop(store, clk), sharedTestLoop(store, clk)
+	a, b, c := testBreaker(la), testBreaker(lb), testBreaker(lc)
+	for i := 0; i < 3; i++ {
+		a.recordFailure("p")
+	}
+	la.refresh()
+	lb.refresh()
+	if !b.sharedOpen("p") {
+		t.Fatal("B shared view closed after the trip")
+	}
+	b.recordSuccess("p")
+	lc.refresh()
+	if c.sharedOpen("p") {
+		t.Fatal("C still sees open after B's success")
+	}
+	if b.sharedOpen("p") {
+		t.Fatal("B still sees open right after its own success")
+	}
+}

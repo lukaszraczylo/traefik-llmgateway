@@ -1303,6 +1303,7 @@ func newGateway(ctx context.Context, next http.Handler, config *Config, name str
 	// is accepted.
 	registry.warmFill(ctx)
 	g.registry = registry
+	g.wireSharedState(config)
 	g.warnRouterSessions()
 	g.warnRouterLearning()
 
