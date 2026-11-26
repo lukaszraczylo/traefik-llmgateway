@@ -441,3 +441,14 @@ func TestFleetLatencyEntriesOnlyWithStore(t *testing.T) {
 		t.Errorf("fleet latency sum in the store = %d, want 300", got)
 	}
 }
+
+func TestProviderHealthyHelpNamesSharedState(t *testing.T) {
+	for _, want := range []string{"redis.sharedState", "max()", "per replica", "min()"} {
+		if !strings.Contains(aggregationNoteProviderHealthy, want) {
+			t.Errorf("provider_healthy HELP note lacks %q: %s", want, aggregationNoteProviderHealthy)
+		}
+	}
+	if strings.Contains(aggregationNoteProviderHealthy, "never shared via Redis") {
+		t.Error("provider_healthy HELP note still says the breaker is never shared via Redis")
+	}
+}

@@ -28,7 +28,7 @@ llmgateway_provider_attempts_total{provider="gamma"} 0
 llmgateway_provider_failures_total{provider="alpha"} 0
 llmgateway_provider_failures_total{provider="beta"} 0
 llmgateway_provider_failures_total{provider="gamma"} 0
-# HELP llmgateway_provider_healthy 1 when the provider's discovery circuit breaker is not open (closed or half-open), 0 when open (discoveryHealthy, registry.go). AGGREGATION ACROSS REPLICAS: each replica runs its own discovery circuit breaker in-process, never shared via Redis, so this can legitimately differ per replica. Read it per-instance where possible; if you must aggregate, use min() to surface "at least one replica sees this provider as unhealthy" — sum() is meaningless for a 0/1 gauge.
+# HELP llmgateway_provider_healthy 1 when the provider's discovery circuit breaker is not open (closed or half-open), 0 when open (discoveryHealthy, registry.go). AGGREGATION ACROSS REPLICAS: with redis.sharedState on, the discovery circuit breaker is shared via Redis, so every replica reports the same value and max() is correct. Without it, each replica runs its own breaker, so the value can differ per replica; use min() to surface "at least one replica sees this provider as unhealthy". sum() is meaningless for a 0/1 gauge.
 # TYPE llmgateway_provider_healthy gauge
 llmgateway_provider_healthy{provider="alpha"} 1
 llmgateway_provider_healthy{provider="beta"} 1

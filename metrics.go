@@ -442,12 +442,10 @@ const aggregationNoteStoreBacked = " AGGREGATION ACROSS REPLICAS: with Redis con
 const aggregationNotePerProcess = " AGGREGATION ACROSS REPLICAS: this counter lives only in this process's memory, never in Redis, regardless of Config.Redis — aggregate with sum(), which is always correct for it, unlike the store-backed families above."
 
 // aggregationNoteProviderHealthy is appended to llmgateway_provider_
-// healthy's HELP text: the discovery circuit breaker (registry.go's
-// providerState.health) is per-process state, set by each replica's own
-// discovery polling loop, and is never written to Redis — two replicas
-// can legitimately disagree about one provider's health at the same
-// instant (e.g. one mid-backoff, one already recovered).
-const aggregationNoteProviderHealthy = " AGGREGATION ACROSS REPLICAS: each replica runs its own discovery circuit breaker in-process, never shared via Redis, so this can legitimately differ per replica. Read it per-instance where possible; if you must aggregate, use min() to surface \"at least one replica sees this provider as unhealthy\" — sum() is meaningless for a 0/1 gauge."
+// healthy's HELP text: with redis.sharedState on, the discovery circuit
+// breaker (registry.go's providerState.health) is shared through Redis;
+// without it, each replica's own discovery loop sets it in-process.
+const aggregationNoteProviderHealthy = " AGGREGATION ACROSS REPLICAS: with redis.sharedState on, the discovery circuit breaker is shared via Redis, so every replica reports the same value and max() is correct. Without it, each replica runs its own breaker, so the value can differ per replica; use min() to surface \"at least one replica sees this provider as unhealthy\". sum() is meaningless for a 0/1 gauge."
 
 // aggregationNoteTargetHealthy is appended to llmgateway_target_healthy's
 // HELP text (feat/target-health): the tracker behind this gauge
