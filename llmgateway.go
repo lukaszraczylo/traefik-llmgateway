@@ -864,6 +864,7 @@ type Gateway struct {
 	targetClient                  *http.Client
 	provenance                    *provenanceStore
 	routerStats                   *routerStats
+	promptCacheStats              promptCacheStats
 	routerSessions                *routerSessions
 	routerLearn                   *routerLearner
 	tokenCalib                    *smartTokenCalibrator

@@ -1480,6 +1480,10 @@ type adminUsageModelEntryView struct {
 	// Free is populated only by serveAdminUsageModelsDetail too; false
 	// (the non-detail zero value) is dropped by its own omitempty.
 	Free bool `json:"free,omitempty"`
+	// Prompt-cache counters (detail mode only) are always emitted, zero included.
+	PromptCacheReadTokens    int64 `json:"promptCacheReadTokens"`
+	PromptCacheWriteTokens   int64 `json:"promptCacheWriteTokens"`
+	PromptCacheSavedMicroUSD int64 `json:"promptCacheSavedMicroUsd"`
 }
 
 // adminUsageModelsResponse is GET /admin/api/usage/models' body. Span
@@ -1654,7 +1658,7 @@ func (g *Gateway) serveAdminUsageModels(sw *statusTrackingWriter, r *http.Reques
 	// one through.
 	keyMultiplier := 1
 	if detail {
-		keyMultiplier = len(usageModelsDetailMetrics()) + 1 // +1: r402, always read
+		keyMultiplier = len(usageModelsDetailMetrics()) + 1 + 3 // +1: r402, +3: pcr/pcw/pcsave, always read
 		if g.buildAdminFeatures().CacheStats {
 			keyMultiplier += 2 // chit, csave
 		}
@@ -1830,6 +1834,12 @@ func (g *Gateway) serveAdminUsageModelsDetail(sw *statusTrackingWriter, ids []st
 	}
 	r402ByID := r402Multi[0]
 
+	pcMulti, storeOK := g.chunkedModelSpanTotalsMulti(ids, []string{metricPcRead, metricPcWrite, metricPcSave}, window, now, span, offset)
+	if !storeOK {
+		writeOAIError(sw, http.StatusServiceUnavailable, "server_error", "usage history store unavailable")
+		return
+	}
+
 	// chit/csave (admin dashboard redesign, WP-B): only when
 	// features.cacheStats (the response cache is configured) — nil
 	// otherwise, as before. Unlike r402, a model's chit/csave are ONLY
@@ -1881,6 +1891,10 @@ func (g *Gateway) serveAdminUsageModelsDetail(sw *statusTrackingWriter, ids []st
 			Free:         adminUsageModelFree(id, bare, g.cfg.Pricing, g.cfg.ModelMeta),
 			PriceSource:  source,
 			R402:         &r402,
+
+			PromptCacheReadTokens:    pcMulti[0][i],
+			PromptCacheWriteTokens:   pcMulti[1][i],
+			PromptCacheSavedMicroUSD: pcMulti[2][i],
 		}
 		if chitByID != nil {
 			chit := chitByID[i]

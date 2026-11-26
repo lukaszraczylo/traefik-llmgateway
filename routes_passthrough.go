@@ -1464,6 +1464,13 @@ func (g *Gateway) handlePassthrough(w http.ResponseWriter, r *http.Request, u *u
 		extras.lat = latSample
 		extras.hasLat = true
 	}
+	extras.promptCacheSaved = unifiedPromptCacheSaved(providerName+"/"+billModel, billModel, respUsage, g.cfg.Pricing, g.cfg.ModelMeta)
+	// The echoed id is upstream-controlled; an uncatalogued one must not mint label series.
+	statModel := respModel
+	if canonical == "" {
+		statModel = "unknown"
+	}
+	g.recordPromptCache(providerName, statModel, respUsage)
 	g.limiter.accountWith(withModelScope(scopes, canonical), respUsage, cost, extras)
 }
 

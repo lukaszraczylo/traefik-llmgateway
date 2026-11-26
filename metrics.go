@@ -485,6 +485,7 @@ func (g *Gateway) renderMetrics() []byte {
 	g.writeLatencyMetrics(&m)
 	g.writeProvenanceMetrics(&m)
 	g.writeRouterMetrics(&m)
+	g.writePromptCacheMetrics(&m)
 	g.writeRejectionMetrics(&m)
 	g.writeStoreHealthMetrics(&m)
 	return m.buf.Bytes()

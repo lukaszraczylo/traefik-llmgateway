@@ -523,7 +523,7 @@ func (g *Gateway) runMeteredCall(sw *statusTrackingWriter, r *http.Request, scop
 				// actually saves the parse.
 				if g.cfg.Cache.AccountHits {
 					hitUsage := cachedUsage(cached.Body)
-					g.limiter.accountWith(scopes, hitUsage, unifiedCostMicros(cand.canonical, cand.upstreamModel, hitUsage, g.cfg.Pricing, g.cfg.ModelMeta, g.pricingWarn), accountExtras{provider: cand.providerName})
+					g.limiter.accountWith(scopes, hitUsage, unifiedCostMicros(cand.canonical, cand.upstreamModel, hitUsage, g.cfg.Pricing, g.cfg.ModelMeta, g.pricingWarn), accountExtras{provider: cand.providerName, responseCacheHit: true})
 				}
 				if g.limiter.statsAdmin {
 					saved := unifiedCostMicros(cand.canonical, cand.upstreamModel, cachedUsage(cached.Body), g.cfg.Pricing, g.cfg.ModelMeta, func(string) {})
@@ -779,6 +779,8 @@ func (g *Gateway) runMeteredCall(sw *statusTrackingWriter, r *http.Request, scop
 			extras.lat = latSample
 			extras.hasLat = true
 		}
+		extras.promptCacheSaved = unifiedPromptCacheSaved(cand.canonical, cand.upstreamModel, result, g.cfg.Pricing, g.cfg.ModelMeta)
+		g.recordPromptCache(providerName, cand.upstreamModel, result)
 		g.limiter.accountWith(acctScopes, result, unifiedCostMicros(cand.canonical, cand.upstreamModel, result, g.cfg.Pricing, g.cfg.ModelMeta, g.pricingWarn), extras)
 		if result.estimated {
 			g.logf("%s: usage for model %q logged as estimated (%d prompt tokens derived from request body size, not the provider's reported usage)", logPrefix, cand.canonical, result.prompt)

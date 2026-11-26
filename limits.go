@@ -1985,6 +1985,8 @@ type accountExtras struct {
 	// increments prov/{failoverFrom}:fover when non-empty and admin stats
 	// are on.
 	failoverFrom string
+	// promptCacheSaved is the micro-USD the provider prompt cache saved this call.
+	promptCacheSaved int64
 	// lat/hasLat carry one completed upstream watchdogBody's latency
 	// sample (metrics.go), when withLatencyRecorder was wired for this
 	// call and it actually fired — hasLat false means no sample arrived
@@ -1999,6 +2001,8 @@ type accountExtras struct {
 	// calling it); recordCacheHit, below, is that path's own async
 	// counterpart.
 	cacheMiss bool
+	// responseCacheHit marks a gateway-cache replay: no provider prompt cache was involved.
+	responseCacheHit bool
 	// noModelHistograms suppresses accountWith's own model-scope latency
 	// AND user x model (umodel) writes even when scopes DOES carry a
 	// kindModel scope (P13 fix, admin dashboard redesign verify round:
@@ -2074,6 +2078,14 @@ func (l *limiter) accountWith(scopes []limitScope, u usage, costMicros int64, x 
 		}
 	}
 
+	var pcRead, pcWrite, pcSave int64
+	if !x.responseCacheHit {
+		pcRead, pcWrite, _ = promptCacheSplit(u)
+		pcSave = x.promptCacheSaved
+		if pcSave < 0 || pcSave > maxCostMicrosPerRequest {
+			pcSave = 0
+		}
+	}
 	entries := make([]counterIncr, 0, len(scopes)*12+16)
 	userScopeCount := 0
 	var userScopeID string
@@ -2132,6 +2144,7 @@ func (l *limiter) accountWith(scopes []limitScope, u usage, costMicros int64, x 
 				counterIncr{key: windowKeyForBucket(sc.kind, sc.id, metricTokIn, windowMonth, wb.month), delta: u.prompt, ttl: monthWindowTTL, enforceTTL: et.month},
 			)
 		}
+		entries = appendPromptCacheEntries(entries, sc, pcRead, pcWrite, pcSave, wb, et)
 		if u.completion != 0 {
 			entries = append(entries,
 				counterIncr{key: windowKeyForBucket(sc.kind, sc.id, metricTokOut, windowHour, wb.hour), delta: u.completion, ttl: hourWindowTTL, enforceTTL: et.hour},
