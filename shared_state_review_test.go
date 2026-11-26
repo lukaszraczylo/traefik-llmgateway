@@ -294,3 +294,33 @@ func TestSharedInflightEndRestartsIdleStoppedLoop(t *testing.T) {
 	}
 	l.close()
 }
+
+func TestSharedBreakerDropsDeltasPastFailWindow(t *testing.T) {
+	store, clk := sharedTestEnv()
+	l := sharedTestLoop(store, clk)
+	b := testBreaker(l)
+	store.setFailIncr(errors.New("redis down"))
+	b.recordFailure("p")
+	l.refresh()
+	if !b.pending() {
+		t.Fatal("delta dropped inside the fail window")
+	}
+	clk.advance(testBrkWindow + time.Second)
+	if b.pending() {
+		t.Error("failure delta older than the fail window still pending")
+	}
+}
+
+func TestSharedStateIdleStopsDuringOutageAfterFailWindow(t *testing.T) {
+	store, clk := sharedTestEnv()
+	l := newSharedStateLoop(store, nil, nil)
+	l.nowFn = clk.now
+	l.every = 5 * time.Millisecond
+	b := testBreaker(l)
+	store.setFailIncr(errors.New("redis down"))
+	b.recordFailure("p")
+	waitLoop(t, l, true)
+	clk.advance(sharedStateIdleStop + time.Second)
+	waitLoop(t, l, false)
+	l.close()
+}

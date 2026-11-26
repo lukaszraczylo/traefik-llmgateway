@@ -334,6 +334,7 @@ type sharedBreaker struct {
 	opensSeen  map[string]int64
 	failsSeen  map[string]int64
 	failAcc    map[string]int64
+	failAccAt  map[string]time.Time
 	kind       string
 	ids        []string
 	openBase   time.Duration
@@ -348,7 +349,7 @@ func newSharedBreaker(loop *sharedStateLoop, kind string, ids []string, threshol
 	b := &sharedBreaker{
 		loop: loop, nowFn: time.Now, kind: kind, ids: ids,
 		threshold: threshold, openBase: openBase, openMax: openMax, failWindow: failWindow,
-		local: make(map[string]*breakerLocal), openUntil: make(map[string]int64), opensSeen: make(map[string]int64), failsSeen: make(map[string]int64), failAcc: make(map[string]int64),
+		local: make(map[string]*breakerLocal), openUntil: make(map[string]int64), opensSeen: make(map[string]int64), failsSeen: make(map[string]int64), failAcc: make(map[string]int64), failAccAt: make(map[string]time.Time),
 	}
 	if loop != nil {
 		b.nowFn = loop.nowFn
@@ -425,6 +426,9 @@ func (b *sharedBreaker) recordFailure(id string) {
 	b.mu.Lock()
 	b.recordFailureLocal(b.localFor(id), b.nowFn())
 	if b.loop != nil {
+		if b.failAcc[id] == 0 {
+			b.failAccAt[id] = b.nowFn()
+		}
 		b.failAcc[id]++
 	}
 	b.mu.Unlock()
@@ -459,13 +463,26 @@ func (b *sharedBreaker) recordFailureLocal(st *breakerLocal, now time.Time) {
 func (b *sharedBreaker) pending() bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	b.pruneStaleLocked(b.nowFn())
 	return len(b.failAcc) > 0
+}
+
+// pruneStaleLocked drops queued failures older than the fail window: the fleet count they would join has expired,
+// and keeping them would stop an idle loop during a Redis outage.
+func (b *sharedBreaker) pruneStaleLocked(now time.Time) {
+	for id, at := range b.failAccAt {
+		if now.Sub(at) > b.failWindow {
+			delete(b.failAcc, id)
+			delete(b.failAccAt, id)
+		}
+	}
 }
 
 // flush adds the queued failures to the fleet counts. An instance whose flush leaves the count at or above the
 // threshold opens the breaker unless its last refresh already shows it open.
-func (b *sharedBreaker) flush(l *sharedStateLoop, _ time.Time) error {
+func (b *sharedBreaker) flush(l *sharedStateLoop, now time.Time) error {
 	b.mu.Lock()
+	b.pruneStaleLocked(now)
 	ids := make([]string, 0, len(b.failAcc))
 	deltas := make([]int64, 0, len(b.failAcc))
 	for id, n := range b.failAcc {
@@ -491,8 +508,10 @@ func (b *sharedBreaker) flush(l *sharedStateLoop, _ time.Time) error {
 	for i, id := range ids {
 		if left := b.failAcc[id] - deltas[i]; left > 0 {
 			b.failAcc[id] = left
+			b.failAccAt[id] = now
 		} else {
 			delete(b.failAcc, id)
+			delete(b.failAccAt, id)
 		}
 	}
 	b.mu.Unlock()
@@ -545,6 +564,7 @@ func (b *sharedBreaker) recordSuccess(id string) {
 	wasOpen := b.openUntil[id] > b.nowFn().UnixMilli()
 	opensSeen := b.opensSeen[id] > 0
 	delete(b.failAcc, id)
+	delete(b.failAccAt, id)
 	st.open = false
 	st.consecutiveFailures = 0
 	st.backoff = 0
