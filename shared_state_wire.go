@@ -31,7 +31,8 @@ func (g *Gateway) wireSharedState(cfg *Config) {
 	}
 }
 
-// maxProviderTimeout is the longest request timeout any provider can run, which bounds how long an in-flight count stays live.
+// maxProviderTimeout is the longest request timeout any provider has, which sets the in-flight read window.
+// The timeout is progress-based, so a stream can outlive it and drop out of the count: an under-count only.
 func maxProviderTimeout(cfg *Config) time.Duration {
 	global, err := resolveRequestTimeout(cfg.RequestTimeout, "requestTimeout")
 	if err != nil {
