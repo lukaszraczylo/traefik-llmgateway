@@ -37,15 +37,15 @@ const ssProbeSource = `func sharedStateProbe() string {
 	}
 	la.refresh()
 	lb.refresh()
-	if !b.isOpen("p") {
+	if !b.sharedOpen("p") {
 		return "breaker: second instance closed after the first tripped it and one refresh"
 	}
-	if b.isOpen("other") {
+	if b.sharedOpen("other") {
 		return "breaker: a trip on one id opened another"
 	}
 	b.recordSuccess("p")
 	lb.refresh()
-	if b.isOpen("p") {
+	if b.sharedOpen("p") {
 		return "breaker: second instance still open after its own success"
 	}
 

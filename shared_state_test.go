@@ -134,20 +134,20 @@ func TestSharedBreakerTripsFleetWide(t *testing.T) {
 	a.recordFailure("p")
 	la.refresh()
 	lc.refresh()
-	if c.isOpen("p") {
+	if c.sharedOpen("p") {
 		t.Fatal("C open after 2 fleet failures, want closed")
 	}
 	b.recordFailure("p")
 	lb.refresh()
-	if c.isOpen("p") {
-		t.Fatal("C open before refresh, isOpen must not read the store")
+	if c.sharedOpen("p") {
+		t.Fatal("C open before refresh, sharedOpen must not read the store")
 	}
 	lc.refresh()
-	if !c.isOpen("p") {
+	if !c.sharedOpen("p") {
 		t.Fatal("C closed after threshold failures and a refresh, want open")
 	}
 	clk.advance(testBrkOpenBase + time.Second)
-	if c.isOpen("p") {
+	if c.sharedOpen("p") {
 		t.Fatal("C still open after the open window")
 	}
 }
@@ -190,13 +190,13 @@ func TestSharedBreakerSuccessResets(t *testing.T) {
 	a2.recordFailure("p")
 	a2.loop.refresh()
 	lc.refresh()
-	if c.isOpen("p") {
+	if c.sharedOpen("p") {
 		t.Fatal("C open after success reset then 2 failures, want closed")
 	}
 	a2.recordFailure("p")
 	a2.loop.refresh()
 	lc.refresh()
-	if !c.isOpen("p") {
+	if !c.sharedOpen("p") {
 		t.Fatal("C closed after 3 failures since the reset, want open")
 	}
 }
@@ -250,33 +250,6 @@ func TestSharedBreakerOpenDurationTable(t *testing.T) {
 	} {
 		if got := b.openDuration(tc.opens); got != tc.want {
 			t.Errorf("openDuration(%d) = %v, want %v", tc.opens, got, tc.want)
-		}
-	}
-}
-
-func TestSharedBreakerLocalOnlyMatchesRequestHealth(t *testing.T) {
-	clk := &sharedClock{t: time.Unix(1_800_000_000, 0)}
-	b := newSharedBreaker(nil, "req", []string{"p"}, requestBreakerFailureThreshold, requestBreakerOpenDuration, requestBreakerMaxOpenDuration, time.Minute)
-	b.nowFn = clk.now
-	ref := newRequestHealthTracker()
-	ref.nowFn = clk.now
-	steps := []struct {
-		success bool
-		advance time.Duration
-	}{
-		{false, 0}, {false, 0}, {false, 0}, {false, time.Second}, {false, 31 * time.Second},
-		{false, 0}, {false, 61 * time.Second}, {true, 0}, {false, 0}, {false, 0}, {false, 0},
-	}
-	for i, s := range steps {
-		clk.advance(s.advance)
-		if s.success {
-			b.recordSuccess("p")
-		} else {
-			b.recordFailure("p")
-		}
-		ref.record("p", s.success)
-		if got, want := !b.isOpen("p"), ref.healthy("p"); got != want {
-			t.Fatalf("step %d: healthy = %v, want %v", i, got, want)
 		}
 	}
 }
@@ -400,7 +373,7 @@ func TestSharedStateStoreErrorFallsBackLocal(t *testing.T) {
 	}
 	la.refresh()
 	lc.refresh()
-	if !c.isOpen("p") {
+	if !c.sharedOpen("p") {
 		t.Fatal("setup: C should see the shared open")
 	}
 
@@ -410,20 +383,12 @@ func TestSharedStateStoreErrorFallsBackLocal(t *testing.T) {
 	if !lc.stale() {
 		t.Error("loop not marked stale after failed refreshes")
 	}
-	if !c.isOpen("p") {
+	if !c.sharedOpen("p") {
 		t.Error("last-known shared open dropped before 3 failed refreshes")
 	}
 	lc.refresh()
-	if c.isOpen("p") {
+	if c.sharedOpen("p") {
 		t.Error("shared open still used after 3 failed refreshes, want absent")
-	}
-
-	// Local breaker keeps working while the store is down.
-	for i := 0; i < 3; i++ {
-		c.recordFailure("p")
-	}
-	if !c.isOpen("p") {
-		t.Error("local breaker did not open while store is down")
 	}
 
 	store.setFail(nil)
@@ -458,7 +423,7 @@ func TestSharedStateOffNoKeys(t *testing.T) {
 	for i := 0; i < 4; i++ {
 		b.recordFailure("p")
 		b.recordSuccess("p")
-		b.isOpen("p")
+		b.sharedOpen("p")
 	}
 	in.begin("p")()
 	in.shared("p")
@@ -557,7 +522,7 @@ func TestSharedStateLoopLifecycle(t *testing.T) {
 	l.mu.Unlock()
 
 	// A new use restarts it; close stops it for good and blocks restarts.
-	b.isOpen("p")
+	b.sharedOpen("p")
 	l.mu.Lock()
 	stop, done := l.stop, l.done
 	l.mu.Unlock()
@@ -572,7 +537,7 @@ func TestSharedStateLoopLifecycle(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("loop did not stop on close")
 	}
-	b.isOpen("p")
+	b.sharedOpen("p")
 	l.mu.Lock()
 	if l.running {
 		t.Error("closed loop restarted")

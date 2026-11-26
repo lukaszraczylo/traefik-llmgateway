@@ -1,6 +1,7 @@
 package traefikllmgateway
 
 import (
+	"errors"
 	"testing"
 	"time"
 )
@@ -62,6 +63,18 @@ func TestSharedRequestBreakerAcrossGateways(t *testing.T) {
 	b.sharedState.refresh()
 	if !b.failoverHealth.healthy("alpha") {
 		t.Fatal("B still unhealthy after a success, want closed")
+	}
+}
+
+func TestSharedRequestBreakerLocalWhileStoreDown(t *testing.T) {
+	a, _, store, _, _ := sharedGatewayPair(t, nil)
+	store.setFail(errors.New("redis down"))
+	for i := 0; i < requestBreakerFailureThreshold; i++ {
+		a.failoverHealth.record("alpha", false)
+	}
+	a.sharedState.refresh()
+	if a.failoverHealth.healthy("alpha") {
+		t.Fatal("A healthy after its own threshold failures with the store down, want the local breaker open")
 	}
 }
 

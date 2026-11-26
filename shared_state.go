@@ -356,19 +356,12 @@ func sharedStateIDs(cfg *Config) []string {
 	return ids
 }
 
-// breakerLocal is one id's local breaker state, mirroring requestHealthState.
-type breakerLocal struct {
-	openUntil           time.Time
-	backoff             time.Duration
-	consecutiveFailures int
-	open                bool
-}
-
-// sharedBreaker is a per-id circuit breaker whose trips are shared fleet-wide through the store. With a nil loop it is purely local.
+// sharedBreaker is the fleet arm of a per-id circuit breaker. Callers keep their own local breaker and layer sharedOpen on top.
+// With a nil loop it never touches the store and never reports open.
 type sharedBreaker struct {
 	loop       *sharedStateLoop
 	nowFn      func() time.Time
-	local      map[string]*breakerLocal
+	fails      map[string]int
 	openUntil  map[string]int64
 	opensSeen  map[string]int64
 	failsSeen  map[string]int64
@@ -384,12 +377,12 @@ type sharedBreaker struct {
 	mu         sync.Mutex
 }
 
-// newSharedBreaker returns a breaker over ids; loop may be nil for a local-only breaker.
+// newSharedBreaker returns a breaker over ids; loop may be nil for a no-op breaker.
 func newSharedBreaker(loop *sharedStateLoop, kind string, ids []string, threshold int, openBase, openMax, failWindow time.Duration) *sharedBreaker {
 	b := &sharedBreaker{
 		loop: loop, nowFn: time.Now, kind: kind, ids: ids,
 		threshold: threshold, openBase: openBase, openMax: openMax, failWindow: failWindow,
-		local: make(map[string]*breakerLocal), openUntil: make(map[string]int64), opensSeen: make(map[string]int64), failsSeen: make(map[string]int64), failAcc: make(map[string]int64), failAccAt: make(map[string]time.Time),
+		fails: make(map[string]int), openUntil: make(map[string]int64), opensSeen: make(map[string]int64), failsSeen: make(map[string]int64), failAcc: make(map[string]int64), failAccAt: make(map[string]time.Time),
 	}
 	b.keyList = make([]string, 0, sharedBreakerKeysPerID*len(ids))
 	for _, id := range ids {
@@ -424,29 +417,7 @@ func (b *sharedBreaker) apply(vals []int64) {
 	}
 }
 
-func (b *sharedBreaker) localFor(id string) *breakerLocal {
-	st, ok := b.local[id]
-	if !ok {
-		st = &breakerLocal{}
-		b.local[id] = st
-	}
-	return st
-}
-
-// isOpen reports whether the local or the last-refreshed shared breaker is open. It never calls the store.
-func (b *sharedBreaker) isOpen(id string) bool {
-	b.loop.touch()
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	now := b.nowFn()
-	if st, ok := b.local[id]; ok && st.open && now.Before(st.openUntil) {
-		return true
-	}
-	return b.openUntil[id] > now.UnixMilli()
-}
-
-// sharedOpen reports whether the last-refreshed fleet state says id is open, ignoring this breaker's local arm.
-// Callers with their own local breaker use it to layer the fleet view on top. It never calls the store.
+// sharedOpen reports whether the last-refreshed fleet state says id is open. It never calls the store.
 func (b *sharedBreaker) sharedOpen(id string) bool {
 	b.loop.touch()
 	b.mu.Lock()
@@ -461,10 +432,10 @@ func (b *sharedBreaker) viewOpen(id string, now time.Time) bool {
 	return b.openUntil[id] > now.UnixMilli()
 }
 
-// recordFailure updates local state and queues the failure for the loop to flush.
+// recordFailure counts the failure since the last success and queues it for the loop to flush.
 func (b *sharedBreaker) recordFailure(id string) {
 	b.mu.Lock()
-	b.recordFailureLocal(b.localFor(id), b.nowFn())
+	b.fails[id]++
 	if b.loop != nil {
 		if b.failAcc[id] == 0 {
 			b.failAccAt[id] = b.nowFn()
@@ -473,31 +444,6 @@ func (b *sharedBreaker) recordFailure(id string) {
 	}
 	b.mu.Unlock()
 	b.loop.touch()
-}
-
-// recordFailureLocal is requestHealthTracker.record's failure arm with this breaker's tunables.
-func (b *sharedBreaker) recordFailureLocal(st *breakerLocal, now time.Time) {
-	if st.open && now.Before(st.openUntil) {
-		return
-	}
-	if st.open {
-		if st.backoff <= 0 {
-			st.backoff = b.openBase
-		} else {
-			st.backoff *= 2
-		}
-		if st.backoff > b.openMax {
-			st.backoff = b.openMax
-		}
-		st.openUntil = now.Add(st.backoff)
-		return
-	}
-	st.consecutiveFailures++
-	if st.consecutiveFailures >= b.threshold {
-		st.open = true
-		st.backoff = b.openBase
-		st.openUntil = now.Add(st.backoff)
-	}
 }
 
 func (b *sharedBreaker) pending() bool {
@@ -595,20 +541,16 @@ func (b *sharedBreaker) openDuration(opens int64) time.Duration {
 	return d
 }
 
-// recordSuccess resets local state and clears the fleet failure count, open mark and open count when any may exist.
+// recordSuccess resets the failure count since the last success and clears the fleet failure count, open mark and open count when any may exist.
 func (b *sharedBreaker) recordSuccess(id string) {
 	b.mu.Lock()
-	st := b.localFor(id)
-	dirty := st.consecutiveFailures > 0 || b.failsSeen[id] > 0 || b.opensSeen[id] > 0
+	dirty := b.fails[id] > 0 || b.failsSeen[id] > 0 || b.opensSeen[id] > 0
 	// A success closes the fleet breaker too, as it closes the local one.
 	wasOpen := b.openUntil[id] > b.nowFn().UnixMilli()
 	opensSeen := b.opensSeen[id] > 0
 	delete(b.failAcc, id)
 	delete(b.failAccAt, id)
-	st.open = false
-	st.consecutiveFailures = 0
-	st.backoff = 0
-	st.openUntil = time.Time{}
+	delete(b.fails, id)
 	b.mu.Unlock()
 	if b.loop == nil || (!dirty && !wasOpen) {
 		return
