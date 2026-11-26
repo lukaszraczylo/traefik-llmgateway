@@ -574,6 +574,29 @@ type usage struct {
 	// cache (Anthropic cache reads, OpenAI cached_tokens). The minute token
 	// window excludes it; the day and month windows keep the full prompt.
 	cached int64
+	// cacheWrite is the part of prompt the provider wrote to its prompt
+	// cache (Anthropic cache_creation_input_tokens); included in prompt.
+	cacheWrite int64
+}
+
+// uncachedPrompt returns the prompt tokens billed at the full input price.
+func (u usage) uncachedPrompt() int64 {
+	n := u.prompt - u.cached - u.cacheWrite
+	if n < 0 {
+		return 0
+	}
+	return n
+}
+
+// cachedPromptTokens returns the cache-read count of an OpenAI-shaped
+// usage object. DeepSeek reports prompt_cache_hit_tokens; OpenAI reports
+// prompt_tokens_details.cached_tokens. A provider sending both is not
+// summed: the larger wins.
+func cachedPromptTokens(details, deepSeekHits int64) int64 {
+	if deepSeekHits > details {
+		return deepSeekHits
+	}
+	return details
 }
 
 // total returns the request's combined prompt and completion tokens.

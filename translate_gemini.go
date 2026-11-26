@@ -462,6 +462,8 @@ type geminiUsageMetadata struct {
 	PromptTokenCount     int64 `json:"promptTokenCount"`
 	CandidatesTokenCount int64 `json:"candidatesTokenCount"`
 	ThoughtsTokenCount   int64 `json:"thoughtsTokenCount"`
+	// CachedContentTokenCount is the cache-read share of PromptTokenCount.
+	CachedContentTokenCount int64 `json:"cachedContentTokenCount"`
 }
 
 // geminiGenerateContentResponse is the subset of a Gemini
@@ -605,7 +607,7 @@ func openAIResponseFromGemini(body []byte, model string, created int64) (map[str
 		message["content"] = nil
 	}
 
-	u := withAnswerFlags(usage{prompt: resp.UsageMetadata.safePrompt(), completion: resp.UsageMetadata.safeCompletion()}, finishReason, len(textParts) > 0 || len(toolCalls) > 0)
+	u := withAnswerFlags(usage{prompt: resp.UsageMetadata.safePrompt(), completion: resp.UsageMetadata.safeCompletion(), cached: resp.UsageMetadata.safeCached()}, finishReason, len(textParts) > 0 || len(toolCalls) > 0)
 
 	out := map[string]any{
 		"id":      chatCompletionIDPrefix + geminiResponseIDOrFallback(resp.ResponseID, created),
@@ -633,6 +635,14 @@ func (m *geminiUsageMetadata) safePrompt() int64 {
 		return 0
 	}
 	return m.PromptTokenCount
+}
+
+// safeCached returns m.CachedContentTokenCount, or 0 when m is nil.
+func (m *geminiUsageMetadata) safeCached() int64 {
+	if m == nil {
+		return 0
+	}
+	return m.CachedContentTokenCount
 }
 
 // safeCompletion returns m.CandidatesTokenCount plus m.ThoughtsTokenCount
@@ -793,7 +803,7 @@ func (st *geminiStreamState) translate(ev sseEvent) ([][]byte, error) {
 	}
 
 	if resp.UsageMetadata != nil {
-		st.u = usage{prompt: resp.UsageMetadata.safePrompt(), completion: resp.UsageMetadata.safeCompletion()}
+		st.u = usage{prompt: resp.UsageMetadata.safePrompt(), completion: resp.UsageMetadata.safeCompletion(), cached: resp.UsageMetadata.safeCached()}
 	}
 
 	var chunks [][]byte

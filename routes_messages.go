@@ -271,7 +271,7 @@ func (g *Gateway) callAnthropicMessagesPassthrough(ctx context.Context, w http.R
 		// own doc comment, translate_anthropic.go, for why dropping them
 		// under-bills a cache-heavy caller (the common case for Claude
 		// Code) by orders of magnitude.
-		billed = withAnswerFlags(usage{prompt: parsed.Usage.totalInputTokens(), completion: parsed.Usage.OutputTokens, cached: parsed.Usage.CacheReadInputTokens}, anthropicFinishReason(parsed.StopReason), anthropicHasOutput(parsed.Content))
+		billed = withAnswerFlags(usage{prompt: parsed.Usage.totalInputTokens(), completion: parsed.Usage.OutputTokens, cached: parsed.Usage.CacheReadInputTokens, cacheWrite: parsed.Usage.CacheCreationInputTokens}, anthropicFinishReason(parsed.StopReason), anthropicHasOutput(parsed.Content))
 	}
 
 	out, err := rewriteModelField(raw, requestedModel)
