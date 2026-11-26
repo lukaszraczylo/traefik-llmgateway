@@ -627,9 +627,13 @@ type AdminStatsConfig struct {
 }
 
 // ModelPricing overrides the built-in per-model price table.
+// CachedInputPerM and CacheWritePerM price cache-read and cache-write
+// prompt tokens; nil falls back to InputPerM.
 type ModelPricing struct {
-	InputPerM  float64 `json:"inputPerM"`
-	OutputPerM float64 `json:"outputPerM"`
+	CachedInputPerM *float64 `json:"cachedInputPerM,omitempty"`
+	CacheWritePerM  *float64 `json:"cacheWritePerM,omitempty"`
+	InputPerM       float64  `json:"inputPerM"`
+	OutputPerM      float64  `json:"outputPerM"`
 }
 
 // ModelMetaConfig overrides one model's context window and per-token
