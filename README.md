@@ -10,7 +10,7 @@ It runs in either of two forms from this one codebase — as a
 [Yaegi](https://github.com/traefik/yaegi)-interpreted Traefik middleware
 plugin, the same way [`traefikoidc`](https://github.com/lukaszraczylo/traefikoidc)
 does, configured per-middleware in Traefik's dynamic configuration; or as
-a standalone compiled binary sitting behind Traefik. The plugin form needs
+a standalone compiled binary behind any reverse proxy. The plugin form needs
 no sidecar and no companion service; the binary form exists because
 streaming arrives token-by-token there and buffered in the plugin. See
 [Deployment modes](#deployment-modes).
@@ -99,12 +99,12 @@ together.
 
 | | **(A) Traefik plugin** | **(B) Standalone binary** |
 |---|---|---|
-| How it runs | Yaegi-interpreted inside Traefik | compiled process behind Traefik |
+| How it runs | Yaegi-interpreted inside Traefik | compiled process behind a reverse proxy |
 | Configured by | `Middleware` CR / dynamic config | a YAML or JSON config file |
 | **Streaming** | **buffered** ([why](#known-limitations)) | **incremental** |
-| Config hot-reload | automatic, on CR change | restart the process |
+| Config hot-reload | automatic, on CR change | automatic, on file change or SIGHUP ([how](#config-reload-in-the-binary)) |
 | Extra moving parts | none | one Deployment + Service + image |
-| Catalog-supported | yes | build it yourself |
+| Distribution | Traefik Plugin Catalog | release image and binaries ([below](#running-the-binary)) |
 
 **Form (A) is still the default** and nothing about it changed. Choose form
 (B) for one reason: SSE arrives token-by-token. Traefik hands the
@@ -121,6 +121,20 @@ accounting, admin API and MCP/A2A proxy, and the same `literal` /
 `env:NAME` / `file:/path` [secret forms](#secret-forms).
 
 ### Running the binary
+
+Each release publishes a signed multi-arch image (linux/amd64, linux/arm64)
+and `llmgateway_v<version>_<os>_<arch>.tar.gz` binaries for linux and darwin.
+GoReleaser builds both from `cmd/gateway`:
+
+```sh
+docker run -p 8080:8080 -v "$PWD/config:/etc/llmgateway:ro" \
+  ghcr.io/lukaszraczylo/traefik-llmgateway:<version>
+cosign verify ghcr.io/lukaszraczylo/traefik-llmgateway:<version> \
+  --certificate-identity-regexp 'https://github.com/lukaszraczylo/' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
+To build from source:
 
 ```sh
 make build-binary                  # -> bin/llmgateway
@@ -141,6 +155,8 @@ passed flag always beats the environment.
 | `-drain-delay` | `LLMGW_DRAIN_DELAY` | `5s` |
 | `-health-path` | `LLMGW_HEALTH_PATH` | `/healthz` |
 | `-ready-path` | `LLMGW_READY_PATH` | `/readyz` |
+| `-reload-interval` | `LLMGW_RELOAD_INTERVAL` | `5s` (`0` turns polling off) |
+| `-reload-drain-timeout` | `LLMGW_RELOAD_DRAIN_TIMEOUT` | `10m` |
 
 `-log-level` filters **only the binary's own lifecycle lines**. The
 gateway's own `INFO`/`WARN`/`ERROR` output is written unconditionally to
@@ -149,6 +165,29 @@ stderr by the root package (`logger.go`) and is never filtered.
 The config file is the same structure as the plugin's `plugin.llmgateway`
 block, hoisted to the top level — so a `Middleware` CR's `spec.plugin.llmgateway`
 can be lifted into a `ConfigMap` unchanged. `.json` is accepted directly.
+
+### Config reload in the binary
+
+The binary reads the config file every `-reload-interval` and on `SIGHUP`.
+When the content changes, it builds a new gateway from the file. If that
+succeeds, new requests go to the new gateway at once. Requests already
+running finish on the old gateway, which then closes. A replaced gateway
+that still has requests after `-reload-drain-timeout` closes anyway.
+`-reload-drain-timeout` must be positive.
+
+- **A bad file changes nothing.** A file that does not parse, has an
+  unknown key or fails validation is logged at error level. The old
+  gateway keeps serving. The binary tries again on every check, because
+  the cause can be outside the file, such as a secret file that is not
+  mounted yet. It logs each distinct error once.
+- **`SIGHUP` always rebuilds**, even when the content is unchanged. Use it
+  after you rotate a secret that a `file:/path` reference reads.
+- **The check compares content, not timestamps.** A Kubernetes `ConfigMap`
+  mount, which swaps a symlink, reloads within one interval.
+- **A rebuilt gateway starts with fresh in-process state.** Without Redis,
+  this resets the counters, breakers and learned limits. With Redis, they
+  are shared and survive. The users file (`usersFile`) reloads by itself
+  and needs no config change.
 
 ### Things that differ from the plugin, and will bite you
 

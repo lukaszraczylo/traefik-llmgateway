@@ -1,5 +1,5 @@
 # Image for deployment form (B): the standalone compiled binary
-# (cmd/gateway), which runs BEHIND Traefik rather than inside it. Form (A),
+# (cmd/gateway), which runs behind a reverse proxy rather than inside Traefik. Form (A),
 # the Yaegi-interpreted plugin, needs no image at all — Traefik loads this
 # repository's source directly — so nothing here affects it.
 #
@@ -7,10 +7,9 @@
 # reachable); .dockerignore keeps webui/node_modules, .git and the
 # integration fixtures out of the transfer.
 #
-# Built locally, never in CI: `make docker-build`. This repository
-# deliberately does not add GitHub Actions for it, and .goreleaser.yaml
-# stays at `builds: - skip: true` because its job is publishing the plugin
-# SOURCE tarball for the Traefik catalog, not producing binaries.
+# This file builds the image from source for local use: `make docker-build`.
+# Releases build the published image with GoReleaser instead
+# (.goreleaser.yaml dockers_v2, Dockerfile.goreleaser).
 
 # --platform=$BUILDPLATFORM pins the toolchain to the BUILDER's native
 # architecture and cross-compiles from there via GOOS/GOARCH below. Without

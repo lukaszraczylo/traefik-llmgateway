@@ -1,5 +1,5 @@
 // Command gateway runs the LLM gateway as a standalone compiled binary,
-// sitting BEHIND Traefik rather than inside it.
+// sitting behind a reverse proxy rather than inside Traefik.
 //
 // This is deployment form (B). Form (A) — the Yaegi-interpreted Traefik
 // middleware plugin — is unchanged and remains the default; both forms are
@@ -74,6 +74,8 @@ const (
 	defaultReadHeaderWait = 10 * time.Second
 	defaultIdleTimeout    = 120 * time.Second
 	defaultMaxHeaderBytes = 1 << 20
+	defaultReloadEvery    = 5 * time.Second
+	defaultReloadDrain    = 10 * time.Minute
 )
 
 // telemetryOptOutVars are the environment variables oss-telemetry itself
@@ -105,6 +107,8 @@ type options struct {
 	readyPath    string
 	shutdownWait time.Duration
 	drainDelay   time.Duration
+	reloadEvery  time.Duration
+	reloadDrain  time.Duration
 	showVersion  bool
 }
 
@@ -135,9 +139,19 @@ func parseOptions(args []string, stderr *os.File) (*options, error) {
 	fs.DurationVar(&o.drainDelay, "drain-delay", envDurationOr("LLMGW_DRAIN_DELAY", defaultDrainDelay),
 		"how long to keep serving after readiness starts failing, so the load balancer can drop this "+
 			"endpoint before the listener closes [LLMGW_DRAIN_DELAY]")
+	fs.DurationVar(&o.reloadEvery, "reload-interval", envDurationOr("LLMGW_RELOAD_INTERVAL", defaultReloadEvery),
+		"how often to check the config file for changes; 0 turns polling off (SIGHUP still reloads) [LLMGW_RELOAD_INTERVAL]")
+	fs.DurationVar(&o.reloadDrain, "reload-drain-timeout", envDurationOr("LLMGW_RELOAD_DRAIN_TIMEOUT", defaultReloadDrain),
+		"how long a replaced gateway keeps running for its in-flight requests before it is closed [LLMGW_RELOAD_DRAIN_TIMEOUT]")
 	fs.BoolVar(&o.showVersion, "version", false, "print this binary's version and exit")
 	if err := fs.Parse(args); err != nil {
 		return nil, err
+	}
+	if o.reloadEvery < 0 {
+		return nil, fmt.Errorf("-reload-interval must not be negative, got %s", o.reloadEvery)
+	}
+	if o.reloadDrain <= 0 {
+		return nil, fmt.Errorf("-reload-drain-timeout must be positive, got %s", o.reloadDrain)
 	}
 	if o.healthPath == o.readyPath {
 		return nil, fmt.Errorf("-health-path and -ready-path must differ (both are %q)", o.healthPath)
@@ -219,29 +233,12 @@ func run() error {
 	}
 	log := newLogger(opts.logLevel)
 
-	cfg, err := loadConfig(opts.configPath)
+	raw, err := os.ReadFile(opts.configPath)
 	if err != nil {
-		return err
+		return fmt.Errorf("read config: %w", err)
 	}
 	log.info("starting version=%s name=%s config=%s listen=%s", version, opts.name, opts.configPath, opts.listenAddr)
 	logTelemetryOptOut(log)
-
-	// passthroughUnknown routes an unrecognized path to the `next`
-	// handler. In form (A) that is the Traefik router's own backing
-	// service; in form (B) Traefik is IN FRONT of this process and there
-	// is no downstream at all, so the flag cannot mean what it means in
-	// the plugin. This is a warning rather than a hard error because the
-	// terminal handler below keeps the behaviour well-defined (a clean
-	// 404) — an operator carrying a working plugin config across should
-	// not be blocked, only told.
-	if cfg.PassthroughUnknown {
-		log.warn("passthroughUnknown is set, but a standalone binary has no downstream to pass through to: " +
-			"unknown routes return 404. Route non-gateway paths in Traefik instead.")
-	}
-
-	if msg, warn := metricsCIDRWarning(cfg); warn {
-		log.warn(msg)
-	}
 
 	// signal.NotifyContext, not context.Background(): New blocks on the
 	// registry's synchronous warm-fill, which with a large provider set
@@ -251,9 +248,10 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	handler, err := traefikllmgateway.New(ctx, terminalHandler(), cfg, opts.name)
+	build := gatewayBuilder(ctx, opts.configPath, opts.name, log)
+	handler, err := build(raw)
 	if err != nil {
-		return fmt.Errorf("construct gateway: %w", err)
+		return err
 	}
 	if ctx.Err() != nil {
 		log.info("signal received during startup; exiting before serving")
@@ -261,10 +259,13 @@ func run() error {
 		return nil
 	}
 
+	sw := &swapHandler{}
+	sw.cur.Store(newGeneration(handler, func() { closeGateway(handler, log) }))
+
 	var ready atomic.Bool
 	srv := &http.Server{
 		Addr:    opts.listenAddr,
-		Handler: withHealth(handler, &ready, opts.healthPath, opts.readyPath),
+		Handler: withHealth(sw, &ready, opts.healthPath, opts.readyPath),
 		// Bounds a Slowloris header trickle (and satisfies gosec G112).
 		ReadHeaderTimeout: defaultReadHeaderWait,
 		// ReadTimeout and WriteTimeout are BOTH deliberately zero.
@@ -311,12 +312,23 @@ func run() error {
 	go func() { errCh <- srv.ListenAndServe() }()
 	log.info("listening on %s (health %s, ready %s)", opts.listenAddr, opts.healthPath, opts.readyPath)
 
+	hup := make(chan os.Signal, 1)
+	signal.Notify(hup, syscall.SIGHUP)
+	defer signal.Stop(hup)
+	reloadDone := make(chan struct{})
+	go func() {
+		defer close(reloadDone)
+		newReloader(opts.configPath, raw, build, sw, opts.reloadDrain, log).run(ctx, opts.reloadEvery, hup)
+	}()
+
 	select {
 	case err := <-errCh:
 		// ErrServerClosed only ever arrives after a Shutdown this
 		// function did not start, so reaching it here is a real failure.
 		if !errors.Is(err, http.ErrServerClosed) {
-			closeGateway(handler, log)
+			stop()
+			<-reloadDone
+			sw.closeCurrent()
 			return fmt.Errorf("listen on %s: %w", opts.listenAddr, err)
 		}
 		return nil
@@ -347,6 +359,9 @@ func run() error {
 		log.error("shutdown: %v", err)
 	}
 
+	// The reloader exits on ctx; waiting for it means no swap lands after the close below.
+	<-reloadDone
+
 	// STRICTLY after Shutdown returns. Close releases the pooled Redis
 	// connections shared by the limiter's store and the response cache;
 	// closing them while requests are still draining would pull Redis out
@@ -354,9 +369,29 @@ func run() error {
 	// default those requests would silently fall back to in-process
 	// counters rather than fail — a correctness regression invisible in
 	// the logs.
-	closeGateway(handler, log)
+	sw.closeCurrent()
 	log.info("stopped")
 	return nil
+}
+
+// logConfigWarnings logs the config settings that mean something else, or nothing, in a standalone binary.
+func logConfigWarnings(cfg *traefikllmgateway.Config, log *logger) {
+	// passthroughUnknown routes an unrecognized path to the `next`
+	// handler. In form (A) that is the Traefik router's own backing
+	// service; in form (B) Traefik is IN FRONT of this process and there
+	// is no downstream at all, so the flag cannot mean what it means in
+	// the plugin. This is a warning rather than a hard error because the
+	// terminal handler below keeps the behaviour well-defined (a clean
+	// 404) — an operator carrying a working plugin config across should
+	// not be blocked, only told.
+	if cfg.PassthroughUnknown {
+		log.warn("passthroughUnknown is set, but a standalone binary has no downstream to pass through to: " +
+			"unknown routes return 404. Route non-gateway paths in Traefik instead.")
+	}
+
+	if msg, warn := metricsCIDRWarning(cfg); warn {
+		log.warn(msg)
+	}
 }
 
 // closeGateway releases the Gateway's pooled resources when the handler
@@ -480,6 +515,12 @@ func loadConfig(path string) (*traefikllmgateway.Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read config: %w", err)
 	}
+	return decodeConfig(path, raw)
+}
+
+// decodeConfig decodes raw the way loadConfig does. path picks the format by its extension and names errors.
+func decodeConfig(path string, raw []byte) (*traefikllmgateway.Config, error) {
+	var err error
 	doc := raw
 	if !strings.EqualFold(filepath.Ext(path), ".json") {
 		if doc, err = yamlToJSON(raw); err != nil {
