@@ -737,7 +737,38 @@ taken back.
 | Field | Type | Default | Semantics |
 |---|---|---|---|
 | `file` | `string` | — | Path to a JSON users file, merged over `inline` and hot-reloaded — see [Users file](#users-file-format). |
+| `anonymousGroup` | `string` | — | Opt-in anonymous access — see [Anonymous access](#anonymous-access). Must name a configured group. |
 | `inline` | `[]UserConfig` | `[]` | Resolved once at plugin construction. |
+
+#### Anonymous access
+
+By default every route except `GET /admin` needs a configured user's key.
+Set `users.anonymousGroup` to serve requests that carry **no** credential
+as the reserved user `anonymous` in that group:
+
+```yaml
+groups:
+  public:
+    models: ["gpt-5-mini"]
+    limits: { requestsPerDay: 5000 }
+    memberLimits: { requestsPerMinute: 30 }
+users:
+  anonymousGroup: public
+```
+
+- A request with no `Authorization` and no `x-api-key` header runs as
+  `anonymous`. Every keyless caller shares that one principal: the group's
+  grant applies, and the group's `memberLimits` are its per-user limits.
+- A request that sends either header, even an empty or non-Bearer one, must
+  carry a valid key. A wrong key still gets 401.
+- Keyed users work as before.
+- The admin API (`/admin/api/*`) and the metrics key fallback (outside `metrics.allowedCIDRs`) always need an admin key.
+- The name `anonymous` is reserved while this is set. An inline or file user
+  with that name is a config error.
+
+Anyone who can reach the gateway can spend the providers this group allows.
+Set group `limits` and `memberLimits`, and restrict who can reach the route
+at the proxy.
 
 ### `UserConfig`
 

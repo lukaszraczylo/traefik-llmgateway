@@ -134,7 +134,7 @@ func (g *Gateway) handleAdmin(sw *statusTrackingWriter, r *http.Request) {
 // holder polling the dashboard aggressively is a self-inflicted, not a
 // shared, resource cost.
 func (g *Gateway) handleAdminAPI(sw *statusTrackingWriter, r *http.Request) {
-	u, _, ok := g.auth.identify(r)
+	u, _, ok := g.auth.identifyKeyed(r)
 	g.logAuthEvent(ok, authEventUserName(u), r)
 	if !ok {
 		writeOAIError(sw, http.StatusUnauthorized, "authentication_error", "invalid or missing API key")

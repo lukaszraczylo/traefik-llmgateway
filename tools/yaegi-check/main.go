@@ -2140,12 +2140,31 @@ func exerciseHandler(handler http.Handler, builtinContextTokens int, failoverBHi
 		return err
 	}
 
-	unauthedReq := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
-	unauthedRec := httptest.NewRecorder()
-	handler.ServeHTTP(unauthedRec, unauthedReq)
-	if unauthedRec.Code != http.StatusUnauthorized {
-		return fmt.Errorf("GET /v1/models without a key: status = %d, want 401, body=%s", unauthedRec.Code, unauthedRec.Body.String())
+	return exerciseAnonymousAccess(handler)
+}
+
+// exerciseAnonymousAccess drives testData's users.anonymousGroup ("public",
+// models [gpt-test]) under Yaegi: a keyless request is served with only that
+// group's models, and a bad or malformed credential is still rejected.
+func exerciseAnonymousAccess(handler http.Handler) error {
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/models", nil))
+	if rec.Code != http.StatusOK {
+		return fmt.Errorf("GET /v1/models without a key: status = %d, want 200 (anonymous), body=%s", rec.Code, rec.Body.String())
 	}
+	if body := rec.Body.String(); !strings.Contains(body, `"`+testDataWantModel+`"`) || strings.Contains(body, "gpt-test-large") {
+		return fmt.Errorf("GET /v1/models without a key: want only the anonymous group's models, body=%s", body)
+	}
+	for _, authz := range []string{"Bearer wrong-key", "Basic dXNlcjpwYXNz"} {
+		req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+		req.Header.Set("Authorization", authz)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusUnauthorized {
+			return fmt.Errorf("GET /v1/models with Authorization %q: status = %d, want 401", strings.Fields(authz)[0], rec.Code)
+		}
+	}
+	fmt.Println("yaegi-check: anonymous access served keyless /v1/models and rejected bad credentials, interpreted")
 	return nil
 }
 
