@@ -357,19 +357,11 @@ func markNotApplied(err error, wrote bool) error {
 }
 
 // respNotApplied reports whether err says the failed call never wrote its request.
-// It walks Unwrap by hand because errors.As is unsupported under yaegi.
+// It checks the top-level type only: under yaegi a fmt.Errorf %w wrapper loses the marker, and errors.As is
+// unsupported, so each wrapper that must keep it (redisStore) re-marks its own error.
 func respNotApplied(err error) bool {
-	for err != nil {
-		if _, ok := err.(*notAppliedError); ok {
-			return true
-		}
-		u, ok := err.(interface{ Unwrap() error })
-		if !ok {
-			return false
-		}
-		err = u.Unwrap()
-	}
-	return false
+	_, ok := err.(*notAppliedError)
+	return ok
 }
 
 // pipelineMutatingCommands names every RESP command this client ever sends

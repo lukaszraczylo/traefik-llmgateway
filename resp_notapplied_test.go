@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"testing"
+	"time"
 )
 
 func TestRESPPipelineNotApplied(t *testing.T) {
@@ -20,9 +21,6 @@ func TestRESPPipelineNotApplied(t *testing.T) {
 		}
 		if !respNotApplied(err) {
 			t.Errorf("respNotApplied(%v) = false, want true", err)
-		}
-		if !respNotApplied(fmt.Errorf("wrapped: %w", err)) {
-			t.Error("respNotApplied lost the marker through fmt.Errorf %w")
 		}
 	})
 
@@ -83,4 +81,18 @@ func TestRESPPipelineNotApplied(t *testing.T) {
 			t.Error("unmarked error reported as not applied")
 		}
 	})
+}
+
+func TestRedisStoreKeepsNotAppliedMarker(t *testing.T) {
+	ln := newFakeListener(t)
+	addr := ln.Addr().String()
+	_ = ln.Close()
+	s := newRedisStore(newRESPClient(addr, "", 0))
+	entries := []counterIncr{{key: "k", delta: 1, ttl: time.Minute, enforceTTL: time.Minute}}
+	if _, err := s.incrMulti(entries); err == nil || !respNotApplied(err) {
+		t.Errorf("incrMulti error %v: respNotApplied = false, want true for a dial failure", err)
+	}
+	if _, _, err := s.incrAndGetMulti(entries, nil); err == nil || !respNotApplied(err) {
+		t.Errorf("incrAndGetMulti error %v: respNotApplied = false, want true for a dial failure", err)
+	}
 }
