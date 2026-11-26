@@ -1089,6 +1089,9 @@ func run() error {
 	if err := exerciseRouterFirstByte(i, pkgName); err != nil {
 		return err
 	}
+	if err := exerciseSharedState(i, pkgName); err != nil {
+		return err
+	}
 	return exerciseAdminRedesignStats(i, pkgName)
 }
 
