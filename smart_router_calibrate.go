@@ -44,19 +44,18 @@ type smartTokenCalibrator struct {
 	stats map[smartCalibKey]*smartCalibStat
 	// fleet holds the ratios the router-learning loop read from the shared counters; nil without sharedState.
 	fleet map[smartCalibKey]smartCalibStat
-	count func([]counterIncr)
 	now   func() time.Time
 	mu    sync.Mutex
 }
 
-// share makes observe also add to the fleet counters through count. Call it before the calibrator serves requests.
-func (c *smartTokenCalibrator) share(count func([]counterIncr), now func() time.Time) {
-	c.count, c.now = count, now
+// share makes fleetEntries return the shared counters to add. Call it before the calibrator serves requests.
+func (c *smartTokenCalibrator) share(now func() time.Time) {
+	c.now = now
 	c.fleet = make(map[smartCalibKey]smartCalibStat)
 }
 
 func (c *smartTokenCalibrator) sharing() bool {
-	return c != nil && c.count != nil
+	return c != nil && c.now != nil
 }
 
 // setFleet replaces the shared ratios with those of the latest learn refresh.
@@ -70,17 +69,23 @@ func calibFleetKey(k smartCalibKey, metric, bucket string) string {
 	return windowKeyForBucket(calibKind, k.provider+"/"+k.model, metric, windowDay, bucket)
 }
 
-// countFleet adds one usable sample to the day's shared counters. Dropped writes only blur an estimate.
-func (c *smartTokenCalibrator) countFleet(key smartCalibKey, promptBytes, promptTokens int64) {
-	if c.count == nil {
-		return
+// fleetEntries returns the day's shared counters for one usable sample, for the caller to add to its own batch.
+// It returns nil when not sharing or the sample is unusable.
+func (c *smartTokenCalibrator) fleetEntries(provider, model string, promptBytes, promptTokens int64) []counterIncr {
+	if !c.sharing() || !calibUsable(promptBytes, promptTokens) {
+		return nil
 	}
+	key := smartCalibKey{provider: provider, model: model}
 	bucket := bucketFor(c.now(), windowDay)
-	c.count([]counterIncr{
+	return []counterIncr{
 		{key: calibFleetKey(key, calibMetricBytes, bucket), delta: promptBytes, ttl: dayWindowTTL, enforceTTL: enforceTTLDayWindow},
 		{key: calibFleetKey(key, calibMetricToken, bucket), delta: promptTokens, ttl: dayWindowTTL, enforceTTL: enforceTTLDayWindow},
 		{key: calibFleetKey(key, calibMetricCount, bucket), delta: 1, ttl: dayWindowTTL, enforceTTL: enforceTTLDayWindow},
-	})
+	}
+}
+
+func calibUsable(promptBytes, promptTokens int64) bool {
+	return promptTokens > 0 && promptBytes >= smartCalibMinBytes
 }
 
 func newSmartTokenCalibrator() *smartTokenCalibrator {
@@ -89,12 +94,11 @@ func newSmartTokenCalibrator() *smartTokenCalibrator {
 
 // observe records one request's estimated prompt bytes against the upstream's reported prompt tokens.
 func (c *smartTokenCalibrator) observe(provider, model string, promptBytes, promptTokens int64) {
-	if c == nil || promptTokens <= 0 || promptBytes < smartCalibMinBytes {
+	if c == nil || !calibUsable(promptBytes, promptTokens) {
 		return
 	}
 	sample := float64(promptBytes) / float64(promptTokens)
 	key := smartCalibKey{provider: provider, model: model}
-	c.countFleet(key, promptBytes, promptTokens)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	st := c.stats[key]

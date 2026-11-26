@@ -25,9 +25,7 @@ func (g *Gateway) wireSharedState(cfg *Config) {
 	}
 	g.shareDecisionBreakers(ids)
 	if g.tokenCalib != nil && g.limiter != nil {
-		g.tokenCalib.share(
-			func(entries []counterIncr) { g.limiter.countAsync(entries) },
-			func() time.Time { return g.limiter.now() })
+		g.tokenCalib.share(func() time.Time { return g.limiter.now() })
 	}
 }
 

@@ -10,6 +10,12 @@ func shareLimiterStore(g *Gateway, store counterStore) {
 	g.limiter.spawn = func(f func()) { f() }
 }
 
+// observeShared records one sample the way a served request does: the shared counters ride accountWith's batch.
+func observeShared(g *Gateway, provider, model string, bytes, tokens int64) {
+	g.limiter.accountWith(nil, usage{}, 0, accountExtras{calibration: g.tokenCalib.fleetEntries(provider, model, bytes, tokens)})
+	g.tokenCalib.observe(provider, model, bytes, tokens)
+}
+
 func TestSharedCalibratorAcrossGateways(t *testing.T) {
 	a, b, store, _, _ := sharedGatewayPair(t, nil)
 	shareLimiterStore(a, store)
@@ -20,13 +26,13 @@ func TestSharedCalibratorAcrossGateways(t *testing.T) {
 		t.Fatalf("uncalibrated estimate = %d, want 250", got)
 	}
 	for i := 0; i < smartCalibMinSamples-1; i++ {
-		a.tokenCalib.observe("alpha", "a1", bytes, tokens)
+		observeShared(a, "alpha", "a1", bytes, tokens)
 	}
 	b.refreshRouterLearning(b.limiter.now())
 	if got := b.tokenCalib.promptTokens("alpha", "a1", bytes); got != 250 {
 		t.Fatalf("estimate below the minimum sample count = %d, want 250", got)
 	}
-	a.tokenCalib.observe("alpha", "a1", bytes, tokens)
+	observeShared(a, "alpha", "a1", bytes, tokens)
 	if got := b.tokenCalib.promptTokens("alpha", "a1", bytes); got != 250 {
 		t.Fatalf("estimate changed before the learn refresh = %d, want 250", got)
 	}
@@ -42,8 +48,8 @@ func TestSharedCalibratorAcrossGateways(t *testing.T) {
 func TestSharedCalibratorSkipsUnusableSamples(t *testing.T) {
 	a, _, store, _, _ := sharedGatewayPair(t, nil)
 	shareLimiterStore(a, store)
-	a.tokenCalib.observe("alpha", "a1", smartCalibMinBytes-1, 10)
-	a.tokenCalib.observe("alpha", "a1", 1000, 0)
+	observeShared(a, "alpha", "a1", smartCalibMinBytes-1, 10)
+	observeShared(a, "alpha", "a1", 1000, 0)
 	if len(store.writes) != 0 {
 		t.Fatalf("unusable samples wrote %d counters, want 0", len(store.writes))
 	}

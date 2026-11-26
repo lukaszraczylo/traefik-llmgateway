@@ -1995,6 +1995,8 @@ type accountExtras struct {
 	// with a store, accountWith mirrors it, and provenanceTokens, into the
 	// shared month counters.
 	provenance string
+	// calibration is the shared token-calibrator counters of this call; accountWith adds them only with a store.
+	calibration []counterIncr
 	// promptCacheSaved is the micro-USD the provider prompt cache saved this call.
 	promptCacheSaved int64
 	provenanceTokens int64
@@ -2227,6 +2229,10 @@ func (l *limiter) accountWith(scopes []limitScope, u usage, costMicros int64, x 
 	// meaningful to report there).
 	if x.provenance != "" && l.store != nil {
 		entries = append(entries, provenanceEntries(x.provider, x.provenance, x.provenanceTokens, wb.month)...)
+	}
+
+	if l.store != nil && len(x.calibration) > 0 {
+		entries = append(entries, x.calibration...)
 	}
 
 	if x.hasLat && l.statsLatency {

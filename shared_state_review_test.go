@@ -360,3 +360,62 @@ func TestSharedStateErrorLogsAreRateLimited(t *testing.T) {
 		t.Errorf("%d error lines after the interval, want 2", got)
 	}
 }
+
+// batchStore records each incrMulti call as one batch of keys.
+type batchStore struct {
+	counterStore
+	batches [][]string
+	mu      sync.Mutex
+}
+
+func (s *batchStore) incrMulti(e []counterIncr) ([]int64, error) {
+	keys := make([]string, len(e))
+	for i, x := range e {
+		keys[i] = x.key
+	}
+	s.mu.Lock()
+	s.batches = append(s.batches, keys)
+	s.mu.Unlock()
+	return s.counterStore.incrMulti(e)
+}
+
+func TestSharedCalibratorCountersRideTheAccountBatch(t *testing.T) {
+	body := `{"id":"x","object":"chat.completion","model":"a1","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1000,"completion_tokens":2}}`
+	a := newRouterBackend(200, body)
+	b := newRouterBackend(200, successRespBody)
+	c := newRouterBackend(200, successRespBody)
+	defer closeBackends(a, b, c)
+	cfg := routerTestConfig(a, b, c, threeTiers())
+	h, gw := buildRouterGateway(t, cfg)
+	rec, clk := sharedTestEnv()
+	bs := &batchStore{counterStore: rec}
+	gw.sharedState = sharedTestLoop(bs, clk)
+	gw.wireSharedState(cfg)
+	shareLimiterStore(gw, bs)
+
+	if r := routerChat(t, h, routerName, strings.Repeat("plain words ", 400), nil); r.Code != 200 {
+		t.Fatalf("status = %d", r.Code)
+	}
+	var calBatches, mixed int
+	bs.mu.Lock()
+	defer bs.mu.Unlock()
+	for _, keys := range bs.batches {
+		cal, other := false, false
+		for _, k := range keys {
+			if strings.Contains(k, ":"+calibKind+":") {
+				cal = true
+			} else {
+				other = true
+			}
+		}
+		if cal {
+			calBatches++
+			if other {
+				mixed++
+			}
+		}
+	}
+	if calBatches != 1 || mixed != 1 {
+		t.Errorf("calibrator counters in %d batches (%d shared with usage counters), want 1 batch shared with them", calBatches, mixed)
+	}
+}

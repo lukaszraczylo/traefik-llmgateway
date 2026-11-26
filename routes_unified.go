@@ -801,6 +801,10 @@ func (g *Gateway) runMeteredCall(sw *statusTrackingWriter, r *http.Request, scop
 			extras.provenance = provenance
 			extras.provenanceTokens = result.total()
 		}
+		calibrate := plan != nil && callErr == nil && !plan.hasImage && !result.estimated
+		if calibrate {
+			extras.calibration = g.tokenCalib.fleetEntries(providerName, cand.upstreamModel, plan.promptBytes, result.prompt)
+		}
 		extras.promptCacheSaved = unifiedPromptCacheSaved(cand.canonical, cand.upstreamModel, result, g.cfg.Pricing, g.cfg.ModelMeta)
 		g.recordPromptCache(providerName, cand.upstreamModel, result)
 		g.limiter.accountWith(acctScopes, result, unifiedCostMicros(cand.canonical, cand.upstreamModel, result, g.cfg.Pricing, g.cfg.ModelMeta, g.pricingWarn), extras)
@@ -808,7 +812,7 @@ func (g *Gateway) runMeteredCall(sw *statusTrackingWriter, r *http.Request, scop
 			g.logf("%s: usage for model %q logged as estimated (%d prompt tokens derived from request body size, not the provider's reported usage)", logPrefix, cand.canonical, result.prompt)
 		}
 
-		if plan != nil && callErr == nil && !plan.hasImage && !result.estimated {
+		if calibrate {
 			g.tokenCalib.observe(providerName, cand.upstreamModel, plan.promptBytes, result.prompt)
 		}
 		if plan != nil && plan.bandit != nil {
