@@ -1,0 +1,26 @@
+# Gateway configuration (README "Configuration reference"). Unknown keys
+# stop the binary from starting, so a typo fails loudly.
+providers:
+  openai:
+    type: openai
+    # Read from the environment of the gateway container (deployment.yaml,
+    # Secret llmgateway-provider-keys). file:/path works too.
+    apiKey: env:OPENAI_API_KEY
+    discovery: true
+groups:
+  engineering:
+    providers: []
+  general:
+    providers: [openai]
+users:
+  # Mounted from Secret llmgateway-users; edits are picked up without a restart.
+  file: /llmgw/users/users.json
+metrics:
+  # No allowedCIDRs: behind a proxy every request arrives from the proxy's
+  # address, so a CIDR allowlist would admit anyone who can reach it.
+  # Scrape /metrics with an admin key instead.
+  enabled: true
+# Uncomment to share limits, breakers and metrics across the replicas.
+# redis:
+#   address: redis.example.svc:6379
+#   sharedState: true

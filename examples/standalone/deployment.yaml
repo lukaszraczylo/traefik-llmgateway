@@ -1,0 +1,125 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: llmgateway
+  labels:
+    app.kubernetes.io/name: llmgateway
+spec:
+  replicas: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: llmgateway
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: llmgateway
+    spec:
+      # Restart drain: on SIGTERM /readyz fails at once, requests that still
+      # arrive during LLMGW_DRAIN_DELAY are served, then the listener closes
+      # and in-flight requests (streams included) run to completion for up
+      # to LLMGW_SHUTDOWN_TIMEOUT. Keep the grace period above drain plus
+      # shutdown, and the shutdown timeout above your longest generation.
+      terminationGracePeriodSeconds: 1230
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: llmgateway
+      containers:
+        - name: llmgateway
+          # Pin a release, ideally by digest: <tag>@sha256:<index digest>.
+          image: ghcr.io/lukaszraczylo/traefik-llmgateway:1.0.169
+          args: ["-config", "/etc/llmgateway/config.yaml", "-listen", ":8080"]
+          env:
+            - name: LLMGW_DRAIN_DELAY
+              value: "10s"
+            - name: LLMGW_SHUTDOWN_TIMEOUT
+              value: "20m"
+          envFrom:
+            - secretRef:
+                name: llmgateway-provider-keys
+          ports:
+            - name: http
+              containerPort: 8080
+          # The listener opens after provider discovery, which can take a
+          # while with many providers.
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 5
+            failureThreshold: 60
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 5
+            failureThreshold: 2
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              memory: 1Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: config
+              mountPath: /etc/llmgateway
+              readOnly: true
+            - name: users
+              mountPath: /llmgw/users
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: llmgateway-config
+        - name: users
+          secret:
+            secretName: llmgateway-users
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: llmgateway
+  labels:
+    app.kubernetes.io/name: llmgateway
+spec:
+  selector:
+    app.kubernetes.io/name: llmgateway
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: llmgateway
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: llmgateway

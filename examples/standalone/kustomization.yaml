@@ -1,0 +1,22 @@
+# Standalone LLM Gateway on Kubernetes: the compiled binary (cmd/gateway)
+# as its own Deployment, behind any reverse proxy. Apply with:
+#
+#   kubectl apply -k examples/standalone
+#
+# config.yaml holds the gateway configuration: the same block a plugin
+# Middleware carries under spec.plugin.llmgateway, hoisted to the top
+# level. configMapGenerator gives the ConfigMap a content hash, so editing
+# config.yaml rolls the pods. The binary also hot-reloads the file in place
+# (-reload-interval), and users.json is reloaded by the gateway itself.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: llmgateway
+resources:
+  - namespace.yaml
+  - secrets.yaml
+  - deployment.yaml
+  - traefik.yaml
+configMapGenerator:
+  - name: llmgateway-config
+    files:
+      - config.yaml
