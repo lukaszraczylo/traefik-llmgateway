@@ -50,3 +50,39 @@ func TestTranslateSystemNoMarkersUnchanged(t *testing.T) {
 		t.Fatalf("system = %#v", out["system"])
 	}
 }
+
+func systemReq(parts ...any) map[string]any {
+	return map[string]any{
+		"model": "claude-x",
+		"messages": []any{
+			map[string]any{"role": "system", "content": parts},
+			map[string]any{"role": "user", "content": "hi"},
+		},
+	}
+}
+
+func TestTranslateSystemEmptyMarkedPartKeepsString(t *testing.T) {
+	cc := map[string]any{"type": "ephemeral"}
+	out, err := anthropicRequestFromOpenAI(systemReq(
+		map[string]any{"type": "text", "text": "", "cache_control": cc}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out["system"] != "" {
+		t.Fatalf("system = %#v, want empty string", out["system"])
+	}
+}
+
+func TestTranslateSystemEmptyMarkedPartWithOthers(t *testing.T) {
+	cc := map[string]any{"type": "ephemeral"}
+	out, err := anthropicRequestFromOpenAI(systemReq(
+		map[string]any{"type": "text", "text": "A"},
+		map[string]any{"type": "text", "text": "", "cache_control": cc},
+		map[string]any{"type": "text", "text": "B"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out["system"] != "A\n\nB" {
+		t.Fatalf("system = %#v", out["system"])
+	}
+}

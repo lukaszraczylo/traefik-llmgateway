@@ -220,3 +220,23 @@ func TestMessagesPassthroughInjects(t *testing.T) {
 		t.Fatalf("enabled body = %s", on)
 	}
 }
+
+func TestInjectCacheControlSkipsEmptyTextBlock(t *testing.T) {
+	b := map[string]any{
+		"model": "m",
+		"messages": []any{
+			map[string]any{"role": "user", "content": []any{
+				map[string]any{"type": "text", "text": "real"},
+				map[string]any{"type": "text", "text": ""},
+			}},
+		},
+	}
+	out, _ := injectCacheControl(b)
+	blocks := out["messages"].([]any)[0].(map[string]any)["content"].([]any)
+	if _, ok := blocks[0].(map[string]any)["cache_control"]; !ok {
+		t.Fatalf("non-empty block not marked: %#v", blocks)
+	}
+	if _, ok := blocks[1].(map[string]any)["cache_control"]; ok {
+		t.Fatal("empty block marked")
+	}
+}

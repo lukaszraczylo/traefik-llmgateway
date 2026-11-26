@@ -84,19 +84,33 @@ func markBlock(block any) (any, bool) {
 	return cp, true
 }
 
-// markLastBlock returns a copy of blocks with the last entry marked.
+// markLastBlock returns a copy of blocks with the last non-empty entry marked;
+// the API rejects a cache marker on an empty text block.
 func markLastBlock(blocks []any) ([]any, bool) {
-	if len(blocks) == 0 {
+	idx := len(blocks) - 1
+	for idx >= 0 && isEmptyTextBlock(blocks[idx]) {
+		idx--
+	}
+	if idx < 0 {
 		return blocks, false
 	}
-	marked, ok := markBlock(blocks[len(blocks)-1])
+	marked, ok := markBlock(blocks[idx])
 	if !ok {
 		return blocks, false
 	}
 	cp := make([]any, len(blocks))
 	copy(cp, blocks)
-	cp[len(cp)-1] = marked
+	cp[idx] = marked
 	return cp, true
+}
+
+func isEmptyTextBlock(block any) bool {
+	m, ok := block.(map[string]any)
+	if !ok {
+		return false
+	}
+	text, isStr := m["text"].(string)
+	return m["type"] == "text" && isStr && text == ""
 }
 
 // markContent returns content (string or block list) with its last block marked.

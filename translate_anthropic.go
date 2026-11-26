@@ -459,10 +459,10 @@ func anthropicRequestFromOpenAI(req map[string]any) (map[string]any, error) {
 				for _, part := range c {
 					pm, _ := part.(map[string]any)
 					block, marked := systemBlockFromPart(pm)
-					if marked {
-						systemMarked = true
-					}
 					if block["text"] != "" {
+						if marked {
+							systemMarked = true
+						}
 						systemBlocks = append(systemBlocks, block)
 					}
 				}
