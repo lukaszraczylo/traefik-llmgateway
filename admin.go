@@ -1469,7 +1469,11 @@ type adminUsageModelEntryView struct {
 	// mode: how many requests for this model were refused as unpriced
 	// under a caller's cost budget (metricR402) over the requested span.
 	R402 *int64 `json:"r402,omitempty"`
-	ID   string `json:"id"`
+	// Prompt-cache counters are set in detail mode only, zero included.
+	PromptCacheReadTokens    *int64 `json:"promptCacheReadTokens,omitempty"`
+	PromptCacheWriteTokens   *int64 `json:"promptCacheWriteTokens,omitempty"`
+	PromptCacheSavedMicroUSD *int64 `json:"promptCacheSavedMicroUsd,omitempty"`
+	ID                       string `json:"id"`
 	// PriceSource (admin dashboard redesign, WP-B) is populated only in
 	// detail mode: billingPriceSource's own result (pricing.go) for this
 	// model — the same "override"|"builtin"|"litellm"|"free"|"unpriced"
@@ -1480,10 +1484,6 @@ type adminUsageModelEntryView struct {
 	// Free is populated only by serveAdminUsageModelsDetail too; false
 	// (the non-detail zero value) is dropped by its own omitempty.
 	Free bool `json:"free,omitempty"`
-	// Prompt-cache counters (detail mode only) are always emitted, zero included.
-	PromptCacheReadTokens    int64 `json:"promptCacheReadTokens"`
-	PromptCacheWriteTokens   int64 `json:"promptCacheWriteTokens"`
-	PromptCacheSavedMicroUSD int64 `json:"promptCacheSavedMicroUsd"`
 }
 
 // adminUsageModelsResponse is GET /admin/api/usage/models' body. Span
@@ -1881,6 +1881,7 @@ func (g *Gateway) serveAdminUsageModelsDetail(sw *statusTrackingWriter, ids []st
 		_, bare, _ := strings.Cut(id, "/")
 		source, _ := billingPriceSource(id, bare, g.cfg.Pricing, g.cfg.ModelMeta)
 		r402 := r402ByID[i]
+		pcRead, pcWrite, pcSave := pcMulti[0][i], pcMulti[1][i], pcMulti[2][i]
 		entry := adminUsageModelEntryView{
 			ID:           id,
 			Value:        totalsByMetric[valueIdx][i],
@@ -1892,9 +1893,9 @@ func (g *Gateway) serveAdminUsageModelsDetail(sw *statusTrackingWriter, ids []st
 			PriceSource:  source,
 			R402:         &r402,
 
-			PromptCacheReadTokens:    pcMulti[0][i],
-			PromptCacheWriteTokens:   pcMulti[1][i],
-			PromptCacheSavedMicroUSD: pcMulti[2][i],
+			PromptCacheReadTokens:    &pcRead,
+			PromptCacheWriteTokens:   &pcWrite,
+			PromptCacheSavedMicroUSD: &pcSave,
 		}
 		if chitByID != nil {
 			chit := chitByID[i]

@@ -114,9 +114,31 @@ func TestAdminUsageModelsPromptCache(t *testing.T) {
 	var got adminUsageModelsResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
 	require.Len(t, got.Models, 1)
-	assert.EqualValues(t, 900, got.Models[0].PromptCacheReadTokens)
-	assert.EqualValues(t, 50, got.Models[0].PromptCacheWriteTokens)
-	assert.EqualValues(t, 2430, got.Models[0].PromptCacheSavedMicroUSD)
+	require.NotNil(t, got.Models[0].PromptCacheReadTokens)
+	require.NotNil(t, got.Models[0].PromptCacheWriteTokens)
+	require.NotNil(t, got.Models[0].PromptCacheSavedMicroUSD)
+	assert.EqualValues(t, 900, *got.Models[0].PromptCacheReadTokens)
+	assert.EqualValues(t, 50, *got.Models[0].PromptCacheWriteTokens)
+	assert.EqualValues(t, 2430, *got.Models[0].PromptCacheSavedMicroUSD)
+}
+
+func TestAdminUsageModelsLegacyShapeOmitsPromptCache(t *testing.T) {
+	t.Parallel()
+	h, gw := newAdminGatewayHandle(t, newAdminTestConfig())
+	now := time.Date(2026, 8, 20, 12, 30, 0, 0, time.UTC)
+	gw.limiter.nowFn = func() time.Time { return now }
+	seedModelCounter(gw, "alpha/a-model-1", metricReq, windowDay, now, 1)
+	seedModelCounter(gw, "alpha/a-model-1", metricPcRead, windowDay, now, 900)
+
+	for _, q := range []string{"?metric=req&window=day", "?metric=req&window=day&detail=0"} {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, adminRequest(http.MethodGet, adminUsageModelsPath+q, "sk-admin1"))
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		require.Contains(t, rec.Body.String(), "alpha/a-model-1")
+		for _, f := range []string{"promptCacheReadTokens", "promptCacheWriteTokens", "promptCacheSavedMicroUsd"} {
+			assert.NotContains(t, rec.Body.String(), f, q)
+		}
+	}
 }
 
 func TestCacheHitDoesNotRecordPromptCache(t *testing.T) {
