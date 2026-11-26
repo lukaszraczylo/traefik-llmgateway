@@ -313,6 +313,20 @@ func systemTextFromContentParts(parts []any) (string, error) {
 	return strings.Join(texts, "\n"), nil
 }
 
+// systemBlockFromPart builds a standard Anthropic text block from a
+// validated system content part, keeping a client cache_control marker.
+// The second result reports whether a marker was kept.
+func systemBlockFromPart(pm map[string]any) (map[string]any, bool) {
+	text, _ := pm["text"].(string)
+	block := map[string]any{"type": "text", "text": text}
+	cc, has := pm["cache_control"]
+	if has && cc != nil {
+		block["cache_control"] = cc
+		return block, true
+	}
+	return block, false
+}
+
 // anthropicToolChoiceFromOpenAI maps OpenAI's "tool_choice" to Anthropic's
 // tool_choice object, and reports whether "tools" should be dropped from
 // the request. tool_choice:"none" maps to Anthropic's own
@@ -395,6 +409,8 @@ func anthropicRequestFromOpenAI(req map[string]any) (map[string]any, error) {
 
 	msgsRaw, _ := req["messages"].([]any)
 	var systemParts []string
+	var systemBlocks []any
+	systemMarked := false
 	anthMsgs := make([]any, 0, len(msgsRaw))
 	// pendingToolResults accumulates consecutive role:"tool" messages'
 	// blocks. Anthropic requires alternating user/assistant turns and
@@ -431,12 +447,25 @@ func anthropicRequestFromOpenAI(req map[string]any) (map[string]any, error) {
 			switch c := msg["content"].(type) {
 			case string:
 				systemParts = append(systemParts, c)
+				if c != "" {
+					systemBlocks = append(systemBlocks, map[string]any{"type": "text", "text": c})
+				}
 			case []any:
 				text, err := systemTextFromContentParts(c)
 				if err != nil {
 					return nil, err
 				}
 				systemParts = append(systemParts, text)
+				for _, part := range c {
+					pm, _ := part.(map[string]any)
+					block, marked := systemBlockFromPart(pm)
+					if marked {
+						systemMarked = true
+					}
+					if block["text"] != "" {
+						systemBlocks = append(systemBlocks, block)
+					}
+				}
 			}
 		case "user", "assistant":
 			flushPendingToolResults()
@@ -456,7 +485,9 @@ func anthropicRequestFromOpenAI(req map[string]any) (map[string]any, error) {
 		}
 	}
 	flushPendingToolResults()
-	if len(systemParts) > 0 {
+	if systemMarked {
+		out["system"] = systemBlocks
+	} else if len(systemParts) > 0 {
 		out["system"] = strings.Join(systemParts, "\n\n")
 	}
 	out["messages"] = anthMsgs
