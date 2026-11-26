@@ -175,3 +175,39 @@ func TestTranslatedMessagesGetsKey(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	assert.Regexp(t, `"prompt_cache_key":"[0-9a-f]{32}"`, ps.last("openai"))
 }
+
+func TestPromptCacheKeyMixedChainOnlyOptedIn(t *testing.T) {
+	gw, ps := newPckGateway(t, false, http.StatusInternalServerError)
+	gw.cfg.Providers["alpha"].PromptCache = &PromptCacheConfig{Key: true}
+	servePck(t, gw, pckBody("s", "u"))
+	assert.Contains(t, ps.last("alpha"), "prompt_cache_key")
+	assert.NotContains(t, ps.last("beta"), "prompt_cache_key")
+}
+
+func messagesPckUpstream(t *testing.T, key bool, body map[string]any) string {
+	t.Helper()
+	ps := &pckServers{bodies: map[string][]string{}}
+	srv := httptest.NewServer(ps.handler("openai", http.StatusOK, `{"id":"c","object":"chat.completion","model":"gpt-real","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":8,"completion_tokens":4}}`))
+	defer srv.Close()
+	gw := newMessagesTestGateway(t, "", srv.URL)
+	if key {
+		gw.cfg.Providers["openai"].PromptCache = &PromptCacheConfig{Key: true}
+	}
+	rec := httptest.NewRecorder()
+	gw.ServeHTTP(rec, newMessagesRequest(t, body, "x-api-key", "sk-alice"))
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	return ps.last("openai")
+}
+
+func TestTranslatedMessagesClientKeyOptionOff(t *testing.T) {
+	mk := func(withKey bool) map[string]any {
+		b := map[string]any{"model": "gpt-test", "max_tokens": 10, "messages": []any{map[string]any{"role": "user", "content": "hello"}}}
+		if withKey {
+			b["prompt_cache_key"] = "client-key"
+		}
+		return b
+	}
+	assert.Equal(t, messagesPckUpstream(t, false, mk(false)), messagesPckUpstream(t, false, mk(true)))
+	assert.NotContains(t, messagesPckUpstream(t, false, mk(true)), "prompt_cache_key")
+	assert.Contains(t, messagesPckUpstream(t, true, mk(true)), `"prompt_cache_key":"client-key"`)
+}

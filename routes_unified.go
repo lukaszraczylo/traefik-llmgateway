@@ -475,7 +475,7 @@ func (g *Gateway) runMeteredCall(sw *statusTrackingWriter, r *http.Request, scop
 		if cacheable {
 			cacheKeyStr = cacheKey(cand.providerName, cand.upstreamModel, requestedModel, endpoint, attemptReq)
 		}
-		g.applyPromptCacheKey(attemptReq, cand.providerName, pck)
+		g.applyPromptCacheKey(attemptReq, endpoint, cand.providerName, pck)
 		attemptReq[gatewayAliasKey] = requestedModel
 		if plan != nil {
 			setRouterHeaders(sw.Header(), plan, i)

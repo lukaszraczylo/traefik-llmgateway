@@ -183,9 +183,12 @@ func injectCacheControl(req map[string]any) (map[string]any, int) {
 
 const (
 	promptCacheKeyField = "prompt_cache_key"
-	promptCacheKeyTag   = "pck\x00"
-	promptCacheKeyBytes = 16
-	promptCacheSep      = "\x1f"
+	// gatewayPromptCacheKey carries the gateway-computed key on an Anthropic-format
+	// body, where translation would drop prompt_cache_key itself.
+	gatewayPromptCacheKey = "_llmgw_prompt_cache_key"
+	promptCacheKeyTag     = "pck\x00"
+	promptCacheKeyBytes   = 16
+	promptCacheSep        = "\x1f"
 )
 
 // promptCacheSystemText returns the system prompt of an OpenAI or Anthropic body.
@@ -245,8 +248,28 @@ func (g *Gateway) promptCacheKeyForRequest(req map[string]any, hdr http.Header, 
 }
 
 // applyPromptCacheKey sets key on attemptReq when the candidate's provider opted in.
-func (g *Gateway) applyPromptCacheKey(attemptReq map[string]any, providerName, key string) {
-	if key != "" && g.providerPromptCache(providerName).Key {
-		attemptReq[promptCacheKeyField] = key
+func (g *Gateway) applyPromptCacheKey(attemptReq map[string]any, endpoint, providerName, key string) {
+	if key == "" || !g.providerPromptCache(providerName).Key {
+		return
+	}
+	if endpoint == cacheEndpointMessages {
+		attemptReq[gatewayPromptCacheKey] = key
+		return
+	}
+	attemptReq[promptCacheKeyField] = key
+}
+
+// applyTranslatedPromptCacheKey sets the upstream key on a translated request for an
+// opted-in provider. A client key wins over the gateway one; otherwise nothing is added.
+func (g *Gateway) applyTranslatedPromptCacheKey(openaiReq, req map[string]any, providerName string) {
+	if !g.providerPromptCache(providerName).Key {
+		return
+	}
+	if client, ok := req[promptCacheKeyField]; ok {
+		openaiReq[promptCacheKeyField] = client
+		return
+	}
+	if key, ok := req[gatewayPromptCacheKey].(string); ok && key != "" {
+		openaiReq[promptCacheKeyField] = key
 	}
 }
