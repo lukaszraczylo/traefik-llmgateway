@@ -307,6 +307,11 @@ func run() error {
 		MaxHeaderBytes: defaultMaxHeaderBytes,
 	}
 
+	// Shutdown waits for open handlers, and an idle MCP event stream never
+	// ends by itself; ending those once the listener closes lets their
+	// clients reconnect to another replica.
+	srv.RegisterOnShutdown(sw.drainIdleStreams)
+
 	ready.Store(true)
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.ListenAndServe() }()
