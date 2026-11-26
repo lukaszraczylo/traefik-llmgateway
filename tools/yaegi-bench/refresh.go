@@ -34,6 +34,8 @@ var (
 	benchLoop *sharedStateLoop
 	benchAll  []string
 	benchVals []int64
+	benchStore counterStore
+	benchBig   []string
 )
 
 func BenchRefreshSetup(redisAddr string, n int) int {
@@ -53,6 +55,16 @@ func BenchRefreshSetup(redisAddr string, n int) int {
 	newSharedBreaker(l, sharedKindDiscovery, ids, 5, time.Second, time.Minute, 2*time.Minute)
 	newSharedBreaker(l, sharedKindDecision, ids, 5, time.Second, time.Minute, 2*time.Minute)
 	benchLoop = l
+	benchStore = store
+	benchBig = make([]string, usageModelsChunkKeys)
+	bigEntries := make([]counterIncr, len(benchBig))
+	for i := range benchBig {
+		benchBig[i] = "bench-big-" + strconv.Itoa(i)
+		bigEntries[i] = counterIncr{key: benchBig[i], delta: int64(i%%5 + 1), ttl: time.Hour, enforceTTL: time.Hour}
+	}
+	if _, err := store.incrMulti(bigEntries); err != nil {
+		panic(err)
+	}
 	now := time.Now()
 	benchAll = nil
 	for _, p := range l.snapshot() {
@@ -110,6 +122,15 @@ func BenchGetMultiRun(n int) int {
 	sum := 0
 	for i := 0; i < n; i++ {
 		got, _ := benchLoop.chunkedGet(benchAll)
+		sum += len(got)
+	}
+	return sum
+}
+
+func BenchGetMulti1600Run(n int) int {
+	sum := 0
+	for i := 0; i < n; i++ {
+		got, _ := benchStore.getMulti(benchBig)
 		sum += len(got)
 	}
 	return sum
@@ -257,7 +278,7 @@ func runRefresh(root, redisAddr string, samples int) error {
 		}
 		add(o.name, f.(func(int)))
 	}
-	for _, o := range []struct{ name, sym string }{{"keys", "BenchKeysRun"}, {"getmulti", "BenchGetMultiRun"}} {
+	for _, o := range []struct{ name, sym string }{{"keys", "BenchKeysRun"}, {"getmulti", "BenchGetMultiRun"}, {"getmulti1600", "BenchGetMulti1600Run"}} {
 		f, e := get(o.sym)
 		if e != nil {
 			return e
