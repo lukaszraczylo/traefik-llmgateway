@@ -468,10 +468,25 @@ func main() {
 	dump := flag.Bool("ranks", false, "print each fixture's rank under yaegi, to diff against a native run")
 	passes := flag.Int("passes", 3, "timed passes over the fixture set; the fastest counts")
 	fixtures := flag.String("fixtures", "testdata/router_fixtures", "fixture directory, relative to the repo root")
+	mode := flag.String("mode", "router", "router | refresh (one shared-state refresh tick) | refresh-native")
+	redisAddr := flag.String("redis", "", "refresh modes: host:port of a local redis to also time redisStore")
+	samples := flag.Int("samples", 5, "refresh modes: samples per measurement")
 	flag.Parse()
 	root := "."
 	if flag.NArg() > 0 {
 		root = flag.Arg(0)
+	}
+	switch *mode {
+	case "refresh", "refresh-native":
+		fn := runRefresh
+		if *mode == "refresh-native" {
+			fn = runRefreshNative
+		}
+		if err := fn(root, *redisAddr, *samples); err != nil {
+			fmt.Fprintln(os.Stderr, "yaegi-bench: FAIL:", err)
+			os.Exit(1)
+		}
+		return
 	}
 	if err := run(root, *fixtures, *minDPS, *passes, *dump); err != nil {
 		fmt.Fprintln(os.Stderr, "yaegi-bench: FAIL:", err)
