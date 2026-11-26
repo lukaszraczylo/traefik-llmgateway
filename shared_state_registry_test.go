@@ -104,3 +104,49 @@ func TestSharedDiscoveryBreakerCountsPerInstance(t *testing.T) {
 		t.Fatal("B healthy after A reached the threshold on its own")
 	}
 }
+
+func TestSharedDiscoveryHalfOpenFailureRetripsFleet(t *testing.T) {
+	a, b, store, clk, _ := sharedGatewayPair(t, nil)
+	boom := errors.New("discovery down")
+	st := a.registry.states["alpha"]
+	for i := 0; i < defaultBreakerFailureThreshold; i++ {
+		a.registry.finishRefresh(st, clk.now(), nil, boom)
+	}
+	a.sharedState.refresh()
+	opens := store.writesTo(":opens")
+	if opens != 1 {
+		t.Fatalf("opens increments after the first trip = %d, want 1", opens)
+	}
+	clk.advance(st.breakerOpenMax + time.Second)
+	b.sharedState.refresh()
+	if !b.registry.discoveryHealthy("alpha") {
+		t.Fatal("B unhealthy after the fleet open window elapsed")
+	}
+	st.mu.Lock()
+	st.health = breakerHalfOpen
+	st.mu.Unlock()
+	a.registry.finishRefresh(st, clk.now(), nil, boom)
+	a.sharedState.refresh()
+	if got := store.writesTo(":opens"); got != opens+1 {
+		t.Fatalf("opens increments after a failed half-open probe = %d, want %d", got, opens+1)
+	}
+	b.sharedState.refresh()
+	if b.registry.discoveryHealthy("alpha") {
+		t.Fatal("B healthy after A's half-open probe failed, want the fleet breaker open again")
+	}
+}
+
+func TestSharedDiscoverySuccessAfterUnsharedFailuresWritesNothing(t *testing.T) {
+	a, _, store, clk, _ := sharedGatewayPair(t, nil)
+	st := a.registry.states["alpha"]
+	for i := 0; i < defaultBreakerFailureThreshold-1; i++ {
+		a.registry.finishRefresh(st, clk.now(), nil, errors.New("discovery down"))
+	}
+	a.sharedState.refresh()
+	before := len(store.writes)
+	a.registry.finishRefresh(st, clk.now(), []string{"m"}, nil)
+	a.sharedState.refresh()
+	if got := len(store.writes); got != before {
+		t.Fatalf("store writes after a success that followed only unshared failures = %d, want %d", got-before, 0)
+	}
+}
