@@ -376,6 +376,7 @@ type sharedBreaker struct {
 	failAccAt  map[string]time.Time
 	kind       string
 	ids        []string
+	keyList    []string
 	openBase   time.Duration
 	openMax    time.Duration
 	failWindow time.Duration
@@ -390,6 +391,10 @@ func newSharedBreaker(loop *sharedStateLoop, kind string, ids []string, threshol
 		threshold: threshold, openBase: openBase, openMax: openMax, failWindow: failWindow,
 		local: make(map[string]*breakerLocal), openUntil: make(map[string]int64), opensSeen: make(map[string]int64), failsSeen: make(map[string]int64), failAcc: make(map[string]int64), failAccAt: make(map[string]time.Time),
 	}
+	b.keyList = make([]string, 0, sharedBreakerKeysPerID*len(ids))
+	for _, id := range ids {
+		b.keyList = append(b.keyList, sharedBreakerKey(kind, id, "open"), sharedBreakerKey(kind, id, "fails"), sharedBreakerKey(kind, id, "opens"))
+	}
 	if loop != nil {
 		b.nowFn = loop.nowFn
 		loop.register(b)
@@ -398,13 +403,9 @@ func newSharedBreaker(loop *sharedStateLoop, kind string, ids []string, threshol
 	return b
 }
 
-// keys lists, per id, the open-until, fail-count and open-count keys.
+// keys lists, per id, the open-until, fail-count and open-count keys. ids never change, so the shared list is built once; callers must not modify it.
 func (b *sharedBreaker) keys(_ time.Time) []string {
-	out := make([]string, 0, sharedBreakerKeysPerID*len(b.ids))
-	for _, id := range b.ids {
-		out = append(out, sharedBreakerKey(b.kind, id, "open"), sharedBreakerKey(b.kind, id, "fails"), sharedBreakerKey(b.kind, id, "opens"))
-	}
-	return out
+	return b.keyList
 }
 
 func (b *sharedBreaker) apply(vals []int64) {
@@ -650,8 +651,11 @@ type sharedInflight struct {
 	limits map[string]int
 	acc    map[string]*infDelta
 	ids    []string
-	epochs int
-	mu     sync.Mutex
+	// keyList is keys() for keyEpoch; keyEpoch is only valid once keyList is non-nil.
+	keyList  []string
+	epochs   int
+	keyEpoch int64
+	mu       sync.Mutex
 }
 
 // newSharedInflight returns the tracker over ids; loop may be nil for a no-op tracker.
@@ -681,9 +685,14 @@ func (s *sharedInflight) epochKey(provider string, epoch int64, kind string) str
 	return sharedInflightKey(provider, strconv.FormatInt(epoch, 10)+":"+kind)
 }
 
-// keys lists, per provider, the started and finished keys of the last M epochs, then the learned limit.
+// keys lists, per provider, the started and finished keys of the last M epochs, then the learned limit. The list is cached per epoch; callers must not modify it.
 func (s *sharedInflight) keys(now time.Time) []string {
 	e := s.epochOf(now)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.keyList != nil && s.keyEpoch == e {
+		return s.keyList
+	}
 	out := make([]string, 0, len(s.ids)*(2*s.epochs+1))
 	for _, id := range s.ids {
 		for i := 0; i < s.epochs; i++ {
@@ -691,6 +700,7 @@ func (s *sharedInflight) keys(now time.Time) []string {
 		}
 		out = append(out, sharedInflightKey(id, "limit"))
 	}
+	s.keyList, s.keyEpoch = out, e
 	return out
 }
 
