@@ -38,6 +38,10 @@ function rankingWith(ids: string[]): AdminUsageModelsResponse {
   }
 }
 
+function truncatedRanking(): AdminUsageModelsResponse {
+  return rankingWith(Array.from({ length: 100 }, (_, i) => `a/m${i}`))
+}
+
 /** mockRoutes wires adminFetch's mock by matching the route prefix — the four concerns this store fetches (models ranking, series, totals, and again totals for drilldown) all hit different admin.go routes. */
 function mockRoutes(handlers: { series?: (url: string) => AdminSeriesResponse; totals?: (url: string) => AdminTotalsResponse; models?: (url: string) => AdminUsageModelsResponse }): void {
   mockedAdminFetch.mockImplementation((async (path: string) => {
@@ -144,6 +148,70 @@ describe('useSpendStore.fetchPricingHealthRanking', () => {
     await spend.fetchPricingHealthRanking()
     expect(requestedUrl).toBe('/admin/api/usage/models?metric=req&window=day&span=7&limit=100&detail=1')
     expect(spend.pricingHealthRanking.map((m) => m.id)).toEqual(['a/one'])
+  })
+})
+
+describe('useSpendStore: one detail fetch feeds both rankings', () => {
+  function entries(n: number): AdminUsageModelsResponse['models'] {
+    // cost ascending with index while req descends, so the two rankings order differently.
+    return Array.from({ length: n }, (_, i) => ({ id: `p/m${String(i).padStart(3, '0')}`, value: 0, requests: n - i, tokensIn: 1, tokensOut: 1, costMicroUsd: i + 1, free: false }))
+  }
+  function byCost(n: number): AdminUsageModelsResponse {
+    const models = entries(n)
+      .map((m) => ({ ...m, value: m.costMicroUsd! }))
+      .sort((a, b) => b.value - a.value)
+    return { metric: 'cost', window: 'day', span: 7, detail: true, offset: 0, models }
+  }
+
+  it('requests once and re-ranks the pricing-health ranking by req', async () => {
+    const urls: string[] = []
+    mockRoutes({
+      models: (url) => {
+        urls.push(url)
+        return byCost(3)
+      },
+    })
+    const spend = useSpendStore()
+    spend.$patch({ metric: 'cost' })
+    await Promise.all([spend.fetchModelRanking(), spend.fetchPricingHealthRanking()])
+    expect(urls).toHaveLength(1)
+    expect(spend.modelRanking.map((m) => m.id)).toEqual(['p/m002', 'p/m001', 'p/m000'])
+    expect(spend.pricingHealthRanking.map((m) => [m.id, m.value])).toEqual([
+      ['p/m000', 3],
+      ['p/m001', 2],
+      ['p/m002', 1],
+    ])
+  })
+
+  it('fetches again when the response is truncated at the limit', async () => {
+    const urls: string[] = []
+    mockRoutes({
+      models: (url) => {
+        urls.push(url)
+        return byCost(100)
+      },
+    })
+    const spend = useSpendStore()
+    spend.$patch({ metric: 'cost' })
+    await Promise.all([spend.fetchModelRanking(), spend.fetchPricingHealthRanking()])
+    expect(urls).toHaveLength(2)
+  })
+
+  it('fetches again when the shared request fails', async () => {
+    let calls = 0
+    mockRoutes({
+      models: () => {
+        calls++
+        if (calls === 1) throw new Error('boom')
+        return byCost(3)
+      },
+    })
+    const spend = useSpendStore()
+    spend.$patch({ metric: 'cost' })
+    await Promise.all([spend.fetchModelRanking(), spend.fetchPricingHealthRanking()])
+    expect(calls).toBe(2)
+    expect(spend.rankingError).toBe('boom')
+    expect(spend.pricingHealthRanking).toHaveLength(3)
   })
 })
 
@@ -524,7 +592,7 @@ describe('useSpendStore: per-request error fields', () => {
     mockRoutes({
       models: (url) => {
         if (url.includes('metric=req')) throw new Error('pricing boom')
-        return rankingWith([])
+        return truncatedRanking() // at the limit, so the pricing leg cannot reuse it and sends its own request
       },
     })
     const spend = useSpendStore()
@@ -555,7 +623,7 @@ describe('useSpendStore: per-request error fields', () => {
     mockRoutes({
       models: (url) => {
         if (url.includes('metric=req')) throw new Error('pricing boom')
-        return rankingWith([])
+        return truncatedRanking() // at the limit, so the pricing leg cannot reuse it and sends its own request
       },
     })
     const spend = useSpendStore()
@@ -572,7 +640,7 @@ describe('useSpendStore: per-request error fields', () => {
     mockRoutes({
       models: (url) => {
         if (url.includes('metric=req')) throw new Error('pricing boom')
-        return rankingWith([])
+        return truncatedRanking() // at the limit, so the pricing leg cannot reuse it and sends its own request
       },
     })
     const spend = useSpendStore()

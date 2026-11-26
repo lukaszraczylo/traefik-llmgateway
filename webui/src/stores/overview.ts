@@ -73,11 +73,12 @@ export const useOverviewStore = defineStore('overview', {
           const res = await this.series([TOTAL_SCOPE], metric, window, span, off)
           return { buckets: res.buckets, points: res.series.find((s) => s.scope === TOTAL_SCOPE)?.points ?? [] }
         }
+        // The ranking does not depend on the series, so it runs beside the first batch.
+        const rankingRequest = adminFetch<AdminUsageModelsResponse>(`/admin/api/usage/models?metric=req&window=${window}&span=${span}&limit=${TOP_N}`)
+        rankingRequest.catch(() => undefined) // a failing series batch never awaits it; the real error surfaces below
         const current = await Promise.all(TOTAL_METRICS.map((m) => totalOf(m, 0)))
         const prior = offset > 0 ? await Promise.all(COMPARED_METRICS.map((m) => totalOf(m, offset))) : null
-        const ranking = await adminFetch<AdminUsageModelsResponse>(
-          `/admin/api/usage/models?metric=req&window=${window}&span=${span}&limit=${TOP_N}`,
-        )
+        const ranking = await rankingRequest
         const scopes = ranking.models.map((m) => `model:${m.id}`)
         const top = scopes.length > 0 ? (await this.series(scopes, 'req', window, span, 0)).series : []
         if (id !== this.reqId) return

@@ -630,8 +630,51 @@ export const useSpendStore = defineStore('spend', {
   },
 })
 
-/** fetchModelsRanking asks for `detail=1` except on ranges the server is known to refuse (48h, 30d); a 400 elsewhere retries once without detail. Reports which form it got. */
-async function fetchModelsRanking(metric: string, window: HistoryWindow, span: number): Promise<{ res: AdminUsageModelsResponse; detail: boolean }> {
+type ModelsRanking = { res: AdminUsageModelsResponse; detail: boolean }
+
+/** The metric each detail row carries a total for, so one detail response can be re-ranked by any of them. */
+const DETAIL_VALUE_FIELD = { req: 'requests', tokin: 'tokensIn', tokout: 'tokensOut', cost: 'costMicroUsd' } as const
+
+/** Detail fetches in flight per window/span, so concurrent callers with another metric share one request instead of sending their own. */
+const inflightDetailRankings = new Map<string, { metric: string; promise: Promise<ModelsRanking> }>()
+
+/** rerankDetail returns `got` re-ranked by `metric` as the server would rank it, or null when it cannot: a non-detail or truncated response is missing rows the other ranking would include. */
+function rerankDetail(got: ModelsRanking, metric: string): ModelsRanking | null {
+  const field = DETAIL_VALUE_FIELD[metric as keyof typeof DETAIL_VALUE_FIELD]
+  if (!got.detail || !field || got.res.models.length >= MODEL_RANKING_LIMIT) return null
+  if (got.res.models.some((m) => m[field] === undefined || m.requests === undefined)) return null
+  const models = got.res.models
+    .map((m) => ({ ...m, value: m[field]! }))
+    .sort((a, b) => b.value - a.value || b.requests! - a.requests! || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+  return { res: { ...got.res, metric, models }, detail: true }
+}
+
+/** fetchModelsRanking asks for `detail=1` except on ranges the server is known to refuse (48h, 30d); a 400 elsewhere retries once without detail. Reports which form it got. A concurrent call for the same range with another metric re-ranks the in-flight detail response instead of fetching again. */
+async function fetchModelsRanking(metric: string, window: HistoryWindow, span: number): Promise<ModelsRanking> {
+  if (!modelDetailSupported(window, span)) return fetchModelsRankingOnce(metric, window, span)
+  const key = `${window}|${span}`
+  const inflight = inflightDetailRankings.get(key)
+  if (inflight) {
+    if (inflight.metric === metric) return inflight.promise
+    try {
+      const derived = rerankDetail(await inflight.promise, metric)
+      if (derived) return derived
+    } catch {
+      // The shared fetch failed; this metric makes its own request below.
+    }
+    return fetchModelsRankingOnce(metric, window, span)
+  }
+  const promise = fetchModelsRankingOnce(metric, window, span)
+  const entry = { metric, promise }
+  inflightDetailRankings.set(key, entry)
+  const clear = () => {
+    if (inflightDetailRankings.get(key) === entry) inflightDetailRankings.delete(key)
+  }
+  promise.then(clear, clear)
+  return promise
+}
+
+async function fetchModelsRankingOnce(metric: string, window: HistoryWindow, span: number): Promise<ModelsRanking> {
   const base = `/admin/api/usage/models?metric=${metric}&window=${window}&span=${span}&limit=${MODEL_RANKING_LIMIT}`
   if (!modelDetailSupported(window, span)) return { res: await adminFetch<AdminUsageModelsResponse>(base), detail: false }
   try {

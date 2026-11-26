@@ -46,6 +46,34 @@ describe('useOverviewStore.refresh', () => {
     expect(s.lastUpdated).not.toBeNull()
   })
 
+  it('requests the model ranking before the first series batch has resolved', async () => {
+    const order: string[] = []
+    let releaseSeries: () => void = () => undefined
+    const gate = new Promise<void>((resolve) => (releaseSeries = resolve))
+    mocked.mockImplementation(async (url: string) => {
+      order.push(new URL(url, 'http://x').pathname)
+      if (url.includes('/usage/series')) await gate
+      return route(url) as never
+    })
+    const s = useOverviewStore()
+    const done = s.refresh()
+    await vi.waitFor(() => expect(order).toContain('/admin/api/usage/models'))
+    releaseSeries()
+    await done
+    expect(s.topModels.map((m) => m.id)).toEqual(['p/m1', 'p/m2'])
+  })
+
+  it('reports a failing series batch without an unhandled ranking rejection', async () => {
+    mocked.mockImplementation(async (url: string) => {
+      if (url.includes('/usage/models')) throw new Error('models 500')
+      if (url.includes('/usage/series')) throw new Error('series 500')
+      return route(url) as never
+    })
+    const s = useOverviewStore()
+    await s.refresh()
+    expect(s.error.traffic).toContain('series 500')
+  })
+
   it('fetches the previous period only when compare is requested', async () => {
     useFiltersStore().cmp = 'prev'
     const s = useOverviewStore()
