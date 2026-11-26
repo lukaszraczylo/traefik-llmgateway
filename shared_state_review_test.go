@@ -257,3 +257,40 @@ func TestSharedInflightNewDeltasSurviveAfterAmbiguousDrop(t *testing.T) {
 		t.Errorf("started total = %d, want 1 (the dropped batch is gone, the new delta lands once)", got)
 	}
 }
+
+func waitLoop(t *testing.T, l *sharedStateLoop, running bool) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		l.mu.Lock()
+		got := l.running
+		l.mu.Unlock()
+		if got == running {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("loop running never became %v", running)
+}
+
+func TestSharedInflightEndRestartsIdleStoppedLoop(t *testing.T) {
+	store, clk := sharedTestEnv()
+	l := newSharedStateLoop(store, nil, nil)
+	l.nowFn = clk.now
+	l.every = 5 * time.Millisecond
+	in := newSharedInflight(l, []string{"p"}, 30*time.Minute)
+	end := in.begin("p")
+	waitLoop(t, l, true)
+	clk.advance(sharedStateIdleStop + time.Second)
+	waitLoop(t, l, false)
+	end()
+	waitLoop(t, l, true)
+	deadline := time.Now().Add(2 * time.Second)
+	for store.writesTo(":f") == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if store.writesTo(":f") != 1 {
+		t.Error("finish delta stranded after the loop idle-stopped")
+	}
+	l.close()
+}

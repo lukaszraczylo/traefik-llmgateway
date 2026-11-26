@@ -668,7 +668,11 @@ func (s *sharedInflight) begin(provider string) func() {
 	s.add(provider, epoch, "s")
 	var once sync.Once
 	return func() {
-		once.Do(func() { s.add(provider, epoch, "f") })
+		once.Do(func() {
+			s.add(provider, epoch, "f")
+			// An idle-stopped loop must restart, or this delta is never flushed.
+			s.loop.touch()
+		})
 	}
 }
 
