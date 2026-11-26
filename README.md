@@ -173,11 +173,13 @@ When the content changes, it builds a new gateway from the file. If that
 succeeds, new requests go to the new gateway at once. Requests already
 running finish on the old gateway, which then closes. A replaced gateway
 that still has requests after `-reload-drain-timeout` closes anyway.
+`-reload-drain-timeout` must be positive.
 
 - **A bad file changes nothing.** A file that does not parse, has an
   unknown key or fails validation is logged at error level. The old
-  gateway keeps serving. The binary tries again only when the content
-  changes, or on `SIGHUP`.
+  gateway keeps serving. The binary tries again on every check, because
+  the cause can be outside the file, such as a secret file that is not
+  mounted yet. It logs each distinct error once.
 - **`SIGHUP` always rebuilds**, even when the content is unchanged. Use it
   after you rotate a secret that a `file:/path` reference reads.
 - **The check compares content, not timestamps.** A Kubernetes `ConfigMap`

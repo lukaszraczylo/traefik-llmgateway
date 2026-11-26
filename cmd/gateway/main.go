@@ -147,8 +147,11 @@ func parseOptions(args []string, stderr *os.File) (*options, error) {
 	if err := fs.Parse(args); err != nil {
 		return nil, err
 	}
-	if o.reloadEvery < 0 || o.reloadDrain < 0 {
-		return nil, fmt.Errorf("-reload-interval and -reload-drain-timeout must not be negative")
+	if o.reloadEvery < 0 {
+		return nil, fmt.Errorf("-reload-interval must not be negative, got %s", o.reloadEvery)
+	}
+	if o.reloadDrain <= 0 {
+		return nil, fmt.Errorf("-reload-drain-timeout must be positive, got %s", o.reloadDrain)
 	}
 	if o.healthPath == o.readyPath {
 		return nil, fmt.Errorf("-health-path and -ready-path must differ (both are %q)", o.healthPath)
@@ -323,6 +326,8 @@ func run() error {
 		// ErrServerClosed only ever arrives after a Shutdown this
 		// function did not start, so reaching it here is a real failure.
 		if !errors.Is(err, http.ErrServerClosed) {
+			stop()
+			<-reloadDone
 			sw.closeCurrent()
 			return fmt.Errorf("listen on %s: %w", opts.listenAddr, err)
 		}
