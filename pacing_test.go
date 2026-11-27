@@ -392,27 +392,59 @@ func TestRateLimitHeaders_429FromDayLimitReportsZeroUntilReset(t *testing.T) {
 	assert.Equal(t, retry+"s", rec.Header().Get("x-ratelimit-reset-requests"), "reset matches Retry-After, not the minute window")
 }
 
-func TestPacing_ConcurrentPacedRequestsCappedPerUser(t *testing.T) {
-	h, _ := pacingGateway(t, nil, &LimitsConfig{
-		RequestsPerMinute: 100,
-		Pacing:            &PacingConfig{StartPct: 1, MaxDelay: "400ms"},
-	})
-	const n = 12
-	var paced atomic.Int64
-	var wg sync.WaitGroup
-	for i := 0; i < n; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			rec := memberLimitsChat(t, h, "sk-a")
-			if rec.Header().Get(pacedHeader) != "" {
-				paced.Add(1)
-			}
-		}()
+func pacedWaiting(gw *Gateway) int {
+	p := gw.limiter.pacedSlots
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	n := 0
+	for _, c := range p.waiting {
+		n += c
 	}
+	return n
+}
+
+func TestPacing_ConcurrentPacedRequestsCappedPerUser(t *testing.T) {
+	// Every admitted request gets a delay of at least 3s, so the first
+	// maxConcurrentPaced requests stay in the gate until the test cancels them.
+	h, gw := pacingGateway(t, nil, &LimitsConfig{
+		RequestsPerMinute: maxConcurrentPaced + 2,
+		Pacing:            &PacingConfig{StartPct: 1, MaxDelay: maxPacingDelay.String()},
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	waiters := make([]*httptest.ResponseRecorder, maxConcurrentPaced)
+	var wg sync.WaitGroup
+	for i := range waiters {
+		waiters[i] = httptest.NewRecorder()
+		wg.Add(1)
+		go func(rec *httptest.ResponseRecorder) {
+			defer wg.Done()
+			body := map[string]any{"model": "gpt-test", "messages": []any{map[string]any{"role": "user", "content": "hi"}}}
+			h.ServeHTTP(rec, newUnifiedRequest(t, http.MethodPost, "/v1/chat/completions", "sk-a", body).WithContext(ctx))
+		}(waiters[i])
+	}
+	require.Eventually(t, func() bool { return pacedWaiting(gw) == maxConcurrentPaced }, 2*time.Second, time.Millisecond,
+		"the first requests wait in the pacing gate")
+
+	for i := 0; i < 2; i++ {
+		done := make(chan *httptest.ResponseRecorder, 1)
+		go func() { done <- memberLimitsChat(t, h, "sk-a") }()
+		select {
+		case rec := <-done:
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			assert.Empty(t, rec.Header().Get(pacedHeader), "a request above the cap proceeds undelayed")
+		case <-time.After(2 * time.Second):
+			t.Fatal("a request above the cap waited in the pacing gate")
+		}
+	}
+
+	cancel()
 	wg.Wait()
-	assert.LessOrEqual(t, paced.Load(), int64(maxConcurrentPaced), "requests above the cap proceed undelayed")
-	assert.Greater(t, paced.Load(), int64(0))
+	for _, rec := range waiters {
+		assert.NotEmpty(t, rec.Header().Get(pacedHeader), "requests inside the cap are paced")
+	}
+	assert.Zero(t, pacedWaiting(gw), "cancelled waiters release their slots")
 }
 
 func TestPacing_EventMessageRoundsDelay(t *testing.T) {

@@ -375,6 +375,15 @@ func cachedUsage(body []byte) usage {
 	return usage{prompt: parsed.Usage.Prompt, completion: parsed.Usage.Completion}
 }
 
+// cachedHitUsage parses a cached body's usage on a response-cache hit.
+// Tests set g.parseHitUsage to count parses; nil means cachedUsage.
+func (g *Gateway) cachedHitUsage(body []byte) usage {
+	if g.parseHitUsage != nil {
+		return g.parseHitUsage(body)
+	}
+	return cachedUsage(body)
+}
+
 // cacheEndpointChat and cacheEndpointEmbeddings are cacheKey's endpoint
 // argument, one per cacheable route (routes_unified.go's handleChat/
 // handleEmbeddings) — keeping /v1/chat/completions and /v1/embeddings

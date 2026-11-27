@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -3114,26 +3115,13 @@ func TestHandleChat_CacheMissFailover_CountsExactlyOneCmiss(t *testing.T) {
 	}
 }
 
-// TestCacheHit_BodyParseSkippedWhenStatsAdminOff is P4 (admin dashboard
-// redesign verify round, hot path): recordCacheHit itself already no-ops
-// when !statsAdmin, but cachedUsage(cached.Body) — a full JSON unmarshal
-// of the cached response body — used to run UNCONDITIONALLY before that
-// check, so a cache-enabled, admin-DISABLED deployment paid the parse
-// cost on every single hit for nothing (measured elsewhere at 639µs for a
-// 1 MiB body). Measured here via testing.AllocsPerRun against two real
-// Gateways (cache configured, admin on vs admin off) serving repeated
-// hits for the SAME large (256 KiB) cached body: admin off must allocate
-// dramatically less per hit than admin on, whose own cachedUsage+
-// unifiedCostMicros parse of that body — plus recordCacheHit's own
-// synchronous (spawn forced sync for determinism) counterStore write —
-// dominates its count.
+// TestCacheHit_BodyParseSkippedWhenStatsAdminOff checks that a cache hit
+// parses the cached body only when admin stats need it: the parse costs about
+// 639µs per MiB of body.
 func TestCacheHit_BodyParseSkippedWhenStatsAdminOff(t *testing.T) {
-	const bodySize = 2 << 20 // 2 MiB content, comfortably past BenchmarkV6_CachedUsage's own 1 MiB/639µs figure
-
-	buildHitFunc := func(t *testing.T, adminOn bool) func() {
+	parsesPerHit := func(t *testing.T, adminOn bool) int64 {
 		t.Helper()
-		content := strings.Repeat("a", bodySize)
-		respBody := `{"id":"x","object":"chat.completion","model":"gpt-test","choices":[{"index":0,"message":{"role":"assistant","content":"` + content + `"}}],"usage":{"prompt_tokens":10,"completion_tokens":5}}`
+		respBody := `{"id":"x","object":"chat.completion","model":"gpt-test","choices":[{"index":0,"message":{"role":"assistant","content":"hello"}}],"usage":{"prompt_tokens":10,"completion_tokens":5}}`
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
@@ -3149,16 +3137,11 @@ func TestCacheHit_BodyParseSkippedWhenStatsAdminOff(t *testing.T) {
 		cfg.Groups = map[string]*GroupConfig{"default": {}}
 		cfg.Users = &UsersConfig{Inline: []*UserConfig{{Name: "alice", Group: "default", APIKey: "sk-alice", Limits: &LimitsConfig{}}}}
 		cfg.Redis = &RedisConfig{Address: redisLn.Addr().String()}
-		// MaxBodyBytes raised to maxCacheMaxBodyBytes: the default
-		// (defaultCacheMaxBodyBytes, cache.go, exactly 1 MiB) would refuse
-		// to cache this test's own >1 MiB body at all, turning every
-		// "hit" attempt below back into a miss.
-		cfg.Cache = CacheConfig{Enabled: true, TTL: "1m", MaxBodyBytes: maxCacheMaxBodyBytes}
+		cfg.Cache = CacheConfig{Enabled: true, TTL: "1m"}
 		if adminOn {
 			cfg.Admin = &AdminConfig{Enabled: true}
 		}
-		next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
-		h, err := New(context.Background(), next, cfg, "llmgw")
+		h, err := New(context.Background(), http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), cfg, "llmgw")
 		if err != nil {
 			t.Fatalf("New: %v", err)
 		}
@@ -3167,50 +3150,31 @@ func TestCacheHit_BodyParseSkippedWhenStatsAdminOff(t *testing.T) {
 			t.Fatal("handler is not *Gateway")
 		}
 		gw.limiter.spawn = func(f func()) { f() }
+		var parses atomic.Int64
+		gw.parseHitUsage = func(b []byte) usage {
+			parses.Add(1)
+			return cachedUsage(b)
+		}
 
 		body := map[string]any{"model": "gpt-test", "messages": []any{map[string]any{"role": "user", "content": "hi"}}}
-		rec := httptest.NewRecorder()
-		h.ServeHTTP(rec, newUnifiedRequest(t, http.MethodPost, "/v1/chat/completions", "sk-alice", body))
-		if rec.Code != http.StatusOK || rec.Header().Get("X-Llmgw-Cache") != "miss" {
-			t.Fatalf("warm-up: status=%d cache=%q, want 200/miss", rec.Code, rec.Header().Get("X-Llmgw-Cache"))
-		}
-
-		return func() {
-			hrec := httptest.NewRecorder()
-			h.ServeHTTP(hrec, newUnifiedRequest(t, http.MethodPost, "/v1/chat/completions", "sk-alice", body))
-			if hrec.Code != http.StatusOK || hrec.Header().Get("X-Llmgw-Cache") != "hit" {
-				t.Fatalf("status=%d cache=%q, want 200/hit", hrec.Code, hrec.Header().Get("X-Llmgw-Cache"))
+		for i, want := range []string{"miss", "hit"} {
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, newUnifiedRequest(t, http.MethodPost, "/v1/chat/completions", "sk-alice", body))
+			if rec.Code != http.StatusOK || rec.Header().Get("X-Llmgw-Cache") != want {
+				t.Fatalf("request %d: status=%d cache=%q, want 200/%s", i, rec.Code, rec.Header().Get("X-Llmgw-Cache"), want)
+			}
+			if want == "miss" && parses.Load() != 0 {
+				t.Fatalf("a miss parsed the body %d times, want 0", parses.Load())
 			}
 		}
+		return parses.Load()
 	}
 
-	hitOn := buildHitFunc(t, true)
-	hitOff := buildHitFunc(t, false)
-
-	// encoding/json's decoder skips a field cachedUsage's target struct
-	// does not name (the cached body's own "choices[0].message.content")
-	// WITHOUT materializing it into a Go value — so the parse's own cost
-	// shows up as CPU time spent scanning every byte, not as a
-	// proportionally large allocation count or byte total (the actual
-	// perf finding this fix addresses was itself time-based: "1 MiB 639
-	// µs per hit"). NsPerOp is therefore the metric that actually reflects
-	// this fix, not AllocsPerRun/AllocedBytesPerOp.
-	resultOn := testing.Benchmark(func(b *testing.B) {
-		for i := 0; i < b.N; i++ {
-			hitOn()
-		}
-	})
-	resultOff := testing.Benchmark(func(b *testing.B) {
-		for i := 0; i < b.N; i++ {
-			hitOff()
-		}
-	})
-
-	nsOn := resultOn.NsPerOp()
-	nsOff := resultOff.NsPerOp()
-	t.Logf("cache-hit ns/op for a %d MiB cached body: admin on = %d, admin off = %d", bodySize/(1<<20), nsOn, nsOff)
-	if nsOn < nsOff+nsOff/3 {
-		t.Errorf("ns/op with admin on (%d) is not meaningfully slower than admin off (%d) — the cached body's own JSON parse (cachedUsage) must be skipped entirely when statsAdmin is off, not merely cheap", nsOn, nsOff)
+	if n := parsesPerHit(t, true); n < 1 {
+		t.Errorf("admin on: cache hit parsed the body %d times, want at least 1 (control: the seam sees the parse)", n)
+	}
+	if n := parsesPerHit(t, false); n != 0 {
+		t.Errorf("admin off: cache hit parsed the body %d times, want 0", n)
 	}
 }
 
