@@ -1930,6 +1930,14 @@ never a second candidate to try.
 - **Never mid-stream**: failover only happens while nothing has reached
   the client yet. Once the first byte of a response is written, status
   and body are committed and the request is never retried elsewhere.
+- **Cut streams fail**: an OpenAI-compatible stream that ends with neither
+  a `finish_reason` nor `data: [DONE]` (for example, the model server died
+  mid-reply) counts as an upstream failure, not a finished answer. Before
+  any output it fails over like any other failure. After output, the
+  client gets an error event instead of `[DONE]`: on `/v1/chat/completions`
+  `data: {"error":{"message":"upstream stream ended before the response
+  finished","type":"server_error"}}`, and on `/v1/messages` an Anthropic
+  `event: error`.
 - **Health signals, kept separate**: the discovery-endpoint health
   surfaced on the admin dashboard is an ordering hint only — a provider
   whose `/v1/models` is unhealthy is tried later, never skipped outright,
