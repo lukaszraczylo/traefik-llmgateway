@@ -133,3 +133,33 @@ func TestIdleStreamSetNilSafe(t *testing.T) {
 	s.remove(1)
 	s.drain()
 }
+
+func TestTargetProxy_EventStreamHeadersBeforeFirstEvent(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
+		<-r.Context().Done()
+	}))
+	t.Cleanup(upstream.Close)
+	front := httptest.NewServer(newIdleStreamGateway(t, upstream.URL))
+	t.Cleanup(front.Close)
+
+	req, err := http.NewRequest(http.MethodGet, front.URL+"/mcp/notes", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer sk-alice")
+	req.Header.Set("Accept", "text/event-stream")
+	// A proxy in front gives up when headers do not arrive, so a silent
+	// stream must still send them at once.
+	client := &http.Client{Transport: &http.Transport{ResponseHeaderTimeout: 2 * time.Second}}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("no response headers from an idle event stream: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || !strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream") {
+		t.Errorf("status %d content-type %q, want 200 text/event-stream", resp.StatusCode, resp.Header.Get("Content-Type"))
+	}
+}
