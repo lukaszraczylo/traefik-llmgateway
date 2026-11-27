@@ -233,6 +233,7 @@ type ProviderConfig struct {
 	// PromptCache opts this provider into prompt-caching body changes.
 	// nil (the default) leaves every request body unchanged.
 	PromptCache       *PromptCacheConfig `json:"promptCache,omitempty"`
+	Thinking          *ThinkingConfig    `json:"thinking,omitempty"`
 	Passthrough       *bool              `json:"passthrough,omitempty"`
 	Type              string             `json:"type"`
 	BaseURL           string             `json:"baseUrl,omitempty"`

@@ -474,6 +474,7 @@ also a construction error, never a panic (`providers.go`, `mcp_a2a.go`,
 | `passthrough` | `*bool` | `nil` (enabled) | `nil` or `true`: this provider's native passthrough route (`/{name}/...`) stays reachable, unchanged from before this field existed. `false`: the route is disabled — `ServeHTTP` treats it exactly like an unconfigured provider name, falling through to the ordinary unknown-route 404 without even reaching authentication. Does not affect the MCP/A2A target proxy, which has its own routing prefix. |
 | `requestTimeout` | `string` (Go duration) | Inherits the top-level `requestTimeout` (`5m` if that is also unset) | Overrides the global request timeout for this provider alone, including its native passthrough route — see [Request timeout](#request-timeout). An explicit override always wins over the global default. Empty inherits; a value that fails to parse, or parses to zero or a negative duration, is a construction error. |
 | `promptCache` | `*PromptCacheConfig` | `nil` (off) | Opt-in prompt-caching body changes. `inject: true` (`anthropic` type only) adds `cache_control` breakpoints. `key: true` (`openai` type only) adds a hashed `prompt_cache_key`. A wrong provider type is a construction error that names the provider. See [Prompt caching](#prompt-caching). |
+| `thinking` | `*ThinkingConfig` | `nil` (off) | Opt-in thinking adjustment, `openai` type only. `offBelowMaxTokens: N` turns thinking off (`chat_template_kwargs: {"enable_thinking": false}`) for a request whose `max_tokens` or `max_completion_tokens` is under `N` and that does not set thinking itself. See [Thinking on small replies](#thinking-on-small-replies). |
 
 ### `GroupConfig`
 
@@ -2222,6 +2223,25 @@ providers:
 
 The chat-to-Anthropic translation always keeps a `cache_control` marker that the client put on a system message.
 
+
+### Thinking on small replies
+
+A thinking model spends a small output cap on reasoning and then stops, so the reply arrives with empty content (`finish_reason: "length"`). Title and summary requests with a `max_tokens` of a few hundred hit this on servers that think by default.
+
+`providers.<name>.thinking.offBelowMaxTokens` (`openai` type only, default off) fixes it for one provider. When a chat request caps its output under the value, the gateway adds `chat_template_kwargs: {"enable_thinking": false}` to the body it sends upstream. It also does this on `/v1/messages` when it translates the request for that provider.
+
+The gateway leaves the request alone when:
+- it has no `max_tokens` or `max_completion_tokens`, or the cap is at or above the value;
+- the client sets thinking itself through `reasoning_effort`, `reasoning`, `thinking`, `enable_thinking`, or `chat_template_kwargs.enable_thinking` / `chat_template_kwargs.thinking`.
+
+A client's other `chat_template_kwargs` keys are kept. The response cache still keys on the client's body.
+
+```yaml
+providers:
+  uni:
+    type: openai
+    thinking: {offBelowMaxTokens: 4096}
+```
 ## Provider health (discovery circuit breaker)
 
 A per-provider, in-memory, three-state circuit breaker (`closed` →
