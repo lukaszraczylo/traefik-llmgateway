@@ -407,13 +407,15 @@ func relayAnthropicMessagesStream(w http.ResponseWriter, body io.Reader, model s
 
 // writeEvent writes one frame with an "event:" line ahead of the data, the
 // framing the Anthropic Messages stream uses. event must not contain a line
-// terminator; an empty event writes a bare data frame.
+// terminator; an empty event writes a bare data frame. Every data line is
+// split the way writeData splits it, so no raw CR or LF reaches the wire.
 func (s *sseWriter) writeEvent(event string, b []byte) error {
-	if event == "" {
-		return s.writeData(b)
+	var buf []byte
+	if event != "" {
+		buf = append(buf, sseEventPrefix...)
+		buf = append(buf, event...)
+		buf = append(buf, '\n')
 	}
-	buf := append([]byte(sseEventPrefix), event...)
-	buf = append(buf, '\n')
 	for _, line := range splitSSELines(b) {
 		buf = append(buf, sseDataPrefix...)
 		buf = append(buf, line...)
