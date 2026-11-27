@@ -1309,6 +1309,9 @@ func midStreamErrorMessage(err error, providerName string) (msg, errType string,
 	if _, isRTerr := err.(*responseTranslationError); isRTerr {
 		return "failed to translate provider response", "server_error", true
 	}
+	if errors.Is(err, errStreamTruncated) {
+		return "upstream stream ended before the response finished", "server_error", true
+	}
 	return "upstream connection error", "server_error", true
 }
 

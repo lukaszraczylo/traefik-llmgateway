@@ -280,8 +280,11 @@ func (a *openaiAdapter) forwardStream(w http.ResponseWriter, body io.Reader, cli
 	finish := ""
 	hasOutput := false
 
+	sawDone := false
+
 	err := readSSE(body, func(ev sseEvent) error {
 		if string(ev.data) == sseDoneMarker {
+			sawDone = true
 			sw.writeDone()
 			return nil
 		}
@@ -306,6 +309,9 @@ func (a *openaiAdapter) forwardStream(w http.ResponseWriter, body io.Reader, cli
 		}
 		return sw.writeData(ev.data)
 	})
+	if err == nil && !sawDone && finish == "" {
+		err = errStreamTruncated
+	}
 	if err != nil {
 		// u carries whatever usage was already captured before the stream
 		// broke — a usage chunk that arrived, then a dropped connection,

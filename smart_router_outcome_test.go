@@ -84,9 +84,10 @@ func TestUsageFinishLengthStream(t *testing.T) {
 func TestUsageFinishLengthStreamCutShortSetsNothing(t *testing.T) {
 	t.Parallel()
 	cut := "data: {\"choices\":[{\"delta\":{\"content\":\"hel\"},\"finish_reason\":null}]}\n\n"
-	length, empty := streamFlags(t, "openai", cut)
-	assert.False(t, length)
-	assert.False(t, empty, "a stream without a finish reason is a cut connection, not an empty answer")
+	u, err := (&openaiAdapter{}).forwardStream(httptest.NewRecorder(), strings.NewReader(cut), false)
+	require.ErrorIs(t, err, errStreamTruncated, "a stream without a finish reason is a cut connection")
+	assert.False(t, u.finishLength)
+	assert.False(t, u.emptyOutput, "a cut connection is not an empty answer")
 }
 
 func jsonResponse(body string) *http.Response {

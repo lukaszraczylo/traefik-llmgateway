@@ -115,6 +115,10 @@ func readAllLimited(r io.Reader, contentLength, limit int64) ([]byte, error) {
 // with a non-2xx status.
 var errUpstream = errors.New("llmgateway: upstream request failed")
 
+// errStreamTruncated marks an upstream event stream that ended with neither a
+// finish_reason nor [DONE], as when the model server dies mid-reply.
+var errStreamTruncated = errors.New("stream ended without finish_reason or [DONE]")
+
 // errRequestBuildFailed marks an upstreamJSON failure that happened
 // before any network I/O — http.NewRequestWithContext rejected the
 // method or URL. It is chained alongside errUpstream (Go's multi-%w), so
