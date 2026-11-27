@@ -1811,6 +1811,11 @@ func (g *Gateway) proxyUpstream(w http.ResponseWriter, r *http.Request, upstream
 	restoreRateLimitHeaders(w.Header(), gwRateHeaders)
 	w.WriteHeader(resp.StatusCode)
 	fw := newFlushWriter(w)
+	// An event stream can stay silent for a long time, and a proxy in front
+	// gives up when no response headers arrive.
+	if fw.f != nil && isEventStreamResponse(resp) {
+		fw.f.Flush()
+	}
 
 	// A non-streaming JSON response, or an SSE stream (isSSE — finding 2
 	// fix, review-routes.md: previously only isJSON was teed at all, so a
