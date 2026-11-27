@@ -55,8 +55,6 @@ var errSSEEventTooLarge = errors.New("llmgateway: sse event data exceeded the ma
 // event payload, per the text/event-stream wire format.
 const sseDataPrefix = "data: "
 
-const sseEventPrefix = "event: "
-
 // sseBOM is the UTF-8 byte-order mark. Some proxies still add one at the
 // start of a stream. Left in place, it attaches to the first field name.
 // "data:" becomes "\ufeffdata:", and readSSE drops the first event as an
@@ -285,31 +283,6 @@ func splitSSELines(b []byte) [][]byte {
 		}
 		b = b[i+1:]
 	}
-}
-
-// writeEvent writes one frame with an "event:" line ahead of the data, the
-// framing the Anthropic Messages stream uses. event must not contain a line
-// terminator; an empty event writes a bare data frame.
-func (s *sseWriter) writeEvent(event string, b []byte) error {
-	if event == "" {
-		return s.writeData(b)
-	}
-	buf := append([]byte(sseEventPrefix), event...)
-	buf = append(buf, '\n')
-	for _, line := range splitSSELines(b) {
-		buf = append(buf, sseDataPrefix...)
-		buf = append(buf, line...)
-		buf = append(buf, '\n')
-	}
-	buf = append(buf, '\n')
-
-	if _, err := s.w.Write(buf); err != nil {
-		return err
-	}
-	if s.f != nil {
-		s.f.Flush()
-	}
-	return nil
 }
 
 // writeData writes one SSE data event as a single Write call, flushing

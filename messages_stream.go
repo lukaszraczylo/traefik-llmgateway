@@ -10,6 +10,9 @@ import (
 	"strings"
 )
 
+// sseEventPrefix is the SSE "event:" field prefix.
+const sseEventPrefix = "event: "
+
 // anthropicStreamErrorType is the error.type of an in-stream Anthropic error event.
 const anthropicStreamErrorType = "api_error"
 
@@ -400,4 +403,29 @@ func relayAnthropicMessagesStream(w http.ResponseWriter, body io.Reader, model s
 		return st.usage(), fmt.Errorf("%w: %w", errStreamErrorRelayed, err)
 	}
 	return st.usage(), fmt.Errorf("%w: stream: %w", errUpstream, err)
+}
+
+// writeEvent writes one frame with an "event:" line ahead of the data, the
+// framing the Anthropic Messages stream uses. event must not contain a line
+// terminator; an empty event writes a bare data frame.
+func (s *sseWriter) writeEvent(event string, b []byte) error {
+	if event == "" {
+		return s.writeData(b)
+	}
+	buf := append([]byte(sseEventPrefix), event...)
+	buf = append(buf, '\n')
+	for _, line := range splitSSELines(b) {
+		buf = append(buf, sseDataPrefix...)
+		buf = append(buf, line...)
+		buf = append(buf, '\n')
+	}
+	buf = append(buf, '\n')
+
+	if _, err := s.w.Write(buf); err != nil {
+		return err
+	}
+	if s.f != nil {
+		s.f.Flush()
+	}
+	return nil
 }
