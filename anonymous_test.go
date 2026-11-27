@@ -173,3 +173,94 @@ func TestGateway_AnonymousModeOffKeepsKeyRequired(t *testing.T) {
 		t.Fatalf("status %d, want 401", rec.Code)
 	}
 }
+
+func TestIdentify_AnonymousAcceptAnyKey(t *testing.T) {
+	cfg := anonAuthCfg()
+	cfg.Users.AnonymousAcceptAnyKey = true
+	a, err := newAuthStore(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		headers   map[string]string
+		name      string
+		wantUser  string
+		wantGroup string
+	}{
+		{name: "no credentials", wantUser: anonymousUserName, wantGroup: "public"},
+		{name: "valid bearer", headers: map[string]string{"Authorization": "Bearer sk-secret"}, wantUser: "a", wantGroup: "eng"},
+		{name: "valid x-api-key", headers: map[string]string{"x-api-key": "sk-secret"}, wantUser: "a", wantGroup: "eng"},
+		{name: "dummy bearer", headers: map[string]string{"Authorization": "Bearer sk-dummy"}, wantUser: anonymousUserName, wantGroup: "public"},
+		{name: "dummy x-api-key", headers: map[string]string{"x-api-key": "sk-dummy"}, wantUser: anonymousUserName, wantGroup: "public"},
+		{name: "non-bearer scheme", headers: map[string]string{"Authorization": "Basic dXNlcjpwYXNz"}, wantUser: anonymousUserName, wantGroup: "public"},
+		{name: "empty bearer", headers: map[string]string{"Authorization": "Bearer "}, wantUser: anonymousUserName, wantGroup: "public"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+			for k, v := range tc.headers {
+				r.Header.Set(k, v)
+			}
+			u, grp, ok := a.identify(r)
+			if !ok {
+				t.Fatal("want a principal")
+			}
+			if u.name != tc.wantUser || grp.name != tc.wantGroup {
+				t.Fatalf("got user %q group %q, want %q %q", u.name, grp.name, tc.wantUser, tc.wantGroup)
+			}
+		})
+	}
+}
+
+func TestIdentify_AnonymousAcceptAnyKeyRecordsNoFailures(t *testing.T) {
+	cfg := anonAuthCfg()
+	cfg.Users.AnonymousAcceptAnyKey = true
+	a, err := newAuthStore(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	r.Header.Set("Authorization", "Bearer sk-dummy")
+	for range authFailureLimit + 1 {
+		a.identify(r)
+	}
+	if a.authThrottled(clientIP(r)) {
+		t.Fatal("a dummy key admitted as anonymous must not count as an auth failure")
+	}
+}
+
+func TestNewAuthStore_AnonymousAcceptAnyKeyNeedsGroup(t *testing.T) {
+	cfg := anonAuthCfg()
+	cfg.Users.AnonymousGroup = ""
+	cfg.Users.AnonymousAcceptAnyKey = true
+	_, err := newAuthStore(cfg)
+	if err == nil || !strings.Contains(err.Error(), "anonymousAcceptAnyKey needs users.anonymousGroup") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestGateway_AnonymousAcceptAnyKey(t *testing.T) {
+	cfg := newAdminTestConfig()
+	cfg.Groups["public"] = &GroupConfig{Models: []string{"a-model-1"}}
+	cfg.Users.AnonymousGroup = "public"
+	cfg.Users.AnonymousAcceptAnyKey = true
+	cfg.Metrics = &MetricsConfig{Enabled: true}
+	h, _ := newAdminGatewayHandle(t, cfg)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, adminRequest(http.MethodGet, "/v1/models", "sk-dummy"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("/v1/models with a dummy key: status %d, body %s", rec.Code, rec.Body.String())
+	}
+	if body := rec.Body.String(); !strings.Contains(body, "a-model-1") || strings.Contains(body, "z-model") {
+		t.Fatalf("/v1/models must list only the anonymous group's models: %s", body)
+	}
+
+	for _, p := range []string{adminOverviewPath, adminUsagePath, adminTargetsPath, metricsPath(cfg)} {
+		rec = httptest.NewRecorder()
+		h.ServeHTTP(rec, adminRequest(http.MethodGet, p, "sk-dummy"))
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("%s with a dummy key: status %d, want 401", p, rec.Code)
+		}
+	}
+}

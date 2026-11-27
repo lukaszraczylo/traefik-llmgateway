@@ -370,6 +370,9 @@ type UsersConfig struct {
 	// key. Empty (the default) requires a key on every route.
 	AnonymousGroup string        `json:"anonymousGroup,omitempty"`
 	Inline         []*UserConfig `json:"inline,omitempty"`
+	// AnonymousAcceptAnyKey also serves a key that matches no user as
+	// "anonymous", for clients that cannot omit the key. Needs AnonymousGroup.
+	AnonymousAcceptAnyKey bool `json:"anonymousAcceptAnyKey,omitempty"`
 }
 
 // UserConfig describes one API-key holder.
