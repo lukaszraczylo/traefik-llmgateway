@@ -15,6 +15,9 @@ import (
 // later tasks' SSE streaming depends on Flush passing through.
 type statusTrackingWriter struct {
 	http.ResponseWriter
+	// sseError, when set, writes a mid-stream failure in the route's own SSE
+	// error shape instead of the OpenAI one.
+	sseError    func(msg string)
 	wroteHeader bool
 }
 

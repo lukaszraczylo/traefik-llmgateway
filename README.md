@@ -2424,22 +2424,38 @@ A few translation specifics worth knowing:
   target; the gateway logs a warning naming the dropped field rather
   than discarding it silently.
 
-### Streaming is not yet supported
+### Streaming
 
-`"stream"` set to anything other than the JSON literal `false`, `null`,
-or an absent key gets a clean **400** `invalid_request_error` — never
-silently ignored, never answered non-streamed. `null` is treated the
-same as unset, so an SDK that serializes an unset optional field as
-explicit `null` never gets a false-positive rejection on an ordinary
-non-streaming call. This is deliberately a 400, not a 501: Anthropic's
-own SDKs retry any status ≥ 500, so a 501 here would turn every
-streaming call — the default for Claude Code — into a multi-request
-retry storm against the caller's own request-rate limit. The rejection
-happens *before* the rate limiter runs, so a streaming-rejected request
-never consumes budget either. A follow-up release adds the Anthropic SSE
-event translator (`message_start`/`content_block_delta`/`message_stop`)
-— a genuinely different event model from OpenAI's own stream shape this
-plugin already forwards on `/v1/chat/completions`.
+Set `"stream": true` and the route answers with the Anthropic Messages
+event stream (`text/event-stream`). Any value other than `false`, `null`
+or an absent key counts as streaming. The gateway flushes each event as
+it arrives and never buffers the whole stream.
+
+- **`openai` and `gemini` providers:** the gateway asks the upstream for a
+  stream with `stream_options.include_usage: true` and translates each
+  chunk. The client sees `message_start`, then one
+  `content_block_start`/`content_block_delta`/`content_block_stop` group
+  per block, then `message_delta` (stop reason, token usage) and
+  `message_stop`. Text arrives as `text_delta`. Each OpenAI tool call
+  becomes a `tool_use` block whose arguments arrive as
+  `input_json_delta`. The stop reason uses the same mapping as a
+  non-streaming answer. `message.model` is the model the client asked
+  for. OpenAI reports prompt tokens only in its last chunk, so
+  `message_start` carries `input_tokens: 0` and `message_delta` carries
+  the real `input_tokens` and `output_tokens`.
+- **`anthropic` providers:** the gateway relays each upstream event
+  unchanged, except that `message.model` in `message_start` becomes the
+  model the client asked for. An upstream `error` event reaches the
+  client as is.
+- **Billing** uses the stream's own usage: the last OpenAI usage chunk,
+  or the `message_start` input and cache tokens plus the `message_delta`
+  output tokens for an Anthropic stream. A stream that reports no usage
+  is accounted like a stream on `/v1/chat/completions`.
+- **Errors:** an upstream error before the stream starts gets the normal
+  Anthropic JSON error. After the stream starts, the gateway sends
+  `event: error` with `{"type":"error","error":{"type":"api_error",...}}`
+  and ends the stream without `message_stop`.
+- Streams are never cached.
 
 ### Route takeover
 

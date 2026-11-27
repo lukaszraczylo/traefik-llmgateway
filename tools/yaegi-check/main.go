@@ -323,6 +323,11 @@ func run() error {
 	// is respecified here too, identical apiKey/group, rather than
 	// silently dropped).
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reqBody, _ := io.ReadAll(r.Body)
+		if bytes.Contains(reqBody, []byte(`"stream":true`)) {
+			writeFakeChatStream(w)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"id":"c1","object":"chat.completion","model":"gpt-test","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`))
@@ -2301,18 +2306,10 @@ func exerciseMessagesRoute(handler http.Handler) error {
 		return err
 	}
 
-	// 4. "stream": true is rejected explicitly, in the Anthropic shape,
-	// as a 400 (item 2 fix, 2026-08-22 review) — NOT 501: a 501 makes
-	// anthropic-sdk-python (which retries any status >= 500) turn every
-	// streaming call into a three-request retry storm against this
-	// route's own rate limit. 400 maps to the SDK's non-retryable
-	// BadRequestError.
+	// 4. "stream": true streams the translated Anthropic event sequence.
 	streamRec := postMessages(handler, "x-api-key", testDataUserAPIKey,
 		`{"model":"`+testDataWantModel+`","max_tokens":64,"stream":true,"messages":[{"role":"user","content":"ping"}]}`)
-	if streamRec.Code != http.StatusBadRequest {
-		return fmt.Errorf("POST /v1/messages with stream=true: status = %d, want 400, body=%s", streamRec.Code, streamRec.Body.String())
-	}
-	if err := assertAnthropicErrorShape("stream rejection", streamRec.Body.Bytes()); err != nil {
+	if err := assertAnthropicStream(streamRec); err != nil {
 		return err
 	}
 
@@ -4262,4 +4259,76 @@ func latestEventKindAndStatus(handler http.Handler) (kind string, status int, er
 	k, _ := first["kind"].(string)
 	s, _ := first["status"].(float64)
 	return k, int(s), nil
+}
+
+// writeFakeChatStream answers a streaming chat completion with one text
+// chunk, one tool call split over two chunks, the finish chunk, the usage
+// chunk and [DONE], flushing after each frame.
+func writeFakeChatStream(w http.ResponseWriter) {
+	frames := []string{
+		`{"id":"c1","choices":[{"index":0,"delta":{"role":"assistant","content":"hi"}}]}`,
+		`{"id":"c1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"get_weather","arguments":"{\"city\":"}}]}}]}`,
+		`{"id":"c1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"Paris\"}"}}]}}]}`,
+		`{"id":"c1","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+		`{"id":"c1","choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1}}`,
+		`[DONE]`,
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.WriteHeader(http.StatusOK)
+	f, _ := w.(http.Flusher)
+	for _, fr := range frames {
+		_, _ = io.WriteString(w, "data: "+fr+"\n\n")
+		if f != nil {
+			f.Flush()
+		}
+	}
+}
+
+// assertAnthropicStream checks a streamed /v1/messages answer to
+// writeFakeChatStream: event order, the text and tool_use blocks, the
+// stop reason and the usage.
+func assertAnthropicStream(rec *httptest.ResponseRecorder) error {
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Header().Get("Content-Type"), "text/event-stream") {
+		return fmt.Errorf("POST /v1/messages stream: status = %d, Content-Type = %q, body=%s", rec.Code, rec.Header().Get("Content-Type"), rec.Body.String())
+	}
+	var names []string
+	var datas []map[string]any
+	for _, frame := range strings.Split(strings.TrimSpace(rec.Body.String()), "\n\n") {
+		var name, data string
+		for _, line := range strings.Split(frame, "\n") {
+			if v, ok := strings.CutPrefix(line, "event: "); ok {
+				name = v
+			}
+			if v, ok := strings.CutPrefix(line, "data: "); ok {
+				data = v
+			}
+		}
+		var m map[string]any
+		if err := json.Unmarshal([]byte(data), &m); err != nil || m["type"] != name {
+			return fmt.Errorf("POST /v1/messages stream: bad frame %q", frame)
+		}
+		names = append(names, name)
+		datas = append(datas, m)
+	}
+	want := "message_start content_block_start content_block_delta content_block_stop content_block_start content_block_delta content_block_delta content_block_stop message_delta message_stop"
+	if got := strings.Join(names, " "); got != want {
+		return fmt.Errorf("POST /v1/messages stream: events = %s, want %s", got, want)
+	}
+	field := func(i int, key string) map[string]any { v, _ := datas[i][key].(map[string]any); return v }
+	if field(0, "message")["model"] != testDataWantModel || field(2, "delta")["text"] != "hi" {
+		return fmt.Errorf("POST /v1/messages stream: message_start/text = %v / %v", datas[0], datas[2])
+	}
+	if tool := field(4, "content_block"); tool["type"] != "tool_use" || tool["name"] != "get_weather" {
+		return fmt.Errorf("POST /v1/messages stream: tool block = %v", tool)
+	}
+	args, _ := field(5, "delta")["partial_json"].(string)
+	more, _ := field(6, "delta")["partial_json"].(string)
+	if args+more != `{"city":"Paris"}` {
+		return fmt.Errorf("POST /v1/messages stream: tool arguments = %q", args+more)
+	}
+	if field(8, "delta")["stop_reason"] != "tool_use" || field(8, "usage")["output_tokens"] != float64(1) {
+		return fmt.Errorf("POST /v1/messages stream: message_delta = %v", datas[8])
+	}
+	fmt.Println("yaegi-check: /v1/messages streamed text and tool_use events, interpreted")
+	return nil
 }
