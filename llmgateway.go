@@ -881,6 +881,7 @@ type Gateway struct {
 	routerLearn                   *routerLearner
 	sharedState                   *sharedStateLoop
 	tokenCalib                    *smartTokenCalibrator
+	parseHitUsage                 func([]byte) usage
 	name                          string
 	replica                       string
 	failoverLogGate               logGate

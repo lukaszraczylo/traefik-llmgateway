@@ -529,11 +529,11 @@ func (g *Gateway) runMeteredCall(sw *statusTrackingWriter, r *http.Request, scop
 				// case. Gating here, not just inside recordCacheHit, is what
 				// actually saves the parse.
 				if g.cfg.Cache.AccountHits {
-					hitUsage := cachedUsage(cached.Body)
+					hitUsage := g.cachedHitUsage(cached.Body)
 					g.limiter.accountWith(scopes, hitUsage, unifiedCostMicros(cand.canonical, cand.upstreamModel, hitUsage, g.cfg.Pricing, g.cfg.ModelMeta, g.pricingWarn), accountExtras{provider: cand.providerName, responseCacheHit: true})
 				}
 				if g.limiter.statsAdmin {
-					saved := unifiedCostMicros(cand.canonical, cand.upstreamModel, cachedUsage(cached.Body), g.cfg.Pricing, g.cfg.ModelMeta, func(string) {})
+					saved := unifiedCostMicros(cand.canonical, cand.upstreamModel, g.cachedHitUsage(cached.Body), g.cfg.Pricing, g.cfg.ModelMeta, func(string) {})
 					g.limiter.recordCacheHit(cand.canonical, saved)
 				}
 				if plan != nil {
