@@ -294,12 +294,9 @@ func (s *sseWriter) writeEvent(event string, b []byte) error {
 	if event == "" {
 		return s.writeData(b)
 	}
-	lines := splitSSELines(b)
-	buf := make([]byte, 0, len(sseEventPrefix)+len(event)+len(b)+len(lines)*len(sseDataPrefix)+len(lines)+2)
-	buf = append(buf, sseEventPrefix...)
-	buf = append(buf, event...)
+	buf := append([]byte(sseEventPrefix), event...)
 	buf = append(buf, '\n')
-	for _, line := range lines {
+	for _, line := range splitSSELines(b) {
 		buf = append(buf, sseDataPrefix...)
 		buf = append(buf, line...)
 		buf = append(buf, '\n')
