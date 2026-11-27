@@ -55,20 +55,9 @@ var anthropicPassthroughForwardedHeaders = []string{"anthropic-beta"}
 // (Anthropic's {"type":"error","error":{...}}, not OpenAI's
 // {"error":{...}} — see writeAnthropicError and its callers, below).
 //
-// ORDERING (item 2 fix, 2026-08-22 review): body admission + decode run
-// BEFORE admitRequestForRoute (the rate-limit check) on THIS route — the
-// opposite order from runUnified's own finding 1a. anthropic-sdk-python
-// retries any status >= 500, and Claude Code streams on every call: the
-// previous ordering (admitRequestForRoute first, streaming rejected only
-// after decode) meant every real client hitting this not-yet-streaming-capable
-// route burned three requests of rate-limit budget per logical call —
-// verified repro: requestsPerMinute 2, three attempts -> 501, 501, 429,
-// day counter reads 3. Deciding "is this streaming" requires the decoded
-// body, so decode has to happen first; the trade-off finding 1a accepts
-// for runUnified (an adversarial caller paying nothing to retry a
-// malformed body) does not apply here, since the common case hitting
-// this ordering is not adversarial retries but every legitimate
-// streaming-capable client that exists today.
+// Body admission and decode run before admitRequestForRoute, the reverse of
+// runUnified: Anthropic SDKs retry any status >= 500, so a request that
+// fails before reaching a provider must not spend rate-limit budget.
 func (g *Gateway) handleMessages(w http.ResponseWriter, r *http.Request, u *user, grp *group) {
 	sw := &statusTrackingWriter{ResponseWriter: w}
 
@@ -83,25 +72,11 @@ func (g *Gateway) handleMessages(w http.ResponseWriter, r *http.Request, u *user
 		return
 	}
 
-	// Streaming is rejected cleanly and explicitly here, before the
-	// rate-limit check, model resolution, or any upstream call: this cut
-	// of the route ships non-streaming only (brief scope) — a follow-up
-	// branch adds the Anthropic SSE event translator (message_start/
-	// content_block_delta/message_stop), a genuinely different event
-	// model from OpenAI's stream shape this route already knows how to
-	// forward. A caller that asked for streaming must see a clear, typed
-	// error, never a silently-ignored flag answered non-streamed.
-	//
-	// 400, not 501 (item 2 fix, 2026-08-22 review): anthropic-sdk-python's
-	// retry classifies purely on status code and retries anything >= 500
-	// — a 501 here turned every streaming call into an SDK-driven retry
-	// storm against this route's own rate limit (this function's own doc
-	// comment above has the verified repro). 400 maps to the SDK's
-	// non-retryable BadRequestError, and invalid_request_error is already
-	// the correct error type for a 400.
+	// Normalized so runMeteredCall and the adapters, which read a bool, see
+	// every shape isStreamingRequested accepts as streaming.
 	if isStreamingRequested(req) {
-		writeAnthropicError(sw, http.StatusBadRequest, "invalid_request_error", "streaming is not yet supported on /v1/messages")
-		return
+		req["stream"] = true
+		sw.sseError = func(msg string) { writeAnthropicStreamError(sw, msg) }
 	}
 
 	scopes, ok := g.admitRequestForRoute(r.Context(), sw, u, grp, writeAnthropicError, routeMessages, int64(len(body)), "")
@@ -241,6 +216,10 @@ func (g *Gateway) callAnthropicMessagesPassthrough(ctx context.Context, w http.R
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return usage{}, newProviderHTTPError(resp)
+	}
+
+	if isStreamingRequested(req) && isEventStreamResponse(resp) {
+		return relayAnthropicMessagesStream(w, resp.Body, requestedModel)
 	}
 
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
@@ -413,19 +392,18 @@ func (g *Gateway) callTranslatedMessages(ctx context.Context, w http.ResponseWri
 
 	g.applyTranslatedPromptCacheKey(openaiReq, req, adapter.name())
 
+	if streaming, _ := openaiReq["stream"].(bool); streaming {
+		aw := newAnthropicStreamWriter(w, requestedModel)
+		streamed, serr := adapter.chatCompletion(ctx, aw, openaiReq)
+		if serr != nil {
+			return streamed, serr
+		}
+		return streamed, aw.finish(streamed)
+	}
+
 	rec := newMessagesResponseRecorder()
 	result, err := adapter.chatCompletion(ctx, rec, openaiReq)
 	if err != nil {
-		// result, not usage{} (F5 fix, 2026-08-23 review): harmless today
-		// — streaming is rejected before this route ever reaches here, so
-		// chatCompletion's non-streaming contract already guarantees
-		// usage{} on any error. It matters the day streaming lands: a
-		// streaming chatCompletion call (forwardStream) CAN return
-		// nonzero usage alongside an error — a usage chunk that arrived
-		// just before a dropped connection must still be billed — and
-		// discarding it here would reintroduce item 1's original
-		// CRITICAL (usage silently dropped on an error path) the moment
-		// this route gains streaming support.
 		return result, err
 	}
 

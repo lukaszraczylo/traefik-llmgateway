@@ -1493,15 +1493,9 @@ func openAIRequestFromAnthropic(req map[string]any) (map[string]any, []string, e
 	if seqs, ok := req["stop_sequences"].([]any); ok && len(seqs) > 0 {
 		out["stop"] = seqs
 	}
-	// L10 fix: no "stream" copy here — routes_messages.go's
-	// isStreamingRequested check (its own doc comment) rejects any
-	// streaming /v1/messages request with a 400 before
-	// openAIRequestFromAnthropic ever runs, so req["stream"] reaching
-	// this point can only be absent, false, or null. Copying it through
-	// was dead code with no observable effect (the downstream adapter's
-	// own `streaming, _ := req["stream"].(bool)` treats all three
-	// identically to omitting the field outright) — removed rather than
-	// left in place, per this repo's dead-code-hygiene rule.
+	if isStreamingRequested(req) {
+		out["stream"] = true
+	}
 
 	if toolsRaw, ok := req["tools"].([]any); ok {
 		out["tools"] = openAIToolsFromAnthropic(toolsRaw)

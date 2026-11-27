@@ -1350,8 +1350,15 @@ func (g *Gateway) handleAdapterErrorEnvelope(sw *statusTrackingWriter, err error
 
 	if sw.wroteHeader {
 		g.errorf("%s: adapter error after response started (provider %q): %v", logPrefix, providerName, err)
+		if errors.Is(err, errStreamErrorRelayed) {
+			return
+		}
 		if msg, errType, ok := midStreamErrorMessage(err, providerName); ok &&
 			strings.Contains(strings.ToLower(sw.Header().Get("Content-Type")), "text/event-stream") {
+			if sw.sseError != nil {
+				sw.sseError(msg)
+				return
+			}
 			errBody, _ := json.Marshal(map[string]any{ // json.Marshal on a literal map[string]any of strings never fails
 				"error": map[string]any{"message": msg, "type": errType},
 			})
