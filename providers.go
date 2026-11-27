@@ -691,6 +691,9 @@ func buildAdapters(cfg *Config) (map[string]providerAdapter, error) {
 		if err := validatePromptCache(name, pc.Type, pc.PromptCache); err != nil {
 			return nil, err
 		}
+		if err := validateThinking(name, pc.Type, pc.Thinking); err != nil {
+			return nil, err
+		}
 
 		switch pc.Type {
 		case providerTypeOpenAI:

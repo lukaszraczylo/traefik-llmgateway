@@ -391,6 +391,7 @@ func (g *Gateway) callTranslatedMessages(ctx context.Context, w http.ResponseWri
 	}
 
 	g.applyTranslatedPromptCacheKey(openaiReq, req, adapter.name())
+	applyThinkingFloor(openaiReq, req, g.providerThinkingFloor(adapter.name()))
 
 	if streaming, _ := openaiReq["stream"].(bool); streaming {
 		aw := newAnthropicStreamWriter(w, requestedModel)
