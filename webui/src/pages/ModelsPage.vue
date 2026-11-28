@@ -5,7 +5,7 @@ import { computed, onMounted, reactive, watch } from 'vue'
 
 import { formatCompactCount, formatContextWindow, formatModelCostHover } from '@/lib/format'
 import { loadState } from '@/lib/load-state'
-import { NO_KIND, groupByProvider, priceStatus, selectModels } from '@/lib/models-view'
+import { groupByProvider, modelFilterFields, priceStatus, selectModels } from '@/lib/models-view'
 import type { ModelSelection, PriceStatus } from '@/lib/models-view'
 import { pageWindow } from '@/lib/paging'
 import { resolveSel } from '@/lib/panel-selection'
@@ -30,11 +30,6 @@ const PAGE_SIZE = 12
 const ROUTER_BADGES = 2
 const FILTER_KEYS = ['provider', 'kind', 'price'] as const
 type FilterKey = (typeof FILTER_KEYS)[number]
-const PRICE_OPTIONS: Array<{ value: PriceStatus; label: string }> = [
-  { value: 'priced', label: 'Priced' },
-  { value: 'unpriced', label: 'Unpriced' },
-  { value: 'free', label: 'Free' },
-]
 const HEALTH_TONE = { healthy: 'success', degraded: 'warning', severe: 'danger' } as const
 const BREAKER_TONE = { closed: 'success', open: 'danger', 'half-open': 'warning', degraded: 'warning' } as const
 
@@ -88,12 +83,8 @@ const filtering = computed(() => query.value.trim() !== '' || FILTER_KEYS.some((
 const overviewProviders = computed(() => dashboard.overview?.providers ?? [])
 const fields = computed<FilterField[]>(() => {
   const kinds = [...new Set(models.rows.map((r) => r.kind).filter((k) => k !== ''))].sort()
-  const providers = [...new Set([...overviewProviders.value.map((p) => p.name), ...models.rows.map((r) => r.providerName)])].sort()
-  return [
-    { id: 'provider', label: 'Provider', type: 'select', operators: ['eq'], options: providers.map((p) => ({ value: p, label: p })) },
-    { id: 'kind', label: 'Kind', type: 'select', operators: ['eq'], options: [{ value: NO_KIND, label: 'No kind' }, ...kinds.map((k) => ({ value: k, label: k }))] },
-    { id: 'price', label: 'Price', type: 'select', operators: ['eq'], options: PRICE_OPTIONS },
-  ]
+  const providers = [...overviewProviders.value.map((p) => p.name), ...models.rows.map((r) => r.providerName)]
+  return modelFilterFields(providers, kinds, nav.params.provider)
 })
 const filterItems = computed<FilterItem[]>(() =>
   FILTER_KEYS.filter((k) => nav.params[k]).map((k) => ({ id: k, field: k, operator: 'eq', value: nav.params[k]! })),
