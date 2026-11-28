@@ -336,6 +336,26 @@ func replaceURLForm(msg, form string) string {
 // base URL names no credential by itself, and any credential-shaped
 // userinfo/query an operator mistakenly embedded in it is stripped by
 // sanitizeBaseURL before this view is ever built.
+// adminUpstreamErrorView is one tolerated modelBaseUrls discovery failure.
+type adminUpstreamErrorView struct {
+	Upstream string `json:"upstream"`
+	Error    string `json:"error"`
+}
+
+func adminUpstreamErrors(fails []upstreamFailure, rawBaseURL string) []adminUpstreamErrorView {
+	if len(fails) == 0 {
+		return nil
+	}
+	out := make([]adminUpstreamErrorView, len(fails))
+	for i, f := range fails {
+		out[i] = adminUpstreamErrorView{
+			Upstream: sanitizeBaseURL(f.Upstream),
+			Error:    sanitizeProviderErr(sanitizeProviderErr(f.Err, f.Upstream), rawBaseURL),
+		}
+	}
+	return out
+}
+
 type adminProviderView struct {
 	LastRefresh time.Time `json:"lastRefresh"`
 	// OpenUntil is when this provider's breaker will next attempt a
@@ -394,6 +414,8 @@ type adminProviderView struct {
 	Type       string                         `json:"type"`
 	BaseURL    string                         `json:"baseUrl"`
 	LastErr    string                         `json:"lastErr,omitempty"`
+	// UpstreamErrors lists modelBaseUrls upstreams whose discovery failed while the provider stayed healthy.
+	UpstreamErrors []adminUpstreamErrorView `json:"upstreamErrors,omitempty"`
 	// HealthState is this provider's discovery circuit breaker state
 	// (feat/provider-health): "closed" (normal), "open" (backing off
 	// after repeated discovery failures — maybeRefresh skips it until
@@ -840,6 +862,7 @@ func (g *Gateway) buildAdminOverview() adminOverviewResponse {
 			ModelCount:       s.modelCount,
 			LastRefresh:      s.lastRefresh,
 			LastErr:          sanitizeProviderErr(s.lastErr, s.baseURL),
+			UpstreamErrors:   adminUpstreamErrors(s.upstreamErrs, s.baseURL),
 			DiscoveryEnabled: s.discoveryEnabled,
 			HealthState:      s.health.String(),
 			OpenUntil:        s.openUntil,

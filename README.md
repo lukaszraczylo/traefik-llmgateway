@@ -2401,9 +2401,12 @@ providers:
   `modelBaseUrls` read the body for this purpose.
 - **Discovery and `metadataPath`** query `baseUrl` and every distinct
   `modelBaseUrls` upstream, one request per upstream. An id is taken only from
-  the upstream its requests route to. Discovery fails as a whole when any
-  upstream fails, keeping the last-known set; metadata keeps the ids of the
-  upstreams that answered. `modelBaseUrls` ids stay declared models.
+  the upstream its requests route to. Discovery fails as a whole only when `baseUrl`
+  fails, keeping the last-known set. A failing `modelBaseUrls` upstream does not
+  degrade the provider: its explicit `models` stay served, the other upstreams'
+  ids still merge, and the admin overview lists it under `upstreamErrors` (also
+  logged, at most once per 10 minutes). Metadata keeps the ids of the upstreams
+  that answered. `modelBaseUrls` ids stay declared models.
 - **Admin catalog**: each `pathBaseUrls` key appears as a pseudo-model row
   (`gx10/v1/decide`). It is display only and never routable as a model.
   `kinds` labels a model id or a path key. The Models page then groups the
