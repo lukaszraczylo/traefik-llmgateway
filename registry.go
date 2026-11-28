@@ -2264,13 +2264,14 @@ func (m *modelRegistry) aliasEntriesFor(grp *group) map[string]map[string]any {
 // both cost fields 0) — that is a known, meaningful zero, not an absent
 // one.
 //
-// The context window is emitted under THREE keys carrying the identical
-// integer: "context_window", "context_length" (the OpenRouter spelling)
-// and "max_model_len" (the vLLM spelling). OpenAI's own /v1/models
+// The context window is emitted under FOUR keys carrying the identical
+// integer: "context_window", "context_length" (the OpenRouter spelling),
+// "max_model_len" (the vLLM spelling) and "max_context_length" (the LM
+// Studio spelling, read by a downstream gateway's metadataPath fetcher). OpenAI's own /v1/models
 // schema has no context field at all, so every client that wants one
 // reads some vendor dialect, and a client whose dialect is missing
 // silently substitutes its own default instead of asking. Emitting all
-// three costs two map entries and removes that whole failure class —
+// four costs three map entries and removes that whole failure class —
 // the same reason the metadata FETCHER already parses all of these
 // dialects on the inbound side (provider_openai.go's modelMetadata).
 func modelObject(id, ownedBy string, meta resolvedModelMeta) map[string]any {
@@ -2279,6 +2280,7 @@ func modelObject(id, ownedBy string, meta resolvedModelMeta) map[string]any {
 		obj["context_window"] = meta.ContextTokens
 		obj["context_length"] = meta.ContextTokens
 		obj["max_model_len"] = meta.ContextTokens
+		obj["max_context_length"] = meta.ContextTokens
 	}
 	if meta.CostKnown {
 		obj["pricing"] = map[string]any{

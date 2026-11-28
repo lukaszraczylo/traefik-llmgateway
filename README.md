@@ -469,7 +469,7 @@ also a construction error, never a panic (`providers.go`, `mcp_a2a.go`,
 | `models` | `[]string` | `[]` | Explicit model ids this provider serves. Combined with any discovered ids. |
 | `discovery` | `bool` | `false` | Pull the provider's own model-listing endpoint at startup, then no more often than `discoveryInterval` when requests arrive. A discovery failure is logged and non-fatal; construction still succeeds on `models` alone. |
 | `metadataPath` | `string` | `""` (no metadata capture) | Only read by `openai`-type providers. A second endpoint, fetched alongside `discovery`, that reports per-model context length — for example `/api/v0/models` on an LM Studio server. Must start with `/` when set (checked at construction). See [Model metadata](#model-metadata). |
-| `modelBaseUrls` | `map[string]string` | `{}` | Only for `openai`-type providers. Maps a bare model id (the id sent upstream) to the base URL that serves it, instead of `baseUrl`. Its keys are declared models of the provider, like `models`, and are never polled by `discovery`. Each URL must be absolute `http(s)` with no userinfo, query or fragment (checked at construction). See [Several upstreams per provider](#several-upstreams-per-provider). |
+| `modelBaseUrls` | `map[string]string` | `{}` | Only for `openai`-type providers. Maps a bare model id (the id sent upstream) to the base URL that serves it, instead of `baseUrl`. Its keys are declared models of the provider, like `models`, and are never added or removed by `discovery`, though `discovery` and `metadataPath` also query each distinct URL. Each URL must be absolute `http(s)` with no userinfo, query or fragment (checked at construction). See [Several upstreams per provider](#several-upstreams-per-provider). |
 | `pathBaseUrls` | `map[string]string` | `{}` | Only for `openai`-type providers. Maps a native passthrough path prefix (such as `/v1/decide`) to a base URL, for requests whose body names no `modelBaseUrls` model. Longest prefix wins, matched on whole path segments. Same URL rules as `modelBaseUrls`. |
 | `passthrough` | `*bool` | `nil` (enabled) | `nil` or `true`: this provider's native passthrough route (`/{name}/...`) stays reachable, unchanged from before this field existed. `false`: the route is disabled — `ServeHTTP` treats it exactly like an unconfigured provider name, falling through to the ordinary unknown-route 404 without even reaching authentication. Does not affect the MCP/A2A target proxy, which has its own routing prefix. |
 | `requestTimeout` | `string` (Go duration) | Inherits the top-level `requestTimeout` (`5m` if that is also unset) | Overrides the global request timeout for this provider alone, including its native passthrough route — see [Request timeout](#request-timeout). An explicit override always wins over the global default. Empty inherits; a value that fails to parse, or parses to zero or a negative duration, is a construction error. |
@@ -1418,7 +1418,7 @@ The gateway picks the highest tier below the first attempted tier, and goes lowe
 - **Learned ratio**: after 50 served requests with provider-reported usage, the gateway learns bytes per token for each upstream model. The ratio stays between 1.5 and 6.0 and lives in memory on each instance.
 - **No fit**: when the check would skip every target, the gateway uses the model with the largest known window instead of returning `404`.
 - **Vision**: a request with an image skips models that set `vision: false` in `modelMeta`.
-- **Advertised window**: `GET /v1/models` lists a router when the group may use its name and at least one target. With `contextEscalation` on, the entry advertises the largest known window of all targets in `context_window`, `context_length`, and `max_model_len`. With `contextEscalation: false`, it advertises the smallest known window. Targets with an unknown window do not count. When no target has a known window, the fields are omitted.
+- **Advertised window**: `GET /v1/models` lists a router when the group may use its name and at least one target. With `contextEscalation` on, the entry advertises the largest known window of all targets in `context_window`, `context_length`, `max_model_len`, and `max_context_length`. With `contextEscalation: false`, it advertises the smallest known window. Targets with an unknown window do not count. When no target has a known window, the fields are omitted.
 - **Override**: a `modelMeta` entry keyed by the router name replaces the value. It needs `contextTokens` above zero. The gateway logs a one-time warning when the override exceeds the largest known target window.
 
 ### Access and response headers
@@ -1551,8 +1551,10 @@ providers:
     metadataPath: "/api/v0/models"
 ```
 
-The response's `loaded_context_length` field is preferred over
-`max_context_length` when both are present — it reflects the context
+The response's context fields rank `loaded_context_length`, then
+`max_context_length`, then `max_model_len` (vLLM and TensorFold report
+only the last, so a plain `/v1/models` works as `metadataPath`).
+`loaded_context_length` is preferred when present — it reflects the context
 actually usable right now, which an operator can configure smaller than
 the model's own maximum under VRAM-constrained runtime settings. This
 means the reported context window can **change** across a discovery
@@ -1593,17 +1595,24 @@ known:
   "context_window": 400000,
   "context_length": 400000,
   "max_model_len": 400000,
+  "max_context_length": 400000,
   "pricing": {"input_per_mtok_usd": 1.25, "output_per_mtok_usd": 10}
 }
 ```
 
-- `context_window`, `context_length`, `max_model_len` — the same integer
-  token count under all three dialect spellings, omitted together when
-  unknown. OpenAI's own schema has no context field, so each client reads
-  whichever vendor dialect it was built against: `context_length` is the
-  OpenRouter spelling, `max_model_len` the vLLM one. A client whose
-  dialect is missing does not ask — it silently substitutes its own
-  default (128k is a common one), so all three are emitted.
+- `context_window`, `context_length`, `max_model_len`,
+  `max_context_length` — the same integer token count under all four
+  dialect spellings, omitted together when unknown. OpenAI's own schema
+  has no context field, so each client reads whichever vendor dialect it
+  was built against: `context_length` is the OpenRouter spelling,
+  `max_model_len` the vLLM one, `max_context_length` the LM Studio one.
+  A client whose dialect is missing does not ask — it silently
+  substitutes its own default (128k is a common one), so all four are
+  emitted. A downstream gateway whose provider sets
+  `metadataPath: "/v1/models"` against this gateway reads
+  `max_context_length`. The value follows the normal resolution
+  (`modelMeta`, then discovery, then the built-in table) for plain ids,
+  `provider/model` ids, aliases and smart router models.
 - `pricing` — `{input_per_mtok_usd, output_per_mtok_usd}`, both floats
   in USD per 1,000,000 tokens. Omitted when unknown; present with `0`
   values for an explicitly free model — a known zero, not an absent
@@ -2390,7 +2399,11 @@ providers:
   first 64KiB). A `modelBaseUrls` hit wins; otherwise the longest matching
   `pathBaseUrls` prefix; otherwise `baseUrl`. Only providers that set
   `modelBaseUrls` read the body for this purpose.
-- **Discovery** polls `baseUrl` only. `modelBaseUrls` ids are static.
+- **Discovery and `metadataPath`** query `baseUrl` and every distinct
+  `modelBaseUrls` upstream, one request per upstream. An id is taken only from
+  the upstream its requests route to. Discovery fails as a whole when any
+  upstream fails, keeping the last-known set; metadata keeps the ids of the
+  upstreams that answered. `modelBaseUrls` ids stay declared models.
 - **Admin catalog**: each `pathBaseUrls` key appears as a pseudo-model row
   (`gx10/v1/decide`). It is display only and never routable as a model.
   `kinds` labels a model id or a path key. The Models page then groups the

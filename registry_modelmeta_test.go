@@ -395,14 +395,14 @@ func TestModelObject_ContextDialectMirrors(t *testing.T) {
 	t.Parallel()
 
 	known := modelObject("m", "prov", resolvedModelMeta{ContextTokens: 1048576, ContextKnown: true})
-	for _, key := range []string{"context_window", "context_length", "max_model_len"} {
+	for _, key := range []string{"context_window", "context_length", "max_model_len", "max_context_length"} {
 		if known[key] != 1048576 {
 			t.Errorf("known[%q] = %v, want 1048576", key, known[key])
 		}
 	}
 
 	unknown := modelObject("m", "prov", resolvedModelMeta{})
-	for _, key := range []string{"context_window", "context_length", "max_model_len"} {
+	for _, key := range []string{"context_window", "context_length", "max_model_len", "max_context_length"} {
 		if v, present := unknown[key]; present {
 			t.Errorf("unknown[%q] present (%v), want omitted entirely", key, v)
 		}
