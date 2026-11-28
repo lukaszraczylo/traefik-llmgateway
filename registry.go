@@ -382,6 +382,9 @@ func (st *providerState) tryBeginWarmFillRetry(sinceWarmFill time.Time) bool {
 	return true
 }
 
+// upstreamErrLogEvery bounds how often a provider's tolerated upstream failures are logged.
+const upstreamErrLogEvery = 10 * time.Minute
+
 // finishRefresh records the outcome of a refresh attempt started by
 // tryBeginRefresh (or, for the synchronous warm fill, run unconditionally).
 // lastRefresh always advances to now, on success or failure alike — that is
@@ -721,6 +724,8 @@ type modelRegistry struct {
 	modelMeta map[string]*ModelMetaConfig
 	nowFn     func() time.Time
 	warned    map[string]bool
+	// upstreamErrLogAt is each provider's last upstream-failure log time; guarded by warnedMu.
+	upstreamErrLogAt map[string]time.Time
 	// routerShadowClean maps a router name to modelsGen+1 of its last collision-free scan; guarded by warnedMu.
 	routerShadowClean map[string]int64
 	// modelsCache holds one encoded GET /v1/models response body per
@@ -864,6 +869,7 @@ func newModelRegistry(adapters map[string]providerAdapter, cfg *Config, log func
 		warmFillRetryDelay: warmFillRetryDelay,
 		warmFillTimeout:    warmFillTimeout,
 		warned:             make(map[string]bool),
+		upstreamErrLogAt:   make(map[string]time.Time),
 		routerShadowClean:  make(map[string]int64),
 		providerNames:      make([]string, 0, len(adapters)),
 		modelsCache:        make(map[string]modelsCacheEntry),
@@ -1095,6 +1101,39 @@ func (m *modelRegistry) discoveryHealthy(name string) bool {
 func (m *modelRegistry) finishRefresh(st *providerState, now time.Time, ids []string, err error) {
 	st.finishRefresh(now, ids, err)
 	atomic.AddInt64(&m.modelsGen, 1)
+	if err == nil {
+		m.logUpstreamErrors(st.name, now)
+	}
+}
+
+// logUpstreamErrors logs name's tolerated modelBaseUrls failures, at most once per upstreamErrLogEvery per provider.
+func (m *modelRegistry) logUpstreamErrors(name string, now time.Time) {
+	adapter := m.adapters[name]
+	if adapter == nil {
+		return
+	}
+	rep, ok := adapter.(upstreamErrorReporter)
+	if !ok {
+		return
+	}
+	errs := rep.upstreamErrors()
+	if len(errs) == 0 {
+		return
+	}
+	m.warnedMu.Lock()
+	due := now.Sub(m.upstreamErrLogAt[name]) >= upstreamErrLogEvery
+	if due {
+		m.upstreamErrLogAt[name] = now
+	}
+	m.warnedMu.Unlock()
+	if !due {
+		return
+	}
+	base := adapter.base()
+	for _, f := range errs {
+		m.log("%s", fmt.Sprintf("model registry: discovery of provider %q upstream %s failed: %v",
+			name, sanitizeBaseURL(f.Upstream), sanitizeProviderErr(sanitizeProviderErr(f.Err, f.Upstream), base)))
+	}
 }
 
 // warmFillFailure records ONE provider whose synchronous warmFill
@@ -2357,13 +2396,15 @@ type providerSnapshot struct {
 	// (feat/provider-health) — see providerState.snapshot's doc comment
 	// for why it is read in the same locked pass as the rest of this
 	// struct's fields.
-	openUntil  time.Time
-	name       string
-	typeName   string
-	baseURL    string
-	lastErr    string
-	models     []string
-	modelCount int
+	openUntil time.Time
+	name      string
+	typeName  string
+	baseURL   string
+	lastErr   string
+	models    []string
+	// upstreamErrs lists modelBaseUrls upstreams that failed the latest discovery without failing the provider.
+	upstreamErrs []upstreamFailure
+	modelCount   int
 	// health mirrors providerState's own field of the same name (feat/
 	// provider-health): the admin dashboard's breaker-state column. Every
 	// provider reads closed until a discovery failure actually trips its
@@ -2414,6 +2455,29 @@ func (m *modelRegistry) aliasSnapshot() []aliasSnapshotEntry {
 	return out
 }
 
+// aliasTargetCanonical resolves an alias target to the canonical
+// "provider/model" id resolveAliasTarget would pick, ignoring group
+// authorization: a provider-prefixed target resolves on that provider,
+// a bare one on the sorted-first provider that knows it. ok is false for
+// a target no provider knows yet.
+func (m *modelRegistry) aliasTargetCanonical(target string) (string, bool) {
+	providerName, model, prefixed := m.splitConfiguredProvider(target)
+	if !prefixed {
+		model = target
+		for _, name := range m.providerNames {
+			if m.states[name].hasModel(model) {
+				providerName = name
+				break
+			}
+		}
+	}
+	if providerName == "" || !m.states[providerName].hasModel(model) {
+		return "", false
+	}
+	canonical := providerModelScopeID(providerName, model)
+	return canonical, true
+}
+
 // snapshot returns every configured provider's read-only view, sorted by
 // name (m.providerNames is already sorted at construction) — the admin
 // dashboard's provider table (spec §4, v0.2).
@@ -2440,7 +2504,15 @@ func (m *modelRegistry) snapshot() []providerSnapshot {
 			discoveryEnabled: m.states[name].discoveryEnabled,
 			health:           health,
 			openUntil:        openUntil,
+			upstreamErrs:     upstreamErrorsOf(adapter),
 		})
 	}
 	return out
+}
+
+func upstreamErrorsOf(adapter providerAdapter) []upstreamFailure {
+	if rep, ok := adapter.(upstreamErrorReporter); ok {
+		return rep.upstreamErrors()
+	}
+	return nil
 }

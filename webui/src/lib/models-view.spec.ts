@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { groupByProvider, priceStatus, selectModels } from '@/lib/models-view'
+import { groupByProvider, modelFilterFields, priceStatus, selectModels } from '@/lib/models-view'
 import type { ModelCatalogRow } from '@/lib/model-table-columns'
 
 function row(id: string, over: Partial<ModelCatalogRow> = {}): ModelCatalogRow {
@@ -66,5 +66,28 @@ describe('groupByProvider', () => {
   it('sorts rows inside a group by requests then id', () => {
     const [g] = groupByProvider([row('a/b'), row('a/a'), row('a/c', { requests: 9 })])
     expect(g!.rows.map((r) => r.id)).toEqual(['a/c', 'a/a', 'a/b'])
+  })
+})
+
+const selectsWithoutOptions = (fields: ReturnType<typeof modelFilterFields>) =>
+  fields.filter((f) => f.type === 'select' && (!f.options || f.options.length === 0))
+
+describe('modelFilterFields', () => {
+  it('never yields a select with empty options before data loads', () => {
+    const fields = modelFilterFields([], [])
+    expect(selectsWithoutOptions(fields)).toEqual([])
+    expect(fields.map((f) => f.id)).toEqual(['kind', 'price'])
+  })
+
+  it('adds the provider select once providers are known, sorted and deduplicated', () => {
+    const fields = modelFilterFields(['uni', 'a', 'uni'], ['chat'])
+    const provider = fields.find((f) => f.id === 'provider')
+    expect(provider?.options?.map((o) => o.value)).toEqual(['a', 'uni'])
+  })
+
+  it('keeps a provider from the URL selectable before the data arrives', () => {
+    const fields = modelFilterFields([], [], 'uni')
+    expect(selectsWithoutOptions(fields)).toEqual([])
+    expect(fields.find((f) => f.id === 'provider')?.options).toEqual([{ value: 'uni', label: 'uni' }])
   })
 })

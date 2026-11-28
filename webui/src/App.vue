@@ -10,12 +10,14 @@ import { useHashState } from '@/composables/useHashState'
 import AppLayout from '@/layout/AppLayout.vue'
 import type { PageId } from '@/lib/pages'
 import { useAuthStore } from '@/stores/auth'
+import { useCatalogStore } from '@/stores/catalog'
 import { useConfigStore } from '@/stores/config'
 import { useDashboardStore } from '@/stores/dashboard'
 import { useNavStore } from '@/stores/nav'
 import { resetSessionData } from '@/stores/session'
 
 const auth = useAuthStore()
+const catalog = useCatalogStore()
 const config = useConfigStore()
 const dashboard = useDashboardStore()
 const nav = useNavStore()
@@ -63,6 +65,15 @@ watch(
   (next, prev) => {
     if (next !== prev) resetSessionData()
   },
+)
+
+// Every model-id cell marks an alias from the catalog's alias list, so load it once per key.
+watch(
+  () => auth.apiKey,
+  () => {
+    if (auth.isAuthenticated) void catalog.ensureLoaded()
+  },
+  { immediate: true },
 )
 
 onMounted(() => {

@@ -365,6 +365,8 @@ export interface AdminRouterView {
 export interface AdminAliasView {
   alias: string
   target: string
+  /** Canonical `provider/model` id the target resolves to; absent while it resolves to no known model. */
+  resolvedTarget?: string
   /**
    * The alias's own resolved metadata (admin.go: adminAliasView.
    * ModelMeta — feature v0.23): INHERITED from its target unless the

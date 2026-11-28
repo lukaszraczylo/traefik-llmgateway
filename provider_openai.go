@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -36,6 +37,8 @@ type openaiAdapter struct {
 	// newOpenAIAdapter call site (every test, and any caller that never
 	// sets this) keeps behaving exactly as before this feature existed.
 	metadataPath string
+	// upstreamErrs is the modelBaseUrls failures of the latest listModels call; guarded by upstreamMu.
+	upstreamErrs []upstreamFailure
 	// timeout is this adapter's resolved per-request timeout
 	// (resolveProviderTimeout, timeout.go) — UNLIKE retry above, it is NOT
 	// left at its zero value by a bare newOpenAIAdapter call: a
@@ -45,7 +48,8 @@ type openaiAdapter struct {
 	// sets it to defaultRequestTimeout; buildAdapters (providers.go)
 	// overwrites it with the real, config-resolved value for production
 	// use, the same way it overwrites retry/metadataPath above.
-	timeout time.Duration
+	timeout    time.Duration
+	upstreamMu sync.Mutex
 }
 
 // newOpenAIAdapter returns an openaiAdapter for provider name, with base as
@@ -441,18 +445,51 @@ type modelsPayload struct {
 	} `json:"data"`
 }
 
+// upstreamFailure is one modelBaseUrls upstream that failed discovery.
+type upstreamFailure struct {
+	Upstream string
+	Err      string
+}
+
+// upstreamErrorReporter is implemented by adapters whose discovery tolerates
+// a failing secondary upstream and reports it out of band.
+type upstreamErrorReporter interface {
+	upstreamErrors() []upstreamFailure
+}
+
+// upstreamErrors returns the modelBaseUrls failures of the latest listModels call.
+func (a *openaiAdapter) upstreamErrors() []upstreamFailure {
+	a.upstreamMu.Lock()
+	defer a.upstreamMu.Unlock()
+	return append([]upstreamFailure(nil), a.upstreamErrs...)
+}
+
+func (a *openaiAdapter) setUpstreamErrors(errs []upstreamFailure) {
+	a.upstreamMu.Lock()
+	a.upstreamErrs = errs
+	a.upstreamMu.Unlock()
+}
+
 // listModels implements providerAdapter. It queries baseURL and every
 // distinct modelBaseUrls upstream; an id counts only when the upstream
-// that lists it is the one requests for that id are routed to. Any failing
-// upstream fails the whole listing, so a refresh never drops the models of
-// an upstream that is briefly down.
+// that lists it is the one requests for that id are routed to. A baseURL
+// failure fails the listing, so a refresh never drops the models of a
+// down baseURL. A failing modelBaseUrls upstream is recorded (see
+// upstreamErrors) and skipped: its configured models stay served, and the
+// other upstreams' ids still merge.
 func (a *openaiAdapter) listModels(ctx context.Context) ([]string, error) {
 	var ids []string
+	var failures []upstreamFailure
 	seen := make(map[string]bool)
-	for _, base := range a.upstreamBases() {
+	for i, base := range a.upstreamBases() {
 		listed, err := a.listModelsFrom(ctx, base)
 		if err != nil {
-			return nil, err
+			if i == 0 || ctx.Err() != nil {
+				a.setUpstreamErrors(nil)
+				return nil, err
+			}
+			failures = append(failures, upstreamFailure{Upstream: base, Err: err.Error()})
+			continue
 		}
 		for _, id := range listed {
 			if a.baseForModel(id) != base || seen[id] {
@@ -462,6 +499,7 @@ func (a *openaiAdapter) listModels(ctx context.Context) ([]string, error) {
 			ids = append(ids, id)
 		}
 	}
+	a.setUpstreamErrors(failures)
 	return ids, nil
 }
 

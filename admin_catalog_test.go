@@ -169,6 +169,55 @@ func TestAdminCatalog_AliasesGroupedByTarget(t *testing.T) {
 	}
 }
 
+// TestAdminCatalog_AliasTargetForms pins that a bare target, a
+// provider-prefixed target and an unresolvable target behave as the
+// registry's own resolution does: the first two attach to the canonical
+// model, the last attaches nowhere but still lists in catalog.aliases.
+func TestAdminCatalog_AliasTargetForms(t *testing.T) {
+	t.Parallel()
+	cfg := newAdminTestConfig()
+	cfg.ModelAliases = map[string]string{
+		"fast-bare":     "z-model",
+		"fast-prefixed": "zeta/z-model",
+		"fast-missing":  "no-such-model",
+	}
+	h, _ := newAdminGatewayHandle(t, cfg)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, adminRequest(http.MethodGet, adminCatalogPath, "sk-admin1"))
+	var got adminCatalogResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	attached := map[string][]string{}
+	for _, p := range got.Providers {
+		for _, m := range p.Models {
+			attached[m.ID] = m.Aliases
+		}
+	}
+	want := []string{"fast-bare", "fast-prefixed"}
+	if g := attached["zeta/z-model"]; len(g) != 2 || g[0] != want[0] || g[1] != want[1] {
+		t.Errorf("zeta/z-model Aliases = %v, want %v", g, want)
+	}
+	for id, names := range attached {
+		for _, n := range names {
+			if n == "fast-missing" {
+				t.Errorf("unresolvable entry attached to %s", id)
+			}
+		}
+	}
+	resolved := map[string]string{}
+	for _, a := range got.Aliases {
+		resolved[a.Alias] = a.ResolvedTarget
+	}
+	if len(resolved) != 3 {
+		t.Fatalf("top-level Aliases = %v, want 3 entries", resolved)
+	}
+	if resolved["fast-bare"] != "zeta/z-model" || resolved["fast-prefixed"] != "zeta/z-model" || resolved["fast-missing"] != "" {
+		t.Errorf("ResolvedTarget = %v", resolved)
+	}
+}
+
 // --- GET /admin/api/consumers ---
 
 func TestAdminConsumers_GateMatrix(t *testing.T) {

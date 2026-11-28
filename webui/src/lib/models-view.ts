@@ -1,3 +1,5 @@
+import type { FilterField } from '@perfect-design/ui'
+
 import { filterModelRows } from '@/lib/model-filter'
 import type { ModelCatalogRow } from '@/lib/model-table-columns'
 
@@ -49,4 +51,24 @@ export function groupByProvider(rows: ModelCatalogRow[]): ProviderGroup[] {
   }
   for (const g of groups.values()) g.rows.sort(byTraffic)
   return [...groups.values()]
+}
+
+const PRICE_OPTIONS: Array<{ value: PriceStatus; label: string }> = [
+  { value: 'priced', label: 'Priced' },
+  { value: 'unpriced', label: 'Unpriced' },
+  { value: 'free', label: 'Free' },
+]
+
+/**
+ * FilterBar throws on a select without options, so the provider select is
+ * omitted until a provider is known; a provider already in the URL counts as known.
+ */
+export function modelFilterFields(providers: string[], kinds: string[], activeProvider?: string): FilterField[] {
+  const names = [...new Set([...providers, ...(activeProvider ? [activeProvider] : [])])].sort()
+  const toOptions = (vs: string[]) => vs.map((v) => ({ value: v, label: v }))
+  return [
+    ...(names.length > 0 ? [{ id: 'provider', label: 'Provider', type: 'select' as const, operators: ['eq' as const], options: toOptions(names) }] : []),
+    { id: 'kind', label: 'Kind', type: 'select', operators: ['eq'], options: [{ value: NO_KIND, label: 'No kind' }, ...toOptions(kinds)] },
+    { id: 'price', label: 'Price', type: 'select', operators: ['eq'], options: PRICE_OPTIONS },
+  ]
 }
