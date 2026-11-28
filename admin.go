@@ -649,6 +649,9 @@ type adminAliasView struct {
 	ModelMeta adminModelMetaView `json:"modelMeta"`
 	Alias     string             `json:"alias"`
 	Target    string             `json:"target"`
+	// ResolvedTarget is Target's canonical "provider/model" id; omitted
+	// while Target resolves to no known model.
+	ResolvedTarget string `json:"resolvedTarget,omitempty"`
 }
 
 // adminOverviewResponse is the full body of GET /admin/api/overview (spec
@@ -908,10 +911,12 @@ func (g *Gateway) buildAdminAliasViews() []adminAliasView {
 	aliasSnaps := g.registry.aliasSnapshot()
 	aliases := make([]adminAliasView, len(aliasSnaps))
 	for i, a := range aliasSnaps {
+		resolved, _ := g.registry.aliasTargetCanonical(a.Target)
 		aliases[i] = adminAliasView{
-			Alias:     a.Alias,
-			Target:    a.Target,
-			ModelMeta: buildAdminModelMetaView(g.registry.resolveMetaForAliasName(a.Alias)),
+			Alias:          a.Alias,
+			Target:         a.Target,
+			ResolvedTarget: resolved,
+			ModelMeta:      buildAdminModelMetaView(g.registry.resolveMetaForAliasName(a.Alias)),
 		}
 	}
 	return aliases

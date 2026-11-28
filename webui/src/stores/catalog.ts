@@ -1,5 +1,6 @@
 import { defineStore } from 'pinia'
 
+import { aliasTargetMap } from '@/lib/alias-display'
 import { adminFetch, isAuthRejection, messageOf } from '@/lib/api'
 import { useAuthStore } from '@/stores/auth'
 import type { AdminCatalogModel, AdminCatalogResponse } from '@/types/api'
@@ -57,6 +58,10 @@ export const useCatalogStore = defineStore('catalog', {
         for (const model of provider.models) map.set(model.id, model)
       }
       return map
+    },
+    /** aliasTargets maps each configured alias id to the model it points at, so any view listing a requested model id can mark an alias. */
+    aliasTargets(state): Map<string, string> {
+      return aliasTargetMap(state.data?.aliases)
     },
   },
   actions: {

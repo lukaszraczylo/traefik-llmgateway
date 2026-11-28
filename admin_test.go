@@ -325,8 +325,8 @@ func TestAdminOverview_SortedShapeAndVersion(t *testing.T) {
 	}
 
 	wantAliases := []adminAliasView{
-		{Alias: "aaliased/y", Target: "alpha/a-model-1"},
-		{Alias: "zaliased/x", Target: "z-model"},
+		{Alias: "aaliased/y", Target: "alpha/a-model-1", ResolvedTarget: "alpha/a-model-1"},
+		{Alias: "zaliased/x", Target: "z-model", ResolvedTarget: "zeta/z-model"},
 	}
 	if len(got.Aliases) != len(wantAliases) {
 		t.Fatalf("aliases = %+v, want exactly %+v", got.Aliases, wantAliases)

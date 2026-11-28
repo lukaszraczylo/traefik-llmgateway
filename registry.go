@@ -2414,6 +2414,29 @@ func (m *modelRegistry) aliasSnapshot() []aliasSnapshotEntry {
 	return out
 }
 
+// aliasTargetCanonical resolves an alias target to the canonical
+// "provider/model" id resolveAliasTarget would pick, ignoring group
+// authorization: a provider-prefixed target resolves on that provider,
+// a bare one on the sorted-first provider that knows it. ok is false for
+// a target no provider knows yet.
+func (m *modelRegistry) aliasTargetCanonical(target string) (string, bool) {
+	providerName, model, prefixed := m.splitConfiguredProvider(target)
+	if !prefixed {
+		model = target
+		for _, name := range m.providerNames {
+			if m.states[name].hasModel(model) {
+				providerName = name
+				break
+			}
+		}
+	}
+	if providerName == "" || !m.states[providerName].hasModel(model) {
+		return "", false
+	}
+	canonical := providerModelScopeID(providerName, model)
+	return canonical, true
+}
+
 // snapshot returns every configured provider's read-only view, sorted by
 // name (m.providerNames is already sorted at construction) — the admin
 // dashboard's provider table (spec §4, v0.2).

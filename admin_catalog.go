@@ -97,14 +97,16 @@ type adminCatalogResponse struct {
 func (g *Gateway) buildAdminCatalog() adminCatalogResponse {
 	snaps := g.registry.snapshot()
 
-	// aliasesByTarget groups every configured alias by its configured
-	// Target string (ModelAliases' own doc comment, llmgateway.go: a
-	// target names a canonical "provider/model" id), so each model's own
-	// Aliases field below is a single map lookup rather than a full scan
-	// of the alias list per model.
+	// aliasesByTarget groups every alias by the canonical id its target
+	// resolves to (a target may be bare or provider-prefixed), so each
+	// model's own Aliases field below is a single map lookup. An alias
+	// whose target resolves to no known model attaches to no model.
+	aliasViews := g.buildAdminAliasViews()
 	aliasesByTarget := make(map[string][]string)
-	for _, a := range g.registry.aliasSnapshot() {
-		aliasesByTarget[a.Target] = append(aliasesByTarget[a.Target], a.Alias)
+	for _, a := range aliasViews {
+		if a.ResolvedTarget != "" {
+			aliasesByTarget[a.ResolvedTarget] = append(aliasesByTarget[a.ResolvedTarget], a.Alias)
+		}
 	}
 
 	routers := g.buildAdminRouterViews()
@@ -181,7 +183,7 @@ func (g *Gateway) buildAdminCatalog() adminCatalogResponse {
 		}
 	}
 
-	return adminCatalogResponse{Providers: providers, Aliases: g.buildAdminAliasViews(), Routers: routers}
+	return adminCatalogResponse{Providers: providers, Aliases: aliasViews, Routers: routers}
 }
 
 // sortedKeys returns m's keys in ascending order, nil for an empty map.
