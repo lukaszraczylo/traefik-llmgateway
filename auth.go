@@ -731,16 +731,16 @@ type authStore struct {
 	inline               map[[32]byte]*authEntry
 	// anonymous is the principal for keyless requests; nil unless
 	// UsersConfig.AnonymousGroup is set.
-	anonymous *authEntry
-	// anonymousAnyKey admits an unknown key as anonymous instead of 401.
-	anonymousAnyKey  bool
+	anonymous        *authEntry
 	lastReloadErrMsg string
 	failureLog       logGate
 	throttleLog      logGate
 	fileUserCount    int
-	mu               sync.RWMutex
-	buildMu          sync.Mutex
-	reloadMu         sync.Mutex
+	// anonymousAnyKey admits an unknown key as anonymous instead of 401.
+	anonymousAnyKey bool
+	mu              sync.RWMutex
+	buildMu         sync.Mutex
+	reloadMu        sync.Mutex
 }
 
 // newAuthStore builds an authStore from cfg's groups and inline users. It
