@@ -478,12 +478,18 @@ func (a *openaiAdapter) setUpstreamErrors(errs []upstreamFailure) {
 // upstreamErrors) and skipped: its configured models stay served, and the
 // other upstreams' ids still merge.
 func (a *openaiAdapter) listModels(ctx context.Context) ([]string, error) {
+	bases := a.upstreamBases()
+	listed := make([][]string, len(bases))
+	errs := a.queryUpstreams(ctx, bases, func(uctx context.Context, i int) error {
+		var err error
+		listed[i], err = a.listModelsFrom(uctx, bases[i])
+		return err
+	})
 	var ids []string
 	var failures []upstreamFailure
 	seen := make(map[string]bool)
-	for i, base := range a.upstreamBases() {
-		listed, err := a.listModelsFrom(ctx, base)
-		if err != nil {
+	for i, base := range bases {
+		if err := errs[i]; err != nil {
 			if i == 0 || ctx.Err() != nil {
 				a.setUpstreamErrors(nil)
 				return nil, err
@@ -491,7 +497,7 @@ func (a *openaiAdapter) listModels(ctx context.Context) ([]string, error) {
 			failures = append(failures, upstreamFailure{Upstream: base, Err: err.Error()})
 			continue
 		}
-		for _, id := range listed {
+		for _, id := range listed[i] {
 			if a.baseForModel(id) != base || seen[id] {
 				continue
 			}
@@ -501,6 +507,42 @@ func (a *openaiAdapter) listModels(ctx context.Context) ([]string, error) {
 	}
 	a.setUpstreamErrors(failures)
 	return ids, nil
+}
+
+// upstreamFallbackTimeout caps a modelBaseUrls request when the parent
+// context has no deadline.
+const upstreamFallbackTimeout = 30 * time.Second
+
+// queryUpstreams runs fn for every base concurrently and returns one error
+// per base. baseURL (index 0) runs on ctx; each other upstream gets its own
+// child context, so a hanging upstream cannot use up the budget of the rest.
+func (a *openaiAdapter) queryUpstreams(ctx context.Context, bases []string, fn func(ctx context.Context, i int) error) []error {
+	errs := make([]error, len(bases))
+	var wg sync.WaitGroup
+	for i := range bases {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			uctx := ctx
+			if i > 0 {
+				var cancel context.CancelFunc
+				uctx, cancel = context.WithTimeout(ctx, childUpstreamTimeout(ctx))
+				defer cancel()
+			}
+			errs[i] = fn(uctx, i)
+		}(i)
+	}
+	wg.Wait()
+	return errs
+}
+
+// childUpstreamTimeout is 3/4 of the time left on ctx, leaving headroom for
+// the caller to finish inside the parent deadline.
+func childUpstreamTimeout(ctx context.Context) time.Duration {
+	if dl, ok := ctx.Deadline(); ok {
+		return time.Until(dl) * 3 / 4
+	}
+	return upstreamFallbackTimeout
 }
 
 // upstreamBases returns baseURL followed by the other distinct modelBaseUrls
@@ -594,19 +636,25 @@ func (a *openaiAdapter) fetchModelMetadata(ctx context.Context) (map[string]int,
 		return nil, nil
 	}
 
+	bases := a.upstreamBases()
+	got := make([]map[string]int, len(bases))
+	errs := a.queryUpstreams(ctx, bases, func(uctx context.Context, i int) error {
+		var err error
+		got[i], err = a.fetchModelMetadataFrom(uctx, bases[i])
+		return err
+	})
 	out := make(map[string]int)
 	var firstErr error
 	ok := false
-	for _, base := range a.upstreamBases() {
-		got, err := a.fetchModelMetadataFrom(ctx, base)
-		if err != nil {
+	for i, base := range bases {
+		if errs[i] != nil {
 			if firstErr == nil {
-				firstErr = err
+				firstErr = errs[i]
 			}
 			continue
 		}
 		ok = true
-		for id, n := range got {
+		for id, n := range got[i] {
 			if a.baseForModel(id) == base {
 				out[id] = n
 			}

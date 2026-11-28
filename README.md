@@ -2402,7 +2402,11 @@ providers:
 - **Discovery and `metadataPath`** query `baseUrl` and every distinct
   `modelBaseUrls` upstream, one request per upstream. An id is taken only from
   the upstream its requests route to. Discovery fails as a whole only when `baseUrl`
-  fails, keeping the last-known set. A failing `modelBaseUrls` upstream does not
+  fails or the whole call is cancelled or times out, keeping the last-known set.
+  Upstreams are queried concurrently, and each `modelBaseUrls` upstream has its
+  own timeout (3/4 of the time left, or 30s without a deadline), so a hanging
+  upstream cannot use up the budget of `baseUrl` or the others. A failing or
+  timed-out `modelBaseUrls` upstream does not
   degrade the provider: its explicit `models` stay served, the other upstreams'
   ids still merge, and the admin overview lists it under `upstreamErrors` (also
   logged, at most once per 10 minutes). Metadata keeps the ids of the upstreams
