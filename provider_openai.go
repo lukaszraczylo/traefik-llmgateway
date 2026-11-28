@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 )
@@ -440,9 +441,48 @@ type modelsPayload struct {
 	} `json:"data"`
 }
 
-// listModels implements providerAdapter.
+// listModels implements providerAdapter. It queries baseURL and every
+// distinct modelBaseUrls upstream; an id counts only when the upstream
+// that lists it is the one requests for that id are routed to. Any failing
+// upstream fails the whole listing, so a refresh never drops the models of
+// an upstream that is briefly down.
 func (a *openaiAdapter) listModels(ctx context.Context) ([]string, error) {
-	resp, err := upstreamJSON(ctx, a.client, http.MethodGet, a.baseURL+"/v1/models", a.requestHeaders(false), nil, a.retry, a.timeout, a.adapterName)
+	var ids []string
+	seen := make(map[string]bool)
+	for _, base := range a.upstreamBases() {
+		listed, err := a.listModelsFrom(ctx, base)
+		if err != nil {
+			return nil, err
+		}
+		for _, id := range listed {
+			if a.baseForModel(id) != base || seen[id] {
+				continue
+			}
+			seen[id] = true
+			ids = append(ids, id)
+		}
+	}
+	return ids, nil
+}
+
+// upstreamBases returns baseURL followed by the other distinct modelBaseUrls
+// values in sorted order.
+func (a *openaiAdapter) upstreamBases() []string {
+	bases := []string{a.baseURL}
+	var extra []string
+	seen := map[string]bool{a.baseURL: true}
+	for _, b := range a.modelBases {
+		if !seen[b] {
+			seen[b] = true
+			extra = append(extra, b)
+		}
+	}
+	sort.Strings(extra)
+	return append(bases, extra...)
+}
+
+func (a *openaiAdapter) listModelsFrom(ctx context.Context, base string) ([]string, error) {
+	resp, err := upstreamJSON(ctx, a.client, http.MethodGet, base+"/v1/models", a.requestHeaders(false), nil, a.retry, a.timeout, a.adapterName)
 	if err != nil {
 		return nil, err
 	}
@@ -516,7 +556,32 @@ func (a *openaiAdapter) fetchModelMetadata(ctx context.Context) (map[string]int,
 		return nil, nil
 	}
 
-	resp, err := upstreamJSON(ctx, a.client, http.MethodGet, a.baseURL+a.metadataPath, a.requestHeaders(false), nil, a.retry, a.timeout, a.adapterName)
+	out := make(map[string]int)
+	var firstErr error
+	ok := false
+	for _, base := range a.upstreamBases() {
+		got, err := a.fetchModelMetadataFrom(ctx, base)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		ok = true
+		for id, n := range got {
+			if a.baseForModel(id) == base {
+				out[id] = n
+			}
+		}
+	}
+	if !ok {
+		return nil, firstErr
+	}
+	return out, nil
+}
+
+func (a *openaiAdapter) fetchModelMetadataFrom(ctx context.Context, base string) (map[string]int, error) {
+	resp, err := upstreamJSON(ctx, a.client, http.MethodGet, base+a.metadataPath, a.requestHeaders(false), nil, a.retry, a.timeout, a.adapterName)
 	if err != nil {
 		return nil, err
 	}

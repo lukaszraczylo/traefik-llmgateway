@@ -90,13 +90,13 @@ func TestModelRegistry_ListFor_RouterAdvertisesTargetContext(t *testing.T) {
 			}
 			entry := routerListEntry(t, cfg, "smart")
 			if !tc.known {
-				for _, k := range []string{"context_window", "context_length", "max_model_len"} {
+				for _, k := range []string{"context_window", "context_length", "max_model_len", "max_context_length"} {
 					_, present := entry[k]
 					assert.False(t, present, "%s must be omitted", k)
 				}
 				return
 			}
-			for _, k := range []string{"context_window", "context_length", "max_model_len"} {
+			for _, k := range []string{"context_window", "context_length", "max_model_len", "max_context_length"} {
 				assert.Equal(t, tc.want, entry[k], k)
 			}
 		})
