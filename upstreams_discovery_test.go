@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -167,4 +168,87 @@ func TestGateway_BaseURLFailure_ProviderDegradedAsBefore(t *testing.T) {
 	require.Len(t, got.Providers, 1)
 	assert.Contains(t, got.Providers[0].LastErr, "404")
 	assert.Empty(t, got.Providers[0].UpstreamErrors)
+}
+
+func hangingServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	}))
+	t.Cleanup(srv.Close)
+	t.Cleanup(func() { close(release) })
+	return srv
+}
+
+func hangingUpstreamAdapter(t *testing.T) (*openaiAdapter, string) {
+	t.Helper()
+	main := modelsServer(t, `{"data":[{"id":"main-model","max_model_len":1000}]}`, nil)
+	other := modelsServer(t, `{"data":[{"id":"glm","max_model_len":2000}]}`, nil)
+	hang := hangingServer(t)
+	ad := newOpenAIAdapter("gx10", main.URL, "")
+	ad.modelBases = map[string]string{"glm": other.URL, "rerank": hang.URL}
+	ad.metadataPath = "/v1/models"
+	return ad, hang.URL
+}
+
+func TestOpenAIAdapter_HangingModelBaseURL_DoesNotUseUpSharedDeadline(t *testing.T) {
+	t.Parallel()
+	ad, hangURL := hangingUpstreamAdapter(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+	start := time.Now()
+	ids, err := ad.listModels(ctx)
+	elapsed := time.Since(start)
+
+	require.NoError(t, err, "a hanging modelBaseUrls upstream must not fail discovery")
+	assert.Equal(t, []string{"main-model", "glm"}, ids)
+	assert.Less(t, elapsed, 3500*time.Millisecond, "child timeout leaves headroom inside the parent deadline")
+	require.Len(t, ad.upstreamErrors(), 1)
+	failure := ad.upstreamErrors()[0]
+	assert.Equal(t, hangURL, failure.Upstream)
+	assert.Contains(t, failure.Err, "context deadline exceeded")
+}
+
+func TestOpenAIAdapter_HangingModelBaseURL_MetadataKeepsOthers(t *testing.T) {
+	t.Parallel()
+	ad, _ := hangingUpstreamAdapter(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+	start := time.Now()
+	got, err := ad.fetchModelMetadata(ctx)
+	elapsed := time.Since(start)
+
+	require.NoError(t, err)
+	assert.Equal(t, map[string]int{"main-model": 1000, "glm": 2000}, got)
+	assert.Less(t, elapsed, 3500*time.Millisecond)
+}
+
+func TestOpenAIAdapter_HangingBaseURL_FailsDiscovery(t *testing.T) {
+	t.Parallel()
+	good := modelsServer(t, `{"data":[{"id":"glm"}]}`, nil)
+	ad := newOpenAIAdapter("gx10", hangingServer(t).URL, "")
+	ad.modelBases = map[string]string{"glm": good.URL}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	_, err := ad.listModels(ctx)
+	require.Error(t, err)
+	assert.Empty(t, ad.upstreamErrors())
+}
+
+func TestOpenAIAdapter_ParentCancel_FailsDiscovery(t *testing.T) {
+	t.Parallel()
+	ad, _ := hangingUpstreamAdapter(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(200*time.Millisecond, cancel)
+	_, err := ad.listModels(ctx)
+	require.Error(t, err)
+	assert.Empty(t, ad.upstreamErrors())
 }
